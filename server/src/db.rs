@@ -75,6 +75,7 @@ impl Database {
         conn.execute_batch(include_str!("../migrations/001_initial.sql"))?;
         // Run e2ee migration (ignores errors if already applied)
         let _ = conn.execute_batch(include_str!("../migrations/002_e2ee.sql"));
+        let _ = conn.execute_batch(include_str!("../migrations/003_bans.sql"));
         Ok(())
     }
 
@@ -267,6 +268,20 @@ impl Database {
             )
             .map_err(|_| "Invalid invite code".to_string())?;
 
+        // Check if user is banned from this server
+        let banned: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM server_bans WHERE server_id = ?1 AND user_id = ?2",
+                params![server.id, user_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|e| e.to_string())?
+            > 0;
+
+        if banned {
+            return Err("You are banned from this server".to_string());
+        }
+
         let already_member: bool = conn
             .query_row(
                 "SELECT COUNT(*) FROM server_members WHERE user_id = ?1 AND server_id = ?2",
@@ -346,6 +361,147 @@ impl Database {
             .filter_map(|r| r.ok())
             .collect();
         Ok(members)
+    }
+
+    pub fn kick_member(&self, server_id: &str, target_user_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM server_members WHERE server_id = ?1 AND user_id = ?2 AND role != 'owner'",
+            params![server_id, target_user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM server_keys WHERE server_id = ?1 AND user_id = ?2",
+            params![server_id, target_user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn leave_server(&self, server_id: &str, user_id: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let is_owner = Self::is_server_owner_c(&conn, user_id, server_id)?;
+
+        if is_owner {
+            // Owner leaving: delete the entire server and everything in it
+            conn.execute("DELETE FROM server_keys WHERE server_id = ?1", params![server_id])
+                .map_err(|e| e.to_string())?;
+            conn.execute(
+                "DELETE FROM messages WHERE channel_id IN (SELECT id FROM channels WHERE server_id = ?1)",
+                params![server_id],
+            )
+            .map_err(|e| e.to_string())?;
+            conn.execute("DELETE FROM server_members WHERE server_id = ?1", params![server_id])
+                .map_err(|e| e.to_string())?;
+            conn.execute("DELETE FROM channels WHERE server_id = ?1", params![server_id])
+                .map_err(|e| e.to_string())?;
+            conn.execute("DELETE FROM server_bans WHERE server_id = ?1", params![server_id])
+                .map_err(|e| e.to_string())?;
+            conn.execute("DELETE FROM servers WHERE id = ?1", params![server_id])
+                .map_err(|e| e.to_string())?;
+            return Ok(true); // true = server was deleted
+        }
+
+        // Non-owner leaving: delete their messages in the server, then remove membership
+        conn.execute(
+            "DELETE FROM messages WHERE sender_id = ?1 AND channel_id IN (SELECT id FROM channels WHERE server_id = ?2)",
+            params![user_id, server_id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM server_members WHERE server_id = ?1 AND user_id = ?2",
+            params![server_id, user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM server_keys WHERE server_id = ?1 AND user_id = ?2",
+            params![server_id, user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(false) // false = only member removed
+    }
+
+    pub fn ban_member(&self, server_id: &str, target_user_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        // Remove from server_keys
+        conn.execute(
+            "DELETE FROM server_keys WHERE server_id = ?1 AND user_id = ?2",
+            params![server_id, target_user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        // Remove from server_members
+        conn.execute(
+            "DELETE FROM server_members WHERE server_id = ?1 AND user_id = ?2 AND role != 'owner'",
+            params![server_id, target_user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        // Add to server_bans (INSERT OR IGNORE if already banned)
+        conn.execute(
+            "INSERT OR IGNORE INTO server_bans (server_id, user_id) VALUES (?1, ?2)",
+            params![server_id, target_user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn unban_member(&self, server_id: &str, target_user_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM server_bans WHERE server_id = ?1 AND user_id = ?2",
+            params![server_id, target_user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn is_banned(&self, server_id: &str, user_id: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM server_bans WHERE server_id = ?1 AND user_id = ?2",
+                params![server_id, user_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(count > 0)
+    }
+
+    pub fn list_server_bans(&self, server_id: &str) -> Result<Vec<(String, String)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT u.id, u.username FROM server_bans sb
+                 INNER JOIN users u ON sb.user_id = u.id
+                 WHERE sb.server_id = ?1 ORDER BY sb.banned_at DESC",
+            )
+            .map_err(|e| e.to_string())?;
+        let bans = stmt
+            .query_map(params![server_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(bans)
+    }
+
+    pub fn delete_channel_by_owner(&self, channel_id: &str, user_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let server_id: String = conn
+            .query_row(
+                "SELECT server_id FROM channels WHERE id = ?1",
+                params![channel_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| "Channel not found".to_string())?;
+        if !Self::is_server_owner_c(&conn, user_id, &server_id)? {
+            return Err("Only the server owner can delete channels".to_string());
+        }
+        conn.execute("DELETE FROM messages WHERE channel_id = ?1", params![channel_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM channels WHERE id = ?1", params![channel_id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     // --- Channels ---
@@ -691,6 +847,42 @@ impl Database {
     }
 
     // --- Admin ---
+
+    pub fn get_admin_password_hash(&self) -> Result<Option<String>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let result = conn.query_row(
+            "SELECT value FROM admin_config WHERE key = 'password_hash'",
+            [],
+            |row| row.get::<_, String>(0),
+        );
+        match result {
+            Ok(hash) => Ok(Some(hash)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    pub fn set_admin_password_hash(&self, hash: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT OR REPLACE INTO admin_config (key, value) VALUES ('password_hash', ?1)",
+            params![hash],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn is_admin_password_set(&self) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM admin_config WHERE key = 'password_hash'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(count > 0)
+    }
 
     pub fn list_all_users(&self) -> Result<Vec<User>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;

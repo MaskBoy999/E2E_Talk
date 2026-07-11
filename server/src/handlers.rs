@@ -8,6 +8,7 @@ use axum::{
 use serde::Deserialize;
 
 use base64::Engine;
+use sha2::{Sha256, Digest};
 use crate::auth;
 use crate::AppState;
 
@@ -495,6 +496,230 @@ pub async fn join_server(
         .into_response()
 }
 
+#[derive(Deserialize)]
+pub struct KickMemberRequest {
+    pub user_id: String,
+}
+
+pub async fn kick_member(
+    Path(server_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<KickMemberRequest>,
+) -> impl IntoResponse {
+    let caller_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    if !state.db.is_server_owner(&caller_id, &server_id).unwrap_or(false) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Only the server owner can kick members"})),
+        )
+            .into_response();
+    }
+
+    if req.user_id == caller_id {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Cannot kick yourself"})),
+        )
+            .into_response();
+    }
+
+    match state.db.kick_member(&server_id, &req.user_id) {
+        Ok(()) => {
+            let kick_msg = serde_json::json!({
+                "type": "member_kicked",
+                "server_id": server_id,
+                "user_id": req.user_id,
+            });
+            let _ = state.ws_manager.broadcast_to_server(&server_id, &kick_msg.to_string()).await;
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"ok": true})),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn leave_server(
+    Path(server_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    match state.db.leave_server(&server_id, &user_id) {
+        Ok(server_deleted) => {
+            if server_deleted {
+                // Owner left: broadcast server deletion to all members
+                let del_msg = serde_json::json!({
+                    "type": "server_deleted",
+                    "server_id": server_id,
+                });
+                let _ = state.ws_manager.broadcast_to_server(&server_id, &del_msg.to_string()).await;
+            } else {
+                // Member left: broadcast member_left
+                let leave_msg = serde_json::json!({
+                    "type": "member_left",
+                    "server_id": server_id,
+                    "user_id": user_id,
+                });
+                let _ = state.ws_manager.broadcast_to_server(&server_id, &leave_msg.to_string()).await;
+            }
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"ok": true, "server_deleted": server_deleted})),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct BanMemberRequest {
+    pub user_id: String,
+}
+
+pub async fn ban_member(
+    Path(server_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BanMemberRequest>,
+) -> impl IntoResponse {
+    let caller_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    if !state.db.is_server_owner(&caller_id, &server_id).unwrap_or(false) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Only the server owner can ban members"})),
+        )
+            .into_response();
+    }
+
+    if req.user_id == caller_id {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Cannot ban yourself"})),
+        )
+            .into_response();
+    }
+
+    match state.db.ban_member(&server_id, &req.user_id) {
+        Ok(()) => {
+            let ban_msg = serde_json::json!({
+                "type": "member_banned",
+                "server_id": server_id,
+                "user_id": req.user_id,
+            });
+            let _ = state.ws_manager.broadcast_to_server(&server_id, &ban_msg.to_string()).await;
+            (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn unban_member(
+    Path((server_id, user_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let caller_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    if !state.db.is_server_owner(&caller_id, &server_id).unwrap_or(false) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Only the server owner can unban members"})),
+        )
+            .into_response();
+    }
+
+    match state.db.unban_member(&server_id, &user_id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn list_server_bans(
+    Path(server_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let caller_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    if !state.db.is_server_owner(&caller_id, &server_id).unwrap_or(false) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Only the server owner can view bans"})),
+        )
+            .into_response();
+    }
+
+    match state.db.list_server_bans(&server_id) {
+        Ok(bans) => {
+            let result: Vec<serde_json::Value> = bans
+                .iter()
+                .map(|(id, username)| {
+                    serde_json::json!({ "id": id, "username": username })
+                })
+                .collect();
+            (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn delete_channel(
+    Path(channel_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    match state.db.delete_channel_by_owner(&channel_id, &user_id) {
+        Ok(()) => {
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"ok": true})),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
 // --- Members ---
 
 pub async fn list_server_members(
@@ -828,13 +1053,51 @@ pub async fn admin_login(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AdminLoginRequest>,
 ) -> impl IntoResponse {
-    if req.password == state.config.admin_password {
+    let is_set = state.db.is_admin_password_set().unwrap_or(false);
+
+    if !is_set {
+        // No password set yet — this is first-time setup
+        // The password in the request becomes the new admin password
+        if req.password.is_empty() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Password cannot be empty", "setup_required": true})),
+            )
+                .into_response();
+        }
+        let hash_str = format!("{:x}", Sha256::digest(req.password.as_bytes()));
+        if let Err(e) = state.db.set_admin_password_hash(&hash_str) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+        return (StatusCode::OK, Json(serde_json::json!({"ok": true, "setup_complete": true}))).into_response();
+    }
+
+    // Password already set — verify
+    let stored_hash = match state.db.get_admin_password_hash() {
+        Ok(Some(h)) => h,
+        _ => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Admin password not configured"})),
+            )
+                .into_response()
+        }
+    };
+
+    let input_hash = format!("{:x}", Sha256::digest(req.password.as_bytes()));
+    if input_hash == stored_hash {
         (StatusCode::OK, Json(serde_json::json!({"ok": true})))
+            .into_response()
     } else {
         (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({"error": "Wrong admin password"})),
         )
+            .into_response()
     }
 }
 

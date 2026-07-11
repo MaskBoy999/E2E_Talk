@@ -41,6 +41,7 @@
             <div class="chat-header">
                 <button class="hamburger" id="hamburger">&#9776;</button>
                 <h3 id="channel-name">Select a channel</h3>
+                <button class="server-settings-btn" id="server-settings-btn" style="display:none" title="Server Settings">&#9881;</button>
                 <button class="members-toggle" id="members-toggle" title="Members">&#9776;</button>
             </div>
             <div class="chat-body">
@@ -49,7 +50,8 @@
                 </div>
                 <div class="members-panel" id="members-panel">
                     <div class="members-header">
-                        Members
+                        <span>Members</span>
+                        <button class="btn-leave-server" id="leave-server-btn" style="display:none" title="Leave server">Leave</button>
                         <button class="members-close" id="members-close">&times;</button>
                     </div>
                     <div id="member-list" class="member-list"></div>
@@ -107,6 +109,22 @@
             <div class="modal-actions">
                 <button class="btn-cancel" id="cancel-create-channel">Cancel</button>
                 <button class="btn-invite" id="confirm-create-channel">Create</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Server Settings Modal -->
+    <div class="modal" id="server-settings-modal" style="display:none">
+        <div class="modal-content" style="max-width:500px">
+            <h3>Server Settings</h3>
+            <div class="settings-section">
+                <h4>Banned Users</h4>
+                <div id="banned-users-list" class="banned-list">
+                    <div style="color:#666;padding:10px">Loading...</div>
+                </div>
+            </div>
+            <div class="modal-actions">
+                <button class="btn-cancel" id="close-server-settings">Close</button>
             </div>
         </div>
     </div>

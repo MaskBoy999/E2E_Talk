@@ -540,6 +540,155 @@ body {
     color: var(--text-faint);
 }
 
+.btn-kick {
+    background: none;
+    border: 1px solid #c62828;
+    color: #c62828;
+    border-radius: 50%;
+    width: clamp(20px, 3vw, 24px);
+    height: clamp(20px, 3vw, 24px);
+    cursor: pointer;
+    font-size: clamp(10px, 1.5vw, 12px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-left: auto;
+    flex-shrink: 0;
+    padding: 0;
+    line-height: 1;
+}
+
+.btn-kick:hover {
+    background: #c62828;
+    color: #fff;
+}
+
+.btn-ban {
+    background: none;
+    border: 1px solid #e65100;
+    color: #e65100;
+    border-radius: 50%;
+    width: clamp(20px, 3vw, 24px);
+    height: clamp(20px, 3vw, 24px);
+    cursor: pointer;
+    font-size: clamp(10px, 1.5vw, 12px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    padding: 0;
+    line-height: 1;
+}
+
+.btn-ban:hover {
+    background: #e65100;
+    color: #fff;
+}
+
+.member-actions {
+    display: flex;
+    gap: 4px;
+    margin-left: auto;
+}
+
+.btn-leave-server {
+    background: none;
+    border: 1px solid #c62828;
+    color: #c62828;
+    border-radius: 4px;
+    padding: 2px 8px;
+    cursor: pointer;
+    font-size: 11px;
+    margin-left: auto;
+}
+
+.btn-leave-server:hover {
+    background: #c62828;
+    color: #fff;
+}
+
+.server-settings-btn {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: clamp(16px, 2.5vw, 20px);
+    cursor: pointer;
+    padding: 0 8px;
+    line-height: 1;
+}
+
+.server-settings-btn:hover {
+    color: var(--accent);
+}
+
+.settings-section {
+    margin-bottom: 16px;
+}
+
+.settings-section h4 {
+    margin: 0 0 8px 0;
+    color: var(--text-primary);
+    font-size: 14px;
+}
+
+.banned-list {
+    max-height: 300px;
+    overflow-y: auto;
+    border: 1px solid var(--bg-border);
+    border-radius: 6px;
+}
+
+.banned-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--bg-border);
+}
+
+.banned-item:last-child {
+    border-bottom: none;
+}
+
+.banned-item span {
+    color: var(--text-primary);
+    font-size: 14px;
+}
+
+.btn-unban {
+    background: #2e7d32;
+    color: white;
+    border: none;
+    padding: 4px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+}
+
+.btn-unban:hover {
+    background: #43a047;
+}
+
+.btn-delete-channel {
+    background: none;
+    border: none;
+    color: #666;
+    cursor: pointer;
+    font-size: 16px;
+    padding: 0 6px;
+    line-height: 1;
+    display: none;
+    flex-shrink: 0;
+}
+
+.channel-item:hover .btn-delete-channel {
+    display: block;
+}
+
+.btn-delete-channel:hover {
+    color: #c62828;
+}
+
 .message-list {
     flex: 1;
     overflow-y: auto;

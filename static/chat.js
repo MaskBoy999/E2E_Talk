@@ -115,6 +115,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('members-toggle').addEventListener('click', toggleMembers);
     document.getElementById('members-close').addEventListener('click', toggleMembers);
+    document.getElementById('leave-server-btn').addEventListener('click', leaveServer);
+    document.getElementById('server-settings-btn').addEventListener('click', openServerSettings);
+    document.getElementById('close-server-settings').addEventListener('click', () => {
+        document.getElementById('server-settings-modal').style.display = 'none';
+    });
 
     document.getElementById('members-panel').classList.toggle('open', membersPanelOpen);
 });
@@ -157,6 +162,48 @@ function connectWebSocket(t) {
                 if (data.server_id && data.user_id) {
                     // Owner auto-uploads encrypted server key for new member
                     await uploadServerKeyForUser(data.server_id, data.user_id);
+                    // Auto-refresh member list for everyone viewing this server
+                    if (data.server_id === currentServerId) {
+                        await loadMembers(data.server_id);
+                    }
+                }
+                break;
+            case 'member_kicked':
+            case 'member_banned':
+            case 'member_left':
+                if (data.server_id) {
+                    if (isOwner && data.server_id === currentServerId) {
+                        await rotateServerKey(data.server_id);
+                    }
+                    if (data.server_id === currentServerId) {
+                        await loadMembers(data.server_id);
+                    }
+                    if (data.user_id === user.id && data.server_id === currentServerId) {
+                        currentServerId = null;
+                        currentChannelId = null;
+                        document.getElementById('server-name').textContent = '';
+                        document.getElementById('channel-list').innerHTML = '<div class="channel-item" style="color:#666;cursor:default">Select a server</div>';
+                        document.getElementById('channel-name').textContent = 'Select a channel';
+                        document.getElementById('message-list').innerHTML = '<div class="welcome">Select a server and channel to start chatting</div>';
+                        document.getElementById('message-input').disabled = true;
+                        document.getElementById('send-btn').disabled = true;
+                        await loadServers();
+                    }
+                }
+                break;
+            case 'server_deleted':
+                if (data.server_id) {
+                    if (data.server_id === currentServerId) {
+                        currentServerId = null;
+                        currentChannelId = null;
+                        document.getElementById('server-name').textContent = '';
+                        document.getElementById('channel-list').innerHTML = '<div class="channel-item" style="color:#666;cursor:default">Select a server</div>';
+                        document.getElementById('channel-name').textContent = 'Select a channel';
+                        document.getElementById('message-list').innerHTML = '<div class="welcome">This server has been deleted</div>';
+                        document.getElementById('message-input').disabled = true;
+                        document.getElementById('send-btn').disabled = true;
+                    }
+                    await loadServers();
                 }
                 break;
             case 'pong':
@@ -200,6 +247,47 @@ async function fetchAndDecryptServerKey(serverId) {
         console.error('Failed to fetch server key:', err);
         return false;
     }
+}
+
+async function rotateServerKey(serverId) {
+    const identity = E2ECrypto.getIdentityKeyPair();
+    if (!identity) return false;
+
+    // Generate a new server key
+    const newKey = E2ECrypto.generateServerKey();
+    E2ECrypto.saveServerKey(serverId, newKey);
+
+    // Get all members of the server
+    const membersRes = await authFetch(`/api/servers/${serverId}/members`);
+    if (!membersRes.ok) return false;
+    const members = await membersRes.json();
+    if (!Array.isArray(members) || members.length === 0) return false;
+
+    // Upload encrypted key for each member
+    for (const member of members) {
+        try {
+            const recipientRes = await authFetch(`/api/identity/${member.id}`);
+            if (!recipientRes.ok) continue;
+            const recipientData = await recipientRes.json();
+            if (!recipientData.identity_public_key) continue;
+            const recipientPub = new Uint8Array(E2ECrypto.base64ToArrayBuffer(recipientData.identity_public_key));
+            const encrypted = E2ECrypto.envelopeEncryptRaw(newKey, recipientPub);
+            await authFetch(`/api/servers/${serverId}/keys`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    user_id: member.id,
+                    encrypted_key: encrypted.ciphertext,
+                    sender_public_key: encrypted.ephemeralPublicKey,
+                    nonce: encrypted.nonce,
+                }),
+            });
+        } catch (e) {
+            console.error('Failed to upload rotated key for member', member.id, e);
+        }
+    }
+
+    return true;
 }
 
 async function uploadServerKeyForUser(serverId, targetUserId) {
@@ -281,6 +369,7 @@ async function selectServer(serverId) {
 
     document.getElementById('server-name').textContent = server ? server.name : '';
     document.getElementById('invite-btn').style.display = isOwner ? '' : 'none';
+    document.getElementById('server-settings-btn').style.display = isOwner ? '' : 'none';
 
     // Ensure we have the server key
     if (!E2ECrypto.getServerKey(serverId)) {
@@ -322,10 +411,24 @@ async function loadChannels(serverId) {
         channels.forEach(ch => {
             const div = document.createElement('div');
             div.className = 'channel-item';
-            div.textContent = `# ${ch.name}`;
             div.dataset.id = ch.id;
             div.dataset.name = ch.name;
             div.addEventListener('click', () => selectChannel(ch.id, ch.name, div));
+            const nameSpan = document.createElement('span');
+            nameSpan.textContent = `# ${ch.name}`;
+            nameSpan.style.flex = '1';
+            div.appendChild(nameSpan);
+            if (isOwner) {
+                const delBtn = document.createElement('button');
+                delBtn.className = 'btn-delete-channel';
+                delBtn.textContent = '\u00d7';
+                delBtn.title = 'Delete channel';
+                delBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    deleteChannel(ch.id, ch.name);
+                });
+                div.appendChild(delBtn);
+            }
             list.appendChild(div);
         });
 
@@ -481,21 +584,170 @@ async function loadMembers(serverId) {
 
         if (!Array.isArray(members) || members.length === 0) return;
 
+        const leaveBtn = document.getElementById('leave-server-btn');
+        leaveBtn.style.display = isOwner ? 'none' : '';
+
         members.forEach(m => {
             const div = document.createElement('div');
             div.className = 'member-item';
             const initial = (m.username || '?').charAt(0).toUpperCase();
             const isMemberOwner = m.role === 'owner';
+            let actionBtns = '';
+            if (isOwner && !isMemberOwner && m.id !== user.id) {
+                actionBtns =
+                    '<button class="btn-kick" onclick="kickMember(\'' + m.id + '\', \'' + escapeHtml(m.username) + '\')" title="Kick">&#10005;</button>' +
+                    '<button class="btn-ban" onclick="banMember(\'' + m.id + '\', \'' + escapeHtml(m.username) + '\')" title="Ban">&#9888;</button>';
+            }
             div.innerHTML =
                 '<div class="member-avatar' + (isMemberOwner ? ' owner' : '') + '">' + initial + '</div>' +
                 '<div>' +
                     '<div class="member-name">' + escapeHtml(m.username) + '</div>' +
                     (isMemberOwner ? '<div class="member-role">Owner</div>' : '') +
-                '</div>';
+                '</div>' +
+                '<div class="member-actions">' + actionBtns + '</div>';
             list.appendChild(div);
         });
     } catch (err) {
         console.error('Failed to load members:', err);
+    }
+}
+
+async function kickMember(targetUserId, username) {
+    if (!confirm('Kick ' + username + ' from this server? A new server key will be generated.')) return;
+    try {
+        const res = await authFetch(`/api/servers/${currentServerId}/members/kick`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ user_id: targetUserId }),
+        });
+        if (res.ok) {
+            await loadMembers(currentServerId);
+        } else {
+            const err = await res.json();
+            alert(err.error || 'Failed to kick member');
+        }
+    } catch (err) {
+        console.error('Kick failed:', err);
+    }
+}
+
+async function banMember(targetUserId, username) {
+    if (!confirm('Ban ' + username + ' from this server? They will be removed and unable to rejoin.')) return;
+    try {
+        const res = await authFetch(`/api/servers/${currentServerId}/members/ban`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ user_id: targetUserId }),
+        });
+        if (res.ok) {
+            await loadMembers(currentServerId);
+        } else {
+            const err = await res.json();
+            alert(err.error || 'Failed to ban member');
+        }
+    } catch (err) {
+        console.error('Ban failed:', err);
+    }
+}
+
+async function leaveServer() {
+    if (!confirm('Leave this server? You will lose access to all channels and messages.')) return;
+    try {
+        const res = await authFetch(`/api/servers/${currentServerId}/leave`, {
+            method: 'POST',
+        });
+        const data = await res.json();
+        if (res.ok) {
+            currentServerId = null;
+            currentChannelId = null;
+            document.getElementById('server-name').textContent = '';
+            document.getElementById('channel-list').innerHTML = '<div class="channel-item" style="color:#666;cursor:default">Select a server</div>';
+            document.getElementById('channel-name').textContent = 'Select a channel';
+            document.getElementById('message-list').innerHTML = '<div class="welcome">' +
+                (data.server_deleted ? 'Server has been deleted' : 'Select a server and channel to start chatting') + '</div>';
+            document.getElementById('message-input').disabled = true;
+            document.getElementById('send-btn').disabled = true;
+            await loadServers();
+        } else {
+            alert(data.error || 'Failed to leave server');
+        }
+    } catch (err) {
+        console.error('Leave server failed:', err);
+    }
+}
+
+async function deleteChannel(channelId, channelName) {
+    if (!confirm('Delete channel #' + channelName + '? All messages will be lost.')) return;
+    try {
+        const res = await authFetch(`/api/channels/${channelId}`, {
+            method: 'DELETE',
+        });
+        if (res.ok) {
+            if (currentChannelId === channelId) {
+                currentChannelId = null;
+                document.getElementById('channel-name').textContent = 'Select a channel';
+                document.getElementById('message-list').innerHTML = '<div class="welcome">Select a channel to start chatting</div>';
+                document.getElementById('message-input').disabled = true;
+                document.getElementById('send-btn').disabled = true;
+            }
+            await loadChannels(currentServerId);
+        } else {
+            const err = await res.json();
+            alert(err.error || 'Failed to delete channel');
+        }
+    } catch (err) {
+        console.error('Delete channel failed:', err);
+    }
+}
+
+async function openServerSettings() {
+    if (!currentServerId || !isOwner) return;
+    document.getElementById('server-settings-modal').style.display = 'flex';
+    await loadBannedUsers();
+}
+
+async function loadBannedUsers() {
+    const list = document.getElementById('banned-users-list');
+    list.innerHTML = '<div style="color:#666;padding:10px">Loading...</div>';
+    try {
+        const res = await authFetch(`/api/servers/${currentServerId}/bans`);
+        if (!res.ok) {
+            list.innerHTML = '<div style="color:#666;padding:10px">Failed to load</div>';
+            return;
+        }
+        const bans = await res.json();
+        if (!Array.isArray(bans) || bans.length === 0) {
+            list.innerHTML = '<div style="color:#666;padding:10px">No banned users</div>';
+            return;
+        }
+        list.innerHTML = '';
+        bans.forEach(b => {
+            const div = document.createElement('div');
+            div.className = 'banned-item';
+            div.innerHTML =
+                '<span>' + escapeHtml(b.username) + '</span>' +
+                '<button class="btn-unban" onclick="unbanUser(\'' + b.id + '\', \'' + escapeHtml(b.username) + '\')">Unban</button>';
+            list.appendChild(div);
+        });
+    } catch (err) {
+        list.innerHTML = '<div style="color:#f44336;padding:10px">Error loading bans</div>';
+    }
+}
+
+async function unbanUser(targetUserId, username) {
+    if (!confirm('Unban ' + username + '? They will be able to rejoin with an invite code.')) return;
+    try {
+        const res = await authFetch(`/api/servers/${currentServerId}/members/unban/${targetUserId}`, {
+            method: 'POST',
+        });
+        if (res.ok) {
+            await loadBannedUsers();
+        } else {
+            const err = await res.json();
+            alert(err.error || 'Failed to unban');
+        }
+    } catch (err) {
+        console.error('Unban failed:', err);
     }
 }
 

@@ -3,7 +3,6 @@ pub struct Config {
     pub port: u16,
     pub database_url: String,
     pub jwt_secret: String,
-    pub admin_password: String,
 }
 
 impl Config {
@@ -17,8 +16,6 @@ impl Config {
                 .unwrap_or_else(|_| "e2e_chat.db".to_string()),
             jwt_secret: std::env::var("JWT_SECRET")
                 .unwrap_or_else(|_| "change-me-in-production".to_string()),
-            admin_password: std::env::var("ADMIN_PASSWORD")
-                .unwrap_or_else(|_| "admin".to_string()),
         }
     }
 }

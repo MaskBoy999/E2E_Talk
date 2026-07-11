@@ -39,6 +39,11 @@
         .cascade-info .stat { color: #ff9800; margin-right: 16px; }
 
         .empty-state { text-align: center; color: #666; padding: 40px; }
+
+        .search-bar { display: flex; gap: 8px; margin-bottom: 12px; }
+        .search-bar input { flex: 1; padding: 8px 12px; border: 1px solid #333; border-radius: 4px; background: #0f0f23; color: #e0e0e0; font-size: 13px; }
+        .search-bar input::placeholder { color: #666; }
+        .search-bar .record-count { display: flex; align-items: center; color: #888; font-size: 13px; white-space: nowrap; }
     </style>
 </head>
 <body>
@@ -46,11 +51,11 @@
         <!-- Admin Login -->
         <div id="admin-login" class="auth-card">
             <h1>Admin Panel</h1>
-            <p class="subtitle">Enter admin password</p>
+            <p id="admin-login-subtitle" class="subtitle">Enter admin password</p>
             <div id="error-message" class="error" style="display: none;"></div>
             <form id="admin-login-form">
                 <input type="password" id="admin-password" placeholder="Admin password" required>
-                <button type="submit">Access Panel</button>
+                <button type="submit" id="admin-login-btn">Access Panel</button>
             </form>
             <p class="toggle"><a href="index.html">Back to chat</a></p>
         </div>
@@ -74,8 +79,10 @@
             <!-- Users Tab -->
             <div class="tab-content active" id="tab-users">
                 <div class="table-header">
-                    <h3>Users</h3>
-                    <span class="record-count" id="users-count"></span>
+                    <div class="search-bar">
+                        <input type="text" id="search-users" placeholder="Search by username or ID..." oninput="filterTab('users')">
+                        <span class="record-count" id="users-count"></span>
+                    </div>
                 </div>
                 <div class="table-scroll">
                     <table class="data-table">
@@ -88,8 +95,10 @@
             <!-- Servers Tab -->
             <div class="tab-content" id="tab-servers">
                 <div class="table-header">
-                    <h3>Servers</h3>
-                    <span class="record-count" id="servers-count"></span>
+                    <div class="search-bar">
+                        <input type="text" id="search-servers" placeholder="Search by name, ID, or invite code..." oninput="filterTab('servers')">
+                        <span class="record-count" id="servers-count"></span>
+                    </div>
                 </div>
                 <div class="table-scroll">
                     <table class="data-table">
@@ -102,8 +111,10 @@
             <!-- Channels Tab -->
             <div class="tab-content" id="tab-channels">
                 <div class="table-header">
-                    <h3>Channels</h3>
-                    <span class="record-count" id="channels-count"></span>
+                    <div class="search-bar">
+                        <input type="text" id="search-channels" placeholder="Search by name or server ID..." oninput="filterTab('channels')">
+                        <span class="record-count" id="channels-count"></span>
+                    </div>
                 </div>
                 <div class="table-scroll">
                     <table class="data-table">
@@ -116,8 +127,10 @@
             <!-- Messages Tab -->
             <div class="tab-content" id="tab-messages">
                 <div class="table-header">
-                    <h3>Messages</h3>
-                    <span class="record-count" id="messages-count"></span>
+                    <div class="search-bar">
+                        <input type="text" id="search-messages" placeholder="Search by sender, channel ID, or timestamp..." oninput="filterTab('messages')">
+                        <span class="record-count" id="messages-count"></span>
+                    </div>
                 </div>
                 <div class="table-scroll">
                     <table class="data-table">
@@ -130,8 +143,10 @@
             <!-- Server Keys Tab -->
             <div class="tab-content" id="tab-server-keys">
                 <div class="table-header">
-                    <h3>Server Keys</h3>
-                    <span class="record-count" id="server-keys-count"></span>
+                    <div class="search-bar">
+                        <input type="text" id="search-server-keys" placeholder="Search by server name, user ID, or version..." oninput="filterTab('server-keys')">
+                        <span class="record-count" id="server-keys-count"></span>
+                    </div>
                 </div>
                 <div class="table-scroll">
                     <table class="data-table">
@@ -144,8 +159,10 @@
             <!-- Server Members Tab -->
             <div class="tab-content" id="tab-server-members">
                 <div class="table-header">
-                    <h3>Server Members</h3>
-                    <span class="record-count" id="server-members-count"></span>
+                    <div class="search-bar">
+                        <input type="text" id="search-server-members" placeholder="Search by username, user ID, or server name..." oninput="filterTab('server-members')">
+                        <span class="record-count" id="server-members-count"></span>
+                    </div>
                 </div>
                 <div class="table-scroll">
                     <table class="data-table">

@@ -491,11 +491,18 @@ test.describe('E2E Chat', () => {
             data: { name: 'Admin Test Server ' + ts },
         });
 
-        // Go to admin panel
+        // Go to admin panel — first login sets the password, second logs in
         await page.goto(`${BASE}/admin.html`);
         await page.fill('#admin-password', 'admin');
         await page.click('#admin-login-form button[type="submit"]');
-        await page.waitForSelector('#admin-panel', { state: 'visible', timeout: 5000 });
+        await page.waitForTimeout(2000);
+        // If panel not visible yet, password was just set — login again
+        const panelVisible = await page.locator('#admin-panel').isVisible().catch(() => false);
+        if (!panelVisible) {
+            await page.fill('#admin-password', 'admin');
+            await page.click('#admin-login-form button[type="submit"]');
+        }
+        await page.waitForSelector('#admin-panel', { state: 'visible', timeout: 10000 });
 
         // Verify Users tab has the user
         await page.waitForFunction(
@@ -549,5 +556,252 @@ test.describe('E2E Chat', () => {
         await page.waitForTimeout(500);
         const membersAfter = await page.locator('#tab-server-members').textContent();
         expect(membersAfter).not.toContain(username);
+    });
+
+    test('kick member triggers key rotation, kicked user loses access', async ({ page, context }) => {
+        const ts = Date.now();
+        const user1 = 'kickowner_' + ts;
+        const user2 = 'kicked_' + ts;
+
+        // Register user1
+        await page.goto(`${BASE}/login.html`);
+        await page.click('#show-register');
+        await page.fill('#register-username', user1);
+        await page.fill('#register-password', 'password123');
+        await page.click('#register-form button[type="submit"]');
+        await page.waitForURL('**/index.html', { timeout: 10000 });
+        const body1 = await page.evaluate(() => ({
+            token: localStorage.getItem('token'),
+            user: JSON.parse(localStorage.getItem('user') || '{}'),
+        }));
+
+        // Register user2 in separate context
+        const ctx2 = await context.browser()!.newContext();
+        const page2 = await ctx2.newPage();
+        await page2.goto(`${BASE}/login.html`);
+        await page2.waitForTimeout(1000);
+        await page2.click('#show-register');
+        await page2.fill('#register-username', user2);
+        await page2.fill('#register-password', 'password123');
+        await page2.click('#register-form button[type="submit"]');
+        await page2.waitForURL('**/index.html', { timeout: 10000 });
+        const body2 = await page2.evaluate(() => ({
+            token: localStorage.getItem('token'),
+            user: JSON.parse(localStorage.getItem('user') || '{}'),
+        }));
+
+        // User1 creates server
+        const srv = await page.request.post(`${BASE}/api/servers`, {
+            headers: { Authorization: `Bearer ${body1.token}` },
+            data: { name: 'Kick Test' },
+        });
+        const server = await srv.json();
+
+        // Generate and upload server key for user1
+        await page.evaluate(async ({ serverId, userId }) => {
+            const serverKey = E2ECrypto.generateServerKey();
+            E2ECrypto.saveServerKey(serverId, serverKey);
+            const identity = E2ECrypto.getIdentityKeyPair();
+            const encrypted = E2ECrypto.envelopeEncryptRaw(serverKey, identity.publicKey);
+            await fetch(`/api/servers/${serverId}/keys`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + localStorage.getItem('token') },
+                body: JSON.stringify({ user_id: userId, encrypted_key: encrypted.ciphertext, sender_public_key: encrypted.ephemeralPublicKey, nonce: encrypted.nonce }),
+            });
+        }, { serverId: server.id, userId: body1.user.id });
+
+        // User2 joins
+        const invRes = await page.request.post(`${BASE}/api/servers/${server.id}/invite`, {
+            headers: { Authorization: `Bearer ${body1.token}` },
+        });
+        const invite = await invRes.json();
+        await page2.request.post(`${BASE}/api/invites/join`, {
+            headers: { Authorization: `Bearer ${body2.token}` },
+            data: { code: invite.code },
+        });
+
+        // Upload key for user2
+        const user2PubKey = await page2.evaluate(() => E2ECrypto.arrayBufferToBase64(E2ECrypto.getIdentityKeyPair().publicKey));
+        await page.evaluate(async ({ serverId, user2Id, user2PubKey }) => {
+            const serverKey = E2ECrypto.getServerKey(serverId);
+            const recipientPub = new Uint8Array(E2ECrypto.base64ToArrayBuffer(user2PubKey));
+            const encrypted = E2ECrypto.envelopeEncryptRaw(serverKey, recipientPub);
+            await fetch(`/api/servers/${serverId}/keys`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + localStorage.getItem('token') },
+                body: JSON.stringify({ user_id: user2Id, encrypted_key: encrypted.ciphertext, sender_public_key: encrypted.ephemeralPublicKey, nonce: encrypted.nonce }),
+            });
+        }, { serverId: server.id, user2Id: body2.user.id, user2PubKey });
+
+        // Both load chat
+        await page.goto(`${BASE}/index.html`);
+        await page.waitForSelector('.server-icon:not(.add-server)', { timeout: 10000 });
+        await page.click('.server-icon:not(.add-server)');
+        await page.waitForSelector('.channel-item', { timeout: 10000 });
+        await page.click('.channel-item >> nth=0');
+        await page.waitForTimeout(500);
+
+        await page2.goto(`${BASE}/index.html`);
+        await page2.waitForSelector('.server-icon:not(.add-server)', { timeout: 10000 });
+        await page2.click('.server-icon:not(.add-server)');
+        await page2.waitForSelector('.channel-item', { timeout: 10000 });
+        await page2.click('.channel-item >> nth=0');
+        await page2.waitForTimeout(1000);
+
+        // User1 sends a message — user2 should see it (both have the key)
+        const input1 = page.locator('#message-input');
+        await expect(input1).toBeEnabled({ timeout: 5000 });
+        await input1.fill('Before kick');
+        await page.click('#send-btn');
+        await page.waitForTimeout(2000);
+        const user2MsgsBefore = await page2.locator('.message .text').allTextContents();
+        expect(user2MsgsBefore).toContain('Before kick');
+
+        // User1 kicks user2 via API
+        await page.request.post(`${BASE}/api/servers/${server.id}/members/kick`, {
+            headers: { Authorization: `Bearer ${body1.token}`, 'Content-Type': 'application/json' },
+            data: { user_id: body2.user.id },
+        });
+        await page.waitForTimeout(2000);
+
+        // User1 sends another message with the rotated key
+        await input1.fill('After kick');
+        await page.click('#send-btn');
+        await page.waitForTimeout(2000);
+
+        // User1 should see both messages
+        const user1Msgs = await page.locator('.message .text').allTextContents();
+        expect(user1Msgs).toContain('Before kick');
+        expect(user1Msgs).toContain('After kick');
+
+        await page2.close();
+        await ctx2.close();
+    });
+
+    test('leave server removes access, delete channel works', async ({ page, context }) => {
+        const ts = Date.now();
+        const user1 = 'leaveowner_' + ts;
+        const user2 = 'leaver_' + ts;
+
+        // Register user1
+        await page.goto(`${BASE}/login.html`);
+        await page.click('#show-register');
+        await page.fill('#register-username', user1);
+        await page.fill('#register-password', 'password123');
+        await page.click('#register-form button[type="submit"]');
+        await page.waitForURL('**/index.html', { timeout: 10000 });
+        const body1 = await page.evaluate(() => ({
+            token: localStorage.getItem('token'),
+            user: JSON.parse(localStorage.getItem('user') || '{}'),
+        }));
+
+        // Register user2
+        const ctx2 = await context.browser()!.newContext();
+        const page2 = await ctx2.newPage();
+        await page2.goto(`${BASE}/login.html`);
+        await page2.waitForTimeout(1000);
+        await page2.click('#show-register');
+        await page2.fill('#register-username', user2);
+        await page2.fill('#register-password', 'password123');
+        await page2.click('#register-form button[type="submit"]');
+        await page2.waitForURL('**/index.html', { timeout: 10000 });
+        const body2 = await page2.evaluate(() => ({
+            token: localStorage.getItem('token'),
+            user: JSON.parse(localStorage.getItem('user') || '{}'),
+        }));
+
+        // User1 creates server, uploads key
+        const srv = await page.request.post(`${BASE}/api/servers`, {
+            headers: { Authorization: `Bearer ${body1.token}` },
+            data: { name: 'Leave Test' },
+        });
+        const server = await srv.json();
+        await page.evaluate(async ({ serverId, userId }) => {
+            const serverKey = E2ECrypto.generateServerKey();
+            E2ECrypto.saveServerKey(serverId, serverKey);
+            const identity = E2ECrypto.getIdentityKeyPair();
+            const encrypted = E2ECrypto.envelopeEncryptRaw(serverKey, identity.publicKey);
+            await fetch(`/api/servers/${serverId}/keys`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + localStorage.getItem('token') },
+                body: JSON.stringify({ user_id: userId, encrypted_key: encrypted.ciphertext, sender_public_key: encrypted.ephemeralPublicKey, nonce: encrypted.nonce }),
+            });
+        }, { serverId: server.id, userId: body1.user.id });
+
+        // User2 joins, gets key
+        const invRes = await page.request.post(`${BASE}/api/servers/${server.id}/invite`, {
+            headers: { Authorization: `Bearer ${body1.token}` },
+        });
+        const invite = await invRes.json();
+        await page2.request.post(`${BASE}/api/invites/join`, {
+            headers: { Authorization: `Bearer ${body2.token}` },
+            data: { code: invite.code },
+        });
+        const user2PubKey = await page2.evaluate(() => E2ECrypto.arrayBufferToBase64(E2ECrypto.getIdentityKeyPair().publicKey));
+        await page.evaluate(async ({ serverId, user2Id, user2PubKey }) => {
+            const serverKey = E2ECrypto.getServerKey(serverId);
+            const recipientPub = new Uint8Array(E2ECrypto.base64ToArrayBuffer(user2PubKey));
+            const encrypted = E2ECrypto.envelopeEncryptRaw(serverKey, recipientPub);
+            await fetch(`/api/servers/${serverId}/keys`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + localStorage.getItem('token') },
+                body: JSON.stringify({ user_id: user2Id, encrypted_key: encrypted.ciphertext, sender_public_key: encrypted.ephemeralPublicKey, nonce: encrypted.nonce }),
+            });
+        }, { serverId: server.id, user2Id: body2.user.id, user2PubKey });
+
+        // User1 creates a second channel
+        await page.evaluate(async (serverId) => {
+            await fetch(`/api/servers/${serverId}/channels`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + localStorage.getItem('token') },
+                body: JSON.stringify({ name: 'delete-me' }),
+            });
+        }, server.id);
+        await page.waitForTimeout(500);
+
+        // User1 loads chat, verifies both channels exist
+        await page.goto(`${BASE}/index.html`);
+        await page.waitForSelector('.server-icon:not(.add-server)', { timeout: 10000 });
+        await page.click('.server-icon:not(.add-server)');
+        await page.waitForSelector('.channel-item', { timeout: 10000 });
+        const channelsBefore = await page.locator('.channel-item span').allTextContents();
+        expect(channelsBefore.some(c => c.includes('delete-me'))).toBeTruthy();
+
+        // User1 deletes the channel via API
+        const chRes = await page.request.get(`${BASE}/api/servers/${server.id}/channels`, {
+            headers: { Authorization: `Bearer ${body1.token}` },
+        });
+        const channels = await chRes.json();
+        const deleteMe = channels.find(c => c.name === 'delete-me');
+        expect(deleteMe).toBeTruthy();
+
+        const delRes = await page.request.delete(`${BASE}/api/channels/${deleteMe.id}`, {
+            headers: { Authorization: `Bearer ${body1.token}` },
+        });
+        expect(delRes.ok()).toBeTruthy();
+
+        // Reload and verify channel is gone
+        await page.reload();
+        await page.waitForSelector('.server-icon:not(.add-server)', { timeout: 10000 });
+        await page.click('.server-icon:not(.add-server)');
+        await page.waitForSelector('.channel-item', { timeout: 10000 });
+        const channelsAfter = await page.locator('.channel-item span').allTextContents();
+        expect(channelsAfter.some(c => c.includes('delete-me'))).toBeFalsy();
+
+        // User2 leaves the server
+        const leaveRes = await page2.request.post(`${BASE}/api/servers/${server.id}/leave`, {
+            headers: { Authorization: `Bearer ${body2.token}` },
+        });
+        expect(leaveRes.ok()).toBeTruthy();
+
+        // Verify user2 is no longer a member
+        const membersRes = await page.request.get(`${BASE}/api/servers/${server.id}/members`, {
+            headers: { Authorization: `Bearer ${body1.token}` },
+        });
+        const members = await membersRes.json();
+        expect(members.some(m => m.id === body2.user.id)).toBeFalsy();
+
+        await page2.close();
+        await ctx2.close();
     });
 });
