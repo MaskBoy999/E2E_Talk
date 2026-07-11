@@ -41,9 +41,19 @@
             <div class="chat-header">
                 <button class="hamburger" id="hamburger">&#9776;</button>
                 <h3 id="channel-name">Select a channel</h3>
+                <button class="members-toggle" id="members-toggle" title="Members">&#9776;</button>
             </div>
-            <div id="message-list" class="message-list">
-                <div class="welcome">Select a server and channel to start chatting</div>
+            <div class="chat-body">
+                <div id="message-list" class="message-list">
+                    <div class="welcome">Select a server and channel to start chatting</div>
+                </div>
+                <div class="members-panel" id="members-panel">
+                    <div class="members-header">
+                        Members
+                        <button class="members-close" id="members-close">&times;</button>
+                    </div>
+                    <div id="member-list" class="member-list"></div>
+                </div>
             </div>
             <div class="chat-input">
                 <input type="text" id="message-input" placeholder="Type a message..." disabled>

@@ -482,6 +482,51 @@ pub async fn join_server(
         .into_response()
 }
 
+// --- Members ---
+
+pub async fn list_server_members(
+    Path(server_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    if !state.db.is_member_of_server(&user_id, &server_id).unwrap_or(false) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Not a member of this server"})),
+        )
+            .into_response();
+    }
+
+    let members = match state.db.get_server_members_with_names(&server_id) {
+        Ok(m) => m,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
+
+    let result: Vec<serde_json::Value> = members
+        .iter()
+        .map(|(id, username, role)| {
+            serde_json::json!({
+                "id": id,
+                "username": username,
+                "role": role,
+            })
+        })
+        .collect();
+
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
 // --- Messages ---
 
 pub async fn list_messages(

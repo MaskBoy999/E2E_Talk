@@ -50,6 +50,11 @@ document.addEventListener('DOMContentLoaded', () => {
     function openSidebar() {
         sidebar.classList.add('open');
         overlay.classList.add('open');
+        // Close members panel if open
+        if (membersPanelOpen) {
+            membersPanelOpen = false;
+            document.getElementById('members-panel').classList.remove('open');
+        }
     }
     function closeSidebar() {
         sidebar.classList.remove('open');
@@ -61,6 +66,23 @@ document.addEventListener('DOMContentLoaded', () => {
     closeBtn.addEventListener('click', closeSidebar);
     window._openSidebar = openSidebar;
     window._closeSidebar = closeSidebar;
+
+    // Click outside members panel closes it
+    document.addEventListener('click', (e) => {
+        if (!membersPanelOpen) return;
+        const panel = document.getElementById('members-panel');
+        const toggle = document.getElementById('members-toggle');
+        if (panel.contains(e.target) || toggle.contains(e.target)) return;
+        membersPanelOpen = false;
+        panel.classList.remove('open');
+    });
+
+    // Click outside sidebar closes it (mobile)
+    document.addEventListener('click', (e) => {
+        if (!sidebar.classList.contains('open')) return;
+        if (sidebar.contains(e.target) || hamburger.contains(e.target)) return;
+        closeSidebar();
+    });
 
     // Add server button
     document.getElementById('add-server-btn').addEventListener('click', () => {
@@ -92,6 +114,13 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('new-channel-name').addEventListener('keypress', (e) => {
         if (e.key === 'Enter') createChannel();
     });
+
+    // Members panel toggle
+    document.getElementById('members-toggle').addEventListener('click', toggleMembers);
+    document.getElementById('members-close').addEventListener('click', toggleMembers);
+
+    // Initialize members panel state
+    document.getElementById('members-panel').classList.toggle('open', membersPanelOpen);
 });
 
 // --- WebSocket ---
@@ -177,6 +206,7 @@ async function selectServer(serverId) {
 
     renderServerList();
     await loadChannels(serverId);
+    loadMembers(serverId);
 
     // On mobile, auto-open sidebar when tapping a server
     if (window.innerWidth <= 768 && window._openSidebar) {
@@ -311,6 +341,49 @@ async function appendMessage(msg) {
 
     list.prepend(div);
     list.scrollTop = 0;
+}
+
+// --- Send ---
+
+// --- Members ---
+
+let membersPanelOpen = window.innerWidth > 768;
+
+function toggleMembers() {
+    const panel = document.getElementById('members-panel');
+    membersPanelOpen = !membersPanelOpen;
+    panel.classList.toggle('open', membersPanelOpen);
+    // Close sidebar if open on mobile
+    if (membersPanelOpen && window.innerWidth <= 768) {
+        window._closeSidebar();
+    }
+}
+
+async function loadMembers(serverId) {
+    try {
+        const res = await authFetch(`/api/servers/${serverId}/members`);
+        const members = await res.json();
+        const list = document.getElementById('member-list');
+        list.innerHTML = '';
+
+        if (!Array.isArray(members) || members.length === 0) return;
+
+        members.forEach(m => {
+            const div = document.createElement('div');
+            div.className = 'member-item';
+            const initial = (m.username || '?').charAt(0).toUpperCase();
+            const isOwner = m.role === 'owner';
+            div.innerHTML =
+                '<div class="member-avatar' + (isOwner ? ' owner' : '') + '">' + initial + '</div>' +
+                '<div>' +
+                    '<div class="member-name">' + escapeHtml(m.username) + '</div>' +
+                    (isOwner ? '<div class="member-role">Owner</div>' : '') +
+                '</div>';
+            list.appendChild(div);
+        });
+    } catch (err) {
+        console.error('Failed to load members:', err);
+    }
 }
 
 // --- Send ---

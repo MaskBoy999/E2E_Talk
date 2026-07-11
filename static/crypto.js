@@ -1,5 +1,6 @@
-﻿console.log('crypto.js v4 loaded - pure JS, no crypto.subtle needed');
+﻿console.log('crypto.js v5 loaded - XChaCha20-Poly1305, pure JS');
 const E2ECrypto = (() => {
+    // --- Base64 helpers ---
     function arrayBufferToBase64(buffer) {
         const bytes = new Uint8Array(buffer);
         let binary = '';
@@ -24,8 +25,9 @@ const E2ECrypto = (() => {
     }
     function equalBytes(a, b) {
         if (a.length !== b.length) return false;
-        for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
-        return true;
+        let diff = 0;
+        for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+        return diff === 0;
     }
 
     // --- SHA-256 ---
@@ -90,110 +92,340 @@ const E2ECrypto = (() => {
         return t.slice(0, len || 32);
     }
 
-    // --- AES-128 ---
-    var SBOX=[0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16];
-    var RCON=[0x01,0x02,0x04,0x08,0x10,0x20,0x40,0x80,0x1b,0x36];
-    function xtime(a){return((a<<1)^(((a>>7)&1)*0x1b))&0xff;}
-
-    function keyExpansion(key) {
-        var nk = key.length / 4, nr = nk + 6;
-        var w = new Uint8Array(16 * (nr + 1));
-        w.set(key);
-        for (var i = nk; i < 4 * (nr + 1); i++) {
-            var t = w.slice((i-1)*4, i*4);
-            if (i % nk === 0) {
-                var t0=SBOX[t[1]]^RCON[i/nk-1], t1=SBOX[t[2]], t2=SBOX[t[3]], t3=SBOX[t[0]];
-                t[0]=t0;t[1]=t1;t[2]=t2;t[3]=t3;
-            } else if (nk > 6 && i % nk === 4) {
-                t[0]=SBOX[t[0]];t[1]=SBOX[t[1]];t[2]=SBOX[t[2]];t[3]=SBOX[t[3]];
-            }
-            for (var j = 0; j < 4; j++) w[i*4+j] = w[(i-nk)*4+j] ^ t[j];
-        }
-        return {w:w, nr:nr};
+    // --- ChaCha20 ---
+    function chacha20QuarterRound(state, a, b, c, d) {
+        state[a] = (state[a] + state[b]) | 0;
+        state[d] = rotl32(state[d] ^ state[a], 16);
+        state[c] = (state[c] + state[d]) | 0;
+        state[b] = rotl32(state[b] ^ state[c], 12);
+        state[a] = (state[a] + state[b]) | 0;
+        state[d] = rotl32(state[d] ^ state[a], 8);
+        state[c] = (state[c] + state[d]) | 0;
+        state[b] = rotl32(state[b] ^ state[c], 7);
     }
 
-    function aesBlock(block, ek) {
-        var s = new Uint8Array(block);
-        var nr = ek.nr, w = ek.w;
-        for (var j=0;j<16;j++) s[j]^=w[j];
-        for (var rd=1;rd<nr;rd++) {
-            for (var i=0;i<16;i++) s[i]=SBOX[s[i]];
-            var tmp=new Uint8Array(16);
-            tmp[0]=s[0]^s[5]^s[10]^s[15]^xtime(s[0]^s[5]);
-            tmp[1]=s[1]^s[6]^s[11]^s[12]^xtime(s[1]^s[6]);
-            tmp[2]=s[2]^s[7]^s[8]^s[13]^xtime(s[2]^s[7]);
-            tmp[3]=s[3]^s[4]^s[9]^s[14]^xtime(s[3]^s[4]);
-            tmp[4]=s[4]^s[0]^s[5]^s[10]^xtime(s[4]^s[0]);
-            tmp[5]=s[5]^s[1]^s[6]^s[11]^xtime(s[5]^s[1]);
-            tmp[6]=s[6]^s[2]^s[7]^s[12]^xtime(s[6]^s[2]);
-            tmp[7]=s[7]^s[3]^s[8]^s[13]^xtime(s[7]^s[3]);
-            tmp[8]=s[8]^s[4]^s[9]^s[14]^xtime(s[8]^s[4]);
-            tmp[9]=s[9]^s[5]^s[10]^s[15]^xtime(s[9]^s[5]);
-            tmp[10]=s[10]^s[6]^s[11]^s[12]^xtime(s[10]^s[6]);
-            tmp[11]=s[11]^s[7]^s[8]^s[13]^xtime(s[11]^s[7]);
-            tmp[12]=s[12]^s[0]^s[5]^s[10]^xtime(s[12]^s[0]);
-            tmp[13]=s[13]^s[1]^s[6]^s[11]^xtime(s[13]^s[1]);
-            tmp[14]=s[14]^s[2]^s[7]^s[12]^xtime(s[14]^s[2]);
-            tmp[15]=s[15]^s[3]^s[8]^s[13]^xtime(s[15]^s[3]);
-            for(var j=0;j<16;j++) s[j]=tmp[j];
-            for(var j=0;j<16;j++) s[j]^=w[rd*16+j];
-        }
-        for (var i=0;i<16;i++) s[i]=SBOX[s[i]];
-        var tmp=new Uint8Array(16);
-        tmp[0]=s[0]^s[5]^s[10]^s[15];tmp[1]=s[1]^s[6]^s[11]^s[12];tmp[2]=s[2]^s[7]^s[8]^s[13];tmp[3]=s[3]^s[4]^s[9]^s[14];
-        tmp[4]=s[4]^s[0]^s[5]^s[10];tmp[5]=s[5]^s[1]^s[6]^s[11];tmp[6]=s[6]^s[2]^s[7]^s[12];tmp[7]=s[7]^s[3]^s[8]^s[13];
-        tmp[8]=s[8]^s[4]^s[9]^s[14];tmp[9]=s[9]^s[5]^s[10]^s[15];tmp[10]=s[10]^s[6]^s[11]^s[12];tmp[11]=s[11]^s[7]^s[8]^s[13];
-        tmp[12]=s[12]^s[0]^s[5]^s[10];tmp[13]=s[13]^s[1]^s[6]^s[11];tmp[14]=s[14]^s[2]^s[7]^s[12];tmp[15]=s[15]^s[3]^s[8]^s[13];
-        for(var j=0;j<16;j++) s[j]=tmp[j];
-        for(var j=0;j<16;j++) s[j]^=w[nr*16+j];
-        return s;
+    function rotl32(v, n) {
+        return ((v << n) | (v >>> (32 - n))) | 0;
     }
 
-    // --- AES-128-CTR ---
-    function aesCtr128(keyBytes, iv, data) {
-        var ek = keyExpansion(keyBytes);
-        var counter = new Uint8Array(iv);
-        var out = new Uint8Array(data.length);
-        for (var pos = 0; pos < data.length; pos += 16) {
-            var keystream = aesBlock(counter, ek);
-            var len = Math.min(16, data.length - pos);
-            for (var i = 0; i < len; i++) out[pos+i] = data[pos+i] ^ keystream[i];
-            for (var i = 15; i >= 0; i--) { counter[i]++; if (counter[i] !== 0) break; }
+    function chacha20Block(key, counter, nonce) {
+        var state = new Int32Array(16);
+        // "expand 32-byte k"
+        state[0] = 0x61707865;
+        state[1] = 0x3320646e;
+        state[2] = 0x79622d32;
+        state[3] = 0x6b206574;
+        // Key (8 words)
+        var kv = new DataView(key.buffer, key.byteOffset);
+        for (var i = 0; i < 8; i++) state[4 + i] = kv.getInt32(i * 4, true);
+        // Counter
+        state[12] = counter;
+        // Nonce (4 words)
+        var nv = new DataView(nonce.buffer, nonce.byteOffset);
+        state[13] = nv.getInt32(0, true);
+        state[14] = nv.getInt32(4, true);
+        state[15] = nv.getInt32(8, true);
+
+        var working = new Int32Array(state);
+        for (var i = 0; i < 10; i++) {
+            chacha20QuarterRound(working, 0, 4, 8, 12);
+            chacha20QuarterRound(working, 1, 5, 9, 13);
+            chacha20QuarterRound(working, 2, 6, 10, 14);
+            chacha20QuarterRound(working, 3, 7, 11, 15);
+            chacha20QuarterRound(working, 0, 5, 10, 15);
+            chacha20QuarterRound(working, 1, 6, 11, 12);
+            chacha20QuarterRound(working, 2, 7, 8, 13);
+            chacha20QuarterRound(working, 3, 4, 9, 14);
+        }
+
+        var out = new Uint8Array(64);
+        var ov = new DataView(out.buffer);
+        for (var i = 0; i < 16; i++) {
+            var v = (working[i] + state[i]) | 0;
+            ov.setInt32(i * 4, v, true);
         }
         return out;
     }
 
-    // --- Encrypt/Decrypt ---
-    function deriveKeys(channelId) {
-        var salt = new TextEncoder().encode('e2e-chat-v4-salt');
-        var keyBytes = hkdf(salt, salt, channelId, 32);
-        return { encKey: keyBytes.slice(0, 16), macKey: keyBytes.slice(16, 32) };
+    function chacha20Encrypt(key, counter, nonce, data) {
+        var out = new Uint8Array(data.length);
+        var blockCount = Math.ceil(data.length / 64);
+        for (var i = 0; i < blockCount; i++) {
+            var keystream = chacha20Block(key, counter + i, nonce);
+            var start = i * 64;
+            var len = Math.min(64, data.length - start);
+            for (var j = 0; j < len; j++) out[start + j] = data[start + j] ^ keystream[j];
+        }
+        return out;
     }
 
+    // --- HChaCha20 ---
+    function hchacha20(key, input) {
+        var state = new Int32Array(16);
+        state[0] = 0x61707865;
+        state[1] = 0x3320646e;
+        state[2] = 0x79622d32;
+        state[3] = 0x6b206574;
+        var kv = new DataView(key.buffer, key.byteOffset);
+        for (var i = 0; i < 8; i++) state[4 + i] = kv.getInt32(i * 4, true);
+        var iv = new DataView(input.buffer, input.byteOffset);
+        state[12] = iv.getInt32(0, true);
+        state[13] = iv.getInt32(4, true);
+        state[14] = iv.getInt32(8, true);
+        state[15] = iv.getInt32(12, true);
+
+        var working = new Int32Array(state);
+        for (var i = 0; i < 10; i++) {
+            chacha20QuarterRound(working, 0, 4, 8, 12);
+            chacha20QuarterRound(working, 1, 5, 9, 13);
+            chacha20QuarterRound(working, 2, 6, 10, 14);
+            chacha20QuarterRound(working, 3, 7, 11, 15);
+            chacha20QuarterRound(working, 0, 5, 10, 15);
+            chacha20QuarterRound(working, 1, 6, 11, 12);
+            chacha20QuarterRound(working, 2, 7, 8, 13);
+            chacha20QuarterRound(working, 3, 4, 9, 14);
+        }
+
+        var out = new Uint8Array(32);
+        var ov = new DataView(out.buffer);
+        ov.setInt32(0, working[0], true);
+        ov.setInt32(4, working[1], true);
+        ov.setInt32(8, working[2], true);
+        ov.setInt32(12, working[3], true);
+        ov.setInt32(16, working[12], true);
+        ov.setInt32(20, working[13], true);
+        ov.setInt32(24, working[14], true);
+        ov.setInt32(28, working[15], true);
+        return out;
+    }
+
+    // --- Poly1305 ---
+    function poly1305(key, data) {
+        var r = new Uint8Array(16);
+        r[0] = key[0] & 0xff; r[1] = key[1] & 0x0f;
+        r[2] = key[2] & 0xfc; r[3] = key[3] & 0xf8;
+        r[4] = key[4] & 0xfe; r[5] = key[5] & 0xff;
+        r[6] = key[6] & 0xfe; r[7] = key[7] & 0xff;
+        r[8] = key[8] & 0xfe; r[9] = key[9] & 0xff;
+        r[10] = key[10] & 0xfe; r[11] = key[11] & 0xff;
+        r[12] = key[12] & 0xfc; r[13] = key[13] & 0xff;
+        r[14] = key[14] & 0xfe; r[15] = key[15] & 0xff;
+
+        var s = new Uint8Array(16);
+        s[0] = key[16]; s[1] = key[17]; s[2] = key[18]; s[3] = key[19];
+        s[4] = key[20]; s[5] = key[21]; s[6] = key[22]; s[7] = key[23];
+        s[8] = key[24]; s[9] = key[25]; s[10] = key[26]; s[11] = key[27];
+        s[12] = key[28]; s[13] = key[29]; s[14] = key[30]; s[15] = key[31];
+
+        var r0 = leBytesToNum(r, 0, 4);
+        var r1 = leBytesToNum(r, 4, 8);
+        var r2 = leBytesToNum(r, 8, 12);
+        var r3 = leBytesToNum(r, 12, 16);
+
+        var s1 = (r1 * 5) | 0;
+        var s2 = (r2 * 5) | 0;
+        var s3 = (r3 * 5) | 0;
+
+        var h0 = 0, h1 = 0, h2 = 0, h3 = 0;
+
+        // Process data in 16-byte blocks
+        var blocks = Math.ceil(data.length / 16);
+        for (var i = 0; i < blocks; i++) {
+            var block = new Uint8Array(16);
+            var offset = i * 16;
+            var blockLen = Math.min(16, data.length - offset);
+            for (var j = 0; j < blockLen; j++) block[j] = data[offset + j];
+            block[blockLen] = 1;
+
+            var t0 = leBytesToNum(block, 0, 4);
+            var t1 = leBytesToNum(block, 4, 8);
+            var t2 = leBytesToNum(block, 8, 12);
+            var t3 = leBytesToNum(block, 12, 16);
+
+            h0 = (h0 + t0) | 0;
+            h1 = (h1 + t1) | 0;
+            h2 = (h2 + t2) | 0;
+            h3 = (h3 + t3) | 0;
+
+            var d0, d1, d2, d3, d4;
+
+            d0 = mul32(h0, r0);
+            d1 = mul32(h0, r1) + mul32(h1, r0);
+            d2 = mul32(h0, r2) + mul32(h1, s1) + mul32(h2, r0);
+            d3 = mul32(h0, r3) + mul32(h1, s2) + mul32(h2, s1) + mul32(h3, r0);
+            d4 = mul32(h1, r3) + mul32(h2, s2) + mul32(h3, s1);
+
+            h0 = d0 & 0xffffffff;
+            h1 = d1 & 0xffffffff;
+            h2 = d2 & 0xffffffff;
+            h3 = d3 & 0xffffffff;
+
+            var carry = (d0 - h0) * 0x100000000 + (d1 - h1) + (d2 - h2) * 0x100000000 + (d3 - h3) * 0x100000000;
+            var carryWord = carry / 0x100000000;
+
+            h0 = (h0 + (carryWord | 0) * 5) | 0;
+            var c = (carryWord | 0);
+            h1 = (h1 + c) | 0;
+
+            h1 = (h1 + ((h0 - (h0 >>> 0)) / 0x100000000 | 0)) | 0;
+            h0 = h0 >>> 0;
+        }
+
+        // Partial reduction
+        var g0 = h0 + 5; var c0 = g0 >>> 26; g0 = g0 & 0x3ffffff;
+        var g1 = h1 + c0; var c1 = g1 >>> 26; g1 = g1 & 0x3ffffff;
+        var g2 = h2 + c1; var c2 = g2 >>> 26; g2 = g2 & 0x3ffffff;
+        var g3 = h3 + c2; var c3 = g3 >>> 26; g3 = g3 & 0x3ffffff;
+
+        g0 = g0 - 0x3ffffff; var mask0 = (g0 >>> 26) & 1;
+        g1 = g1 - c3 + mask0; var mask1 = (g1 >>> 26) & 1;
+        g2 = g2 + mask1;
+
+        g0 = (g0 & ~mask0) | ((g0 + 0x3ffffff) & mask0);
+        g1 = (g1 & ~mask1) | ((g1 + 0x3ffffff) & mask1);
+
+        h0 = r0 * g0 + s3 * g1 + s2 * g2 + s1 * g3;
+        h1 = r1 * g0 + r0 * g1 + s3 * g2 + s2 * g3;
+        h2 = r2 * g0 + r1 * g1 + r0 * g2 + s3 * g3;
+        h3 = r3 * g0 + r2 * g1 + r1 * g2 + r0 * g3;
+
+        h1 = (h1 + (h0 >>> 26)) | 0; h0 = h0 & 0x3ffffff;
+        h2 = (h2 + (h1 >>> 26)) | 0; h1 = h1 & 0x3ffffff;
+        h3 = (h3 + (h2 >>> 26)) | 0; h2 = h2 & 0x3ffffff;
+        h0 = h0 + (h3 >>> 26) * 5; h3 = h3 & 0x3ffffff;
+        h1 = (h1 + (h0 >>> 26)) | 0; h0 = h0 & 0x3ffffff;
+
+        var result = new Uint8Array(16);
+        numToLeBytes(result, 0, h0);
+        numToLeBytes(result, 4, h1);
+        numToLeBytes(result, 8, h2);
+        numToLeBytes(result, 12, h3);
+
+        // Add s (the second half of the key)
+        var carry = 0;
+        for (var i = 0; i < 16; i++) {
+            carry += result[i] + s[i];
+            result[i] = carry & 0xff;
+            carry >>>= 8;
+        }
+
+        return result;
+    }
+
+    function leBytesToNum(bytes, start, end) {
+        var result = 0;
+        var factor = 1;
+        for (var i = start; i < end; i++) {
+            result += bytes[i] * factor;
+            factor *= 256;
+        }
+        return result;
+    }
+
+    function numToLeBytes(bytes, offset, num) {
+        bytes[offset] = num & 0xff;
+        bytes[offset + 1] = (num >>> 8) & 0xff;
+        bytes[offset + 2] = (num >>> 16) & 0xff;
+        bytes[offset + 3] = (num >>> 24) & 0xff;
+    }
+
+    function mul32(a, b) {
+        a = a | 0;
+        b = b | 0;
+        var ah = (a >>> 16) & 0xffff, al = a & 0xffff;
+        var bh = (b >>> 16) & 0xffff, bl = b & 0xffff;
+        return (ah * bl + al * bh) * 0x10000 + al * bl;
+    }
+
+    // --- XChaCha20-Poly1305 ---
+    function xchacha20poly1305Encrypt(key, plaintext) {
+        // Generate 24-byte random nonce
+        var nonce = new Uint8Array(24);
+        for (var i = 0; i < 24; i++) nonce[i] = Math.floor(Math.random() * 256);
+
+        // HChaCha20 to derive subkey
+        var subkey = hchacha20(key, nonce.subarray(0, 16));
+
+        // Pad nonce: last 8 bytes of original nonce → 12-byte padded nonce (first 4 bytes = 0)
+        var paddedNonce = new Uint8Array(12);
+        paddedNonce[4] = nonce[16]; paddedNonce[5] = nonce[17];
+        paddedNonce[6] = nonce[18]; paddedNonce[7] = nonce[19];
+        paddedNonce[8] = nonce[20]; paddedNonce[9] = nonce[21];
+        paddedNonce[10] = nonce[22]; paddedNonce[11] = nonce[23];
+
+        // Encrypt with ChaCha20 starting at counter=1
+        var ciphertext = chacha20Encrypt(subkey, 1, paddedNonce, plaintext);
+
+        // Poly1305: compute over 64-byte pad, then ciphertext, then lengths
+        var polyKey = chacha20Block(subkey, 0, paddedNonce);
+        var macData = new Uint8Array(plaintext.length + (plaintext.length % 16 === 0 ? 0 : 16 - (plaintext.length % 16)) + 16);
+        for (var i = 0; i < ciphertext.length; i++) macData[i] = ciphertext[i];
+        macData[ciphertext.length] = 1;
+        var cLen = new DataView(macData.buffer);
+        cLen.setUint32(macData.length - 8, ciphertext.length, true);
+        cLen.setUint32(macData.length - 4, 0, true);
+
+        var tag = poly1305(polyKey, macData);
+
+        // Wire format: ciphertext + tag (16 bytes)
+        return { ciphertext: ciphertext, tag: tag, nonce: nonce };
+    }
+
+    function xchacha20poly1305Decrypt(key, ciphertext, tag, nonce) {
+        // HChaCha20 to derive subkey
+        var subkey = hchacha20(key, nonce.subarray(0, 16));
+
+        // Pad nonce
+        var paddedNonce = new Uint8Array(12);
+        paddedNonce[4] = nonce[16]; paddedNonce[5] = nonce[17];
+        paddedNonce[6] = nonce[18]; paddedNonce[7] = nonce[19];
+        paddedNonce[8] = nonce[20]; paddedNonce[9] = nonce[21];
+        paddedNonce[10] = nonce[22]; paddedNonce[11] = nonce[23];
+
+        // Verify Poly1305 tag first
+        var polyKey = chacha20Block(subkey, 0, paddedNonce);
+        var macData = new Uint8Array(ciphertext.length + (ciphertext.length % 16 === 0 ? 0 : 16 - (ciphertext.length % 16)) + 16);
+        for (var i = 0; i < ciphertext.length; i++) macData[i] = ciphertext[i];
+        macData[ciphertext.length] = 1;
+        var cLen = new DataView(macData.buffer);
+        cLen.setUint32(macData.length - 8, ciphertext.length, true);
+        cLen.setUint32(macData.length - 4, 0, true);
+
+        var expectedTag = poly1305(polyKey, macData);
+        if (!equalBytes(tag, expectedTag)) throw new Error('Authentication failed');
+
+        // Decrypt
+        return chacha20Encrypt(subkey, 1, paddedNonce, ciphertext);
+    }
+
+    // --- Key Derivation ---
+    function deriveKey(channelId) {
+        var salt = new TextEncoder().encode('e2e-chat-v5-xchacha20');
+        return hkdf(salt, salt, channelId, 32);
+    }
+
+    // --- Public API ---
     function encrypt(plaintext, channelId) {
-        var keys = deriveKeys(channelId);
-        var iv = crypto.getRandomValues(new Uint8Array(16));
-        var ct = aesCtr128(keys.encKey, iv, new TextEncoder().encode(plaintext));
-        var tag = hmacSHA256(keys.macKey, concatBuffers(iv, ct));
-        var tagSlice = tag.slice(0, 16);
-        var combined = concatBuffers(ct, tagSlice);
+        var key = deriveKey(channelId);
+        var plaintextBytes = new TextEncoder().encode(plaintext);
+        var result = xchacha20poly1305Encrypt(key, plaintextBytes);
+        // Wire: ciphertext + tag
+        var combined = concatBuffers(result.ciphertext, result.tag);
         return {
             ciphertext: arrayBufferToBase64(combined),
-            nonce: arrayBufferToBase64(iv)
+            nonce: arrayBufferToBase64(result.nonce)
         };
     }
 
     function decrypt(ciphertextB64, nonceB64, channelId) {
-        var keys = deriveKeys(channelId);
+        var key = deriveKey(channelId);
         var combined = new Uint8Array(base64ToArrayBuffer(ciphertextB64));
-        var iv = new Uint8Array(base64ToArrayBuffer(nonceB64));
+        var nonce = new Uint8Array(base64ToArrayBuffer(nonceB64));
         if (combined.length < 16) throw new Error('Ciphertext too short');
-        var ct = combined.slice(0, combined.length - 16);
+        var ciphertext = combined.slice(0, combined.length - 16);
         var tag = combined.slice(combined.length - 16);
-        var expectedTag = hmacSHA256(keys.macKey, concatBuffers(iv, ct)).slice(0, 16);
-        if (!equalBytes(tag, expectedTag)) throw new Error('Authentication failed');
-        var pt = aesCtr128(keys.encKey, iv, ct);
-        return new TextDecoder().decode(pt);
+        var plaintext = xchacha20poly1305Decrypt(key, ciphertext, tag, nonce);
+        return new TextDecoder().decode(plaintext);
     }
 
     return {

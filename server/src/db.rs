@@ -325,6 +325,27 @@ impl Database {
         Ok(members)
     }
 
+    pub fn get_server_members_with_names(&self, server_id: &str) -> Result<Vec<(String, String, String)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT u.id, u.username, sm.role
+                 FROM server_members sm
+                 INNER JOIN users u ON sm.user_id = u.id
+                 WHERE sm.server_id = ?1
+                 ORDER BY sm.role = 'owner' DESC, u.username ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        let members = stmt
+            .query_map(params![server_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(members)
+    }
+
     // --- Channels ---
 
     pub fn list_server_channels(&self, server_id: &str) -> Result<Vec<Channel>, String> {

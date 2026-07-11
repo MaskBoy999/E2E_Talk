@@ -78,6 +78,7 @@ async fn main() {
         .route("/api/login", post(handlers::login))
         .route("/api/servers", get(handlers::list_servers).post(handlers::create_server))
         .route("/api/servers/{server_id}/channels", get(handlers::list_channels).post(handlers::create_channel))
+        .route("/api/servers/{server_id}/members", get(handlers::list_server_members))
         .route("/api/servers/{server_id}/invite", get(handlers::get_invite).post(handlers::regenerate_invite))
         .route("/api/channels/{channel_id}/messages", get(handlers::list_messages))
         .route("/api/invites/join", post(handlers::join_server))
