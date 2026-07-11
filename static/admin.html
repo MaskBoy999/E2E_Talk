@@ -4,7 +4,42 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>E2E Chat - Admin</title>
-    <link rel="stylesheet" href="style.css?v=2">
+    <link rel="stylesheet" href="style.css?v=3">
+    <style>
+        .admin-card { max-width: 1200px; }
+        .admin-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        .admin-header h1 { margin: 0; }
+
+        .tabs { display: flex; gap: 4px; margin-bottom: 20px; flex-wrap: wrap; border-bottom: 2px solid #333; padding-bottom: 0; }
+        .tab-btn { background: #1a1a2e; border: none; color: #999; padding: 10px 18px; cursor: pointer; border-radius: 6px 6px 0 0; font-size: 14px; transition: all 0.2s; border: 2px solid transparent; border-bottom: none; }
+        .tab-btn:hover { color: #fff; background: #252540; }
+        .tab-btn.active { color: #fff; background: #16213e; border-color: #555; border-bottom-color: #16213e; margin-bottom: -2px; }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+
+        .data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        .data-table th { background: #16213e; color: #ccc; padding: 10px 12px; text-align: left; font-weight: 600; position: sticky; top: 0; }
+        .data-table td { padding: 8px 12px; border-bottom: 1px solid #1a1a2e; vertical-align: top; }
+        .data-table tr:hover td { background: #1a1a2e; }
+        .data-table .id-cell { font-family: monospace; font-size: 11px; color: #888; max-width: 100px; overflow: hidden; text-overflow: ellipsis; }
+        .data-table .blob-cell { font-family: monospace; font-size: 10px; color: #666; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+        .data-table .blob-cell:hover { color: #aaa; white-space: normal; word-break: break-all; }
+        .data-table .ts-cell { font-size: 11px; color: #999; white-space: nowrap; }
+
+        .table-scroll { max-height: 70vh; overflow-y: auto; border: 1px solid #1a1a2e; border-radius: 6px; }
+        .table-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+        .table-header h3 { margin: 0; color: #ccc; font-size: 16px; }
+        .record-count { color: #888; font-size: 13px; }
+
+        .btn-delete-sm { background: #c62828; color: white; border: none; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+        .btn-delete-sm:hover { background: #e53935; }
+
+        .cascade-info { background: #1a1a2e; border: 1px solid #333; border-radius: 6px; padding: 12px 16px; margin-bottom: 12px; font-size: 13px; }
+        .cascade-info strong { color: #e53935; }
+        .cascade-info .stat { color: #ff9800; margin-right: 16px; }
+
+        .empty-state { text-align: center; color: #666; padding: 40px; }
+    </style>
 </head>
 <body>
     <div class="auth-container">
@@ -27,21 +62,97 @@
                 <a href="index.html" class="back-link">Back to chat</a>
             </div>
 
-            <div id="error-message2" class="error" style="display: none;"></div>
+            <div class="tabs">
+                <button class="tab-btn active" data-tab="users">Users</button>
+                <button class="tab-btn" data-tab="servers">Servers</button>
+                <button class="tab-btn" data-tab="channels">Channels</button>
+                <button class="tab-btn" data-tab="messages">Messages</button>
+                <button class="tab-btn" data-tab="server-keys">Server Keys</button>
+                <button class="tab-btn" data-tab="server-members">Members</button>
+            </div>
 
-            <div class="user-table-container">
-                <table class="user-table">
-                    <thead>
-                        <tr>
-                            <th>Username</th>
-                            <th>User ID</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody id="user-list">
-                        <tr><td colspan="3" style="text-align:center;color:#666;">Loading...</td></tr>
-                    </tbody>
-                </table>
+            <!-- Users Tab -->
+            <div class="tab-content active" id="tab-users">
+                <div class="table-header">
+                    <h3>Users</h3>
+                    <span class="record-count" id="users-count"></span>
+                </div>
+                <div class="table-scroll">
+                    <table class="data-table">
+                        <thead><tr><th>Username</th><th>User ID</th><th>Actions</th></tr></thead>
+                        <tbody id="user-list"><tr><td colspan="3" class="empty-state">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Servers Tab -->
+            <div class="tab-content" id="tab-servers">
+                <div class="table-header">
+                    <h3>Servers</h3>
+                    <span class="record-count" id="servers-count"></span>
+                </div>
+                <div class="table-scroll">
+                    <table class="data-table">
+                        <thead><tr><th>Name</th><th>Server ID</th><th>Owner ID</th><th>Invite Code</th><th>Actions</th></tr></thead>
+                        <tbody id="server-list"><tr><td colspan="5" class="empty-state">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Channels Tab -->
+            <div class="tab-content" id="tab-channels">
+                <div class="table-header">
+                    <h3>Channels</h3>
+                    <span class="record-count" id="channels-count"></span>
+                </div>
+                <div class="table-scroll">
+                    <table class="data-table">
+                        <thead><tr><th>Name</th><th>Channel ID</th><th>Server ID</th><th>Type</th><th>Actions</th></tr></thead>
+                        <tbody id="channel-list"><tr><td colspan="5" class="empty-state">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Messages Tab -->
+            <div class="tab-content" id="tab-messages">
+                <div class="table-header">
+                    <h3>Messages</h3>
+                    <span class="record-count" id="messages-count"></span>
+                </div>
+                <div class="table-scroll">
+                    <table class="data-table">
+                        <thead><tr><th>Sender</th><th>Channel ID</th><th>Encrypted Content (base64)</th><th>Nonce</th><th>Timestamp</th></tr></thead>
+                        <tbody id="message-list"><tr><td colspan="5" class="empty-state">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Server Keys Tab -->
+            <div class="tab-content" id="tab-server-keys">
+                <div class="table-header">
+                    <h3>Server Keys</h3>
+                    <span class="record-count" id="server-keys-count"></span>
+                </div>
+                <div class="table-scroll">
+                    <table class="data-table">
+                        <thead><tr><th>Server</th><th>User ID</th><th>Encrypted Key</th><th>Sender Public Key</th><th>Nonce</th><th>v</th></tr></thead>
+                        <tbody id="server-key-list"><tr><td colspan="6" class="empty-state">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Server Members Tab -->
+            <div class="tab-content" id="tab-server-members">
+                <div class="table-header">
+                    <h3>Server Members</h3>
+                    <span class="record-count" id="server-members-count"></span>
+                </div>
+                <div class="table-scroll">
+                    <table class="data-table">
+                        <thead><tr><th>Username</th><th>User ID</th><th>Server</th><th>Server ID</th></tr></thead>
+                        <tbody id="server-member-list"><tr><td colspan="4" class="empty-state">Loading...</td></tr></tbody>
+                    </table>
+                </div>
             </div>
         </div>
     </div>
@@ -49,9 +160,10 @@
     <!-- Delete Confirmation Modal -->
     <div id="confirm-modal" class="modal" style="display: none;">
         <div class="modal-content">
-            <h3>Delete User</h3>
-            <p>Are you sure you want to delete <strong id="delete-username"></strong>?</p>
-            <p class="warning">This will permanently remove their account and all messages.</p>
+            <h3 id="confirm-title">Delete</h3>
+            <p id="confirm-message"></p>
+            <div id="cascade-stats" class="cascade-info" style="display: none;"></div>
+            <p class="warning" id="confirm-warning"></p>
             <div class="modal-actions">
                 <button id="confirm-cancel" class="btn-cancel">Cancel</button>
                 <button id="confirm-delete" class="btn-delete">Delete</button>
@@ -59,6 +171,6 @@
         </div>
     </div>
 
-    <script src="admin.js?v=2"></script>
+    <script src="admin.js?v=3"></script>
 </body>
 </html>

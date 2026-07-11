@@ -73,6 +73,8 @@ impl Database {
     fn run_migrations(&self) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
         conn.execute_batch(include_str!("../migrations/001_initial.sql"))?;
+        // Run e2ee migration (ignores errors if already applied)
+        let _ = conn.execute_batch(include_str!("../migrations/002_e2ee.sql"));
         Ok(())
     }
 
@@ -93,13 +95,13 @@ impl Database {
 
     // --- Users ---
 
-    pub fn create_user(&self, username: &str, password_hash: &str) -> Result<User, String> {
+    pub fn create_user(&self, username: &str, password_hash: &str, identity_public_key: Option<&[u8]>) -> Result<User, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let id = Uuid::new_v4().to_string();
 
         conn.execute(
-            "INSERT INTO users (id, username, password_hash) VALUES (?1, ?2, ?3)",
-            params![id, username, password_hash],
+            "INSERT INTO users (id, username, password_hash, identity_public_key) VALUES (?1, ?2, ?3, ?4)",
+            params![id, username, password_hash, identity_public_key],
         )
         .map_err(|e| {
             if e.to_string().contains("UNIQUE") {
@@ -593,6 +595,101 @@ impl Database {
         Ok(())
     }
 
+    // --- Identity Keys ---
+
+    pub fn get_identity_public_key(&self, user_id: &str) -> Result<Vec<u8>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT identity_public_key FROM users WHERE id = ?1",
+            params![user_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| "User not found or no public key".to_string())
+    }
+
+    pub fn update_identity_public_key(&self, user_id: &str, key: &[u8]) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE users SET identity_public_key = ?1 WHERE id = ?2",
+            params![key, user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    // --- Server Keys (envelope-encrypted) ---
+
+    pub fn save_server_key(
+        &self,
+        server_id: &str,
+        user_id: &str,
+        encrypted_key: &[u8],
+        sender_public_key: &[u8],
+        nonce: &[u8],
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT OR REPLACE INTO server_keys (server_id, user_id, encrypted_key, sender_public_key, nonce, version)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1)",
+            params![server_id, user_id, encrypted_key, sender_public_key, nonce],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn get_server_keys_for_user(&self, server_id: &str, user_id: &str) -> Result<Vec<(Vec<u8>, Vec<u8>, Vec<u8>, i32)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT encrypted_key, sender_public_key, nonce, version
+                 FROM server_keys WHERE server_id = ?1 AND user_id = ?2",
+            )
+            .map_err(|e| e.to_string())?;
+        let keys = stmt
+            .query_map(params![server_id, user_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(keys)
+    }
+
+    pub fn get_all_server_keys(&self, server_id: &str) -> Result<Vec<(String, Vec<u8>, Vec<u8>, Vec<u8>, i32)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT user_id, encrypted_key, sender_public_key, nonce, version
+                 FROM server_keys WHERE server_id = ?1",
+            )
+            .map_err(|e| e.to_string())?;
+        let keys = stmt
+            .query_map(params![server_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(keys)
+    }
+
+    pub fn delete_server_keys(&self, server_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM server_keys WHERE server_id = ?1", params![server_id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn delete_server_keys_for_user(&self, server_id: &str, user_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM server_keys WHERE server_id = ?1 AND user_id = ?2",
+            params![server_id, user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     // --- Admin ---
 
     pub fn list_all_users(&self) -> Result<Vec<User>, String> {
@@ -613,12 +710,251 @@ impl Database {
         Ok(users)
     }
 
+    pub fn list_all_servers_admin(&self) -> Result<Vec<Server>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT id, name, owner_id, invite_code FROM servers ORDER BY created_at")
+            .map_err(|e| e.to_string())?;
+        let servers = stmt
+            .query_map([], |row| {
+                Ok(Server {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    owner_id: row.get(2)?,
+                    invite_code: row.get(3)?,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(servers)
+    }
+
+    pub fn list_all_channels_admin(&self) -> Result<Vec<Channel>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT id, server_id, name, type FROM channels ORDER BY created_at")
+            .map_err(|e| e.to_string())?;
+        let channels = stmt
+            .query_map([], |row| {
+                Ok(Channel {
+                    id: row.get(0)?,
+                    server_id: row.get(1)?,
+                    name: row.get(2)?,
+                    channel_type: row.get(3)?,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(channels)
+    }
+
+    pub fn list_all_messages_admin(&self) -> Result<Vec<Message>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT m.id, m.channel_id, m.sender_id, COALESCE(u.username, '?'), m.encrypted_content, m.nonce, m.timestamp
+                 FROM messages m LEFT JOIN users u ON m.sender_id = u.id ORDER BY m.timestamp DESC LIMIT 500",
+            )
+            .map_err(|e| e.to_string())?;
+        let messages = stmt
+            .query_map([], |row| {
+                Ok(Message {
+                    id: row.get(0)?,
+                    channel_id: row.get(1)?,
+                    sender_id: row.get(2)?,
+                    sender_username: row.get(3)?,
+                    encrypted_content: row.get(4)?,
+                    nonce: row.get(5)?,
+                    timestamp: row.get(6)?,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(messages)
+    }
+
+    pub fn list_all_server_keys_admin(
+        &self,
+    ) -> Result<Vec<(String, String, String, Vec<u8>, Vec<u8>, Vec<u8>, i32)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT sk.server_id, COALESCE(s.name, '?'), sk.user_id, sk.encrypted_key, sk.sender_public_key, sk.nonce, sk.version
+                 FROM server_keys sk LEFT JOIN servers s ON sk.server_id = s.id ORDER BY sk.created_at",
+            )
+            .map_err(|e| e.to_string())?;
+        let keys = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                    row.get::<_, Vec<u8>>(5)?,
+                    row.get::<_, i32>(6)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(keys)
+    }
+
+    pub fn list_all_server_members_admin(
+        &self,
+    ) -> Result<Vec<(String, String, String, String)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT sm.user_id, COALESCE(u.username, '?'), sm.server_id, COALESCE(s.name, '?')
+                 FROM server_members sm
+                 LEFT JOIN users u ON sm.user_id = u.id
+                 LEFT JOIN servers s ON sm.server_id = s.id
+                 ORDER BY sm.joined_at",
+            )
+            .map_err(|e| e.to_string())?;
+        let members = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(members)
+    }
+
+    pub fn get_user_cascade_stats(&self, user_id: &str) -> Result<serde_json::Value, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+
+        let msg_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE sender_id = ?1",
+                params![user_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+
+        let member_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM server_members WHERE user_id = ?1",
+                params![user_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+
+        let key_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM server_keys WHERE user_id = ?1",
+                params![user_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+
+        let owned_servers: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT id FROM servers WHERE owner_id = ?1")
+                .map_err(|e| e.to_string())?;
+            let rows: Vec<String> = stmt
+                .query_map(params![user_id], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?
+                .filter_map(|r| r.ok())
+                .collect();
+            rows
+        };
+
+        Ok(serde_json::json!({
+            "messages": msg_count,
+            "memberships": member_count,
+            "server_keys": key_count,
+            "owned_servers": owned_servers.len(),
+            "owned_server_ids": owned_servers,
+        }))
+    }
+
+    pub fn delete_server_admin(&self, server_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM server_keys WHERE server_id = ?1", params![server_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM messages WHERE channel_id IN (SELECT id FROM channels WHERE server_id = ?1)",
+            params![server_id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM channels WHERE server_id = ?1", params![server_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM server_members WHERE server_id = ?1",
+            params![server_id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM servers WHERE id = ?1", params![server_id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn delete_channel_admin(&self, channel_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM messages WHERE channel_id = ?1",
+            params![channel_id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM channels WHERE id = ?1", params![channel_id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     pub fn delete_user(&self, user_id: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
+
+        // 1. Delete messages sent by user (messages.sender_id -> users(id) has NO CASCADE)
         conn.execute("DELETE FROM messages WHERE sender_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+
+        // 2. Fully delete each server owned by user (cascades channels, members, keys, messages)
+        let owned_server_ids: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT id FROM servers WHERE owner_id = ?1")
+                .map_err(|e| e.to_string())?;
+            let rows: Vec<String> = stmt
+                .query_map(params![user_id], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?
+                .filter_map(|r| r.ok())
+                .collect();
+            rows
+        };
+        for sid in &owned_server_ids {
+            conn.execute("DELETE FROM server_keys WHERE server_id = ?1", params![sid])
+                .map_err(|e| e.to_string())?;
+            conn.execute(
+                "DELETE FROM messages WHERE channel_id IN (SELECT id FROM channels WHERE server_id = ?1)",
+                params![sid],
+            )
+            .map_err(|e| e.to_string())?;
+            conn.execute("DELETE FROM server_members WHERE server_id = ?1", params![sid])
+                .map_err(|e| e.to_string())?;
+            conn.execute("DELETE FROM channels WHERE server_id = ?1", params![sid])
+                .map_err(|e| e.to_string())?;
+            conn.execute("DELETE FROM servers WHERE id = ?1", params![sid])
+                .map_err(|e| e.to_string())?;
+        }
+
+        // 3. Clean up remaining memberships and keys in other servers
+        conn.execute("DELETE FROM server_keys WHERE user_id = ?1", params![user_id])
             .map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM server_members WHERE user_id = ?1", params![user_id])
             .map_err(|e| e.to_string())?;
+
+        // 4. Clean up Signal protocol tables
         conn.execute("DELETE FROM prekey_bundles WHERE user_id = ?1", params![user_id])
             .map_err(|e| e.to_string())?;
         conn.execute(
@@ -626,6 +962,8 @@ impl Database {
             params![user_id],
         )
         .map_err(|e| e.to_string())?;
+
+        // 5. Delete the user
         conn.execute("DELETE FROM users WHERE id = ?1", params![user_id])
             .map_err(|e| e.to_string())?;
         Ok(())

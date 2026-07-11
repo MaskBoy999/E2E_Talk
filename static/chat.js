@@ -1,4 +1,4 @@
-console.log('chat.js v5 loaded - server system');
+console.log('chat.js v6 loaded - true E2E encryption');
 
 let ws = null;
 let currentChannelId = null;
@@ -26,6 +26,12 @@ document.addEventListener('DOMContentLoaded', () => {
     user = JSON.parse(userStr);
     document.getElementById('current-user').textContent = user.username;
 
+    // Ensure identity keypair exists
+    if (!E2ECrypto.getIdentityKeyPair()) {
+        const kp = E2ECrypto.x25519GenerateKeyPair();
+        E2ECrypto.saveIdentityKeyPair(kp);
+    }
+
     document.getElementById('logout-btn').addEventListener('click', () => {
         localStorage.removeItem('token');
         localStorage.removeItem('user');
@@ -50,7 +56,6 @@ document.addEventListener('DOMContentLoaded', () => {
     function openSidebar() {
         sidebar.classList.add('open');
         overlay.classList.add('open');
-        // Close members panel if open
         if (membersPanelOpen) {
             membersPanelOpen = false;
             document.getElementById('members-panel').classList.remove('open');
@@ -67,7 +72,6 @@ document.addEventListener('DOMContentLoaded', () => {
     window._openSidebar = openSidebar;
     window._closeSidebar = closeSidebar;
 
-    // Click outside members panel closes it
     document.addEventListener('click', (e) => {
         if (!membersPanelOpen) return;
         const panel = document.getElementById('members-panel');
@@ -77,49 +81,41 @@ document.addEventListener('DOMContentLoaded', () => {
         panel.classList.remove('open');
     });
 
-    // Click outside sidebar closes it (mobile)
     document.addEventListener('click', (e) => {
         if (!sidebar.classList.contains('open')) return;
         if (sidebar.contains(e.target) || hamburger.contains(e.target)) return;
         closeSidebar();
     });
 
-    // Add server button
     document.getElementById('add-server-btn').addEventListener('click', () => {
         showAddServerMenu();
     });
 
-    // Create server modal
     document.getElementById('cancel-create-server').addEventListener('click', () => hideModal('create-server-modal'));
     document.getElementById('confirm-create-server').addEventListener('click', createServer);
     document.getElementById('new-server-name').addEventListener('keypress', (e) => {
         if (e.key === 'Enter') createServer();
     });
 
-    // Join server modal
     document.getElementById('cancel-join-server').addEventListener('click', () => hideModal('join-server-modal'));
     document.getElementById('confirm-join-server').addEventListener('click', joinServer);
     document.getElementById('invite-code-input').addEventListener('keypress', (e) => {
         if (e.key === 'Enter') joinServer();
     });
 
-    // Invite modal
     document.getElementById('close-invite').addEventListener('click', () => hideModal('invite-modal'));
     document.getElementById('invite-btn').addEventListener('click', showInviteModal);
     document.getElementById('regenerate-invite').addEventListener('click', regenerateInvite);
 
-    // Create channel modal
     document.getElementById('cancel-create-channel').addEventListener('click', () => hideModal('create-channel-modal'));
     document.getElementById('confirm-create-channel').addEventListener('click', createChannel);
     document.getElementById('new-channel-name').addEventListener('keypress', (e) => {
         if (e.key === 'Enter') createChannel();
     });
 
-    // Members panel toggle
     document.getElementById('members-toggle').addEventListener('click', toggleMembers);
     document.getElementById('members-close').addEventListener('click', toggleMembers);
 
-    // Initialize members panel state
     document.getElementById('members-panel').classList.toggle('open', membersPanelOpen);
 });
 
@@ -149,6 +145,20 @@ function connectWebSocket(t) {
                     await appendMessage(data.message);
                 }
                 break;
+            case 'server_key_rotated':
+                if (data.server_id) {
+                    await fetchAndDecryptServerKey(data.server_id);
+                    if (data.server_id === currentServerId && currentChannelId) {
+                        await loadMessages(currentChannelId);
+                    }
+                }
+                break;
+            case 'member_joined':
+                if (data.server_id && data.user_id) {
+                    // Owner auto-uploads encrypted server key for new member
+                    await uploadServerKeyForUser(data.server_id, data.user_id);
+                }
+                break;
             case 'pong':
                 break;
         }
@@ -159,6 +169,66 @@ function connectWebSocket(t) {
     };
 }
 
+// --- E2E Key Management ---
+
+async function fetchAndDecryptServerKey(serverId) {
+    try {
+        const res = await authFetch(`/api/servers/${serverId}/keys`);
+        if (!res.ok) return false;
+        const keys = await res.json();
+        if (!Array.isArray(keys) || keys.length === 0) return false;
+
+        const identity = E2ECrypto.getIdentityKeyPair();
+        if (!identity) return false;
+
+        for (const entry of keys) {
+            try {
+                const serverKey = E2ECrypto.envelopeDecryptRaw(
+                    entry.encrypted_key,
+                    entry.nonce,
+                    entry.sender_public_key,
+                    identity.privateKey
+                );
+                E2ECrypto.saveServerKey(serverId, serverKey);
+                return true;
+            } catch (e) {
+                continue;
+            }
+        }
+        return false;
+    } catch (err) {
+        console.error('Failed to fetch server key:', err);
+        return false;
+    }
+}
+
+async function uploadServerKeyForUser(serverId, targetUserId) {
+    const identity = E2ECrypto.getIdentityKeyPair();
+    if (!identity) return false;
+
+    const recipientRes = await authFetch(`/api/identity/${targetUserId}`);
+    if (!recipientRes.ok) return false;
+    const recipientData = await recipientRes.json();
+    const recipientPubKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(recipientData.identity_public_key));
+
+    const serverKey = E2ECrypto.getServerKey(serverId);
+    if (!serverKey) return false;
+
+    const encrypted = E2ECrypto.envelopeEncryptRaw(serverKey, recipientPubKey);
+
+    const uploadRes = await authFetch(`/api/servers/${serverId}/keys`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            user_id: targetUserId,
+            encrypted_key: encrypted.ciphertext,
+            sender_public_key: encrypted.ephemeralPublicKey,
+            nonce: encrypted.nonce,
+        }),
+    });
+    return uploadRes.ok;
+}
+
 // --- Servers ---
 
 async function loadServers() {
@@ -167,6 +237,14 @@ async function loadServers() {
         servers = await res.json();
         if (!Array.isArray(servers)) servers = [];
         renderServerList();
+
+        // Fetch server keys for all servers we're missing keys for
+        for (const s of servers) {
+            if (!E2ECrypto.getServerKey(s.id)) {
+                await fetchAndDecryptServerKey(s.id);
+            }
+        }
+
         if (servers.length > 0) {
             selectServer(servers[0].id);
         } else {
@@ -204,11 +282,19 @@ async function selectServer(serverId) {
     document.getElementById('server-name').textContent = server ? server.name : '';
     document.getElementById('invite-btn').style.display = isOwner ? '' : 'none';
 
+    // Ensure we have the server key
+    if (!E2ECrypto.getServerKey(serverId)) {
+        const ok = await fetchAndDecryptServerKey(serverId);
+        if (!ok) {
+            document.getElementById('channel-list').innerHTML = '<div class="channel-item" style="color:#f44336;cursor:default">Cannot decrypt server key</div>';
+            return;
+        }
+    }
+
     renderServerList();
     await loadChannels(serverId);
     loadMembers(serverId);
 
-    // On mobile, auto-open sidebar when tapping a server
     if (window.innerWidth <= 768 && window._openSidebar) {
         window._openSidebar();
     } else if (window._closeSidebar) {
@@ -243,7 +329,6 @@ async function loadChannels(serverId) {
             list.appendChild(div);
         });
 
-        // Add create channel button inside the scrollable list (owner only)
         if (isOwner) {
             const btn = document.createElement('button');
             btn.className = 'create-channel-btn';
@@ -256,7 +341,6 @@ async function loadChannels(serverId) {
             list.appendChild(btn);
         }
 
-        // Auto-select first channel on desktop; on mobile, user taps to select
         if (window.innerWidth > 768) {
             list.children[0].click();
         }
@@ -320,9 +404,9 @@ async function appendMessage(msg) {
     }
 
     let textContent = '';
-    if (msg.encrypted_content && msg.nonce && currentChannelId) {
+    if (msg.encrypted_content && msg.nonce && currentChannelId && currentServerId) {
         try {
-            textContent = E2ECrypto.decrypt(msg.encrypted_content, msg.nonce, currentChannelId);
+            textContent = E2ECrypto.decrypt(msg.encrypted_content, msg.nonce, currentChannelId, currentServerId);
         } catch (e) {
             console.warn('Decrypt failed:', e);
             textContent = '[encrypted message - unable to decrypt]';
@@ -345,6 +429,36 @@ async function appendMessage(msg) {
 
 // --- Send ---
 
+async function sendMessage() {
+    const input = document.getElementById('message-input');
+    const content = input.value.trim();
+
+    if (!content || !currentChannelId || !currentServerId) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+    if (!E2ECrypto.getServerKey(currentServerId)) {
+        console.error('No server key available');
+        return;
+    }
+
+    var encrypted;
+    try {
+        encrypted = E2ECrypto.encrypt(content, currentChannelId, currentServerId);
+    } catch (e) {
+        console.error('Encryption failed:', e);
+        return;
+    }
+
+    ws.send(JSON.stringify({
+        type: 'message_send',
+        channel_id: currentChannelId,
+        encrypted_content: encrypted.ciphertext,
+        nonce: encrypted.nonce,
+    }));
+
+    input.value = '';
+}
+
 // --- Members ---
 
 let membersPanelOpen = window.innerWidth > 768;
@@ -353,7 +467,6 @@ function toggleMembers() {
     const panel = document.getElementById('members-panel');
     membersPanelOpen = !membersPanelOpen;
     panel.classList.toggle('open', membersPanelOpen);
-    // Close sidebar if open on mobile
     if (membersPanelOpen && window.innerWidth <= 768) {
         window._closeSidebar();
     }
@@ -372,12 +485,12 @@ async function loadMembers(serverId) {
             const div = document.createElement('div');
             div.className = 'member-item';
             const initial = (m.username || '?').charAt(0).toUpperCase();
-            const isOwner = m.role === 'owner';
+            const isMemberOwner = m.role === 'owner';
             div.innerHTML =
-                '<div class="member-avatar' + (isOwner ? ' owner' : '') + '">' + initial + '</div>' +
+                '<div class="member-avatar' + (isMemberOwner ? ' owner' : '') + '">' + initial + '</div>' +
                 '<div>' +
                     '<div class="member-name">' + escapeHtml(m.username) + '</div>' +
-                    (isOwner ? '<div class="member-role">Owner</div>' : '') +
+                    (isMemberOwner ? '<div class="member-role">Owner</div>' : '') +
                 '</div>';
             list.appendChild(div);
         });
@@ -386,37 +499,9 @@ async function loadMembers(serverId) {
     }
 }
 
-// --- Send ---
-
-async function sendMessage() {
-    const input = document.getElementById('message-input');
-    const content = input.value.trim();
-
-    if (!content || !currentChannelId) return;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-
-    var encrypted;
-    try {
-        encrypted = E2ECrypto.encrypt(content, currentChannelId);
-    } catch (e) {
-        console.error('Encryption failed:', e);
-        return;
-    }
-
-    ws.send(JSON.stringify({
-        type: 'message_send',
-        channel_id: currentChannelId,
-        encrypted_content: encrypted.ciphertext,
-        nonce: encrypted.nonce,
-    }));
-
-    input.value = '';
-}
-
 // --- Server Actions ---
 
 function showAddServerMenu() {
-    // Show a simple choice: create or join
     const choice = confirm('Click OK to CREATE a new server\nClick Cancel to JOIN with an invite code');
     if (choice) {
         document.getElementById('create-server-modal').style.display = 'flex';
@@ -441,12 +526,28 @@ async function createServer() {
         });
 
         if (res.ok) {
+            const serverData = await res.json();
+
+            const serverKey = E2ECrypto.generateServerKey();
+            E2ECrypto.saveServerKey(serverData.id, serverKey);
+
+            const identity = E2ECrypto.getIdentityKeyPair();
+            if (identity) {
+                const encrypted = E2ECrypto.envelopeEncryptRaw(serverKey, identity.publicKey);
+                await authFetch(`/api/servers/${serverData.id}/keys`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        user_id: user.id,
+                        encrypted_key: encrypted.ciphertext,
+                        sender_public_key: encrypted.ephemeralPublicKey,
+                        nonce: encrypted.nonce,
+                    }),
+                });
+            }
+
             hideModal('create-server-modal');
             await loadServers();
-            // Auto-select the new server
-            if (servers.length > 0) {
-                selectServer(servers[servers.length - 1].id);
-            }
         } else {
             const err = await res.json();
             alert(err.error || 'Failed to create server');
@@ -468,10 +569,18 @@ async function joinServer() {
         });
 
         if (res.ok) {
+            const serverData = await res.json();
             hideModal('join-server-modal');
             await loadServers();
-            const server = await res.json();
-            selectServer(server.id);
+
+            // Retry fetching the server key (owner may need to upload it first)
+            for (let attempt = 0; attempt < 5; attempt++) {
+                const ok = await fetchAndDecryptServerKey(serverData.id);
+                if (ok) break;
+                await new Promise(r => setTimeout(r, 1000));
+            }
+
+            selectServer(serverData.id);
         } else {
             const err = await res.json();
             alert(err.error || 'Invalid invite code');
@@ -500,7 +609,6 @@ async function regenerateInvite() {
             const data = await res.json();
             currentInviteCode = data.code;
             document.getElementById('invite-code-display').textContent = data.code;
-            // Update cached server data
             const server = servers.find(s => s.id === currentServerId);
             if (server) server.invite_code = data.code;
         } else {

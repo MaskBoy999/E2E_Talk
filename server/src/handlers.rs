@@ -39,6 +39,7 @@ fn extract_user(headers: &HeaderMap, state: &AppState) -> Result<String, (Status
 pub struct RegisterRequest {
     pub username: String,
     pub password: String,
+    pub identity_public_key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -80,7 +81,11 @@ pub async fn register(
         }
     };
 
-    let user = match state.db.create_user(&req.username, &password_hash) {
+    let identity_key_bytes = req.identity_public_key.as_ref().and_then(|k| {
+        base64::engine::general_purpose::STANDARD.decode(k).ok()
+    });
+
+    let user = match state.db.create_user(&req.username, &password_hash, identity_key_bytes.as_deref()) {
         Ok(u) => u,
         Err(e) => {
             return (
@@ -472,6 +477,14 @@ pub async fn join_server(
         }
     };
 
+    // Broadcast member_joined to the server owner so they can upload the encrypted server key
+    let join_msg = serde_json::json!({
+        "type": "member_joined",
+        "server_id": server.id,
+        "user_id": user_id,
+    });
+    let _ = state.ws_manager.broadcast_to_users(&[server.owner_id.clone()], &join_msg.to_string()).await;
+
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -626,6 +639,189 @@ pub async fn get_user_id(
     }
 }
 
+// --- Server Keys (E2EE) ---
+
+pub async fn get_identity_key(
+    Path(user_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match state.db.get_identity_public_key(&user_id) {
+        Ok(key) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "user_id": user_id,
+                "identity_public_key": base64::engine::general_purpose::STANDARD.encode(&key),
+            })),
+        ),
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": e})),
+        ),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct UploadServerKeyRequest {
+    pub user_id: String,
+    pub encrypted_key: String,
+    pub sender_public_key: String,
+    pub nonce: String,
+}
+
+pub async fn upload_server_key(
+    Path(server_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UploadServerKeyRequest>,
+) -> impl IntoResponse {
+    let caller_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    // Only the server owner can upload keys for others
+    if !state.db.is_server_owner(&caller_id, &server_id).unwrap_or(false) {
+        // Allow users to upload their own key too
+        if caller_id != req.user_id {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "Only the server owner can upload keys for others"})),
+            )
+                .into_response();
+        }
+    }
+
+    if !state.db.is_member_of_server(&req.user_id, &server_id).unwrap_or(false) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "User is not a member of this server"})),
+        )
+            .into_response();
+    }
+
+    let encrypted_key = match base64::engine::general_purpose::STANDARD.decode(&req.encrypted_key) {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid encrypted_key"}))).into_response(),
+    };
+    let sender_pub = match base64::engine::general_purpose::STANDARD.decode(&req.sender_public_key) {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid sender_public_key"}))).into_response(),
+    };
+    let nonce = match base64::engine::general_purpose::STANDARD.decode(&req.nonce) {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid nonce"}))).into_response(),
+    };
+
+    match state.db.save_server_key(&server_id, &req.user_id, &encrypted_key, &sender_pub, &nonce) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn get_server_keys(
+    Path(server_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    if !state.db.is_member_of_server(&user_id, &server_id).unwrap_or(false) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Not a member of this server"})),
+        )
+            .into_response();
+    }
+
+    match state.db.get_all_server_keys(&server_id) {
+        Ok(keys) => {
+            let result: Vec<serde_json::Value> = keys
+                .iter()
+                .map(|(uid, ek, spk, nonce, ver)| {
+                    serde_json::json!({
+                        "user_id": uid,
+                        "encrypted_key": base64::engine::general_purpose::STANDARD.encode(ek),
+                        "sender_public_key": base64::engine::general_purpose::STANDARD.encode(spk),
+                        "nonce": base64::engine::general_purpose::STANDARD.encode(nonce),
+                        "version": ver,
+                    })
+                })
+                .collect();
+            (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct RotateKeyRequest {
+    pub encrypted_keys: Vec<RotatedKeyEntry>,
+}
+
+#[derive(Deserialize)]
+pub struct RotatedKeyEntry {
+    pub user_id: String,
+    pub encrypted_key: String,
+    pub sender_public_key: String,
+    pub nonce: String,
+}
+
+pub async fn rotate_server_keys(
+    Path(server_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RotateKeyRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    if !state.db.is_server_owner(&user_id, &server_id).unwrap_or(false) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Only the server owner can rotate keys"})),
+        )
+            .into_response();
+    }
+
+    // Delete old keys
+    if let Err(e) = state.db.delete_server_keys(&server_id) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
+    }
+
+    // Save new keys
+    for entry in &req.encrypted_keys {
+        let encrypted_key = match base64::engine::general_purpose::STANDARD.decode(&entry.encrypted_key) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let sender_pub = match base64::engine::general_purpose::STANDARD.decode(&entry.sender_public_key) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let nonce = match base64::engine::general_purpose::STANDARD.decode(&entry.nonce) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let _ = state.db.save_server_key(&server_id, &entry.user_id, &encrypted_key, &sender_pub, &nonce);
+    }
+
+    // Broadcast key rotation to all server members
+    if let Ok(members) = state.db.get_server_members(&server_id) {
+        let rotation_msg = serde_json::json!({
+            "type": "server_key_rotated",
+            "server_id": server_id,
+        });
+        state.ws_manager.broadcast_to_users(&members, &rotation_msg.to_string()).await;
+    }
+
+    (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+}
+
 // --- Admin ---
 
 pub async fn admin_login(
@@ -688,5 +884,156 @@ pub async fn admin_delete_user(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e})),
         ),
+    }
+}
+
+pub async fn admin_list_servers(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let servers = match state.db.list_all_servers_admin() {
+        Ok(s) => s,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response()
+        }
+    };
+    let result: Vec<serde_json::Value> = servers
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "id": s.id,
+                "name": s.name,
+                "owner_id": s.owner_id,
+                "invite_code": s.invite_code,
+            })
+        })
+        .collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
+pub async fn admin_list_channels(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let channels = match state.db.list_all_channels_admin() {
+        Ok(c) => c,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response()
+        }
+    };
+    let result: Vec<serde_json::Value> = channels
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "id": c.id,
+                "server_id": c.server_id,
+                "name": c.name,
+                "type": c.channel_type,
+            })
+        })
+        .collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
+pub async fn admin_list_messages(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let messages = match state.db.list_all_messages_admin() {
+        Ok(m) => m,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response()
+        }
+    };
+    let result: Vec<serde_json::Value> = messages
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "id": m.id,
+                "channel_id": m.channel_id,
+                "sender_id": m.sender_id,
+                "sender_username": m.sender_username,
+                "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
+                "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
+                "timestamp": m.timestamp,
+            })
+        })
+        .collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
+pub async fn admin_list_server_keys(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let keys = match state.db.list_all_server_keys_admin() {
+        Ok(k) => k,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response()
+        }
+    };
+    let result: Vec<serde_json::Value> = keys
+        .iter()
+        .map(|(sid, sname, uid, ek, spk, nonce, ver)| {
+            serde_json::json!({
+                "server_id": sid,
+                "server_name": sname,
+                "user_id": uid,
+                "encrypted_key": base64::engine::general_purpose::STANDARD.encode(ek),
+                "sender_public_key": base64::engine::general_purpose::STANDARD.encode(spk),
+                "nonce": base64::engine::general_purpose::STANDARD.encode(nonce),
+                "version": ver,
+            })
+        })
+        .collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
+pub async fn admin_list_server_members(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let members = match state.db.list_all_server_members_admin() {
+        Ok(m) => m,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response()
+        }
+    };
+    let result: Vec<serde_json::Value> = members
+        .iter()
+        .map(|(uid, uname, sid, sname)| {
+            serde_json::json!({
+                "user_id": uid,
+                "username": uname,
+                "server_id": sid,
+                "server_name": sname,
+            })
+        })
+        .collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
+pub async fn admin_user_cascade_stats(
+    Path(user_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match state.db.get_user_cascade_stats(&user_id) {
+        Ok(stats) => (StatusCode::OK, Json(stats)).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn admin_delete_server(
+    Path(server_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match state.db.delete_server_admin(&server_id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn admin_delete_channel(
+    Path(channel_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match state.db.delete_channel_admin(&channel_id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
 }

@@ -1,4 +1,4 @@
-﻿console.log('crypto.js v5 loaded - XChaCha20-Poly1305, pure JS');
+﻿console.log('crypto.js v6 loaded - X25519 + XChaCha20-Poly1305, true E2EE');
 const E2ECrypto = (() => {
     // --- Base64 helpers ---
     function arrayBufferToBase64(buffer) {
@@ -28,6 +28,11 @@ const E2ECrypto = (() => {
         let diff = 0;
         for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
         return diff === 0;
+    }
+    function randomBytes(n) {
+        var r = new Uint8Array(n);
+        crypto.getRandomValues(r);
+        return r;
     }
 
     // --- SHA-256 ---
@@ -92,6 +97,103 @@ const E2ECrypto = (() => {
         return t.slice(0, len || 32);
     }
 
+    // --- X25519 (Curve25519 ECDH) ---
+    var CURVE_P = (1n << 255n) - 19n;
+    var CURVE_A486662 = 486662n;
+    var CURVE_A24 = 121666n;
+    var CURVE_ORDER = (1n << 255n) - 19n;
+    var CURVE_BASE_POINT = 9n;
+
+    function feMod(a) { return ((a % CURVE_P) + CURVE_P) % CURVE_P; }
+    function feMul(a, b) { return feMod(a * b); }
+    function feAdd(a, b) { return feMod(a + b); }
+    function feSub(a, b) { return feMod(a - b); }
+    function fePow(a, e) {
+        var r = 1n;
+        a = feMod(a);
+        while (e > 0n) {
+            if (e & 1n) r = feMul(r, a);
+            e >>= 1n;
+            a = feMul(a, a);
+        }
+        return r;
+    }
+    function feInv(a) { return fePow(a, CURVE_P - 2n); }
+
+    function bytesToBigInt(bytes) {
+        var hex = '';
+        for (var i = bytes.length - 1; i >= 0; i--) hex += bytes[i].toString(16).padStart(2, '0');
+        return BigInt('0x' + hex);
+    }
+    function bigIntToBytes(num, len) {
+        var hex = num.toString(16).padStart(len * 2, '0');
+        var bytes = new Uint8Array(len);
+        for (var i = 0; i < len; i++) bytes[i] = parseInt(hex.substr(hex.length - 2 - i * 2, 2), 16);
+        return bytes;
+    }
+
+    function decodeUCoordinate(bytes) {
+        var u = bytesToBigInt(bytes);
+        u &= (1n << 255n) - 1n;
+        return u;
+    }
+    function decodeScalar(bytes) {
+        var k = bytesToBigInt(bytes);
+        k &= ~7n;
+        k &= ~(1n << 255n);
+        k |= (1n << 254n);
+        return k;
+    }
+
+    function x25519ScalarMult(scalar, u) {
+        var x1 = u;
+        var x2 = 1n, z2 = 0n;
+        var x3 = u, z3 = 1n;
+        var swap = 0;
+
+        for (var t = 254; t >= 0; t--) {
+            var k_t = (scalar >> BigInt(t)) & 1n;
+            swap ^= Number(k_t);
+            var dummy;
+            if (swap) { dummy = x2; x2 = x3; x3 = dummy; dummy = z2; z2 = z3; z3 = dummy; }
+            swap = Number(k_t);
+
+            var A = feAdd(x2, z2);
+            var AA = feMul(A, A);
+            var B = feSub(x2, z2);
+            var BB = feMul(B, B);
+            var E = feSub(AA, BB);
+            var C = feAdd(x3, z3);
+            var D = feSub(x3, z3);
+            var DA = feMul(D, A);
+            var CB = feMul(C, B);
+            x3 = feMul(feAdd(DA, CB), feAdd(DA, CB));
+            z3 = feMul(x1, feMul(feSub(DA, CB), feSub(DA, CB)));
+            x2 = feMul(AA, BB);
+            z2 = feMul(E, feAdd(AA, feMul(CURVE_A24, E)));
+        }
+
+        if (swap) { var dummy = x2; x2 = x3; x3 = dummy; dummy = z2; z2 = z3; z3 = dummy; }
+        return feMul(x2, feInv(z2));
+    }
+
+    function x25519SharedSecret(privateKeyBytes, publicKeyBytes) {
+        var scalar = decodeScalar(privateKeyBytes);
+        var u = decodeUCoordinate(publicKeyBytes);
+        var result = x25519ScalarMult(scalar, u);
+        return bigIntToBytes(result, 32);
+    }
+
+    function x25519GenerateKeyPair() {
+        var privateKey = randomBytes(32);
+        privateKey[0] &= 248;
+        privateKey[31] &= 127;
+        privateKey[31] |= 64;
+        var scalar = bytesToBigInt(privateKey);
+        var publicKey = bigIntToBytes(x25519ScalarMult(scalar, CURVE_BASE_POINT), 32);
+        return { privateKey: privateKey, publicKey: publicKey };
+    }
+
     // --- ChaCha20 ---
     function chacha20QuarterRound(state, a, b, c, d) {
         state[a] = (state[a] + state[b]) | 0;
@@ -110,17 +212,13 @@ const E2ECrypto = (() => {
 
     function chacha20Block(key, counter, nonce) {
         var state = new Int32Array(16);
-        // "expand 32-byte k"
         state[0] = 0x61707865;
         state[1] = 0x3320646e;
         state[2] = 0x79622d32;
         state[3] = 0x6b206574;
-        // Key (8 words)
         var kv = new DataView(key.buffer, key.byteOffset);
         for (var i = 0; i < 8; i++) state[4 + i] = kv.getInt32(i * 4, true);
-        // Counter
         state[12] = counter;
-        // Nonce (4 words)
         var nv = new DataView(nonce.buffer, nonce.byteOffset);
         state[13] = nv.getInt32(0, true);
         state[14] = nv.getInt32(4, true);
@@ -228,7 +326,6 @@ const E2ECrypto = (() => {
 
         var h0 = 0, h1 = 0, h2 = 0, h3 = 0;
 
-        // Process data in 16-byte blocks
         var blocks = Math.ceil(data.length / 16);
         for (var i = 0; i < blocks; i++) {
             var block = new Uint8Array(16);
@@ -271,7 +368,6 @@ const E2ECrypto = (() => {
             h0 = h0 >>> 0;
         }
 
-        // Partial reduction
         var g0 = h0 + 5; var c0 = g0 >>> 26; g0 = g0 & 0x3ffffff;
         var g1 = h1 + c0; var c1 = g1 >>> 26; g1 = g1 & 0x3ffffff;
         var g2 = h2 + c1; var c2 = g2 >>> 26; g2 = g2 & 0x3ffffff;
@@ -301,7 +397,6 @@ const E2ECrypto = (() => {
         numToLeBytes(result, 8, h2);
         numToLeBytes(result, 12, h3);
 
-        // Add s (the second half of the key)
         var carry = 0;
         for (var i = 0; i < 16; i++) {
             carry += result[i] + s[i];
@@ -339,26 +434,19 @@ const E2ECrypto = (() => {
 
     // --- XChaCha20-Poly1305 ---
     function xchacha20poly1305Encrypt(key, plaintext) {
-        // Generate 24-byte random nonce
-        var nonce = new Uint8Array(24);
-        for (var i = 0; i < 24; i++) nonce[i] = Math.floor(Math.random() * 256);
-
-        // HChaCha20 to derive subkey
+        var nonce = randomBytes(24);
         var subkey = hchacha20(key, nonce.subarray(0, 16));
 
-        // Pad nonce: last 8 bytes of original nonce → 12-byte padded nonce (first 4 bytes = 0)
         var paddedNonce = new Uint8Array(12);
         paddedNonce[4] = nonce[16]; paddedNonce[5] = nonce[17];
         paddedNonce[6] = nonce[18]; paddedNonce[7] = nonce[19];
         paddedNonce[8] = nonce[20]; paddedNonce[9] = nonce[21];
         paddedNonce[10] = nonce[22]; paddedNonce[11] = nonce[23];
 
-        // Encrypt with ChaCha20 starting at counter=1
         var ciphertext = chacha20Encrypt(subkey, 1, paddedNonce, plaintext);
 
-        // Poly1305: compute over 64-byte pad, then ciphertext, then lengths
         var polyKey = chacha20Block(subkey, 0, paddedNonce);
-        var macData = new Uint8Array(plaintext.length + (plaintext.length % 16 === 0 ? 0 : 16 - (plaintext.length % 16)) + 16);
+        var macData = new Uint8Array(ciphertext.length + (ciphertext.length % 16 === 0 ? 0 : 16 - (ciphertext.length % 16)) + 16);
         for (var i = 0; i < ciphertext.length; i++) macData[i] = ciphertext[i];
         macData[ciphertext.length] = 1;
         var cLen = new DataView(macData.buffer);
@@ -367,22 +455,18 @@ const E2ECrypto = (() => {
 
         var tag = poly1305(polyKey, macData);
 
-        // Wire format: ciphertext + tag (16 bytes)
         return { ciphertext: ciphertext, tag: tag, nonce: nonce };
     }
 
     function xchacha20poly1305Decrypt(key, ciphertext, tag, nonce) {
-        // HChaCha20 to derive subkey
         var subkey = hchacha20(key, nonce.subarray(0, 16));
 
-        // Pad nonce
         var paddedNonce = new Uint8Array(12);
         paddedNonce[4] = nonce[16]; paddedNonce[5] = nonce[17];
         paddedNonce[6] = nonce[18]; paddedNonce[7] = nonce[19];
         paddedNonce[8] = nonce[20]; paddedNonce[9] = nonce[21];
         paddedNonce[10] = nonce[22]; paddedNonce[11] = nonce[23];
 
-        // Verify Poly1305 tag first
         var polyKey = chacha20Block(subkey, 0, paddedNonce);
         var macData = new Uint8Array(ciphertext.length + (ciphertext.length % 16 === 0 ? 0 : 16 - (ciphertext.length % 16)) + 16);
         for (var i = 0; i < ciphertext.length; i++) macData[i] = ciphertext[i];
@@ -394,44 +478,180 @@ const E2ECrypto = (() => {
         var expectedTag = poly1305(polyKey, macData);
         if (!equalBytes(tag, expectedTag)) throw new Error('Authentication failed');
 
-        // Decrypt
         return chacha20Encrypt(subkey, 1, paddedNonce, ciphertext);
     }
 
-    // --- Key Derivation ---
-    function deriveKey(channelId) {
-        var salt = new TextEncoder().encode('e2e-chat-v5-xchacha20');
-        return hkdf(salt, salt, channelId, 32);
-    }
-
-    // --- Public API ---
-    function encrypt(plaintext, channelId) {
-        var key = deriveKey(channelId);
+    // --- Envelope Encryption (X25519 + XChaCha20-Poly1305) ---
+    function envelopeEncrypt(plaintext, recipientPublicKey) {
+        var ephemeral = x25519GenerateKeyPair();
+        var sharedSecret = x25519SharedSecret(ephemeral.privateKey, recipientPublicKey);
+        var info = new TextEncoder().encode('e2e-envelope-v1');
+        var envelopeKey = hkdf(sharedSecret, sharedSecret, 'e2e-envelope-v1', 32);
         var plaintextBytes = new TextEncoder().encode(plaintext);
-        var result = xchacha20poly1305Encrypt(key, plaintextBytes);
-        // Wire: ciphertext + tag
-        var combined = concatBuffers(result.ciphertext, result.tag);
+        var enc = xchacha20poly1305Encrypt(envelopeKey, plaintextBytes);
+        var combined = concatBuffers(enc.ciphertext, enc.tag);
         return {
             ciphertext: arrayBufferToBase64(combined),
-            nonce: arrayBufferToBase64(result.nonce)
+            nonce: arrayBufferToBase64(enc.nonce),
+            ephemeralPublicKey: arrayBufferToBase64(ephemeral.publicKey)
         };
     }
 
-    function decrypt(ciphertextB64, nonceB64, channelId) {
-        var key = deriveKey(channelId);
+    function envelopeDecrypt(ciphertextB64, nonceB64, ephemeralPublicKeyB64, recipientPrivateKey) {
+        var ciphertext = new Uint8Array(base64ToArrayBuffer(ciphertextB64));
+        var nonce = new Uint8Array(base64ToArrayBuffer(nonceB64));
+        var ephemeralPub = new Uint8Array(base64ToArrayBuffer(ephemeralPublicKeyB64));
+        if (ciphertext.length < 16) throw new Error('Ciphertext too short');
+        var ct = ciphertext.slice(0, ciphertext.length - 16);
+        var tag = ciphertext.slice(ciphertext.length - 16);
+        var sharedSecret = x25519SharedSecret(recipientPrivateKey, ephemeralPub);
+        var envelopeKey = hkdf(sharedSecret, sharedSecret, 'e2e-envelope-v1', 32);
+        var plaintext = xchacha20poly1305Decrypt(envelopeKey, ct, tag, nonce);
+        return new TextDecoder().decode(plaintext);
+    }
+
+    // --- Envelope encrypt raw bytes (for server keys) ---
+    function envelopeEncryptRaw(plaintextBytes, recipientPublicKey) {
+        var ephemeral = x25519GenerateKeyPair();
+        var sharedSecret = x25519SharedSecret(ephemeral.privateKey, recipientPublicKey);
+        var envelopeKey = hkdf(sharedSecret, sharedSecret, 'e2e-envelope-v1', 32);
+        var enc = xchacha20poly1305Encrypt(envelopeKey, plaintextBytes);
+        var combined = concatBuffers(enc.ciphertext, enc.tag);
+        return {
+            ciphertext: arrayBufferToBase64(combined),
+            nonce: arrayBufferToBase64(enc.nonce),
+            ephemeralPublicKey: arrayBufferToBase64(ephemeral.publicKey)
+        };
+    }
+
+    function envelopeDecryptRaw(ciphertextB64, nonceB64, ephemeralPublicKeyB64, recipientPrivateKey) {
+        var ciphertext = new Uint8Array(base64ToArrayBuffer(ciphertextB64));
+        var nonce = new Uint8Array(base64ToArrayBuffer(nonceB64));
+        var ephemeralPub = new Uint8Array(base64ToArrayBuffer(ephemeralPublicKeyB64));
+        if (ciphertext.length < 16) throw new Error('Ciphertext too short');
+        var ct = ciphertext.slice(0, ciphertext.length - 16);
+        var tag = ciphertext.slice(ciphertext.length - 16);
+        var sharedSecret = x25519SharedSecret(recipientPrivateKey, ephemeralPub);
+        var envelopeKey = hkdf(sharedSecret, sharedSecret, 'e2e-envelope-v1', 32);
+        return xchacha20poly1305Decrypt(envelopeKey, ct, tag, nonce);
+    }
+
+    // --- Per-Server Key Management ---
+    function generateServerKey() {
+        return randomBytes(32);
+    }
+
+    function deriveChannelKey(serverKey, channelId) {
+        return hkdf(serverKey, serverKey, 'e2e-channel-v1:' + channelId, 32);
+    }
+
+    function deriveMetadataKey(serverKey) {
+        return hkdf(serverKey, serverKey, 'e2e-metadata-v1', 32);
+    }
+
+    // --- Encrypt/decrypt with server key ---
+    function encryptWithKey(plaintext, key) {
+        var plaintextBytes = new TextEncoder().encode(plaintext);
+        var enc = xchacha20poly1305Encrypt(key, plaintextBytes);
+        var combined = concatBuffers(enc.ciphertext, enc.tag);
+        return {
+            ciphertext: arrayBufferToBase64(combined),
+            nonce: arrayBufferToBase64(enc.nonce)
+        };
+    }
+
+    function decryptWithKey(ciphertextB64, nonceB64, key) {
         var combined = new Uint8Array(base64ToArrayBuffer(ciphertextB64));
         var nonce = new Uint8Array(base64ToArrayBuffer(nonceB64));
         if (combined.length < 16) throw new Error('Ciphertext too short');
-        var ciphertext = combined.slice(0, combined.length - 16);
+        var ct = combined.slice(0, combined.length - 16);
         var tag = combined.slice(combined.length - 16);
-        var plaintext = xchacha20poly1305Decrypt(key, ciphertext, tag, nonce);
+        var plaintext = xchacha20poly1305Decrypt(key, ct, tag, nonce);
         return new TextDecoder().decode(plaintext);
+    }
+
+    // --- Key storage in localStorage ---
+    function getIdentityKeyPair() {
+        var priv = localStorage.getItem('e2e_identity_private');
+        var pub = localStorage.getItem('e2e_identity_public');
+        if (!priv || !pub) return null;
+        return {
+            privateKey: new Uint8Array(base64ToArrayBuffer(priv)),
+            publicKey: new Uint8Array(base64ToArrayBuffer(pub))
+        };
+    }
+
+    function saveIdentityKeyPair(kp) {
+        localStorage.setItem('e2e_identity_private', arrayBufferToBase64(kp.privateKey));
+        localStorage.setItem('e2e_identity_public', arrayBufferToBase64(kp.publicKey));
+    }
+
+    function getServerKey(serverId) {
+        var key = localStorage.getItem('e2e_server_' + serverId);
+        if (!key) return null;
+        return new Uint8Array(base64ToArrayBuffer(key));
+    }
+
+    function saveServerKey(serverId, key) {
+        localStorage.setItem('e2e_server_' + serverId, arrayBufferToBase64(key));
+    }
+
+    function removeServerKey(serverId) {
+        localStorage.removeItem('e2e_server_' + serverId);
+    }
+
+    // --- Public API ---
+    function encrypt(plaintext, channelId, serverId) {
+        var serverKey = getServerKey(serverId);
+        if (!serverKey) throw new Error('No server key - cannot encrypt');
+        var key = deriveChannelKey(serverKey, channelId);
+        return encryptWithKey(plaintext, key);
+    }
+
+    function decrypt(ciphertextB64, nonceB64, channelId, serverId) {
+        var serverKey = getServerKey(serverId);
+        if (!serverKey) throw new Error('No server key - cannot decrypt');
+        var key = deriveChannelKey(serverKey, channelId);
+        return decryptWithKey(ciphertextB64, nonceB64, key);
+    }
+
+    function encryptMetadata(plaintext, serverId) {
+        var serverKey = getServerKey(serverId);
+        if (!serverKey) throw new Error('No server key - cannot encrypt metadata');
+        var key = deriveMetadataKey(serverKey);
+        return encryptWithKey(plaintext, key);
+    }
+
+    function decryptMetadata(ciphertextB64, nonceB64, serverId) {
+        var serverKey = getServerKey(serverId);
+        if (!serverKey) throw new Error('No server key - cannot decrypt metadata');
+        var key = deriveMetadataKey(serverKey);
+        return decryptWithKey(ciphertextB64, nonceB64, key);
     }
 
     return {
         arrayBufferToBase64: arrayBufferToBase64,
         base64ToArrayBuffer: base64ToArrayBuffer,
+        randomBytes: randomBytes,
+        x25519GenerateKeyPair: x25519GenerateKeyPair,
+        x25519SharedSecret: x25519SharedSecret,
+        envelopeEncrypt: envelopeEncrypt,
+        envelopeDecrypt: envelopeDecrypt,
+        envelopeEncryptRaw: envelopeEncryptRaw,
+        envelopeDecryptRaw: envelopeDecryptRaw,
+        generateServerKey: generateServerKey,
+        deriveChannelKey: deriveChannelKey,
+        deriveMetadataKey: deriveMetadataKey,
+        encryptWithKey: encryptWithKey,
+        decryptWithKey: decryptWithKey,
+        getIdentityKeyPair: getIdentityKeyPair,
+        saveIdentityKeyPair: saveIdentityKeyPair,
+        getServerKey: getServerKey,
+        saveServerKey: saveServerKey,
+        removeServerKey: removeServerKey,
         encrypt: encrypt,
-        decrypt: decrypt
+        decrypt: decrypt,
+        encryptMetadata: encryptMetadata,
+        decryptMetadata: decryptMetadata
     };
 })();

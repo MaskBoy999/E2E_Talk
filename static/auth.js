@@ -94,10 +94,15 @@ document.addEventListener('DOMContentLoaded', () => {
         setLoading(registerForm, true);
 
         try {
+            // Generate identity keypair for E2E
+            const keypair = E2ECrypto.x25519GenerateKeyPair();
+            E2ECrypto.saveIdentityKeyPair(keypair);
+            const publicKeyB64 = E2ECrypto.arrayBufferToBase64(keypair.publicKey);
+
             const res = await fetch('/api/register', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username, password })
+                body: JSON.stringify({ username, password, identity_public_key: publicKeyB64 })
             });
 
             const data = await res.json();
