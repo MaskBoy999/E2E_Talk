@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>E2E Chat</title>
+    <link rel="stylesheet" href="style.css?v=3">
+</head>
+<body>
+    <div class="app">
+        <!-- Sidebar -->
+        <div class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <h2>Servers</h2>
+                <button class="sidebar-close" id="sidebar-close">&times;</button>
+            </div>
+            <div id="channel-list" class="channel-list">
+                <!-- Channels loaded dynamically -->
+            </div>
+            <div class="sidebar-footer">
+                <span id="current-user"></span>
+                <div class="footer-actions">
+                    <a href="admin.html" class="admin-link">Admin</a>
+                    <button id="logout-btn">Logout</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Sidebar overlay for mobile -->
+        <div class="sidebar-overlay" id="sidebar-overlay"></div>
+
+        <!-- Main Chat -->
+        <div class="main">
+            <div class="chat-header">
+                <button class="hamburger" id="hamburger">&#9776;</button>
+                <h3 id="channel-name">Select a channel</h3>
+            </div>
+            <div id="message-list" class="message-list">
+                <div class="welcome">Select a channel to start chatting</div>
+            </div>
+            <div class="chat-input">
+                <input type="text" id="message-input" placeholder="Type a message..." disabled>
+                <button id="send-btn" disabled>Send</button>
+            </div>
+        </div>
+    </div>
+    <script src="crypto.js?v=3"></script>
+    <script src="chat.js?v=3"></script>
+</body>
+</html>

@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>E2E Chat - Login</title>
+    <link rel="stylesheet" href="style.css?v=2">
+</head>
+<body>
+    <div class="auth-container">
+        <div class="auth-card">
+            <h1>E2E Chat</h1>
+            <p class="subtitle">LAN chat with friends</p>
+
+            <div id="error-message" class="error" style="display: none;"></div>
+
+            <!-- Login Form -->
+            <form id="login-form">
+                <h2>Login</h2>
+                <input type="text" id="login-username" placeholder="Username" required autocomplete="username">
+                <input type="password" id="login-password" placeholder="Password" required autocomplete="current-password">
+                <button type="submit">Login</button>
+                <p class="toggle">Don't have an account? <a href="#" id="show-register">Register</a></p>
+                <p class="toggle"><a href="admin.html" class="admin-link-login">Host Admin</a></p>
+            </form>
+
+            <!-- Register Form -->
+            <form id="register-form" style="display: none;">
+                <h2>Register</h2>
+                <input type="text" id="register-username" placeholder="Pick a username" required autocomplete="username">
+                <input type="password" id="register-password" placeholder="Password (min 6 chars)" required minlength="6" autocomplete="new-password">
+                <button type="submit">Register</button>
+                <p class="toggle">Already have an account? <a href="#" id="show-login">Login</a></p>
+                <p class="toggle"><a href="admin.html" class="admin-link-login">Host Admin</a></p>
+            </form>
+        </div>
+    </div>
+    <script src="auth.js?v=2"></script>
+</body>
+</html>
