@@ -4,19 +4,26 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>E2E Chat</title>
-    <link rel="stylesheet" href="style.css?v=3">
+    <link rel="stylesheet" href="style.css?v=4">
 </head>
 <body>
     <div class="app">
+        <!-- Server Strip (far left) -->
+        <div class="server-strip" id="server-strip">
+            <div id="server-list" class="server-list"></div>
+            <button class="server-icon add-server" id="add-server-btn" title="Create or Join Server">+</button>
+        </div>
+
         <!-- Sidebar -->
         <div class="sidebar" id="sidebar">
             <div class="sidebar-header">
-                <h2>Servers</h2>
-                <button class="sidebar-close" id="sidebar-close">&times;</button>
+                <h2 id="server-name">Select a server</h2>
+                <div class="sidebar-header-actions">
+                    <button class="invite-btn" id="invite-btn" title="Invite someone" style="display:none">+</button>
+                    <button class="sidebar-close" id="sidebar-close">&times;</button>
+                </div>
             </div>
-            <div id="channel-list" class="channel-list">
-                <!-- Channels loaded dynamically -->
-            </div>
+            <div id="channel-list" class="channel-list"></div>
             <div class="sidebar-footer">
                 <span id="current-user"></span>
                 <div class="footer-actions">
@@ -34,9 +41,10 @@
             <div class="chat-header">
                 <button class="hamburger" id="hamburger">&#9776;</button>
                 <h3 id="channel-name">Select a channel</h3>
+                <button class="create-channel-btn" id="create-channel-btn" style="display:none">+ Channel</button>
             </div>
             <div id="message-list" class="message-list">
-                <div class="welcome">Select a channel to start chatting</div>
+                <div class="welcome">Select a server and channel to start chatting</div>
             </div>
             <div class="chat-input">
                 <input type="text" id="message-input" placeholder="Type a message..." disabled>
@@ -44,7 +52,57 @@
             </div>
         </div>
     </div>
-    <script src="crypto.js?v=3"></script>
-    <script src="chat.js?v=3"></script>
+
+    <!-- Create Server Modal -->
+    <div class="modal" id="create-server-modal" style="display:none">
+        <div class="modal-content">
+            <h3>Create a Server</h3>
+            <input type="text" id="new-server-name" placeholder="Server name" maxlength="50" style="width:100%;padding:10px 14px;margin-bottom:16px;border:1px solid #2a2a4a;border-radius:8px;background:#1a1a2e;color:#e0e0e0;font-size:16px;">
+            <div class="modal-actions">
+                <button class="btn-cancel" id="cancel-create-server">Cancel</button>
+                <button class="btn-invite" id="confirm-create-server">Create</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Join Server Modal -->
+    <div class="modal" id="join-server-modal" style="display:none">
+        <div class="modal-content">
+            <h3>Join a Server</h3>
+            <input type="text" id="invite-code-input" placeholder="Enter invite code" maxlength="20" style="width:100%;padding:10px 14px;margin-bottom:16px;border:1px solid #2a2a4a;border-radius:8px;background:#1a1a2e;color:#e0e0e0;font-size:16px;">
+            <div class="modal-actions">
+                <button class="btn-cancel" id="cancel-join-server">Cancel</button>
+                <button class="btn-invite" id="confirm-join-server">Join</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Invite Modal -->
+    <div class="modal" id="invite-modal" style="display:none">
+        <div class="modal-content">
+            <h3>Invite to Server</h3>
+            <p style="color:#aaa;margin-bottom:12px;">Share this code with someone to let them join:</p>
+            <div style="background:#1a1a2e;padding:12px 16px;border-radius:8px;font-family:monospace;font-size:20px;text-align:center;color:#4fc3f7;letter-spacing:2px;margin-bottom:16px;user-select:all;" id="invite-code-display"></div>
+            <div class="modal-actions">
+                <button class="btn-cancel" id="regenerate-invite" style="border-color:var(--danger);color:var(--danger)">Regenerate Code</button>
+                <button class="btn-cancel" id="close-invite">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Create Channel Modal -->
+    <div class="modal" id="create-channel-modal" style="display:none">
+        <div class="modal-content">
+            <h3>Create a Channel</h3>
+            <input type="text" id="new-channel-name" placeholder="Channel name" maxlength="50" style="width:100%;padding:10px 14px;margin-bottom:16px;border:1px solid #2a2a4a;border-radius:8px;background:#1a1a2e;color:#e0e0e0;font-size:16px;">
+            <div class="modal-actions">
+                <button class="btn-cancel" id="cancel-create-channel">Cancel</button>
+                <button class="btn-invite" id="confirm-create-channel">Create</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="crypto.js?v=4"></script>
+    <script src="chat.js?v=5"></script>
 </body>
 </html>

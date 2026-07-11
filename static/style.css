@@ -149,6 +149,72 @@ body {
     height: 100dvh;
 }
 
+/* ===== Server Strip ===== */
+.server-strip {
+    width: clamp(48px, 8vw, 72px);
+    background: #111127;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: clamp(6px, 1vw, 10px) 0;
+    gap: clamp(4px, 0.8vw, 8px);
+    overflow-y: auto;
+    flex-shrink: 0;
+    border-right: 1px solid var(--bg-border);
+}
+
+.server-list {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: clamp(4px, 0.8vw, 8px);
+    width: 100%;
+}
+
+.server-icon {
+    width: clamp(36px, 6vw, 48px);
+    height: clamp(36px, 6vw, 48px);
+    border-radius: clamp(12px, 2.5vw, 16px);
+    background: var(--bg-secondary);
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: clamp(14px, 2.5vw, 18px);
+    cursor: pointer;
+    transition: border-radius 0.15s ease, background 0.15s ease, color 0.15s ease;
+    border: 2px solid transparent;
+    flex-shrink: 0;
+}
+
+.server-icon:hover {
+    border-radius: clamp(8px, 2vw, 12px);
+    background: var(--accent);
+    color: var(--bg-primary);
+}
+
+.server-icon.active {
+    border-radius: clamp(8px, 2vw, 12px);
+    background: var(--accent);
+    color: var(--bg-primary);
+}
+
+.server-icon.add-server {
+    background: transparent;
+    border: 2px dashed var(--text-faint);
+    color: var(--text-faint);
+    font-size: clamp(18px, 3vw, 24px);
+    font-weight: 300;
+}
+
+.server-icon.add-server:hover {
+    border-color: var(--success);
+    color: var(--success);
+    background: rgba(76, 175, 80, 0.1);
+    border-radius: clamp(8px, 2vw, 12px);
+}
+
 /* ===== Sidebar ===== */
 .sidebar {
     width: 22%;
@@ -174,6 +240,49 @@ body {
     color: var(--text-muted);
     text-transform: uppercase;
     letter-spacing: 1px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.sidebar-header-actions {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+    flex-shrink: 0;
+}
+
+.invite-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-size: 18px;
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 4px;
+    line-height: 1;
+}
+
+.invite-btn:hover {
+    color: var(--success);
+    background: rgba(76, 175, 80, 0.1);
+}
+
+.create-channel-btn {
+    margin-left: auto;
+    background: transparent;
+    border: none;
+    color: var(--text-faint);
+    font-size: clamp(12px, 2vw, 14px);
+    cursor: pointer;
+    padding: 2px 8px;
+    border-radius: 4px;
+    white-space: nowrap;
+}
+
+.create-channel-btn:hover {
+    color: var(--accent);
+    background: rgba(79, 195, 247, 0.1);
 }
 
 .sidebar-close {
@@ -591,18 +700,38 @@ body {
     cursor: not-allowed;
 }
 
+.btn-invite {
+    background: var(--success);
+    border: none;
+    color: white;
+    padding: clamp(8px, 1.5vw, 10px) clamp(14px, 3vw, 20px);
+    border-radius: clamp(6px, 1.5vw, 8px);
+    cursor: pointer;
+    font-size: clamp(13px, 2vw, 14px);
+    font-weight: 600;
+}
+
+.btn-invite:hover {
+    background: #43a047;
+}
+
 /* ===== Mobile: 768px and below ===== */
 @media (max-width: 768px) {
+    .server-strip {
+        width: clamp(42px, 12vw, 56px);
+    }
+
     .sidebar {
         position: fixed;
         top: 0;
-        left: 0;
+        left: clamp(42px, 12vw, 56px);
         bottom: 0;
         transform: translateX(-100%);
         transition: transform 0.25s ease;
-        width: 75%;
-        min-width: 220px;
-        max-width: 300px;
+        width: 70%;
+        min-width: 200px;
+        max-width: 280px;
+        z-index: 101;
     }
 
     .sidebar.open {

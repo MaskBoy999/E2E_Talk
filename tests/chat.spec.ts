@@ -9,11 +9,12 @@ test.describe('E2E Chat', () => {
         await expect(page.locator('h1').first()).toContainText('E2E Chat');
     });
 
-    test('register via API, send and receive encrypted message', async ({ page, context }) => {
+    test('register, create server, send and receive encrypted message', async ({ page, context }) => {
         const ts = Date.now();
         const user1 = 'alice_' + ts;
         const user2 = 'bob_' + ts;
 
+        // Register both users
         const reg1 = await page.request.post(`${BASE}/api/register`, {
             data: { username: user1, password: 'password123' },
         });
@@ -25,6 +26,37 @@ test.describe('E2E Chat', () => {
         });
         const body2 = await reg2.json();
 
+        // User1 creates a server
+        const srv = await page.request.post(`${BASE}/api/servers`, {
+            headers: { Authorization: `Bearer ${body1.token}` },
+            data: { name: 'Test Server' },
+        });
+        const server = await srv.json();
+        expect(server.id).toBeTruthy();
+
+        // User1 gets the default #general channel
+        const chRes = await page.request.get(`${BASE}/api/servers/${server.id}/channels`, {
+            headers: { Authorization: `Bearer ${body1.token}` },
+        });
+        const channels = await chRes.json();
+        expect(channels.length).toBeGreaterThanOrEqual(1);
+        const generalChannel = channels.find((c: any) => c.name === 'general') || channels[0];
+
+        // User1 generates invite
+        const invRes = await page.request.post(`${BASE}/api/servers/${server.id}/invite`, {
+            headers: { Authorization: `Bearer ${body1.token}` },
+        });
+        const invite = await invRes.json();
+        expect(invite.code).toBeTruthy();
+
+        // User2 joins via invite
+        const joinRes = await page.request.post(`${BASE}/api/invites/join`, {
+            headers: { Authorization: `Bearer ${body2.token}` },
+            data: { code: invite.code },
+        });
+        const joined = await joinRes.json();
+        expect(joined.id).toBe(server.id);
+
         // User1 loads chat
         await page.goto(`${BASE}/index.html`);
         await page.evaluate(({ token, user }) => {
@@ -32,11 +64,14 @@ test.describe('E2E Chat', () => {
             localStorage.setItem('user', JSON.stringify(user));
         }, { token: body1.token, user: body1.user });
         await page.goto(`${BASE}/index.html`);
+        await page.waitForSelector('.server-icon', { timeout: 10000 });
+        // Click first server icon (not the + button)
+        await page.click('.server-icon:not(.add-server)');
         await page.waitForSelector('.channel-item', { timeout: 10000 });
         await page.click('.channel-item >> nth=0');
         await page.waitForTimeout(500);
 
-        // User2 loads chat in new context
+        // User2 loads chat
         const ctx2 = await page.context().browser()!.newContext();
         const page2 = await ctx2.newPage();
         await page2.goto(`${BASE}/index.html`);
@@ -45,6 +80,8 @@ test.describe('E2E Chat', () => {
             localStorage.setItem('user', JSON.stringify(user));
         }, { token: body2.token, user: body2.user });
         await page2.goto(`${BASE}/index.html`);
+        await page2.waitForSelector('.server-icon', { timeout: 10000 });
+        await page2.click('.server-icon:not(.add-server)');
         await page2.waitForSelector('.channel-item', { timeout: 10000 });
         await page2.click('.channel-item >> nth=0');
         await page2.waitForTimeout(500);
@@ -75,10 +112,20 @@ test.describe('E2E Chat', () => {
     });
 
     test('reload preserves decrypted messages', async ({ page }) => {
+        const ts = Date.now();
+        const username = 'reload_' + ts;
+
         const reg = await page.request.post(`${BASE}/api/register`, {
-            data: { username: 'reload_' + Date.now(), password: 'password123' },
+            data: { username, password: 'password123' },
         });
         const body = await reg.json();
+
+        // Create server
+        const srv = await page.request.post(`${BASE}/api/servers`, {
+            headers: { Authorization: `Bearer ${body.token}` },
+            data: { name: 'Reload Server' },
+        });
+        const server = await srv.json();
 
         await page.goto(`${BASE}/index.html`);
         await page.evaluate(({ token, user }) => {
@@ -86,6 +133,8 @@ test.describe('E2E Chat', () => {
             localStorage.setItem('user', JSON.stringify(user));
         }, { token: body.token, user: body.user });
         await page.goto(`${BASE}/index.html`);
+        await page.waitForSelector('.server-icon', { timeout: 10000 });
+        await page.click('.server-icon:not(.add-server)');
         await page.waitForSelector('.channel-item', { timeout: 10000 });
         await page.click('.channel-item >> nth=0');
         await page.waitForTimeout(500);
@@ -99,6 +148,8 @@ test.describe('E2E Chat', () => {
         expect(await page.locator('.message .text').allTextContents()).toContainEqual('Persistent!');
 
         await page.reload();
+        await page.waitForSelector('.server-icon', { timeout: 10000 });
+        await page.click('.server-icon:not(.add-server)');
         await page.waitForSelector('.channel-item', { timeout: 10000 });
         await page.click('.channel-item >> nth=0');
         await page.waitForTimeout(1500);
@@ -107,10 +158,27 @@ test.describe('E2E Chat', () => {
     });
 
     test('server only stores ciphertext', async ({ page }) => {
+        const ts = Date.now();
+        const username = 'ct_' + ts;
+
         const reg = await page.request.post(`${BASE}/api/register`, {
-            data: { username: 'ct_' + Date.now(), password: 'password123' },
+            data: { username, password: 'password123' },
         });
         const body = await reg.json();
+
+        // Create server
+        const srv = await page.request.post(`${BASE}/api/servers`, {
+            headers: { Authorization: `Bearer ${body.token}` },
+            data: { name: 'CT Server' },
+        });
+        const server = await srv.json();
+
+        // Get channel
+        const chRes = await page.request.get(`${BASE}/api/servers/${server.id}/channels`, {
+            headers: { Authorization: `Bearer ${body.token}` },
+        });
+        const channels = await chRes.json();
+        const channelId = channels[0].id;
 
         await page.goto(`${BASE}/index.html`);
         await page.evaluate(({ token, user }) => {
@@ -118,6 +186,8 @@ test.describe('E2E Chat', () => {
             localStorage.setItem('user', JSON.stringify(user));
         }, { token: body.token, user: body.user });
         await page.goto(`${BASE}/index.html`);
+        await page.waitForSelector('.server-icon', { timeout: 10000 });
+        await page.click('.server-icon:not(.add-server)');
         await page.waitForSelector('.channel-item', { timeout: 10000 });
         await page.click('.channel-item >> nth=0');
         await page.waitForTimeout(500);
@@ -128,8 +198,11 @@ test.describe('E2E Chat', () => {
         await page.click('#send-btn');
         await page.waitForTimeout(1500);
 
-        const channels = await (await page.request.get(`${BASE}/api/channels`)).json();
-        const msgs = await (await page.request.get(`${BASE}/api/channels/${channels[0].id}/messages`)).json();
+        // Verify server only stores ciphertext
+        const msgsRes = await page.request.get(`${BASE}/api/channels/${channelId}/messages`, {
+            headers: { Authorization: `Bearer ${body.token}` },
+        });
+        const msgs = await msgsRes.json();
         expect(msgs.length).toBeGreaterThanOrEqual(1);
         for (const m of msgs) {
             expect(m).toHaveProperty('encrypted_content');

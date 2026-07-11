@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::{
     extract::{Json, Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
 use serde::Deserialize;
@@ -10,6 +10,30 @@ use serde::Deserialize;
 use base64::Engine;
 use crate::auth;
 use crate::AppState;
+
+fn extract_user(headers: &HeaderMap, state: &AppState) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
+    let token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Missing authorization header"})),
+            )
+        })?;
+
+    let claims = auth::validate_token(token, &state.config.jwt_secret).map_err(|_| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Invalid token"})),
+        )
+    })?;
+
+    Ok(claims.sub)
+}
+
+// --- Auth ---
 
 #[derive(Deserialize)]
 pub struct RegisterRequest {
@@ -65,8 +89,6 @@ pub async fn register(
             );
         }
     };
-
-    let _ = state.db.ensure_user_in_default_server(&user.id);
 
     let token = match auth::create_token(&user.id, &user.username, &state.config.jwt_secret) {
         Ok(t) => t,
@@ -128,8 +150,6 @@ pub async fn login(
         }
     };
 
-    let _ = state.db.ensure_user_in_default_server(&user.id);
-
     let token = match auth::create_token(&user.id, &user.username, &state.config.jwt_secret) {
         Ok(t) => t,
         Err(e) => {
@@ -149,16 +169,123 @@ pub async fn login(
     )
 }
 
-pub async fn list_channels(
+// --- Servers ---
+
+#[derive(Deserialize)]
+pub struct CreateServerRequest {
+    pub name: String,
+}
+
+pub async fn create_server(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateServerRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    if req.name.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Server name is required"})),
+        )
+            .into_response();
+    }
+
+    let server = match state.db.create_server(req.name.trim(), &user_id) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
+
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "id": server.id,
+            "name": server.name,
+            "invite_code": server.invite_code,
+        })),
+    )
+        .into_response()
+}
+
+pub async fn list_servers(
+    headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    let channels = match state.db.list_all_channels() {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    let servers = match state.db.list_user_servers(&user_id) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
+
+    let result: Vec<serde_json::Value> = servers
+        .iter()
+        .map(|s| {
+            let is_owner = s.owner_id == user_id;
+            let mut obj = serde_json::json!({
+                "id": s.id,
+                "name": s.name,
+            });
+            // Only expose invite code and owner status to the owner
+            if is_owner {
+                obj["invite_code"] = serde_json::json!(s.invite_code);
+                obj["is_owner"] = serde_json::json!(true);
+            } else {
+                obj["is_owner"] = serde_json::json!(false);
+            }
+            obj
+        })
+        .collect();
+
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
+// --- Channels ---
+
+pub async fn list_channels(
+    Path(server_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    if !state.db.is_member_of_server(&user_id, &server_id).unwrap_or(false) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Not a member of this server"})),
+        )
+            .into_response();
+    }
+
+    let channels = match state.db.list_server_channels(&server_id) {
         Ok(c) => c,
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": e})),
-            );
+            )
+                .into_response();
         }
     };
 
@@ -168,25 +295,232 @@ pub async fn list_channels(
             serde_json::json!({
                 "id": c.id,
                 "name": c.name,
-                "channel_type": c.channel_type
             })
         })
         .collect();
 
-    (StatusCode::OK, Json(serde_json::json!(channel_infos)))
+    (StatusCode::OK, Json(serde_json::json!(channel_infos))).into_response()
 }
+
+#[derive(Deserialize)]
+pub struct CreateChannelRequest {
+    pub name: String,
+}
+
+pub async fn create_channel(
+    Path(server_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateChannelRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    if !state.db.is_server_owner(&user_id, &server_id).unwrap_or(false) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Only the server owner can create channels"})),
+        )
+            .into_response();
+    }
+
+    if req.name.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Channel name is required"})),
+        )
+            .into_response();
+    }
+
+    let channel = match state.db.create_channel(&server_id, req.name.trim()) {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
+
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "id": channel.id,
+            "name": channel.name,
+        })),
+    )
+        .into_response()
+}
+
+// --- Invites ---
+
+pub async fn get_invite(
+    Path(server_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    if !state.db.is_server_owner(&user_id, &server_id).unwrap_or(false) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Only the server owner can view the invite code"})),
+        )
+            .into_response();
+    }
+
+    let servers = match state.db.list_user_servers(&user_id) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
+
+    let server = match servers.iter().find(|s| s.id == server_id) {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "Server not found"})),
+            )
+                .into_response();
+        }
+    };
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "code": server.invite_code,
+            "server_id": server.id,
+        })),
+    )
+        .into_response()
+}
+
+pub async fn regenerate_invite(
+    Path(server_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    let new_code = match state.db.regenerate_invite(&server_id, &user_id) {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "code": new_code,
+            "server_id": server_id,
+        })),
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+pub struct JoinServerRequest {
+    pub code: String,
+}
+
+pub async fn join_server(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<JoinServerRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    if req.code.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invite code is required"})),
+        )
+            .into_response();
+    }
+
+    let server = match state.db.join_server_by_invite(req.code.trim(), &user_id) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "id": server.id,
+            "name": server.name,
+        })),
+    )
+        .into_response()
+}
+
+// --- Messages ---
 
 pub async fn list_messages(
     Path(channel_id): Path<String>,
+    headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    let server_id = match state.db.get_server_id_for_channel(&channel_id) {
+        Ok(id) => id,
+        Err(e) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
+
+    if !state.db.is_member_of_server(&user_id, &server_id).unwrap_or(false) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Not a member of this server"})),
+        )
+            .into_response();
+    }
+
     let messages = match state.db.list_messages(&channel_id, 100) {
         Ok(m) => m,
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": e})),
-            );
+            )
+                .into_response();
         }
     };
 
@@ -195,8 +529,6 @@ pub async fn list_messages(
         .map(|m| {
             serde_json::json!({
                 "id": m.id,
-                "channel_id": m.channel_id,
-                "sender_id": m.sender_id,
                 "sender_username": m.sender_username,
                 "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
                 "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
@@ -205,8 +537,10 @@ pub async fn list_messages(
         })
         .collect();
 
-    (StatusCode::OK, Json(serde_json::json!(message_infos)))
+    (StatusCode::OK, Json(serde_json::json!(message_infos))).into_response()
 }
+
+// --- Keys ---
 
 pub async fn get_key_bundle(
     Path(user_id): Path<String>,
@@ -246,6 +580,8 @@ pub async fn get_user_id(
         ),
     }
 }
+
+// --- Admin ---
 
 pub async fn admin_login(
     State(state): State<Arc<AppState>>,

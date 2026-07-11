@@ -39,10 +39,12 @@ impl WsManager {
         self.connections.write().await.remove(&conn_id);
     }
 
-    pub async fn broadcast(&self, message: &str) {
+    pub async fn broadcast_to_users(&self, user_ids: &[String], message: &str) {
         let conns = self.connections.read().await;
-        for (_, sender) in conns.values() {
-            let _ = sender.send(message.to_string());
+        for (uid, sender) in conns.values() {
+            if user_ids.contains(uid) {
+                let _ = sender.send(message.to_string());
+            }
         }
     }
 }
@@ -229,6 +231,15 @@ async fn handle_ws_message(
                 None => return,
             };
 
+            // Check user is member of the server this channel belongs to
+            let server_id = match state.db.get_server_id_for_channel(channel_id) {
+                Ok(id) => id,
+                Err(_) => return,
+            };
+            if !state.db.is_member_of_server(user_id, &server_id).unwrap_or(false) {
+                return;
+            }
+
             let encrypted_content = match base64::engine::general_purpose::STANDARD.decode(encrypted_content_b64) {
                 Ok(b) => b,
                 Err(_) => return,
@@ -264,8 +275,16 @@ async fn handle_ws_message(
             };
 
             let json = serde_json::to_string(&outgoing).unwrap();
-            tracing::info!("Broadcasting message to all clients");
-            state.ws_manager.broadcast(&json).await;
+
+            // Only broadcast to members of this server
+            match state.db.get_server_members(&server_id) {
+                Ok(members) => {
+                    state.ws_manager.broadcast_to_users(&members, &json).await;
+                }
+                Err(e) => {
+                    tracing::error!("Failed to get server members: {}", e);
+                }
+            }
         }
         "upload_key_bundle" => {
             let identity_key_public = match parsed.get("identity_key_public").and_then(|v| v.as_str()) {
@@ -303,9 +322,7 @@ async fn handle_ws_message(
                         "type": "key_bundle_uploaded",
                         "ok": true,
                     });
-                    // Send back via broadcast (only this user will match)
-                    // Actually we need to send to the specific connection. For simplicity, broadcast.
-                    state.ws_manager.broadcast(&resp.to_string()).await;
+                    state.ws_manager.broadcast_to_users(&[user_id.to_string()], &resp.to_string()).await;
                 }
                 Err(e) => {
                     tracing::error!("Failed to save key bundle: {}", e);
@@ -318,7 +335,7 @@ async fn handle_ws_message(
             });
             state
                 .ws_manager
-                .broadcast(&pong.to_string())
+                .broadcast_to_users(&[user_id.to_string()], &pong.to_string())
                 .await;
         }
         _ => {}

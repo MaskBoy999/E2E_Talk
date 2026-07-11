@@ -1,14 +1,24 @@
-console.log('chat.js v4 loaded');
+console.log('chat.js v5 loaded - server system');
 
 let ws = null;
 let currentChannelId = null;
+let currentServerId = null;
 let user = null;
+let servers = [];
+let isOwner = false;
+let currentInviteCode = null;
+
+const token = () => localStorage.getItem('token');
+const authFetch = (url, opts = {}) => {
+    opts.headers = { ...(opts.headers || {}), 'Authorization': 'Bearer ' + token() };
+    return fetch(url, opts);
+};
 
 document.addEventListener('DOMContentLoaded', () => {
-    const token = localStorage.getItem('token');
+    const t = token();
     const userStr = localStorage.getItem('user');
 
-    if (!token || !userStr) {
+    if (!t || !userStr) {
         window.location.href = 'login.html';
         return;
     }
@@ -23,17 +33,15 @@ document.addEventListener('DOMContentLoaded', () => {
         window.location.href = 'login.html';
     });
 
-    connectWebSocket(token);
-    loadChannels();
+    connectWebSocket(t);
+    loadServers();
 
-    const input = document.getElementById('message-input');
-    const sendBtn = document.getElementById('send-btn');
-
-    sendBtn.addEventListener('click', sendMessage);
-    input.addEventListener('keypress', (e) => {
+    document.getElementById('send-btn').addEventListener('click', sendMessage);
+    document.getElementById('message-input').addEventListener('keypress', (e) => {
         if (e.key === 'Enter') sendMessage();
     });
 
+    // Mobile sidebar
     const hamburger = document.getElementById('hamburger');
     const sidebar = document.getElementById('sidebar');
     const overlay = document.getElementById('sidebar-overlay');
@@ -51,29 +59,62 @@ document.addEventListener('DOMContentLoaded', () => {
     hamburger.addEventListener('click', openSidebar);
     overlay.addEventListener('click', closeSidebar);
     closeBtn.addEventListener('click', closeSidebar);
-
     window._closeSidebar = closeSidebar;
+
+    // Add server button
+    document.getElementById('add-server-btn').addEventListener('click', () => {
+        showAddServerMenu();
+    });
+
+    // Create server modal
+    document.getElementById('cancel-create-server').addEventListener('click', () => hideModal('create-server-modal'));
+    document.getElementById('confirm-create-server').addEventListener('click', createServer);
+    document.getElementById('new-server-name').addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') createServer();
+    });
+
+    // Join server modal
+    document.getElementById('cancel-join-server').addEventListener('click', () => hideModal('join-server-modal'));
+    document.getElementById('confirm-join-server').addEventListener('click', joinServer);
+    document.getElementById('invite-code-input').addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') joinServer();
+    });
+
+    // Invite modal
+    document.getElementById('close-invite').addEventListener('click', () => hideModal('invite-modal'));
+    document.getElementById('invite-btn').addEventListener('click', showInviteModal);
+    document.getElementById('regenerate-invite').addEventListener('click', regenerateInvite);
+
+    // Create channel modal
+    document.getElementById('cancel-create-channel').addEventListener('click', () => hideModal('create-channel-modal'));
+    document.getElementById('confirm-create-channel').addEventListener('click', createChannel);
+    document.getElementById('new-channel-name').addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') createChannel();
+    });
+    document.getElementById('create-channel-btn').addEventListener('click', () => {
+        document.getElementById('create-channel-modal').style.display = 'flex';
+        document.getElementById('new-channel-name').value = '';
+        document.getElementById('new-channel-name').focus();
+    });
 });
 
-function connectWebSocket(token) {
+// --- WebSocket ---
+
+function connectWebSocket(t) {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
 
     ws.onopen = () => {
-        console.log('WebSocket connected, sending auth...');
-        ws.send(JSON.stringify({ type: 'auth', token: token }));
+        ws.send(JSON.stringify({ type: 'auth', token: t }));
     };
 
     ws.onmessage = async (event) => {
         const data = JSON.parse(event.data);
-        console.log('WS received:', data.type);
 
         switch (data.type) {
             case 'auth_ok':
-                console.log('Authenticated as', data.username);
                 break;
             case 'auth_error':
-                console.error('Auth error:', data.error);
                 localStorage.removeItem('token');
                 localStorage.removeItem('user');
                 window.location.href = 'login.html';
@@ -88,27 +129,77 @@ function connectWebSocket(token) {
         }
     };
 
-    ws.onclose = (event) => {
-        console.log('WebSocket disconnected, reconnecting in 3s...');
-        setTimeout(() => connectWebSocket(token), 3000);
-    };
-
-    ws.onerror = (err) => {
-        console.error('WebSocket error:', err);
+    ws.onclose = () => {
+        setTimeout(() => connectWebSocket(t), 3000);
     };
 }
 
-async function loadChannels() {
-    try {
-        const res = await fetch('/api/channels');
-        const data = await res.json();
+// --- Servers ---
 
-        const channels = Array.isArray(data) ? data : [];
+async function loadServers() {
+    try {
+        const res = await authFetch('/api/servers');
+        servers = await res.json();
+        if (!Array.isArray(servers)) servers = [];
+        renderServerList();
+        if (servers.length > 0) {
+            selectServer(servers[0].id);
+        } else {
+            document.getElementById('server-name').textContent = 'No servers yet';
+            document.getElementById('channel-list').innerHTML = '<div class="channel-item" style="color:#666;cursor:default">Create or join a server</div>';
+        }
+    } catch (err) {
+        console.error('Failed to load servers:', err);
+    }
+}
+
+function renderServerList() {
+    const list = document.getElementById('server-list');
+    list.innerHTML = '';
+
+    servers.forEach(s => {
+        const div = document.createElement('div');
+        div.className = 'server-icon' + (s.id === currentServerId ? ' active' : '');
+        div.textContent = s.name.charAt(0).toUpperCase();
+        div.title = s.name;
+        div.dataset.id = s.id;
+        div.addEventListener('click', () => selectServer(s.id));
+        list.appendChild(div);
+    });
+}
+
+async function selectServer(serverId) {
+    currentServerId = serverId;
+    currentChannelId = null;
+
+    const server = servers.find(s => s.id === serverId);
+    isOwner = server && server.is_owner;
+    currentInviteCode = server ? server.invite_code : null;
+
+    document.getElementById('server-name').textContent = server ? server.name : '';
+    document.getElementById('invite-btn').style.display = isOwner ? '' : 'none';
+    document.getElementById('create-channel-btn').style.display = isOwner ? '' : 'none';
+
+    renderServerList();
+    await loadChannels(serverId);
+
+    if (window._closeSidebar) window._closeSidebar();
+}
+
+// --- Channels ---
+
+async function loadChannels(serverId) {
+    try {
+        const res = await authFetch(`/api/servers/${serverId}/channels`);
+        const channels = await res.json();
         const list = document.getElementById('channel-list');
         list.innerHTML = '';
 
-        if (channels.length === 0) {
+        if (!Array.isArray(channels) || channels.length === 0) {
             list.innerHTML = '<div class="channel-item" style="color:#666;cursor:default">No channels yet</div>';
+            document.getElementById('channel-name').textContent = 'Select a channel';
+            document.getElementById('message-input').disabled = true;
+            document.getElementById('send-btn').disabled = true;
             return;
         }
 
@@ -118,7 +209,6 @@ async function loadChannels() {
             div.textContent = `# ${ch.name}`;
             div.dataset.id = ch.id;
             div.dataset.name = ch.name;
-
             div.addEventListener('click', () => selectChannel(ch.id, ch.name, div));
             list.appendChild(div);
         });
@@ -144,12 +234,14 @@ async function selectChannel(channelId, channelName, element) {
     if (window._closeSidebar) window._closeSidebar();
 }
 
+// --- Messages ---
+
 async function loadMessages(channelId) {
     const list = document.getElementById('message-list');
     list.innerHTML = '<div class="welcome">Loading messages...</div>';
 
     try {
-        const res = await fetch(`/api/channels/${channelId}/messages`);
+        const res = await authFetch(`/api/channels/${channelId}/messages`);
         const messages = await res.json();
 
         list.innerHTML = '';
@@ -205,15 +297,14 @@ async function appendMessage(msg) {
     list.scrollTop = 0;
 }
 
+// --- Send ---
+
 async function sendMessage() {
     const input = document.getElementById('message-input');
     const content = input.value.trim();
 
     if (!content || !currentChannelId) return;
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-        console.warn('WebSocket not connected, cannot send');
-        return;
-    }
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
     var encrypted;
     try {
@@ -231,6 +322,134 @@ async function sendMessage() {
     }));
 
     input.value = '';
+}
+
+// --- Server Actions ---
+
+function showAddServerMenu() {
+    // Show a simple choice: create or join
+    const choice = confirm('Click OK to CREATE a new server\nClick Cancel to JOIN with an invite code');
+    if (choice) {
+        document.getElementById('create-server-modal').style.display = 'flex';
+        document.getElementById('new-server-name').value = '';
+        document.getElementById('new-server-name').focus();
+    } else {
+        document.getElementById('join-server-modal').style.display = 'flex';
+        document.getElementById('invite-code-input').value = '';
+        document.getElementById('invite-code-input').focus();
+    }
+}
+
+async function createServer() {
+    const name = document.getElementById('new-server-name').value.trim();
+    if (!name) return;
+
+    try {
+        const res = await authFetch('/api/servers', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name }),
+        });
+
+        if (res.ok) {
+            hideModal('create-server-modal');
+            await loadServers();
+            // Auto-select the new server
+            if (servers.length > 0) {
+                selectServer(servers[servers.length - 1].id);
+            }
+        } else {
+            const err = await res.json();
+            alert(err.error || 'Failed to create server');
+        }
+    } catch (err) {
+        console.error('Create server failed:', err);
+    }
+}
+
+async function joinServer() {
+    const code = document.getElementById('invite-code-input').value.trim();
+    if (!code) return;
+
+    try {
+        const res = await authFetch('/api/invites/join', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ code }),
+        });
+
+        if (res.ok) {
+            hideModal('join-server-modal');
+            await loadServers();
+            const server = await res.json();
+            selectServer(server.id);
+        } else {
+            const err = await res.json();
+            alert(err.error || 'Invalid invite code');
+        }
+    } catch (err) {
+        console.error('Join server failed:', err);
+    }
+}
+
+async function showInviteModal() {
+    if (!currentServerId || !currentInviteCode) return;
+    document.getElementById('invite-code-display').textContent = currentInviteCode;
+    document.getElementById('invite-modal').style.display = 'flex';
+}
+
+async function regenerateInvite() {
+    if (!currentServerId) return;
+    if (!confirm('Regenerate invite code? The old code will stop working immediately.')) return;
+
+    try {
+        const res = await authFetch(`/api/servers/${currentServerId}/invite`, {
+            method: 'POST',
+        });
+
+        if (res.ok) {
+            const data = await res.json();
+            currentInviteCode = data.code;
+            document.getElementById('invite-code-display').textContent = data.code;
+            // Update cached server data
+            const server = servers.find(s => s.id === currentServerId);
+            if (server) server.invite_code = data.code;
+        } else {
+            const err = await res.json();
+            alert(err.error || 'Failed to regenerate invite');
+        }
+    } catch (err) {
+        console.error('Regenerate invite failed:', err);
+    }
+}
+
+async function createChannel() {
+    const name = document.getElementById('new-channel-name').value.trim();
+    if (!name || !currentServerId) return;
+
+    try {
+        const res = await authFetch(`/api/servers/${currentServerId}/channels`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name }),
+        });
+
+        if (res.ok) {
+            hideModal('create-channel-modal');
+            await loadChannels(currentServerId);
+        } else {
+            const err = await res.json();
+            alert(err.error || 'Failed to create channel');
+        }
+    } catch (err) {
+        console.error('Create channel failed:', err);
+    }
+}
+
+// --- Helpers ---
+
+function hideModal(id) {
+    document.getElementById(id).style.display = 'none';
 }
 
 function escapeHtml(str) {

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::{
     http::{HeaderMap, HeaderValue},
-    routing::{get, post},
+    routing::{get, post, delete},
     Router,
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -76,13 +76,16 @@ async fn main() {
     let app = Router::new()
         .route("/api/register", post(handlers::register))
         .route("/api/login", post(handlers::login))
-        .route("/api/channels", get(handlers::list_channels))
+        .route("/api/servers", get(handlers::list_servers).post(handlers::create_server))
+        .route("/api/servers/{server_id}/channels", get(handlers::list_channels).post(handlers::create_channel))
+        .route("/api/servers/{server_id}/invite", get(handlers::get_invite).post(handlers::regenerate_invite))
         .route("/api/channels/{channel_id}/messages", get(handlers::list_messages))
+        .route("/api/invites/join", post(handlers::join_server))
         .route("/api/keys/{user_id}", get(handlers::get_key_bundle))
         .route("/api/user/{username}", get(handlers::get_user_id))
         .route("/api/admin/login", post(handlers::admin_login))
         .route("/api/admin/users", get(handlers::admin_list_users))
-        .route("/api/admin/users/{user_id}", axum::routing::delete(handlers::admin_delete_user))
+        .route("/api/admin/users/{user_id}", delete(handlers::admin_delete_user))
         .route("/ws", get(ws::ws_handler))
         .fallback(get(serve_static))
         .with_state(state);

@@ -13,6 +13,14 @@ pub struct User {
 }
 
 #[derive(Debug, Clone)]
+pub struct Server {
+    pub id: String,
+    pub name: String,
+    pub owner_id: String,
+    pub invite_code: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct Channel {
     pub id: String,
     pub server_id: String,
@@ -59,7 +67,6 @@ impl Database {
             conn: Mutex::new(conn),
         };
         db.run_migrations()?;
-        db.ensure_default_server()?;
         Ok(db)
     }
 
@@ -69,27 +76,22 @@ impl Database {
         Ok(())
     }
 
-    fn ensure_default_server(&self) -> Result<(), rusqlite::Error> {
-        let conn = self.conn.lock().unwrap();
-        let server_exists: bool =
-            conn.query_row("SELECT COUNT(*) FROM servers", [], |row| row.get::<_, i64>(0))?
-                > 0;
-
-        if !server_exists {
-            let server_id = Uuid::new_v4().to_string();
-            let general_id = Uuid::new_v4().to_string();
-
-            conn.execute(
-                "INSERT INTO servers (id, name, owner_id) VALUES (?1, ?2, ?3)",
-                params![server_id, "General", "system"],
-            )?;
-            conn.execute(
-                "INSERT INTO channels (id, server_id, name, type) VALUES (?1, ?2, ?3, ?4)",
-                params![general_id, server_id, "general", "text"],
-            )?;
-        }
-        Ok(())
+    fn generate_invite_code() -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        Uuid::new_v4().hash(&mut hasher);
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            .hash(&mut hasher);
+        let hash = hasher.finish();
+        // 8-char lowercase hex code
+        format!("{:08x}", hash & 0xFFFFFFFF)
     }
+
+    // --- Users ---
 
     pub fn create_user(&self, username: &str, password_hash: &str) -> Result<User, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
@@ -153,26 +155,188 @@ impl Database {
         .map_err(|_| "User not found".to_string())
     }
 
-    pub fn ensure_user_in_default_server(&self, user_id: &str) -> Result<(), String> {
+    // --- Servers ---
+
+    pub fn create_server(&self, name: &str, owner_id: &str) -> Result<Server, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let server_id: String = conn
-            .query_row("SELECT id FROM servers LIMIT 1", [], |row| row.get(0))
-            .map_err(|_| "No servers found".to_string())?;
+        let server_id = Uuid::new_v4().to_string();
+        let general_id = Uuid::new_v4().to_string();
+        let invite_code = Self::generate_invite_code();
+
         conn.execute(
-            "INSERT OR IGNORE INTO server_members (user_id, server_id) VALUES (?1, ?2)",
-            params![user_id, server_id],
+            "INSERT INTO servers (id, name, owner_id, invite_code) VALUES (?1, ?2, ?3, ?4)",
+            params![server_id, name, owner_id, invite_code],
         )
         .map_err(|e| e.to_string())?;
-        Ok(())
+
+        conn.execute(
+            "INSERT INTO server_members (user_id, server_id, role) VALUES (?1, ?2, 'owner')",
+            params![owner_id, server_id],
+        )
+        .map_err(|e| e.to_string())?;
+
+        conn.execute(
+            "INSERT INTO channels (id, server_id, name, type, position) VALUES (?1, ?2, 'general', 'text', 0)",
+            params![general_id, server_id],
+        )
+        .map_err(|e| e.to_string())?;
+
+        Ok(Server {
+            id: server_id,
+            name: name.to_string(),
+            owner_id: owner_id.to_string(),
+            invite_code,
+        })
     }
 
-    pub fn list_all_channels(&self) -> Result<Vec<Channel>, String> {
+    pub fn list_user_servers(&self, user_id: &str) -> Result<Vec<Server>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT id, server_id, name, type FROM channels ORDER BY position")
+            .prepare(
+                "SELECT s.id, s.name, s.owner_id, s.invite_code
+                 FROM servers s
+                 INNER JOIN server_members sm ON s.id = sm.server_id
+                 WHERE sm.user_id = ?1
+                 ORDER BY s.name",
+            )
+            .map_err(|e| e.to_string())?;
+        let servers = stmt
+            .query_map(params![user_id], |row| {
+                Ok(Server {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    owner_id: row.get(2)?,
+                    invite_code: row.get(3)?,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(servers)
+    }
+
+    pub fn is_member_of_server(&self, user_id: &str, server_id: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        Self::is_member_of_server_c(&conn, user_id, server_id)
+    }
+
+    fn is_member_of_server_c(conn: &Connection, user_id: &str, server_id: &str) -> Result<bool, String> {
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM server_members WHERE user_id = ?1 AND server_id = ?2",
+                params![user_id, server_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(count > 0)
+    }
+
+    pub fn is_server_owner(&self, user_id: &str, server_id: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        Self::is_server_owner_c(&conn, user_id, server_id)
+    }
+
+    fn is_server_owner_c(conn: &Connection, user_id: &str, server_id: &str) -> Result<bool, String> {
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM servers WHERE id = ?1 AND owner_id = ?2",
+                params![server_id, user_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(count > 0)
+    }
+
+    pub fn join_server_by_invite(&self, code: &str, user_id: &str) -> Result<Server, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+
+        let server: Server = conn
+            .query_row(
+                "SELECT id, name, owner_id, invite_code FROM servers WHERE invite_code = ?1",
+                params![code],
+                |row| {
+                    Ok(Server {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        owner_id: row.get(2)?,
+                        invite_code: row.get(3)?,
+                    })
+                },
+            )
+            .map_err(|_| "Invalid invite code".to_string())?;
+
+        let already_member: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM server_members WHERE user_id = ?1 AND server_id = ?2",
+                params![user_id, server.id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|e| e.to_string())?
+            > 0;
+
+        if !already_member {
+            conn.execute(
+                "INSERT INTO server_members (user_id, server_id, role) VALUES (?1, ?2, 'member')",
+                params![user_id, server.id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+
+        Ok(server)
+    }
+
+    pub fn regenerate_invite(&self, server_id: &str, user_id: &str) -> Result<String, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+
+        if !Self::is_server_owner_c(&conn, user_id, server_id).unwrap_or(false) {
+            return Err("Only the server owner can regenerate the invite".to_string());
+        }
+
+        let new_code = Self::generate_invite_code();
+        conn.execute(
+            "UPDATE servers SET invite_code = ?1 WHERE id = ?2",
+            params![new_code, server_id],
+        )
+        .map_err(|e| e.to_string())?;
+
+        Ok(new_code)
+    }
+
+    pub fn get_server_id_for_channel(&self, channel_id: &str) -> Result<String, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT server_id FROM channels WHERE id = ?1",
+            params![channel_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| "Channel not found".to_string())
+    }
+
+    pub fn get_server_members(&self, server_id: &str) -> Result<Vec<String>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT user_id FROM server_members WHERE server_id = ?1")
+            .map_err(|e| e.to_string())?;
+        let members = stmt
+            .query_map(params![server_id], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(members)
+    }
+
+    // --- Channels ---
+
+    pub fn list_server_channels(&self, server_id: &str) -> Result<Vec<Channel>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, server_id, name, type FROM channels
+                 WHERE server_id = ?1 ORDER BY position",
+            )
             .map_err(|e| e.to_string())?;
         let channels = stmt
-            .query_map([], |row| {
+            .query_map(params![server_id], |row| {
                 Ok(Channel {
                     id: row.get(0)?,
                     server_id: row.get(1)?,
@@ -186,13 +350,41 @@ impl Database {
         Ok(channels)
     }
 
+    pub fn create_channel(&self, server_id: &str, name: &str) -> Result<Channel, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let id = Uuid::new_v4().to_string();
+
+        let max_pos: i32 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(position), -1) FROM channels WHERE server_id = ?1",
+                params![server_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+
+        conn.execute(
+            "INSERT INTO channels (id, server_id, name, type, position) VALUES (?1, ?2, ?3, 'text', ?4)",
+            params![id, server_id, name, max_pos + 1],
+        )
+        .map_err(|e| e.to_string())?;
+
+        Ok(Channel {
+            id,
+            server_id: server_id.to_string(),
+            name: name.to_string(),
+            channel_type: "text".to_string(),
+        })
+    }
+
+    // --- Messages ---
+
     pub fn list_messages(&self, channel_id: &str, limit: i64) -> Result<Vec<Message>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
                 "SELECT m.id, m.channel_id, m.sender_id, u.username, m.encrypted_content, m.nonce, m.timestamp
                  FROM messages m
-                 JOIN users u ON m.sender_id = u.id
+                 INNER JOIN users u ON m.sender_id = u.id
                  WHERE m.channel_id = ?1
                  ORDER BY m.timestamp DESC
                  LIMIT ?2",
@@ -295,7 +487,6 @@ impl Database {
     pub fn consume_one_time_prekey(&self, user_id: &str) -> Result<Option<(Vec<u8>, i32)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
 
-        // Find an available one-time prekey
         let result: Option<(Vec<u8>, i32)> = conn
             .query_row(
                 "SELECT one_time_prekey_public, one_time_prekey_id
@@ -308,7 +499,6 @@ impl Database {
             .ok();
 
         if let Some((key, key_id)) = result {
-            // Remove the consumed prekey by setting it to NULL
             conn.execute(
                 "UPDATE prekey_bundles SET one_time_prekey_public = NULL, one_time_prekey_id = NULL
                  WHERE user_id = ?1 AND one_time_prekey_id = ?2",
@@ -382,17 +572,7 @@ impl Database {
         Ok(())
     }
 
-    pub fn is_member_of_server(&self, user_id: &str, server_id: &str) -> Result<bool, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM server_members WHERE user_id = ?1 AND server_id = ?2",
-                params![user_id, server_id],
-                |row| row.get(0),
-            )
-            .map_err(|e| e.to_string())?;
-        Ok(count > 0)
-    }
+    // --- Admin ---
 
     pub fn list_all_users(&self) -> Result<Vec<User>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
@@ -420,8 +600,11 @@ impl Database {
             .map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM prekey_bundles WHERE user_id = ?1", params![user_id])
             .map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM sessions WHERE our_user_id = ?1 OR their_user_id = ?1", params![user_id])
-            .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM sessions WHERE our_user_id = ?1 OR their_user_id = ?1",
+            params![user_id],
+        )
+        .map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM users WHERE id = ?1", params![user_id])
             .map_err(|e| e.to_string())?;
         Ok(())
