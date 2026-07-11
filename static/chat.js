@@ -159,7 +159,7 @@ async function loadMessages(channelId) {
             return;
         }
 
-        for (const msg of messages.reverse()) {
+        for (const msg of messages) {
             await appendMessage(msg);
         }
     } catch (err) {
@@ -201,8 +201,8 @@ async function appendMessage(msg) {
             '<div class="text">' + escapeHtml(textContent) + '</div>' +
         '</div>';
 
-    list.appendChild(div);
-    list.scrollTop = list.scrollHeight;
+    list.prepend(div);
+    list.scrollTop = 0;
 }
 
 async function sendMessage() {
