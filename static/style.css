@@ -269,20 +269,23 @@ body {
 }
 
 .create-channel-btn {
-    margin-left: auto;
+    display: block;
+    width: 100%;
     background: transparent;
     border: none;
+    border-top: 1px solid var(--bg-border);
     color: var(--text-faint);
     font-size: clamp(12px, 2vw, 14px);
     cursor: pointer;
-    padding: 2px 8px;
-    border-radius: 4px;
-    white-space: nowrap;
+    padding: clamp(8px, 1.5vw, 10px) clamp(8px, 2vw, 12px);
+    border-radius: 0;
+    text-align: left;
+    flex-shrink: 0;
 }
 
 .create-channel-btn:hover {
     color: var(--accent);
-    background: rgba(79, 195, 247, 0.1);
+    background: rgba(79, 195, 247, 0.05);
 }
 
 .sidebar-close {
@@ -718,19 +721,32 @@ body {
 /* ===== Mobile: 768px and below ===== */
 @media (max-width: 768px) {
     .server-strip {
-        width: clamp(42px, 12vw, 56px);
+        width: clamp(48px, 14vw, 60px);
+        z-index: 102;
+    }
+
+    .server-icon {
+        width: clamp(38px, 10vw, 48px);
+        height: clamp(38px, 10vw, 48px);
+        font-size: clamp(14px, 3.5vw, 18px);
+    }
+
+    .server-icon.add-server {
+        width: clamp(38px, 10vw, 48px);
+        height: clamp(38px, 10vw, 48px);
+        font-size: clamp(20px, 5vw, 26px);
     }
 
     .sidebar {
         position: fixed;
         top: 0;
-        left: clamp(42px, 12vw, 56px);
+        left: clamp(48px, 14vw, 60px);
         bottom: 0;
-        transform: translateX(-100%);
+        transform: translateX(calc(-100% - clamp(48px, 14vw, 60px)));
         transition: transform 0.25s ease;
-        width: 70%;
+        width: 72%;
         min-width: 200px;
-        max-width: 280px;
+        max-width: 300px;
         z-index: 101;
     }
 
@@ -759,6 +775,10 @@ body {
 
     .hamburger {
         display: block;
+    }
+
+    .create-channel-btn {
+        margin-bottom: clamp(4px, 1vw, 8px);
     }
 }
 

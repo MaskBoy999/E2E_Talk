@@ -59,6 +59,7 @@ document.addEventListener('DOMContentLoaded', () => {
     hamburger.addEventListener('click', openSidebar);
     overlay.addEventListener('click', closeSidebar);
     closeBtn.addEventListener('click', closeSidebar);
+    window._openSidebar = openSidebar;
     window._closeSidebar = closeSidebar;
 
     // Add server button
@@ -90,11 +91,6 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('confirm-create-channel').addEventListener('click', createChannel);
     document.getElementById('new-channel-name').addEventListener('keypress', (e) => {
         if (e.key === 'Enter') createChannel();
-    });
-    document.getElementById('create-channel-btn').addEventListener('click', () => {
-        document.getElementById('create-channel-modal').style.display = 'flex';
-        document.getElementById('new-channel-name').value = '';
-        document.getElementById('new-channel-name').focus();
     });
 });
 
@@ -178,12 +174,16 @@ async function selectServer(serverId) {
 
     document.getElementById('server-name').textContent = server ? server.name : '';
     document.getElementById('invite-btn').style.display = isOwner ? '' : 'none';
-    document.getElementById('create-channel-btn').style.display = isOwner ? '' : 'none';
 
     renderServerList();
     await loadChannels(serverId);
 
-    if (window._closeSidebar) window._closeSidebar();
+    // On mobile, auto-open sidebar when tapping a server
+    if (window.innerWidth <= 768 && window._openSidebar) {
+        window._openSidebar();
+    } else if (window._closeSidebar) {
+        window._closeSidebar();
+    }
 }
 
 // --- Channels ---
@@ -213,7 +213,23 @@ async function loadChannels(serverId) {
             list.appendChild(div);
         });
 
-        list.children[0].click();
+        // Add create channel button inside the scrollable list (owner only)
+        if (isOwner) {
+            const btn = document.createElement('button');
+            btn.className = 'create-channel-btn';
+            btn.textContent = '+ Channel';
+            btn.addEventListener('click', () => {
+                document.getElementById('create-channel-modal').style.display = 'flex';
+                document.getElementById('new-channel-name').value = '';
+                document.getElementById('new-channel-name').focus();
+            });
+            list.appendChild(btn);
+        }
+
+        // Auto-select first channel on desktop; on mobile, user taps to select
+        if (window.innerWidth > 768) {
+            list.children[0].click();
+        }
     } catch (err) {
         console.error('Failed to load channels:', err);
     }
