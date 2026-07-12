@@ -138,20 +138,20 @@ document.addEventListener('DOMContentLoaded', () => {
     // Polling intervals for auto-refresh
     setInterval(() => {
         if (viewMode === 'servers') loadServers();
-    }, 2000);
+    }, 5000);
 
     setInterval(() => {
         if (currentServerId && viewMode === 'servers') {
             loadChannels(currentServerId);
             loadMembers(currentServerId);
         }
-    }, 2000);
+    }, 5000);
 
     setInterval(() => {
         if (currentChannelId && viewMode === 'servers') {
             loadMessages(currentChannelId);
         }
-    }, 2000);
+    }, 5000);
 });
 
 // --- WebSocket ---

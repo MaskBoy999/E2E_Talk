@@ -69,6 +69,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (e.target === document.getElementById('confirm-modal')) closeModal();
     });
     document.getElementById('confirm-delete').addEventListener('click', executeDelete);
+
+    document.getElementById('clear-all-btn').addEventListener('click', clearAll);
 });
 
 function showError(msg) {
@@ -379,4 +381,17 @@ function renderServerMembers(members) {
         ),
         'No members'
     );
+}
+
+async function clearAll() {
+    if (!confirm('Are you sure you want to delete ALL data?')) return;
+    if (!confirm('This will permanently remove all users, servers, channels, messages, and keys. This cannot be undone. Continue?')) return;
+    try {
+        const res = await fetch('/api/admin/clear', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Clear failed');
+        await loadAllData();
+    } catch (err) {
+        alert('Clear failed: ' + err.message);
+    }
 }

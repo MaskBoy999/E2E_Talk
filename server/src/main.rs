@@ -104,6 +104,7 @@ async fn main() {
         .route("/api/admin/messages", get(handlers::admin_list_messages))
         .route("/api/admin/server-keys", get(handlers::admin_list_server_keys))
         .route("/api/admin/server-members", get(handlers::admin_list_server_members))
+        .route("/api/admin/clear", post(handlers::admin_clear_all))
         .route("/ws", get(ws::ws_handler))
         .fallback(get(serve_static))
         .with_state(state);

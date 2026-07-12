@@ -12,50 +12,91 @@
 # Error details
 
 ```
-Error: expect(received).toBeGreaterThanOrEqual(expected)
+Test timeout of 30000ms exceeded.
+```
 
-Expected: >= 1
-Received:    0
+```
+Error: page.fill: Test timeout of 30000ms exceeded.
+Call log:
+  - waiting for locator('#message-input')
+    - locator resolved to <input disabled type="text" id="message-input" placeholder="Type a message..."/>
+    - fill("Secret DM message")
+  - attempting fill action
+    2 × waiting for element to be visible, enabled and editable
+      - element is not enabled
+    - retrying fill action
+    - waiting 20ms
+    2 × waiting for element to be visible, enabled and editable
+      - element is not enabled
+    - retrying fill action
+      - waiting 100ms
+    46 × waiting for element to be visible, enabled and editable
+       - element is not enabled
+     - retrying fill action
+       - waiting 500ms
+
 ```
 
 # Page snapshot
 
 ```yaml
-- generic [ref=e2]:
-  - generic [ref=e3]:
-    - generic "Direct Messages" [ref=e4]:
-      - img [ref=e5]
-    - button "+" [ref=e7] [cursor=pointer]
-  - generic [ref=e8]:
-    - heading "Direct Messages" [level=2] [ref=e10]
-    - generic [ref=e11]:
-      - button "+ New Message" [ref=e12]
-      - generic [ref=e14] [cursor=pointer]:
-        - generic [ref=e15]: C
-        - generic [ref=e17]: ctuser2_1783851484589
-    - generic [ref=e18]:
-      - generic [ref=e19]: ctuser1_1783851484589
-      - generic [ref=e20]:
-        - link "Admin" [ref=e21] [cursor=pointer]:
-          - /url: admin.html
-        - button "Logout" [ref=e22] [cursor=pointer]
-  - generic [ref=e23]:
-    - generic [ref=e24]:
-      - heading "ctuser2_1783851484589" [level=3] [ref=e25]
-      - button "☰" [ref=e26] [cursor=pointer]
-    - generic [ref=e27]:
-      - generic [ref=e29]: No messages yet. Say hello!
-      - generic:
+- generic [ref=e1]:
+  - generic [ref=e2]:
+    - generic [ref=e3]:
+      - generic "Direct Messages" [ref=e4]:
+        - img [ref=e5]
+      - button "+" [ref=e7] [cursor=pointer]
+    - generic [ref=e8]:
+      - heading "Direct Messages" [level=2] [ref=e10]
+      - generic [ref=e11]:
+        - button "+ New Message" [ref=e12]
+        - generic [ref=e14]: No conversations yet
+      - generic [ref=e15]:
+        - generic [ref=e16]: ctuser1_1783852677348
+        - generic [ref=e17]:
+          - link "Admin" [ref=e18] [cursor=pointer]:
+            - /url: admin.html
+          - button "Logout" [ref=e19] [cursor=pointer]
+    - generic [ref=e20]:
+      - generic [ref=e21]:
+        - heading "Select a conversation" [level=3] [ref=e22]
+        - button "☰" [ref=e23] [cursor=pointer]
+      - generic [ref=e24]:
+        - generic [ref=e26]: Select a conversation to start chatting
         - generic:
-          - button "×"
-    - generic [ref=e30]:
-      - textbox "Type a message..." [ref=e31]: Secret DM message
-      - button "Send" [active] [ref=e32] [cursor=pointer]
+          - generic:
+            - button "×"
+      - generic [ref=e27]:
+        - textbox "Type a message..." [disabled] [ref=e28]
+        - button "Send" [disabled] [ref=e29]
+  - generic [ref=e31]:
+    - textbox "Enter username" [ref=e32]: ctuser2_1783852677348
+    - generic [ref=e33]: Failed to start DM
+    - generic [ref=e34]:
+      - button "Cancel" [ref=e35] [cursor=pointer]
+      - button "Start Chat" [active] [ref=e36] [cursor=pointer]
 ```
 
 # Test source
 
 ```ts
+  86  |         }));
+  87  | 
+  88  |         // Register user2 in a separate context (already-authed pages redirect away from login)
+  89  |         const ctx2 = await context.browser()!.newContext();
+  90  |         const page2 = await ctx2.newPage();
+  91  |         await page2.goto(`${BASE}/login.html`);
+  92  |         await page2.waitForTimeout(1000);
+  93  |         await page2.click('#show-register');
+  94  |         await page2.fill('#register-username', user2);
+  95  |         await page2.fill('#register-password', 'password123');
+  96  |         await page2.click('#register-form button[type="submit"]');
+  97  |         await page2.waitForURL('**/index.html', { timeout: 10000 });
+  98  |         const body2 = await page2.evaluate(() => ({
+  99  |             token: localStorage.getItem('token'),
+  100 |             user: JSON.parse(localStorage.getItem('user') || '{}'),
+  101 |         }));
+  102 |         expect(body2.token).toBeTruthy();
   103 | 
   104 |         // User1 creates DM with user2
   105 |         await page.goto(`${BASE}/index.html`);
@@ -139,7 +180,8 @@ Received:    0
   183 |         await page.waitForTimeout(2000);
   184 | 
   185 |         // Send a message
-  186 |         await page.fill('#message-input', 'Secret DM message');
+> 186 |         await page.fill('#message-input', 'Secret DM message');
+      |                    ^ Error: page.fill: Test timeout of 30000ms exceeded.
   187 |         await page.click('#send-btn');
   188 |         await page.waitForTimeout(1000);
   189 | 
@@ -156,8 +198,7 @@ Received:    0
   200 |             headers: { Authorization: `Bearer ${body1.token}` },
   201 |         });
   202 |         const msgs = await msgsRes.json();
-> 203 |         expect(msgs.length).toBeGreaterThanOrEqual(1);
-      |                             ^ Error: expect(received).toBeGreaterThanOrEqual(expected)
+  203 |         expect(msgs.length).toBeGreaterThanOrEqual(1);
   204 |         for (const m of msgs) {
   205 |             expect(m).toHaveProperty('encrypted_content');
   206 |             expect(m).toHaveProperty('nonce');

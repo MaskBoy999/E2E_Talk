@@ -1300,3 +1300,12 @@ pub async fn admin_delete_channel(
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
 }
+
+pub async fn admin_clear_all(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match state.db.clear_all() {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}

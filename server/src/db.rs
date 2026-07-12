@@ -1160,4 +1160,19 @@ impl Database {
             .map_err(|e| e.to_string())?;
         Ok(())
     }
+
+    pub fn clear_all(&self) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM messages", []).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM server_keys", []).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM server_bans", []).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM server_members", []).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM channels", []).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM servers", []).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM prekey_bundles", []).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM sessions", []).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM users", []).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM admin_config", []).map_err(|e| e.to_string())?;
+        Ok(())
+    }
 }
