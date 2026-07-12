@@ -126,6 +126,7 @@ async fn main() {
         .route("/api/admin/clear", post(handlers::admin_clear_all))
         // Phase 4: Friends + DMs
         .route("/api/me", get(handlers::get_me).delete(handlers::delete_me))
+        .route("/api/user/secrets/friend-code", get(handlers::get_encrypted_friend_code).post(handlers::upload_encrypted_friend_code))
         .route("/api/friends", get(handlers::list_friends))
         .route("/api/friends/remove", post(handlers::remove_friend))
         .route("/api/friends/request", post(handlers::send_friend_request))

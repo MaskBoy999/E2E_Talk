@@ -75,6 +75,49 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             } catch (_) {}
 
+            // Try to fetch the encrypted friend code from the server and decrypt it.
+            // This syncs the friend code to any device that has the identity key.
+            try {
+                const kp = E2ECrypto.getIdentityKeyPair(data.user.id);
+                if (kp) {
+                    const fcRes = await fetch('/api/user/secrets/friend-code', {
+                        headers: { 'Authorization': 'Bearer ' + data.token },
+                    });
+                    if (fcRes.ok) {
+                        const fcData = await fcRes.json();
+                        const decrypted = E2ECrypto.envelopeDecryptRaw(
+                            fcData.encrypted, fcData.nonce, fcData.sender_key, kp.privateKey
+                        );
+                        const friendCode = new TextDecoder().decode(decrypted);
+                        if (friendCode) {
+                            localStorage.setItem('e2e_friend_code', friendCode);
+                        }
+                    }
+                }
+            } catch (_) {}
+
+            // Backfill: if we have a friend code locally but it's not synced, upload it now
+            try {
+                const localFc = localStorage.getItem('e2e_friend_code');
+                if (localFc && !localStorage.getItem('e2e_friend_code_synced')) {
+                    const kp = E2ECrypto.getIdentityKeyPair(data.user.id);
+                    if (kp) {
+                        const fcBytes = new TextEncoder().encode(localFc);
+                        const encrypted = E2ECrypto.envelopeEncryptRaw(fcBytes, kp.publicKey);
+                        const r = await fetch('/api/user/secrets/friend-code', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + data.token },
+                            body: JSON.stringify({
+                                encrypted: encrypted.ciphertext,
+                                nonce: encrypted.nonce,
+                                sender_key: encrypted.ephemeralPublicKey,
+                            }),
+                        });
+                        if (r.ok) localStorage.setItem('e2e_friend_code_synced', '1');
+                    }
+                }
+            } catch (_) {}
+
             localStorage.setItem('token', data.token);
             localStorage.setItem('user', JSON.stringify(data.user));
             window.location.href = 'index.html';
@@ -132,6 +175,24 @@ document.addEventListener('DOMContentLoaded', () => {
             // Only persist a new private key after the account has actually
             // been created, and bind it to that account.
             E2ECrypto.saveIdentityKeyPair(keypair, data.user.id);
+
+            // Upload the friend code encrypted with our identity public key,
+            // so other devices with the same identity key can read it.
+            try {
+                const fcBytes = new TextEncoder().encode(friendCode);
+                const encrypted = E2ECrypto.envelopeEncryptRaw(fcBytes, keypair.publicKey);
+                const r = await fetch('/api/user/secrets/friend-code', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + data.token },
+                    body: JSON.stringify({
+                        encrypted: encrypted.ciphertext,
+                        nonce: encrypted.nonce,
+                        sender_key: encrypted.ephemeralPublicKey,
+                    }),
+                });
+                if (r.ok) localStorage.setItem('e2e_friend_code_synced', '1');
+            } catch (_) {}
+
             localStorage.setItem('token', data.token);
             localStorage.setItem('user', JSON.stringify(data.user));
             window.location.href = 'index.html';
@@ -322,6 +383,23 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             E2ECrypto.saveIdentityKeyPair({ privateKey: privateKeyBytes, publicKey: publicKey }, data.user.id);
+
+            // Fetch the encrypted friend code from the server and decrypt it.
+            try {
+                const fcRes = await fetch('/api/user/secrets/friend-code', {
+                    headers: { 'Authorization': 'Bearer ' + data.token },
+                });
+                if (fcRes.ok) {
+                    const fcData = await fcRes.json();
+                    const decrypted = E2ECrypto.envelopeDecryptRaw(
+                        fcData.encrypted, fcData.nonce, fcData.sender_key, privateKeyBytes
+                    );
+                    const friendCode = new TextDecoder().decode(decrypted);
+                    if (friendCode) {
+                        localStorage.setItem('e2e_friend_code', friendCode);
+                    }
+                }
+            } catch (_) {}
 
             localStorage.setItem('token', data.token);
             localStorage.setItem('user', JSON.stringify(data.user));

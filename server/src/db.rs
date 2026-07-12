@@ -153,6 +153,16 @@ impl Database {
         }
         let _ = conn.execute_batch(include_str!("../migrations/006_hashed_codes.sql"));
 
+        // --- user_secrets table (encrypted friend code storage) ---
+        let _ = conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS user_secrets (
+                user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                friend_code_encrypted BLOB NOT NULL,
+                friend_code_nonce BLOB NOT NULL,
+                friend_code_sender_key BLOB NOT NULL
+            )"
+        );
+
         // --- invite_code_hash on servers ---
         // First, make the old invite_code column nullable (SQLite can't DROP COLUMN easily)
         let invite_col_nullable: bool = conn
@@ -1025,6 +1035,30 @@ impl Database {
             )
             .ok();
         code.ok_or_else(|| "No friend code set".to_string())
+    }
+
+    pub fn save_encrypted_friend_code(&self, user_id: &str, encrypted: &[u8], nonce: &[u8], sender_key: &[u8]) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT OR REPLACE INTO user_secrets (user_id, friend_code_encrypted, friend_code_nonce, friend_code_sender_key) VALUES (?1, ?2, ?3, ?4)",
+            params![user_id, encrypted, nonce, sender_key],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn get_encrypted_friend_code(&self, user_id: &str) -> Result<Option<(Vec<u8>, Vec<u8>, Vec<u8>)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let result = conn.query_row(
+            "SELECT friend_code_encrypted, friend_code_nonce, friend_code_sender_key FROM user_secrets WHERE user_id = ?1",
+            params![user_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        );
+        match result {
+            Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
     }
 
     pub fn get_user_by_friend_code(&self, code: &str) -> Result<User, String> {

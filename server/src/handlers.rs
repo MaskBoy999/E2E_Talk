@@ -1697,6 +1697,73 @@ pub async fn delete_me(
     }
 }
 
+// --- Encrypted Friend Code (multi-device sync) ---
+
+#[derive(Deserialize)]
+pub struct UploadEncryptedFriendCodeRequest {
+    pub encrypted: String,
+    pub nonce: String,
+    pub sender_key: String,
+}
+
+pub async fn upload_encrypted_friend_code(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UploadEncryptedFriendCodeRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    let encrypted = match base64::engine::general_purpose::STANDARD.decode(&req.encrypted) {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid encrypted"}))).into_response(),
+    };
+    let nonce = match base64::engine::general_purpose::STANDARD.decode(&req.nonce) {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid nonce"}))).into_response(),
+    };
+    let sender_key = match base64::engine::general_purpose::STANDARD.decode(&req.sender_key) {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid sender_key"}))).into_response(),
+    };
+
+    match state.db.save_encrypted_friend_code(&user_id, &encrypted, &nonce, &sender_key) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn get_encrypted_friend_code(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    match state.db.get_encrypted_friend_code(&user_id) {
+        Ok(Some((encrypted, nonce, sender_key))) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "encrypted": base64::engine::general_purpose::STANDARD.encode(&encrypted),
+                "nonce": base64::engine::general_purpose::STANDARD.encode(&nonce),
+                "sender_key": base64::engine::general_purpose::STANDARD.encode(&sender_key),
+            })),
+        ).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "No friend code synced yet"})),
+        ).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        ).into_response(),
+    }
+}
+
 // --- Friends ---
 
 #[derive(Deserialize)]

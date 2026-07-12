@@ -1425,6 +1425,31 @@ let myFriendCode = '';
 async function loadMyFriendCode() {
     try {
         myFriendCode = localStorage.getItem('e2e_friend_code') || '';
+
+        // Backfill: if we have a friend code in localStorage but it hasn't been
+        // synced to the server yet, upload it encrypted so other devices can fetch it.
+        if (myFriendCode && !localStorage.getItem('e2e_friend_code_synced')) {
+            try {
+                const kp = E2ECrypto.getIdentityKeyPair();
+                if (kp) {
+                    const fcBytes = new TextEncoder().encode(myFriendCode);
+                    const encrypted = E2ECrypto.envelopeEncryptRaw(fcBytes, kp.publicKey);
+                    const res = await authFetch('/api/user/secrets/friend-code', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            encrypted: encrypted.ciphertext,
+                            nonce: encrypted.nonce,
+                            sender_key: encrypted.ephemeralPublicKey,
+                        }),
+                    });
+                    if (res.ok) {
+                        localStorage.setItem('e2e_friend_code_synced', '1');
+                    }
+                }
+            } catch (_) {}
+        }
+
         const el = document.getElementById('my-friend-code');
         if (el) {
             el.textContent = '••••••••••••••••';
