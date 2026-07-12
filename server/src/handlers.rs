@@ -41,6 +41,7 @@ pub struct RegisterRequest {
     pub username: String,
     pub password: String,
     pub identity_public_key: Option<String>,
+    pub friend_code_hash: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -86,7 +87,7 @@ pub async fn register(
         base64::engine::general_purpose::STANDARD.decode(k).ok()
     });
 
-    let user = match state.db.create_user(&req.username, &password_hash, identity_key_bytes.as_deref()) {
+    let user = match state.db.create_user(&req.username, &password_hash, identity_key_bytes.as_deref(), req.friend_code_hash.as_deref()) {
         Ok(u) => u,
         Err(e) => {
             return (
@@ -95,6 +96,11 @@ pub async fn register(
             );
         }
     };
+
+    // Also store in user_public_keys for multi-device support
+    if let Some(ref key_bytes) = identity_key_bytes {
+        let _ = state.db.add_user_public_key(&user.id, key_bytes);
+    }
 
     let token = match auth::create_token(&user.id, &user.username, &state.config.jwt_secret) {
         Ok(t) => t,
@@ -180,6 +186,7 @@ pub async fn login(
 #[derive(Deserialize)]
 pub struct CreateServerRequest {
     pub name: String,
+    pub invite_code_hash: String,
 }
 
 pub async fn create_server(
@@ -200,7 +207,7 @@ pub async fn create_server(
             .into_response();
     }
 
-    let server = match state.db.create_server(req.name.trim(), &user_id) {
+    let server = match state.db.create_server(req.name.trim(), &user_id, &req.invite_code_hash) {
         Ok(s) => s,
         Err(e) => {
             return (
@@ -216,7 +223,6 @@ pub async fn create_server(
         Json(serde_json::json!({
             "id": server.id,
             "name": server.name,
-            "invite_code": server.invite_code,
         })),
     )
         .into_response()
@@ -246,18 +252,11 @@ pub async fn list_servers(
         .iter()
         .map(|s| {
             let is_owner = s.owner_id == user_id;
-            let mut obj = serde_json::json!({
+            serde_json::json!({
                 "id": s.id,
                 "name": s.name,
-            });
-            // Only expose invite code and owner status to the owner
-            if is_owner {
-                obj["invite_code"] = serde_json::json!(s.invite_code);
-                obj["is_owner"] = serde_json::json!(true);
-            } else {
-                obj["is_owner"] = serde_json::json!(false);
-            }
-            obj
+                "is_owner": is_owner,
+            })
         })
         .collect();
 
@@ -351,6 +350,13 @@ pub async fn create_channel(
         }
     };
 
+    // Broadcast channel_created to all server members
+    let channel_msg = serde_json::json!({
+        "type": "channel_created",
+        "server_id": server_id,
+    });
+    let _ = state.ws_manager.broadcast_to_server(&server_id, &channel_msg.to_string()).await;
+
     (
         StatusCode::CREATED,
         Json(serde_json::json!({
@@ -406,42 +412,47 @@ pub async fn get_invite(
     (
         StatusCode::OK,
         Json(serde_json::json!({
-            "code": server.invite_code,
             "server_id": server.id,
         })),
     )
         .into_response()
 }
 
+#[derive(Deserialize)]
+pub struct RegenerateInviteRequest {
+    pub invite_code_hash: String,
+}
+
 pub async fn regenerate_invite(
     Path(server_id): Path<String>,
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
+    Json(req): Json<RegenerateInviteRequest>,
 ) -> impl IntoResponse {
     let user_id = match extract_user(&headers, &state) {
         Ok(id) => id,
         Err(e) => return e.into_response(),
     };
 
-    let new_code = match state.db.regenerate_invite(&server_id, &user_id) {
-        Ok(c) => c,
+    match state.db.regenerate_invite(&server_id, &user_id, &req.invite_code_hash) {
+        Ok(()) => {
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "ok": true,
+                    "server_id": server_id,
+                })),
+            )
+                .into_response()
+        }
         Err(e) => {
-            return (
+            (
                 StatusCode::FORBIDDEN,
                 Json(serde_json::json!({"error": e})),
             )
-                .into_response();
+                .into_response()
         }
-    };
-
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "code": new_code,
-            "server_id": server_id,
-        })),
-    )
-        .into_response()
+    }
 }
 
 #[derive(Deserialize)]
@@ -478,13 +489,15 @@ pub async fn join_server(
         }
     };
 
-    // Broadcast member_joined to the server owner so they can upload the encrypted server key
+    // Broadcast member_joined to all server members
     let join_msg = serde_json::json!({
         "type": "member_joined",
         "server_id": server.id,
         "user_id": user_id,
     });
-    let _ = state.ws_manager.broadcast_to_users(&[server.owner_id.clone()], &join_msg.to_string()).await;
+    if let Ok(members) = state.db.get_server_members(&server.id) {
+        let _ = state.ws_manager.broadcast_to_users(&members, &join_msg.to_string()).await;
+    }
 
     (
         StatusCode::OK,
@@ -704,8 +717,18 @@ pub async fn delete_channel(
         Err(e) => return e.into_response(),
     };
 
+    // Get server_id before deletion for the broadcast
+    let server_id = state.db.get_server_id_for_channel(&channel_id);
+
     match state.db.delete_channel_by_owner(&channel_id, &user_id) {
         Ok(()) => {
+            if let Ok(sid) = server_id {
+                let channel_msg = serde_json::json!({
+                    "type": "channel_deleted",
+                    "server_id": sid,
+                });
+                let _ = state.ws_manager.broadcast_to_server(&sid, &channel_msg.to_string()).await;
+            }
             (
                 StatusCode::OK,
                 Json(serde_json::json!({"ok": true})),
@@ -870,19 +893,78 @@ pub async fn get_identity_key(
     Path(user_id): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    match state.db.get_identity_public_key(&user_id) {
-        Ok(key) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "user_id": user_id,
-                "identity_public_key": base64::engine::general_purpose::STANDARD.encode(&key),
-            })),
-        ),
-        Err(e) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": e})),
-        ),
+    let mut all_keys: Vec<String> = Vec::new();
+
+    // Primary key from users table
+    if let Ok(key) = state.db.get_identity_public_key(&user_id) {
+        all_keys.push(base64::engine::general_purpose::STANDARD.encode(&key));
     }
+
+    // Additional keys from user_public_keys table
+    if let Ok(extra_keys) = state.db.get_all_user_public_keys(&user_id) {
+        for k in extra_keys {
+            all_keys.push(base64::engine::general_purpose::STANDARD.encode(&k));
+        }
+    }
+
+    if all_keys.is_empty() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "User not found or no public key"})),
+        )
+            .into_response();
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "user_id": user_id,
+            "identity_public_key": all_keys[0],
+            "identity_public_keys": all_keys,
+        })),
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+pub struct UploadIdentityKeyRequest {
+    pub identity_public_key: String,
+}
+
+pub async fn upload_identity_key(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UploadIdentityKeyRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    let key_bytes = match base64::engine::general_purpose::STANDARD.decode(&req.identity_public_key) {
+        Ok(b) => b,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid identity_public_key"})),
+            )
+                .into_response();
+        }
+    };
+
+    // Update primary key
+    if let Err(e) = state.db.update_identity_public_key(&user_id, &key_bytes) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response();
+    }
+
+    // Also add to multi-device keys table
+    let _ = state.db.add_user_public_key(&user_id, &key_bytes);
+
+    (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
 }
 
 #[derive(Deserialize)]
@@ -1166,7 +1248,6 @@ pub async fn admin_list_servers(
                 "id": s.id,
                 "name": s.name,
                 "owner_id": s.owner_id,
-                "invite_code": s.invite_code,
             })
         })
         .collect();
@@ -1306,6 +1387,505 @@ pub async fn admin_clear_all(
 ) -> impl IntoResponse {
     match state.db.clear_all() {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+// ===== Phase 4: Friends + Direct Messages =====
+
+// --- Current user / friend code ---
+
+pub async fn get_me(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    let user = match state.db.get_user_by_id(&user_id) {
+        Ok(u) => u,
+        Err(e) => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "id": user.id,
+            "username": user.username,
+        })),
+    )
+        .into_response()
+}
+
+pub async fn delete_me(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    match state.db.delete_user(&user_id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+// --- Friends ---
+
+#[derive(Deserialize)]
+pub struct SendFriendRequest {
+    pub friend_code: String,
+}
+
+pub async fn send_friend_request(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SendFriendRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    let code = req.friend_code.trim().to_uppercase();
+    if code.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Friend code is required"})),
+        )
+            .into_response();
+    }
+
+    match state.db.create_friend_request(&user_id, &code) {
+        Ok(target) => {
+            // Notify the recipient in real time (best-effort).
+            let notify = serde_json::json!({
+                "type": "friend_request_received",
+                "from_user_id": user_id,
+            });
+            let _ = state
+                .ws_manager
+                .broadcast_to_users(&[target.id.clone()], &notify.to_string())
+                .await;
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "ok": true,
+                    "to": { "id": target.id, "username": target.username },
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct RespondFriendRequest {
+    pub request_id: String,
+}
+
+pub async fn accept_friend_request(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RespondFriendRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    match state.db.accept_friend_request(&req.request_id, &user_id) {
+        Ok((from_id, _to_id)) => {
+            // Auto-create a DM channel between the two new friends
+            let _ = state.db.find_or_create_dm_channel(&from_id, &user_id);
+
+            // Notify the original sender that they are now friends.
+            let notify = serde_json::json!({
+                "type": "friend_request_accepted",
+                "by_user_id": user_id,
+            });
+            let _ = state
+                .ws_manager
+                .broadcast_to_users(&[from_id], &notify.to_string())
+                .await;
+            (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn decline_friend_request(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RespondFriendRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    match state.db.decline_friend_request(&req.request_id, &user_id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn list_incoming_friend_requests(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    match state.db.list_incoming_friend_requests(&user_id) {
+        Ok(reqs) => {
+            let result: Vec<serde_json::Value> = reqs
+                .iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "id": r.id,
+                        "from_user_id": r.from_user_id,
+                        "from_username": r.from_username,
+                        "status": r.status,
+                        "created_at": r.created_at,
+                    })
+                })
+                .collect();
+            (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn list_outgoing_friend_requests(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    match state.db.list_outgoing_friend_requests(&user_id) {
+        Ok(reqs) => {
+            let result: Vec<serde_json::Value> = reqs
+                .iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "id": r.id,
+                        "to_user_id": r.to_user_id,
+                        "to_username": r.to_username,
+                        "status": r.status,
+                        "created_at": r.created_at,
+                    })
+                })
+                .collect();
+            (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn list_friends(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    match state.db.list_friends(&user_id) {
+        Ok(friends) => {
+            let result: Vec<serde_json::Value> = friends
+                .iter()
+                .map(|f| serde_json::json!({ "id": f.user_id, "username": f.username }))
+                .collect();
+            (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct RemoveFriendRequest {
+    pub user_id: String,
+}
+
+pub async fn remove_friend(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RemoveFriendRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    match state.db.remove_friend(&user_id, &req.user_id) {
+        Ok(()) => {
+            // Notify the other user that they've been unfriended
+            let notify = serde_json::json!({
+                "type": "friend_removed",
+                "by_user_id": user_id,
+            });
+            let _ = state
+                .ws_manager
+                .broadcast_to_users(&[req.user_id.clone()], &notify.to_string())
+                .await;
+            (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+// --- DM Channels ---
+
+/// Get or create a DM channel with a friend. Returns the dm_channel_id.
+/// Friendship is required; the endpoint refuses otherwise.
+pub async fn get_or_create_dm(
+    Path(friend_user_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    if user_id == friend_user_id {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Cannot DM yourself"})),
+        )
+            .into_response();
+    }
+    if !state.db.are_friends(&user_id, &friend_user_id).unwrap_or(false) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "You can only DM friends. Send a friend request first."})),
+        )
+            .into_response();
+    }
+
+    let dm_channel_id = match state.db.find_dm_channel(&user_id, &friend_user_id) {
+        Ok(Some(id)) => id,
+        Ok(None) => match state.db.create_dm_channel(&user_id, &friend_user_id) {
+            Ok(id) => id,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": e})),
+                )
+                    .into_response();
+            }
+        },
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "id": dm_channel_id })),
+    )
+        .into_response()
+}
+
+pub async fn list_dm_conversations(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    match state.db.list_dm_channels_for_user(&user_id) {
+        Ok(channels) => {
+            let mut result: Vec<serde_json::Value> = Vec::new();
+            for (dm_id, other_id, other_username) in channels {
+                let identity_pub = state
+                    .db
+                    .get_identity_public_key(&other_id)
+                    .map(|k| base64::engine::general_purpose::STANDARD.encode(k))
+                    .unwrap_or_default();
+                let last = state.db.get_dm_last_message(&dm_id).ok().flatten();
+                let last_json = match last {
+                    Some(m) => serde_json::json!({
+                        "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
+                        "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
+                        "sender_id": m.sender_id,
+                        "timestamp": m.timestamp,
+                    }),
+                    None => serde_json::Value::Null,
+                };
+                result.push(serde_json::json!({
+                    "dm_channel_id": dm_id,
+                    "other_user_id": other_id,
+                    "other_username": other_username,
+                    "other_public_key": identity_pub,
+                    "last_message": last_json,
+                }));
+            }
+            (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn list_dm_messages(
+    Path(dm_channel_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    if !state.db.is_dm_member(&dm_channel_id, &user_id).unwrap_or(false) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Not a member of this DM"})),
+        )
+            .into_response();
+    }
+    match state.db.list_dm_messages(&dm_channel_id, 100) {
+        Ok(msgs) => {
+            let result: Vec<serde_json::Value> = msgs
+                .iter()
+                .map(|m| {
+                    serde_json::json!({
+                        "id": m.id,
+                        "dm_channel_id": m.dm_channel_id,
+                        "sender_id": m.sender_id,
+                        "sender_username": m.sender_username,
+                        "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
+                        "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
+                        "timestamp": m.timestamp,
+                    })
+                })
+                .collect();
+            (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
+// --- DM Keys (envelope-encrypted distribution, same pattern as server keys) ---
+
+#[derive(Deserialize)]
+pub struct UploadDmKeyRequest {
+    pub user_id: String,
+    pub encrypted_key: String,
+    pub sender_public_key: String,
+    pub nonce: String,
+}
+
+pub async fn upload_dm_key(
+    Path(dm_channel_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UploadDmKeyRequest>,
+) -> impl IntoResponse {
+    let caller_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    // Must be a member of the DM to upload a key (for self or for the other member).
+    if !state.db.is_dm_member(&dm_channel_id, &caller_id).unwrap_or(false) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Not a member of this DM"})),
+        )
+            .into_response();
+    }
+    if !state.db.is_dm_member(&dm_channel_id, &req.user_id).unwrap_or(false) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Recipient is not a member of this DM"})),
+        )
+            .into_response();
+    }
+
+    let encrypted_key = match base64::engine::general_purpose::STANDARD.decode(&req.encrypted_key) {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid encrypted_key"}))).into_response(),
+    };
+    let sender_pub = match base64::engine::general_purpose::STANDARD.decode(&req.sender_public_key) {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid sender_public_key"}))).into_response(),
+    };
+    let nonce = match base64::engine::general_purpose::STANDARD.decode(&req.nonce) {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid nonce"}))).into_response(),
+    };
+
+    match state.db.save_dm_key(&dm_channel_id, &req.user_id, &encrypted_key, &sender_pub, &nonce) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn get_dm_keys(
+    Path(dm_channel_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    if !state.db.is_dm_member(&dm_channel_id, &user_id).unwrap_or(false) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Not a member of this DM"})),
+        )
+            .into_response();
+    }
+    match state.db.get_dm_keys_for_user(&dm_channel_id, &user_id) {
+        Ok(keys) => {
+            let result: Vec<serde_json::Value> = keys
+                .iter()
+                .map(|(ek, spk, nonce)| {
+                    serde_json::json!({
+                        "encrypted_key": base64::engine::general_purpose::STANDARD.encode(ek),
+                        "sender_public_key": base64::engine::general_purpose::STANDARD.encode(spk),
+                        "nonce": base64::engine::general_purpose::STANDARD.encode(nonce),
+                    })
+                })
+                .collect();
+            (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
 }

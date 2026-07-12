@@ -12,6 +12,7 @@
         <div class="server-strip" id="server-strip">
             <div class="dm-strip-btn" id="dm-strip-btn" title="Direct Messages">
                 <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z"/></svg>
+                <span class="badge" id="dm-strip-badge" style="display:none"></span>
             </div>
             <div class="strip-divider"></div>
             <div id="server-list" class="server-list"></div>
@@ -31,7 +32,7 @@
             <div class="sidebar-footer">
                 <span id="current-user"></span>
                 <div class="footer-actions">
-                    <a href="admin.html" class="admin-link">Admin</a>
+                    <button id="settings-btn" class="settings-gear" title="Settings">&#9881;</button>
                     <button id="logout-btn">Logout</button>
                 </div>
             </div>
@@ -92,7 +93,11 @@
     <!-- Invite Modal -->
     <div class="modal" id="invite-modal" style="display:none">
         <div class="modal-content">
-            <div style="background:#1a1a2e;padding:12px 16px;border-radius:8px;font-family:monospace;font-size:20px;text-align:center;color:#4fc3f7;letter-spacing:2px;margin-bottom:16px;user-select:all;" id="invite-code-display"></div>
+            <div class="identity-key-box">
+                <span class="key-value" id="invite-code-display">••••••••••••••••</span>
+                <button class="key-action-btn" id="toggle-invite-btn" title="Show/Hide">&#128065;</button>
+                <button class="key-action-btn" id="copy-invite-btn" title="Copy">&#128203;</button>
+            </div>
             <div class="modal-actions">
                 <button class="btn-cancel" id="regenerate-invite" style="border-color:var(--danger);color:var(--danger)">Regenerate Code</button>
                 <button class="btn-cancel" id="close-invite">Close</button>
@@ -123,19 +128,71 @@
         </div>
     </div>
 
-    <!-- DM Search Modal -->
-    <div class="modal" id="dm-search-modal" style="display:none">
+    <!-- Add Friend Modal (friend code) -->
+    <div class="modal" id="add-friend-modal" style="display:none">
         <div class="modal-content">
-            <input type="text" id="dm-username-input" placeholder="Enter username" maxlength="30" style="width:100%;padding:10px 14px;margin-bottom:16px;border:1px solid #2a2a4a;border-radius:8px;background:#1a1a2e;color:#e0e0e0;font-size:16px;">
-            <div id="dm-search-error" style="color:var(--danger);margin-bottom:12px;display:none;font-size:13px"></div>
+            <h3 style="margin-bottom:12px;color:var(--accent)">Add Friend</h3>
+            <input type="text" id="friend-code-input" placeholder="Enter friend code" maxlength="20" style="width:100%;padding:10px 14px;margin-bottom:16px;border:1px solid #2a2a4a;border-radius:8px;background:#1a1a2e;color:#e0e0e0;font-size:16px;text-transform:uppercase;letter-spacing:2px;">
+            <div id="add-friend-error" style="color:var(--danger);margin-bottom:12px;display:none;font-size:13px"></div>
             <div class="modal-actions">
-                <button class="btn-cancel" id="cancel-dm-search">Cancel</button>
-                <button class="btn-invite" id="confirm-dm-search">Start Chat</button>
+                <button class="btn-cancel" id="cancel-add-friend">Cancel</button>
+                <button class="btn-invite" id="confirm-add-friend">Send Friend Request</button>
             </div>
         </div>
     </div>
 
-    <script src="crypto.js?v=4"></script>
-    <script src="chat.js?v=5"></script>
+    <!-- Friend Requests Modal -->
+    <div class="modal" id="friend-requests-modal" style="display:none">
+        <div class="modal-content" style="max-width:420px">
+            <h3 style="margin-bottom:12px;color:var(--accent)">Incoming Friend Requests</h3>
+            <div id="friend-requests-list" style="max-height:300px;overflow-y:auto"></div>
+            <div class="modal-actions">
+                <button class="btn-cancel" id="close-friend-requests">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Settings Modal -->
+    <div class="modal" id="settings-modal" style="display:none">
+        <div class="modal-content settings-modal-content">
+            <div class="settings-tabs">
+                <button class="settings-tab active" data-tab="user-settings">User</button>
+                <button class="settings-tab" data-tab="display-settings">Display</button>
+            </div>
+
+            <!-- User Settings -->
+            <div class="settings-panel" id="user-settings">
+                <div class="settings-group">
+                    <h4>Local Key</h4>
+                    <p class="settings-hint">Copy this key and paste it on another device to sync your identity.</p>
+                    <div class="identity-key-box">
+                        <span class="key-value" id="identity-key-value">••••••••••••••••</span>
+                        <button class="key-action-btn" id="toggle-key-btn" title="Show/Hide">&#128065;</button>
+                        <button class="key-action-btn" id="copy-key-btn" title="Copy">&#128203;</button>
+                    </div>
+                </div>
+                <div class="settings-group settings-danger">
+                    <h4>Danger Zone</h4>
+                    <p class="settings-hint">Permanently delete your account and all associated data. This cannot be undone.</p>
+                    <button class="btn-delete-account" id="delete-account-btn">Delete Account</button>
+                </div>
+            </div>
+
+            <!-- Display Settings (placeholder) -->
+            <div class="settings-panel" id="display-settings" style="display:none">
+                <div class="settings-group">
+                    <h4>Display Settings</h4>
+                    <p class="settings-hint">Customize the appearance of the chat. Coming soon.</p>
+                </div>
+            </div>
+
+            <div class="modal-actions">
+                <button class="btn-cancel" id="close-settings">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="crypto.js?v=5"></script>
+    <script src="chat.js?v=8"></script>
 </body>
 </html>

@@ -1,6 +1,18 @@
 import { test, expect } from '@playwright/test';
+import { createHash } from 'crypto';
 
 const BASE = 'http://localhost:3000';
+
+function sha256Hex(data: string): string {
+    return createHash('sha256').update(data).digest('hex');
+}
+
+function generateCode(len: number): string {
+    const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    let code = '';
+    for (let i = 0; i < len; i++) code += ALPHABET[Math.floor(Math.random() * ALPHABET.length)];
+    return code;
+}
 
 test.describe('E2E Chat', () => {
 
@@ -51,9 +63,10 @@ test.describe('E2E Chat', () => {
         });
 
         // User1 creates a server through the API
+        const inviteCode1 = generateCode(8);
         const srv = await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${body1.token}` },
-            data: { name: 'Test Server' },
+            data: { name: 'Test Server', invite_code_hash: sha256Hex(inviteCode1) },
         });
         const server = await srv.json();
         expect(server.id).toBeTruthy();
@@ -81,15 +94,16 @@ test.describe('E2E Chat', () => {
 
         // Get invite code
         const invRes = await page.request.post(`${BASE}/api/servers/${server.id}/invite`, {
-            headers: { Authorization: `Bearer ${body1.token}` },
+            headers: { Authorization: `Bearer ${body1.token}`, 'Content-Type': 'application/json' },
+            data: { invite_code_hash: sha256Hex(inviteCode1) },
         });
         const invite = await invRes.json();
-        expect(invite.code).toBeTruthy();
+        expect(invite.ok).toBeTruthy();
 
         // User2 joins
         const joinRes = await page.request.post(`${BASE}/api/invites/join`, {
             headers: { Authorization: `Bearer ${body2.token}` },
-            data: { code: invite.code },
+            data: { code: inviteCode1 },
         });
         const joined = await joinRes.json();
         expect(joined.id).toBe(server.id);
@@ -232,12 +246,11 @@ test.describe('E2E Chat', () => {
         });
         expect(serverId).toBeTruthy();
 
-        const invRes = await page.request.post(`${BASE}/api/servers/${serverId}/invite`, {
-            headers: { Authorization: `Bearer ${body1.token}` },
-        });
-        const invite = await invRes.json();
-        expect(invite.code).toBeTruthy();
-        console.log('Invite code:', invite.code);
+        // The UI test creates server via UI which generates invite code client-side.
+        // We need to get the invite code from localStorage.
+        const inviteCode = await page.evaluate((sid) => localStorage.getItem('e2e_invite_' + sid), serverId);
+        console.log('Invite code:', inviteCode);
+        expect(inviteCode).toBeTruthy();
 
         // === User2 joins via UI ===
         await page2reg.goto(`${BASE}/index.html`);
@@ -249,7 +262,7 @@ test.describe('E2E Chat', () => {
         });
         await page2reg.click('#add-server-btn');
         await page2reg.waitForSelector('#join-server-modal', { state: 'visible', timeout: 5000 });
-        await page2reg.fill('#invite-code-input', invite.code);
+        await page2reg.fill('#invite-code-input', inviteCode!);
         await page2reg.click('#confirm-join-server');
         await page2reg.waitForTimeout(5000);
 
@@ -336,7 +349,7 @@ test.describe('E2E Chat', () => {
         // Create server
         const srv = await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${body.token}` },
-            data: { name: 'Reload Server' },
+            data: { name: 'Reload Server', invite_code_hash: sha256Hex(generateCode(8)) },
         });
         const server = await srv.json();
 
@@ -405,7 +418,7 @@ test.describe('E2E Chat', () => {
         // Create server
         const srv = await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${body.token}` },
-            data: { name: 'CT Server' },
+            data: { name: 'CT Server', invite_code_hash: sha256Hex(generateCode(8)) },
         });
         const server = await srv.json();
 
@@ -488,7 +501,7 @@ test.describe('E2E Chat', () => {
         // Create a server with this user
         await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${body.token}` },
-            data: { name: 'Admin Test Server ' + ts },
+            data: { name: 'Admin Test Server ' + ts, invite_code_hash: sha256Hex(generateCode(8)) },
         });
 
         // Go to admin panel — first login sets the password, second logs in
@@ -591,9 +604,10 @@ test.describe('E2E Chat', () => {
         }));
 
         // User1 creates server
+        const inviteCode2 = generateCode(8);
         const srv = await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${body1.token}` },
-            data: { name: 'Kick Test' },
+            data: { name: 'Kick Test', invite_code_hash: sha256Hex(inviteCode2) },
         });
         const server = await srv.json();
 
@@ -612,12 +626,14 @@ test.describe('E2E Chat', () => {
 
         // User2 joins
         const invRes = await page.request.post(`${BASE}/api/servers/${server.id}/invite`, {
-            headers: { Authorization: `Bearer ${body1.token}` },
+            headers: { Authorization: `Bearer ${body1.token}`, 'Content-Type': 'application/json' },
+            data: { invite_code_hash: sha256Hex(inviteCode2) },
         });
         const invite = await invRes.json();
+        expect(invite.ok).toBeTruthy();
         await page2.request.post(`${BASE}/api/invites/join`, {
             headers: { Authorization: `Bearer ${body2.token}` },
-            data: { code: invite.code },
+            data: { code: inviteCode2 },
         });
 
         // Upload key for user2
@@ -711,9 +727,10 @@ test.describe('E2E Chat', () => {
         }));
 
         // User1 creates server, uploads key
+        const inviteCode3 = generateCode(8);
         const srv = await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${body1.token}` },
-            data: { name: 'Leave Test' },
+            data: { name: 'Leave Test', invite_code_hash: sha256Hex(inviteCode3) },
         });
         const server = await srv.json();
         await page.evaluate(async ({ serverId, userId }) => {
@@ -730,12 +747,14 @@ test.describe('E2E Chat', () => {
 
         // User2 joins, gets key
         const invRes = await page.request.post(`${BASE}/api/servers/${server.id}/invite`, {
-            headers: { Authorization: `Bearer ${body1.token}` },
+            headers: { Authorization: `Bearer ${body1.token}`, 'Content-Type': 'application/json' },
+            data: { invite_code_hash: sha256Hex(inviteCode3) },
         });
         const invite = await invRes.json();
+        expect(invite.ok).toBeTruthy();
         await page2.request.post(`${BASE}/api/invites/join`, {
             headers: { Authorization: `Bearer ${body2.token}` },
-            data: { code: invite.code },
+            data: { code: inviteCode3 },
         });
         const user2PubKey = await page2.evaluate(() => E2ECrypto.arrayBufferToBase64(E2ECrypto.getIdentityKeyPair().publicKey));
         await page.evaluate(async ({ serverId, user2Id, user2PubKey }) => {

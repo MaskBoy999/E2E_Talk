@@ -70,6 +70,8 @@ struct OutgoingMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     channel_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    dm_channel_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<OutgoingChatMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     user_id: Option<String>,
@@ -83,6 +85,8 @@ struct OutgoingMessage {
 struct OutgoingChatMessage {
     id: String,
     channel_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dm_channel_id: Option<String>,
     sender_id: String,
     sender_username: String,
     encrypted_content: String,
@@ -111,6 +115,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                 let err = OutgoingMessage {
                                     msg_type: "auth_error".to_string(),
                                     channel_id: None,
+                                    dm_channel_id: None,
                                     message: None,
                                     user_id: None,
                                     username: None,
@@ -127,6 +132,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                         let err = OutgoingMessage {
                             msg_type: "auth_error".to_string(),
                             channel_id: None,
+                            dm_channel_id: None,
                             message: None,
                             user_id: None,
                             username: None,
@@ -149,6 +155,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
             let err = OutgoingMessage {
                 msg_type: "auth_error".to_string(),
                 channel_id: None,
+                dm_channel_id: None,
                 message: None,
                 user_id: None,
                 username: None,
@@ -164,6 +171,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     let auth_ok = OutgoingMessage {
         msg_type: "auth_ok".to_string(),
         channel_id: None,
+        dm_channel_id: None,
         message: None,
         user_id: Some(user.id.clone()),
         username: Some(user.username.clone()),
@@ -267,9 +275,11 @@ async fn handle_ws_message(
             let outgoing = OutgoingMessage {
                 msg_type: "message_new".to_string(),
                 channel_id: Some(message.channel_id.clone()),
+                dm_channel_id: None,
                 message: Some(OutgoingChatMessage {
                     id: message.id,
                     channel_id: message.channel_id,
+                    dm_channel_id: None,
                     sender_id: message.sender_id,
                     sender_username: message.sender_username,
                     encrypted_content: encrypted_content_b64.to_string(),
@@ -333,6 +343,73 @@ async fn handle_ws_message(
                 }
                 Err(e) => {
                     tracing::error!("Failed to save key bundle: {}", e);
+                }
+            }
+        }
+        "dm_send" => {
+            let dm_channel_id = match parsed.get("dm_channel_id").and_then(|c| c.as_str()) {
+                Some(c) => c,
+                None => return,
+            };
+            let encrypted_content_b64 = match parsed.get("encrypted_content").and_then(|c| c.as_str()) {
+                Some(c) => c,
+                None => return,
+            };
+            let nonce_b64 = match parsed.get("nonce").and_then(|c| c.as_str()) {
+                Some(c) => c,
+                None => return,
+            };
+
+            // Must be a member of this DM channel.
+            if !state.db.is_dm_member(dm_channel_id, user_id).unwrap_or(false) {
+                return;
+            }
+
+            let encrypted_content = match base64::engine::general_purpose::STANDARD.decode(encrypted_content_b64) {
+                Ok(b) => b,
+                Err(_) => return,
+            };
+            let nonce = match base64::engine::general_purpose::STANDARD.decode(nonce_b64) {
+                Ok(b) => b,
+                Err(_) => return,
+            };
+
+            let message = match state.db.save_dm_message(dm_channel_id, user_id, &encrypted_content, &nonce) {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::error!("Failed to save DM message: {}", e);
+                    return;
+                }
+            };
+
+            let outgoing = OutgoingMessage {
+                msg_type: "dm_new".to_string(),
+                channel_id: None,
+                dm_channel_id: Some(message.dm_channel_id.clone()),
+                message: Some(OutgoingChatMessage {
+                    id: message.id,
+                    channel_id: String::new(),
+                    dm_channel_id: Some(message.dm_channel_id.clone()),
+                    sender_id: message.sender_id,
+                    sender_username: message.sender_username,
+                    encrypted_content: encrypted_content_b64.to_string(),
+                    nonce: nonce_b64.to_string(),
+                    timestamp: message.timestamp,
+                }),
+                user_id: None,
+                username: None,
+                error: None,
+            };
+
+            let json = serde_json::to_string(&outgoing).unwrap();
+
+            // Broadcast to both DM members.
+            match state.db.get_dm_members(dm_channel_id) {
+                Ok(members) => {
+                    state.ws_manager.broadcast_to_users(&members, &json).await;
+                }
+                Err(e) => {
+                    tracing::error!("Failed to get DM members: {}", e);
                 }
             }
         }

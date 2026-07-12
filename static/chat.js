@@ -1,4 +1,11 @@
-console.log('chat.js v6 loaded - true E2E encryption');
+console.log('chat.js v7 loaded - hashed codes + true E2E encryption');
+
+function generateCode(len) {
+    const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    let code = '';
+    for (let i = 0; i < len; i++) code += ALPHABET[Math.floor(Math.random() * ALPHABET.length)];
+    return code;
+}
 
 let ws = null;
 let currentChannelId = null;
@@ -11,6 +18,8 @@ let viewMode = 'servers';
 let currentDmChannelId = null;
 let currentDmOtherUser = null;
 let dmConversations = [];
+let unreadDms = {};
+let pendingFriendRequests = 0;
 
 const token = () => localStorage.getItem('token');
 const authFetch = (url, opts = {}) => {
@@ -36,6 +45,61 @@ document.addEventListener('DOMContentLoaded', () => {
         E2ECrypto.saveIdentityKeyPair(kp);
     }
 
+    // Settings modal
+    const settingsBtn = document.getElementById('settings-btn');
+    const settingsModal = document.getElementById('settings-modal');
+    settingsBtn.addEventListener('click', () => { settingsModal.style.display = 'flex'; });
+    document.getElementById('close-settings').addEventListener('click', () => { settingsModal.style.display = 'none'; });
+
+    // Tab switching
+    settingsModal.querySelectorAll('.settings-tab').forEach(tab => {
+        tab.addEventListener('click', () => {
+            settingsModal.querySelectorAll('.settings-tab').forEach(t => t.classList.remove('active'));
+            settingsModal.querySelectorAll('.settings-panel').forEach(p => p.style.display = 'none');
+            tab.classList.add('active');
+            document.getElementById(tab.dataset.tab).style.display = 'block';
+        });
+    });
+
+    // Identity key display in settings
+    const kp = E2ECrypto.getIdentityKeyPair();
+    if (kp) {
+        const keyB64 = E2ECrypto.arrayBufferToBase64(kp.privateKey);
+        const keyValue = document.getElementById('identity-key-value');
+        keyValue.textContent = '••••••••••••••••';
+        let keyVisible = false;
+        document.getElementById('toggle-key-btn').addEventListener('click', () => {
+            keyVisible = !keyVisible;
+            keyValue.textContent = keyVisible ? keyB64 : '••••••••••••••••';
+        });
+        document.getElementById('copy-key-btn').addEventListener('click', () => {
+            navigator.clipboard.writeText(keyB64).then(() => {
+                const btn = document.getElementById('copy-key-btn');
+                btn.textContent = '✓';
+                setTimeout(() => { btn.innerHTML = '&#128203;'; }, 1500);
+            });
+        });
+    }
+
+    // Delete account
+    document.getElementById('delete-account-btn').addEventListener('click', async () => {
+        if (!confirm('Are you sure you want to delete your account? This cannot be undone.')) return;
+        if (!confirm('Really? All your messages, servers, and keys will be permanently lost.')) return;
+        try {
+            const res = await authFetch('/api/me', { method: 'DELETE' });
+            if (res.ok) {
+                localStorage.clear();
+                if (ws) ws.close();
+                window.location.href = 'login.html';
+            } else {
+                const err = await res.json();
+                alert(err.error || 'Failed to delete account');
+            }
+        } catch (e) {
+            alert('Failed to delete account');
+        }
+    });
+
     document.getElementById('logout-btn').addEventListener('click', () => {
         localStorage.removeItem('token');
         localStorage.removeItem('user');
@@ -45,6 +109,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     connectWebSocket(t);
     loadServers();
+    loadFriendRequestBadge();
 
     document.getElementById('send-btn').addEventListener('click', sendMessage);
     document.getElementById('message-input').addEventListener('keypress', (e) => {
@@ -127,31 +192,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // DM listeners
     document.getElementById('dm-strip-btn').addEventListener('click', enterDmView);
-    document.getElementById('cancel-dm-search').addEventListener('click', () => hideModal('dm-search-modal'));
-    document.getElementById('confirm-dm-search').addEventListener('click', startDmByUsername);
-    document.getElementById('dm-username-input').addEventListener('keypress', (e) => {
-        if (e.key === 'Enter') startDmByUsername();
+
+    // Friend listeners
+    document.getElementById('cancel-add-friend').addEventListener('click', () => hideModal('add-friend-modal'));
+    document.getElementById('confirm-add-friend').addEventListener('click', sendFriendRequest);
+    document.getElementById('friend-code-input').addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') sendFriendRequest();
     });
+    document.getElementById('close-friend-requests').addEventListener('click', () => hideModal('friend-requests-modal'));
 
     document.getElementById('members-panel').classList.toggle('open', membersPanelOpen);
 
-    // Polling intervals for auto-refresh
-    setInterval(() => {
-        if (viewMode === 'servers') loadServers();
-    }, 5000);
-
-    setInterval(() => {
-        if (currentServerId && viewMode === 'servers') {
-            loadChannels(currentServerId);
-            loadMembers(currentServerId);
-        }
-    }, 5000);
-
-    setInterval(() => {
-        if (currentChannelId && viewMode === 'servers') {
-            loadMessages(currentChannelId);
-        }
-    }, 5000);
+    // No polling needed — WebSocket handles all live updates
 });
 
 // --- WebSocket ---
@@ -192,12 +244,17 @@ function connectWebSocket(t) {
                             try {
                                 const res = await authFetch('/api/identity/' + currentDmOtherUser.id);
                                 const d = await res.json();
-                                otherPubKey = d.identity_public_key;
+                                otherPubKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(d.identity_public_key));
                             } catch (_) {}
                         }
                         await appendDmMessage(data.message, kp, otherPubKey);
+                    } else {
+                        // Message is for a different DM channel - mark as unread
+                        unreadDms[data.dm_channel_id] = (unreadDms[data.dm_channel_id] || 0) + 1;
+                        updateDmStripBadge();
+                        if (viewMode === 'dms') renderDmSidebar();
                     }
-                    loadDmConversations();
+                    if (viewMode === 'dms') loadDmConversations();
                 }
                 break;
             case 'server_key_rotated':
@@ -211,7 +268,7 @@ function connectWebSocket(t) {
             case 'member_joined':
                 if (data.server_id && data.user_id) {
                     // Owner auto-uploads encrypted server key for new member
-                    await uploadServerKeyForUser(data.server_id, data.user_id);
+                    if (isOwner) await uploadServerKeyForUser(data.server_id, data.user_id);
                     // Auto-refresh member list for everyone viewing this server
                     if (data.server_id === currentServerId) {
                         await loadMembers(data.server_id);
@@ -256,7 +313,30 @@ function connectWebSocket(t) {
                     await loadServers();
                 }
                 break;
+            case 'channel_created':
+            case 'channel_deleted':
+                if (data.server_id && data.server_id === currentServerId) {
+                    await loadChannels(data.server_id);
+                }
+                break;
             case 'pong':
+                break;
+            case 'friend_request_received':
+                loadFriendRequestBadge();
+                break;
+            case 'friend_request_accepted':
+                if (viewMode === 'dms') loadDmConversations();
+                break;
+            case 'friend_removed':
+                if (viewMode === 'dms') loadDmConversations();
+                if (data.by_user_id && currentDmOtherUser && data.by_user_id === currentDmOtherUser.id) {
+                    currentDmChannelId = null;
+                    currentDmOtherUser = null;
+                    document.getElementById('channel-name').textContent = 'Select a conversation';
+                    document.getElementById('message-input').disabled = true;
+                    document.getElementById('send-btn').disabled = true;
+                    document.getElementById('message-list').innerHTML = '<div class="welcome">Select a conversation to start chatting</div>';
+                }
                 break;
         }
     };
@@ -383,9 +463,9 @@ async function loadServers() {
             }
         }
 
-        if (servers.length > 0) {
+        if (servers.length > 0 && !currentServerId) {
             selectServer(servers[0].id);
-        } else {
+        } else if (servers.length === 0) {
             document.getElementById('server-name').textContent = 'No servers yet';
             document.getElementById('channel-list').innerHTML = '<div class="channel-item" style="color:#666;cursor:default">Create or join a server</div>';
         }
@@ -410,16 +490,25 @@ function renderServerList() {
 }
 
 async function selectServer(serverId) {
+    viewMode = 'servers';
+    currentDmChannelId = null;
+    currentDmOtherUser = null;
     currentServerId = serverId;
     currentChannelId = null;
+    document.getElementById('dm-strip-btn').classList.remove('active');
 
     const server = servers.find(s => s.id === serverId);
     isOwner = server && server.is_owner;
-    currentInviteCode = server ? server.invite_code : null;
+    currentInviteCode = isOwner ? localStorage.getItem('e2e_invite_' + serverId) : null;
 
     document.getElementById('server-name').textContent = server ? server.name : '';
+    document.getElementById('channel-name').textContent = 'Select a channel';
+    document.getElementById('message-list').innerHTML = '<div class="welcome">Select a channel to start chatting</div>';
+    document.getElementById('message-input').disabled = true;
+    document.getElementById('send-btn').disabled = true;
     document.getElementById('invite-btn').style.display = isOwner ? '' : 'none';
     document.getElementById('server-settings-btn').style.display = isOwner ? '' : 'none';
+    document.getElementById('members-toggle').style.display = '';
 
     // Ensure we have the server key
     if (!E2ECrypto.getServerKey(serverId)) {
@@ -509,7 +598,7 @@ async function loadChannels(serverId) {
             list.appendChild(btn);
         }
 
-        if (window.innerWidth > 768) {
+        if (window.innerWidth > 768 && !currentChannelId) {
             list.children[0].click();
         }
     } catch (err) {
@@ -591,8 +680,8 @@ async function appendMessage(msg) {
             '<div class="text">' + escapeHtml(textContent) + '</div>' +
         '</div>';
 
-    list.prepend(div);
-    list.scrollTop = 0;
+    list.appendChild(div);
+    list.scrollTop = list.scrollHeight;
 }
 
 // --- Send ---
@@ -639,6 +728,9 @@ function enterDmView() {
     document.getElementById('server-name').textContent = 'Direct Messages';
     document.getElementById('invite-btn').style.display = 'none';
     document.getElementById('server-settings-btn').style.display = 'none';
+    document.getElementById('members-toggle').style.display = 'none';
+    document.getElementById('members-panel').classList.remove('open');
+    membersPanelOpen = false;
     document.getElementById('channel-name').textContent = 'Select a conversation';
     document.getElementById('message-input').disabled = true;
     document.getElementById('send-btn').disabled = true;
@@ -658,11 +750,21 @@ async function loadDmConversations() {
         dmConversations = [];
     }
     renderDmSidebar();
+    loadMyFriendCode();
 }
 
 function renderDmSidebar() {
     const container = document.getElementById('channel-list');
-    let html = '<button class="create-dm-btn" id="new-dm-btn">+ New Message</button>';
+    let html = '<div class="dm-header">';
+    html += '<div class="identity-key-box" style="margin-bottom:10px">';
+    html += '<span class="key-value" id="my-friend-code">••••••••••••••••</span>';
+    html += '<button class="key-action-btn" id="toggle-friend-code-btn" title="Show/Hide">&#128065;</button>';
+    html += '<button class="key-action-btn" id="copy-friend-code-btn" title="Copy">&#128203;</button>';
+    html += '</div>';
+    html += '<div class="dm-actions">';
+    html += '<button class="dm-action-btn" id="add-friend-btn">+ Add Friend</button>';
+    html += '<button class="dm-action-btn" id="friend-requests-btn">Requests <span id="friend-request-badge" class="inline-badge" style="display:none"></span></button>';
+    html += '</div></div>';
     html += '<div class="channel-list dm-list" id="dm-list">';
     if (dmConversations.length === 0) {
         html += '<div style="color:#666;padding:12px;font-size:13px">No conversations yet</div>';
@@ -675,7 +777,8 @@ function renderDmSidebar() {
                 const kp = E2ECrypto.getIdentityKeyPair();
                 preview = E2ECrypto.decryptDm(
                     c.last_message.encrypted_content, c.last_message.nonce,
-                    c.dm_channel_id, kp.privateKey, c.other_public_key || ''
+                    c.dm_channel_id, kp.privateKey,
+                    c.other_public_key ? new Uint8Array(E2ECrypto.base64ToArrayBuffer(c.other_public_key)) : null
                 );
                 preview = preview.substring(0, 40);
             } catch (e) {
@@ -688,15 +791,21 @@ function renderDmSidebar() {
             '<div class="dm-info">' +
                 '<div class="dm-name">' + escapeHtml(c.other_username) + '</div>' +
                 '<div class="dm-preview">' + escapeHtml(preview) + '</div>' +
-            '</div></div>';
+            '</div>' +
+            (unreadDms[c.dm_channel_id] ? '<span class="badge"></span>' : '') +
+            '</div>';
     }
     html += '</div>';
     container.innerHTML = html;
 
-    document.getElementById('new-dm-btn').addEventListener('click', () => {
-        document.getElementById('dm-username-input').value = '';
-        document.getElementById('dm-search-error').style.display = 'none';
-        showModal('dm-search-modal');
+    document.getElementById('add-friend-btn').addEventListener('click', () => {
+        document.getElementById('friend-code-input').value = '';
+        document.getElementById('add-friend-error').style.display = 'none';
+        showModal('add-friend-modal');
+    });
+    document.getElementById('friend-requests-btn').addEventListener('click', async () => {
+        await loadFriendRequests();
+        showModal('friend-requests-modal');
     });
 }
 
@@ -709,9 +818,15 @@ async function selectDmChannel(dmChannelId, otherUserId, otherUsername, element)
     document.querySelectorAll('.channel-item').forEach(el => el.classList.remove('active'));
     if (element) element.classList.add('active');
 
-    document.getElementById('channel-name').textContent = otherUsername;
+    document.getElementById('channel-name').innerHTML = escapeHtml(otherUsername) +
+        ' <button class="btn-unfriend" onclick="unfriend(\'' + escapeHtml(otherUserId) + '\', \'' + escapeHtml(otherUsername) + '\')" title="Unfriend">Unfriend</button>';
     document.getElementById('message-input').disabled = false;
     document.getElementById('send-btn').disabled = false;
+
+    // Clear unread badge for this DM channel
+    delete unreadDms[dmChannelId];
+    updateDmStripBadge();
+    renderDmSidebar();
 
     await loadDmMessages(dmChannelId, otherUserId);
 
@@ -735,7 +850,7 @@ async function loadDmMessages(dmChannelId, otherUserId) {
         const kp = E2ECrypto.getIdentityKeyPair();
         const otherUserRes = await authFetch('/api/identity/' + otherUserId);
         const otherUserData = await otherUserRes.json();
-        const otherPublicKey = otherUserData.identity_public_key;
+        const otherPublicKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(otherUserData.identity_public_key));
 
         for (const msg of messages) {
             await appendDmMessage(msg, kp, otherPublicKey);
@@ -746,7 +861,7 @@ async function loadDmMessages(dmChannelId, otherUserId) {
     }
 }
 
-async function appendDmMessage(msg, kp, otherPublicKey) {
+function appendDmMessage(msg, kp, otherPublicKey) {
     const list = document.getElementById('message-list');
     const div = document.createElement('div');
     div.className = 'message';
@@ -762,7 +877,8 @@ async function appendDmMessage(msg, kp, otherPublicKey) {
     let textContent = '';
     if (msg.encrypted_content && msg.nonce && kp && otherPublicKey) {
         try {
-            textContent = E2ECrypto.decryptDm(msg.encrypted_content, msg.nonce, msg.dm_channel_id, kp.privateKey, otherPublicKey);
+            const dmId = msg.dm_channel_id || currentDmChannelId;
+            textContent = E2ECrypto.decryptDm(msg.encrypted_content, msg.nonce, dmId, kp.privateKey, otherPublicKey);
         } catch (e) {
             textContent = '[encrypted message - unable to decrypt]';
         }
@@ -778,8 +894,8 @@ async function appendDmMessage(msg, kp, otherPublicKey) {
             '<div class="text">' + escapeHtml(textContent) + '</div>' +
         '</div>';
 
-    list.prepend(div);
-    list.scrollTop = 0;
+    list.appendChild(div);
+    list.scrollTop = list.scrollHeight;
 }
 
 async function sendDmMessage() {
@@ -796,7 +912,7 @@ async function sendDmMessage() {
     try {
         const res = await authFetch('/api/identity/' + currentDmOtherUser.id);
         const data = await res.json();
-        otherPublicKey = data.identity_public_key;
+        otherPublicKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(data.identity_public_key));
     } catch (e) {
         console.error('Failed to fetch other user key:', e);
         return;
@@ -820,38 +936,28 @@ async function sendDmMessage() {
     input.value = '';
 }
 
-async function startDmByUsername() {
-    const username = document.getElementById('dm-username-input').value.trim();
-    if (!username) return;
-
-    const errDiv = document.getElementById('dm-search-error');
-    errDiv.style.display = 'none';
-
+async function unfriend(otherUserId, otherUsername) {
+    if (!confirm('Unfriend ' + otherUsername + '? The DM conversation and all messages will be deleted.')) return;
     try {
-        const res = await authFetch('/api/user/' + encodeURIComponent(username));
-        if (!res.ok) {
-            errDiv.textContent = 'User not found';
-            errDiv.style.display = 'block';
-            return;
+        const res = await authFetch('/api/friends/remove', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ user_id: otherUserId }),
+        });
+        if (res.ok) {
+            currentDmChannelId = null;
+            currentDmOtherUser = null;
+            document.getElementById('channel-name').textContent = 'Select a conversation';
+            document.getElementById('message-input').disabled = true;
+            document.getElementById('send-btn').disabled = true;
+            document.getElementById('message-list').innerHTML = '<div class="welcome">Select a conversation to start chatting</div>';
+            await loadDmConversations();
+        } else {
+            const err = await res.json();
+            alert(err.error || 'Failed to unfriend');
         }
-        const userData = await res.json();
-        const targetUserId = userData.id;
-
-        if (targetUserId === user.id) {
-            errDiv.textContent = 'Cannot DM yourself';
-            errDiv.style.display = 'block';
-            return;
-        }
-
-        const dmRes = await authFetch('/api/dm/' + targetUserId, { method: 'POST' });
-        const dmChannel = await dmRes.json();
-
-        hideModal('dm-search-modal');
-        await loadDmConversations();
-        await selectDmChannel(dmChannel.id, targetUserId, username, null);
-    } catch (e) {
-        errDiv.textContent = 'Failed to start DM';
-        errDiv.style.display = 'block';
+    } catch (err) {
+        console.error('Unfriend failed:', err);
     }
 }
 
@@ -859,8 +965,14 @@ function enterServerView() {
     viewMode = 'servers';
     currentDmChannelId = null;
     currentDmOtherUser = null;
+    currentChannelId = null;
+    currentServerId = null;
     document.getElementById('dm-strip-btn').classList.remove('active');
     document.getElementById('server-name').textContent = 'Select a server';
+    document.getElementById('channel-name').textContent = 'Select a channel';
+    document.getElementById('message-list').innerHTML = '<div class="welcome">Select a server and channel to start chatting</div>';
+    document.getElementById('message-input').disabled = true;
+    document.getElementById('send-btn').disabled = true;
     loadServers();
 }
 
@@ -887,7 +999,7 @@ async function loadMembers(serverId) {
         if (!Array.isArray(members) || members.length === 0) return;
 
         const leaveBtn = document.getElementById('leave-server-btn');
-        leaveBtn.style.display = isOwner ? 'none' : '';
+        leaveBtn.style.display = '';
 
         members.forEach(m => {
             const div = document.createElement('div');
@@ -953,7 +1065,11 @@ async function banMember(targetUserId, username) {
 }
 
 async function leaveServer() {
-    if (!confirm('Leave this server? You will lose access to all channels and messages.')) return;
+    const server = servers.find(s => s.id === currentServerId);
+    const msg = isOwner
+        ? 'Delete this server permanently? All channels, messages, and members will be removed. This cannot be undone.'
+        : 'Leave this server? You will lose access to all channels and messages.';
+    if (!confirm(msg)) return;
     try {
         const res = await authFetch(`/api/servers/${currentServerId}/leave`, {
             method: 'POST',
@@ -1073,14 +1189,19 @@ async function createServer() {
     if (!name) return;
 
     try {
+        // Generate invite code client-side, send only the hash
+        const inviteCode = generateCode(8);
+        const inviteCodeHash = E2ECrypto.sha256Hex(inviteCode);
+
         const res = await authFetch('/api/servers', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name }),
+            body: JSON.stringify({ name, invite_code_hash: inviteCodeHash }),
         });
 
         if (res.ok) {
             const serverData = await res.json();
+            localStorage.setItem('e2e_invite_' + serverData.id, inviteCode);
 
             const serverKey = E2ECrypto.generateServerKey();
             E2ECrypto.saveServerKey(serverData.id, serverKey);
@@ -1149,7 +1270,26 @@ async function joinServer() {
 
 async function showInviteModal() {
     if (!currentServerId || !currentInviteCode) return;
-    document.getElementById('invite-code-display').textContent = currentInviteCode;
+    const display = document.getElementById('invite-code-display');
+    display.textContent = '••••••••••••••••';
+    display.dataset.value = currentInviteCode;
+    display.dataset.visible = '0';
+
+    const toggleBtn = document.getElementById('toggle-invite-btn');
+    const copyBtn = document.getElementById('copy-invite-btn');
+
+    toggleBtn.onclick = () => {
+        const vis = display.dataset.visible === '1';
+        display.dataset.visible = vis ? '0' : '1';
+        display.textContent = vis ? '••••••••••••••••' : display.dataset.value;
+    };
+    copyBtn.onclick = () => {
+        navigator.clipboard.writeText(display.dataset.value).then(() => {
+            copyBtn.textContent = '✓';
+            setTimeout(() => { copyBtn.innerHTML = '&#128203;'; }, 1500);
+        });
+    };
+
     document.getElementById('invite-modal').style.display = 'flex';
 }
 
@@ -1158,16 +1298,22 @@ async function regenerateInvite() {
     if (!confirm('Regenerate invite code? The old code will stop working immediately.')) return;
 
     try {
+        const inviteCode = generateCode(8);
+        const inviteCodeHash = E2ECrypto.sha256Hex(inviteCode);
+
         const res = await authFetch(`/api/servers/${currentServerId}/invite`, {
             method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ invite_code_hash: inviteCodeHash }),
         });
 
         if (res.ok) {
-            const data = await res.json();
-            currentInviteCode = data.code;
-            document.getElementById('invite-code-display').textContent = data.code;
-            const server = servers.find(s => s.id === currentServerId);
-            if (server) server.invite_code = data.code;
+            currentInviteCode = inviteCode;
+            localStorage.setItem('e2e_invite_' + currentServerId, inviteCode);
+            const display = document.getElementById('invite-code-display');
+            display.dataset.value = inviteCode;
+            display.dataset.visible = '0';
+            display.textContent = '••••••••••••••••';
         } else {
             const err = await res.json();
             alert(err.error || 'Failed to regenerate invite');
@@ -1198,6 +1344,155 @@ async function createChannel() {
     } catch (err) {
         console.error('Create channel failed:', err);
     }
+}
+
+// --- Friends ---
+
+let myFriendCode = '';
+
+async function loadMyFriendCode() {
+    try {
+        myFriendCode = localStorage.getItem('e2e_friend_code') || '';
+        const el = document.getElementById('my-friend-code');
+        if (el) {
+            el.textContent = '••••••••••••••••';
+            el.dataset.value = myFriendCode || '';
+            el.dataset.visible = '0';
+        }
+        const toggleBtn = document.getElementById('toggle-friend-code-btn');
+        const copyBtn = document.getElementById('copy-friend-code-btn');
+        if (toggleBtn && copyBtn && el) {
+            toggleBtn.onclick = () => {
+                const vis = el.dataset.visible === '1';
+                el.dataset.visible = vis ? '0' : '1';
+                el.textContent = vis ? '••••••••••••••••' : (el.dataset.value || '(none - re-register)');
+            };
+            copyBtn.onclick = () => {
+                if (!el.dataset.value) return;
+                navigator.clipboard.writeText(el.dataset.value).then(() => {
+                    copyBtn.textContent = '✓';
+                    setTimeout(() => { copyBtn.innerHTML = '&#128203;'; }, 1500);
+                });
+            };
+        }
+    } catch (_) {}
+    loadFriendRequestBadge();
+}
+
+async function loadFriendRequestBadge() {
+    try {
+        const res = await authFetch('/api/friends/requests/incoming');
+        if (res.ok) {
+            const requests = await res.json();
+            pendingFriendRequests = Array.isArray(requests) ? requests.length : 0;
+            const badge = document.getElementById('friend-request-badge');
+            if (badge) {
+                if (pendingFriendRequests > 0) {
+                    badge.style.display = 'inline';
+                } else {
+                    badge.style.display = 'none';
+                }
+            }
+            updateDmStripBadge();
+        }
+    } catch (_) {}
+}
+
+function updateDmStripBadge() {
+    const badge = document.getElementById('dm-strip-badge');
+    if (!badge) return;
+    const hasNotifications = Object.keys(unreadDms).length > 0 || pendingFriendRequests > 0;
+    badge.style.display = hasNotifications ? '' : 'none';
+}
+
+async function sendFriendRequest() {
+    const code = document.getElementById('friend-code-input').value.trim().toUpperCase();
+    if (!code) return;
+    const errDiv = document.getElementById('add-friend-error');
+    errDiv.style.display = 'none';
+    try {
+        const res = await authFetch('/api/friends/request', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ friend_code: code }),
+        });
+        const data = await res.json();
+        if (res.ok) {
+            hideModal('add-friend-modal');
+            loadFriendRequestBadge();
+        } else {
+            errDiv.textContent = data.error || 'Failed to send request';
+            errDiv.style.display = 'block';
+        }
+    } catch (_) {
+        errDiv.textContent = 'Server error';
+        errDiv.style.display = 'block';
+    }
+}
+
+let cachedFriendRequests = [];
+
+async function loadFriendRequests() {
+    const list = document.getElementById('friend-requests-list');
+    try {
+        const res = await authFetch('/api/friends/requests/incoming');
+        if (res.ok) {
+            cachedFriendRequests = await res.json();
+        } else {
+            cachedFriendRequests = [];
+        }
+    } catch (_) {
+        cachedFriendRequests = [];
+    }
+    if (!Array.isArray(cachedFriendRequests) || cachedFriendRequests.length === 0) {
+        list.innerHTML = '<div style="color:#666;padding:16px;text-align:center">No incoming friend requests</div>';
+        return;
+    }
+    let html = '';
+    for (const r of cachedFriendRequests) {
+        html += '<div class="friend-request-item">' +
+            '<span class="friend-request-name">' + escapeHtml(r.from_username) + '</span>' +
+            '<div class="friend-request-actions">' +
+            '<button class="btn-accept" data-rid="' + r.id + '">Accept</button>' +
+            '<button class="btn-decline" data-rid="' + r.id + '">Decline</button>' +
+            '</div></div>';
+    }
+    list.innerHTML = html;
+    list.querySelectorAll('.btn-accept').forEach(btn => {
+        btn.addEventListener('click', () => acceptFriendRequest(btn.dataset.rid));
+    });
+    list.querySelectorAll('.btn-decline').forEach(btn => {
+        btn.addEventListener('click', () => declineFriendRequest(btn.dataset.rid));
+    });
+}
+
+async function acceptFriendRequest(requestId) {
+    try {
+        const res = await authFetch('/api/friends/requests/accept', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ request_id: requestId }),
+        });
+        if (res.ok) {
+            await loadFriendRequests();
+            loadFriendRequestBadge();
+            if (viewMode === 'dms') loadDmConversations();
+        }
+    } catch (_) {}
+}
+
+async function declineFriendRequest(requestId) {
+    try {
+        const res = await authFetch('/api/friends/requests/decline', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ request_id: requestId }),
+        });
+        if (res.ok) {
+            await loadFriendRequests();
+            loadFriendRequestBadge();
+        }
+    } catch (_) {}
 }
 
 // --- Helpers ---

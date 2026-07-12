@@ -194,6 +194,11 @@ const E2ECrypto = (() => {
         return { privateKey: privateKey, publicKey: publicKey };
     }
 
+    function x25519DerivePublicKey(privateKeyBytes) {
+        var scalar = bytesToBigInt(privateKeyBytes);
+        return bigIntToBytes(x25519ScalarMult(scalar, CURVE_BASE_POINT), 32);
+    }
+
     // --- ChaCha20 ---
     function chacha20QuarterRound(state, a, b, c, d) {
         state[a] = (state[a] + state[b]) | 0;
@@ -657,11 +662,32 @@ const E2ECrypto = (() => {
         throw new Error('Metadata decryption failed with all keys');
     }
 
+    // --- DM Encryption (ECDH shared secret + HKDF per-channel) ---
+    function encryptDm(plaintext, dmChannelId, myPrivateKey, otherPublicKey) {
+        var shared = x25519SharedSecret(myPrivateKey, otherPublicKey);
+        var key = hkdf(shared, shared, 'e2e-dm-v1:' + dmChannelId, 32);
+        return encryptWithKey(plaintext, key);
+    }
+
+    function decryptDm(ciphertextB64, nonceB64, dmChannelId, myPrivateKey, otherPublicKey) {
+        var shared = x25519SharedSecret(myPrivateKey, otherPublicKey);
+        var key = hkdf(shared, shared, 'e2e-dm-v1:' + dmChannelId, 32);
+        return decryptWithKey(ciphertextB64, nonceB64, key);
+    }
+
     return {
+        sha256Hex: function(data) {
+            var bytes = new TextEncoder().encode(data);
+            var hash = sha256(bytes);
+            var hex = '';
+            for (var i = 0; i < hash.length; i++) hex += hash[i].toString(16).padStart(2, '0');
+            return hex;
+        },
         arrayBufferToBase64: arrayBufferToBase64,
         base64ToArrayBuffer: base64ToArrayBuffer,
         randomBytes: randomBytes,
         x25519GenerateKeyPair: x25519GenerateKeyPair,
+        x25519DerivePublicKey: x25519DerivePublicKey,
         x25519SharedSecret: x25519SharedSecret,
         envelopeEncrypt: envelopeEncrypt,
         envelopeDecrypt: envelopeDecrypt,
@@ -681,6 +707,8 @@ const E2ECrypto = (() => {
         encrypt: encrypt,
         decrypt: decrypt,
         encryptMetadata: encryptMetadata,
-        decryptMetadata: decryptMetadata
+        decryptMetadata: decryptMetadata,
+        encryptDm: encryptDm,
+        decryptDm: decryptDm
     };
 })();

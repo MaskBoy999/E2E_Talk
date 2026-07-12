@@ -158,7 +158,7 @@ function filterTab(tab) {
     const q = input ? input.value.toLowerCase() : '';
     switch (tab) {
         case 'users': renderUsers(rawData.users.filter(u => !q || u.username.toLowerCase().includes(q) || u.id.toLowerCase().includes(q))); break;
-        case 'servers': renderServers(rawData.servers.filter(s => !q || s.name.toLowerCase().includes(q) || s.id.toLowerCase().includes(q) || s.invite_code.toLowerCase().includes(q))); break;
+        case 'servers': renderServers(rawData.servers.filter(s => !q || s.name.toLowerCase().includes(q) || s.id.toLowerCase().includes(q))); break;
         case 'channels': renderChannels(rawData.channels.filter(c => !q || c.name.toLowerCase().includes(q) || c.server_id.toLowerCase().includes(q))); break;
         case 'messages': renderMessages(rawData.messages.filter(m => !q || (m.sender_username || m.sender_id).toLowerCase().includes(q) || m.channel_id.toLowerCase().includes(q) || (m.timestamp || '').toLowerCase().includes(q))); break;
         case 'server-keys': renderServerKeys(rawData.serverKeys.filter(k => !q || k.server_name.toLowerCase().includes(q) || k.user_id.toLowerCase().includes(q) || String(k.version).includes(q))); break;
@@ -243,12 +243,11 @@ async function loadServers() {
 
 function renderServers(servers) {
     updateCount('servers-count', servers.length);
-    renderTable('server-list', 5,
+    renderTable('server-list', 4,
         servers.map(s =>
             '<td>' + escapeHtml(s.name) + '</td>' +
             '<td class="id-cell" title="' + escapeHtml(s.id) + '">' + escapeHtml(truncate(s.id, 12)) + '</td>' +
             '<td class="id-cell" title="' + escapeHtml(s.owner_id) + '">' + escapeHtml(truncate(s.owner_id, 12)) + '</td>' +
-            '<td class="id-cell">' + escapeHtml(s.invite_code) + '</td>' +
             '<td><button class="btn-delete-sm" onclick="deleteServer(\'' + s.id + '\', \'' + escapeHtml(s.name) + '\')">Delete</button></td>'
         ),
         'No servers'
