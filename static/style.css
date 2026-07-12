@@ -1181,6 +1181,10 @@ body {
     color: var(--bg-primary);
 }
 
+.friend-requests-btn {
+    position: relative;
+}
+
 .create-dm-btn {
     width: calc(100% - 16px);
     margin: 8px;
@@ -1339,13 +1343,15 @@ body {
 }
 
 .inline-badge {
-    display: inline-block;
+    display: block;
     width: 8px;
     height: 8px;
     background: var(--danger);
     border-radius: 50%;
-    vertical-align: middle;
-    margin-left: 4px;
+    position: absolute;
+    top: -3px;
+    right: -3px;
+    box-shadow: 0 0 0 2px var(--bg-secondary);
 }
 
 /* ===== Settings Modal ===== */

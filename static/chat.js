@@ -27,6 +27,35 @@ const authFetch = (url, opts = {}) => {
     return fetch(url, opts);
 };
 
+// The modern Clipboard API is restricted to HTTPS (or localhost). It also
+// needs to be called directly from a click, so each copy button uses this
+// helper to let the browser request access and to support plain HTTP locally.
+async function copyToClipboard(text) {
+    if (!text) return false;
+
+    try {
+        if (navigator.clipboard && window.isSecureContext) {
+            await navigator.clipboard.writeText(text);
+            return true;
+        }
+
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.setAttribute('readonly', '');
+        textarea.style.cssText = 'position:fixed;opacity:0;pointer-events:none';
+        document.body.appendChild(textarea);
+        textarea.select();
+        const copied = document.execCommand('copy');
+        textarea.remove();
+        if (copied) return true;
+        throw new Error('Clipboard copy was rejected');
+    } catch (error) {
+        console.error('Clipboard copy failed:', error);
+        alert('Clipboard access was blocked. Allow clipboard permission for this site, or open the app over HTTPS (or localhost) and try again.');
+        return false;
+    }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     const t = token();
     const userStr = localStorage.getItem('user');
@@ -73,7 +102,8 @@ document.addEventListener('DOMContentLoaded', () => {
             keyValue.textContent = keyVisible ? keyB64 : '••••••••••••••••';
         });
         document.getElementById('copy-key-btn').addEventListener('click', () => {
-            navigator.clipboard.writeText(keyB64).then(() => {
+            copyToClipboard(keyB64).then((copied) => {
+                if (!copied) return;
                 const btn = document.getElementById('copy-key-btn');
                 btn.textContent = '✓';
                 setTimeout(() => { btn.innerHTML = '&#128203;'; }, 1500);
@@ -763,7 +793,7 @@ function renderDmSidebar() {
     html += '</div>';
     html += '<div class="dm-actions">';
     html += '<button class="dm-action-btn" id="add-friend-btn">+ Add Friend</button>';
-    html += '<button class="dm-action-btn" id="friend-requests-btn">Requests <span id="friend-request-badge" class="inline-badge" style="display:none"></span></button>';
+    html += '<button class="dm-action-btn friend-requests-btn" id="friend-requests-btn">Requests <span id="friend-request-badge" class="inline-badge" style="display:' + (pendingFriendRequests > 0 ? 'block' : 'none') + '"></span></button>';
     html += '</div></div>';
     html += '<div class="channel-list dm-list" id="dm-list">';
     if (dmConversations.length === 0) {
@@ -1284,7 +1314,8 @@ async function showInviteModal() {
         display.textContent = vis ? '••••••••••••••••' : display.dataset.value;
     };
     copyBtn.onclick = () => {
-        navigator.clipboard.writeText(display.dataset.value).then(() => {
+        copyToClipboard(display.dataset.value).then((copied) => {
+            if (!copied) return;
             copyBtn.textContent = '✓';
             setTimeout(() => { copyBtn.innerHTML = '&#128203;'; }, 1500);
         });
@@ -1369,7 +1400,8 @@ async function loadMyFriendCode() {
             };
             copyBtn.onclick = () => {
                 if (!el.dataset.value) return;
-                navigator.clipboard.writeText(el.dataset.value).then(() => {
+                copyToClipboard(el.dataset.value).then((copied) => {
+                    if (!copied) return;
                     copyBtn.textContent = '✓';
                     setTimeout(() => { copyBtn.innerHTML = '&#128203;'; }, 1500);
                 });
@@ -1387,11 +1419,7 @@ async function loadFriendRequestBadge() {
             pendingFriendRequests = Array.isArray(requests) ? requests.length : 0;
             const badge = document.getElementById('friend-request-badge');
             if (badge) {
-                if (pendingFriendRequests > 0) {
-                    badge.style.display = 'inline';
-                } else {
-                    badge.style.display = 'none';
-                }
+                badge.style.display = pendingFriendRequests > 0 ? 'block' : 'none';
             }
             updateDmStripBadge();
         }
