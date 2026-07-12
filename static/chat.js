@@ -68,10 +68,15 @@ document.addEventListener('DOMContentLoaded', () => {
     user = JSON.parse(userStr);
     document.getElementById('current-user').textContent = user.username;
 
-    // Ensure identity keypair exists
+    // A missing key means this browser has not been linked to this account.
+    // Never generate a replacement on login: doing that makes prior messages
+    // permanently unreadable and can overwrite another account's identity.
     if (!E2ECrypto.getIdentityKeyPair()) {
-        const kp = E2ECrypto.x25519GenerateKeyPair();
-        E2ECrypto.saveIdentityKeyPair(kp);
+        localStorage.removeItem('token');
+        localStorage.removeItem('user');
+        alert('This device is not linked to this account. Sign in with Connect with Local Key to import the account identity.');
+        window.location.href = 'login.html';
+        return;
     }
 
     // Settings modal

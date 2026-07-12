@@ -245,6 +245,98 @@ test.describe('Direct Messages', () => {
             expect(m.encrypted_content.length).toBeGreaterThan(0);
         }
 
+        // The ciphertext returned by the host cannot be opened with an
+        // unrelated identity, even though public keys and the DM id are known.
+        const attackerCanDecrypt = await page.evaluate(({ message, dmId }) => {
+            const attacker = E2ECrypto.x25519GenerateKeyPair();
+            try {
+                E2ECrypto.decryptDm(
+                    message.encrypted_content, message.nonce, dmId,
+                    attacker.privateKey, attacker.publicKey
+                );
+                return true;
+            } catch (_) {
+                return false;
+            }
+        }, { message: msgs[0], dmId: foundDmId });
+        expect(attackerCanDecrypt).toBeFalsy();
+
+        await page2.close();
+        await ctx2.close();
+    });
+
+    test('identity keys stay bound to their account when accounts share a browser', async ({ page }) => {
+        const ts = Date.now();
+        const user1 = 'keyuser1_' + ts;
+        const user2 = 'keyuser2_' + ts;
+
+        const body1 = await registerUser(page, user1);
+        const key1 = await page.evaluate(() => E2ECrypto.arrayBufferToBase64(E2ECrypto.getIdentityKeyPair().privateKey));
+
+        // Simulate signing out and creating a second account in the same
+        // browser profile. Account one’s private key must remain untouched.
+        await page.evaluate(() => {
+            localStorage.removeItem('token');
+            localStorage.removeItem('user');
+        });
+        await page.goto(`${BASE}/login.html`);
+        await page.click('#show-register');
+        await page.fill('#register-username', user2);
+        await page.fill('#register-password', 'password123');
+        await page.click('#register-form button[type="submit"]');
+        await page.waitForURL('**/index.html');
+        const key2 = await page.evaluate(() => E2ECrypto.arrayBufferToBase64(E2ECrypto.getIdentityKeyPair().privateKey));
+        expect(key2).not.toBe(key1);
+
+        await page.evaluate(() => {
+            localStorage.removeItem('token');
+            localStorage.removeItem('user');
+        });
+        await page.goto(`${BASE}/login.html`);
+        await page.fill('#login-username', user1);
+        await page.fill('#login-password', 'password123');
+        await page.click('#login-form button[type="submit"]');
+        await page.waitForURL('**/index.html');
+
+        const restoredKey1 = await page.evaluate(() => E2ECrypto.arrayBufferToBase64(E2ECrypto.getIdentityKeyPair().privateKey));
+        expect(restoredKey1).toBe(key1);
+        expect(body1.user.id).toBeTruthy();
+    });
+
+    test('a declined friend request can be sent again', async ({ page, context }) => {
+        const ts = Date.now();
+        const user1 = 'retryuser1_' + ts;
+        const user2 = 'retryuser2_' + ts;
+        const body1 = await registerUser(page, user1);
+        const ctx2 = await context.browser()!.newContext();
+        const page2 = await ctx2.newPage();
+        const body2 = await registerUser(page2, user2);
+        const friendCode2 = await page2.evaluate(() => localStorage.getItem('e2e_friend_code'));
+
+        const first = await page.request.post(`${BASE}/api/friends/request`, {
+            headers: { Authorization: `Bearer ${body1.token}`, 'Content-Type': 'application/json' },
+            data: { friend_code: friendCode2 },
+        });
+        expect(first.ok()).toBeTruthy();
+        const incoming = await (await page2.request.get(`${BASE}/api/friends/requests/incoming`, {
+            headers: { Authorization: `Bearer ${body2.token}` },
+        })).json();
+        const decline = await page2.request.post(`${BASE}/api/friends/requests/decline`, {
+            headers: { Authorization: `Bearer ${body2.token}`, 'Content-Type': 'application/json' },
+            data: { request_id: incoming[0].id },
+        });
+        expect(decline.ok()).toBeTruthy();
+
+        const resent = await page.request.post(`${BASE}/api/friends/request`, {
+            headers: { Authorization: `Bearer ${body1.token}`, 'Content-Type': 'application/json' },
+            data: { friend_code: friendCode2 },
+        });
+        expect(resent.ok()).toBeTruthy();
+        const retriedIncoming = await (await page2.request.get(`${BASE}/api/friends/requests/incoming`, {
+            headers: { Authorization: `Bearer ${body2.token}` },
+        })).json();
+        expect(retriedIncoming).toHaveLength(1);
+
         await page2.close();
         await ctx2.close();
     });

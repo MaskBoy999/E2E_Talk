@@ -1160,6 +1160,18 @@ impl Database {
             return Err("Friend request already sent".to_string());
         }
 
+        // A declined request is not a permanent block. Re-open the existing
+        // row so the pair remains unique while allowing a later request.
+        let reopened = conn.execute(
+            "UPDATE friend_requests
+             SET status = 'pending', created_at = CURRENT_TIMESTAMP, responded_at = NULL
+             WHERE from_user_id = ?1 AND to_user_id = ?2 AND status = 'declined'",
+            params![from_user_id, target.id],
+        ).map_err(|e| e.to_string())?;
+        if reopened > 0 {
+            return Ok(target);
+        }
+
         let id = Uuid::new_v4().to_string();
         conn.execute(
             "INSERT INTO friend_requests (id, from_user_id, to_user_id, status) VALUES (?1, ?2, ?3, 'pending')",

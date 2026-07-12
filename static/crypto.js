@@ -576,9 +576,24 @@ const E2ECrypto = (() => {
     }
 
     // --- Key storage in localStorage ---
-    function getIdentityKeyPair() {
-        var priv = localStorage.getItem('e2e_identity_private');
-        var pub = localStorage.getItem('e2e_identity_public');
+    // Identity keys are tied to an account, never to the browser as a whole.
+    // This prevents logging into a second account from replacing the first
+    // account's private key.
+    function identityStorageSuffix(accountId) {
+        if (accountId) return accountId;
+        try {
+            var currentUser = JSON.parse(localStorage.getItem('user') || 'null');
+            return currentUser && currentUser.id ? currentUser.id : null;
+        } catch (_) {
+            return null;
+        }
+    }
+
+    function getIdentityKeyPair(accountId) {
+        var suffix = identityStorageSuffix(accountId);
+        if (!suffix) return null;
+        var priv = localStorage.getItem('e2e_identity_private_' + suffix);
+        var pub = localStorage.getItem('e2e_identity_public_' + suffix);
         if (!priv || !pub) return null;
         return {
             privateKey: new Uint8Array(base64ToArrayBuffer(priv)),
@@ -586,9 +601,26 @@ const E2ECrypto = (() => {
         };
     }
 
-    function saveIdentityKeyPair(kp) {
-        localStorage.setItem('e2e_identity_private', arrayBufferToBase64(kp.privateKey));
-        localStorage.setItem('e2e_identity_public', arrayBufferToBase64(kp.publicKey));
+    function saveIdentityKeyPair(kp, accountId) {
+        var suffix = identityStorageSuffix(accountId);
+        if (!suffix) throw new Error('Cannot save an identity key without an account id');
+        localStorage.setItem('e2e_identity_private_' + suffix, arrayBufferToBase64(kp.privateKey));
+        localStorage.setItem('e2e_identity_public_' + suffix, arrayBufferToBase64(kp.publicKey));
+    }
+
+    // One-time migration for the original single browser-wide key. The caller
+    // must supply the account's public key returned by the server; this avoids
+    // assigning a key belonging to a different account.
+    function claimLegacyIdentityKey(accountId, expectedPublicKeyB64) {
+        if (getIdentityKeyPair(accountId)) return true;
+        var priv = localStorage.getItem('e2e_identity_private');
+        var pub = localStorage.getItem('e2e_identity_public');
+        if (!priv || !pub || pub !== expectedPublicKeyB64) return false;
+        localStorage.setItem('e2e_identity_private_' + accountId, priv);
+        localStorage.setItem('e2e_identity_public_' + accountId, pub);
+        localStorage.removeItem('e2e_identity_private');
+        localStorage.removeItem('e2e_identity_public');
+        return true;
     }
 
     function getServerKey(serverId) {
@@ -700,6 +732,7 @@ const E2ECrypto = (() => {
         decryptWithKey: decryptWithKey,
         getIdentityKeyPair: getIdentityKeyPair,
         saveIdentityKeyPair: saveIdentityKeyPair,
+        claimLegacyIdentityKey: claimLegacyIdentityKey,
         getServerKey: getServerKey,
         getAllServerKeys: getAllServerKeys,
         saveServerKey: saveServerKey,

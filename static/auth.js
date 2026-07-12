@@ -65,6 +65,16 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
+            // Safely claim a key from the pre-account-scoped storage used by
+            // older versions, but only if its public half matches this account.
+            try {
+                const keyRes = await fetch('/api/identity/' + data.user.id);
+                if (keyRes.ok) {
+                    const keyData = await keyRes.json();
+                    E2ECrypto.claimLegacyIdentityKey(data.user.id, keyData.identity_public_key);
+                }
+            } catch (_) {}
+
             localStorage.setItem('token', data.token);
             localStorage.setItem('user', JSON.stringify(data.user));
             window.location.href = 'index.html';
@@ -96,7 +106,6 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             // Generate identity keypair for E2E
             const keypair = E2ECrypto.x25519GenerateKeyPair();
-            E2ECrypto.saveIdentityKeyPair(keypair);
             const publicKeyB64 = E2ECrypto.arrayBufferToBase64(keypair.publicKey);
 
             // Generate friend code client-side, send only the hash
@@ -120,6 +129,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
+            // Only persist a new private key after the account has actually
+            // been created, and bind it to that account.
+            E2ECrypto.saveIdentityKeyPair(keypair, data.user.id);
             localStorage.setItem('token', data.token);
             localStorage.setItem('user', JSON.stringify(data.user));
             window.location.href = 'index.html';
@@ -192,26 +204,23 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
-            // Import keypair
+            // Import the account's already-established identity. The private
+            // key stays on this device; only a matching public key is accepted.
             const publicKey = E2ECrypto.x25519DerivePublicKey(privateKeyBytes);
-            E2ECrypto.saveIdentityKeyPair({ privateKey: privateKeyBytes, publicKey: publicKey });
-
-            // Upload public key to server
             const publicKeyB64 = E2ECrypto.arrayBufferToBase64(publicKey);
-            await fetch('/api/identity/upload', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': 'Bearer ' + data.token,
-                },
-                body: JSON.stringify({ identity_public_key: publicKeyB64 }),
-            });
+            const identityRes = await fetch('/api/identity/' + data.user.id);
+            const identityData = await identityRes.json();
+            if (!identityRes.ok || identityData.identity_public_key !== publicKeyB64) {
+                throw new Error('This local key does not belong to that account');
+            }
+
+            E2ECrypto.saveIdentityKeyPair({ privateKey: privateKeyBytes, publicKey: publicKey }, data.user.id);
 
             localStorage.setItem('token', data.token);
             localStorage.setItem('user', JSON.stringify(data.user));
             window.location.href = 'index.html';
         } catch (err) {
-            connectKeyError.textContent = 'Server is not running';
+            connectKeyError.textContent = err.message || 'Server is not running';
             connectKeyError.style.display = 'block';
             connectKeyBtn.disabled = false;
             connectKeyBtn.textContent = 'Connect with Key';
