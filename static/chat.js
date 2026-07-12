@@ -7,6 +7,10 @@ let user = null;
 let servers = [];
 let isOwner = false;
 let currentInviteCode = null;
+let viewMode = 'servers';
+let currentDmChannelId = null;
+let currentDmOtherUser = null;
+let dmConversations = [];
 
 const token = () => localStorage.getItem('token');
 const authFetch = (url, opts = {}) => {
@@ -121,7 +125,33 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('server-settings-modal').style.display = 'none';
     });
 
+    // DM listeners
+    document.getElementById('dm-strip-btn').addEventListener('click', enterDmView);
+    document.getElementById('cancel-dm-search').addEventListener('click', () => hideModal('dm-search-modal'));
+    document.getElementById('confirm-dm-search').addEventListener('click', startDmByUsername);
+    document.getElementById('dm-username-input').addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') startDmByUsername();
+    });
+
     document.getElementById('members-panel').classList.toggle('open', membersPanelOpen);
+
+    // Polling intervals for auto-refresh
+    setInterval(() => {
+        if (viewMode === 'servers') loadServers();
+    }, 2000);
+
+    setInterval(() => {
+        if (currentServerId && viewMode === 'servers') {
+            loadChannels(currentServerId);
+            loadMembers(currentServerId);
+        }
+    }, 2000);
+
+    setInterval(() => {
+        if (currentChannelId && viewMode === 'servers') {
+            loadMessages(currentChannelId);
+        }
+    }, 2000);
 });
 
 // --- WebSocket ---
@@ -145,9 +175,29 @@ function connectWebSocket(t) {
                 localStorage.removeItem('user');
                 window.location.href = 'login.html';
                 break;
+            case 'ping':
+                ws.send(JSON.stringify({ type: 'pong' }));
+                break;
             case 'message_new':
                 if (data.channel_id === currentChannelId && data.message) {
                     await appendMessage(data.message);
+                }
+                break;
+            case 'dm_new':
+                if (data.dm_channel_id && data.message) {
+                    if (data.dm_channel_id === currentDmChannelId) {
+                        const kp = E2ECrypto.getIdentityKeyPair();
+                        let otherPubKey = '';
+                        if (currentDmOtherUser) {
+                            try {
+                                const res = await authFetch('/api/identity/' + currentDmOtherUser.id);
+                                const d = await res.json();
+                                otherPubKey = d.identity_public_key;
+                            } catch (_) {}
+                        }
+                        await appendDmMessage(data.message, kp, otherPubKey);
+                    }
+                    loadDmConversations();
                 }
                 break;
             case 'server_key_rotated':
@@ -375,7 +425,22 @@ async function selectServer(serverId) {
     if (!E2ECrypto.getServerKey(serverId)) {
         const ok = await fetchAndDecryptServerKey(serverId);
         if (!ok) {
-            document.getElementById('channel-list').innerHTML = '<div class="channel-item" style="color:#f44336;cursor:default">Cannot decrypt server key</div>';
+            if (isOwner) {
+                document.getElementById('channel-list').innerHTML = '<div class="channel-item" style="color:#f44336;cursor:default">Cannot decrypt server key. <a href="#" id="regenerate-server-key-btn" style="color:#4fc3f7;text-decoration:underline">Regenerate server key</a></div>';
+                document.getElementById('regenerate-server-key-btn').addEventListener('click', async (e) => {
+                    e.preventDefault();
+                    document.getElementById('channel-list').innerHTML = '<div class="channel-item" style="color:#666;cursor:default">Regenerating server key...</div>';
+                    const ok2 = await rotateServerKey(serverId);
+                    if (ok2) {
+                        await loadChannels(serverId);
+                        loadMembers(serverId);
+                    } else {
+                        document.getElementById('channel-list').innerHTML = '<div class="channel-item" style="color:#f44336;cursor:default">Failed to regenerate server key</div>';
+                    }
+                });
+            } else {
+                document.getElementById('channel-list').innerHTML = '<div class="channel-item" style="color:#f44336;cursor:default">Cannot decrypt server key</div>';
+            }
             return;
         }
     }
@@ -533,6 +598,7 @@ async function appendMessage(msg) {
 // --- Send ---
 
 async function sendMessage() {
+    if (viewMode === 'dms') { sendDmMessage(); return; }
     const input = document.getElementById('message-input');
     const content = input.value.trim();
 
@@ -560,6 +626,242 @@ async function sendMessage() {
     }));
 
     input.value = '';
+}
+
+// --- DM View ---
+
+function enterDmView() {
+    viewMode = 'dms';
+    currentChannelId = null;
+    currentServerId = null;
+    document.getElementById('dm-strip-btn').classList.add('active');
+    document.querySelectorAll('.server-icon:not(.add-server):not(.dm-strip-btn)').forEach(el => el.classList.remove('active'));
+    document.getElementById('server-name').textContent = 'Direct Messages';
+    document.getElementById('invite-btn').style.display = 'none';
+    document.getElementById('server-settings-btn').style.display = 'none';
+    document.getElementById('channel-name').textContent = 'Select a conversation';
+    document.getElementById('message-input').disabled = true;
+    document.getElementById('send-btn').disabled = true;
+    document.getElementById('message-list').innerHTML = '<div class="welcome">Select a conversation to start chatting</div>';
+    loadDmConversations();
+}
+
+async function loadDmConversations() {
+    try {
+        const res = await authFetch('/api/dm/conversations');
+        if (!res.ok) {
+            dmConversations = [];
+        } else {
+            dmConversations = await res.json();
+        }
+    } catch (e) {
+        dmConversations = [];
+    }
+    renderDmSidebar();
+}
+
+function renderDmSidebar() {
+    const container = document.getElementById('channel-list');
+    let html = '<button class="create-dm-btn" id="new-dm-btn">+ New Message</button>';
+    html += '<div class="channel-list dm-list" id="dm-list">';
+    if (dmConversations.length === 0) {
+        html += '<div style="color:#666;padding:12px;font-size:13px">No conversations yet</div>';
+    }
+    for (const c of dmConversations) {
+        const initial = (c.other_username || '?').charAt(0).toUpperCase();
+        let preview = '';
+        if (c.last_message) {
+            try {
+                const kp = E2ECrypto.getIdentityKeyPair();
+                preview = E2ECrypto.decryptDm(
+                    c.last_message.encrypted_content, c.last_message.nonce,
+                    c.dm_channel_id, kp.privateKey, c.other_public_key || ''
+                );
+                preview = preview.substring(0, 40);
+            } catch (e) {
+                preview = '[encrypted]';
+            }
+        }
+        html += '<div class="channel-item dm-item" onclick="selectDmChannel(\'' + c.dm_channel_id + '\', \'' +
+            escapeHtml(c.other_user_id) + '\', \'' + escapeHtml(c.other_username) + '\', this)">' +
+            '<div class="dm-avatar">' + initial + '</div>' +
+            '<div class="dm-info">' +
+                '<div class="dm-name">' + escapeHtml(c.other_username) + '</div>' +
+                '<div class="dm-preview">' + escapeHtml(preview) + '</div>' +
+            '</div></div>';
+    }
+    html += '</div>';
+    container.innerHTML = html;
+
+    document.getElementById('new-dm-btn').addEventListener('click', () => {
+        document.getElementById('dm-username-input').value = '';
+        document.getElementById('dm-search-error').style.display = 'none';
+        showModal('dm-search-modal');
+    });
+}
+
+async function selectDmChannel(dmChannelId, otherUserId, otherUsername, element) {
+    currentDmChannelId = dmChannelId;
+    currentDmOtherUser = { id: otherUserId, username: otherUsername };
+    currentChannelId = null;
+    currentServerId = null;
+
+    document.querySelectorAll('.channel-item').forEach(el => el.classList.remove('active'));
+    if (element) element.classList.add('active');
+
+    document.getElementById('channel-name').textContent = otherUsername;
+    document.getElementById('message-input').disabled = false;
+    document.getElementById('send-btn').disabled = false;
+
+    await loadDmMessages(dmChannelId, otherUserId);
+
+    if (window._closeSidebar) window._closeSidebar();
+}
+
+async function loadDmMessages(dmChannelId, otherUserId) {
+    const list = document.getElementById('message-list');
+    list.innerHTML = '<div class="welcome">Loading messages...</div>';
+
+    try {
+        const res = await authFetch('/api/dm/' + dmChannelId + '/messages');
+        const messages = await res.json();
+        list.innerHTML = '';
+
+        if (!Array.isArray(messages) || messages.length === 0) {
+            list.innerHTML = '<div class="welcome">No messages yet. Say hello!</div>';
+            return;
+        }
+
+        const kp = E2ECrypto.getIdentityKeyPair();
+        const otherUserRes = await authFetch('/api/identity/' + otherUserId);
+        const otherUserData = await otherUserRes.json();
+        const otherPublicKey = otherUserData.identity_public_key;
+
+        for (const msg of messages) {
+            await appendDmMessage(msg, kp, otherPublicKey);
+        }
+    } catch (err) {
+        console.error('Failed to load DM messages:', err);
+        list.innerHTML = '<div class="welcome" style="color:#f44336">Failed to load messages</div>';
+    }
+}
+
+async function appendDmMessage(msg, kp, otherPublicKey) {
+    const list = document.getElementById('message-list');
+    const div = document.createElement('div');
+    div.className = 'message';
+
+    const initial = (msg.sender_username || '?').charAt(0).toUpperCase();
+    let time = '';
+    try {
+        time = new Date(msg.timestamp).toLocaleTimeString();
+    } catch (e) {
+        time = msg.timestamp || '';
+    }
+
+    let textContent = '';
+    if (msg.encrypted_content && msg.nonce && kp && otherPublicKey) {
+        try {
+            textContent = E2ECrypto.decryptDm(msg.encrypted_content, msg.nonce, msg.dm_channel_id, kp.privateKey, otherPublicKey);
+        } catch (e) {
+            textContent = '[encrypted message - unable to decrypt]';
+        }
+    }
+
+    div.innerHTML =
+        '<div class="avatar">' + initial + '</div>' +
+        '<div class="content">' +
+            '<div class="header">' +
+                '<span class="username">' + escapeHtml(msg.sender_username || 'unknown') + '</span>' +
+                '<span class="time">' + time + '</span>' +
+            '</div>' +
+            '<div class="text">' + escapeHtml(textContent) + '</div>' +
+        '</div>';
+
+    list.prepend(div);
+    list.scrollTop = 0;
+}
+
+async function sendDmMessage() {
+    const input = document.getElementById('message-input');
+    const content = input.value.trim();
+
+    if (!content || !currentDmChannelId || !currentDmOtherUser) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+    const kp = E2ECrypto.getIdentityKeyPair();
+    if (!kp) return;
+
+    let otherPublicKey;
+    try {
+        const res = await authFetch('/api/identity/' + currentDmOtherUser.id);
+        const data = await res.json();
+        otherPublicKey = data.identity_public_key;
+    } catch (e) {
+        console.error('Failed to fetch other user key:', e);
+        return;
+    }
+
+    var encrypted;
+    try {
+        encrypted = E2ECrypto.encryptDm(content, currentDmChannelId, kp.privateKey, otherPublicKey);
+    } catch (e) {
+        console.error('DM encryption failed:', e);
+        return;
+    }
+
+    ws.send(JSON.stringify({
+        type: 'dm_send',
+        dm_channel_id: currentDmChannelId,
+        encrypted_content: encrypted.ciphertext,
+        nonce: encrypted.nonce,
+    }));
+
+    input.value = '';
+}
+
+async function startDmByUsername() {
+    const username = document.getElementById('dm-username-input').value.trim();
+    if (!username) return;
+
+    const errDiv = document.getElementById('dm-search-error');
+    errDiv.style.display = 'none';
+
+    try {
+        const res = await authFetch('/api/user/' + encodeURIComponent(username));
+        if (!res.ok) {
+            errDiv.textContent = 'User not found';
+            errDiv.style.display = 'block';
+            return;
+        }
+        const userData = await res.json();
+        const targetUserId = userData.id;
+
+        if (targetUserId === user.id) {
+            errDiv.textContent = 'Cannot DM yourself';
+            errDiv.style.display = 'block';
+            return;
+        }
+
+        const dmRes = await authFetch('/api/dm/' + targetUserId, { method: 'POST' });
+        const dmChannel = await dmRes.json();
+
+        hideModal('dm-search-modal');
+        await loadDmConversations();
+        await selectDmChannel(dmChannel.id, targetUserId, username, null);
+    } catch (e) {
+        errDiv.textContent = 'Failed to start DM';
+        errDiv.style.display = 'block';
+    }
+}
+
+function enterServerView() {
+    viewMode = 'servers';
+    currentDmChannelId = null;
+    currentDmOtherUser = null;
+    document.getElementById('dm-strip-btn').classList.remove('active');
+    document.getElementById('server-name').textContent = 'Select a server';
+    loadServers();
 }
 
 // --- Members ---
@@ -786,7 +1088,7 @@ async function createServer() {
             const identity = E2ECrypto.getIdentityKeyPair();
             if (identity) {
                 const encrypted = E2ECrypto.envelopeEncryptRaw(serverKey, identity.publicKey);
-                await authFetch(`/api/servers/${serverData.id}/keys`, {
+                const keyRes = await authFetch(`/api/servers/${serverData.id}/keys`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -796,6 +1098,9 @@ async function createServer() {
                         nonce: encrypted.nonce,
                     }),
                 });
+                if (!keyRes.ok) {
+                    console.error('Server key upload failed');
+                }
             }
 
             hideModal('create-server-modal');
@@ -898,7 +1203,15 @@ async function createChannel() {
 // --- Helpers ---
 
 function hideModal(id) {
-    document.getElementById(id).style.display = 'none';
+    const el = document.getElementById(id);
+    if (el) el.style.display = 'none';
+}
+
+function showModal(id) {
+    const el = document.getElementById(id);
+    if (el) {
+        el.style.display = 'flex';
+    }
 }
 
 function escapeHtml(str) {

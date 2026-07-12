@@ -593,11 +593,29 @@ const E2ECrypto = (() => {
     }
 
     function saveServerKey(serverId, key) {
+        var oldKey = localStorage.getItem('e2e_server_' + serverId);
+        if (oldKey) {
+            var history = JSON.parse(localStorage.getItem('e2e_server_history_' + serverId) || '[]');
+            history.push(oldKey);
+            localStorage.setItem('e2e_server_history_' + serverId, JSON.stringify(history));
+        }
         localStorage.setItem('e2e_server_' + serverId, arrayBufferToBase64(key));
+    }
+
+    function getAllServerKeys(serverId) {
+        var keys = [];
+        var current = getServerKey(serverId);
+        if (current) keys.push(current);
+        var history = JSON.parse(localStorage.getItem('e2e_server_history_' + serverId) || '[]');
+        for (var i = 0; i < history.length; i++) {
+            keys.push(new Uint8Array(base64ToArrayBuffer(history[i])));
+        }
+        return keys;
     }
 
     function removeServerKey(serverId) {
         localStorage.removeItem('e2e_server_' + serverId);
+        localStorage.removeItem('e2e_server_history_' + serverId);
     }
 
     // --- Public API ---
@@ -609,10 +627,15 @@ const E2ECrypto = (() => {
     }
 
     function decrypt(ciphertextB64, nonceB64, channelId, serverId) {
-        var serverKey = getServerKey(serverId);
-        if (!serverKey) throw new Error('No server key - cannot decrypt');
-        var key = deriveChannelKey(serverKey, channelId);
-        return decryptWithKey(ciphertextB64, nonceB64, key);
+        var allKeys = getAllServerKeys(serverId);
+        if (allKeys.length === 0) throw new Error('No server keys - cannot decrypt');
+        for (var i = 0; i < allKeys.length; i++) {
+            try {
+                var key = deriveChannelKey(allKeys[i], channelId);
+                return decryptWithKey(ciphertextB64, nonceB64, key);
+            } catch (_) {}
+        }
+        throw new Error('Decryption failed with all keys');
     }
 
     function encryptMetadata(plaintext, serverId) {
@@ -623,10 +646,15 @@ const E2ECrypto = (() => {
     }
 
     function decryptMetadata(ciphertextB64, nonceB64, serverId) {
-        var serverKey = getServerKey(serverId);
-        if (!serverKey) throw new Error('No server key - cannot decrypt metadata');
-        var key = deriveMetadataKey(serverKey);
-        return decryptWithKey(ciphertextB64, nonceB64, key);
+        var allKeys = getAllServerKeys(serverId);
+        if (allKeys.length === 0) throw new Error('No server keys - cannot decrypt metadata');
+        for (var i = 0; i < allKeys.length; i++) {
+            try {
+                var key = deriveMetadataKey(allKeys[i]);
+                return decryptWithKey(ciphertextB64, nonceB64, key);
+            } catch (_) {}
+        }
+        throw new Error('Metadata decryption failed with all keys');
     }
 
     return {
@@ -647,6 +675,7 @@ const E2ECrypto = (() => {
         getIdentityKeyPair: getIdentityKeyPair,
         saveIdentityKeyPair: saveIdentityKeyPair,
         getServerKey: getServerKey,
+        getAllServerKeys: getAllServerKeys,
         saveServerKey: saveServerKey,
         removeServerKey: removeServerKey,
         encrypt: encrypt,

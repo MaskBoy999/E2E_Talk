@@ -10,6 +10,10 @@
     <div class="app">
         <!-- Server Strip (far left) -->
         <div class="server-strip" id="server-strip">
+            <div class="dm-strip-btn" id="dm-strip-btn" title="Direct Messages">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z"/></svg>
+            </div>
+            <div class="strip-divider"></div>
             <div id="server-list" class="server-list"></div>
             <button class="server-icon add-server" id="add-server-btn" title="Create or Join Server">+</button>
         </div>
@@ -50,7 +54,6 @@
                 </div>
                 <div class="members-panel" id="members-panel">
                     <div class="members-header">
-                        <span>Members</span>
                         <button class="btn-leave-server" id="leave-server-btn" style="display:none" title="Leave server">Leave</button>
                         <button class="members-close" id="members-close">&times;</button>
                     </div>
@@ -67,7 +70,6 @@
     <!-- Create Server Modal -->
     <div class="modal" id="create-server-modal" style="display:none">
         <div class="modal-content">
-            <h3>Create a Server</h3>
             <input type="text" id="new-server-name" placeholder="Server name" maxlength="50" style="width:100%;padding:10px 14px;margin-bottom:16px;border:1px solid #2a2a4a;border-radius:8px;background:#1a1a2e;color:#e0e0e0;font-size:16px;">
             <div class="modal-actions">
                 <button class="btn-cancel" id="cancel-create-server">Cancel</button>
@@ -79,7 +81,6 @@
     <!-- Join Server Modal -->
     <div class="modal" id="join-server-modal" style="display:none">
         <div class="modal-content">
-            <h3>Join a Server</h3>
             <input type="text" id="invite-code-input" placeholder="Enter invite code" maxlength="20" style="width:100%;padding:10px 14px;margin-bottom:16px;border:1px solid #2a2a4a;border-radius:8px;background:#1a1a2e;color:#e0e0e0;font-size:16px;">
             <div class="modal-actions">
                 <button class="btn-cancel" id="cancel-join-server">Cancel</button>
@@ -91,8 +92,6 @@
     <!-- Invite Modal -->
     <div class="modal" id="invite-modal" style="display:none">
         <div class="modal-content">
-            <h3>Invite to Server</h3>
-            <p style="color:#aaa;margin-bottom:12px;">Share this code with someone to let them join:</p>
             <div style="background:#1a1a2e;padding:12px 16px;border-radius:8px;font-family:monospace;font-size:20px;text-align:center;color:#4fc3f7;letter-spacing:2px;margin-bottom:16px;user-select:all;" id="invite-code-display"></div>
             <div class="modal-actions">
                 <button class="btn-cancel" id="regenerate-invite" style="border-color:var(--danger);color:var(--danger)">Regenerate Code</button>
@@ -104,7 +103,6 @@
     <!-- Create Channel Modal -->
     <div class="modal" id="create-channel-modal" style="display:none">
         <div class="modal-content">
-            <h3>Create a Channel</h3>
             <input type="text" id="new-channel-name" placeholder="Channel name" maxlength="50" style="width:100%;padding:10px 14px;margin-bottom:16px;border:1px solid #2a2a4a;border-radius:8px;background:#1a1a2e;color:#e0e0e0;font-size:16px;">
             <div class="modal-actions">
                 <button class="btn-cancel" id="cancel-create-channel">Cancel</button>
@@ -116,15 +114,23 @@
     <!-- Server Settings Modal -->
     <div class="modal" id="server-settings-modal" style="display:none">
         <div class="modal-content" style="max-width:500px">
-            <h3>Server Settings</h3>
             <div class="settings-section">
-                <h4>Banned Users</h4>
-                <div id="banned-users-list" class="banned-list">
-                    <div style="color:#666;padding:10px">Loading...</div>
-                </div>
+                <div id="banned-users-list" class="banned-list"></div>
             </div>
             <div class="modal-actions">
                 <button class="btn-cancel" id="close-server-settings">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- DM Search Modal -->
+    <div class="modal" id="dm-search-modal" style="display:none">
+        <div class="modal-content">
+            <input type="text" id="dm-username-input" placeholder="Enter username" maxlength="30" style="width:100%;padding:10px 14px;margin-bottom:16px;border:1px solid #2a2a4a;border-radius:8px;background:#1a1a2e;color:#e0e0e0;font-size:16px;">
+            <div id="dm-search-error" style="color:var(--danger);margin-bottom:12px;display:none;font-size:13px"></div>
+            <div class="modal-actions">
+                <button class="btn-cancel" id="cancel-dm-search">Cancel</button>
+                <button class="btn-invite" id="confirm-dm-search">Start Chat</button>
             </div>
         </div>
     </div>
