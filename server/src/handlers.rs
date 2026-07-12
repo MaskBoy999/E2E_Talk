@@ -1382,6 +1382,272 @@ pub async fn admin_delete_channel(
     }
 }
 
+pub async fn admin_delete_ban(
+    Path((server_id, user_id)): Path<(String, String)>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match state.db.admin_delete_ban(&server_id, &user_id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn admin_delete_dm_channel(
+    Path(channel_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match state.db.admin_delete_dm_channel(&channel_id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn admin_delete_dm_message(
+    Path(message_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match state.db.admin_delete_dm_message(&message_id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn admin_delete_dm_key(
+    Path((dm_channel_id, user_id)): Path<(String, String)>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match state.db.admin_delete_dm_key(&dm_channel_id, &user_id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn admin_delete_friend_request(
+    Path(request_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match state.db.admin_delete_friend_request(&request_id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn admin_delete_friendship(
+    Path((user_id_a, user_id_b)): Path<(String, String)>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match state.db.admin_delete_friendship(&user_id_a, &user_id_b) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn admin_delete_prekey_bundle(
+    Path(user_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match state.db.admin_delete_prekey_bundle(&user_id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn admin_delete_session(
+    Path((our_user_id, their_user_id)): Path<(String, String)>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match state.db.admin_delete_session(&our_user_id, &their_user_id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn admin_delete_user_public_key(
+    Path(key_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match state.db.admin_delete_user_public_key(&key_id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn admin_list_bans(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match state.db.list_all_bans_admin() {
+        Ok(bans) => {
+            let result: Vec<serde_json::Value> = bans.iter().map(|(sid, sname, uid, uname, bat)| {
+                serde_json::json!({
+                    "server_id": sid,
+                    "server_name": sname,
+                    "user_id": uid,
+                    "username": uname,
+                    "banned_at": bat,
+                })
+            }).collect();
+            (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn admin_list_dm_channels(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match state.db.list_all_dm_channels_admin() {
+        Ok(channels) => {
+            let result: Vec<serde_json::Value> = channels.iter().map(|(id, created)| {
+                serde_json::json!({"id": id, "created_at": created})
+            }).collect();
+            (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn admin_list_dm_messages(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match state.db.list_all_dm_messages_admin() {
+        Ok(msgs) => {
+            let result: Vec<serde_json::Value> = msgs.iter().map(|m| {
+                serde_json::json!({
+                    "id": m.id,
+                    "dm_channel_id": m.dm_channel_id,
+                    "sender_id": m.sender_id,
+                    "sender_username": m.sender_username,
+                    "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
+                    "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
+                    "timestamp": m.timestamp,
+                })
+            }).collect();
+            (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn admin_list_dm_keys(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match state.db.list_all_dm_keys_admin() {
+        Ok(keys) => {
+            let result: Vec<serde_json::Value> = keys.iter().map(|(dcid, uid, ek, spk, nonce)| {
+                serde_json::json!({
+                    "dm_channel_id": dcid,
+                    "user_id": uid,
+                    "encrypted_key": base64::engine::general_purpose::STANDARD.encode(ek),
+                    "sender_public_key": base64::engine::general_purpose::STANDARD.encode(spk),
+                    "nonce": base64::engine::general_purpose::STANDARD.encode(nonce),
+                })
+            }).collect();
+            (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn admin_list_friend_requests(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match state.db.list_all_friend_requests_admin() {
+        Ok(reqs) => {
+            let result: Vec<serde_json::Value> = reqs.iter().map(|r| {
+                serde_json::json!({
+                    "id": r.id,
+                    "from_user_id": r.from_user_id,
+                    "from_username": r.from_username,
+                    "to_user_id": r.to_user_id,
+                    "to_username": r.to_username,
+                    "status": r.status,
+                    "created_at": r.created_at,
+                })
+            }).collect();
+            (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn admin_list_friendships(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match state.db.list_all_friendships_admin() {
+        Ok(friends) => {
+            let result: Vec<serde_json::Value> = friends.iter().map(|(aid, aname, bid, bname, created)| {
+                serde_json::json!({
+                    "user_id_a": aid,
+                    "username_a": aname,
+                    "user_id_b": bid,
+                    "username_b": bname,
+                    "created_at": created,
+                })
+            }).collect();
+            (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn admin_list_prekey_bundles(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match state.db.list_all_prekey_bundles_admin() {
+        Ok(bundles) => {
+            let result: Vec<serde_json::Value> = bundles.iter().map(|(uid, ik, spk, sig, otp, otpid)| {
+                serde_json::json!({
+                    "user_id": uid,
+                    "identity_key_public": base64::engine::general_purpose::STANDARD.encode(ik),
+                    "signed_prekey_public": base64::engine::general_purpose::STANDARD.encode(spk),
+                    "signed_prekey_signature": base64::engine::general_purpose::STANDARD.encode(sig),
+                    "one_time_prekey_public": otp.as_ref().map(|k| base64::engine::general_purpose::STANDARD.encode(k)),
+                    "one_time_prekey_id": otpid,
+                })
+            }).collect();
+            (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn admin_list_sessions(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match state.db.list_all_sessions_admin() {
+        Ok(sessions) => {
+            let result: Vec<serde_json::Value> = sessions.iter().map(|(our, their, ratchet)| {
+                serde_json::json!({
+                    "our_user_id": our,
+                    "their_user_id": their,
+                    "ratchet_counter": ratchet,
+                })
+            }).collect();
+            (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn admin_list_user_public_keys(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match state.db.list_all_user_public_keys_admin() {
+        Ok(keys) => {
+            let result: Vec<serde_json::Value> = keys.iter().map(|(id, uid, pk, created)| {
+                serde_json::json!({
+                    "id": id,
+                    "user_id": uid,
+                    "public_key": base64::engine::general_purpose::STANDARD.encode(pk),
+                    "created_at": created,
+                })
+            }).collect();
+            (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
 pub async fn admin_clear_all(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {

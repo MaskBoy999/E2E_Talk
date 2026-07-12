@@ -1865,6 +1865,189 @@ impl Database {
         Ok(members)
     }
 
+    // --- New Admin query methods ---
+
+    pub fn list_all_bans_admin(&self) -> Result<Vec<(String, String, String, String, String)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT sb.server_id, COALESCE(s.name, '?'), sb.user_id, COALESCE(u.username, '?'), sb.banned_at
+             FROM server_bans sb
+             LEFT JOIN servers s ON sb.server_id = s.id
+             LEFT JOIN users u ON sb.user_id = u.id
+             ORDER BY sb.banned_at DESC",
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        }).map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows { out.push(r.map_err(|e| e.to_string())?); }
+        Ok(out)
+    }
+
+    pub fn list_all_dm_channels_admin(&self) -> Result<Vec<(String, String)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT id, created_at FROM dm_channels ORDER BY created_at DESC",
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }).map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows { out.push(r.map_err(|e| e.to_string())?); }
+        Ok(out)
+    }
+
+    pub fn list_all_dm_messages_admin(&self) -> Result<Vec<DmMessage>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT m.id, m.dm_channel_id, m.sender_id, COALESCE(u.username, '?'), m.encrypted_content, m.nonce, m.timestamp
+             FROM dm_messages m LEFT JOIN users u ON m.sender_id = u.id ORDER BY m.timestamp DESC LIMIT 500",
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |row| {
+            Ok(DmMessage {
+                id: row.get(0)?,
+                dm_channel_id: row.get(1)?,
+                sender_id: row.get(2)?,
+                sender_username: row.get(3)?,
+                encrypted_content: row.get(4)?,
+                nonce: row.get(5)?,
+                timestamp: row.get(6)?,
+            })
+        }).map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows { out.push(r.map_err(|e| e.to_string())?); }
+        Ok(out)
+    }
+
+    pub fn list_all_dm_keys_admin(&self) -> Result<Vec<(String, String, Vec<u8>, Vec<u8>, Vec<u8>)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT dm_channel_id, user_id, encrypted_key, sender_public_key, nonce FROM dm_keys ORDER BY created_at DESC",
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+                row.get::<_, Vec<u8>>(4)?,
+            ))
+        }).map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows { out.push(r.map_err(|e| e.to_string())?); }
+        Ok(out)
+    }
+
+    pub fn list_all_friend_requests_admin(&self) -> Result<Vec<FriendRequestRow>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT fr.id, fr.from_user_id, fu.username, fr.to_user_id, tu.username, fr.status, fr.created_at
+             FROM friend_requests fr
+             INNER JOIN users fu ON fr.from_user_id = fu.id
+             INNER JOIN users tu ON fr.to_user_id = tu.id
+             ORDER BY fr.created_at DESC",
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |row| {
+            Ok(FriendRequestRow {
+                id: row.get(0)?,
+                from_user_id: row.get(1)?,
+                from_username: row.get(2)?,
+                to_user_id: row.get(3)?,
+                to_username: row.get(4)?,
+                status: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        }).map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows { out.push(r.map_err(|e| e.to_string())?); }
+        Ok(out)
+    }
+
+    pub fn list_all_friendships_admin(&self) -> Result<Vec<(String, String, String, String, String)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT f.user_id_a, COALESCE(ua.username, '?'), f.user_id_b, COALESCE(ub.username, '?'), f.created_at
+             FROM friendships f
+             LEFT JOIN users ua ON f.user_id_a = ua.id
+             LEFT JOIN users ub ON f.user_id_b = ub.id
+             ORDER BY f.created_at DESC",
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        }).map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows { out.push(r.map_err(|e| e.to_string())?); }
+        Ok(out)
+    }
+
+    pub fn list_all_prekey_bundles_admin(&self) -> Result<Vec<(String, Vec<u8>, Vec<u8>, Vec<u8>, Option<Vec<u8>>, Option<i32>)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT user_id, identity_key_public, signed_prekey_public, signed_prekey_signature, one_time_prekey_public, one_time_prekey_id
+             FROM prekey_bundles ORDER BY created_at DESC",
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+                row.get::<_, Option<Vec<u8>>>(4)?,
+                row.get::<_, Option<i32>>(5)?,
+            ))
+        }).map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows { out.push(r.map_err(|e| e.to_string())?); }
+        Ok(out)
+    }
+
+    pub fn list_all_sessions_admin(&self) -> Result<Vec<(String, String, i32)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT our_user_id, their_user_id, ratchet_counter FROM sessions ORDER BY id",
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i32>(2)?,
+            ))
+        }).map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows { out.push(r.map_err(|e| e.to_string())?); }
+        Ok(out)
+    }
+
+    pub fn list_all_user_public_keys_admin(&self) -> Result<Vec<(String, String, Vec<u8>, String)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT upk.id, upk.user_id, upk.public_key, upk.created_at FROM user_public_keys upk ORDER BY upk.created_at DESC",
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        }).map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows { out.push(r.map_err(|e| e.to_string())?); }
+        Ok(out)
+    }
+
     pub fn get_user_cascade_stats(&self, user_id: &str) -> Result<serde_json::Value, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
 
@@ -1911,6 +2094,78 @@ impl Database {
             "owned_servers": owned_servers.len(),
             "owned_server_ids": owned_servers,
         }))
+    }
+
+    // --- Admin delete methods for new tables ---
+
+    pub fn admin_delete_ban(&self, server_id: &str, user_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM server_bans WHERE server_id = ?1 AND user_id = ?2", params![server_id, user_id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn admin_delete_dm_channel(&self, channel_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM dm_keys WHERE dm_channel_id = ?1", params![channel_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM dm_messages WHERE dm_channel_id = ?1", params![channel_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM dm_members WHERE dm_channel_id = ?1", params![channel_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM dm_channels WHERE id = ?1", params![channel_id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn admin_delete_dm_message(&self, message_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM dm_messages WHERE id = ?1", params![message_id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn admin_delete_dm_key(&self, dm_channel_id: &str, user_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM dm_keys WHERE dm_channel_id = ?1 AND user_id = ?2", params![dm_channel_id, user_id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn admin_delete_friend_request(&self, request_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM friend_requests WHERE id = ?1", params![request_id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn admin_delete_friendship(&self, user_id_a: &str, user_id_b: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let (a, b) = if user_id_a < user_id_b { (user_id_a, user_id_b) } else { (user_id_b, user_id_a) };
+        conn.execute("DELETE FROM friendships WHERE user_id_a = ?1 AND user_id_b = ?2", params![a, b])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn admin_delete_prekey_bundle(&self, user_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM prekey_bundles WHERE user_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn admin_delete_session(&self, our_user_id: &str, their_user_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM sessions WHERE our_user_id = ?1 AND their_user_id = ?2", params![our_user_id, their_user_id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn admin_delete_user_public_key(&self, key_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM user_public_keys WHERE id = ?1", params![key_id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     pub fn delete_server_admin(&self, server_id: &str) -> Result<(), String> {

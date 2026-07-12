@@ -146,6 +146,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const connectKeySection = document.getElementById('connect-key-section');
     const connectKeyError = document.getElementById('connect-key-error');
     const connectKeyBtn = document.getElementById('connect-key-btn');
+    const scanQrBtn = document.getElementById('scan-qr-btn');
+    const qrScannerSection = document.getElementById('qr-scanner-section');
+    const qrVideo = document.getElementById('qr-video');
+    const stopScanBtn = document.getElementById('stop-scan-btn');
+    let qrStream = null;
+    let qrScanInterval = null;
+    let scannerOriginatedError = false;
 
     showConnectKey.addEventListener('click', (e) => {
         e.preventDefault();
@@ -159,6 +166,106 @@ document.addEventListener('DOMContentLoaded', () => {
             loginForm.style.display = 'block';
         }
     });
+
+    // QR Code Scanner
+    async function startQrScanner() {
+        // Check for secure context (camera requires HTTPS or localhost)
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            const isLocalhost = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+            connectKeyError.textContent = isLocalhost
+                ? 'Camera not available. Try https://localhost:3443 or grant camera permission in your browser settings.'
+                : 'Camera requires HTTPS. Try https://localhost:3443 or paste the key manually.';
+            connectKeyError.style.display = 'block';
+            scannerOriginatedError = true;
+            return;
+        }
+        try {
+            // Try back camera first, fallback to any camera
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: { facingMode: 'environment' }
+            }).catch(() => navigator.mediaDevices.getUserMedia({ video: true }));
+            qrStream = stream;
+            qrVideo.srcObject = stream;
+            qrScannerSection.style.display = 'block';
+            scanQrBtn.style.display = 'none';
+            connectKeyError.style.display = 'none';
+            // Register cleanup handler when scanner starts
+            window.addEventListener('beforeunload', beforeUnloadHandler);
+
+            // Check for BarcodeDetector API support
+            if ('BarcodeDetector' in window) {
+                try {
+                    const detector = new BarcodeDetector({ formats: ['qr_code'] });
+                    qrScanInterval = setInterval(async () => {
+                        try {
+                            const barcodes = await detector.detect(qrVideo);
+                            if (barcodes.length > 0) {
+                                const key = barcodes[0].rawValue;
+                                document.getElementById('connect-key-input').value = key;
+                                stopQrScanner();
+                                connectKeyError.textContent = 'QR code scanned successfully!';
+                                connectKeyError.style.color = '#4caf50';
+                                connectKeyError.style.display = 'block';
+                                scannerOriginatedError = true;
+                            }
+                        } catch (e) {
+                            // Continue scanning
+                        }
+                    }, 500);
+                } catch (e) {
+                    // BarcodeDetector constructor threw - unsupported format
+                    connectKeyError.textContent = 'QR code detection not supported in this browser. Please paste the key manually.';
+                    connectKeyError.style.color = '#ff9800';
+                    connectKeyError.style.display = 'block';
+                    scannerOriginatedError = true;
+                }
+            } else {
+                // Fallback: display message that QR scanning needs a modern browser
+                connectKeyError.textContent = 'QR scanning requires a modern browser. Please paste the key manually.';
+                connectKeyError.style.color = '#ff9800';
+                connectKeyError.style.display = 'block';
+                scannerOriginatedError = true;
+            }
+        } catch (err) {
+            console.error('Camera access denied:', err);
+            connectKeyError.textContent = 'Camera access denied. Please allow camera permission and try again.';
+            connectKeyError.style.display = 'block';
+            scannerOriginatedError = true;
+        }
+    }
+
+    // Handler to clean up scanner on navigation
+    function beforeUnloadHandler() {
+        if (qrStream) stopQrScanner();
+    }
+
+    function stopQrScanner() {
+        if (qrScanInterval) {
+            clearInterval(qrScanInterval);
+            qrScanInterval = null;
+        }
+        if (qrStream) {
+            qrStream.getTracks().forEach(track => track.stop());
+            qrStream = null;
+        }
+        qrVideo.srcObject = null;
+        qrScannerSection.style.display = 'none';
+        scanQrBtn.style.display = '';
+        // Reset error styling and hide only scanner-originated errors
+        connectKeyError.style.removeProperty('color');
+        if (scannerOriginatedError) {
+            connectKeyError.style.display = 'none';
+            scannerOriginatedError = false;
+        }
+        window.removeEventListener('beforeunload', beforeUnloadHandler);
+    }
+
+    if (scanQrBtn) {
+        scanQrBtn.addEventListener('click', startQrScanner);
+    }
+    if (stopScanBtn) {
+        stopScanBtn.addEventListener('click', stopQrScanner);
+    }
 
     connectKeyBtn.addEventListener('click', async () => {
         connectKeyError.style.display = 'none';

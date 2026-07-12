@@ -44,6 +44,11 @@
         .search-bar input { flex: 1; padding: 8px 12px; border: 1px solid #333; border-radius: 4px; background: #0f0f23; color: #e0e0e0; font-size: 13px; }
         .search-bar input::placeholder { color: #666; }
         .search-bar .record-count { display: flex; align-items: center; color: #888; font-size: 13px; white-space: nowrap; }
+
+        .status-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+        .status-pending { background: #ff9800; color: #000; }
+        .status-accepted { background: #4caf50; color: #fff; }
+        .status-declined { background: #666; color: #fff; }
     </style>
 </head>
 <body>
@@ -75,8 +80,17 @@
                 <button class="tab-btn" data-tab="servers">Servers</button>
                 <button class="tab-btn" data-tab="channels">Channels</button>
                 <button class="tab-btn" data-tab="messages">Messages</button>
-                <button class="tab-btn" data-tab="server-keys">Server Keys</button>
+                <button class="tab-btn" data-tab="server-keys">Srv Keys</button>
                 <button class="tab-btn" data-tab="server-members">Members</button>
+                <button class="tab-btn" data-tab="bans">Bans</button>
+                <button class="tab-btn" data-tab="dm-channels">DM Ch.</button>
+                <button class="tab-btn" data-tab="dm-messages">DM Msgs</button>
+                <button class="tab-btn" data-tab="dm-keys">DM Keys</button>
+                <button class="tab-btn" data-tab="friend-requests">FR Req</button>
+                <button class="tab-btn" data-tab="friendships">Friends</button>
+                <button class="tab-btn" data-tab="prekey-bundles">PreKeys</button>
+                <button class="tab-btn" data-tab="sessions">Sessions</button>
+                <button class="tab-btn" data-tab="user-keys">DevKeys</button>
             </div>
 
             <!-- Users Tab -->
@@ -153,7 +167,7 @@
                 </div>
                 <div class="table-scroll">
                     <table class="data-table">
-                        <thead><tr><th>Server</th><th>User ID</th><th>Encrypted Key</th><th>Sender Public Key</th><th>Nonce</th><th>v</th></tr></thead>
+                        <thead><tr><th>Server</th><th>User ID</th><th>Encrypted Key</th><th>Sender Pub Key</th><th>Nonce</th><th>v</th></tr></thead>
                         <tbody id="server-key-list"><tr><td colspan="6" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
@@ -174,6 +188,150 @@
                     </table>
                 </div>
             </div>
+
+            <!-- Bans Tab -->
+            <div class="tab-content" id="tab-bans">
+                <div class="table-header">
+                    <div class="search-bar">
+                        <input type="text" id="search-bans" placeholder="Search by server, user, or ID..." oninput="filterTab('bans')">
+                        <span class="record-count" id="bans-count"></span>
+                    </div>
+                </div>
+                <div class="table-scroll">
+                    <table class="data-table">
+                        <thead><tr><th>Server</th><th>Server ID</th><th>Username</th><th>User ID</th><th>Banned At</th></tr></thead>
+                        <tbody id="ban-list"><tr><td colspan="5" class="empty-state">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- DM Channels Tab -->
+            <div class="tab-content" id="tab-dm-channels">
+                <div class="table-header">
+                    <div class="search-bar">
+                        <input type="text" id="search-dm-channels" placeholder="Search by ID..." oninput="filterTab('dm-channels')">
+                        <span class="record-count" id="dm-channels-count"></span>
+                    </div>
+                </div>
+                <div class="table-scroll">
+                    <table class="data-table">
+                        <thead><tr><th>DM Channel ID</th><th>Created At</th></tr></thead>
+                        <tbody id="dm-channel-list"><tr><td colspan="2" class="empty-state">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- DM Messages Tab -->
+            <div class="tab-content" id="tab-dm-messages">
+                <div class="table-header">
+                    <div class="search-bar">
+                        <input type="text" id="search-dm-messages" placeholder="Search by sender, channel ID, or timestamp..." oninput="filterTab('dm-messages')">
+                        <span class="record-count" id="dm-messages-count"></span>
+                    </div>
+                </div>
+                <div class="table-scroll">
+                    <table class="data-table">
+                        <thead><tr><th>Sender</th><th>DM Channel ID</th><th>Encrypted Content</th><th>Nonce</th><th>Timestamp</th></tr></thead>
+                        <tbody id="dm-message-list"><tr><td colspan="5" class="empty-state">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- DM Keys Tab -->
+            <div class="tab-content" id="tab-dm-keys">
+                <div class="table-header">
+                    <div class="search-bar">
+                        <input type="text" id="search-dm-keys" placeholder="Search by channel ID or user ID..." oninput="filterTab('dm-keys')">
+                        <span class="record-count" id="dm-keys-count"></span>
+                    </div>
+                </div>
+                <div class="table-scroll">
+                    <table class="data-table">
+                        <thead><tr><th>DM Channel ID</th><th>User ID</th><th>Encrypted Key</th><th>Sender Pub Key</th><th>Nonce</th></tr></thead>
+                        <tbody id="dm-key-list"><tr><td colspan="5" class="empty-state">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Friend Requests Tab -->
+            <div class="tab-content" id="tab-friend-requests">
+                <div class="table-header">
+                    <div class="search-bar">
+                        <input type="text" id="search-friend-requests" placeholder="Search by username or status..." oninput="filterTab('friend-requests')">
+                        <span class="record-count" id="friend-requests-count"></span>
+                    </div>
+                </div>
+                <div class="table-scroll">
+                    <table class="data-table">
+                        <thead><tr><th>From</th><th>From ID</th><th>To</th><th>To ID</th><th>Status</th><th>Created</th></tr></thead>
+                        <tbody id="friend-request-list"><tr><td colspan="6" class="empty-state">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Friendships Tab -->
+            <div class="tab-content" id="tab-friendships">
+                <div class="table-header">
+                    <div class="search-bar">
+                        <input type="text" id="search-friendships" placeholder="Search by username or ID..." oninput="filterTab('friendships')">
+                        <span class="record-count" id="friendships-count"></span>
+                    </div>
+                </div>
+                <div class="table-scroll">
+                    <table class="data-table">
+                        <thead><tr><th>User A</th><th>User A ID</th><th>User B</th><th>User B ID</th><th>Created</th></tr></thead>
+                        <tbody id="friendship-list"><tr><td colspan="5" class="empty-state">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Prekey Bundles Tab -->
+            <div class="tab-content" id="tab-prekey-bundles">
+                <div class="table-header">
+                    <div class="search-bar">
+                        <input type="text" id="search-prekey-bundles" placeholder="Search by user ID..." oninput="filterTab('prekey-bundles')">
+                        <span class="record-count" id="prekey-bundles-count"></span>
+                    </div>
+                </div>
+                <div class="table-scroll">
+                    <table class="data-table">
+                        <thead><tr><th>User ID</th><th>Identity Key</th><th>Signed Prekey</th><th>Signature</th><th>OT Prekey</th><th>OT ID</th></tr></thead>
+                        <tbody id="prekey-bundle-list"><tr><td colspan="6" class="empty-state">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Sessions Tab -->
+            <div class="tab-content" id="tab-sessions">
+                <div class="table-header">
+                    <div class="search-bar">
+                        <input type="text" id="search-sessions" placeholder="Search by user ID..." oninput="filterTab('sessions')">
+                        <span class="record-count" id="sessions-count"></span>
+                    </div>
+                </div>
+                <div class="table-scroll">
+                    <table class="data-table">
+                        <thead><tr><th>Our User ID</th><th>Their User ID</th><th>Ratchet</th></tr></thead>
+                        <tbody id="session-list"><tr><td colspan="3" class="empty-state">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- User Public Keys (multi-device) Tab -->
+            <div class="tab-content" id="tab-user-keys">
+                <div class="table-header">
+                    <div class="search-bar">
+                        <input type="text" id="search-user-keys" placeholder="Search by user ID..." oninput="filterTab('user-keys')">
+                        <span class="record-count" id="user-keys-count"></span>
+                    </div>
+                </div>
+                <div class="table-scroll">
+                    <table class="data-table">
+                        <thead><tr><th>Key ID</th><th>User ID</th><th>Public Key</th><th>Created</th></tr></thead>
+                        <tbody id="user-key-list"><tr><td colspan="4" class="empty-state">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -191,6 +349,6 @@
         </div>
     </div>
 
-    <script src="admin.js?v=3"></script>
+    <script src="admin.js?v=4"></script>
 </body>
 </html>

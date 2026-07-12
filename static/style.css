@@ -1472,3 +1472,41 @@ body {
     background: var(--danger);
     color: #fff;
 }
+
+/* ===== QR Code ===== */
+.qr-code-container {
+    margin-top: 8px;
+}
+
+.qr-placeholder {
+    text-align: center;
+    padding: 12px;
+    background: var(--bg-primary);
+    border-radius: 8px;
+    border: 1px dashed var(--bg-border);
+}
+
+.btn-show-qr {
+    background: var(--bg-secondary);
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    padding: 8px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    transition: background 0.15s, color 0.15s;
+}
+
+.btn-show-qr:hover {
+    background: var(--accent);
+    color: var(--bg-primary);
+}
+
+#qr-code-display table {
+    margin: 0 auto;
+}
+
+#qr-code-display td {
+    border: none !important;
+    padding: 0 !important;
+}

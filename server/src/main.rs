@@ -105,6 +105,24 @@ async fn main() {
         .route("/api/admin/messages", get(handlers::admin_list_messages))
         .route("/api/admin/server-keys", get(handlers::admin_list_server_keys))
         .route("/api/admin/server-members", get(handlers::admin_list_server_members))
+        .route("/api/admin/bans", get(handlers::admin_list_bans))
+        .route("/api/admin/bans/{server_id}/{user_id}", delete(handlers::admin_delete_ban))
+        .route("/api/admin/dm-channels", get(handlers::admin_list_dm_channels))
+        .route("/api/admin/dm-channels/{channel_id}", delete(handlers::admin_delete_dm_channel))
+        .route("/api/admin/dm-messages", get(handlers::admin_list_dm_messages))
+        .route("/api/admin/dm-messages/{message_id}", delete(handlers::admin_delete_dm_message))
+        .route("/api/admin/dm-keys", get(handlers::admin_list_dm_keys))
+        .route("/api/admin/dm-keys/{dm_channel_id}/{user_id}", delete(handlers::admin_delete_dm_key))
+        .route("/api/admin/friend-requests", get(handlers::admin_list_friend_requests))
+        .route("/api/admin/friend-requests/{request_id}", delete(handlers::admin_delete_friend_request))
+        .route("/api/admin/friendships", get(handlers::admin_list_friendships))
+        .route("/api/admin/friendships/{user_id_a}/{user_id_b}", delete(handlers::admin_delete_friendship))
+        .route("/api/admin/prekey-bundles", get(handlers::admin_list_prekey_bundles))
+        .route("/api/admin/prekey-bundles/{user_id}", delete(handlers::admin_delete_prekey_bundle))
+        .route("/api/admin/sessions", get(handlers::admin_list_sessions))
+        .route("/api/admin/sessions/{our_user_id}/{their_user_id}", delete(handlers::admin_delete_session))
+        .route("/api/admin/user-keys", get(handlers::admin_list_user_public_keys))
+        .route("/api/admin/user-keys/{key_id}", delete(handlers::admin_delete_user_public_key))
         .route("/api/admin/clear", post(handlers::admin_clear_all))
         // Phase 4: Friends + DMs
         .route("/api/me", get(handlers::get_me).delete(handlers::delete_me))
@@ -125,6 +143,7 @@ async fn main() {
 
     let addr = format!("0.0.0.0:{}", config.port);
     tracing::info!("Server starting on {}", addr);
+
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
