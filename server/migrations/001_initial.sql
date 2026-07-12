@@ -35,8 +35,6 @@ CREATE TABLE IF NOT EXISTS server_members (
 );
 
 -- Messages
-DROP TABLE IF EXISTS messages;
-
 CREATE TABLE IF NOT EXISTS messages (
     id TEXT PRIMARY KEY,
     channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,

@@ -113,7 +113,44 @@ impl Database {
         let _ = conn.execute_batch(include_str!("../migrations/002_e2ee.sql"));
         let _ = conn.execute_batch(include_str!("../migrations/003_bans.sql"));
         let _ = conn.execute_batch(include_str!("../migrations/004_friends_dms.sql"));
-        let _ = conn.execute_batch(include_str!("../migrations/005_multi_device.sql"));
+        // Only run 005 if server_keys still has UNIQUE(server_id, user_id) from 001
+        let server_keys_needs_migration: bool = conn
+            .query_row(
+                "SELECT sql LIKE '%UNIQUE(server_id, user_id)%' FROM sqlite_master WHERE name = 'server_keys' AND type = 'table'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if server_keys_needs_migration {
+            let _ = conn.execute_batch(include_str!("../migrations/005_multi_device.sql"));
+        }
+        // Same check for dm_keys
+        let dm_keys_needs_migration: bool = conn
+            .query_row(
+                "SELECT sql LIKE '%UNIQUE(dm_channel_id, user_id)%' FROM sqlite_master WHERE name = 'dm_keys' AND type = 'table'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if dm_keys_needs_migration {
+            // dm_keys migration is in 005, run it separately
+            let _ = conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS dm_keys_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    dm_channel_id TEXT NOT NULL REFERENCES dm_channels(id) ON DELETE CASCADE,
+                    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    encrypted_key BLOB NOT NULL,
+                    sender_public_key BLOB NOT NULL,
+                    nonce BLOB NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
+                INSERT OR IGNORE INTO dm_keys_new (dm_channel_id, user_id, encrypted_key, sender_public_key, nonce, created_at)
+                    SELECT dm_channel_id, user_id, encrypted_key, sender_public_key, nonce, created_at FROM dm_keys;
+                DROP TABLE dm_keys;
+                ALTER TABLE dm_keys_new RENAME TO dm_keys;
+                CREATE INDEX IF NOT EXISTS idx_dm_keys_channel_user ON dm_keys(dm_channel_id, user_id);",
+            );
+        }
         let _ = conn.execute_batch(include_str!("../migrations/006_hashed_codes.sql"));
 
         // --- invite_code_hash on servers ---
