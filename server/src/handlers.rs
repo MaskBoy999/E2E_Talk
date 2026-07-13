@@ -218,6 +218,14 @@ pub async fn create_server(
         }
     };
 
+    // Broadcast server_created to all devices of this user so they see it without refreshing
+    let created_msg = serde_json::json!({
+        "type": "server_created",
+        "server_id": server.id,
+        "server_name": server.name,
+    });
+    let _ = state.ws_manager.broadcast_to_users(&[user_id.clone()], &created_msg.to_string()).await;
+
     (
         StatusCode::CREATED,
         Json(serde_json::json!({
@@ -500,6 +508,14 @@ pub async fn join_server(
     if let Ok(members) = state.db.get_server_members(&server.id) {
         let _ = state.ws_manager.broadcast_to_users(&members, &join_msg.to_string()).await;
     }
+
+    // Also broadcast server_joined to all devices of the joining user so the server appears in their sidebar
+    let joined_msg = serde_json::json!({
+        "type": "server_joined",
+        "server_id": server.id,
+        "server_name": server.name,
+    });
+    let _ = state.ws_manager.broadcast_to_users(&[user_id.clone()], &joined_msg.to_string()).await;
 
     (
         StatusCode::OK,

@@ -349,6 +349,13 @@ function connectWebSocket(t) {
                     }
                 }
                 break;
+            case 'server_created':
+            case 'server_joined':
+                // New server appeared for this user on another device — refresh sidebar
+                if (data.server_id) {
+                    await loadServers();
+                }
+                break;
             case 'member_joined':
                 if (data.server_id && data.user_id) {
                     // Owner auto-uploads encrypted server key for new member
@@ -373,9 +380,19 @@ function connectWebSocket(t) {
                         currentServerId = null;
                         currentChannelId = null;
                         document.getElementById('server-name').textContent = '';
-                        document.getElementById('channel-list').innerHTML = '<div class="channel-item" style="color:#666;cursor:default">Select a server</div>';
+                        // Atomic replace to avoid flicker
+                        const cl = document.getElementById('channel-list');
+                        const placeholder = document.createElement('div');
+                        placeholder.className = 'channel-item';
+                        placeholder.style.cssText = 'color:#666;cursor:default';
+                        placeholder.textContent = 'Select a server';
+                        cl.replaceChildren(placeholder);
                         document.getElementById('channel-name').textContent = 'Select a channel';
-                        document.getElementById('message-list').innerHTML = '<div class="welcome">Select a server and channel to start chatting</div>';
+                        const ml = document.getElementById('message-list');
+                        const welcome = document.createElement('div');
+                        welcome.className = 'welcome';
+                        welcome.textContent = 'Select a server and channel to start chatting';
+                        ml.replaceChildren(welcome);
                         document.getElementById('message-input').disabled = true;
                         document.getElementById('send-btn').disabled = true;
                         await loadServers();
@@ -388,9 +405,19 @@ function connectWebSocket(t) {
                         currentServerId = null;
                         currentChannelId = null;
                         document.getElementById('server-name').textContent = '';
-                        document.getElementById('channel-list').innerHTML = '<div class="channel-item" style="color:#666;cursor:default">Select a server</div>';
+                        // Atomic replace to avoid flicker
+                        const cl = document.getElementById('channel-list');
+                        const placeholder = document.createElement('div');
+                        placeholder.className = 'channel-item';
+                        placeholder.style.cssText = 'color:#666;cursor:default';
+                        placeholder.textContent = 'Select a server';
+                        cl.replaceChildren(placeholder);
                         document.getElementById('channel-name').textContent = 'Select a channel';
-                        document.getElementById('message-list').innerHTML = '<div class="welcome">This server has been deleted</div>';
+                        const ml = document.getElementById('message-list');
+                        const welcome = document.createElement('div');
+                        welcome.className = 'welcome';
+                        welcome.textContent = 'This server has been deleted';
+                        ml.replaceChildren(welcome);
                         document.getElementById('message-input').disabled = true;
                         document.getElementById('send-btn').disabled = true;
                     }
@@ -551,7 +578,12 @@ async function loadServers() {
             selectServer(servers[0].id);
         } else if (servers.length === 0) {
             document.getElementById('server-name').textContent = 'No servers yet';
-            document.getElementById('channel-list').innerHTML = '<div class="channel-item" style="color:#666;cursor:default">Create or join a server</div>';
+            const cl = document.getElementById('channel-list');
+            const placeholder = document.createElement('div');
+            placeholder.className = 'channel-item';
+            placeholder.style.cssText = 'color:#666;cursor:default';
+            placeholder.textContent = 'Create or join a server';
+            cl.replaceChildren(placeholder);
         }
     } catch (err) {
         console.error('Failed to load servers:', err);
@@ -560,17 +592,31 @@ async function loadServers() {
 
 function renderServerList() {
     const list = document.getElementById('server-list');
-    list.innerHTML = '';
 
-    servers.forEach(s => {
+    // Only rebuild if the list is empty (first load) or total count changed drastically
+    // Otherwise, use syncList for flicker-free incremental updates
+    function createServerIcon(s) {
         const div = document.createElement('div');
         div.className = 'server-icon' + (s.id === currentServerId ? ' active' : '');
         div.textContent = s.name.charAt(0).toUpperCase();
         div.title = s.name;
-        div.dataset.id = s.id;
         div.addEventListener('click', () => selectServer(s.id));
-        list.appendChild(div);
-    });
+        return div;
+    }
+
+    function updateServerIcon(el, s) {
+        const shouldBeActive = s.id === currentServerId;
+        const isActive = el.classList.contains('active');
+        if (isActive !== shouldBeActive) {
+            el.classList.toggle('active', shouldBeActive);
+        }
+        if (el.title !== s.name) {
+            el.title = s.name;
+            el.textContent = s.name.charAt(0).toUpperCase();
+        }
+    }
+
+    syncList(list, servers, s => s.id, createServerIcon, updateServerIcon);
 }
 
 async function selectServer(serverId) {
@@ -618,7 +664,14 @@ async function selectServer(serverId) {
         }
     }
 
-    renderServerList();
+    // renderServerList() is called by syncList when servers list changes;
+    // we just need to update the active state on the already-rendered icons
+    const serverIcons = document.querySelectorAll('.server-icon');
+    for (const icon of serverIcons) {
+        icon.classList.toggle('active', icon.dataset.id === serverId);
+    }
+    // Reset DM sidebar so it re-renders fully when user returns to DMs
+    dmSidebarInit = false;
     await loadChannels(serverId);
     loadMembers(serverId);
 
@@ -631,25 +684,48 @@ async function selectServer(serverId) {
 
 // --- Channels ---
 
+// Store channel create button reference so we can add/remove it without flicker
+let channelCreateBtnRef = null;
+
+function getOrCreateChannelCreateBtn() {
+    if (!channelCreateBtnRef) {
+        channelCreateBtnRef = document.createElement('button');
+        channelCreateBtnRef.className = 'create-channel-btn';
+        channelCreateBtnRef.textContent = '+ Channel';
+        channelCreateBtnRef.addEventListener('click', () => {
+            document.getElementById('create-channel-modal').style.display = 'flex';
+            document.getElementById('new-channel-name').value = '';
+            document.getElementById('new-channel-name').focus();
+        });
+    }
+    return channelCreateBtnRef;
+}
+
 async function loadChannels(serverId) {
     try {
         const res = await authFetch(`/api/servers/${serverId}/channels`);
         const channels = await res.json();
         const list = document.getElementById('channel-list');
-        list.innerHTML = '';
+
+        // Clear any DM sidebar header that might be showing
+        const dmHeader = list.querySelector('.dm-header');
+        if (dmHeader) dmHeader.remove();
 
         if (!Array.isArray(channels) || channels.length === 0) {
-            list.innerHTML = '<div class="channel-item" style="color:#666;cursor:default">No channels yet</div>';
+            const placeholder = document.createElement('div');
+            placeholder.className = 'channel-item';
+            placeholder.style.cssText = 'color:#666;cursor:default';
+            placeholder.textContent = 'No channels yet';
+            list.replaceChildren(placeholder);
             document.getElementById('channel-name').textContent = 'Select a channel';
             document.getElementById('message-input').disabled = true;
             document.getElementById('send-btn').disabled = true;
             return;
         }
 
-        channels.forEach(ch => {
+        function createChannelItem(ch) {
             const div = document.createElement('div');
-            div.className = 'channel-item';
-            div.dataset.id = ch.id;
+            div.className = 'channel-item' + (ch.id === currentChannelId ? ' active' : '');
             div.dataset.name = ch.name;
             div.addEventListener('click', () => selectChannel(ch.id, ch.name, div));
             const nameSpan = document.createElement('span');
@@ -667,23 +743,38 @@ async function loadChannels(serverId) {
                 });
                 div.appendChild(delBtn);
             }
-            list.appendChild(div);
-        });
+            return div;
+        }
 
+        function updateChannelItem(el, ch) {
+            const shouldBeActive = ch.id === currentChannelId;
+            const isActive = el.classList.contains('active');
+            if (isActive !== shouldBeActive) {
+                el.classList.toggle('active', shouldBeActive);
+            }
+            if (el.dataset.name !== ch.name) {
+                el.dataset.name = ch.name;
+                const nameSpan = el.querySelector('span');
+                if (nameSpan) nameSpan.textContent = `# ${ch.name}`;
+            }
+        }
+
+        syncList(list, channels, ch => ch.id, createChannelItem, updateChannelItem);
+
+        // Append the "+ Channel" button after channels if owner
+        const existingCreateBtn = list.querySelector('.create-channel-btn');
         if (isOwner) {
-            const btn = document.createElement('button');
-            btn.className = 'create-channel-btn';
-            btn.textContent = '+ Channel';
-            btn.addEventListener('click', () => {
-                document.getElementById('create-channel-modal').style.display = 'flex';
-                document.getElementById('new-channel-name').value = '';
-                document.getElementById('new-channel-name').focus();
-            });
-            list.appendChild(btn);
+            const btn = getOrCreateChannelCreateBtn();
+            if (!existingCreateBtn) {
+                list.appendChild(btn);
+            }
+        } else if (existingCreateBtn) {
+            existingCreateBtn.remove();
         }
 
         if (window.innerWidth > 768 && !currentChannelId) {
-            list.children[0].click();
+            const firstChannel = list.querySelector('.channel-item:not(.create-channel-btn)');
+            if (firstChannel) firstChannel.click();
         }
     } catch (err) {
         console.error('Failed to load channels:', err);
@@ -709,30 +800,41 @@ async function selectChannel(channelId, channelName, element) {
 
 async function loadMessages(channelId) {
     const list = document.getElementById('message-list');
-    list.innerHTML = '<div class="welcome">Loading messages...</div>';
 
     try {
         const res = await authFetch(`/api/channels/${channelId}/messages`);
         const messages = await res.json();
 
-        list.innerHTML = '';
+        // Build all messages into a document fragment first (no flickering)
+        const frag = document.createDocumentFragment();
 
         if (!Array.isArray(messages) || messages.length === 0) {
-            list.innerHTML = '<div class="welcome">No messages yet. Say hello!</div>';
+            const welcome = document.createElement('div');
+            welcome.className = 'welcome';
+            welcome.textContent = 'No messages yet. Say hello!';
+            frag.appendChild(welcome);
+            list.replaceChildren(frag);
             return;
         }
 
         for (const msg of messages) {
-            await appendMessage(msg);
+            const div = buildMessageElement(msg);
+            if (div) frag.appendChild(div);
         }
+
+        // Atomic replace — no "Loading..." flash
+        list.replaceChildren(frag);
+        list.scrollTop = list.scrollHeight;
     } catch (err) {
         console.error('Failed to load messages:', err);
-        list.innerHTML = '<div class="welcome" style="color:#f44336">Failed to load messages</div>';
+        // Only show error if list is empty (don't overwrite existing messages)
+        if (list.children.length === 0) {
+            list.innerHTML = '<div class="welcome" style="color:#f44336">Failed to load messages</div>';
+        }
     }
 }
 
-async function appendMessage(msg) {
-    const list = document.getElementById('message-list');
+function buildMessageElement(msg) {
     const div = document.createElement('div');
     div.className = 'message';
 
@@ -764,8 +866,20 @@ async function appendMessage(msg) {
             '<div class="text">' + escapeHtml(textContent) + '</div>' +
         '</div>';
 
-    list.appendChild(div);
-    list.scrollTop = list.scrollHeight;
+    return div;
+}
+
+async function appendMessage(msg) {
+    const list = document.getElementById('message-list');
+    // Remove welcome message if present
+    const welcome = list.querySelector('.welcome');
+    if (welcome) welcome.remove();
+
+    const div = buildMessageElement(msg);
+    if (div) {
+        list.appendChild(div);
+        list.scrollTop = list.scrollHeight;
+    }
 }
 
 // --- Send ---
@@ -819,6 +933,8 @@ function enterDmView() {
     document.getElementById('message-input').disabled = true;
     document.getElementById('send-btn').disabled = true;
     document.getElementById('message-list').innerHTML = '<div class="welcome">Select a conversation to start chatting</div>';
+    // Reset DM sidebar so the full header renders fresh
+    dmSidebarInit = false;
     loadDmConversations();
 }
 
@@ -837,29 +953,60 @@ async function loadDmConversations() {
     loadMyFriendCode();
 }
 
+let dmSidebarInit = false;
+
 function renderDmSidebar() {
     const container = document.getElementById('channel-list');
-    let html = '<div class="dm-header">';
-    html += '<div class="identity-key-box" style="margin-bottom:10px">';
-    html += '<span class="key-value" id="my-friend-code">••••••••••••••••</span>';
-    html += '<button class="key-action-btn" id="toggle-friend-code-btn" title="Show/Hide">&#128065;</button>';
-    html += '<button class="key-action-btn" id="copy-friend-code-btn" title="Copy">&#128203;</button>';
-    html += '<button class="key-action-btn" id="qr-friend-code-btn" title="Show QR Code">&#128247;</button>';
-    html += '</div>';
-    html += '<div id="friend-code-qr-area" style="display:none;text-align:center;margin-top:8px;padding:8px;background:var(--bg-primary);border-radius:8px;">';
-    html += '<div id="friend-code-qr-canvas" style="background:#fff;padding:8px;border-radius:6px;display:inline-block;"></div>';
-    html += '<p style="color:#999;font-size:10px;margin-top:4px;">Scan to add friend</p>';
-    html += '<button class="btn-show-qr" id="hide-friend-code-qr-btn" style="margin-top:4px;font-size:11px;padding:4px 10px;">Hide QR</button>';
-    html += '</div>';
-    html += '<div class="dm-actions">';
-    html += '<button class="dm-action-btn" id="add-friend-btn">+ Add Friend</button>';
-    html += '<button class="dm-action-btn friend-requests-btn" id="friend-requests-btn">Requests <span id="friend-request-badge" class="inline-badge" style="display:' + (pendingFriendRequests > 0 ? 'block' : 'none') + '"></span></button>';
-    html += '</div></div>';
-    html += '<div class="channel-list dm-list" id="dm-list">';
-    if (dmConversations.length === 0) {
-        html += '<div style="color:#666;padding:12px;font-size:13px">No conversations yet</div>';
+
+    if (!dmSidebarInit) {
+        // First time: set the full DM header HTML
+        const headerHtml = '<div class="dm-header">' +
+            '<div class="identity-key-box" style="margin-bottom:10px">' +
+                '<span class="key-value" id="my-friend-code">••••••••••••••••</span>' +
+                '<button class="key-action-btn" id="toggle-friend-code-btn" title="Show/Hide">&#128065;</button>' +
+                '<button class="key-action-btn" id="copy-friend-code-btn" title="Copy">&#128203;</button>' +
+                '<button class="key-action-btn" id="qr-friend-code-btn" title="Show QR Code">&#128247;</button>' +
+            '</div>' +
+            '<div id="friend-code-qr-area" style="display:none;text-align:center;margin-top:8px;padding:8px;background:var(--bg-primary);border-radius:8px;">' +
+                '<div id="friend-code-qr-canvas" style="background:#fff;padding:8px;border-radius:6px;display:inline-block;"></div>' +
+                '<p style="color:#999;font-size:10px;margin-top:4px;">Scan to add friend</p>' +
+                '<button class="btn-show-qr" id="hide-friend-code-qr-btn" style="margin-top:4px;font-size:11px;padding:4px 10px;">Hide QR</button>' +
+            '</div>' +
+            '<div class="dm-actions">' +
+                '<button class="dm-action-btn" id="add-friend-btn">+ Add Friend</button>' +
+                '<button class="dm-action-btn friend-requests-btn" id="friend-requests-btn">Requests <span id="friend-request-badge" class="inline-badge" style="display:' +
+                    (pendingFriendRequests > 0 ? 'block' : 'none') + '"></span></button>' +
+            '</div>' +
+        '</div>' +
+        '<div class="channel-list dm-list" id="dm-list"></div>';
+
+        container.innerHTML = headerHtml;
+        dmSidebarInit = true;
+
+        document.getElementById('add-friend-btn').addEventListener('click', () => {
+            document.getElementById('friend-code-input').value = '';
+            document.getElementById('add-friend-error').style.display = 'none';
+            showModal('add-friend-modal');
+        });
+        document.getElementById('friend-requests-btn').addEventListener('click', async () => {
+            await loadFriendRequests();
+            showModal('friend-requests-modal');
+        });
+    } else {
+        // Just update the friend request badge if it changed
+        const badge = document.getElementById('friend-request-badge');
+        if (badge) {
+            badge.style.display = pendingFriendRequests > 0 ? 'block' : 'none';
+        }
     }
-    for (const c of dmConversations) {
+
+    // Update the DM list incrementally — no flickering
+    const dmList = document.getElementById('dm-list');
+    if (!dmList) return;
+
+    function createDmItem(c) {
+        const div = document.createElement('div');
+        div.className = 'channel-item dm-item' + (c.dm_channel_id === currentDmChannelId ? ' active' : '');
         const initial = (c.other_username || '?').charAt(0).toUpperCase();
         let preview = '';
         if (c.last_message) {
@@ -875,28 +1022,57 @@ function renderDmSidebar() {
                 preview = '[encrypted]';
             }
         }
-        html += '<div class="channel-item dm-item" onclick="selectDmChannel(\'' + c.dm_channel_id + '\', \'' +
-            escapeHtml(c.other_user_id) + '\', \'' + escapeHtml(c.other_username) + '\', this)">' +
+        div.innerHTML =
             '<div class="dm-avatar">' + initial + '</div>' +
             '<div class="dm-info">' +
                 '<div class="dm-name">' + escapeHtml(c.other_username) + '</div>' +
                 '<div class="dm-preview">' + escapeHtml(preview) + '</div>' +
             '</div>' +
-            (unreadDms[c.dm_channel_id] ? '<span class="badge"></span>' : '') +
-            '</div>';
+            (unreadDms[c.dm_channel_id] ? '<span class="badge"></span>' : '');
+        div.addEventListener('click', () => {
+            selectDmChannel(c.dm_channel_id, c.other_user_id, c.other_username, div);
+        });
+        return div;
     }
-    html += '</div>';
-    container.innerHTML = html;
 
-    document.getElementById('add-friend-btn').addEventListener('click', () => {
-        document.getElementById('friend-code-input').value = '';
-        document.getElementById('add-friend-error').style.display = 'none';
-        showModal('add-friend-modal');
-    });
-    document.getElementById('friend-requests-btn').addEventListener('click', async () => {
-        await loadFriendRequests();
-        showModal('friend-requests-modal');
-    });
+    function updateDmItem(el, c) {
+        const shouldBeActive = c.dm_channel_id === currentDmChannelId;
+        const isActive = el.classList.contains('active');
+        if (isActive !== shouldBeActive) {
+            el.classList.toggle('active', shouldBeActive);
+        }
+        // Update preview text
+        const previewEl = el.querySelector('.dm-preview');
+        if (previewEl && c.last_message) {
+            try {
+                const kp = E2ECrypto.getIdentityKeyPair();
+                const newPreview = E2ECrypto.decryptDm(
+                    c.last_message.encrypted_content, c.last_message.nonce,
+                    c.dm_channel_id, kp.privateKey,
+                    c.other_public_key ? new Uint8Array(E2ECrypto.base64ToArrayBuffer(c.other_public_key)) : null
+                );
+                const truncated = newPreview.substring(0, 40);
+                if (previewEl.textContent !== truncated) {
+                    previewEl.textContent = truncated;
+                }
+            } catch (e) {}
+        }
+        // Update unread badge
+        const existingBadge = el.querySelector('.badge');
+        if (unreadDms[c.dm_channel_id] && !existingBadge) {
+            const badge = document.createElement('span');
+            badge.className = 'badge';
+            el.appendChild(badge);
+        } else if (!unreadDms[c.dm_channel_id] && existingBadge) {
+            existingBadge.remove();
+        }
+    }
+
+    if (dmConversations.length === 0) {
+        dmList.innerHTML = '<div style="color:#666;padding:12px;font-size:13px">No conversations yet</div>';
+    } else {
+        syncList(dmList, dmConversations, c => c.dm_channel_id, createDmItem, updateDmItem);
+    }
 }
 
 async function selectDmChannel(dmChannelId, otherUserId, otherUsername, element) {
@@ -916,7 +1092,19 @@ async function selectDmChannel(dmChannelId, otherUserId, otherUsername, element)
     // Clear unread badge for this DM channel
     delete unreadDms[dmChannelId];
     updateDmStripBadge();
-    renderDmSidebar();
+
+    // Update the DM list active state without re-rendering the whole sidebar
+    const dmList = document.getElementById('dm-list');
+    if (dmList) {
+        for (const child of dmList.children) {
+            if (child.dataset.id === dmChannelId) {
+                child.classList.add('active');
+            } else {
+                child.classList.remove('active');
+            }
+        }
+    }
+
     loadMyFriendCode();
 
     await loadDmMessages(dmChannelId, otherUserId);
@@ -926,34 +1114,45 @@ async function selectDmChannel(dmChannelId, otherUserId, otherUsername, element)
 
 async function loadDmMessages(dmChannelId, otherUserId) {
     const list = document.getElementById('message-list');
-    list.innerHTML = '<div class="welcome">Loading messages...</div>';
 
     try {
         const res = await authFetch('/api/dm/' + dmChannelId + '/messages');
         const messages = await res.json();
-        list.innerHTML = '';
-
-        if (!Array.isArray(messages) || messages.length === 0) {
-            list.innerHTML = '<div class="welcome">No messages yet. Say hello!</div>';
-            return;
-        }
 
         const kp = E2ECrypto.getIdentityKeyPair();
         const otherUserRes = await authFetch('/api/identity/' + otherUserId);
         const otherUserData = await otherUserRes.json();
         const otherPublicKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(otherUserData.identity_public_key));
 
-        for (const msg of messages) {
-            await appendDmMessage(msg, kp, otherPublicKey);
+        // Build all messages into a document fragment (no flickering)
+        const frag = document.createDocumentFragment();
+
+        if (!Array.isArray(messages) || messages.length === 0) {
+            const welcome = document.createElement('div');
+            welcome.className = 'welcome';
+            welcome.textContent = 'No messages yet. Say hello!';
+            frag.appendChild(welcome);
+            list.replaceChildren(frag);
+            return;
         }
+
+        for (const msg of messages) {
+            const div = buildDmMessageElement(msg, kp, otherPublicKey);
+            if (div) frag.appendChild(div);
+        }
+
+        // Atomic replace — no "Loading..." flash
+        list.replaceChildren(frag);
+        list.scrollTop = list.scrollHeight;
     } catch (err) {
         console.error('Failed to load DM messages:', err);
-        list.innerHTML = '<div class="welcome" style="color:#f44336">Failed to load messages</div>';
+        if (list.children.length === 0) {
+            list.innerHTML = '<div class="welcome" style="color:#f44336">Failed to load messages</div>';
+        }
     }
 }
 
-function appendDmMessage(msg, kp, otherPublicKey) {
-    const list = document.getElementById('message-list');
+function buildDmMessageElement(msg, kp, otherPublicKey) {
     const div = document.createElement('div');
     div.className = 'message';
 
@@ -985,8 +1184,19 @@ function appendDmMessage(msg, kp, otherPublicKey) {
             '<div class="text">' + escapeHtml(textContent) + '</div>' +
         '</div>';
 
-    list.appendChild(div);
-    list.scrollTop = list.scrollHeight;
+    return div;
+}
+
+function appendDmMessage(msg, kp, otherPublicKey) {
+    const list = document.getElementById('message-list');
+    const welcome = list.querySelector('.welcome');
+    if (welcome) welcome.remove();
+
+    const div = buildDmMessageElement(msg, kp, otherPublicKey);
+    if (div) {
+        list.appendChild(div);
+        list.scrollTop = list.scrollHeight;
+    }
 }
 
 async function sendDmMessage() {
@@ -1085,14 +1295,16 @@ async function loadMembers(serverId) {
         const res = await authFetch(`/api/servers/${serverId}/members`);
         const members = await res.json();
         const list = document.getElementById('member-list');
-        list.innerHTML = '';
-
-        if (!Array.isArray(members) || members.length === 0) return;
 
         const leaveBtn = document.getElementById('leave-server-btn');
         leaveBtn.style.display = '';
 
-        members.forEach(m => {
+        if (!Array.isArray(members) || members.length === 0) {
+            list.innerHTML = '';
+            return;
+        }
+
+        function createMemberItem(m) {
             const div = document.createElement('div');
             div.className = 'member-item';
             const initial = (m.username || '?').charAt(0).toUpperCase();
@@ -1110,8 +1322,51 @@ async function loadMembers(serverId) {
                     (isMemberOwner ? '<div class="member-role">Owner</div>' : '') +
                 '</div>' +
                 '<div class="member-actions">' + actionBtns + '</div>';
-            list.appendChild(div);
-        });
+            return div;
+        }
+
+        function updateMemberItem(el, m) {
+            // Update avatar if name changed
+            const avatar = el.querySelector('.member-avatar');
+            if (avatar) {
+                const newInitial = (m.username || '?').charAt(0).toUpperCase();
+                if (avatar.textContent !== newInitial) {
+                    avatar.textContent = newInitial;
+                }
+                avatar.className = 'member-avatar' + (m.role === 'owner' ? ' owner' : '');
+            }
+            const nameEl = el.querySelector('.member-name');
+            if (nameEl && nameEl.textContent !== m.username) {
+                nameEl.textContent = escapeHtml(m.username);
+            }
+            const roleEl = el.querySelector('.member-role');
+            if (m.role === 'owner' && !roleEl) {
+                const div = el.querySelector('div');
+                if (div) {
+                    const role = document.createElement('div');
+                    role.className = 'member-role';
+                    role.textContent = 'Owner';
+                    div.appendChild(role);
+                }
+            } else if (m.role !== 'owner' && roleEl) {
+                roleEl.remove();
+            }
+            // Update kick/ban buttons based on current permissions
+            if (m.id === user.id) return; // Don't show actions for ourselves
+            const actionsEl = el.querySelector('.member-actions');
+            if (!actionsEl) return;
+            const shouldShowActions = isOwner && m.role !== 'owner';
+            const hasButtons = actionsEl.querySelector('.btn-kick') !== null;
+            if (shouldShowActions && !hasButtons) {
+                actionsEl.innerHTML =
+                    '<button class="btn-kick" onclick="kickMember(\'' + m.id + '\', \'' + escapeHtml(m.username) + '\')" title="Kick">&#10005;</button>' +
+                    '<button class="btn-ban" onclick="banMember(\'' + m.id + '\', \'' + escapeHtml(m.username) + '\')" title="Ban">&#9888;</button>';
+            } else if (!shouldShowActions && hasButtons) {
+                actionsEl.innerHTML = '';
+            }
+        }
+
+        syncList(list, members, m => m.id, createMemberItem, updateMemberItem);
     } catch (err) {
         console.error('Failed to load members:', err);
     }
@@ -1170,10 +1425,21 @@ async function leaveServer() {
             currentServerId = null;
             currentChannelId = null;
             document.getElementById('server-name').textContent = '';
-            document.getElementById('channel-list').innerHTML = '<div class="channel-item" style="color:#666;cursor:default">Select a server</div>';
+
+            // Atomic replace to avoid flicker
+            const cl = document.getElementById('channel-list');
+            const placeholder = document.createElement('div');
+            placeholder.className = 'channel-item';
+            placeholder.style.cssText = 'color:#666;cursor:default';
+            placeholder.textContent = 'Select a server';
+            cl.replaceChildren(placeholder);
+
             document.getElementById('channel-name').textContent = 'Select a channel';
-            document.getElementById('message-list').innerHTML = '<div class="welcome">' +
-                (data.server_deleted ? 'Server has been deleted' : 'Select a server and channel to start chatting') + '</div>';
+            const ml = document.getElementById('message-list');
+            const welcome = document.createElement('div');
+            welcome.className = 'welcome';
+            welcome.textContent = data.server_deleted ? 'Server has been deleted' : 'Select a server and channel to start chatting';
+            ml.replaceChildren(welcome);
             document.getElementById('message-input').disabled = true;
             document.getElementById('send-btn').disabled = true;
             await loadServers();
@@ -1645,6 +1911,43 @@ async function declineFriendRequest(requestId) {
             loadFriendRequestBadge();
         }
     } catch (_) {}
+}
+
+// --- Flicker-Free Incremental DOM Syncing ---
+
+function syncList(container, items, getId, createEl, onUpdate) {
+    // Build map of existing elements keyed by data-id
+    const existing = new Map();
+    for (const child of container.children) {
+        const id = child.dataset?.id;
+        if (id) existing.set(id, child);
+    }
+
+    const newIds = new Set(items.map(getId));
+
+    // Remove items no longer in the list
+    for (const [id, el] of existing) {
+        if (!newIds.has(id)) {
+            el.remove();
+        }
+    }
+
+    // Build fragment in correct order, reusing existing DOM elements
+    const frag = document.createDocumentFragment();
+    for (const item of items) {
+        const id = getId(item);
+        let el = existing.get(id);
+        if (!el) {
+            el = createEl(item);
+            el.dataset.id = id;
+        } else if (onUpdate) {
+            onUpdate(el, item);
+        }
+        frag.appendChild(el);
+    }
+
+    // Atomic replace — container is never empty during update
+    container.replaceChildren(frag);
 }
 
 // --- Helpers ---

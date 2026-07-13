@@ -303,6 +303,10 @@ body {
     padding: 2%;
 }
 
+#message-list, #channel-list, #member-list, #server-list {
+    transition: opacity 0.12s ease;
+}
+
 .channel-item {
     padding: clamp(8px, 1.5vw, 10px) clamp(8px, 2vw, 12px);
     border-radius: clamp(4px, 1vw, 6px);
