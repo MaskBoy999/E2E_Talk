@@ -94,8 +94,8 @@ body {
     border: 1px solid var(--bg-border);
     border-radius: clamp(6px, 1.5vw, 8px);
     background: var(--bg-primary);
-    overflow: hidden;
     transition: border-color 0.15s ease;
+    min-width: 0;
 }
 
 .auth-input-row:focus-within {
@@ -1187,6 +1187,23 @@ body {
     .create-channel-btn {
         margin-bottom: clamp(4px, 1vw, 8px);
     }
+
+    .toggle-visibility-btn {
+        width: 40px;
+        height: 40px;
+        font-size: 17px;
+        border-radius: 0 5px 5px 0;
+    }
+
+    .auth-input-row .toggle-visibility-btn {
+        padding: 8px 10px;
+        font-size: 17px;
+        border-radius: 0 5px 5px 0;
+    }
+
+    .modal-content {
+        max-width: min(400px, 92vw);
+    }
 }
 
 /* ===== Very small screens: 380px and below ===== */
@@ -1205,6 +1222,19 @@ body {
     .message .header {
         flex-direction: column;
         gap: 2px;
+    }
+
+    .toggle-visibility-btn {
+        width: 36px;
+        height: 36px;
+        font-size: 16px;
+        border-radius: 0 4px 4px 0;
+    }
+
+    .auth-input-row .toggle-visibility-btn {
+        padding: 8px 10px;
+        font-size: 16px;
+        border-radius: 0 4px 4px 0;
     }
 }
 
@@ -1599,8 +1629,8 @@ body {
     border: 1px solid var(--bg-border);
     border-radius: 8px;
     background: var(--bg-primary);
-    overflow: hidden;
     transition: border-color 0.15s ease;
+    min-width: 0;
 }
 
 .code-input-row:focus-within {
@@ -1646,7 +1676,7 @@ body {
     display: flex;
     align-items: center;
     justify-content: center;
-    border-radius: 0;
+    border-radius: 0 7px 7px 0;
     box-sizing: border-box;
 }
 
