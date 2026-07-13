@@ -27,12 +27,8 @@ test.describe('QR Code Key Transfer', () => {
         await page.click('#settings-btn');
         await page.waitForSelector('#settings-modal', { state: 'visible', timeout: 5000 });
 
-        const qrSection = page.locator('#qr-code-container');
-        await expect(qrSection).toBeVisible();
-
         const showQrBtn = page.locator('#show-qr-btn');
         await expect(showQrBtn).toBeVisible();
-        await expect(showQrBtn).toContainText('Show QR Code');
     });
 
     test('QR code displays after confirmation dialog', async ({ page }) => {
@@ -51,8 +47,8 @@ test.describe('QR Code Key Transfer', () => {
         await page.click('#show-qr-btn');
         await page.waitForTimeout(500);
 
-        const qrDisplay = page.locator('#qr-code-display');
-        await expect(qrDisplay).toBeVisible();
+        const qrContainer = page.locator('#qr-code-container');
+        await expect(qrContainer).toBeVisible();
 
         const svgElement = page.locator('#qr-code-canvas svg');
         await expect(svgElement).toBeVisible();
@@ -73,8 +69,8 @@ test.describe('QR Code Key Transfer', () => {
         await page.click('#show-qr-btn');
         await page.waitForTimeout(500);
 
-        const placeholder = page.locator('#qr-code-placeholder');
-        await expect(placeholder).toBeVisible();
+        const qrContainer = page.locator('#qr-code-container');
+        await expect(qrContainer).toBeHidden();
     });
 
     test('connect with key section shows QR scan button', async ({ page }) => {

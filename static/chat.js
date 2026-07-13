@@ -118,16 +118,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // QR Code generation for key transfer
         const showQrBtn = document.getElementById('show-qr-btn');
-        const qrDisplay = document.getElementById('qr-code-display');
-        const qrPlaceholder = document.getElementById('qr-code-placeholder');
+        const qrContainer = document.getElementById('qr-code-container');
         const qrCanvas = document.getElementById('qr-code-canvas');
         const hideQrBtn = document.getElementById('hide-qr-btn');
 
         if (showQrBtn) {
             showQrBtn.addEventListener('click', () => {
                 if (!confirm('Anyone who photographs this QR code gains full control of your account. Continue?')) return;
-                qrPlaceholder.style.display = 'none';
-                qrDisplay.style.display = 'block';
+                qrContainer.style.display = 'block';
                 qrCanvas.innerHTML = '';
                 try {
                     const qr = qrcode(0, 'M');
@@ -143,8 +141,32 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (hideQrBtn) {
             hideQrBtn.addEventListener('click', () => {
-                qrDisplay.style.display = 'none';
-                qrPlaceholder.style.display = 'block';
+                qrContainer.style.display = 'none';
+            });
+        }
+
+        // Export QR as PNG
+        const exportQrBtn = document.getElementById('export-qr-btn');
+        if (exportQrBtn) {
+            exportQrBtn.addEventListener('click', () => {
+                const svgEl = qrCanvas.querySelector('svg');
+                if (!svgEl) return;
+                const svgData = new XMLSerializer().serializeToString(svgEl);
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+                const img = new Image();
+                img.onload = () => {
+                    canvas.width = img.width;
+                    canvas.height = img.height;
+                    ctx.fillStyle = '#ffffff';
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    ctx.drawImage(img, 0, 0);
+                    const link = document.createElement('a');
+                    link.download = 'e2e-chat-local-key-qr.png';
+                    link.href = canvas.toDataURL('image/png');
+                    link.click();
+                };
+                img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svgData)));
             });
         }
     }
@@ -228,6 +250,21 @@ document.addEventListener('DOMContentLoaded', () => {
         showAddServerMenu();
     });
 
+    // Server choice modal buttons
+    document.getElementById('cancel-server-choice').addEventListener('click', () => hideModal('server-choice-modal'));
+    document.getElementById('choice-create-server').addEventListener('click', () => {
+        hideModal('server-choice-modal');
+        document.getElementById('create-server-modal').style.display = 'flex';
+        document.getElementById('new-server-name').value = '';
+        document.getElementById('new-server-name').focus();
+    });
+    document.getElementById('choice-join-server').addEventListener('click', () => {
+        hideModal('server-choice-modal');
+        document.getElementById('join-server-modal').style.display = 'flex';
+        document.getElementById('invite-code-input').value = '';
+        document.getElementById('invite-code-input').focus();
+    });
+
     document.getElementById('cancel-create-server').addEventListener('click', () => hideModal('create-server-modal'));
     document.getElementById('confirm-create-server').addEventListener('click', createServer);
     document.getElementById('new-server-name').addEventListener('keypress', (e) => {
@@ -239,6 +276,18 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('invite-code-input').addEventListener('keypress', (e) => {
         if (e.key === 'Enter') joinServer();
     });
+
+    // Toggle visibility for invite code input
+    const toggleInviteCodeVis = document.getElementById('toggle-invite-code-visibility');
+    const inviteCodeInput = document.getElementById('invite-code-input');
+    if (toggleInviteCodeVis && inviteCodeInput) {
+        let inviteCodeVisible = false;
+        toggleInviteCodeVis.addEventListener('click', () => {
+            inviteCodeVisible = !inviteCodeVisible;
+            inviteCodeInput.type = inviteCodeVisible ? 'text' : 'password';
+            toggleInviteCodeVis.innerHTML = inviteCodeVisible ? '&#128064;' : '&#128065;';
+        });
+    }
 
     document.getElementById('close-invite').addEventListener('click', () => hideModal('invite-modal'));
     document.getElementById('invite-btn').addEventListener('click', showInviteModal);
@@ -268,6 +317,66 @@ document.addEventListener('DOMContentLoaded', () => {
         if (e.key === 'Enter') sendFriendRequest();
     });
     document.getElementById('close-friend-requests').addEventListener('click', () => hideModal('friend-requests-modal'));
+
+    // Toggle visibility for friend code input
+    const toggleFriendCodeVis = document.getElementById('toggle-friend-code-visibility');
+    const friendCodeInput = document.getElementById('friend-code-input');
+    if (toggleFriendCodeVis && friendCodeInput) {
+        let friendCodeVisible = false;
+        toggleFriendCodeVis.addEventListener('click', () => {
+            friendCodeVisible = !friendCodeVisible;
+            friendCodeInput.type = friendCodeVisible ? 'text' : 'password';
+            toggleFriendCodeVis.innerHTML = friendCodeVisible ? '&#128064;' : '&#128065;';
+        });
+    }
+
+    // Import QR for friend code
+    const friendImportQrBtn = document.getElementById('friend-import-qr-btn');
+    const friendQrFileInput = document.getElementById('friend-qr-file-input');
+    if (friendImportQrBtn && friendQrFileInput) {
+        friendImportQrBtn.addEventListener('click', () => friendQrFileInput.click());
+        friendQrFileInput.addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            try {
+                const decoded = await decodeQrFromFile(file);
+                if (decoded) {
+                    const input = document.getElementById('friend-code-input');
+                    input.type = 'password';
+                    input.value = decoded;
+                } else {
+                    alert('Could not read QR code from image.');
+                }
+            } catch (err) {
+                alert('Error reading QR code: ' + err.message);
+            }
+            friendQrFileInput.value = '';
+        });
+    }
+
+    // Import QR for join server
+    const joinImportQrBtn = document.getElementById('join-import-qr-btn');
+    const joinQrFileInput = document.getElementById('join-qr-file-input');
+    if (joinImportQrBtn && joinQrFileInput) {
+        joinImportQrBtn.addEventListener('click', () => joinQrFileInput.click());
+        joinQrFileInput.addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            try {
+                const decoded = await decodeQrFromFile(file);
+                if (decoded) {
+                    const input = document.getElementById('invite-code-input');
+                    input.type = 'password';
+                    input.value = decoded;
+                } else {
+                    alert('Could not read QR code from image.');
+                }
+            } catch (err) {
+                alert('Error reading QR code: ' + err.message);
+            }
+            joinQrFileInput.value = '';
+        });
+    }
 
     document.getElementById('members-panel').classList.toggle('open', membersPanelOpen);
 
@@ -828,6 +937,15 @@ function renderDmSidebar() {
     html += '<span class="key-value" id="my-friend-code">••••••••••••••••</span>';
     html += '<button class="key-action-btn" id="toggle-friend-code-btn" title="Show/Hide">&#128065;</button>';
     html += '<button class="key-action-btn" id="copy-friend-code-btn" title="Copy">&#128203;</button>';
+    html += '<button class="key-action-btn" id="friend-qr-btn" title="Show QR Code">&#128247;</button>';
+    html += '</div>';
+    html += '<div id="friend-qr-container" class="qr-code-container" style="display:none;margin-top:10px;margin-bottom:10px;">';
+    html += '<div id="friend-qr-canvas" class="qr-code-canvas"></div>';
+    html += '<p class="qr-warning">⚠️ This shows your friend code. Only show to trusted people.</p>';
+    html += '<div class="qr-actions">';
+    html += '<button id="hide-friend-qr-btn" class="key-action-btn">Hide QR Code</button>';
+    html += '<button id="export-friend-qr-btn" class="key-action-btn qr-export-btn">⬇ Export QR</button>';
+    html += '</div>';
     html += '</div>';
     html += '<div class="dm-actions">';
     html += '<button class="dm-action-btn" id="add-friend-btn">+ Add Friend</button>';
@@ -1240,16 +1358,7 @@ async function unbanUser(targetUserId, username) {
 // --- Server Actions ---
 
 function showAddServerMenu() {
-    const choice = confirm('Click OK to CREATE a new server\nClick Cancel to JOIN with an invite code');
-    if (choice) {
-        document.getElementById('create-server-modal').style.display = 'flex';
-        document.getElementById('new-server-name').value = '';
-        document.getElementById('new-server-name').focus();
-    } else {
-        document.getElementById('join-server-modal').style.display = 'flex';
-        document.getElementById('invite-code-input').value = '';
-        document.getElementById('invite-code-input').focus();
-    }
+    document.getElementById('server-choice-modal').style.display = 'flex';
 }
 
 async function createServer() {
@@ -1343,8 +1452,13 @@ async function showInviteModal() {
     display.dataset.value = currentInviteCode;
     display.dataset.visible = '0';
 
+    // Hide QR container when opening
+    const inviteQrContainer = document.getElementById('invite-qr-container');
+    if (inviteQrContainer) inviteQrContainer.style.display = 'none';
+
     const toggleBtn = document.getElementById('toggle-invite-btn');
     const copyBtn = document.getElementById('copy-invite-btn');
+    const qrBtn = document.getElementById('invite-qr-btn');
 
     toggleBtn.onclick = () => {
         const vis = display.dataset.visible === '1';
@@ -1358,6 +1472,58 @@ async function showInviteModal() {
             setTimeout(() => { copyBtn.innerHTML = '&#128203;'; }, 1500);
         });
     };
+
+    // QR Code for invite code
+    if (qrBtn) {
+        qrBtn.onclick = () => {
+            if (!confirm('Anyone who photographs this QR code can join this server. Continue?')) return;
+            inviteQrContainer.style.display = 'block';
+            const inviteQrCanvas = document.getElementById('invite-qr-canvas');
+            inviteQrCanvas.innerHTML = '';
+            try {
+                const qr = qrcode(0, 'M');
+                qr.addData(currentInviteCode);
+                qr.make();
+                inviteQrCanvas.innerHTML = qr.createSvgTag({ cellSize: 3, margin: 4, alt: 'Invite code QR code', title: 'Scan to join server' });
+            } catch (e) {
+                console.error('QR generation failed:', e);
+                inviteQrCanvas.innerHTML = '<p style="color:#f44336">Failed to generate QR code</p>';
+            }
+        };
+    }
+
+    // Hide invite QR button
+    const hideInviteQrBtn = document.getElementById('hide-invite-qr-btn');
+    if (hideInviteQrBtn) {
+        hideInviteQrBtn.onclick = () => {
+            inviteQrContainer.style.display = 'none';
+        };
+    }
+
+    // Export invite QR as PNG
+    const exportInviteQrBtn = document.getElementById('export-invite-qr-btn');
+    if (exportInviteQrBtn) {
+        exportInviteQrBtn.onclick = () => {
+            const svgEl = document.getElementById('invite-qr-canvas').querySelector('svg');
+            if (!svgEl) return;
+            const svgData = new XMLSerializer().serializeToString(svgEl);
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            const img = new Image();
+            img.onload = () => {
+                canvas.width = img.width;
+                canvas.height = img.height;
+                ctx.fillStyle = '#ffffff';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.drawImage(img, 0, 0);
+                const link = document.createElement('a');
+                link.download = 'e2e-chat-invite-code-qr.png';
+                link.href = canvas.toDataURL('image/png');
+                link.click();
+            };
+            img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svgData)));
+        };
+    }
 
     document.getElementById('invite-modal').style.display = 'flex';
 }
@@ -1383,6 +1549,9 @@ async function regenerateInvite() {
             display.dataset.value = inviteCode;
             display.dataset.visible = '0';
             display.textContent = '••••••••••••••••';
+            // Hide QR container since the code changed
+            const inviteQrContainer = document.getElementById('invite-qr-container');
+            if (inviteQrContainer) inviteQrContainer.style.display = 'none';
         } else {
             const err = await res.json();
             alert(err.error || 'Failed to regenerate invite');
@@ -1430,6 +1599,8 @@ async function loadMyFriendCode() {
         }
         const toggleBtn = document.getElementById('toggle-friend-code-btn');
         const copyBtn = document.getElementById('copy-friend-code-btn');
+        const qrBtn = document.getElementById('friend-qr-btn');
+        const friendQrContainer = document.getElementById('friend-qr-container');
         if (toggleBtn && copyBtn && el) {
             toggleBtn.onclick = () => {
                 const vis = el.dataset.visible === '1';
@@ -1444,6 +1615,59 @@ async function loadMyFriendCode() {
                     setTimeout(() => { copyBtn.innerHTML = '&#128203;'; }, 1500);
                 });
             };
+            // QR Code for friend code
+            if (qrBtn && friendQrContainer) {
+                qrBtn.onclick = () => {
+                    if (!el.dataset.value) {
+                        alert('No friend code available. Please re-register.');
+                        return;
+                    }
+                    if (!confirm('Anyone who photographs this QR code can send you a friend request. Continue?')) return;
+                    friendQrContainer.style.display = 'block';
+                    const friendQrCanvas = document.getElementById('friend-qr-canvas');
+                    friendQrCanvas.innerHTML = '';
+                    try {
+                        const qr = qrcode(0, 'M');
+                        qr.addData(el.dataset.value);
+                        qr.make();
+                        friendQrCanvas.innerHTML = qr.createSvgTag({ cellSize: 3, margin: 4, alt: 'Friend code QR code', title: 'Scan to add as friend' });
+                    } catch (e) {
+                        console.error('QR generation failed:', e);
+                        friendQrCanvas.innerHTML = '<p style="color:#f44336">Failed to generate QR code</p>';
+                    }
+                };
+            }
+            // Hide friend QR
+            const hideFriendQrBtn = document.getElementById('hide-friend-qr-btn');
+            if (hideFriendQrBtn) {
+                hideFriendQrBtn.onclick = () => {
+                    friendQrContainer.style.display = 'none';
+                };
+            }
+            // Export friend QR as PNG
+            const exportFriendQrBtn = document.getElementById('export-friend-qr-btn');
+            if (exportFriendQrBtn) {
+                exportFriendQrBtn.onclick = () => {
+                    const svgEl = document.getElementById('friend-qr-canvas').querySelector('svg');
+                    if (!svgEl) return;
+                    const svgData = new XMLSerializer().serializeToString(svgEl);
+                    const canvas = document.createElement('canvas');
+                    const ctx = canvas.getContext('2d');
+                    const img = new Image();
+                    img.onload = () => {
+                        canvas.width = img.width;
+                        canvas.height = img.height;
+                        ctx.fillStyle = '#ffffff';
+                        ctx.fillRect(0, 0, canvas.width, canvas.height);
+                        ctx.drawImage(img, 0, 0);
+                        const link = document.createElement('a');
+                        link.download = 'e2e-chat-friend-code-qr.png';
+                        link.href = canvas.toDataURL('image/png');
+                        link.click();
+                    };
+                    img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svgData)));
+                };
+            }
         }
     } catch (_) {}
     loadFriendRequestBadge();
@@ -1579,4 +1803,35 @@ function escapeHtml(str) {
     const div = document.createElement('div');
     div.textContent = str;
     return div.innerHTML;
+}
+
+// --- QR Code Decode Helper ---
+async function decodeQrFromFile(file) {
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        const url = URL.createObjectURL(file);
+        img.onload = () => {
+            const canvas = document.createElement('canvas');
+            canvas.width = img.width;
+            canvas.height = img.height;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0);
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            URL.revokeObjectURL(url);
+            if (typeof jsQR !== 'undefined') {
+                const code = jsQR(imageData.data, imageData.width, imageData.height);
+                resolve(code ? code.data : null);
+            } else if ('BarcodeDetector' in window) {
+                const detector = new BarcodeDetector({ formats: ['qr_code'] });
+                detector.detect(canvas).then(barcodes => {
+                    resolve(barcodes.length > 0 ? barcodes[0].rawValue : null);
+                }).catch(() => resolve(null));
+            } else {
+                reject(new Error('QR code scanning not supported in this browser'));
+            }
+        };
+        img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Failed to load image'));
+        };
+        img.src = url;
+    });
 }

@@ -16,6 +16,160 @@ function generateCode(len: number): string {
 
 test.describe('E2E Chat', () => {
 
+    test('add server button shows in-page choice modal, not browser confirm', async ({ page }) => {
+        const ts = Date.now();
+        const username = 'choicemodal_' + ts;
+
+        // Register
+        await page.goto(`${BASE}/login.html`);
+        await page.click('#show-register');
+        await page.fill('#register-username', username);
+        await page.fill('#register-password', 'password123');
+        await page.click('#register-form button[type="submit"]');
+        await page.waitForURL('**/index.html', { timeout: 10000 });
+
+        // Intercept any native dialogs - they should NOT appear
+        let nativeDialogShown = false;
+        page.on('dialog', async dialog => {
+            nativeDialogShown = true;
+            await dialog.accept();
+        });
+
+        // Click + button
+        await page.click('#add-server-btn');
+
+        // The in-page server choice modal should appear
+        await page.waitForSelector('#server-choice-modal', { state: 'visible', timeout: 5000 });
+        const choiceModalVisible = await page.locator('#server-choice-modal').isVisible();
+        expect(choiceModalVisible).toBeTruthy();
+
+        // Verify both choice buttons are visible
+        await expect(page.locator('#choice-create-server')).toBeVisible();
+        await expect(page.locator('#choice-join-server')).toBeVisible();
+
+        // No native browser confirm should have been shown
+        expect(nativeDialogShown).toBeFalsy();
+
+        // Cancel should close it
+        await page.click('#cancel-server-choice');
+        await expect(page.locator('#server-choice-modal')).toBeHidden();
+    });
+
+    test('server choice modal: create button opens create-server modal', async ({ page }) => {
+        const ts = Date.now();
+        const username = 'choicecreate_' + ts;
+
+        await page.goto(`${BASE}/login.html`);
+        await page.click('#show-register');
+        await page.fill('#register-username', username);
+        await page.fill('#register-password', 'password123');
+        await page.click('#register-form button[type="submit"]');
+        await page.waitForURL('**/index.html', { timeout: 10000 });
+
+        await page.click('#add-server-btn');
+        await page.waitForSelector('#server-choice-modal', { state: 'visible', timeout: 5000 });
+        await page.click('#choice-create-server');
+
+        await expect(page.locator('#server-choice-modal')).toBeHidden();
+        await page.waitForSelector('#create-server-modal', { state: 'visible', timeout: 5000 });
+        const input = page.locator('#new-server-name');
+        await expect(input).toBeVisible();
+        // Input should be focused
+        const isFocused = await page.evaluate(() => document.activeElement?.id === 'new-server-name');
+        expect(isFocused).toBeTruthy();
+    });
+
+    test('server choice modal: join button opens join-server modal', async ({ page }) => {
+        const ts = Date.now();
+        const username = 'choicejoin_' + ts;
+
+        await page.goto(`${BASE}/login.html`);
+        await page.click('#show-register');
+        await page.fill('#register-username', username);
+        await page.fill('#register-password', 'password123');
+        await page.click('#register-form button[type="submit"]');
+        await page.waitForURL('**/index.html', { timeout: 10000 });
+
+        await page.click('#add-server-btn');
+        await page.waitForSelector('#server-choice-modal', { state: 'visible', timeout: 5000 });
+        await page.click('#choice-join-server');
+
+        await expect(page.locator('#server-choice-modal')).toBeHidden();
+        await page.waitForSelector('#join-server-modal', { state: 'visible', timeout: 5000 });
+        const input = page.locator('#invite-code-input');
+        await expect(input).toBeVisible();
+    });
+
+    test('invite code input starts hidden (password type) with toggle', async ({ page }) => {
+        const ts = Date.now();
+        const username = 'codetoggle_' + ts;
+
+        await page.goto(`${BASE}/login.html`);
+        await page.click('#show-register');
+        await page.fill('#register-username', username);
+        await page.fill('#register-password', 'password123');
+        await page.click('#register-form button[type="submit"]');
+        await page.waitForURL('**/index.html', { timeout: 10000 });
+
+        // Open join server modal via the new choice modal
+        await page.click('#add-server-btn');
+        await page.waitForSelector('#server-choice-modal', { state: 'visible', timeout: 5000 });
+        await page.click('#choice-join-server');
+        await page.waitForSelector('#join-server-modal', { state: 'visible', timeout: 5000 });
+
+        // Input should be password type by default
+        const inputType = await page.locator('#invite-code-input').getAttribute('type');
+        expect(inputType).toBe('password');
+
+        // Toggle visibility button should exist
+        await expect(page.locator('#toggle-invite-code-visibility')).toBeVisible();
+
+        // Click toggle to show
+        await page.click('#toggle-invite-code-visibility');
+        const inputTypeAfter = await page.locator('#invite-code-input').getAttribute('type');
+        expect(inputTypeAfter).toBe('text');
+
+        // Click toggle again to hide
+        await page.click('#toggle-invite-code-visibility');
+        const inputTypeHidden = await page.locator('#invite-code-input').getAttribute('type');
+        expect(inputTypeHidden).toBe('password');
+    });
+
+    test('friend code input starts hidden (password type) with toggle', async ({ page }) => {
+        const ts = Date.now();
+        const username = 'friendtoggle_' + ts;
+
+        await page.goto(`${BASE}/login.html`);
+        await page.click('#show-register');
+        await page.fill('#register-username', username);
+        await page.fill('#register-password', 'password123');
+        await page.click('#register-form button[type="submit"]');
+        await page.waitForURL('**/index.html', { timeout: 10000 });
+
+        // Navigate to DM view to find Add Friend button
+        await page.click('#dm-strip-btn');
+        await page.waitForTimeout(1500);
+        await page.click('#add-friend-btn');
+        await page.waitForSelector('#add-friend-modal', { state: 'visible', timeout: 5000 });
+
+        // Input should be password type by default
+        const inputType = await page.locator('#friend-code-input').getAttribute('type');
+        expect(inputType).toBe('password');
+
+        // Toggle visibility button should exist
+        await expect(page.locator('#toggle-friend-code-visibility')).toBeVisible();
+
+        // Click toggle to show
+        await page.click('#toggle-friend-code-visibility');
+        const inputTypeAfter = await page.locator('#friend-code-input').getAttribute('type');
+        expect(inputTypeAfter).toBe('text');
+
+        // Click toggle again to hide
+        await page.click('#toggle-friend-code-visibility');
+        const inputTypeHidden = await page.locator('#friend-code-input').getAttribute('type');
+        expect(inputTypeHidden).toBe('password');
+    });
+
     test('login page loads', async ({ page }) => {
         await page.goto(`${BASE}/login.html`);
         await expect(page.locator('h1').first()).toContainText('E2E Chat');
@@ -207,11 +361,9 @@ test.describe('E2E Chat', () => {
         expect(body2.token).toBeTruthy();
 
         // === User1 creates server via UI ===
-        // The "+" button uses a native confirm() dialog: OK=create, Cancel=join
-        page.on('dialog', async dialog => {
-            await dialog.accept();
-        });
         await page.click('#add-server-btn');
+        await page.waitForSelector('#server-choice-modal', { state: 'visible', timeout: 5000 });
+        await page.click('#choice-create-server');
         await page.waitForSelector('#create-server-modal', { state: 'visible', timeout: 5000 });
         await page.fill('#new-server-name', 'UI Test Server');
         await page.click('#confirm-create-server');
@@ -256,11 +408,10 @@ test.describe('E2E Chat', () => {
         await page2reg.goto(`${BASE}/index.html`);
         await page2reg.waitForSelector('.add-server', { timeout: 10000 });
 
-        // Click "+" to join server - need to handle the confirm() dialog (Cancel = join)
-        page2reg.on('dialog', async dialog => {
-            await dialog.dismiss();
-        });
+        // Click "+" to join server
         await page2reg.click('#add-server-btn');
+        await page2reg.waitForSelector('#server-choice-modal', { state: 'visible', timeout: 5000 });
+        await page2reg.click('#choice-join-server');
         await page2reg.waitForSelector('#join-server-modal', { state: 'visible', timeout: 5000 });
         await page2reg.fill('#invite-code-input', inviteCode!);
         await page2reg.click('#confirm-join-server');

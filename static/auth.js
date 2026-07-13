@@ -5,6 +5,25 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
     }
 
+    // --- Toggle visibility for password inputs ---
+    function setupToggleVisibility(btnId, inputId) {
+        const btn = document.getElementById(btnId);
+        const input = document.getElementById(inputId);
+        if (btn && input) {
+            let visible = false;
+            btn.addEventListener('click', () => {
+                visible = !visible;
+                input.type = visible ? 'text' : 'password';
+                btn.innerHTML = visible ? '&#128064;' : '&#128065;';
+                btn.classList.toggle('active', visible);
+            });
+        }
+    }
+    setupToggleVisibility('toggle-login-password', 'login-password');
+    setupToggleVisibility('toggle-register-password', 'register-password');
+    setupToggleVisibility('toggle-connect-password', 'connect-password');
+    setupToggleVisibility('toggle-connect-key', 'connect-key-input');
+
     const loginForm = document.getElementById('login-form');
     const registerForm = document.getElementById('register-form');
     const showRegister = document.getElementById('show-register');
@@ -245,6 +264,83 @@ document.addEventListener('DOMContentLoaded', () => {
         stopScanBtn.addEventListener('click', stopQrScanner);
     }
 
+    // --- QR Import from Image File ---
+    const importQrBtn = document.getElementById('import-qr-btn');
+    const qrFileInput = document.getElementById('qr-file-input');
+
+    if (importQrBtn && qrFileInput) {
+        importQrBtn.addEventListener('click', () => {
+            qrFileInput.click();
+        });
+
+        qrFileInput.addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            
+            try {
+                const img = new Image();
+                const url = URL.createObjectURL(file);
+                
+                img.onload = () => {
+                    const canvas = document.createElement('canvas');
+                    canvas.width = img.width;
+                    canvas.height = img.height;
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0);
+                    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                    
+                    // Try to decode QR code using jsQR or BarcodeDetector
+                    let decoded = null;
+                    
+                    if (typeof jsQR !== 'undefined') {
+                        const code = jsQR(imageData.data, imageData.width, imageData.height);
+                        if (code) decoded = code.data;
+                    } else if ('BarcodeDetector' in window) {
+                        // Fallback to native BarcodeDetector
+                        try {
+                            const detector = new BarcodeDetector({ formats: ['qr_code'] });
+                            const canvas2 = document.createElement('canvas');
+                            canvas2.width = img.width;
+                            canvas2.height = img.height;
+                            canvas2.getContext('2d').drawImage(img, 0, 0);
+                            detector.detect(canvas2).then(barcodes => {
+                                if (barcodes.length > 0) {
+                                    document.getElementById('connect-key-input').value = barcodes[0].rawValue;
+                                    connectKeyError.textContent = 'QR code imported successfully!';
+                                    connectKeyError.style.color = '#4caf50';
+                                    connectKeyError.style.display = 'block';
+                                }
+                            });
+                        } catch (err) {
+                            connectKeyError.textContent = 'Could not read QR code from image.';
+                            connectKeyError.style.display = 'block';
+                        }
+                    }
+                    
+                    URL.revokeObjectURL(url);
+                    
+                    if (decoded) {
+                        document.getElementById('connect-key-input').value = decoded;
+                        connectKeyError.textContent = 'QR code imported successfully!';
+                        connectKeyError.style.color = '#4caf50';
+                        connectKeyError.style.display = 'block';
+                    } else if (!('BarcodeDetector' in window)) {
+                        connectKeyError.textContent = 'Could not read QR code. Please ensure the image contains a valid QR code.';
+                        connectKeyError.style.display = 'block';
+                    }
+                };
+                
+                img.src = url;
+            } catch (err) {
+                connectKeyError.textContent = 'Error reading file. Please try again.';
+                connectKeyError.style.display = 'block';
+            }
+            
+            // Reset file input
+            qrFileInput.value = '';
+        });
+    }
+
     showConnectKey.addEventListener('click', (e) => {
         e.preventDefault();
         const isVisible = connectKeySection.style.display !== 'none';
@@ -253,8 +349,10 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!isVisible) {
             loginForm.style.display = 'none';
             registerForm.style.display = 'none';
+            showConnectKey.textContent = '\u2190 Go Back';
         } else {
             loginForm.style.display = 'block';
+            showConnectKey.textContent = 'Connect with Local Key';
         }
     });
 
