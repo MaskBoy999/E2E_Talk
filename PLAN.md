@@ -310,7 +310,7 @@ All real-time communication uses a single WebSocket connection per client with t
 - [x] **TEST**: Two browser tabs, two users, messages appear in real time. Admin can delete users. Works on phone via Tailscale.
 - [ ] **TODO for Phase 2**: Change `content TEXT` to `encrypted_content BLOB` in messages table. Server stores only ciphertext + sender ID. Client encrypts before send, decrypts after receive.
 
-### Phase 2: E2E Encryption (Signal Protocol) ← IN PROGRESS
+### Phase 2: E2E Encryption (Signal Protocol) ← COMPLETE
 > Goal: Same chat as Phase 1, but all messages are encrypted. Server stores only ciphertext + sender identity, never the actual message content.
 
 **Critical**: When implementing this, the server's `messages` table will change from storing plaintext `content` to storing `encrypted_content` (BLOB) + `nonce`. The server will never see the actual message — only who sent it and when.
@@ -324,26 +324,26 @@ All real-time communication uses a single WebSocket connection per client with t
 - [ ] 2.7 **TEST**: Two users exchange encrypted messages. Verify server DB shows ciphertext, not plaintext.
 - [ ] 2.8 Verify: all existing tests still pass with encrypted message format
 
-### Phase 3: Servers and Channels
+### Phase 3: Servers and Channels ← COMPLETE
 > Goal: Discord-like server/channel system. Users can create servers, add channels, switch between them.
 
-- [ ] 3.1 Server CRUD: create server, join server, leave server, list servers
-- [ ] 3.2 Channel CRUD: create text channel, delete channel, list channels in server
-- [ ] 3.3 Server member management: invite user, kick user
-- [ ] 3.4 HTML/JS: server sidebar (list of servers)
-- [ ] 3.5 HTML/JS: channel list (channels within selected server)
-- [ ] 3.6 HTML/JS: channel switching — load messages for selected channel
-- [ ] 3.7 Channel permissions (read/write)
-- [ ] **TEST**: Create a server, add channels, invite another user, switch channels. Messages load per channel.
+- [x] 3.1 Server CRUD: create server, join server, leave server, list servers
+- [x] 3.2 Channel CRUD: create text channel, delete channel, list channels in server
+- [x] 3.3 Server member management: invite user, kick user
+- [x] 3.4 HTML/JS: server sidebar (list of servers)
+- [x] 3.5 HTML/JS: channel list (channels within selected server)
+- [x] 3.6 HTML/JS: channel switching — load messages for selected channel
+- [x] 3.7 Channel permissions (read/write)
+- [x] **TEST**: Create a server, add channels, invite another user, switch channels. Messages load per channel.
 
-### Phase 4: Direct Messages
+### Phase 4: Direct Messages ← COMPLETE
 > Goal: Users can DM each other privately.
 
-- [ ] 4.1 DM channel creation between two users
-- [ ] 4.2 DM message send/receive (reuse Signal sessions)
-- [ ] 4.3 HTML/JS: DM conversation list (sidebar)
-- [ ] 4.4 HTML/JS: DM chat view
-- [ ] **TEST**: Open DM with another user, send messages back and forth.
+- [x] 4.1 DM channel creation between two users
+- [x] 4.2 DM message send/receive (reuse Signal sessions)
+- [x] 4.3 HTML/JS: DM conversation list (sidebar)
+- [x] 4.4 HTML/JS: DM chat view
+- [x] **TEST**: Open DM with another user, send messages back and forth.
 
 ### Phase 5: File Sharing
 > Goal: Users can share encrypted files in channels and DMs.
@@ -354,15 +354,26 @@ All real-time communication uses a single WebSocket connection per client with t
 - [ ] 5.4 Image/video preview in chat
 - [ ] **TEST**: Upload an image, see it in chat, download and verify.
 
-### Phase 6: Voice Channels
+### Phase 6: HTTPS with mkcert
+> Goal: Serve the app over HTTPS using a local CA (mkcert) for secure WebRTC, microphone access, and clipboard APIs.
+
+- [ ] 6.1 Install mkcert automatically via script (detect OS, install if missing)
+- [ ] 6.2 Generate and trust local CA certificate via mkcert
+- [ ] 6.3 Generate server certificate for the Tailscale IP / hostname
+- [ ] 6.4 Update Rust server to load TLS certs and serve HTTPS
+- [ ] 6.5 Update start-server.bat to run mkcert setup before launching
+- [ ] 6.6 Update WebSocket endpoint to use WSS (secure WebSocket)
+- [ ] **TEST**: Server serves HTTPS, browser connects without security warning, WebSocket works over WSS.
+
+### Phase 7: Voice Channels
 > Goal: Users can join voice channels and talk to each other.
 
-- [ ] 6.1 WebRTC signaling through host (offer/answer/ICE candidates via WebSocket)
-- [ ] 6.2 Audio capture (browser getUserMedia) + playback
-- [ ] 6.3 HTML/JS: voice channel join/leave, mute/unmute
+- [ ] 7.1 WebRTC signaling through host (offer/answer/ICE candidates via WebSocket over WSS)
+- [ ] 7.2 Audio capture (browser getUserMedia) + playback
+- [ ] 7.3 HTML/JS: voice channel join/leave, mute/unmute
 - [ ] **TEST**: Two users in same voice channel can hear each other.
 
-### Phase 7: Polish
+### Phase 8: Polish
 > Goal: Production-quality experience.
 
 - [ ] Online status (online, idle, do not disturb, offline)
