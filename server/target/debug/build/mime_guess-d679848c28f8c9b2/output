@@ -1,1 +1,0 @@
-cargo:rustc-env=MIME_TYPES_GENERATED_PATH=X:\Documents\GitHub\E2E_Talk\server\target\debug\build\mime_guess-d679848c28f8c9b2\out\mime_types_generated.rs

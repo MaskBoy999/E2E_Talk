@@ -1,0 +1,23 @@
+# Node
+node_modules/
+
+# Server build artifacts
+server/target/
+
+# SQLite database (runtime data + schema auto-created by server on startup)
+server/*.db
+server/*.db-shm
+server/*.db-wal
+
+# Test results
+test-results/
+
+# Debug/log files
+test-debug.txt
+test-out.txt
+server/debug.log
+jwt.txt
+migrations_ran.txt
+
+# Environment files
+.env
