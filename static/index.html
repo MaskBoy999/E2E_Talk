@@ -68,23 +68,9 @@
         </div>
     </div>
 
-    <!-- Create or Join Server Modal (replaces native confirm) -->
-    <div class="modal" id="server-choice-modal" style="display:none">
-        <div class="modal-content" style="text-align:center;max-width:320px;">
-            <h3 style="color:var(--accent);margin-bottom:20px;">Add a Server</h3>
-            <p style="color:var(--text-muted);margin-bottom:20px;font-size:13px;">Create a new server or join an existing one with an invite code.</p>
-            <div style="display:flex;gap:12px;flex-direction:column;">
-                <button id="choice-create-server" class="btn-invite" style="width:100%;padding:12px;font-size:15px;">Create Server</button>
-                <button id="choice-join-server" class="btn-cancel" style="width:100%;padding:12px;font-size:15px;">Join Server</button>
-                <button id="choice-cancel" class="btn-cancel" style="width:100%;padding:10px;font-size:13px;border:1px solid var(--bg-border);margin-top:4px;">Cancel</button>
-            </div>
-        </div>
-    </div>
-
     <!-- Create Server Modal -->
     <div class="modal" id="create-server-modal" style="display:none">
         <div class="modal-content">
-            <h3 style="color:var(--accent);margin-bottom:12px;">Create Server</h3>
             <input type="text" id="new-server-name" placeholder="Server name" maxlength="50" style="width:100%;padding:10px 14px;margin-bottom:16px;border:1px solid #2a2a4a;border-radius:8px;background:#1a1a2e;color:#e0e0e0;font-size:16px;">
             <div class="modal-actions">
                 <button class="btn-cancel" id="cancel-create-server">Cancel</button>
@@ -96,7 +82,6 @@
     <!-- Join Server Modal -->
     <div class="modal" id="join-server-modal" style="display:none">
         <div class="modal-content">
-            <h3 style="color:var(--accent);margin-bottom:12px;">Join Server</h3>
             <input type="text" id="invite-code-input" placeholder="Enter invite code" maxlength="20" style="width:100%;padding:10px 14px;margin-bottom:16px;border:1px solid #2a2a4a;border-radius:8px;background:#1a1a2e;color:#e0e0e0;font-size:16px;">
             <div class="modal-actions">
                 <button class="btn-cancel" id="cancel-join-server">Cancel</button>
@@ -112,12 +97,6 @@
                 <span class="key-value" id="invite-code-display">••••••••••••••••</span>
                 <button class="key-action-btn" id="toggle-invite-btn" title="Show/Hide">&#128065;</button>
                 <button class="key-action-btn" id="copy-invite-btn" title="Copy">&#128203;</button>
-                <button class="key-action-btn" id="qr-invite-btn" title="Show QR Code">&#128247;</button>
-            </div>
-            <div id="invite-code-qr-area" style="display:none;text-align:center;margin-top:10px;padding:10px;background:var(--bg-primary);border-radius:8px;">
-                <div id="invite-code-qr-canvas" style="background:#fff;padding:8px;border-radius:6px;display:inline-block;"></div>
-                <p style="color:#999;font-size:11px;margin-top:4px;">Scan to join server</p>
-                <button class="btn-show-qr" id="hide-invite-qr-btn" style="margin-top:4px;font-size:12px;padding:4px 12px;">Hide QR</button>
             </div>
             <div class="modal-actions">
                 <button class="btn-cancel" id="regenerate-invite" style="border-color:var(--danger);color:var(--danger)">Regenerate Code</button>
@@ -192,20 +171,6 @@
                         <button class="key-action-btn" id="copy-key-btn" title="Copy">&#128203;</button>
                     </div>
                 </div>
-                <div class="settings-group">
-                    <h4>QR Code Transfer</h4>
-                    <p class="settings-hint">Scan this QR code on another device to import your identity key.</p>
-                    <div id="qr-code-container" class="qr-code-container">
-                        <div id="qr-code-placeholder" class="qr-placeholder">
-                            <button id="show-qr-btn" class="btn-show-qr">Show QR Code</button>
-                        </div>
-                        <div id="qr-code-display" style="display:none;text-align:center;">
-                            <div id="qr-code-canvas" style="background:#fff;padding:16px;border-radius:8px;display:inline-block;"></div>
-                            <p style="color:#999;font-size:11px;margin-top:8px;">⚠️ This shows your private key. Only show to trusted devices.</p>
-                            <button id="hide-qr-btn" class="btn-show-qr" style="margin-top:8px;">Hide QR Code</button>
-                        </div>
-                    </div>
-                </div>
                 <div class="settings-group settings-danger">
                     <h4>Danger Zone</h4>
                     <p class="settings-hint">Permanently delete your account and all associated data. This cannot be undone.</p>
@@ -228,7 +193,6 @@
     </div>
 
     <script src="crypto.js?v=5"></script>
-    <script src="qrcode.js"></script>
     <script src="chat.js?v=8"></script>
 </body>
 </html>

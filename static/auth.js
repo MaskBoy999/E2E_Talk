@@ -75,49 +75,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             } catch (_) {}
 
-            // Try to fetch the encrypted friend code from the server and decrypt it.
-            // This syncs the friend code to any device that has the identity key.
-            try {
-                const kp = E2ECrypto.getIdentityKeyPair(data.user.id);
-                if (kp) {
-                    const fcRes = await fetch('/api/user/secrets/friend-code', {
-                        headers: { 'Authorization': 'Bearer ' + data.token },
-                    });
-                    if (fcRes.ok) {
-                        const fcData = await fcRes.json();
-                        const decrypted = E2ECrypto.envelopeDecryptRaw(
-                            fcData.encrypted, fcData.nonce, fcData.sender_key, kp.privateKey
-                        );
-                        const friendCode = new TextDecoder().decode(decrypted);
-                        if (friendCode) {
-                            localStorage.setItem('e2e_friend_code', friendCode);
-                        }
-                    }
-                }
-            } catch (_) {}
-
-            // Backfill: if we have a friend code locally but it's not synced, upload it now
-            try {
-                const localFc = localStorage.getItem('e2e_friend_code');
-                if (localFc && !localStorage.getItem('e2e_friend_code_synced')) {
-                    const kp = E2ECrypto.getIdentityKeyPair(data.user.id);
-                    if (kp) {
-                        const fcBytes = new TextEncoder().encode(localFc);
-                        const encrypted = E2ECrypto.envelopeEncryptRaw(fcBytes, kp.publicKey);
-                        const r = await fetch('/api/user/secrets/friend-code', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + data.token },
-                            body: JSON.stringify({
-                                encrypted: encrypted.ciphertext,
-                                nonce: encrypted.nonce,
-                                sender_key: encrypted.ephemeralPublicKey,
-                            }),
-                        });
-                        if (r.ok) localStorage.setItem('e2e_friend_code_synced', '1');
-                    }
-                }
-            } catch (_) {}
-
             localStorage.setItem('token', data.token);
             localStorage.setItem('user', JSON.stringify(data.user));
             window.location.href = 'index.html';
@@ -175,24 +132,6 @@ document.addEventListener('DOMContentLoaded', () => {
             // Only persist a new private key after the account has actually
             // been created, and bind it to that account.
             E2ECrypto.saveIdentityKeyPair(keypair, data.user.id);
-
-            // Upload the friend code encrypted with our identity public key,
-            // so other devices with the same identity key can read it.
-            try {
-                const fcBytes = new TextEncoder().encode(friendCode);
-                const encrypted = E2ECrypto.envelopeEncryptRaw(fcBytes, keypair.publicKey);
-                const r = await fetch('/api/user/secrets/friend-code', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + data.token },
-                    body: JSON.stringify({
-                        encrypted: encrypted.ciphertext,
-                        nonce: encrypted.nonce,
-                        sender_key: encrypted.ephemeralPublicKey,
-                    }),
-                });
-                if (r.ok) localStorage.setItem('e2e_friend_code_synced', '1');
-            } catch (_) {}
-
             localStorage.setItem('token', data.token);
             localStorage.setItem('user', JSON.stringify(data.user));
             window.location.href = 'index.html';
@@ -207,13 +146,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const connectKeySection = document.getElementById('connect-key-section');
     const connectKeyError = document.getElementById('connect-key-error');
     const connectKeyBtn = document.getElementById('connect-key-btn');
-    const scanQrBtn = document.getElementById('scan-qr-btn');
-    const qrScannerSection = document.getElementById('qr-scanner-section');
-    const qrVideo = document.getElementById('qr-video');
-    const stopScanBtn = document.getElementById('stop-scan-btn');
-    let qrStream = null;
-    let qrScanInterval = null;
-    let scannerOriginatedError = false;
 
     showConnectKey.addEventListener('click', (e) => {
         e.preventDefault();
@@ -227,106 +159,6 @@ document.addEventListener('DOMContentLoaded', () => {
             loginForm.style.display = 'block';
         }
     });
-
-    // QR Code Scanner
-    async function startQrScanner() {
-        // Check for secure context (camera requires HTTPS or localhost)
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-            const isLocalhost = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
-            connectKeyError.textContent = isLocalhost
-                ? 'Camera not available. Try https://localhost:3443 or grant camera permission in your browser settings.'
-                : 'Camera requires HTTPS. Try https://localhost:3443 or paste the key manually.';
-            connectKeyError.style.display = 'block';
-            scannerOriginatedError = true;
-            return;
-        }
-        try {
-            // Try back camera first, fallback to any camera
-            const stream = await navigator.mediaDevices.getUserMedia({
-                video: { facingMode: 'environment' }
-            }).catch(() => navigator.mediaDevices.getUserMedia({ video: true }));
-            qrStream = stream;
-            qrVideo.srcObject = stream;
-            qrScannerSection.style.display = 'block';
-            scanQrBtn.style.display = 'none';
-            connectKeyError.style.display = 'none';
-            // Register cleanup handler when scanner starts
-            window.addEventListener('beforeunload', beforeUnloadHandler);
-
-            // Check for BarcodeDetector API support
-            if ('BarcodeDetector' in window) {
-                try {
-                    const detector = new BarcodeDetector({ formats: ['qr_code'] });
-                    qrScanInterval = setInterval(async () => {
-                        try {
-                            const barcodes = await detector.detect(qrVideo);
-                            if (barcodes.length > 0) {
-                                const key = barcodes[0].rawValue;
-                                document.getElementById('connect-key-input').value = key;
-                                stopQrScanner();
-                                connectKeyError.textContent = 'QR code scanned successfully!';
-                                connectKeyError.style.color = '#4caf50';
-                                connectKeyError.style.display = 'block';
-                                scannerOriginatedError = true;
-                            }
-                        } catch (e) {
-                            // Continue scanning
-                        }
-                    }, 500);
-                } catch (e) {
-                    // BarcodeDetector constructor threw - unsupported format
-                    connectKeyError.textContent = 'QR code detection not supported in this browser. Please paste the key manually.';
-                    connectKeyError.style.color = '#ff9800';
-                    connectKeyError.style.display = 'block';
-                    scannerOriginatedError = true;
-                }
-            } else {
-                // Fallback: display message that QR scanning needs a modern browser
-                connectKeyError.textContent = 'QR scanning requires a modern browser. Please paste the key manually.';
-                connectKeyError.style.color = '#ff9800';
-                connectKeyError.style.display = 'block';
-                scannerOriginatedError = true;
-            }
-        } catch (err) {
-            console.error('Camera access denied:', err);
-            connectKeyError.textContent = 'Camera access denied. Please allow camera permission and try again.';
-            connectKeyError.style.display = 'block';
-            scannerOriginatedError = true;
-        }
-    }
-
-    // Handler to clean up scanner on navigation
-    function beforeUnloadHandler() {
-        if (qrStream) stopQrScanner();
-    }
-
-    function stopQrScanner() {
-        if (qrScanInterval) {
-            clearInterval(qrScanInterval);
-            qrScanInterval = null;
-        }
-        if (qrStream) {
-            qrStream.getTracks().forEach(track => track.stop());
-            qrStream = null;
-        }
-        qrVideo.srcObject = null;
-        qrScannerSection.style.display = 'none';
-        scanQrBtn.style.display = '';
-        // Reset error styling and hide only scanner-originated errors
-        connectKeyError.style.removeProperty('color');
-        if (scannerOriginatedError) {
-            connectKeyError.style.display = 'none';
-            scannerOriginatedError = false;
-        }
-        window.removeEventListener('beforeunload', beforeUnloadHandler);
-    }
-
-    if (scanQrBtn) {
-        scanQrBtn.addEventListener('click', startQrScanner);
-    }
-    if (stopScanBtn) {
-        stopScanBtn.addEventListener('click', stopQrScanner);
-    }
 
     connectKeyBtn.addEventListener('click', async () => {
         connectKeyError.style.display = 'none';
@@ -383,23 +215,6 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             E2ECrypto.saveIdentityKeyPair({ privateKey: privateKeyBytes, publicKey: publicKey }, data.user.id);
-
-            // Fetch the encrypted friend code from the server and decrypt it.
-            try {
-                const fcRes = await fetch('/api/user/secrets/friend-code', {
-                    headers: { 'Authorization': 'Bearer ' + data.token },
-                });
-                if (fcRes.ok) {
-                    const fcData = await fcRes.json();
-                    const decrypted = E2ECrypto.envelopeDecryptRaw(
-                        fcData.encrypted, fcData.nonce, fcData.sender_key, privateKeyBytes
-                    );
-                    const friendCode = new TextDecoder().decode(decrypted);
-                    if (friendCode) {
-                        localStorage.setItem('e2e_friend_code', friendCode);
-                    }
-                }
-            } catch (_) {}
 
             localStorage.setItem('token', data.token);
             localStorage.setItem('user', JSON.stringify(data.user));

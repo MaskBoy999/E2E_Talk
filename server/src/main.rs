@@ -46,6 +46,15 @@ async fn serve_static(uri: axum::http::Uri) -> impl axum::response::IntoResponse
             headers.insert("cache-control", HeaderValue::from_static("no-store, no-cache, must-revalidate"));
             headers.insert("pragma", HeaderValue::from_static("no-cache"));
             headers.insert("expires", HeaderValue::from_static("0"));
+            headers.insert("content-security-policy", HeaderValue::from_static(
+                "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+            ));
+            headers.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
+            headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
+            headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
+            headers.insert("strict-transport-security", HeaderValue::from_static(
+                "max-age=31536000; includeSubDomains; preload"
+            ));
 
             (headers, contents)
         }
@@ -105,28 +114,9 @@ async fn main() {
         .route("/api/admin/messages", get(handlers::admin_list_messages))
         .route("/api/admin/server-keys", get(handlers::admin_list_server_keys))
         .route("/api/admin/server-members", get(handlers::admin_list_server_members))
-        .route("/api/admin/bans", get(handlers::admin_list_bans))
-        .route("/api/admin/bans/{server_id}/{user_id}", delete(handlers::admin_delete_ban))
-        .route("/api/admin/dm-channels", get(handlers::admin_list_dm_channels))
-        .route("/api/admin/dm-channels/{channel_id}", delete(handlers::admin_delete_dm_channel))
-        .route("/api/admin/dm-messages", get(handlers::admin_list_dm_messages))
-        .route("/api/admin/dm-messages/{message_id}", delete(handlers::admin_delete_dm_message))
-        .route("/api/admin/dm-keys", get(handlers::admin_list_dm_keys))
-        .route("/api/admin/dm-keys/{dm_channel_id}/{user_id}", delete(handlers::admin_delete_dm_key))
-        .route("/api/admin/friend-requests", get(handlers::admin_list_friend_requests))
-        .route("/api/admin/friend-requests/{request_id}", delete(handlers::admin_delete_friend_request))
-        .route("/api/admin/friendships", get(handlers::admin_list_friendships))
-        .route("/api/admin/friendships/{user_id_a}/{user_id_b}", delete(handlers::admin_delete_friendship))
-        .route("/api/admin/prekey-bundles", get(handlers::admin_list_prekey_bundles))
-        .route("/api/admin/prekey-bundles/{user_id}", delete(handlers::admin_delete_prekey_bundle))
-        .route("/api/admin/sessions", get(handlers::admin_list_sessions))
-        .route("/api/admin/sessions/{our_user_id}/{their_user_id}", delete(handlers::admin_delete_session))
-        .route("/api/admin/user-keys", get(handlers::admin_list_user_public_keys))
-        .route("/api/admin/user-keys/{key_id}", delete(handlers::admin_delete_user_public_key))
         .route("/api/admin/clear", post(handlers::admin_clear_all))
         // Phase 4: Friends + DMs
         .route("/api/me", get(handlers::get_me).delete(handlers::delete_me))
-        .route("/api/user/secrets/friend-code", get(handlers::get_encrypted_friend_code).post(handlers::upload_encrypted_friend_code))
         .route("/api/friends", get(handlers::list_friends))
         .route("/api/friends/remove", post(handlers::remove_friend))
         .route("/api/friends/request", post(handlers::send_friend_request))
@@ -144,7 +134,6 @@ async fn main() {
 
     let addr = format!("0.0.0.0:{}", config.port);
     tracing::info!("Server starting on {}", addr);
-
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }

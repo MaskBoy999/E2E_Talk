@@ -13,18 +13,32 @@ use crate::auth;
 use crate::AppState;
 
 fn extract_user(headers: &HeaderMap, state: &AppState) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
+    // Check HttpOnly cookie first
     let token = headers
-        .get("authorization")
+        .get("cookie")
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
+        .and_then(|cookie_str| {
+            cookie_str.split(';')
+                .find_map(|part| {
+                    let trimmed = part.trim();
+                    trimmed.strip_prefix("token=").map(|v| v.to_string())
+                })
+        })
+        .or_else(|| {
+            // Fall back to Authorization: Bearer header
+            headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer ").map(|s| s.to_string()))
+        })
         .ok_or_else(|| {
             (
                 StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": "Missing authorization header"})),
+                Json(serde_json::json!({"error": "Missing authorization"})),
             )
         })?;
 
-    let claims = auth::validate_token(token, &state.config.jwt_secret).map_err(|_| {
+    let claims = auth::validate_token(&token, &state.config.jwt_secret).map_err(|_| {
         (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({"error": "Invalid token"})),
@@ -131,7 +145,8 @@ pub async fn login(
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({"error": "Wrong username or password"})),
-            );
+            )
+                .into_response();
         }
     };
 
@@ -141,7 +156,8 @@ pub async fn login(
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({"error": "Wrong username or password"})),
-            );
+            )
+                .into_response();
         }
     };
 
@@ -149,7 +165,8 @@ pub async fn login(
         return (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({"error": "Wrong username or password"})),
-        );
+        )
+            .into_response();
     }
 
     let user = match state.db.get_user_by_username(&req.username) {
@@ -158,7 +175,8 @@ pub async fn login(
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": e})),
-            );
+            )
+                .into_response();
         }
     };
 
@@ -168,17 +186,23 @@ pub async fn login(
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": e})),
-            );
+            )
+                .into_response();
         }
     };
 
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "token": token,
-            "user": { "id": user.id, "username": user.username }
-        })),
-    )
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "set-cookie",
+        HeaderValue::from_str(
+            &format!("token={}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=86400", token)
+        ).unwrap(),
+    );
+
+    (StatusCode::OK, headers, Json(serde_json::json!({
+        "token": token,
+        "user": { "id": user.id, "username": user.username }
+    })))
 }
 
 // --- Servers ---
@@ -217,14 +241,6 @@ pub async fn create_server(
                 .into_response();
         }
     };
-
-    // Broadcast server_created to all devices of this user so they see it without refreshing
-    let created_msg = serde_json::json!({
-        "type": "server_created",
-        "server_id": server.id,
-        "server_name": server.name,
-    });
-    let _ = state.ws_manager.broadcast_to_users(&[user_id.clone()], &created_msg.to_string()).await;
 
     (
         StatusCode::CREATED,
@@ -363,9 +379,7 @@ pub async fn create_channel(
         "type": "channel_created",
         "server_id": server_id,
     });
-    if let Ok(members) = state.db.get_server_members(&server_id) {
-        let _ = state.ws_manager.broadcast_to_users(&members, &channel_msg.to_string()).await;
-    }
+    let _ = state.ws_manager.broadcast_to_server(&server_id, &channel_msg.to_string()).await;
 
     (
         StatusCode::CREATED,
@@ -509,14 +523,6 @@ pub async fn join_server(
         let _ = state.ws_manager.broadcast_to_users(&members, &join_msg.to_string()).await;
     }
 
-    // Also broadcast server_joined to all devices of the joining user so the server appears in their sidebar
-    let joined_msg = serde_json::json!({
-        "type": "server_joined",
-        "server_id": server.id,
-        "server_name": server.name,
-    });
-    let _ = state.ws_manager.broadcast_to_users(&[user_id.clone()], &joined_msg.to_string()).await;
-
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -566,9 +572,7 @@ pub async fn kick_member(
                 "server_id": server_id,
                 "user_id": req.user_id,
             });
-            if let Ok(members) = state.db.get_server_members(&server_id) {
-                let _ = state.ws_manager.broadcast_to_users(&members, &kick_msg.to_string()).await;
-            }
+            let _ = state.ws_manager.broadcast_to_server(&server_id, &kick_msg.to_string()).await;
             (
                 StatusCode::OK,
                 Json(serde_json::json!({"ok": true})),
@@ -593,29 +597,23 @@ pub async fn leave_server(
         Err(e) => return e.into_response(),
     };
 
-    // Fetch members before leave_server, because owner-leave deletes the server entirely
-    let members_before = state.db.get_server_members(&server_id).ok();
     match state.db.leave_server(&server_id, &user_id) {
         Ok(server_deleted) => {
             if server_deleted {
-                // Owner left: broadcast to all members before they were deleted
+                // Owner left: broadcast server deletion to all members
                 let del_msg = serde_json::json!({
                     "type": "server_deleted",
                     "server_id": server_id,
                 });
-                if let Some(ref m) = members_before {
-                    let _ = state.ws_manager.broadcast_to_users(m, &del_msg.to_string()).await;
-                }
+                let _ = state.ws_manager.broadcast_to_server(&server_id, &del_msg.to_string()).await;
             } else {
-                // Member left: broadcast to remaining members (after the leave)
+                // Member left: broadcast member_left
                 let leave_msg = serde_json::json!({
                     "type": "member_left",
                     "server_id": server_id,
                     "user_id": user_id,
                 });
-                if let Ok(remaining) = state.db.get_server_members(&server_id) {
-                    let _ = state.ws_manager.broadcast_to_users(&remaining, &leave_msg.to_string()).await;
-                }
+                let _ = state.ws_manager.broadcast_to_server(&server_id, &leave_msg.to_string()).await;
             }
             (
                 StatusCode::OK,
@@ -670,9 +668,7 @@ pub async fn ban_member(
                 "server_id": server_id,
                 "user_id": req.user_id,
             });
-            if let Ok(members) = state.db.get_server_members(&server_id) {
-                let _ = state.ws_manager.broadcast_to_users(&members, &ban_msg.to_string()).await;
-            }
+            let _ = state.ws_manager.broadcast_to_server(&server_id, &ban_msg.to_string()).await;
             (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
@@ -755,9 +751,7 @@ pub async fn delete_channel(
                     "type": "channel_deleted",
                     "server_id": sid,
                 });
-                if let Ok(members) = state.db.get_server_members(&sid) {
-                    let _ = state.ws_manager.broadcast_to_users(&members, &channel_msg.to_string()).await;
-                }
+                let _ = state.ws_manager.broadcast_to_server(&sid, &channel_msg.to_string()).await;
             }
             (
                 StatusCode::OK,
@@ -1412,272 +1406,6 @@ pub async fn admin_delete_channel(
     }
 }
 
-pub async fn admin_delete_ban(
-    Path((server_id, user_id)): Path<(String, String)>,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    match state.db.admin_delete_ban(&server_id, &user_id) {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-    }
-}
-
-pub async fn admin_delete_dm_channel(
-    Path(channel_id): Path<String>,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    match state.db.admin_delete_dm_channel(&channel_id) {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-    }
-}
-
-pub async fn admin_delete_dm_message(
-    Path(message_id): Path<String>,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    match state.db.admin_delete_dm_message(&message_id) {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-    }
-}
-
-pub async fn admin_delete_dm_key(
-    Path((dm_channel_id, user_id)): Path<(String, String)>,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    match state.db.admin_delete_dm_key(&dm_channel_id, &user_id) {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-    }
-}
-
-pub async fn admin_delete_friend_request(
-    Path(request_id): Path<String>,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    match state.db.admin_delete_friend_request(&request_id) {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-    }
-}
-
-pub async fn admin_delete_friendship(
-    Path((user_id_a, user_id_b)): Path<(String, String)>,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    match state.db.admin_delete_friendship(&user_id_a, &user_id_b) {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-    }
-}
-
-pub async fn admin_delete_prekey_bundle(
-    Path(user_id): Path<String>,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    match state.db.admin_delete_prekey_bundle(&user_id) {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-    }
-}
-
-pub async fn admin_delete_session(
-    Path((our_user_id, their_user_id)): Path<(String, String)>,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    match state.db.admin_delete_session(&our_user_id, &their_user_id) {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-    }
-}
-
-pub async fn admin_delete_user_public_key(
-    Path(key_id): Path<String>,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    match state.db.admin_delete_user_public_key(&key_id) {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-    }
-}
-
-pub async fn admin_list_bans(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    match state.db.list_all_bans_admin() {
-        Ok(bans) => {
-            let result: Vec<serde_json::Value> = bans.iter().map(|(sid, sname, uid, uname, bat)| {
-                serde_json::json!({
-                    "server_id": sid,
-                    "server_name": sname,
-                    "user_id": uid,
-                    "username": uname,
-                    "banned_at": bat,
-                })
-            }).collect();
-            (StatusCode::OK, Json(serde_json::json!(result))).into_response()
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-    }
-}
-
-pub async fn admin_list_dm_channels(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    match state.db.list_all_dm_channels_admin() {
-        Ok(channels) => {
-            let result: Vec<serde_json::Value> = channels.iter().map(|(id, created)| {
-                serde_json::json!({"id": id, "created_at": created})
-            }).collect();
-            (StatusCode::OK, Json(serde_json::json!(result))).into_response()
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-    }
-}
-
-pub async fn admin_list_dm_messages(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    match state.db.list_all_dm_messages_admin() {
-        Ok(msgs) => {
-            let result: Vec<serde_json::Value> = msgs.iter().map(|m| {
-                serde_json::json!({
-                    "id": m.id,
-                    "dm_channel_id": m.dm_channel_id,
-                    "sender_id": m.sender_id,
-                    "sender_username": m.sender_username,
-                    "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
-                    "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
-                    "timestamp": m.timestamp,
-                })
-            }).collect();
-            (StatusCode::OK, Json(serde_json::json!(result))).into_response()
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-    }
-}
-
-pub async fn admin_list_dm_keys(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    match state.db.list_all_dm_keys_admin() {
-        Ok(keys) => {
-            let result: Vec<serde_json::Value> = keys.iter().map(|(dcid, uid, ek, spk, nonce)| {
-                serde_json::json!({
-                    "dm_channel_id": dcid,
-                    "user_id": uid,
-                    "encrypted_key": base64::engine::general_purpose::STANDARD.encode(ek),
-                    "sender_public_key": base64::engine::general_purpose::STANDARD.encode(spk),
-                    "nonce": base64::engine::general_purpose::STANDARD.encode(nonce),
-                })
-            }).collect();
-            (StatusCode::OK, Json(serde_json::json!(result))).into_response()
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-    }
-}
-
-pub async fn admin_list_friend_requests(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    match state.db.list_all_friend_requests_admin() {
-        Ok(reqs) => {
-            let result: Vec<serde_json::Value> = reqs.iter().map(|r| {
-                serde_json::json!({
-                    "id": r.id,
-                    "from_user_id": r.from_user_id,
-                    "from_username": r.from_username,
-                    "to_user_id": r.to_user_id,
-                    "to_username": r.to_username,
-                    "status": r.status,
-                    "created_at": r.created_at,
-                })
-            }).collect();
-            (StatusCode::OK, Json(serde_json::json!(result))).into_response()
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-    }
-}
-
-pub async fn admin_list_friendships(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    match state.db.list_all_friendships_admin() {
-        Ok(friends) => {
-            let result: Vec<serde_json::Value> = friends.iter().map(|(aid, aname, bid, bname, created)| {
-                serde_json::json!({
-                    "user_id_a": aid,
-                    "username_a": aname,
-                    "user_id_b": bid,
-                    "username_b": bname,
-                    "created_at": created,
-                })
-            }).collect();
-            (StatusCode::OK, Json(serde_json::json!(result))).into_response()
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-    }
-}
-
-pub async fn admin_list_prekey_bundles(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    match state.db.list_all_prekey_bundles_admin() {
-        Ok(bundles) => {
-            let result: Vec<serde_json::Value> = bundles.iter().map(|(uid, ik, spk, sig, otp, otpid)| {
-                serde_json::json!({
-                    "user_id": uid,
-                    "identity_key_public": base64::engine::general_purpose::STANDARD.encode(ik),
-                    "signed_prekey_public": base64::engine::general_purpose::STANDARD.encode(spk),
-                    "signed_prekey_signature": base64::engine::general_purpose::STANDARD.encode(sig),
-                    "one_time_prekey_public": otp.as_ref().map(|k| base64::engine::general_purpose::STANDARD.encode(k)),
-                    "one_time_prekey_id": otpid,
-                })
-            }).collect();
-            (StatusCode::OK, Json(serde_json::json!(result))).into_response()
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-    }
-}
-
-pub async fn admin_list_sessions(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    match state.db.list_all_sessions_admin() {
-        Ok(sessions) => {
-            let result: Vec<serde_json::Value> = sessions.iter().map(|(our, their, ratchet)| {
-                serde_json::json!({
-                    "our_user_id": our,
-                    "their_user_id": their,
-                    "ratchet_counter": ratchet,
-                })
-            }).collect();
-            (StatusCode::OK, Json(serde_json::json!(result))).into_response()
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-    }
-}
-
-pub async fn admin_list_user_public_keys(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    match state.db.list_all_user_public_keys_admin() {
-        Ok(keys) => {
-            let result: Vec<serde_json::Value> = keys.iter().map(|(id, uid, pk, created)| {
-                serde_json::json!({
-                    "id": id,
-                    "user_id": uid,
-                    "public_key": base64::engine::general_purpose::STANDARD.encode(pk),
-                    "created_at": created,
-                })
-            }).collect();
-            (StatusCode::OK, Json(serde_json::json!(result))).into_response()
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-    }
-}
-
 pub async fn admin_clear_all(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
@@ -1724,73 +1452,6 @@ pub async fn delete_me(
     match state.db.delete_user(&user_id) {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-    }
-}
-
-// --- Encrypted Friend Code (multi-device sync) ---
-
-#[derive(Deserialize)]
-pub struct UploadEncryptedFriendCodeRequest {
-    pub encrypted: String,
-    pub nonce: String,
-    pub sender_key: String,
-}
-
-pub async fn upload_encrypted_friend_code(
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<UploadEncryptedFriendCodeRequest>,
-) -> impl IntoResponse {
-    let user_id = match extract_user(&headers, &state) {
-        Ok(id) => id,
-        Err(e) => return e.into_response(),
-    };
-
-    let encrypted = match base64::engine::general_purpose::STANDARD.decode(&req.encrypted) {
-        Ok(b) => b,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid encrypted"}))).into_response(),
-    };
-    let nonce = match base64::engine::general_purpose::STANDARD.decode(&req.nonce) {
-        Ok(b) => b,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid nonce"}))).into_response(),
-    };
-    let sender_key = match base64::engine::general_purpose::STANDARD.decode(&req.sender_key) {
-        Ok(b) => b,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid sender_key"}))).into_response(),
-    };
-
-    match state.db.save_encrypted_friend_code(&user_id, &encrypted, &nonce, &sender_key) {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-    }
-}
-
-pub async fn get_encrypted_friend_code(
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    let user_id = match extract_user(&headers, &state) {
-        Ok(id) => id,
-        Err(e) => return e.into_response(),
-    };
-
-    match state.db.get_encrypted_friend_code(&user_id) {
-        Ok(Some((encrypted, nonce, sender_key))) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "encrypted": base64::engine::general_purpose::STANDARD.encode(&encrypted),
-                "nonce": base64::engine::general_purpose::STANDARD.encode(&nonce),
-                "sender_key": base64::engine::general_purpose::STANDARD.encode(&sender_key),
-            })),
-        ).into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "No friend code synced yet"})),
-        ).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
-        ).into_response(),
     }
 }
 

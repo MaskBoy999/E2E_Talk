@@ -1,10 +1,11 @@
 let pendingDeleteAction = null;
-let rawData = { users: [], servers: [], channels: [], messages: [], serverKeys: [], serverMembers: [],
-                bans: [], dmChannels: [], dmMessages: [], dmKeys: [], friendRequests: [],
-                friendships: [], prekeyBundles: [], sessions: [], userPublicKeys: [] };
+let rawData = { users: [], servers: [], channels: [], messages: [], serverKeys: [], serverMembers: [] };
 
 document.addEventListener('DOMContentLoaded', () => {
-    // Always require password — no session persistence
+    if (sessionStorage.getItem('admin_auth')) {
+        showPanel();
+        loadAllData();
+    }
 
     document.getElementById('admin-login-form').addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -44,6 +45,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 btn.disabled = false;
                 return;
             }
+            sessionStorage.setItem('admin_auth', 'true');
             showPanel();
             loadAllData();
         } catch (err) {
@@ -150,11 +152,7 @@ function updateCount(id, count, suffix) {
     document.getElementById(id).textContent = count + (suffix || ' records');
 }
 
-function statusBadge(status) {
-    const cls = status === 'pending' ? 'status-pending' : status === 'accepted' ? 'status-accepted' : 'status-declined';
-    return '<span class="status-badge ' + cls + '">' + escapeHtml(status) + '</span>';
-}
-
+// --- Search/Filter ---
 function filterTab(tab) {
     const input = document.getElementById('search-' + tab);
     const q = input ? input.value.toLowerCase() : '';
@@ -165,15 +163,6 @@ function filterTab(tab) {
         case 'messages': renderMessages(rawData.messages.filter(m => !q || (m.sender_username || m.sender_id).toLowerCase().includes(q) || m.channel_id.toLowerCase().includes(q) || (m.timestamp || '').toLowerCase().includes(q))); break;
         case 'server-keys': renderServerKeys(rawData.serverKeys.filter(k => !q || k.server_name.toLowerCase().includes(q) || k.user_id.toLowerCase().includes(q) || String(k.version).includes(q))); break;
         case 'server-members': renderServerMembers(rawData.serverMembers.filter(m => !q || m.username.toLowerCase().includes(q) || m.user_id.toLowerCase().includes(q) || m.server_name.toLowerCase().includes(q))); break;
-        case 'bans': renderBans(rawData.bans.filter(b => !q || b.server_name.toLowerCase().includes(q) || b.username.toLowerCase().includes(q) || b.server_id.toLowerCase().includes(q) || b.user_id.toLowerCase().includes(q))); break;
-        case 'dm-channels': renderDmChannels(rawData.dmChannels.filter(c => !q || c.id.toLowerCase().includes(q))); break;
-        case 'dm-messages': renderDmMessages(rawData.dmMessages.filter(m => !q || (m.sender_username || m.sender_id).toLowerCase().includes(q) || m.dm_channel_id.toLowerCase().includes(q) || (m.timestamp || '').toLowerCase().includes(q))); break;
-        case 'dm-keys': renderDmKeys(rawData.dmKeys.filter(k => !q || k.dm_channel_id.toLowerCase().includes(q) || k.user_id.toLowerCase().includes(q))); break;
-        case 'friend-requests': renderFriendRequests(rawData.friendRequests.filter(r => !q || r.from_username.toLowerCase().includes(q) || r.to_username.toLowerCase().includes(q) || r.status.toLowerCase().includes(q))); break;
-        case 'friendships': renderFriendships(rawData.friendships.filter(f => !q || f.username_a.toLowerCase().includes(q) || f.username_b.toLowerCase().includes(q) || f.user_id_a.toLowerCase().includes(q) || f.user_id_b.toLowerCase().includes(q))); break;
-        case 'prekey-bundles': renderPrekeyBundles(rawData.prekeyBundles.filter(p => !q || p.user_id.toLowerCase().includes(q))); break;
-        case 'sessions': renderSessions(rawData.sessions.filter(s => !q || s.our_user_id.toLowerCase().includes(q) || s.their_user_id.toLowerCase().includes(q))); break;
-        case 'user-keys': renderUserPublicKeys(rawData.userPublicKeys.filter(k => !q || k.user_id.toLowerCase().includes(q))); break;
     }
 }
 
@@ -185,15 +174,6 @@ async function loadAllData() {
         loadMessages(),
         loadServerKeys(),
         loadServerMembers(),
-        loadBans(),
-        loadDmChannels(),
-        loadDmMessages(),
-        loadDmKeys(),
-        loadFriendRequests(),
-        loadFriendships(),
-        loadPrekeyBundles(),
-        loadSessions(),
-        loadUserPublicKeys(),
     ]);
 }
 
@@ -399,335 +379,6 @@ function renderServerMembers(members) {
             '<td class="id-cell" title="' + escapeHtml(m.server_id) + '">' + escapeHtml(truncate(m.server_id, 12)) + '</td>'
         ),
         'No members'
-    );
-}
-
-// --- Bans ---
-async function loadBans() {
-    try {
-        const bans = await apiFetch('/api/admin/bans');
-        rawData.bans = Array.isArray(bans) ? bans : [];
-        renderBans(rawData.bans);
-    } catch (err) {
-        rawData.bans = [];
-        renderBans([]);
-    }
-}
-
-function renderBans(bans) {
-    updateCount('bans-count', bans.length);
-    renderTable('ban-list', 6,
-        bans.map(b =>
-            '<td>' + escapeHtml(b.server_name) + '</td>' +
-            '<td class="id-cell" title="' + escapeHtml(b.server_id) + '">' + escapeHtml(truncate(b.server_id, 12)) + '</td>' +
-            '<td>' + escapeHtml(b.username) + '</td>' +
-            '<td class="id-cell" title="' + escapeHtml(b.user_id) + '">' + escapeHtml(truncate(b.user_id, 12)) + '</td>' +
-            '<td class="ts-cell">' + escapeHtml(b.banned_at) + '</td>' +
-            '<td><button class="btn-delete-sm" onclick="adminDeleteBan(\'' + b.server_id + '\', \'' + b.user_id + '\')">Del</button></td>'
-        ),
-        'No bans'
-    );
-}
-
-function adminDeleteBan(serverId, userId) {
-    openModal('Delete Ban', 'Remove this ban? User will be able to rejoin with invite.', '',
-        async () => {
-            const res = await fetch('/api/admin/bans/' + serverId + '/' + userId, { method: 'DELETE' });
-            const data = await res.json();
-            if (!res.ok) throw new Error(data.error || 'Delete failed');
-        }
-    );
-}
-
-// --- DM Channels ---
-async function loadDmChannels() {
-    try {
-        const channels = await apiFetch('/api/admin/dm-channels');
-        rawData.dmChannels = Array.isArray(channels) ? channels : [];
-        renderDmChannels(rawData.dmChannels);
-    } catch (err) {
-        rawData.dmChannels = [];
-        renderDmChannels([]);
-    }
-}
-
-function renderDmChannels(channels) {
-    updateCount('dm-channels-count', channels.length);
-    renderTable('dm-channel-list', 3,
-        channels.map(c =>
-            '<td class="id-cell" title="' + escapeHtml(c.id) + '">' + escapeHtml(truncate(c.id, 16)) + '</td>' +
-            '<td class="ts-cell">' + escapeHtml(c.created_at) + '</td>' +
-            '<td><button class="btn-delete-sm" onclick="adminDeleteDmChannel(\'' + c.id + '\')">Del</button></td>'
-        ),
-        'No DM channels'
-    );
-}
-
-function adminDeleteDmChannel(channelId) {
-    openModal('Delete DM Channel', 'Delete this DM channel and all its messages/keys?', 'This cannot be undone.',
-        async () => {
-            const res = await fetch('/api/admin/dm-channels/' + channelId, { method: 'DELETE' });
-            const data = await res.json();
-            if (!res.ok) throw new Error(data.error || 'Delete failed');
-        }
-    );
-}
-
-// --- DM Messages ---
-async function loadDmMessages() {
-    try {
-        const msgs = await apiFetch('/api/admin/dm-messages');
-        rawData.dmMessages = Array.isArray(msgs) ? msgs : [];
-        renderDmMessages(rawData.dmMessages);
-    } catch (err) {
-        rawData.dmMessages = [];
-        renderDmMessages([]);
-    }
-}
-
-function renderDmMessages(msgs) {
-    updateCount('dm-messages-count', msgs.length, ' records (max 500)');
-    renderTable('dm-message-list', 6,
-        msgs.map(m =>
-            '<td>' + escapeHtml(m.sender_username || m.sender_id) + '</td>' +
-            '<td class="id-cell" title="' + escapeHtml(m.dm_channel_id) + '">' + escapeHtml(truncate(m.dm_channel_id, 12)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(m.encrypted_content, 60)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(m.nonce, 30)) + '</td>' +
-            '<td class="ts-cell">' + escapeHtml(m.timestamp) + '</td>' +
-            '<td><button class="btn-delete-sm" onclick="adminDeleteDmMessage(\'' + m.id + '\')">Del</button></td>'
-        ),
-        'No DM messages'
-    );
-}
-
-function adminDeleteDmMessage(msgId) {
-    openModal('Delete DM Message', 'Delete this DM message?', 'This cannot be undone.',
-        async () => {
-            const res = await fetch('/api/admin/dm-messages/' + msgId, { method: 'DELETE' });
-            const data = await res.json();
-            if (!res.ok) throw new Error(data.error || 'Delete failed');
-        }
-    );
-}
-
-// --- DM Keys ---
-async function loadDmKeys() {
-    try {
-        const keys = await apiFetch('/api/admin/dm-keys');
-        rawData.dmKeys = Array.isArray(keys) ? keys : [];
-        renderDmKeys(rawData.dmKeys);
-    } catch (err) {
-        rawData.dmKeys = [];
-        renderDmKeys([]);
-    }
-}
-
-function renderDmKeys(keys) {
-    updateCount('dm-keys-count', keys.length);
-    renderTable('dm-key-list', 6,
-        keys.map(k =>
-            '<td class="id-cell" title="' + escapeHtml(k.dm_channel_id) + '">' + escapeHtml(truncate(k.dm_channel_id, 12)) + '</td>' +
-            '<td class="id-cell" title="' + escapeHtml(k.user_id) + '">' + escapeHtml(truncate(k.user_id, 12)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(k.encrypted_key, 30)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(k.sender_public_key, 30)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(k.nonce, 20)) + '</td>' +
-            '<td><button class="btn-delete-sm" onclick="adminDeleteDmKey(\'' + k.dm_channel_id + '\', \'' + k.user_id + '\')">Del</button></td>'
-        ),
-        'No DM keys'
-    );
-}
-
-function adminDeleteDmKey(dmChannelId, userId) {
-    openModal('Delete DM Key', 'Delete this DM key entry?', 'This cannot be undone.',
-        async () => {
-            const res = await fetch('/api/admin/dm-keys/' + dmChannelId + '/' + userId, { method: 'DELETE' });
-            const data = await res.json();
-            if (!res.ok) throw new Error(data.error || 'Delete failed');
-        }
-    );
-}
-
-// --- Friend Requests ---
-async function loadFriendRequests() {
-    try {
-        const reqs = await apiFetch('/api/admin/friend-requests');
-        rawData.friendRequests = Array.isArray(reqs) ? reqs : [];
-        renderFriendRequests(rawData.friendRequests);
-    } catch (err) {
-        rawData.friendRequests = [];
-        renderFriendRequests([]);
-    }
-}
-
-function renderFriendRequests(reqs) {
-    updateCount('friend-requests-count', reqs.length);
-    renderTable('friend-request-list', 7,
-        reqs.map(r =>
-            '<td>' + escapeHtml(r.from_username) + '</td>' +
-            '<td class="id-cell" title="' + escapeHtml(r.from_user_id) + '">' + escapeHtml(truncate(r.from_user_id, 10)) + '</td>' +
-            '<td>' + escapeHtml(r.to_username) + '</td>' +
-            '<td class="id-cell" title="' + escapeHtml(r.to_user_id) + '">' + escapeHtml(truncate(r.to_user_id, 10)) + '</td>' +
-            '<td>' + statusBadge(r.status) + '</td>' +
-            '<td class="ts-cell">' + escapeHtml(r.created_at) + '</td>' +
-            '<td><button class="btn-delete-sm" onclick="adminDeleteFriendRequest(\'' + r.id + '\')">Del</button></td>'
-        ),
-        'No friend requests'
-    );
-}
-
-function adminDeleteFriendRequest(reqId) {
-    openModal('Delete Friend Request', 'Delete this friend request entry?', '',
-        async () => {
-            const res = await fetch('/api/admin/friend-requests/' + reqId, { method: 'DELETE' });
-            const data = await res.json();
-            if (!res.ok) throw new Error(data.error || 'Delete failed');
-        }
-    );
-}
-
-// --- Friendships ---
-async function loadFriendships() {
-    try {
-        const friends = await apiFetch('/api/admin/friendships');
-        rawData.friendships = Array.isArray(friends) ? friends : [];
-        renderFriendships(rawData.friendships);
-    } catch (err) {
-        rawData.friendships = [];
-        renderFriendships([]);
-    }
-}
-
-function renderFriendships(friends) {
-    updateCount('friendships-count', friends.length);
-    renderTable('friendship-list', 6,
-        friends.map(f =>
-            '<td>' + escapeHtml(f.username_a) + '</td>' +
-            '<td class="id-cell" title="' + escapeHtml(f.user_id_a) + '">' + escapeHtml(truncate(f.user_id_a, 10)) + '</td>' +
-            '<td>' + escapeHtml(f.username_b) + '</td>' +
-            '<td class="id-cell" title="' + escapeHtml(f.user_id_b) + '">' + escapeHtml(truncate(f.user_id_b, 10)) + '</td>' +
-            '<td class="ts-cell">' + escapeHtml(f.created_at) + '</td>' +
-            '<td><button class="btn-delete-sm" onclick="adminDeleteFriendship(\'' + f.user_id_a + '\', \'' + f.user_id_b + '\')">Del</button></td>'
-        ),
-        'No friendships'
-    );
-}
-
-function adminDeleteFriendship(userIdA, userIdB) {
-    openModal('Delete Friendship', 'Remove this friendship link?', '',
-        async () => {
-            const res = await fetch('/api/admin/friendships/' + userIdA + '/' + userIdB, { method: 'DELETE' });
-            const data = await res.json();
-            if (!res.ok) throw new Error(data.error || 'Delete failed');
-        }
-    );
-}
-
-// --- Prekey Bundles ---
-async function loadPrekeyBundles() {
-    try {
-        const bundles = await apiFetch('/api/admin/prekey-bundles');
-        rawData.prekeyBundles = Array.isArray(bundles) ? bundles : [];
-        renderPrekeyBundles(rawData.prekeyBundles);
-    } catch (err) {
-        rawData.prekeyBundles = [];
-        renderPrekeyBundles([]);
-    }
-}
-
-function renderPrekeyBundles(bundles) {
-    updateCount('prekey-bundles-count', bundles.length);
-    renderTable('prekey-bundle-list', 7,
-        bundles.map(b =>
-            '<td class="id-cell" title="' + escapeHtml(b.user_id) + '">' + escapeHtml(truncate(b.user_id, 10)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(b.identity_key_public, 30)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(b.signed_prekey_public, 30)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(b.signed_prekey_signature, 30)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(b.one_time_prekey_public || '', 20)) + '</td>' +
-            '<td>' + (b.one_time_prekey_id !== null && b.one_time_prekey_id !== undefined ? b.one_time_prekey_id : '-') + '</td>' +
-            '<td><button class="btn-delete-sm" onclick="adminDeletePrekeyBundle(\'' + b.user_id + '\')">Del</button></td>'
-        ),
-        'No prekey bundles'
-    );
-}
-
-function adminDeletePrekeyBundle(userId) {
-    openModal('Delete Prekey Bundle', 'Delete prekey bundle for this user?', 'They will need to re-upload.',
-        async () => {
-            const res = await fetch('/api/admin/prekey-bundles/' + userId, { method: 'DELETE' });
-            const data = await res.json();
-            if (!res.ok) throw new Error(data.error || 'Delete failed');
-        }
-    );
-}
-
-// --- Sessions ---
-async function loadSessions() {
-    try {
-        const sessions = await apiFetch('/api/admin/sessions');
-        rawData.sessions = Array.isArray(sessions) ? sessions : [];
-        renderSessions(rawData.sessions);
-    } catch (err) {
-        rawData.sessions = [];
-        renderSessions([]);
-    }
-}
-
-function renderSessions(sessions) {
-    updateCount('sessions-count', sessions.length);
-    renderTable('session-list', 4,
-        sessions.map(s =>
-            '<td class="id-cell" title="' + escapeHtml(s.our_user_id) + '">' + escapeHtml(truncate(s.our_user_id, 12)) + '</td>' +
-            '<td class="id-cell" title="' + escapeHtml(s.their_user_id) + '">' + escapeHtml(truncate(s.their_user_id, 12)) + '</td>' +
-            '<td>' + s.ratchet_counter + '</td>' +
-            '<td><button class="btn-delete-sm" onclick="adminDeleteSession(\'' + s.our_user_id + '\', \'' + s.their_user_id + '\')">Del</button></td>'
-        ),
-        'No sessions'
-    );
-}
-
-function adminDeleteSession(ourId, theirId) {
-    openModal('Delete Session', 'Delete this Signal session?', 'May disrupt E2EE until re-keying.',
-        async () => {
-            const res = await fetch('/api/admin/sessions/' + ourId + '/' + theirId, { method: 'DELETE' });
-            const data = await res.json();
-            if (!res.ok) throw new Error(data.error || 'Delete failed');
-        }
-    );
-}
-
-// --- User Public Keys (multi-device) ---
-async function loadUserPublicKeys() {
-    try {
-        const keys = await apiFetch('/api/admin/user-keys');
-        rawData.userPublicKeys = Array.isArray(keys) ? keys : [];
-        renderUserPublicKeys(rawData.userPublicKeys);
-    } catch (err) {
-        rawData.userPublicKeys = [];
-        renderUserPublicKeys([]);
-    }
-}
-
-function renderUserPublicKeys(keys) {
-    updateCount('user-keys-count', keys.length);
-    renderTable('user-key-list', 5,
-        keys.map(k =>
-            '<td class="id-cell" title="' + escapeHtml(k.id) + '">' + escapeHtml(truncate(k.id, 10)) + '</td>' +
-            '<td class="id-cell" title="' + escapeHtml(k.user_id) + '">' + escapeHtml(truncate(k.user_id, 12)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(k.public_key, 40)) + '</td>' +
-            '<td class="ts-cell">' + escapeHtml(k.created_at) + '</td>' +
-            '<td><button class="btn-delete-sm" onclick="adminDeleteUserPublicKey(\'' + k.id + '\')">Del</button></td>'
-        ),
-        'No user public keys'
-    );
-}
-
-function adminDeleteUserPublicKey(keyId) {
-    openModal('Delete Device Key', 'Delete this device public key?', 'The device may need to re-link.',
-        async () => {
-            const res = await fetch('/api/admin/user-keys/' + keyId, { method: 'DELETE' });
-            const data = await res.json();
-            if (!res.ok) throw new Error(data.error || 'Delete failed');
-        }
     );
 }
 

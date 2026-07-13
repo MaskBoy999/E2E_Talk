@@ -48,7 +48,12 @@ impl WsManager {
         }
     }
 
-
+    pub async fn broadcast_to_server(&self, _server_id: &str, message: &str) {
+        let conns = self.connections.read().await;
+        for (_conn_id, sender) in conns.values() {
+            let _ = sender.send(message.to_string());
+        }
+    }
 }
 
 #[derive(Deserialize)]

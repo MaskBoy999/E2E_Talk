@@ -6,48 +6,6 @@ This document describes the encryption system currently implemented in this repo
 
 Direct messages and server-channel messages are encrypted in the browser before they are sent. The Rust server stores and relays ciphertext, nonces, public keys, and metadata; it does not receive the plaintext or an identity private key. A database leak or an API caller without a participant's private key cannot decrypt message bodies. This is end-to-end encryption against an honest-but-curious server and storage/network attackers. It is **not** a complete Signal-style protocol and it does not protect against a server that maliciously serves modified JavaScript to a browser.
 
-## Transport and application-layer security (added July 2026)
-
-In addition to end-to-end encryption, the following defense-in-depth protections have been implemented:
-
-### Content Security Policy (CSP)
-
-A strict CSP header is set on all static file responses in `server/src/main.rs`:
-
-- `default-src 'self'` — blocks loading resources from external origins
-- `script-src 'self'` — prevents inline scripts and external script injection (XSS mitigation)
-- `style-src 'self' 'unsafe-inline'` — allows styles (the `unsafe-inline` is required for the QR code library's generated table styles)
-- `connect-src 'self' ws: wss:'` — restricts network requests to same-origin and WebSocket connections
-- `frame-ancestors 'none'` — prevents clickjacking by blocking iframe embedding
-- `base-uri 'self'` and `form-action 'self'` — restricts base URL and form submissions to same origin
-
-### HttpOnly + SameSite=Strict + Secure cookies
-
-Authentication tokens are set via `Set-Cookie` headers in the login handler (`server/src/handlers.rs`) with:
-
-- `HttpOnly` — prevents JavaScript access to the token, mitigating XSS-based token theft
-- `SameSite=Strict` — blocks cross-site request forgery (CSRF) by never sending cookies on cross-origin requests
-- `Secure` — ensures cookies are only sent over HTTPS (required when using any HTTPS deployment)
-- `Path=/; Max-Age=86400` — cookie applies to all paths and expires after 24 hours
-- The server's `extract_user` function first checks the `token` cookie, then falls back to the `Authorization: Bearer` header for backward compatibility
-
-### Additional security headers
-
-The static file handler in `server/src/main.rs` now sets:
-
-- `X-Content-Type-Options: nosniff` — prevents MIME type sniffing
-- `X-Frame-Options: DENY` — blocks framing/clickjacking
-- `Referrer-Policy: no-referrer` — prevents leaking URLs to external sites
-- `Strict-Transport-Security: max-age=31536000; includeSubDomains; preload` — enforces HTTPS for one year
-
-### QR-code key transfer
-
-Instead of copy-pasting the identity private key through the clipboard (which may be intercepted by clipboard managers or shared across apps), users can now:
-
-- **Display** their key as a QR code in the Settings modal (`static/chat.js`, `static/index.html`) with a security confirmation dialog warning that anyone who scans it gains full account control
-- **Scan** a QR code on the login page (`static/auth.js`, `static/login.html`) using the `BarcodeDetector` API to import the key on a new device, with camera cleanup on navigation
-- This eliminates clipboard exposure and provides a more intuitive device-linking flow
-
 ## Cryptographic implementation
 
 All browser cryptography is implemented in `static/crypto.js`.
@@ -155,9 +113,9 @@ Not protected, or only partially protected:
 
 Recommended hardening order:
 
-1. ~~Serve only over HTTPS with a strict Content Security Policy and dependency integrity controls.~~ **Done** — CSP headers, HSTS, and security headers are now set in `server/src/main.rs`.
+1. Serve only over HTTPS with a strict Content Security Policy and dependency integrity controls.
 2. Move key material from plaintext localStorage toward Web Crypto non-extractable `CryptoKey` objects in IndexedDB where practical; this helps against simple extraction but does not defeat XSS running in the app origin.
-3. ~~Replace manual private-key copying with QR-approved linking and distinct per-device public keys.~~ **Done** — QR code key transfer is implemented in `static/chat.js` (display) and `static/auth.js` (scan via `BarcodeDetector` API).
+3. Replace manual private-key copying with QR-approved linking and distinct per-device public keys.
 4. Encrypt every outgoing message for every active recipient device and sender companion device.
 5. Adopt an audited X3DH/PQXDH + Double Ratchet implementation, with identity/safety-number verification and key-change warnings.
 6. Consider key transparency so a malicious key directory is detectable.

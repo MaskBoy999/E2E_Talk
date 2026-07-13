@@ -207,10 +207,11 @@ test.describe('E2E Chat', () => {
         expect(body2.token).toBeTruthy();
 
         // === User1 creates server via UI ===
-        // The "+" button opens a choice modal
+        // The "+" button uses a native confirm() dialog: OK=create, Cancel=join
+        page.on('dialog', async dialog => {
+            await dialog.accept();
+        });
         await page.click('#add-server-btn');
-        await page.waitForSelector('#server-choice-modal', { state: 'visible', timeout: 5000 });
-        await page.click('#choice-create-server');
         await page.waitForSelector('#create-server-modal', { state: 'visible', timeout: 5000 });
         await page.fill('#new-server-name', 'UI Test Server');
         await page.click('#confirm-create-server');
@@ -255,10 +256,11 @@ test.describe('E2E Chat', () => {
         await page2reg.goto(`${BASE}/index.html`);
         await page2reg.waitForSelector('.add-server', { timeout: 10000 });
 
-        // Click "+" to join server - opens choice modal
+        // Click "+" to join server - need to handle the confirm() dialog (Cancel = join)
+        page2reg.on('dialog', async dialog => {
+            await dialog.dismiss();
+        });
         await page2reg.click('#add-server-btn');
-        await page2reg.waitForSelector('#server-choice-modal', { state: 'visible', timeout: 5000 });
-        await page2reg.click('#choice-join-server');
         await page2reg.waitForSelector('#join-server-modal', { state: 'visible', timeout: 5000 });
         await page2reg.fill('#invite-code-input', inviteCode!);
         await page2reg.click('#confirm-join-server');
