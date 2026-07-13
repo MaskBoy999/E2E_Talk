@@ -103,6 +103,7 @@ document.addEventListener('DOMContentLoaded', () => {
         keyValue.textContent = '••••••••••••••••';
         let keyVisible = false;
         document.getElementById('toggle-key-btn').addEventListener('click', () => {
+            if (!keyVisible && !confirm('Anyone who sees this key can read all your messages. Continue?')) return;
             keyVisible = !keyVisible;
             keyValue.textContent = keyVisible ? keyB64 : '••••••••••••••••';
         });
@@ -114,6 +115,38 @@ document.addEventListener('DOMContentLoaded', () => {
                 setTimeout(() => { btn.innerHTML = '&#128203;'; }, 1500);
             });
         });
+
+        // QR Code generation for key transfer
+        const showQrBtn = document.getElementById('show-qr-btn');
+        const qrDisplay = document.getElementById('qr-code-display');
+        const qrPlaceholder = document.getElementById('qr-code-placeholder');
+        const qrCanvas = document.getElementById('qr-code-canvas');
+        const hideQrBtn = document.getElementById('hide-qr-btn');
+
+        if (showQrBtn) {
+            showQrBtn.addEventListener('click', () => {
+                if (!confirm('Anyone who photographs this QR code gains full control of your account. Continue?')) return;
+                qrPlaceholder.style.display = 'none';
+                qrDisplay.style.display = 'block';
+                qrCanvas.innerHTML = '';
+                try {
+                    const qr = qrcode(0, 'M');
+                    qr.addData(keyB64);
+                    qr.make();
+                    qrCanvas.innerHTML = qr.createSvgTag({ cellSize: 3, margin: 4, alt: 'Identity key QR code', title: 'Scan to import identity key' });
+                } catch (e) {
+                    console.error('QR generation failed:', e);
+                    qrCanvas.innerHTML = '<p style="color:#f44336">Failed to generate QR code</p>';
+                }
+            });
+        }
+
+        if (hideQrBtn) {
+            hideQrBtn.addEventListener('click', () => {
+                qrDisplay.style.display = 'none';
+                qrPlaceholder.style.display = 'block';
+            });
+        }
     }
 
     // Delete account
