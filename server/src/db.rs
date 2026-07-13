@@ -2178,6 +2178,26 @@ impl Database {
         let (a, b) = if user_id_a < user_id_b { (user_id_a, user_id_b) } else { (user_id_b, user_id_a) };
         conn.execute("DELETE FROM friendships WHERE user_id_a = ?1 AND user_id_b = ?2", params![a, b])
             .map_err(|e| e.to_string())?;
+
+        // Also delete the DM channel between these two users (same cascade pattern as remove_friend)
+        if let Ok(Some(dm_id)) = Self::find_dm_channel_c(&conn, user_id_a, user_id_b) {
+            conn.execute("DELETE FROM dm_keys WHERE dm_channel_id = ?1", params![dm_id])
+                .map_err(|e| e.to_string())?;
+            conn.execute("DELETE FROM dm_messages WHERE dm_channel_id = ?1", params![dm_id])
+                .map_err(|e| e.to_string())?;
+            conn.execute("DELETE FROM dm_members WHERE dm_channel_id = ?1", params![dm_id])
+                .map_err(|e| e.to_string())?;
+            conn.execute("DELETE FROM dm_channels WHERE id = ?1", params![dm_id])
+                .map_err(|e| e.to_string())?;
+        }
+
+        // Also delete any pending friend requests between them
+        conn.execute(
+            "DELETE FROM friend_requests WHERE (from_user_id = ?1 AND to_user_id = ?2) OR (from_user_id = ?2 AND to_user_id = ?1)",
+            params![user_id_a, user_id_b],
+        )
+        .map_err(|e| e.to_string())?;
+
         Ok(())
     }
 
@@ -2218,6 +2238,8 @@ impl Database {
             params![server_id],
         )
         .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM server_bans WHERE server_id = ?1", params![server_id])
+            .map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM servers WHERE id = ?1", params![server_id])
             .map_err(|e| e.to_string())?;
         Ok(())
@@ -2285,8 +2307,33 @@ impl Database {
         )
         .map_err(|e| e.to_string())?;
 
-        // 4b. Clean up DM + friend data. dm_messages/dm_keys/dm_members cascade on user delete,
-        //     but friendships + friend_requests are bidirectional so handle both directions.
+        // 4b. Clean up DM + friend data.
+        // dm_messages/dm_keys/dm_members have ON DELETE CASCADE from users,
+        // but dm_channels themselves do NOT cascade from users, so we must
+        // fully delete every DM channel this user belongs to before removing the user.
+        let dm_ids: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT dm_channel_id FROM dm_members WHERE user_id = ?1")
+                .map_err(|e| e.to_string())?;
+            let rows: Vec<String> = stmt
+                .query_map(params![user_id], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?
+                .filter_map(|r| r.ok())
+                .collect();
+            rows
+        };
+        for dm_id in &dm_ids {
+            conn.execute("DELETE FROM dm_keys WHERE dm_channel_id = ?1", params![dm_id])
+                .map_err(|e| e.to_string())?;
+            conn.execute("DELETE FROM dm_messages WHERE dm_channel_id = ?1", params![dm_id])
+                .map_err(|e| e.to_string())?;
+            conn.execute("DELETE FROM dm_members WHERE dm_channel_id = ?1", params![dm_id])
+                .map_err(|e| e.to_string())?;
+            conn.execute("DELETE FROM dm_channels WHERE id = ?1", params![dm_id])
+                .map_err(|e| e.to_string())?;
+        }
+
+        // friendships + friend_requests are bidirectional so handle both directions.
         conn.execute(
             "DELETE FROM friendships WHERE user_id_a = ?1 OR user_id_b = ?1",
             params![user_id],

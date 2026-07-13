@@ -4,10 +4,7 @@ let rawData = { users: [], servers: [], channels: [], messages: [], serverKeys: 
                 friendships: [], prekeyBundles: [], sessions: [], userPublicKeys: [] };
 
 document.addEventListener('DOMContentLoaded', () => {
-    if (sessionStorage.getItem('admin_auth')) {
-        showPanel();
-        loadAllData();
-    }
+    // Always require password — no session persistence
 
     document.getElementById('admin-login-form').addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -47,7 +44,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 btn.disabled = false;
                 return;
             }
-            sessionStorage.setItem('admin_auth', 'true');
             showPanel();
             loadAllData();
         } catch (err) {

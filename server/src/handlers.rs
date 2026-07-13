@@ -355,7 +355,9 @@ pub async fn create_channel(
         "type": "channel_created",
         "server_id": server_id,
     });
-    let _ = state.ws_manager.broadcast_to_server(&server_id, &channel_msg.to_string()).await;
+    if let Ok(members) = state.db.get_server_members(&server_id) {
+        let _ = state.ws_manager.broadcast_to_users(&members, &channel_msg.to_string()).await;
+    }
 
     (
         StatusCode::CREATED,
@@ -548,7 +550,9 @@ pub async fn kick_member(
                 "server_id": server_id,
                 "user_id": req.user_id,
             });
-            let _ = state.ws_manager.broadcast_to_server(&server_id, &kick_msg.to_string()).await;
+            if let Ok(members) = state.db.get_server_members(&server_id) {
+                let _ = state.ws_manager.broadcast_to_users(&members, &kick_msg.to_string()).await;
+            }
             (
                 StatusCode::OK,
                 Json(serde_json::json!({"ok": true})),
@@ -573,23 +577,29 @@ pub async fn leave_server(
         Err(e) => return e.into_response(),
     };
 
+    // Fetch members before leave_server, because owner-leave deletes the server entirely
+    let members_before = state.db.get_server_members(&server_id).ok();
     match state.db.leave_server(&server_id, &user_id) {
         Ok(server_deleted) => {
             if server_deleted {
-                // Owner left: broadcast server deletion to all members
+                // Owner left: broadcast to all members before they were deleted
                 let del_msg = serde_json::json!({
                     "type": "server_deleted",
                     "server_id": server_id,
                 });
-                let _ = state.ws_manager.broadcast_to_server(&server_id, &del_msg.to_string()).await;
+                if let Some(ref m) = members_before {
+                    let _ = state.ws_manager.broadcast_to_users(m, &del_msg.to_string()).await;
+                }
             } else {
-                // Member left: broadcast member_left
+                // Member left: broadcast to remaining members (after the leave)
                 let leave_msg = serde_json::json!({
                     "type": "member_left",
                     "server_id": server_id,
                     "user_id": user_id,
                 });
-                let _ = state.ws_manager.broadcast_to_server(&server_id, &leave_msg.to_string()).await;
+                if let Ok(remaining) = state.db.get_server_members(&server_id) {
+                    let _ = state.ws_manager.broadcast_to_users(&remaining, &leave_msg.to_string()).await;
+                }
             }
             (
                 StatusCode::OK,
@@ -644,7 +654,9 @@ pub async fn ban_member(
                 "server_id": server_id,
                 "user_id": req.user_id,
             });
-            let _ = state.ws_manager.broadcast_to_server(&server_id, &ban_msg.to_string()).await;
+            if let Ok(members) = state.db.get_server_members(&server_id) {
+                let _ = state.ws_manager.broadcast_to_users(&members, &ban_msg.to_string()).await;
+            }
             (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
@@ -727,7 +739,9 @@ pub async fn delete_channel(
                     "type": "channel_deleted",
                     "server_id": sid,
                 });
-                let _ = state.ws_manager.broadcast_to_server(&sid, &channel_msg.to_string()).await;
+                if let Ok(members) = state.db.get_server_members(&sid) {
+                    let _ = state.ws_manager.broadcast_to_users(&members, &channel_msg.to_string()).await;
+                }
             }
             (
                 StatusCode::OK,

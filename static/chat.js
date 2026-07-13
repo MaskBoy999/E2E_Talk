@@ -844,6 +844,12 @@ function renderDmSidebar() {
     html += '<span class="key-value" id="my-friend-code">••••••••••••••••</span>';
     html += '<button class="key-action-btn" id="toggle-friend-code-btn" title="Show/Hide">&#128065;</button>';
     html += '<button class="key-action-btn" id="copy-friend-code-btn" title="Copy">&#128203;</button>';
+    html += '<button class="key-action-btn" id="qr-friend-code-btn" title="Show QR Code">&#128247;</button>';
+    html += '</div>';
+    html += '<div id="friend-code-qr-area" style="display:none;text-align:center;margin-top:8px;padding:8px;background:var(--bg-primary);border-radius:8px;">';
+    html += '<div id="friend-code-qr-canvas" style="background:#fff;padding:8px;border-radius:6px;display:inline-block;"></div>';
+    html += '<p style="color:#999;font-size:10px;margin-top:4px;">Scan to add friend</p>';
+    html += '<button class="btn-show-qr" id="hide-friend-code-qr-btn" style="margin-top:4px;font-size:11px;padding:4px 10px;">Hide QR</button>';
     html += '</div>';
     html += '<div class="dm-actions">';
     html += '<button class="dm-action-btn" id="add-friend-btn">+ Add Friend</button>';
@@ -911,6 +917,7 @@ async function selectDmChannel(dmChannelId, otherUserId, otherUsername, element)
     delete unreadDms[dmChannelId];
     updateDmStripBadge();
     renderDmSidebar();
+    loadMyFriendCode();
 
     await loadDmMessages(dmChannelId, otherUserId);
 
@@ -1349,6 +1356,10 @@ async function showInviteModal() {
     const toggleBtn = document.getElementById('toggle-invite-btn');
     const copyBtn = document.getElementById('copy-invite-btn');
 
+    const qrInviteBtn = document.getElementById('qr-invite-btn');
+    const qrInviteArea = document.getElementById('invite-code-qr-area');
+    const qrInviteCanvas = document.getElementById('invite-code-qr-canvas');
+
     toggleBtn.onclick = () => {
         const vis = display.dataset.visible === '1';
         display.dataset.visible = vis ? '0' : '1';
@@ -1361,6 +1372,28 @@ async function showInviteModal() {
             setTimeout(() => { copyBtn.innerHTML = '&#128203;'; }, 1500);
         });
     };
+    if (qrInviteBtn && qrInviteArea && qrInviteCanvas) {
+        qrInviteBtn.onclick = () => {
+            if (!display.dataset.value) return;
+            if (qrInviteArea.style.display === 'block') {
+                qrInviteArea.style.display = 'none';
+                return;
+            }
+            qrInviteCanvas.innerHTML = '';
+            try {
+                const qr = qrcode(0, 'M');
+                qr.addData(display.dataset.value);
+                qr.make();
+                qrInviteCanvas.innerHTML = qr.createSvgTag({ cellSize: 3, margin: 4, alt: 'Invite code QR', title: 'Server Invite' });
+            } catch (e) {
+                qrInviteCanvas.innerHTML = '<p style="color:#f44336;font-size:11px">Failed</p>';
+            }
+            qrInviteArea.style.display = 'block';
+        };
+        document.getElementById('hide-invite-qr-btn').onclick = () => {
+            qrInviteArea.style.display = 'none';
+        };
+    }
 
     document.getElementById('invite-modal').style.display = 'flex';
 }
@@ -1458,6 +1491,9 @@ async function loadMyFriendCode() {
         }
         const toggleBtn = document.getElementById('toggle-friend-code-btn');
         const copyBtn = document.getElementById('copy-friend-code-btn');
+        const qrBtn = document.getElementById('qr-friend-code-btn');
+        const qrArea = document.getElementById('friend-code-qr-area');
+        const qrCanvas = document.getElementById('friend-code-qr-canvas');
         if (toggleBtn && copyBtn && el) {
             toggleBtn.onclick = () => {
                 const vis = el.dataset.visible === '1';
@@ -1471,6 +1507,28 @@ async function loadMyFriendCode() {
                     copyBtn.textContent = '✓';
                     setTimeout(() => { copyBtn.innerHTML = '&#128203;'; }, 1500);
                 });
+            };
+        }
+        if (qrBtn && qrArea && qrCanvas) {
+            qrBtn.onclick = () => {
+                if (!myFriendCode) return;
+                if (qrArea.style.display === 'block') {
+                    qrArea.style.display = 'none';
+                    return;
+                }
+                qrCanvas.innerHTML = '';
+                try {
+                    const qr = qrcode(0, 'M');
+                    qr.addData(myFriendCode);
+                    qr.make();
+                    qrCanvas.innerHTML = qr.createSvgTag({ cellSize: 3, margin: 4, alt: 'Friend code QR', title: 'Friend Code' });
+                } catch (e) {
+                    qrCanvas.innerHTML = '<p style="color:#f44336;font-size:11px">Failed</p>';
+                }
+                qrArea.style.display = 'block';
+            };
+            document.getElementById('hide-friend-code-qr-btn').onclick = () => {
+                qrArea.style.display = 'none';
             };
         }
     } catch (_) {}

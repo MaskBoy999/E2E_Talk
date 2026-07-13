@@ -112,6 +112,12 @@
                 <span class="key-value" id="invite-code-display">••••••••••••••••</span>
                 <button class="key-action-btn" id="toggle-invite-btn" title="Show/Hide">&#128065;</button>
                 <button class="key-action-btn" id="copy-invite-btn" title="Copy">&#128203;</button>
+                <button class="key-action-btn" id="qr-invite-btn" title="Show QR Code">&#128247;</button>
+            </div>
+            <div id="invite-code-qr-area" style="display:none;text-align:center;margin-top:10px;padding:10px;background:var(--bg-primary);border-radius:8px;">
+                <div id="invite-code-qr-canvas" style="background:#fff;padding:8px;border-radius:6px;display:inline-block;"></div>
+                <p style="color:#999;font-size:11px;margin-top:4px;">Scan to join server</p>
+                <button class="btn-show-qr" id="hide-invite-qr-btn" style="margin-top:4px;font-size:12px;padding:4px 12px;">Hide QR</button>
             </div>
             <div class="modal-actions">
                 <button class="btn-cancel" id="regenerate-invite" style="border-color:var(--danger);color:var(--danger)">Regenerate Code</button>
