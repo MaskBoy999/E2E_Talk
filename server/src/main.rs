@@ -86,6 +86,33 @@ fn generate_self_signed_cert(cert_dir: &str) -> Result<(String, String), Box<dyn
         rcgen::SanType::IpAddress("::1".parse()?),
     ];
 
+    // Auto-detect Tailscale IPs from network interfaces
+    if let Ok(addrs) = local_ip_address::list_afinet_netifas() {
+        for (_name, ip) in addrs {
+            if ip.is_loopback() { continue; }
+            if let std::net::IpAddr::V4(v4) = ip {
+                let octets = v4.octets();
+                // Tailscale CGNAT range: 100.64.0.0/10
+                if octets[0] == 100 && (octets[1] & 0xC0) == 64 {
+                    params.subject_alt_names.push(rcgen::SanType::IpAddress(ip));
+                    tracing::info!("Auto-detected Tailscale IP: {}", ip);
+                }
+            }
+        }
+    }
+
+    // Allow additional SANs via env var (e.g., TLS_SAN=100.80.1.2,myhostname)
+    if let Ok(extra_sans) = std::env::var("TLS_SAN") {
+        for san in extra_sans.split(',') {
+            let san = san.trim();
+            if let Ok(ip) = san.parse::<std::net::IpAddr>() {
+                params.subject_alt_names.push(rcgen::SanType::IpAddress(ip));
+            } else if let Ok(dns) = san.try_into() {
+                params.subject_alt_names.push(rcgen::SanType::DnsName(dns));
+            }
+        }
+    }
+
     let key_pair = rcgen::KeyPair::generate()?;
     let cert = params.self_signed(&key_pair)?;
 

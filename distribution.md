@@ -56,6 +56,20 @@ set TLS_CERT_PATH=localhost+1.pem
 set TLS_KEY_PATH=localhost+1-key.pem
 ```
 
+### Tailscale / Remote Device Access
+To access from another device on your Tailscale network, add your Tailscale IP as a SAN:
+```bash
+# Option 1: Set TLS_SAN env var (auto-includes in self-signed cert)
+set TLS_SAN=100.80.1.2
+
+# Option 2: Use mkcert with your Tailscale hostname
+mkcert localhost 127.0.0.1 ::1 100.80.1.2 my-tailscale-hostname
+set TLS_CERT_PATH=my-tailscale-hostname+4.pem
+set TLS_KEY_PATH=my-tailscale-hostname+4-key.pem
+```
+
+Then access from any device: `https://<tailscale-ip>:3443`
+
 ---
 
 ## Building Distributable Packages
