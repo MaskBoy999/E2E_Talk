@@ -243,7 +243,7 @@ async fn main() {
 
     match use_tls {
         Some(tls_config) => {
-            let https_port = config.port + 1;
+            let https_port = 3443u16;
             let https_addr: std::net::SocketAddr = format!("0.0.0.0:{}", https_port).parse().unwrap();
             tracing::info!("HTTPS available on https://localhost:{}", https_port);
             tracing::info!("HTTP available on http://localhost:{}", config.port);
