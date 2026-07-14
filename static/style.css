@@ -1579,6 +1579,36 @@ body {
     color: #fff;
 }
 
+.btn-reauth {
+    background: transparent;
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    padding: 8px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    margin-top: 8px;
+    transition: background 0.15s, color 0.15s;
+}
+.btn-reauth:hover {
+    background: var(--accent);
+    color: #fff;
+}
+.btn-reauth-confirm {
+    background: var(--accent);
+    border: none;
+    color: #fff;
+    padding: 8px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    margin-top: 8px;
+    margin-left: 8px;
+}
+.btn-reauth-confirm:hover {
+    opacity: 0.9;
+}
+
 /* ===== QR Code Container ===== */
 .qr-code-container {
     background: var(--bg-primary);

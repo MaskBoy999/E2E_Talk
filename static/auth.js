@@ -94,22 +94,30 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             } catch (_) {}
 
-            // If no local identity key exists for this account, generate a new
-            // one and register it with the server so this device can encrypt/decrypt.
+            // If no local identity key exists, try to recover from escrow
             let identityKeyPair = E2ECrypto.getIdentityKeyPair(data.user.id);
             if (!identityKeyPair) {
                 try {
-                    identityKeyPair = E2ECrypto.x25519GenerateKeyPair();
-                    const pubB64 = E2ECrypto.arrayBufferToBase64(identityKeyPair.publicKey);
-                    await fetch('/api/identity/add-key', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'Authorization': 'Bearer ' + data.token
-                        },
-                        body: JSON.stringify({ identity_public_key: pubB64 })
+                    const escrowRes = await fetch('/api/identity/escrow', {
+                        headers: { 'Authorization': 'Bearer ' + data.token }
                     });
-                    E2ECrypto.saveIdentityKeyPair(identityKeyPair, data.user.id);
+                    if (escrowRes.ok) {
+                        const escrowData = await escrowRes.json();
+                        const privateKeyB64 = E2ECrypto.decryptKeyFromEscrow(
+                            escrowData.encrypted_private_key,
+                            password,
+                            escrowData.salt,
+                            escrowData.nonce
+                        );
+                        if (privateKeyB64) {
+                            const privBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(privateKeyB64));
+                            const pubBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(
+                                (await (await fetch('/api/identity/' + data.user.id)).json()).identity_public_key
+                            ));
+                            identityKeyPair = { privateKey: privBytes, publicKey: pubBytes };
+                            E2ECrypto.saveIdentityKeyPair(identityKeyPair, data.user.id);
+                        }
+                    }
                 } catch (_) {}
             }
 
@@ -170,8 +178,24 @@ document.addEventListener('DOMContentLoaded', () => {
             // Only persist a new private key after the account has actually
             // been created, and bind it to that account.
             E2ECrypto.saveIdentityKeyPair(keypair, data.user.id);
+
             localStorage.setItem('token', data.token);
             localStorage.setItem('user', JSON.stringify(data.user));
+
+            // Upload escrowed key in background (non-blocking)
+            try {
+                const privB64 = E2ECrypto.arrayBufferToBase64(keypair.privateKey);
+                const escrow = E2ECrypto.encryptKeyForEscrow(privB64, password);
+                fetch('/api/identity/escrow', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Bearer ' + data.token
+                    },
+                    body: JSON.stringify(escrow)
+                });
+            } catch (_) {}
+
             window.location.href = 'index.html';
         } catch (err) {
             showError('Server is not running');

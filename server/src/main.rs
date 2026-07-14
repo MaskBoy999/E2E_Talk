@@ -66,6 +66,35 @@ async fn serve_static(uri: axum::http::Uri) -> impl axum::response::IntoResponse
     }
 }
 
+fn generate_self_signed_cert(cert_dir: &str) -> Result<(String, String), Box<dyn std::error::Error>> {
+    use rcgen::CertificateParams;
+
+    std::fs::create_dir_all(cert_dir)?;
+
+    let cert_path = format!("{}/cert.pem", cert_dir);
+    let key_path = format!("{}/key.pem", cert_dir);
+
+    // Check if certs already exist
+    if std::path::Path::new(&cert_path).exists() && std::path::Path::new(&key_path).exists() {
+        return Ok((cert_path, key_path));
+    }
+
+    let mut params = CertificateParams::new(vec!["localhost".to_string()])?;
+    params.subject_alt_names = vec![
+        rcgen::SanType::DnsName("localhost".try_into()?),
+        rcgen::SanType::IpAddress("127.0.0.1".parse()?),
+        rcgen::SanType::IpAddress("::1".parse()?),
+    ];
+
+    let key_pair = rcgen::KeyPair::generate()?;
+    let cert = params.self_signed(&key_pair)?;
+
+    std::fs::write(&cert_path, cert.pem())?;
+    std::fs::write(&key_path, key_pair.serialize_pem())?;
+
+    Ok((cert_path, key_path))
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::registry()
@@ -103,6 +132,8 @@ async fn main() {
         .route("/api/identity/{user_id}", get(handlers::get_identity_key))
         .route("/api/identity/upload", post(handlers::upload_identity_key))
         .route("/api/identity/add-key", post(handlers::add_device_key))
+        .route("/api/identity/escrow", post(handlers::upload_escrowed_key).get(handlers::get_escrowed_key))
+        .route("/api/reauth", post(handlers::reauth))
         .route("/api/user/{username}", get(handlers::get_user_id))
         .route("/api/admin/login", post(handlers::admin_login))
         .route("/api/admin/users", get(handlers::admin_list_users))
@@ -150,7 +181,66 @@ async fn main() {
         .with_state(state);
 
     let addr = format!("0.0.0.0:{}", config.port);
+
+    // Determine TLS configuration
+    let use_tls = match (&config.tls_cert_path, &config.tls_key_path) {
+        (Some(cert), Some(key)) => {
+            tracing::info!("Using provided TLS certificates: cert={}, key={}", cert, key);
+            Some(axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key)
+                .await
+                .expect("Failed to load TLS certificates"))
+        }
+        _ => {
+            // Auto-generate self-signed cert for development
+            let cert_dir = "certs";
+            match generate_self_signed_cert(cert_dir) {
+                Ok((cert, key)) => {
+                    tracing::info!("Auto-generated self-signed TLS certificates in {}", cert_dir);
+                    tracing::info!("For trusted HTTPS, install mkcert and run:");
+                    tracing::info!("  mkcert -install");
+                    tracing::info!("  mkcert localhost 127.0.0.1 ::1");
+                    tracing::info!("Then set TLS_CERT_PATH and TLS_KEY_PATH env vars");
+                    Some(axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert, &key)
+                        .await
+                        .expect("Failed to load auto-generated TLS certificates"))
+                }
+                Err(e) => {
+                    tracing::warn!("Could not generate TLS certificates: {}. Running without TLS.", e);
+                    None
+                }
+            }
+        }
+    };
+
     tracing::info!("Server starting on {}", addr);
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+
+    match use_tls {
+        Some(tls_config) => {
+            let https_port = config.port + 1;
+            let https_addr: std::net::SocketAddr = format!("0.0.0.0:{}", https_port).parse().unwrap();
+            tracing::info!("HTTPS available on https://localhost:{}", https_port);
+            tracing::info!("HTTP available on http://localhost:{}", config.port);
+
+            // Serve HTTP on the main port
+            let http_addr = addr.clone();
+            let app_clone = app.clone();
+            tokio::spawn(async move {
+                let listener = tokio::net::TcpListener::bind(&http_addr).await.unwrap();
+                axum::serve(listener, app_clone).await.unwrap();
+            });
+
+            // Serve HTTPS on port+1
+            axum_server::bind_rustls(https_addr, tls_config)
+                .serve(app.into_make_service())
+                .await
+                .unwrap();
+        }
+        None => {
+            tracing::info!("Running without TLS on http://{}", addr);
+            let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+            axum::serve(listener, app).await.unwrap();
+        }
+    }
 }
+
+

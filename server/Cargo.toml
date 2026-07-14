@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
 tokio = { version = "1", features = ["full"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
@@ -20,3 +21,5 @@ futures = "0.3"
 rand = "0.8"
 base64 = "0.22"
 sha2 = "0.10"
+rcgen = "0.13"
+rustls-pemfile = "2"

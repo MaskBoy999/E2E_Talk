@@ -303,6 +303,9 @@ impl Database {
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_friend_code_hash ON users(friend_code_hash)",
         )?;
 
+        // Migration 009: key escrow
+        let _ = conn.execute_batch(include_str!("../migrations/009_key_escrow.sql"));
+
         Ok(())
     }
 
@@ -378,6 +381,16 @@ impl Database {
         conn.query_row(
             "SELECT password_hash FROM users WHERE username = ?1",
             params![username],
+            |row| row.get(0),
+        )
+        .map_err(|_| "User not found".to_string())
+    }
+
+    pub fn get_password_hash_by_id(&self, user_id: &str) -> Result<String, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT password_hash FROM users WHERE id = ?1",
+            params![user_id],
             |row| row.get(0),
         )
         .map_err(|_| "User not found".to_string())
@@ -1031,6 +1044,38 @@ impl Database {
             .filter_map(|r| r.ok())
             .collect();
         Ok(keys)
+    }
+
+    // --- Key Escrow ---
+
+    pub fn save_escrowed_key(&self, user_id: &str, encrypted_key: &[u8], salt: &[u8], nonce: &[u8]) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO user_key_escrow (user_id, encrypted_private_key, salt, nonce, updated_at)
+             VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)
+             ON CONFLICT(user_id) DO UPDATE SET
+                encrypted_private_key = excluded.encrypted_private_key,
+                salt = excluded.salt,
+                nonce = excluded.nonce,
+                updated_at = CURRENT_TIMESTAMP",
+            params![user_id, encrypted_key, salt, nonce],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn get_escrowed_key(&self, user_id: &str) -> Result<Option<(Vec<u8>, Vec<u8>, Vec<u8>)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let result = conn.query_row(
+            "SELECT encrypted_private_key, salt, nonce FROM user_key_escrow WHERE user_id = ?1",
+            params![user_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        );
+        match result {
+            Ok(row) => Ok(Some(row)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
     }
 
     // --- Friend Codes ---

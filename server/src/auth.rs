@@ -35,7 +35,7 @@ pub fn create_token(user_id: &str, username: &str, secret: &str) -> Result<Strin
         sub: user_id.to_string(),
         username: username.to_string(),
         exp: chrono::Utc::now()
-            .checked_add_signed(chrono::Duration::hours(24))
+            .checked_add_signed(chrono::Duration::days(30))
             .unwrap()
             .timestamp() as usize,
     };

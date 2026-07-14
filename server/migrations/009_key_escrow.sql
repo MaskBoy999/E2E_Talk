@@ -1,0 +1,8 @@
+CREATE TABLE IF NOT EXISTS user_key_escrow (
+    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    encrypted_private_key BLOB NOT NULL,
+    salt BLOB NOT NULL,
+    nonce BLOB NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);

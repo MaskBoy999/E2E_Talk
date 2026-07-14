@@ -290,7 +290,7 @@ pub async fn login(
     headers.insert(
         "set-cookie",
         HeaderValue::from_str(
-            &format!("token={}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=86400", token)
+            &format!("token={}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=2592000", token)
         ).unwrap(),
     );
 
@@ -298,6 +298,179 @@ pub async fn login(
         "token": token,
         "user": { "id": user.id, "username": user.username }
     }))).into_response()
+}
+
+// --- Re-authenticate ---
+
+#[derive(Deserialize)]
+pub struct ReauthRequest {
+    pub password: String,
+}
+
+pub async fn reauth(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ReauthRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    let user = match state.db.get_user_by_id(&user_id) {
+        Ok(u) => u,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
+
+    let password_hash = match state.db.get_password_hash_by_id(&user_id) {
+        Ok(h) => h,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
+
+    let valid = match auth::verify_password(&req.password, &password_hash) {
+        Ok(v) => v,
+        Err(_) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Wrong password"})),
+            )
+                .into_response();
+        }
+    };
+
+    if !valid {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Wrong password"})),
+        )
+            .into_response();
+    }
+
+    let token = match auth::create_token(&user.id, &user.username, &state.config.jwt_secret) {
+        Ok(t) => t,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "set-cookie",
+        HeaderValue::from_str(
+            &format!("token={}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=2592000", token)
+        ).unwrap(),
+    );
+
+    (StatusCode::OK, headers, Json(serde_json::json!({
+        "token": token,
+        "user": { "id": user.id, "username": user.username }
+    }))).into_response()
+}
+
+// --- Key Escrow ---
+
+#[derive(Deserialize)]
+pub struct UploadEscrowRequest {
+    pub encrypted_private_key: String,
+    pub salt: String,
+    pub nonce: String,
+}
+
+pub async fn upload_escrowed_key(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UploadEscrowRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    let encrypted_key = match base64::engine::general_purpose::STANDARD.decode(&req.encrypted_private_key) {
+        Ok(b) => b,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid encrypted_private_key"})),
+            )
+                .into_response();
+        }
+    };
+
+    let salt = match base64::engine::general_purpose::STANDARD.decode(&req.salt) {
+        Ok(b) => b,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid salt"})),
+            )
+                .into_response();
+        }
+    };
+
+    let nonce = match base64::engine::general_purpose::STANDARD.decode(&req.nonce) {
+        Ok(b) => b,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid nonce"})),
+            )
+                .into_response();
+        }
+    };
+
+    match state.db.save_escrowed_key(&user_id, &encrypted_key, &salt, &nonce) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn get_escrowed_key(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    match state.db.get_escrowed_key(&user_id) {
+        Ok(Some((encrypted_key, salt, nonce))) => {
+            (StatusCode::OK, Json(serde_json::json!({
+                "encrypted_private_key": base64::engine::general_purpose::STANDARD.encode(&encrypted_key),
+                "salt": base64::engine::general_purpose::STANDARD.encode(&salt),
+                "nonce": base64::engine::general_purpose::STANDARD.encode(&nonce),
+            }))).into_response()
+        }
+        Ok(None) => {
+            (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "No escrowed key found"}))).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
 }
 
 // --- Servers ---

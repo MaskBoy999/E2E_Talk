@@ -29,6 +29,43 @@ const authFetch = (url, opts = {}) => {
     return fetch(url, opts);
 };
 
+// JWT helpers
+function decodeJwtPayload(t) {
+    try {
+        const base64Url = t.split('.')[1];
+        const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+        const jsonPayload = decodeURIComponent(atob(base64).split('').map(function(c) {
+            return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
+        }).join(''));
+        return JSON.parse(jsonPayload);
+    } catch (_) { return null; }
+}
+
+function getTokenExpiresAt(t) {
+    const payload = decodeJwtPayload(t);
+    return payload && payload.exp ? payload.exp * 1000 : null;
+}
+
+function checkTokenExpiry() {
+    const t = token();
+    if (!t) return;
+    const expiresAt = getTokenExpiresAt(t);
+    if (!expiresAt) return;
+    if (Date.now() >= expiresAt) {
+        localStorage.removeItem('token');
+        localStorage.removeItem('user');
+        window.location.href = 'login.html';
+        return;
+    }
+    const msLeft = expiresAt - Date.now();
+    const delay = Math.min(Math.max(msLeft - 5000, 0), 2147483647);
+    setTimeout(() => {
+        localStorage.removeItem('token');
+        localStorage.removeItem('user');
+        window.location.href = 'login.html';
+    }, delay);
+}
+
 // The modern Clipboard API is restricted to HTTPS (or localhost). It also
 // needs to be called directly from a click, so each copy button uses this
 // helper to let the browser request access and to support plain HTTP locally.
@@ -59,6 +96,8 @@ async function copyToClipboard(text) {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+    checkTokenExpiry();
+
     const t = token();
     const userStr = localStorage.getItem('user');
 
@@ -198,6 +237,67 @@ document.addEventListener('DOMContentLoaded', () => {
         if (ws) ws.close();
         window.location.href = 'login.html';
     });
+
+    // Security tab - session countdown
+    function updateSessionCountdown() {
+        const countdownEl = document.getElementById('session-countdown');
+        if (!countdownEl) return;
+        const expiresAt = getTokenExpiresAt(token());
+        if (!expiresAt) { countdownEl.textContent = 'Unknown'; return; }
+        const msLeft = expiresAt - Date.now();
+        if (msLeft <= 0) { countdownEl.textContent = 'Expired'; return; }
+        const days = Math.floor(msLeft / 86400000);
+        const hours = Math.floor((msLeft % 86400000) / 3600000);
+        const minutes = Math.floor((msLeft % 3600000) / 60000);
+        countdownEl.textContent = days + 'd ' + hours + 'h ' + minutes + 'm';
+    }
+    updateSessionCountdown();
+    setInterval(updateSessionCountdown, 60000);
+
+    // Re-auth button
+    const reauthBtn = document.getElementById('reauth-btn');
+    const reauthSection = document.getElementById('reauth-section');
+    const reauthConfirmBtn = document.getElementById('reauth-confirm-btn');
+    const reauthError = document.getElementById('reauth-error');
+
+    if (reauthBtn) {
+        reauthBtn.addEventListener('click', () => {
+            reauthSection.style.display = reauthSection.style.display === 'none' ? 'block' : 'none';
+            reauthError.style.display = 'none';
+        });
+    }
+
+    if (reauthConfirmBtn) {
+        reauthConfirmBtn.addEventListener('click', async () => {
+            const password = document.getElementById('reauth-password').value;
+            if (!password) { reauthError.textContent = 'Enter your password'; reauthError.style.display = 'block'; return; }
+            try {
+                const res = await fetch('/api/reauth', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Bearer ' + token()
+                    },
+                    body: JSON.stringify({ password })
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                    reauthError.textContent = data.error || 'Re-authentication failed';
+                    reauthError.style.display = 'block';
+                    return;
+                }
+                localStorage.setItem('token', data.token);
+                localStorage.setItem('user', JSON.stringify(data.user));
+                reauthSection.style.display = 'none';
+                document.getElementById('reauth-password').value = '';
+                updateSessionCountdown();
+                alert('Session extended by 30 days');
+            } catch (e) {
+                reauthError.textContent = 'Server is not running';
+                reauthError.style.display = 'block';
+            }
+        });
+    }
 
     connectWebSocket(t);
     loadServers();

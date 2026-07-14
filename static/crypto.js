@@ -779,6 +779,36 @@ const E2ECrypto = (() => {
         saveKnownFingerprints(known);
     }
 
+    // --- Key Escrow ---
+    // Encrypt identity private key with a password-derived key for server-side storage
+
+    function deriveEscrowKey(password, salt) {
+        var passwordBytes = new TextEncoder().encode(password);
+        var saltBytes = salt instanceof Uint8Array ? salt : new Uint8Array(base64ToArrayBuffer(salt));
+        return hkdf(passwordBytes, saltBytes, 'e2e-key-escrow-v1', 32);
+    }
+
+    function encryptKeyForEscrow(privateKeyB64, password) {
+        var salt = randomBytes(16);
+        var key = deriveEscrowKey(password, salt);
+        var plaintext = base64ToArrayBuffer(privateKeyB64);
+        var result = xchacha20poly1305Encrypt(key, plaintext);
+        return {
+            encrypted_private_key: arrayBufferToBase64(result.ciphertext),
+            salt: arrayBufferToBase64(salt),
+            nonce: arrayBufferToBase64(result.nonce)
+        };
+    }
+
+    function decryptKeyFromEscrow(encryptedKeyB64, password, saltB64, nonceB64) {
+        var key = deriveEscrowKey(password, saltB64);
+        var ciphertext = new Uint8Array(base64ToArrayBuffer(encryptedKeyB64));
+        var nonce = new Uint8Array(base64ToArrayBuffer(nonceB64));
+        var plaintext = xchacha20poly1305Decrypt(key, ciphertext, nonce);
+        if (!plaintext) return null;
+        return arrayBufferToBase64(plaintext);
+    }
+
     return {
         sha256Hex: function(data) {
             var bytes = new TextEncoder().encode(data);
@@ -821,6 +851,8 @@ const E2ECrypto = (() => {
         decryptFileChunk: decryptFileChunk,
         verifyKeyForUser: verifyKeyForUser,
         trustCurrentKey: trustCurrentKey,
-        fingerprintKey: fingerprintKey
+        fingerprintKey: fingerprintKey,
+        encryptKeyForEscrow: encryptKeyForEscrow,
+        decryptKeyFromEscrow: decryptKeyFromEscrow
     };
 })();

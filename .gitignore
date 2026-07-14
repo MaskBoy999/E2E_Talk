@@ -16,11 +16,21 @@ test-results/
 test-debug.txt
 test-out.txt
 server/debug.log
+server/server.log
+server/server_err.log
+server/server_stderr.log
+server/server_stdout.log
+server/stderr.log
+server/stdout.log
 jwt.txt
 migrations_ran.txt
 
-# File uploads (encrypted chunks stored at runtime)
-server/uploads/
+# TLS certificates (auto-generated or user-provided)
+server/certs/
 
 # Environment files
 .env
+server/.env
+
+# File uploads (encrypted chunks stored at runtime)
+server/uploads/
