@@ -1836,6 +1836,11 @@ body {
     margin-top: 6px;
     border-radius: 6px;
     overflow: hidden;
+    display: inline-flex;
+    justify-content: center;
+    align-items: center;
+    position: relative;
+    max-width: 100%;
 }
 
 .file-preview img {
@@ -1857,6 +1862,19 @@ body {
     border-radius: 6px;
     display: block;
     background: #000;
+    flex-shrink: 0;
+}
+
+.video-play-overlay {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    font-size: 48px;
+    color: #fff;
+    text-shadow: 0 2px 8px rgba(0,0,0,0.5);
+    pointer-events: none;
+    line-height: 1;
 }
 
 .file-preview .file-type-icon {

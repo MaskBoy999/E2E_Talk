@@ -1485,6 +1485,211 @@ pub async fn admin_list_server_members(
     (StatusCode::OK, Json(serde_json::json!(result))).into_response()
 }
 
+pub async fn admin_list_prekey_bundles(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
+    let rows = match state.db.list_all_prekey_bundles_admin() {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let result: Vec<serde_json::Value> = rows.iter().map(|(uid, ik, spk, sig, otpk, otpk_id)| {
+        serde_json::json!({
+            "user_id": uid,
+            "identity_key_public": base64::engine::general_purpose::STANDARD.encode(ik),
+            "signed_prekey_public": base64::engine::general_purpose::STANDARD.encode(spk),
+            "signed_prekey_signature": base64::engine::general_purpose::STANDARD.encode(sig),
+            "one_time_prekey_public": otpk.as_ref().map(|k| base64::engine::general_purpose::STANDARD.encode(k)),
+            "one_time_prekey_id": otpk_id,
+        })
+    }).collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
+pub async fn admin_list_sessions(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
+    let rows = match state.db.list_all_sessions_admin() {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let result: Vec<serde_json::Value> = rows.iter().map(|(our_id, our_name, their_id, their_name, data, rc)| {
+        serde_json::json!({
+            "our_user_id": our_id, "our_username": our_name,
+            "their_user_id": their_id, "their_username": their_name,
+            "session_data": base64::engine::general_purpose::STANDARD.encode(data),
+            "ratchet_counter": rc,
+        })
+    }).collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
+pub async fn admin_list_server_bans(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
+    let rows = match state.db.list_all_server_bans_admin() {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let result: Vec<serde_json::Value> = rows.iter().map(|(sid, sname, uid, uname, reason, ts)| {
+        serde_json::json!({
+            "server_id": sid, "server_name": sname, "user_id": uid, "username": uname, "reason": reason, "created_at": ts,
+        })
+    }).collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
+pub async fn admin_list_dm_channels(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
+    let rows = match state.db.list_all_dm_channels_admin() {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let result: Vec<serde_json::Value> = rows.iter().map(|(id, ts)| {
+        serde_json::json!({ "id": id, "created_at": ts })
+    }).collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
+pub async fn admin_list_dm_members(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
+    let rows = match state.db.list_all_dm_members_admin() {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let result: Vec<serde_json::Value> = rows.iter().map(|(dm_id, uid, uname, created)| {
+        serde_json::json!({ "dm_channel_id": dm_id, "user_id": uid, "username": uname, "created_at": created })
+    }).collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
+pub async fn admin_list_dm_messages(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
+    let rows = match state.db.list_all_dm_messages_admin() {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let result: Vec<serde_json::Value> = rows.iter().map(|(id, dm_id, sid, sname, enc, nonce, ts)| {
+        serde_json::json!({
+            "id": id, "dm_channel_id": dm_id, "sender_id": sid, "sender_username": sname,
+            "encrypted_content": base64::engine::general_purpose::STANDARD.encode(enc),
+            "nonce": base64::engine::general_purpose::STANDARD.encode(nonce),
+            "timestamp": ts,
+        })
+    }).collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
+pub async fn admin_list_dm_keys(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
+    let rows = match state.db.list_all_dm_keys_admin() {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let result: Vec<serde_json::Value> = rows.iter().map(|(dm_id, uid, uname, ek, spk, nonce)| {
+        serde_json::json!({
+            "dm_channel_id": dm_id, "user_id": uid, "username": uname,
+            "encrypted_key": base64::engine::general_purpose::STANDARD.encode(ek),
+            "sender_public_key": base64::engine::general_purpose::STANDARD.encode(spk),
+            "nonce": base64::engine::general_purpose::STANDARD.encode(nonce),
+        })
+    }).collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
+pub async fn admin_list_friend_requests(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
+    let rows = match state.db.list_all_friend_requests_admin() {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let result: Vec<serde_json::Value> = rows.iter().map(|(id, fid, fname, tid, tname, status, ts)| {
+        serde_json::json!({
+            "id": id, "from_user_id": fid, "from_username": fname,
+            "to_user_id": tid, "to_username": tname, "status": status, "created_at": ts,
+        })
+    }).collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
+pub async fn admin_list_friendships(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
+    let rows = match state.db.list_all_friendships_admin() {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let result: Vec<serde_json::Value> = rows.iter().map(|(u1id, u1name, u2id, u2name, ts)| {
+        serde_json::json!({
+            "user_id_1": u1id, "username_1": u1name,
+            "user_id_2": u2id, "username_2": u2name, "created_at": ts,
+        })
+    }).collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
+pub async fn admin_list_user_public_keys(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
+    let rows = match state.db.list_all_user_public_keys_admin() {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let result: Vec<serde_json::Value> = rows.iter().map(|(uid, uname, did, ik, spk, otpk, otpk_id)| {
+        serde_json::json!({
+            "user_id": uid, "username": uname, "device_id": did,
+            "identity_key": base64::engine::general_purpose::STANDARD.encode(ik),
+            "signed_prekey": base64::engine::general_purpose::STANDARD.encode(spk),
+            "one_time_prekey": otpk.as_ref().map(|k| base64::engine::general_purpose::STANDARD.encode(k)),
+            "one_time_prekey_id": otpk_id,
+        })
+    }).collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
+pub async fn admin_list_files(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
+    let rows = match state.db.list_all_files_admin() {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let result: Vec<serde_json::Value> = rows.iter().map(|(id, uid, uname, name, mime, size, sid, cid, ts)| {
+        serde_json::json!({
+            "id": id, "uploader_id": uid, "uploader_username": uname,
+            "original_name": name, "mime_type": mime, "file_size": size,
+            "server_id": sid, "channel_id": cid, "created_at": ts,
+        })
+    }).collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
 pub async fn admin_user_cascade_stats(
     headers: HeaderMap,
     Path(user_id): Path<String>,

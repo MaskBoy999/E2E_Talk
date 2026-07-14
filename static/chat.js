@@ -2222,9 +2222,8 @@ async function loadMediaPreview(container, fileData) {
             video.muted = true;
             video.addEventListener('click', () => openMediaViewer(url, 'video', fileData));
             const playOverlay = document.createElement('div');
-            playOverlay.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:48px;color:#fff;text-shadow:0 2px 8px rgba(0,0,0,0.5);pointer-events:none;';
+            playOverlay.className = 'video-play-overlay';
             playOverlay.textContent = '▶';
-            container.style.position = 'relative';
             container.appendChild(video);
             container.appendChild(playOverlay);
         } else if (isAudio) {

@@ -1,5 +1,9 @@
 let pendingDeleteAction = null;
-let rawData = { users: [], servers: [], channels: [], messages: [], serverKeys: [], serverMembers: [] };
+let rawData = {
+    users: [], servers: [], channels: [], messages: [], serverKeys: [], serverMembers: [],
+    prekeyBundles: [], sessions: [], serverBans: [], dmChannels: [], dmMembers: [],
+    dmMessages: [], dmKeys: [], friendRequests: [], friendships: [], userPublicKeys: [], files: []
+};
 
 document.addEventListener('DOMContentLoaded', () => {
     if (sessionStorage.getItem('admin_auth')) {
@@ -179,6 +183,17 @@ function filterTab(tab) {
         case 'messages': renderMessages(rawData.messages.filter(m => !q || (m.sender_username || m.sender_id).toLowerCase().includes(q) || m.channel_id.toLowerCase().includes(q) || (m.timestamp || '').toLowerCase().includes(q))); break;
         case 'server-keys': renderServerKeys(rawData.serverKeys.filter(k => !q || k.server_name.toLowerCase().includes(q) || k.user_id.toLowerCase().includes(q) || String(k.version).includes(q))); break;
         case 'server-members': renderServerMembers(rawData.serverMembers.filter(m => !q || m.username.toLowerCase().includes(q) || m.user_id.toLowerCase().includes(q) || m.server_name.toLowerCase().includes(q))); break;
+        case 'prekey-bundles': renderPrekeyBundles(rawData.prekeyBundles.filter(k => !q || k.user_id.toLowerCase().includes(q))); break;
+        case 'sessions': renderSessions(rawData.sessions.filter(s => !q || s.our_username.toLowerCase().includes(q) || s.our_user_id.toLowerCase().includes(q) || s.their_username.toLowerCase().includes(q) || s.their_user_id.toLowerCase().includes(q))); break;
+        case 'server-bans': renderServerBans(rawData.serverBans.filter(b => !q || b.server_name.toLowerCase().includes(q) || b.username.toLowerCase().includes(q) || (b.reason || '').toLowerCase().includes(q))); break;
+        case 'dm-channels': renderDmChannels(rawData.dmChannels.filter(c => !q || c.id.toLowerCase().includes(q))); break;
+        case 'dm-members': renderDmMembers(rawData.dmMembers.filter(m => !q || m.username.toLowerCase().includes(q) || m.user_id.toLowerCase().includes(q) || m.dm_channel_id.toLowerCase().includes(q))); break;
+        case 'dm-messages': renderDmMessages(rawData.dmMessages.filter(m => !q || (m.sender_username || m.sender_id).toLowerCase().includes(q) || m.dm_channel_id.toLowerCase().includes(q) || (m.timestamp || '').toLowerCase().includes(q))); break;
+        case 'dm-keys': renderDmKeys(rawData.dmKeys.filter(k => !q || k.username.toLowerCase().includes(q) || k.user_id.toLowerCase().includes(q) || k.dm_channel_id.toLowerCase().includes(q))); break;
+        case 'friend-requests': renderFriendRequests(rawData.friendRequests.filter(r => !q || r.from_username.toLowerCase().includes(q) || r.to_username.toLowerCase().includes(q) || r.status.toLowerCase().includes(q))); break;
+        case 'friendships': renderFriendships(rawData.friendships.filter(f => !q || f.username_1.toLowerCase().includes(q) || f.username_2.toLowerCase().includes(q))); break;
+        case 'user-public-keys': renderUserPublicKeys(rawData.userPublicKeys.filter(k => !q || k.username.toLowerCase().includes(q) || k.user_id.toLowerCase().includes(q) || k.device_id.toLowerCase().includes(q))); break;
+        case 'files': renderFiles(rawData.files.filter(f => !q || f.original_name.toLowerCase().includes(q) || f.uploader_username.toLowerCase().includes(q) || f.mime_type.toLowerCase().includes(q))); break;
     }
 }
 
@@ -190,6 +205,17 @@ async function loadAllData() {
         loadMessages(),
         loadServerKeys(),
         loadServerMembers(),
+        loadPrekeyBundles(),
+        loadSessions(),
+        loadServerBans(),
+        loadDmChannels(),
+        loadDmMembers(),
+        loadDmMessages(),
+        loadDmKeys(),
+        loadFriendRequests(),
+        loadFriendships(),
+        loadUserPublicKeys(),
+        loadFiles(),
     ]);
 }
 
@@ -396,6 +422,279 @@ function renderServerMembers(members) {
             '<td class="id-cell" title="' + escapeHtml(m.server_id) + '">' + escapeHtml(truncate(m.server_id, 12)) + '</td>'
         ),
         'No members'
+    );
+}
+
+// --- Prekey Bundles ---
+async function loadPrekeyBundles() {
+    try {
+        const rows = await apiFetch('/api/admin/prekey-bundles');
+        rawData.prekeyBundles = Array.isArray(rows) ? rows : [];
+        renderPrekeyBundles(rawData.prekeyBundles);
+    } catch (err) {
+        rawData.prekeyBundles = [];
+        renderPrekeyBundles([]);
+    }
+}
+function renderPrekeyBundles(rows) {
+    updateCount('prekey-bundles-count', rows.length);
+    renderTable('prekey-bundle-list', 6,
+        rows.map(r =>
+            '<td class="id-cell" title="' + escapeHtml(r.user_id) + '">' + escapeHtml(truncate(r.user_id, 12)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.identity_key_public, 30)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.signed_prekey_public, 30)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.signed_prekey_signature, 30)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.one_time_prekey_public || '', 30)) + '</td>' +
+            '<td>' + (r.one_time_prekey_id || '') + '</td>'
+        ),
+        'No prekey bundles'
+    );
+}
+
+// --- Sessions ---
+async function loadSessions() {
+    try {
+        const rows = await apiFetch('/api/admin/sessions');
+        rawData.sessions = Array.isArray(rows) ? rows : [];
+        renderSessions(rawData.sessions);
+    } catch (err) {
+        rawData.sessions = [];
+        renderSessions([]);
+    }
+}
+function renderSessions(rows) {
+    updateCount('sessions-count', rows.length);
+    renderTable('session-list', 4,
+        rows.map(r =>
+            '<td>' + escapeHtml(r.our_username) + ' <span class="id-cell" title="' + escapeHtml(r.our_user_id) + '">(' + escapeHtml(truncate(r.our_user_id, 8)) + ')</span></td>' +
+            '<td>' + escapeHtml(r.their_username) + ' <span class="id-cell" title="' + escapeHtml(r.their_user_id) + '">(' + escapeHtml(truncate(r.their_user_id, 8)) + ')</span></td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.session_data, 40)) + '</td>' +
+            '<td>' + r.ratchet_counter + '</td>'
+        ),
+        'No sessions'
+    );
+}
+
+// --- Server Bans ---
+async function loadServerBans() {
+    try {
+        const rows = await apiFetch('/api/admin/server-bans');
+        rawData.serverBans = Array.isArray(rows) ? rows : [];
+        renderServerBans(rawData.serverBans);
+    } catch (err) {
+        rawData.serverBans = [];
+        renderServerBans([]);
+    }
+}
+function renderServerBans(rows) {
+    updateCount('server-bans-count', rows.length);
+    renderTable('server-ban-list', 4,
+        rows.map(r =>
+            '<td>' + escapeHtml(r.server_name) + '</td>' +
+            '<td>' + escapeHtml(r.username) + '</td>' +
+            '<td>' + escapeHtml(r.reason || '') + '</td>' +
+            '<td class="ts-cell">' + escapeHtml(r.created_at) + '</td>'
+        ),
+        'No server bans'
+    );
+}
+
+// --- DM Channels ---
+async function loadDmChannels() {
+    try {
+        const rows = await apiFetch('/api/admin/dm-channels');
+        rawData.dmChannels = Array.isArray(rows) ? rows : [];
+        renderDmChannels(rawData.dmChannels);
+    } catch (err) {
+        rawData.dmChannels = [];
+        renderDmChannels([]);
+    }
+}
+function renderDmChannels(rows) {
+    updateCount('dm-channels-count', rows.length);
+    renderTable('dm-channel-list', 2,
+        rows.map(r =>
+            '<td class="id-cell" title="' + escapeHtml(r.id) + '">' + escapeHtml(truncate(r.id, 16)) + '</td>' +
+            '<td class="ts-cell">' + escapeHtml(r.created_at) + '</td>'
+        ),
+        'No DM channels'
+    );
+}
+
+// --- DM Members ---
+async function loadDmMembers() {
+    try {
+        const rows = await apiFetch('/api/admin/dm-members');
+        rawData.dmMembers = Array.isArray(rows) ? rows : [];
+        renderDmMembers(rawData.dmMembers);
+    } catch (err) {
+        rawData.dmMembers = [];
+        renderDmMembers([]);
+    }
+}
+function renderDmMembers(rows) {
+    updateCount('dm-members-count', rows.length);
+    renderTable('dm-member-list', 4,
+        rows.map(r =>
+            '<td class="id-cell" title="' + escapeHtml(r.dm_channel_id) + '">' + escapeHtml(truncate(r.dm_channel_id, 12)) + '</td>' +
+            '<td class="id-cell" title="' + escapeHtml(r.user_id) + '">' + escapeHtml(truncate(r.user_id, 12)) + '</td>' +
+            '<td>' + escapeHtml(r.username) + '</td>' +
+            '<td class="ts-cell">' + escapeHtml(r.created_at) + '</td>'
+        ),
+        'No DM members'
+    );
+}
+
+// --- DM Messages ---
+async function loadDmMessages() {
+    try {
+        const rows = await apiFetch('/api/admin/dm-messages');
+        rawData.dmMessages = Array.isArray(rows) ? rows : [];
+        renderDmMessages(rawData.dmMessages);
+    } catch (err) {
+        rawData.dmMessages = [];
+        renderDmMessages([]);
+    }
+}
+function renderDmMessages(rows) {
+    updateCount('dm-messages-count', rows.length, ' records (max 500)');
+    renderTable('dm-message-list', 5,
+        rows.map(m =>
+            '<td>' + escapeHtml(m.sender_username || m.sender_id) + '</td>' +
+            '<td class="id-cell" title="' + escapeHtml(m.dm_channel_id) + '">' + escapeHtml(truncate(m.dm_channel_id, 12)) + '</td>' +
+            '<td class="blob-cell" title="Click to expand">' + escapeHtml(truncate(m.encrypted_content, 50)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(m.nonce, 30)) + '</td>' +
+            '<td class="ts-cell">' + escapeHtml(m.timestamp) + '</td>'
+        ),
+        'No DM messages'
+    );
+}
+
+// --- DM Keys ---
+async function loadDmKeys() {
+    try {
+        const rows = await apiFetch('/api/admin/dm-keys');
+        rawData.dmKeys = Array.isArray(rows) ? rows : [];
+        renderDmKeys(rawData.dmKeys);
+    } catch (err) {
+        rawData.dmKeys = [];
+        renderDmKeys([]);
+    }
+}
+function renderDmKeys(rows) {
+    updateCount('dm-keys-count', rows.length);
+    renderTable('dm-key-list', 6,
+        rows.map(r =>
+            '<td class="id-cell" title="' + escapeHtml(r.dm_channel_id) + '">' + escapeHtml(truncate(r.dm_channel_id, 12)) + '</td>' +
+            '<td class="id-cell" title="' + escapeHtml(r.user_id) + '">' + escapeHtml(truncate(r.user_id, 12)) + '</td>' +
+            '<td>' + escapeHtml(r.username) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.encrypted_key, 40)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.sender_public_key, 40)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.nonce, 30)) + '</td>'
+        ),
+        'No DM keys'
+    );
+}
+
+// --- Friend Requests ---
+async function loadFriendRequests() {
+    try {
+        const rows = await apiFetch('/api/admin/friend-requests');
+        rawData.friendRequests = Array.isArray(rows) ? rows : [];
+        renderFriendRequests(rawData.friendRequests);
+    } catch (err) {
+        rawData.friendRequests = [];
+        renderFriendRequests([]);
+    }
+}
+function renderFriendRequests(rows) {
+    updateCount('friend-requests-count', rows.length);
+    renderTable('friend-request-list', 4,
+        rows.map(r =>
+            '<td>' + escapeHtml(r.from_username) + ' <span class="id-cell">(' + escapeHtml(truncate(r.from_user_id, 8)) + ')</span></td>' +
+            '<td>' + escapeHtml(r.to_username) + ' <span class="id-cell">(' + escapeHtml(truncate(r.to_user_id, 8)) + ')</span></td>' +
+            '<td>' + escapeHtml(r.status) + '</td>' +
+            '<td class="ts-cell">' + escapeHtml(r.created_at) + '</td>'
+        ),
+        'No friend requests'
+    );
+}
+
+// --- Friendships ---
+async function loadFriendships() {
+    try {
+        const rows = await apiFetch('/api/admin/friendships');
+        rawData.friendships = Array.isArray(rows) ? rows : [];
+        renderFriendships(rawData.friendships);
+    } catch (err) {
+        rawData.friendships = [];
+        renderFriendships([]);
+    }
+}
+function renderFriendships(rows) {
+    updateCount('friendships-count', rows.length);
+    renderTable('friendship-list', 3,
+        rows.map(r =>
+            '<td>' + escapeHtml(r.username_1) + ' <span class="id-cell">(' + escapeHtml(truncate(r.user_id_1, 8)) + ')</span></td>' +
+            '<td>' + escapeHtml(r.username_2) + ' <span class="id-cell">(' + escapeHtml(truncate(r.user_id_2, 8)) + ')</span></td>' +
+            '<td class="ts-cell">' + escapeHtml(r.created_at) + '</td>'
+        ),
+        'No friendships'
+    );
+}
+
+// --- User Public Keys ---
+async function loadUserPublicKeys() {
+    try {
+        const rows = await apiFetch('/api/admin/user-public-keys');
+        rawData.userPublicKeys = Array.isArray(rows) ? rows : [];
+        renderUserPublicKeys(rawData.userPublicKeys);
+    } catch (err) {
+        rawData.userPublicKeys = [];
+        renderUserPublicKeys([]);
+    }
+}
+function renderUserPublicKeys(rows) {
+    updateCount('user-public-keys-count', rows.length);
+    renderTable('user-public-key-list', 6,
+        rows.map(r =>
+            '<td>' + escapeHtml(r.username) + ' <span class="id-cell">(' + escapeHtml(truncate(r.user_id, 8)) + ')</span></td>' +
+            '<td>' + escapeHtml(r.device_id) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.identity_key, 30)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.signed_prekey, 30)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.one_time_prekey || '', 30)) + '</td>' +
+            '<td>' + (r.one_time_prekey_id || '') + '</td>'
+        ),
+        'No user public keys'
+    );
+}
+
+// --- Files ---
+async function loadFiles() {
+    try {
+        const rows = await apiFetch('/api/admin/files');
+        rawData.files = Array.isArray(rows) ? rows : [];
+        renderFiles(rawData.files);
+    } catch (err) {
+        rawData.files = [];
+        renderFiles([]);
+    }
+}
+function renderFiles(rows) {
+    updateCount('files-count', rows.length);
+    renderTable('file-list', 7,
+        rows.map(r => {
+            const size = r.file_size > 1048576 ? (r.file_size / 1048576).toFixed(1) + ' MB' :
+                         r.file_size > 1024 ? (r.file_size / 1024).toFixed(1) + ' KB' : r.file_size + ' B';
+            return '<td>' + escapeHtml(r.original_name) + '</td>' +
+            '<td>' + escapeHtml(r.uploader_username) + '</td>' +
+            '<td>' + escapeHtml(r.mime_type) + '</td>' +
+            '<td>' + size + '</td>' +
+            '<td class="id-cell">' + escapeHtml(truncate(r.server_id || '-', 10)) + '</td>' +
+            '<td class="id-cell">' + escapeHtml(truncate(r.channel_id || '-', 10)) + '</td>' +
+            '<td class="ts-cell">' + escapeHtml(r.created_at) + '</td>';
+        }),
+        'No files'
     );
 }
 
