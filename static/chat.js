@@ -112,14 +112,6 @@ document.addEventListener('DOMContentLoaded', () => {
     // A missing key means this browser has not been linked to this account.
     // Never generate a replacement on login: doing that makes prior messages
     // permanently unreadable and can overwrite another account's identity.
-    if (!E2ECrypto.getIdentityKeyPair()) {
-        localStorage.removeItem('token');
-        localStorage.removeItem('user');
-        alert('This device is not linked to this account. Sign in with Connect with Local Key to import the account identity.');
-        window.location.href = 'login.html';
-        return;
-    }
-
     // Settings modal
     const settingsBtn = document.getElementById('settings-btn');
     const settingsModal = document.getElementById('settings-modal');
@@ -135,82 +127,6 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById(tab.dataset.tab).style.display = 'block';
         });
     });
-
-    // Identity key display in settings
-    const kp = E2ECrypto.getIdentityKeyPair();
-    if (kp) {
-        const keyB64 = E2ECrypto.arrayBufferToBase64(kp.privateKey);
-        const keyValue = document.getElementById('identity-key-value');
-        keyValue.textContent = '••••••••••••••••';
-        let keyVisible = false;
-        document.getElementById('toggle-key-btn').addEventListener('click', () => {
-            if (!keyVisible && !confirm('Anyone who sees this key can read all your messages. Continue?')) return;
-            keyVisible = !keyVisible;
-            keyValue.textContent = keyVisible ? keyB64 : '••••••••••••••••';
-        });
-        document.getElementById('copy-key-btn').addEventListener('click', () => {
-            copyToClipboard(keyB64).then((copied) => {
-                if (!copied) return;
-                const btn = document.getElementById('copy-key-btn');
-                btn.textContent = '✓';
-                setTimeout(() => { btn.innerHTML = '&#128203;'; }, 1500);
-            });
-        });
-
-        // QR Code generation for key transfer
-        const showQrBtn = document.getElementById('show-qr-btn');
-        const qrContainer = document.getElementById('qr-code-container');
-        const qrCanvas = document.getElementById('qr-code-canvas');
-        const hideQrBtn = document.getElementById('hide-qr-btn');
-
-        if (showQrBtn) {
-            showQrBtn.addEventListener('click', () => {
-                if (!confirm('Anyone who photographs this QR code gains full control of your account. Continue?')) return;
-                qrContainer.style.display = 'block';
-                qrCanvas.innerHTML = '';
-                try {
-                    const qr = qrcode(0, 'M');
-                    qr.addData(keyB64);
-                    qr.make();
-                    qrCanvas.innerHTML = qr.createSvgTag({ cellSize: 3, margin: 4, alt: 'Identity key QR code', title: 'Scan to import identity key' });
-                } catch (e) {
-                    console.error('QR generation failed:', e);
-                    qrCanvas.innerHTML = '<p style="color:#f44336">Failed to generate QR code</p>';
-                }
-            });
-        }
-
-        if (hideQrBtn) {
-            hideQrBtn.addEventListener('click', () => {
-                qrContainer.style.display = 'none';
-            });
-        }
-
-        // Export QR as PNG
-        const exportQrBtn = document.getElementById('export-qr-btn');
-        if (exportQrBtn) {
-            exportQrBtn.addEventListener('click', () => {
-                const svgEl = qrCanvas.querySelector('svg');
-                if (!svgEl) return;
-                const svgData = new XMLSerializer().serializeToString(svgEl);
-                const canvas = document.createElement('canvas');
-                const ctx = canvas.getContext('2d');
-                const img = new Image();
-                img.onload = () => {
-                    canvas.width = img.width;
-                    canvas.height = img.height;
-                    ctx.fillStyle = '#ffffff';
-                    ctx.fillRect(0, 0, canvas.width, canvas.height);
-                    ctx.drawImage(img, 0, 0);
-                    const link = document.createElement('a');
-                    link.download = 'e2e-chat-local-key-qr.png';
-                    link.href = canvas.toDataURL('image/png');
-                    link.click();
-                };
-                img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svgData)));
-            });
-        }
-    }
 
     // Delete account
     document.getElementById('delete-account-btn').addEventListener('click', async () => {

@@ -211,24 +211,6 @@
 
             <!-- User Settings -->
             <div class="settings-panel" id="user-settings">
-                <div class="settings-group">
-                    <h4>Local Key</h4>
-                    <p class="settings-hint">Copy this key and paste it on another device to sync your identity.</p>
-                    <div class="identity-key-box">
-                        <span class="key-value" id="identity-key-value">••••••••••••••••</span>
-                        <button class="key-action-btn" id="toggle-key-btn" title="Show/Hide">&#128065;</button>
-                        <button class="key-action-btn" id="copy-key-btn" title="Copy">&#128203;</button>
-                        <button class="key-action-btn" id="show-qr-btn" title="Show QR Code">&#128247;</button>
-                    </div>
-                    <div id="qr-code-container" class="qr-code-container" style="display:none;margin-top:10px;">
-                        <div id="qr-code-canvas" class="qr-code-canvas"></div>
-                        <p class="qr-warning">⚠️ This shows your private key. Only show to trusted devices.</p>
-                        <div class="qr-actions">
-                            <button id="hide-qr-btn" class="key-action-btn">Hide QR Code</button>
-                            <button id="export-qr-btn" class="key-action-btn qr-export-btn">⬇ Export QR</button>
-                        </div>
-                    </div>
-                </div>
                 <div class="settings-group settings-danger">
                     <h4>Danger Zone</h4>
                     <p class="settings-hint">Permanently delete your account and all associated data. This cannot be undone.</p>

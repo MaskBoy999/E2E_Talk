@@ -348,7 +348,6 @@ Trust On First Use (TOFU) lets users verify they're communicating with the right
 **What happens if you forget your password:**
 - You lose access to your identity key
 - You cannot decrypt old messages
-- You'd need to use "Connect with Local Key" from an existing device to import the key manually
 - This is by design — there's no backdoor
 
 **The escrow encryption formula:**

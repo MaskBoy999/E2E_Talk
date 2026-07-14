@@ -791,10 +791,12 @@ const E2ECrypto = (() => {
     function encryptKeyForEscrow(privateKeyB64, password) {
         var salt = randomBytes(16);
         var key = deriveEscrowKey(password, salt);
-        var plaintext = base64ToArrayBuffer(privateKeyB64);
+        var plaintext = new Uint8Array(base64ToArrayBuffer(privateKeyB64));
         var result = xchacha20poly1305Encrypt(key, plaintext);
+        // Store ciphertext + tag concatenated (same pattern as encryptWithKey).
+        var combined = concatBuffers(result.ciphertext, result.tag);
         return {
-            encrypted_private_key: arrayBufferToBase64(result.ciphertext),
+            encrypted_private_key: arrayBufferToBase64(combined),
             salt: arrayBufferToBase64(salt),
             nonce: arrayBufferToBase64(result.nonce)
         };
@@ -802,9 +804,16 @@ const E2ECrypto = (() => {
 
     function decryptKeyFromEscrow(encryptedKeyB64, password, saltB64, nonceB64) {
         var key = deriveEscrowKey(password, saltB64);
-        var ciphertext = new Uint8Array(base64ToArrayBuffer(encryptedKeyB64));
+        var combined = new Uint8Array(base64ToArrayBuffer(encryptedKeyB64));
         var nonce = new Uint8Array(base64ToArrayBuffer(nonceB64));
-        var plaintext = xchacha20poly1305Decrypt(key, ciphertext, nonce);
+        if (combined.length < 16) return null;
+        var ciphertext = combined.slice(0, combined.length - 16);
+        var tag = combined.slice(combined.length - 16);
+        try {
+            var plaintext = xchacha20poly1305Decrypt(key, ciphertext, tag, nonce);
+        } catch (e) {
+            return null; // wrong password / corrupted data
+        }
         if (!plaintext) return null;
         return arrayBufferToBase64(plaintext);
     }
