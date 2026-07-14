@@ -707,6 +707,27 @@ const E2ECrypto = (() => {
         return decryptWithKey(ciphertextB64, nonceB64, key);
     }
 
+    // --- File Encryption (XChaCha20-Poly1305 chunked) ---
+    function generateFileKey() {
+        return randomBytes(32);
+    }
+
+    // Encrypt a single chunk. Returns Uint8Array: [24-byte nonce] + [ciphertext] + [16-byte tag]
+    function encryptFileChunk(fileKey, plaintextChunk) {
+        var enc = xchacha20poly1305Encrypt(fileKey, plaintextChunk);
+        var combined = concatBuffers(enc.nonce, enc.ciphertext, enc.tag);
+        return combined;
+    }
+
+    // Decrypt a single chunk. Input: Uint8Array from encryptFileChunk.
+    function decryptFileChunk(fileKey, encryptedChunk) {
+        if (encryptedChunk.length < 40) throw new Error('Encrypted chunk too short');
+        var nonce = encryptedChunk.slice(0, 24);
+        var tag = encryptedChunk.slice(encryptedChunk.length - 16);
+        var ciphertext = encryptedChunk.slice(24, encryptedChunk.length - 16);
+        return xchacha20poly1305Decrypt(fileKey, ciphertext, tag, nonce);
+    }
+
     return {
         sha256Hex: function(data) {
             var bytes = new TextEncoder().encode(data);
@@ -742,6 +763,9 @@ const E2ECrypto = (() => {
         encryptMetadata: encryptMetadata,
         decryptMetadata: decryptMetadata,
         encryptDm: encryptDm,
-        decryptDm: decryptDm
+        decryptDm: decryptDm,
+        generateFileKey: generateFileKey,
+        encryptFileChunk: encryptFileChunk,
+        decryptFileChunk: decryptFileChunk
     };
 })();

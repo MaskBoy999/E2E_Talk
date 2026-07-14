@@ -1,16 +1,29 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::{
     extract::{Json, Path, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
 };
 use serde::Deserialize;
 
 use base64::Engine;
-use sha2::{Sha256, Digest};
 use crate::auth;
 use crate::AppState;
+
+static ADMIN_TOKENS: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
+
+fn get_admin_tokens() -> std::sync::MutexGuard<'static, Option<HashMap<String, Instant>>> {
+    ADMIN_TOKENS.lock().unwrap()
+}
+
+fn store_admin_token(token: String) {
+    let mut guard = get_admin_tokens();
+    let map = guard.get_or_insert_with(HashMap::new);
+    map.insert(token, Instant::now() + Duration::from_secs(24 * 3600));
+}
 
 fn extract_user(headers: &HeaderMap, state: &AppState) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
     // Check HttpOnly cookie first
@@ -46,6 +59,35 @@ fn extract_user(headers: &HeaderMap, state: &AppState) -> Result<String, (Status
     })?;
 
     Ok(claims.sub)
+}
+
+fn extract_admin_token(headers: &HeaderMap) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    let token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer ").map(|s| s.to_string()))
+        .ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Missing admin authorization"})),
+            )
+        })?;
+
+    let guard = get_admin_tokens();
+    let map = guard.as_ref().ok_or_else(|| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Invalid admin token"})),
+        )
+    })?;
+
+    match map.get(&token) {
+        Some(expiry) if *expiry > Instant::now() => Ok(()),
+        _ => Err((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Invalid or expired admin token"})),
+        )),
+    }
 }
 
 // --- Auth ---
@@ -202,7 +244,7 @@ pub async fn login(
     (StatusCode::OK, headers, Json(serde_json::json!({
         "token": token,
         "user": { "id": user.id, "username": user.username }
-    })))
+    }))).into_response()
 }
 
 // --- Servers ---
@@ -379,7 +421,9 @@ pub async fn create_channel(
         "type": "channel_created",
         "server_id": server_id,
     });
-    let _ = state.ws_manager.broadcast_to_server(&server_id, &channel_msg.to_string()).await;
+    if let Ok(members) = state.db.get_server_members(&server_id) {
+        let _ = state.ws_manager.broadcast_to_users(&members, &channel_msg.to_string()).await;
+    }
 
     (
         StatusCode::CREATED,
@@ -572,7 +616,9 @@ pub async fn kick_member(
                 "server_id": server_id,
                 "user_id": req.user_id,
             });
-            let _ = state.ws_manager.broadcast_to_server(&server_id, &kick_msg.to_string()).await;
+            if let Ok(members) = state.db.get_server_members(&server_id) {
+                let _ = state.ws_manager.broadcast_to_users(&members, &kick_msg.to_string()).await;
+            }
             (
                 StatusCode::OK,
                 Json(serde_json::json!({"ok": true})),
@@ -605,7 +651,9 @@ pub async fn leave_server(
                     "type": "server_deleted",
                     "server_id": server_id,
                 });
-                let _ = state.ws_manager.broadcast_to_server(&server_id, &del_msg.to_string()).await;
+                if let Ok(members) = state.db.get_server_members(&server_id) {
+                    let _ = state.ws_manager.broadcast_to_users(&members, &del_msg.to_string()).await;
+                }
             } else {
                 // Member left: broadcast member_left
                 let leave_msg = serde_json::json!({
@@ -613,7 +661,9 @@ pub async fn leave_server(
                     "server_id": server_id,
                     "user_id": user_id,
                 });
-                let _ = state.ws_manager.broadcast_to_server(&server_id, &leave_msg.to_string()).await;
+                if let Ok(members) = state.db.get_server_members(&server_id) {
+                    let _ = state.ws_manager.broadcast_to_users(&members, &leave_msg.to_string()).await;
+                }
             }
             (
                 StatusCode::OK,
@@ -668,7 +718,9 @@ pub async fn ban_member(
                 "server_id": server_id,
                 "user_id": req.user_id,
             });
-            let _ = state.ws_manager.broadcast_to_server(&server_id, &ban_msg.to_string()).await;
+            if let Ok(members) = state.db.get_server_members(&server_id) {
+                let _ = state.ws_manager.broadcast_to_users(&members, &ban_msg.to_string()).await;
+            }
             (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
@@ -751,7 +803,9 @@ pub async fn delete_channel(
                     "type": "channel_deleted",
                     "server_id": sid,
                 });
-                let _ = state.ws_manager.broadcast_to_server(&sid, &channel_msg.to_string()).await;
+                if let Ok(members) = state.db.get_server_members(&sid) {
+                    let _ = state.ws_manager.broadcast_to_users(&members, &channel_msg.to_string()).await;
+                }
             }
             (
                 StatusCode::OK,
@@ -1162,8 +1216,6 @@ pub async fn admin_login(
     let is_set = state.db.is_admin_password_set().unwrap_or(false);
 
     if !is_set {
-        // No password set yet — this is first-time setup
-        // The password in the request becomes the new admin password
         if req.password.is_empty() {
             return (
                 StatusCode::BAD_REQUEST,
@@ -1171,7 +1223,16 @@ pub async fn admin_login(
             )
                 .into_response();
         }
-        let hash_str = format!("{:x}", Sha256::digest(req.password.as_bytes()));
+        let hash_str = match auth::hash_password(&req.password) {
+            Ok(h) => h,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": e})),
+                )
+                    .into_response();
+            }
+        };
         if let Err(e) = state.db.set_admin_password_hash(&hash_str) {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1179,10 +1240,11 @@ pub async fn admin_login(
             )
                 .into_response();
         }
-        return (StatusCode::OK, Json(serde_json::json!({"ok": true, "setup_complete": true}))).into_response();
+        let admin_token = uuid::Uuid::new_v4().to_string();
+        store_admin_token(admin_token.clone());
+        return (StatusCode::OK, Json(serde_json::json!({"ok": true, "setup_complete": true, "token": admin_token}))).into_response();
     }
 
-    // Password already set — verify
     let stored_hash = match state.db.get_admin_password_hash() {
         Ok(Some(h)) => h,
         _ => {
@@ -1194,9 +1256,21 @@ pub async fn admin_login(
         }
     };
 
-    let input_hash = format!("{:x}", Sha256::digest(req.password.as_bytes()));
-    if input_hash == stored_hash {
-        (StatusCode::OK, Json(serde_json::json!({"ok": true})))
+    let valid = match auth::verify_password(&req.password, &stored_hash) {
+        Ok(v) => v,
+        Err(_) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Wrong admin password"})),
+            )
+                .into_response();
+        }
+    };
+
+    if valid {
+        let admin_token = uuid::Uuid::new_v4().to_string();
+        store_admin_token(admin_token.clone());
+        (StatusCode::OK, Json(serde_json::json!({"ok": true, "token": admin_token})))
             .into_response()
     } else {
         (
@@ -1208,15 +1282,20 @@ pub async fn admin_login(
 }
 
 pub async fn admin_list_users(
+    headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) {
+        return e.into_response();
+    }
+
     let users = match state.db.list_all_users() {
         Ok(u) => u,
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": e})),
-            );
+            ).into_response();
         }
     };
 
@@ -1230,18 +1309,23 @@ pub async fn admin_list_users(
         })
         .collect();
 
-    (StatusCode::OK, Json(serde_json::json!(user_infos)))
+    (StatusCode::OK, Json(serde_json::json!(user_infos))).into_response()
 }
 
 pub async fn admin_delete_user(
+    headers: HeaderMap,
     Path(user_id): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) {
+        return e.into_response();
+    }
+
     if user_id == "system" {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"error": "Cannot delete system user"})),
-        );
+        ).into_response();
     }
 
     match state.db.delete_user(&user_id) {
@@ -1253,12 +1337,17 @@ pub async fn admin_delete_user(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e})),
         ),
-    }
+    }.into_response()
 }
 
 pub async fn admin_list_servers(
+    headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) {
+        return e.into_response();
+    }
+
     let servers = match state.db.list_all_servers_admin() {
         Ok(s) => s,
         Err(e) => {
@@ -1279,8 +1368,13 @@ pub async fn admin_list_servers(
 }
 
 pub async fn admin_list_channels(
+    headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) {
+        return e.into_response();
+    }
+
     let channels = match state.db.list_all_channels_admin() {
         Ok(c) => c,
         Err(e) => {
@@ -1302,8 +1396,13 @@ pub async fn admin_list_channels(
 }
 
 pub async fn admin_list_messages(
+    headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) {
+        return e.into_response();
+    }
+
     let messages = match state.db.list_all_messages_admin() {
         Ok(m) => m,
         Err(e) => {
@@ -1328,8 +1427,13 @@ pub async fn admin_list_messages(
 }
 
 pub async fn admin_list_server_keys(
+    headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) {
+        return e.into_response();
+    }
+
     let keys = match state.db.list_all_server_keys_admin() {
         Ok(k) => k,
         Err(e) => {
@@ -1354,8 +1458,13 @@ pub async fn admin_list_server_keys(
 }
 
 pub async fn admin_list_server_members(
+    headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) {
+        return e.into_response();
+    }
+
     let members = match state.db.list_all_server_members_admin() {
         Ok(m) => m,
         Err(e) => {
@@ -1377,9 +1486,14 @@ pub async fn admin_list_server_members(
 }
 
 pub async fn admin_user_cascade_stats(
+    headers: HeaderMap,
     Path(user_id): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) {
+        return e.into_response();
+    }
+
     match state.db.get_user_cascade_stats(&user_id) {
         Ok(stats) => (StatusCode::OK, Json(stats)).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
@@ -1387,9 +1501,14 @@ pub async fn admin_user_cascade_stats(
 }
 
 pub async fn admin_delete_server(
+    headers: HeaderMap,
     Path(server_id): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) {
+        return e.into_response();
+    }
+
     match state.db.delete_server_admin(&server_id) {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
@@ -1397,9 +1516,14 @@ pub async fn admin_delete_server(
 }
 
 pub async fn admin_delete_channel(
+    headers: HeaderMap,
     Path(channel_id): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) {
+        return e.into_response();
+    }
+
     match state.db.delete_channel_admin(&channel_id) {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
@@ -1407,12 +1531,252 @@ pub async fn admin_delete_channel(
 }
 
 pub async fn admin_clear_all(
+    headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) {
+        return e.into_response();
+    }
+
     match state.db.clear_all() {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
+}
+
+// ===== Phase 5: File Sharing =====
+
+const MAX_FILE_SIZE: i64 = 1024 * 1024 * 1024; // 1 GB
+const UPLOAD_DIR: &str = "uploads";
+
+#[derive(Deserialize)]
+pub struct InitFileUploadRequest {
+    pub size: i64,
+    pub mime: String,
+}
+
+pub async fn init_file_upload(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<InitFileUploadRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    if req.size <= 0 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "File size must be positive"})),
+        )
+            .into_response();
+    }
+
+    if req.size > MAX_FILE_SIZE {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({"error": "File too large (max 1 GB)"})),
+        )
+            .into_response();
+    }
+
+    match state.db.create_file_record(&user_id, req.size, &req.mime) {
+        Ok(file_id) => {
+            let dir = format!("{}/{}", UPLOAD_DIR, file_id);
+            let _ = tokio::fs::create_dir_all(&dir).await;
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"file_id": file_id})),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn upload_file_chunk(
+    Path((file_id, index)): Path<(String, usize)>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    let file_info = match state.db.get_file_info(&file_id) {
+        Ok(f) => f,
+        Err(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "File not found"})),
+            )
+                .into_response()
+        }
+    };
+
+    if file_info.uploader_id != user_id {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Not your file"})),
+        )
+            .into_response();
+    }
+
+    if file_info.upload_complete {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Upload already complete"})),
+        )
+            .into_response();
+    }
+
+    let chunk_path = format!("{}/{}/{}.enc", UPLOAD_DIR, file_id, index);
+    if let Err(e) = tokio::fs::write(&chunk_path, &body).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response();
+    }
+
+    let _ = state
+        .db
+        .update_file_chunks(&file_id, (index + 1) as i32);
+
+    (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+}
+
+pub async fn complete_file_upload(
+    Path(file_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    let file_info = match state.db.get_file_info(&file_id) {
+        Ok(f) => f,
+        Err(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "File not found"})),
+            )
+                .into_response()
+        }
+    };
+
+    if file_info.uploader_id != user_id {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Not your file"})),
+        )
+            .into_response();
+    }
+
+    if file_info.chunk_count == 0 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "No chunks uploaded"})),
+        )
+            .into_response();
+    }
+
+    match state.db.mark_file_complete(&file_id) {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"ok": true})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn download_file(
+    Path(file_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    let file_info = match state.db.get_file_info(&file_id) {
+        Ok(f) => f,
+        Err(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "File not found"})),
+            )
+                .into_response()
+        }
+    };
+
+    if !file_info.upload_complete {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Upload not complete"})),
+        )
+            .into_response();
+    }
+
+    // Authorization: user must be the uploader, or a member of at least one server
+    // (files are shared within server channels or DMs)
+    let is_uploader = file_info.uploader_id == user_id;
+    if !is_uploader {
+        let is_member = state.db.list_user_servers(&user_id)
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        if !is_member {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "Not authorized to access this file"})),
+            )
+                .into_response();
+        }
+    }
+
+    // Read all encrypted chunks and concatenate
+    let mut data = Vec::new();
+    for i in 0..file_info.chunk_count {
+        let chunk_path = format!("{}/{}/{}.enc", UPLOAD_DIR, file_id, i);
+        match std::fs::read(&chunk_path) {
+            Ok(chunk) => data.extend_from_slice(&chunk),
+            Err(_) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": "Missing chunk"})),
+                )
+                    .into_response()
+            }
+        }
+    }
+
+    (
+        StatusCode::OK,
+        [
+            ("content-type", "application/octet-stream"),
+            (
+                "content-disposition",
+                &format!("attachment; filename=\"{}.bin\"", file_id),
+            ),
+        ],
+        data,
+    )
+        .into_response()
 }
 
 // ===== Phase 4: Friends + Direct Messages =====

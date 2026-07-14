@@ -19,5 +19,8 @@ server/debug.log
 jwt.txt
 migrations_ran.txt
 
+# File uploads (encrypted chunks stored at runtime)
+server/uploads/
+
 # Environment files
 .env

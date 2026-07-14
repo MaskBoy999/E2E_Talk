@@ -94,6 +94,17 @@ pub struct FriendRow {
     pub username: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct FileRecord {
+    pub id: String,
+    pub uploader_id: String,
+    pub original_size: i64,
+    pub mime_type: String,
+    pub chunk_count: i32,
+    pub upload_complete: bool,
+    pub created_at: String,
+}
+
 impl Database {
     pub fn new(path: &str) -> Result<Self, rusqlite::Error> {
         let conn = Connection::open(path)?;
@@ -152,6 +163,7 @@ impl Database {
             );
         }
         let _ = conn.execute_batch(include_str!("../migrations/006_hashed_codes.sql"));
+        let _ = conn.execute_batch(include_str!("../migrations/007_files.sql"));
 
         // --- invite_code_hash on servers ---
         // First, make the old invite_code column nullable (SQLite can't DROP COLUMN easily)
@@ -2015,8 +2027,63 @@ impl Database {
         Ok(())
     }
 
+    // --- Files (Phase 5) ---
+
+    pub fn create_file_record(&self, uploader_id: &str, original_size: i64, mime_type: &str) -> Result<String, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let id = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO files (id, uploader_id, original_size, mime_type) VALUES (?1, ?2, ?3, ?4)",
+            params![id, uploader_id, original_size, mime_type],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(id)
+    }
+
+    pub fn update_file_chunks(&self, file_id: &str, chunk_count: i32) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE files SET chunk_count = MAX(chunk_count, ?1) WHERE id = ?2",
+            params![chunk_count, file_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn mark_file_complete(&self, file_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE files SET upload_complete = 1 WHERE id = ?1",
+            params![file_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn get_file_info(&self, file_id: &str) -> Result<FileRecord, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT id, uploader_id, original_size, mime_type, chunk_count, upload_complete, created_at
+             FROM files WHERE id = ?1",
+            params![file_id],
+            |row| {
+                Ok(FileRecord {
+                    id: row.get(0)?,
+                    uploader_id: row.get(1)?,
+                    original_size: row.get(2)?,
+                    mime_type: row.get(3)?,
+                    chunk_count: row.get(4)?,
+                    upload_complete: row.get::<_, i32>(5)? != 0,
+                    created_at: row.get(6)?,
+                })
+            },
+        )
+        .map_err(|e| e.to_string())
+    }
+
     pub fn clear_all(&self) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM files", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM messages", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM server_keys", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM server_bans", []).map_err(|e| e.to_string())?;

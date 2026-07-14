@@ -47,7 +47,7 @@ async fn serve_static(uri: axum::http::Uri) -> impl axum::response::IntoResponse
             headers.insert("pragma", HeaderValue::from_static("no-cache"));
             headers.insert("expires", HeaderValue::from_static("0"));
             headers.insert("content-security-policy", HeaderValue::from_static(
-                "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+                "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
             ));
             headers.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
             headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
@@ -128,6 +128,11 @@ async fn main() {
         .route("/api/dm/{friend_user_id}", post(handlers::get_or_create_dm))
         .route("/api/dm/{dm_channel_id}/messages", get(handlers::list_dm_messages))
         .route("/api/dm/{dm_channel_id}/keys", get(handlers::get_dm_keys).post(handlers::upload_dm_key))
+        // Phase 5: File Sharing
+        .route("/api/files/init", post(handlers::init_file_upload))
+        .route("/api/files/{file_id}/chunk/{index}", post(handlers::upload_file_chunk))
+        .route("/api/files/{file_id}/complete", post(handlers::complete_file_upload))
+        .route("/api/files/{file_id}/download", get(handlers::download_file))
         .route("/ws", get(ws::ws_handler))
         .fallback(get(serve_static))
         .with_state(state);

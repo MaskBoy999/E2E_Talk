@@ -46,6 +46,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
             sessionStorage.setItem('admin_auth', 'true');
+            sessionStorage.setItem('admin_token', data.token || '');
             showPanel();
             loadAllData();
         } catch (err) {
@@ -71,6 +72,17 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('confirm-delete').addEventListener('click', executeDelete);
 
     document.getElementById('clear-all-btn').addEventListener('click', clearAll);
+
+    document.addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-action]');
+        if (!btn) return;
+        const action = btn.dataset.action;
+        const id = btn.dataset.id;
+        const name = btn.dataset.name;
+        if (action === 'delete-user') deleteUser(id, name);
+        else if (action === 'delete-server') deleteServer(id, name);
+        else if (action === 'delete-channel') deleteChannel(id, name);
+    });
 });
 
 function showError(msg) {
@@ -130,7 +142,11 @@ async function executeDelete() {
 }
 
 async function apiFetch(url, method) {
-    const res = await fetch(url, { method: method || 'GET' });
+    const adminToken = sessionStorage.getItem('admin_token') || '';
+    const res = await fetch(url, {
+        method: method || 'GET',
+        headers: adminToken ? { 'Authorization': 'Bearer ' + adminToken } : {}
+    });
     return res.json();
 }
 
@@ -195,7 +211,7 @@ function renderUsers(users) {
         users.map(u =>
             '<td>' + escapeHtml(u.username) + '</td>' +
             '<td class="id-cell" title="' + escapeHtml(u.id) + '">' + escapeHtml(truncate(u.id, 12)) + '</td>' +
-            '<td><button class="btn-delete-sm" onclick="deleteUser(\'' + u.id + '\', \'' + escapeHtml(u.username) + '\')">Delete</button></td>'
+            '<td><button class="btn-delete-sm" data-action="delete-user" data-id="' + escapeHtml(u.id) + '" data-name="' + escapeHtml(u.username) + '">Delete</button></td>'
         ),
         'No users'
     );
@@ -207,6 +223,8 @@ async function deleteUser(userId, username) {
         'Are you sure you want to delete <strong>' + escapeHtml(username) + '</strong>?';
     document.getElementById('confirm-warning').textContent = 'This will permanently remove their account and ALL associated data.';
     document.getElementById('cascade-stats').style.display = 'none';
+
+    document.getElementById('confirm-modal').style.display = 'flex';
 
     try {
         const stats = await apiFetch('/api/admin/users/' + userId + '/stats');
@@ -222,7 +240,6 @@ async function deleteUser(userId, username) {
         statsDiv.style.display = 'block';
     } catch (e) {}
 
-    document.getElementById('confirm-modal').style.display = 'flex';
     pendingDeleteAction = async () => {
         const res = await apiFetch('/api/admin/users/' + userId, 'DELETE');
         if (!res.ok && res.error) throw new Error(res.error);
@@ -248,7 +265,7 @@ function renderServers(servers) {
             '<td>' + escapeHtml(s.name) + '</td>' +
             '<td class="id-cell" title="' + escapeHtml(s.id) + '">' + escapeHtml(truncate(s.id, 12)) + '</td>' +
             '<td class="id-cell" title="' + escapeHtml(s.owner_id) + '">' + escapeHtml(truncate(s.owner_id, 12)) + '</td>' +
-            '<td><button class="btn-delete-sm" onclick="deleteServer(\'' + s.id + '\', \'' + escapeHtml(s.name) + '\')">Delete</button></td>'
+            '<td><button class="btn-delete-sm" data-action="delete-server" data-id="' + escapeHtml(s.id) + '" data-name="' + escapeHtml(s.name) + '">Delete</button></td>'
         ),
         'No servers'
     );
@@ -286,7 +303,7 @@ function renderChannels(channels) {
             '<td class="id-cell" title="' + escapeHtml(c.id) + '">' + escapeHtml(truncate(c.id, 12)) + '</td>' +
             '<td class="id-cell" title="' + escapeHtml(c.server_id) + '">' + escapeHtml(truncate(c.server_id, 12)) + '</td>' +
             '<td>' + escapeHtml(c.type) + '</td>' +
-            '<td><button class="btn-delete-sm" onclick="deleteChannel(\'' + c.id + '\', \'' + escapeHtml(c.name) + '\')">Delete</button></td>'
+            '<td><button class="btn-delete-sm" data-action="delete-channel" data-id="' + escapeHtml(c.id) + '" data-name="' + escapeHtml(c.name) + '">Delete</button></td>'
         ),
         'No channels'
     );
@@ -386,7 +403,11 @@ async function clearAll() {
     if (!confirm('Are you sure you want to delete ALL data?')) return;
     if (!confirm('This will permanently remove all users, servers, channels, messages, and keys. This cannot be undone. Continue?')) return;
     try {
-        const res = await fetch('/api/admin/clear', { method: 'POST' });
+        const adminToken = sessionStorage.getItem('admin_token') || '';
+        const res = await fetch('/api/admin/clear', {
+            method: 'POST',
+            headers: adminToken ? { 'Authorization': 'Bearer ' + adminToken } : {}
+        });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || 'Clear failed');
         await loadAllData();

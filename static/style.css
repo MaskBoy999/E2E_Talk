@@ -1755,3 +1755,396 @@ body {
     border-color: var(--accent);
     background: rgba(79, 195, 247, 0.05);
 }
+
+/* ===== Attach / File Upload ===== */
+.attach-btn {
+    width: clamp(40px, 8vw, 44px);
+    height: clamp(40px, 8vw, 44px);
+    background: var(--bg-secondary);
+    border: 1px solid var(--bg-border);
+    border-radius: 8px;
+    color: var(--text-muted);
+    font-size: 22px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    transition: color 0.15s, border-color 0.15s, background 0.15s;
+    line-height: 1;
+}
+
+.attach-btn:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: rgba(79, 195, 247, 0.08);
+}
+
+/* ===== File Card in Chat ===== */
+.file-card {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--bg-border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-top: 4px;
+    max-width: min(420px, 85vw);
+}
+
+.file-download-btn {
+    width: 36px;
+    height: 36px;
+    background: var(--accent);
+    color: var(--bg-primary);
+    border: none;
+    border-radius: 8px;
+    font-size: 16px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    transition: background 0.15s;
+}
+
+.file-download-btn:hover {
+    background: var(--accent-hover);
+}
+
+.file-details {
+    flex: 1;
+    min-width: 0;
+}
+
+.file-name {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+    word-break: break-word;
+    line-height: 1.3;
+}
+
+.file-meta {
+    font-size: 12px;
+    color: var(--text-faint);
+    margin-top: 2px;
+}
+
+.file-preview {
+    margin-top: 6px;
+    border-radius: 6px;
+    overflow: hidden;
+}
+
+.file-preview img {
+    max-width: 100%;
+    max-height: 300px;
+    border-radius: 6px;
+    display: block;
+    cursor: pointer;
+    transition: opacity 0.15s;
+}
+
+.file-preview img:hover {
+    opacity: 0.9;
+}
+
+.file-preview video {
+    max-width: 100%;
+    max-height: 300px;
+    border-radius: 6px;
+    display: block;
+    background: #000;
+}
+
+.file-preview .file-type-icon {
+    font-size: 48px;
+    padding: 16px;
+    text-align: center;
+    color: var(--text-faint);
+}
+
+.file-preview .text-preview {
+    background: var(--bg-primary);
+    border: 1px solid var(--bg-border);
+    border-radius: 6px;
+    padding: 10px 12px;
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 12px;
+    color: var(--text-primary);
+    max-height: 200px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    margin-top: 6px;
+    line-height: 1.4;
+}
+
+.file-preview audio {
+    width: 100%;
+    max-width: 400px;
+    border-radius: 6px;
+    margin-top: 6px;
+}
+
+.file-preview .text-preview-more {
+    font-size: 11px;
+    color: var(--text-faint);
+    margin-top: 4px;
+    text-align: right;
+}
+
+.file-preview-btn {
+    display: inline-block;
+    margin-top: 6px;
+    padding: 4px 10px;
+    background: var(--bg-primary);
+    border: 1px solid var(--bg-border);
+    border-radius: 6px;
+    color: var(--accent);
+    font-size: 12px;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.file-preview-btn:hover {
+    background: rgba(79, 195, 247, 0.1);
+}
+
+.file-loading {
+    font-size: 12px;
+    color: var(--text-faint);
+    padding: 8px 0;
+    text-align: center;
+    animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 0.5; }
+    50% { opacity: 1; }
+}
+
+/* ===== Upload Modal ===== */
+.upload-file-info {
+    background: var(--bg-primary);
+    border: 1px solid var(--bg-border);
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 12px;
+}
+
+.upload-file-info .ufi-name {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+    word-break: break-word;
+}
+
+.upload-file-info .ufi-meta {
+    font-size: 12px;
+    color: var(--text-faint);
+    margin-top: 4px;
+}
+
+.upload-preview {
+    margin-bottom: 12px;
+    text-align: center;
+}
+
+.upload-preview img {
+    max-width: 100%;
+    max-height: 200px;
+    border-radius: 8px;
+    display: block;
+    margin: 0 auto;
+}
+
+.progress-bar-container {
+    width: 100%;
+    height: 6px;
+    background: var(--bg-primary);
+    border-radius: 3px;
+    overflow: hidden;
+    margin-bottom: 6px;
+}
+
+.progress-bar-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 3px;
+    width: 0%;
+    transition: width 0.2s ease;
+}
+
+.progress-text {
+    font-size: 12px;
+    color: var(--text-muted);
+    text-align: center;
+}
+
+/* ===== Fullscreen Media Viewer ===== */
+.media-viewer {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 9999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+}
+
+.media-viewer-backdrop {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.88);
+}
+
+.media-viewer-close {
+    position: absolute;
+    top: 12px;
+    right: 16px;
+    z-index: 10001;
+    background: rgba(255,255,255,0.1);
+    border: none;
+    color: #fff;
+    font-size: 28px;
+    cursor: pointer;
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s;
+}
+
+.media-viewer-close:hover {
+    background: rgba(255,255,255,0.2);
+}
+
+.media-viewer-content {
+    position: relative;
+    z-index: 10000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    max-width: 90vw;
+    max-height: 85vh;
+}
+
+.media-viewer-content img {
+    max-width: 90vw;
+    max-height: 85vh;
+    object-fit: contain;
+    border-radius: 4px;
+    user-select: none;
+    -webkit-user-select: none;
+    cursor: zoom-in;
+}
+
+.media-viewer-content img.zoomed {
+    cursor: zoom-out;
+    transform-origin: center center;
+}
+
+.media-viewer-content video {
+    max-width: 90vw;
+    max-height: 80vh;
+    border-radius: 4px;
+    outline: none;
+}
+
+/* ===== Video Controls ===== */
+.video-controls {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 10001;
+    background: linear-gradient(transparent, rgba(0,0,0,0.85));
+    padding: 16px 16px 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.video-ctrl-btn {
+    background: none;
+    border: none;
+    color: #fff;
+    font-size: 20px;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 4px;
+    transition: background 0.15s;
+    flex-shrink: 0;
+}
+
+.video-ctrl-btn:hover {
+    background: rgba(255,255,255,0.15);
+}
+
+.video-progress-wrap {
+    flex: 1;
+    position: relative;
+    height: 24px;
+    display: flex;
+    align-items: center;
+}
+
+.video-progress-bg {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 4px;
+    background: rgba(255,255,255,0.2);
+    border-radius: 2px;
+}
+
+.video-progress-buffered {
+    position: absolute;
+    top: 0;
+    left: 0;
+    height: 100%;
+    background: rgba(255,255,255,0.3);
+    border-radius: 2px;
+}
+
+.video-progress-played {
+    position: absolute;
+    top: 0;
+    left: 0;
+    height: 100%;
+    background: var(--accent);
+    border-radius: 2px;
+}
+
+.video-progress-input {
+    position: absolute;
+    left: 0;
+    right: 0;
+    width: 100%;
+    height: 24px;
+    opacity: 0;
+    cursor: pointer;
+    z-index: 2;
+    margin: 0;
+}
+
+.video-time-display {
+    color: rgba(255,255,255,0.8);
+    font-size: 12px;
+    white-space: nowrap;
+    flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+}
+
+/* ===== DM / Friends (existing) ===== */

@@ -1,4 +1,4 @@
-console.log('chat.js v7 loaded - hashed codes + true E2E encryption');
+console.log('chat.js v9 loaded - file sharing + media preview');
 
 function generateCode(len) {
     const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -20,6 +20,8 @@ let currentDmOtherUser = null;
 let dmConversations = [];
 let unreadDms = {};
 let pendingFriendRequests = 0;
+let selectedFile = null;
+let isUploading = false;
 
 const token = () => localStorage.getItem('token');
 const authFetch = (url, opts = {}) => {
@@ -206,6 +208,34 @@ document.addEventListener('DOMContentLoaded', () => {
         if (e.key === 'Enter') sendMessage();
     });
 
+    // File upload
+    document.getElementById('attach-btn').addEventListener('click', () => {
+        if (!currentChannelId && !currentDmChannelId) return;
+        document.getElementById('file-input').click();
+    });
+    document.getElementById('file-input').addEventListener('change', handleFileSelect);
+    document.getElementById('cancel-upload').addEventListener('click', closeUploadModal);
+    document.getElementById('confirm-upload').addEventListener('click', startFileUpload);
+    document.getElementById('media-viewer-close').addEventListener('click', closeMediaViewer);
+    document.getElementById('media-viewer-backdrop').addEventListener('click', closeMediaViewer);
+
+    // Event delegation for file download buttons
+    document.getElementById('message-list').addEventListener('click', (e) => {
+        const dlBtn = e.target.closest('.file-download-btn');
+        if (dlBtn) {
+            const card = dlBtn.closest('.file-card');
+            if (card) {
+                downloadFileById(
+                    card.dataset.fileId,
+                    card.dataset.fileKey,
+                    card.dataset.fileName,
+                    card.dataset.fileMime,
+                    parseInt(card.dataset.fileSize, 10) || 0
+                );
+            }
+        }
+    });
+
     // Mobile sidebar
     const hamburger = document.getElementById('hamburger');
     const sidebar = document.getElementById('sidebar');
@@ -379,6 +409,18 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     document.getElementById('members-panel').classList.toggle('open', membersPanelOpen);
+
+    // Event delegation for member action buttons (kick/ban/unban)
+    document.addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-action]');
+        if (!btn) return;
+        const action = btn.dataset.action;
+        const userId = btn.dataset.userId;
+        const username = btn.dataset.username;
+        if (action === 'kick') kickMember(userId, username);
+        else if (action === 'ban') banMember(userId, username);
+        else if (action === 'unban') unbanUser(userId, username);
+    });
 
     // No polling needed — WebSocket handles all live updates
 });
@@ -801,6 +843,8 @@ async function selectChannel(channelId, channelName, element) {
 // --- Messages ---
 
 async function loadMessages(channelId) {
+    // Clean up old blob URLs when switching channels
+    revokeBlobUrls();
     const list = document.getElementById('message-list');
     list.innerHTML = '<div class="welcome">Loading messages...</div>';
 
@@ -838,13 +882,29 @@ async function appendMessage(msg) {
     }
 
     let textContent = '';
+    let fileData = null;
     if (msg.encrypted_content && msg.nonce && currentChannelId && currentServerId) {
         try {
             textContent = E2ECrypto.decrypt(msg.encrypted_content, msg.nonce, currentChannelId, currentServerId);
+            // Check if it's a file message
+            try {
+                const parsed = JSON.parse(textContent);
+                if (parsed && parsed.type === 'file') {
+                    fileData = parsed;
+                    textContent = '';
+                }
+            } catch (_) {}
         } catch (e) {
             console.warn('Decrypt failed:', e);
             textContent = '[encrypted message - unable to decrypt]';
         }
+    }
+
+    let contentHtml = '';
+    if (fileData) {
+        contentHtml = buildFileCardHtml(fileData);
+    } else {
+        contentHtml = '<div class="text">' + escapeHtml(textContent) + '</div>';
     }
 
     div.innerHTML =
@@ -854,8 +914,13 @@ async function appendMessage(msg) {
                 '<span class="username">' + escapeHtml(msg.sender_username || 'unknown') + '</span>' +
                 '<span class="time">' + time + '</span>' +
             '</div>' +
-            '<div class="text">' + escapeHtml(textContent) + '</div>' +
+            contentHtml +
         '</div>';
+
+    // Load media preview if applicable
+    if (fileData && fileData.file_key) {
+        loadMediaPreview(div.querySelector('.file-preview'), fileData);
+    }
 
     list.appendChild(div);
     list.scrollTop = list.scrollHeight;
@@ -961,18 +1026,26 @@ function renderDmSidebar() {
         if (c.last_message) {
             try {
                 const kp = E2ECrypto.getIdentityKeyPair();
-                preview = E2ECrypto.decryptDm(
+                const decrypted = E2ECrypto.decryptDm(
                     c.last_message.encrypted_content, c.last_message.nonce,
                     c.dm_channel_id, kp.privateKey,
                     c.other_public_key ? new Uint8Array(E2ECrypto.base64ToArrayBuffer(c.other_public_key)) : null
                 );
-                preview = preview.substring(0, 40);
+                try {
+                    const parsed = JSON.parse(decrypted);
+                    if (parsed && parsed.type === 'file') {
+                        preview = getFileIcon(parsed.mime_type) + ' ' + (parsed.filename || 'File');
+                    } else {
+                        preview = decrypted.substring(0, 40);
+                    }
+                } catch (_) {
+                    preview = decrypted.substring(0, 40);
+                }
             } catch (e) {
                 preview = '[encrypted]';
             }
         }
-        html += '<div class="channel-item dm-item" onclick="selectDmChannel(\'' + c.dm_channel_id + '\', \'' +
-            escapeHtml(c.other_user_id) + '\', \'' + escapeHtml(c.other_username) + '\', this)">' +
+        html += '<div class="channel-item dm-item" data-dm-id="' + c.dm_channel_id + '" data-user-id="' + escapeAttr(c.other_user_id) + '" data-username="' + escapeAttr(c.other_username) + '">' +
             '<div class="dm-avatar">' + initial + '</div>' +
             '<div class="dm-info">' +
                 '<div class="dm-name">' + escapeHtml(c.other_username) + '</div>' +
@@ -983,6 +1056,13 @@ function renderDmSidebar() {
     }
     html += '</div>';
     container.innerHTML = html;
+
+    // Event delegation for DM items
+    document.querySelectorAll('.dm-item[data-dm-id]').forEach(item => {
+        item.addEventListener('click', () => {
+            selectDmChannel(item.dataset.dmId, item.dataset.userId, item.dataset.username, item);
+        });
+    });
 
     document.getElementById('add-friend-btn').addEventListener('click', () => {
         document.getElementById('friend-code-input').value = '';
@@ -1004,22 +1084,25 @@ async function selectDmChannel(dmChannelId, otherUserId, otherUsername, element)
     document.querySelectorAll('.channel-item').forEach(el => el.classList.remove('active'));
     if (element) element.classList.add('active');
 
-    document.getElementById('channel-name').innerHTML = escapeHtml(otherUsername) +
-        ' <button class="btn-unfriend" onclick="unfriend(\'' + escapeHtml(otherUserId) + '\', \'' + escapeHtml(otherUsername) + '\')" title="Unfriend">Unfriend</button>';
+    document.getElementById('channel-name').innerHTML = '<span>' + escapeHtml(otherUsername) + '</span>' +
+        ' <button class="btn-unfriend" id="unfriend-btn" title="Unfriend">Unfriend</button>';
     document.getElementById('message-input').disabled = false;
     document.getElementById('send-btn').disabled = false;
 
+    document.getElementById('unfriend-btn').addEventListener('click', () => unfriend(otherUserId, otherUsername));
+    
     // Clear unread badge for this DM channel
     delete unreadDms[dmChannelId];
     updateDmStripBadge();
-    renderDmSidebar();
-
     await loadDmMessages(dmChannelId, otherUserId);
+    renderDmSidebar();
 
     if (window._closeSidebar) window._closeSidebar();
 }
 
 async function loadDmMessages(dmChannelId, otherUserId) {
+    // Clean up old blob URLs when switching DM channels
+    revokeBlobUrls();
     const list = document.getElementById('message-list');
     list.innerHTML = '<div class="welcome">Loading messages...</div>';
 
@@ -1061,13 +1144,29 @@ function appendDmMessage(msg, kp, otherPublicKey) {
     }
 
     let textContent = '';
+    let fileData = null;
     if (msg.encrypted_content && msg.nonce && kp && otherPublicKey) {
         try {
             const dmId = msg.dm_channel_id || currentDmChannelId;
             textContent = E2ECrypto.decryptDm(msg.encrypted_content, msg.nonce, dmId, kp.privateKey, otherPublicKey);
+            // Check if it's a file message
+            try {
+                const parsed = JSON.parse(textContent);
+                if (parsed && parsed.type === 'file') {
+                    fileData = parsed;
+                    textContent = '';
+                }
+            } catch (_) {}
         } catch (e) {
             textContent = '[encrypted message - unable to decrypt]';
         }
+    }
+
+    let contentHtml = '';
+    if (fileData) {
+        contentHtml = buildFileCardHtml(fileData);
+    } else {
+        contentHtml = '<div class="text">' + escapeHtml(textContent) + '</div>';
     }
 
     div.innerHTML =
@@ -1077,8 +1176,13 @@ function appendDmMessage(msg, kp, otherPublicKey) {
                 '<span class="username">' + escapeHtml(msg.sender_username || 'unknown') + '</span>' +
                 '<span class="time">' + time + '</span>' +
             '</div>' +
-            '<div class="text">' + escapeHtml(textContent) + '</div>' +
+            contentHtml +
         '</div>';
+
+    // Load media preview if applicable
+    if (fileData && fileData.file_key) {
+        loadMediaPreview(div.querySelector('.file-preview'), fileData);
+    }
 
     list.appendChild(div);
     list.scrollTop = list.scrollHeight;
@@ -1195,8 +1299,8 @@ async function loadMembers(serverId) {
             let actionBtns = '';
             if (isOwner && !isMemberOwner && m.id !== user.id) {
                 actionBtns =
-                    '<button class="btn-kick" onclick="kickMember(\'' + m.id + '\', \'' + escapeHtml(m.username) + '\')" title="Kick">&#10005;</button>' +
-                    '<button class="btn-ban" onclick="banMember(\'' + m.id + '\', \'' + escapeHtml(m.username) + '\')" title="Ban">&#9888;</button>';
+                    '<button class="btn-kick" data-action="kick" data-user-id="' + escapeAttr(m.id) + '" data-username="' + escapeAttr(m.username) + '" title="Kick">&#10005;</button>' +
+                    '<button class="btn-ban" data-action="ban" data-user-id="' + escapeAttr(m.id) + '" data-username="' + escapeAttr(m.username) + '" title="Ban">&#9888;</button>';
             }
             div.innerHTML =
                 '<div class="member-avatar' + (isMemberOwner ? ' owner' : '') + '">' + initial + '</div>' +
@@ -1330,7 +1434,7 @@ async function loadBannedUsers() {
             div.className = 'banned-item';
             div.innerHTML =
                 '<span>' + escapeHtml(b.username) + '</span>' +
-                '<button class="btn-unban" onclick="unbanUser(\'' + b.id + '\', \'' + escapeHtml(b.username) + '\')">Unban</button>';
+                '<button class="btn-unban" data-action="unban" data-user-id="' + escapeAttr(b.id) + '" data-username="' + escapeAttr(b.username) + '">Unban</button>';
             list.appendChild(div);
         });
     } catch (err) {
@@ -1804,6 +1908,13 @@ function escapeHtml(str) {
     div.textContent = str;
     return div.innerHTML;
 }
+function escapeAttr(str) {
+    return escapeHtml(str).replace(/"/g, '&quot;');
+}
+function escapeJsStr(str) {
+    if (!str) return '';
+    return String(str).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r');
+}
 
 // --- QR Code Decode Helper ---
 async function decodeQrFromFile(file) {
@@ -1834,4 +1945,548 @@ async function decodeQrFromFile(file) {
         };
         img.src = url;
     });
+}
+
+// ===== File Sharing =====
+
+function formatFileSize(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+}
+
+function getFileIcon(mimeType) {
+    if (!mimeType) return '📄';
+    if (mimeType.startsWith('image/')) return '🖼️';
+    if (mimeType.startsWith('video/')) return '🎬';
+    if (mimeType.startsWith('audio/')) return '🎵';
+    if (mimeType.includes('pdf')) return '📕';
+    if (mimeType.includes('zip') || mimeType.includes('rar') || mimeType.includes('tar') || mimeType.includes('gzip')) return '📦';
+    if (mimeType.includes('word') || mimeType.includes('document')) return '📝';
+    if (mimeType.includes('sheet') || mimeType.includes('excel')) return '📊';
+    if (mimeType.includes('presentation') || mimeType.includes('powerpoint')) return '📽️';
+    if (mimeType.startsWith('text/')) return '📄';
+    return '📄';
+}
+
+function handleFileSelect(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (file.size > 1024 * 1024 * 1024) {
+        alert('File too large. Maximum file size is 1 GB.');
+        return;
+    }
+    selectedFile = file;
+    showUploadModal(file);
+    e.target.value = '';
+}
+
+function showUploadModal(file) {
+    const modal = document.getElementById('upload-modal');
+    const info = document.getElementById('upload-file-info');
+    const preview = document.getElementById('upload-preview');
+    const progressContainer = document.getElementById('upload-progress-container');
+    const errorEl = document.getElementById('upload-error');
+    const confirmBtn = document.getElementById('confirm-upload');
+
+    info.innerHTML = '<div class="ufi-name">' + escapeHtml(file.name) + '</div>' +
+        '<div class="ufi-meta">' + formatFileSize(file.size) + ' • ' + escapeHtml(file.type || 'Unknown') + '</div>';
+
+    preview.innerHTML = '';
+    if (file.type && file.type.startsWith('image/')) {
+        const img = document.createElement('img');
+        img.src = URL.createObjectURL(file);
+        preview.appendChild(img);
+    } else if (file.type && file.type.startsWith('video/')) {
+        const video = document.createElement('video');
+        video.src = URL.createObjectURL(file);
+        video.controls = true;
+        video.style.maxWidth = '100%';
+        video.style.maxHeight = '200px';
+        video.style.borderRadius = '8px';
+        preview.appendChild(video);
+    }
+
+    progressContainer.style.display = 'none';
+    errorEl.style.display = 'none';
+    confirmBtn.disabled = false;
+    confirmBtn.textContent = 'Upload';
+    modal.style.display = 'flex';
+}
+
+function closeUploadModal() {
+    const modal = document.getElementById('upload-modal');
+    // Revoke preview blob URLs
+    const previewEl = document.getElementById('upload-preview');
+    if (previewEl) {
+        previewEl.querySelectorAll('img, video').forEach(el => {
+            if (el.src && el.src.startsWith('blob:')) URL.revokeObjectURL(el.src);
+        });
+        previewEl.innerHTML = '';
+    }
+    modal.style.display = 'none';
+    selectedFile = null;
+    isUploading = false;
+}
+
+async function startFileUpload() {
+    if (!selectedFile || isUploading) return;
+    const isDm = viewMode === 'dms';
+    if (!isDm && !currentChannelId) return;
+    if (isDm && !currentDmChannelId) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+    isUploading = true;
+    const confirmBtn = document.getElementById('confirm-upload');
+    const progressContainer = document.getElementById('upload-progress-container');
+    const progressFill = document.getElementById('upload-progress-fill');
+    const progressText = document.getElementById('upload-progress-text');
+    const errorEl = document.getElementById('upload-error');
+
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = 'Uploading...';
+    progressContainer.style.display = 'block';
+    errorEl.style.display = 'none';
+
+    try {
+        // Generate a random file encryption key
+        const fileKey = E2ECrypto.generateFileKey();
+        const fileKeyB64 = E2ECrypto.arrayBufferToBase64(fileKey);
+
+        // Initialize upload on server
+        const initRes = await authFetch('/api/files/init', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                size: selectedFile.size,
+                mime: selectedFile.type || 'application/octet-stream'
+            })
+        });
+        if (!initRes.ok) {
+            const err = await initRes.json();
+            throw new Error(err.error || 'Failed to initialize upload');
+        }
+        const { file_id } = await initRes.json();
+
+        // Read file and upload chunks
+        const CHUNK_SIZE = 64 * 1024; // 64 KB
+        const totalChunks = Math.ceil(selectedFile.size / CHUNK_SIZE);
+
+        for (let i = 0; i < totalChunks; i++) {
+            const start = i * CHUNK_SIZE;
+            const end = Math.min(start + CHUNK_SIZE, selectedFile.size);
+            const chunkData = new Uint8Array(await selectedFile.slice(start, end).arrayBuffer());
+
+            // Encrypt chunk with file key
+            const encryptedChunk = E2ECrypto.encryptFileChunk(fileKey, chunkData);
+
+            // Upload encrypted chunk
+            const chunkRes = await authFetch('/api/files/' + file_id + '/chunk/' + i, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/octet-stream' },
+                body: encryptedChunk
+            });
+            if (!chunkRes.ok) throw new Error('Failed to upload chunk ' + (i + 1));
+
+            // Update progress
+            const pct = Math.round(((i + 1) / totalChunks) * 100);
+            progressFill.style.width = pct + '%';
+            progressText.textContent = pct + '% (' + (i + 1) + '/' + totalChunks + ')';
+        }
+
+        // Mark upload complete
+        const completeRes = await authFetch('/api/files/' + file_id + '/complete', {
+            method: 'POST'
+        });
+        if (!completeRes.ok) throw new Error('Failed to finalize upload');
+
+        // Build file message payload (will be encrypted as message content)
+        const filePayload = JSON.stringify({
+            type: 'file',
+            file_id: file_id,
+            filename: selectedFile.name,
+            mime_type: selectedFile.type || 'application/octet-stream',
+            file_size: selectedFile.size,
+            file_key: fileKeyB64
+        });
+
+        let encrypted;
+        if (isDm) {
+            const kp = E2ECrypto.getIdentityKeyPair();
+            let otherPublicKey;
+            try {
+                const res = await authFetch('/api/identity/' + currentDmOtherUser.id);
+                const data = await res.json();
+                otherPublicKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(data.identity_public_key));
+            } catch (e) {
+                throw new Error('Failed to fetch recipient key');
+            }
+            encrypted = E2ECrypto.encryptDm(filePayload, currentDmChannelId, kp.privateKey, otherPublicKey);
+            ws.send(JSON.stringify({
+                type: 'dm_send',
+                dm_channel_id: currentDmChannelId,
+                encrypted_content: encrypted.ciphertext,
+                nonce: encrypted.nonce,
+            }));
+        } else {
+            encrypted = E2ECrypto.encrypt(filePayload, currentChannelId, currentServerId);
+            ws.send(JSON.stringify({
+                type: 'message_send',
+                channel_id: currentChannelId,
+                encrypted_content: encrypted.ciphertext,
+                nonce: encrypted.nonce,
+            }));
+        }
+
+        closeUploadModal();
+    } catch (err) {
+        console.error('File upload failed:', err);
+        errorEl.textContent = err.message || 'Upload failed';
+        errorEl.style.display = 'block';
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = 'Retry';
+    }
+}
+
+function buildFileCardHtml(fileData) {
+    const isImage = fileData.mime_type && fileData.mime_type.startsWith('image/');
+    const isVideo = fileData.mime_type && fileData.mime_type.startsWith('video/');
+    const isAudio = fileData.mime_type && fileData.mime_type.startsWith('audio/');
+    const isText = fileData.mime_type && (fileData.mime_type.startsWith('text/') || fileData.mime_type === 'application/json' || fileData.mime_type === 'application/javascript' || fileData.mime_type === 'application/xml');
+    const icon = getFileIcon(fileData.mime_type);
+
+    let previewContainer = '';
+    if (isImage || isVideo || isAudio || isText) {
+        previewContainer = '<div class="file-preview" ' +
+            'data-file-id="' + escapeAttr(fileData.file_id) + '" ' +
+            'data-mime="' + escapeAttr(fileData.mime_type) + '" ' +
+            'data-key="' + escapeAttr(fileData.file_key) + '" ' +
+            'data-filename="' + escapeAttr(fileData.filename) + '" ' +
+            'data-size="' + fileData.file_size + '"></div>';
+    }
+
+    // Use data attributes instead of inline onclick to prevent XSS
+    // escapeAttr escapes double quotes to prevent data-attribute injection
+    return '<div class="file-card" ' +
+        'data-file-id="' + escapeAttr(fileData.file_id) + '" ' +
+        'data-file-key="' + escapeAttr(fileData.file_key) + '" ' +
+        'data-file-name="' + escapeAttr(fileData.filename) + '" ' +
+        'data-file-mime="' + escapeAttr(fileData.mime_type) + '" ' +
+        'data-file-size="' + fileData.file_size + '">' +
+        '<button class="file-download-btn" title="Download">⬇</button>' +
+        '<div class="file-details">' +
+            '<div class="file-name">' + icon + ' ' + escapeHtml(fileData.filename) + '</div>' +
+            '<div class="file-meta">' + formatFileSize(fileData.file_size) + (fileData.mime_type ? ' • ' + escapeHtml(fileData.mime_type) : '') + '</div>' +
+            previewContainer +
+        '</div>' +
+    '</div>';
+}
+
+let blobUrls = []; // Track blob URLs for cleanup
+
+function revokeBlobUrls() {
+    for (const u of blobUrls) { try { URL.revokeObjectURL(u); } catch (_) {} }
+    blobUrls = [];
+}
+
+async function loadMediaPreview(container, fileData) {
+    if (!container) return;
+    const isImage = fileData.mime_type && fileData.mime_type.startsWith('image/');
+    const isVideo = fileData.mime_type && fileData.mime_type.startsWith('video/');
+    const isAudio = fileData.mime_type && fileData.mime_type.startsWith('audio/');
+    const isText = fileData.mime_type && (fileData.mime_type.startsWith('text/') || fileData.mime_type === 'application/json' || fileData.mime_type === 'application/javascript' || fileData.mime_type === 'application/xml');
+    if (!isImage && !isVideo && !isAudio && !isText) return;
+
+    // Show loading indicator
+    container.innerHTML = '<div class="file-loading">Loading preview...</div>';
+
+    try {
+        const blob = await downloadAndDecryptFile(fileData.file_id, fileData.file_key, fileData.mime_type, fileData.file_size);
+        const url = URL.createObjectURL(blob);
+        blobUrls.push(url);
+        container.innerHTML = '';
+
+        if (isImage) {
+            const img = document.createElement('img');
+            img.src = url;
+            img.loading = 'lazy';
+            img.alt = fileData.filename;
+            img.addEventListener('click', () => openMediaViewer(url, 'image', fileData));
+            container.appendChild(img);
+        } else if (isVideo) {
+            const video = document.createElement('video');
+            video.src = url;
+            video.preload = 'metadata';
+            video.playsInline = true;
+            video.muted = true;
+            video.addEventListener('click', () => openMediaViewer(url, 'video', fileData));
+            const playOverlay = document.createElement('div');
+            playOverlay.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:48px;color:#fff;text-shadow:0 2px 8px rgba(0,0,0,0.5);pointer-events:none;';
+            playOverlay.textContent = '▶';
+            container.style.position = 'relative';
+            container.appendChild(video);
+            container.appendChild(playOverlay);
+        } else if (isAudio) {
+            const audio = document.createElement('audio');
+            audio.src = url;
+            audio.controls = true;
+            audio.style.width = '100%';
+            container.appendChild(audio);
+        } else if (isText) {
+            try {
+                if (fileData.file_size > 512 * 1024) {
+                    container.innerHTML = '<div class="file-type-icon">📄</div>';
+                    return;
+                }
+                const text = await blob.text();
+                const preview = text.substring(0, 2048);
+                const pre = document.createElement('pre');
+                pre.className = 'text-preview';
+                pre.textContent = preview;
+                container.appendChild(pre);
+                if (text.length > 2048) {
+                    const more = document.createElement('div');
+                    more.className = 'text-preview-more';
+                    more.textContent = '... (' + formatFileSize(text.length) + ' total)';
+                    container.appendChild(more);
+                }
+            } catch (_) {
+                container.innerHTML = '<div class="file-type-icon">📄</div>';
+            }
+        }
+    } catch (e) {
+        console.warn('Failed to load media preview:', e);
+        container.innerHTML = '<div class="file-type-icon">' + (isImage ? '🖼️' : isVideo ? '🎬' : isAudio ? '🎵' : '📄') + '</div>';
+    }
+}
+
+async function downloadAndDecryptFile(fileId, fileKeyB64, mimeType, fileSize) {
+    const fileKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(fileKeyB64));
+
+    const res = await authFetch('/api/files/' + fileId + '/download');
+    if (!res.ok) throw new Error('Failed to download file');
+
+    const data = new Uint8Array(await res.arrayBuffer());
+    if (data.length === 0) throw new Error('Empty file data');
+
+    // Each chunk: [24-byte nonce] + [ciphertext] + [16-byte Poly1305 tag]
+    // Plaintext chunk = 64KB. Encrypted = 64KB + 16 tag. With nonce prefix = 64KB + 40.
+    const CHUNK_PLAINTEXT = 65536;
+    const CHUNK_ENCRYPTED_FULL = CHUNK_PLAINTEXT + 16 + 24; // 65576
+    const totalChunks = fileSize ? Math.ceil(fileSize / CHUNK_PLAINTEXT) : Math.ceil(data.length / CHUNK_ENCRYPTED_FULL);
+
+    const decryptedChunks = [];
+    for (let i = 0; i < totalChunks; i++) {
+        const start = i * CHUNK_ENCRYPTED_FULL;
+        let chunkData;
+        if (i < totalChunks - 1) {
+            chunkData = data.slice(start, start + CHUNK_ENCRYPTED_FULL);
+        } else {
+            chunkData = data.slice(start);
+        }
+        if (chunkData.length < 40) throw new Error('Encrypted chunk too short');
+        const decrypted = E2ECrypto.decryptFileChunk(fileKey, chunkData);
+        decryptedChunks.push(decrypted);
+    }
+
+    let totalLength = 0;
+    for (const c of decryptedChunks) totalLength += c.length;
+    const result = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const c of decryptedChunks) {
+        result.set(c, offset);
+        offset += c.length;
+    }
+
+    return new Blob([result], { type: mimeType || 'application/octet-stream' });
+}
+
+async function downloadFileById(fileId, fileKeyB64, filename, mimeType, fileSize) {
+    try {
+        const blob = await downloadAndDecryptFile(fileId, fileKeyB64, mimeType, fileSize);
+        const url = URL.createObjectURL(blob);
+        blobUrls.push(url);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => {
+            URL.revokeObjectURL(url);
+            blobUrls = blobUrls.filter(u => u !== url);
+        }, 5000);
+    } catch (e) {
+        console.error('Download failed:', e);
+        alert('Failed to download file: ' + e.message);
+    }
+}
+
+// ===== Fullscreen Media Viewer =====
+
+let viewerZoomed = false;
+
+function openMediaViewer(url, type, fileData) {
+    const viewer = document.getElementById('media-viewer');
+    const content = document.getElementById('media-viewer-content');
+    const controls = document.getElementById('video-controls');
+
+    content.innerHTML = '';
+    viewerZoomed = false;
+
+    if (type === 'image') {
+        controls.style.display = 'none';
+        const img = document.createElement('img');
+        img.src = url;
+        img.draggable = false;
+
+        // Desktop: mouse events for 2x zoom
+        img.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            if (!viewerZoomed) {
+                viewerZoomed = true;
+                img.classList.add('zoomed');
+                updateZoomPosition(img, e);
+            } else {
+                viewerZoomed = false;
+                img.classList.remove('zoomed');
+                img.style.transform = '';
+            }
+        });
+
+        img.addEventListener('mousemove', (e) => {
+            if (viewerZoomed) updateZoomPosition(img, e);
+        });
+
+        // Mobile: touch events for 2x zoom
+        let touchStartTime = 0;
+        img.addEventListener('touchstart', (e) => {
+            touchStartTime = Date.now();
+        }, { passive: true });
+
+        img.addEventListener('touchend', (e) => {
+            const elapsed = Date.now() - touchStartTime;
+            if (elapsed < 300) {
+                if (!viewerZoomed) {
+                    viewerZoomed = true;
+                    img.classList.add('zoomed');
+                    const touch = e.changedTouches[0];
+                    updateZoomPosition(img, { clientX: touch.clientX, clientY: touch.clientY });
+                } else {
+                    viewerZoomed = false;
+                    img.classList.remove('zoomed');
+                    img.style.transform = '';
+                }
+            }
+        }, { passive: true });
+
+        img.addEventListener('touchmove', (e) => {
+            if (viewerZoomed && e.touches.length === 1) {
+                const touch = e.touches[0];
+                updateZoomPosition(img, { clientX: touch.clientX, clientY: touch.clientY });
+            }
+        }, { passive: true });
+
+        content.appendChild(img);
+    } else if (type === 'video') {
+        const video = document.createElement('video');
+        video.src = url;
+        video.controls = false;
+        video.playsInline = true;
+        content.appendChild(video);
+
+        controls.style.display = 'flex';
+        setupVideoControls(video);
+    }
+
+    viewer.style.display = 'flex';
+    document.body.style.overflow = 'hidden';
+}
+
+function updateZoomPosition(img, e) {
+    const rect = img.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width) * 100;
+    const y = ((e.clientY - rect.top) / rect.height) * 100;
+    img.style.transform = 'scale(2)';
+    img.style.transformOrigin = x + '% ' + y + '%';
+}
+
+function closeMediaViewer() {
+    const viewer = document.getElementById('media-viewer');
+    const content = document.getElementById('media-viewer-content');
+    const video = content.querySelector('video');
+    if (video) {
+        video.pause();
+        // Do NOT revoke - shared with inline preview
+        video.src = '';
+    }
+    const img = content.querySelector('img');
+    // Do NOT revoke - shared with inline preview
+    content.innerHTML = '';
+    viewer.style.display = 'none';
+    document.body.style.overflow = '';
+    viewerZoomed = false;
+    document.getElementById('video-controls').style.display = 'none';
+}
+
+function setupVideoControls(video) {
+    // Clone controls to remove old event listeners
+    const controls = document.getElementById('video-controls');
+    const freshControls = controls.cloneNode(true);
+    controls.parentNode.replaceChild(freshControls, controls);
+
+    const playPauseBtn = document.getElementById('vc-play-pause');
+    const seekInput = document.getElementById('vc-seek');
+    const timeDisplay = document.getElementById('vc-time');
+    const fullscreenBtn = document.getElementById('vc-fullscreen');
+    const playedBar = document.getElementById('vc-played');
+    const bufferedBar = document.getElementById('vc-buffered');
+
+    playPauseBtn.innerHTML = '▶';
+
+    playPauseBtn.onclick = () => {
+        if (video.paused) { video.play(); } else { video.pause(); }
+    };
+
+    video.onclick = (e) => {
+        e.stopPropagation();
+        if (video.paused) { video.play(); } else { video.pause(); }
+    };
+
+    video.addEventListener('play', () => { playPauseBtn.innerHTML = '⏸'; });
+    video.addEventListener('pause', () => { playPauseBtn.innerHTML = '▶'; });
+
+    video.addEventListener('timeupdate', () => {
+        if (!video.duration) return;
+        const pct = (video.currentTime / video.duration) * 1000;
+        seekInput.value = pct;
+        playedBar.style.width = (pct / 10) + '%';
+        timeDisplay.textContent = formatTime(video.currentTime) + ' / ' + formatTime(video.duration);
+    });
+
+    video.addEventListener('progress', () => {
+        if (!video.duration || !video.buffered.length) return;
+        const buffEnd = video.buffered.end(video.buffered.length - 1);
+        bufferedBar.style.width = (buffEnd / video.duration * 100) + '%';
+    });
+
+    seekInput.addEventListener('input', () => {
+        if (video.duration) {
+            video.currentTime = (seekInput.value / 1000) * video.duration;
+        }
+    });
+
+    fullscreenBtn.onclick = () => {
+        const viewer = document.getElementById('media-viewer');
+        if (viewer.requestFullscreen) viewer.requestFullscreen();
+        else if (viewer.webkitRequestFullscreen) viewer.webkitRequestFullscreen();
+    };
+}
+
+function formatTime(seconds) {
+    if (!isFinite(seconds)) return '0:00';
+    const m = Math.floor(seconds / 60);
+    const s = Math.floor(seconds % 60);
+    return m + ':' + (s < 10 ? '0' : '') + s;
 }

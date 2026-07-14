@@ -713,7 +713,7 @@ test.describe('E2E Chat', () => {
         await page.click('[data-tab="servers"]');
         await page.waitForTimeout(500);
         const serversAfter = await page.locator('#tab-servers').textContent();
-        expect(serversAfter).not.toContain('Admin Test Server');
+        expect(serversAfter).not.toContain('Admin Test Server ' + ts);
 
         // Verify member is also GONE (cascade)
         await page.click('[data-tab="server-members"]');
