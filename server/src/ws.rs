@@ -92,6 +92,8 @@ struct OutgoingChatMessage {
     encrypted_content: String,
     nonce: String,
     timestamp: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message_nonce: Option<String>,
 }
 
 pub async fn ws_handler(
@@ -245,6 +247,7 @@ async fn handle_ws_message(
                 Some(c) => c,
                 None => return,
             };
+            let message_nonce = parsed.get("message_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
 
             // Check user is member of the server this channel belongs to
             let server_id = match state.db.get_server_id_for_channel(channel_id) {
@@ -264,7 +267,7 @@ async fn handle_ws_message(
                 Err(_) => return,
             };
 
-            let message = match state.db.save_encrypted_message(channel_id, user_id, &encrypted_content, &nonce) {
+            let message = match state.db.save_encrypted_message(channel_id, user_id, &encrypted_content, &nonce, message_nonce.as_deref()) {
                 Ok(m) => m,
                 Err(e) => {
                     tracing::error!("Failed to save message: {}", e);
@@ -285,6 +288,7 @@ async fn handle_ws_message(
                     encrypted_content: encrypted_content_b64.to_string(),
                     nonce: nonce_b64.to_string(),
                     timestamp: message.timestamp,
+                    message_nonce: message.message_nonce,
                 }),
                 user_id: None,
                 username: None,
@@ -359,6 +363,7 @@ async fn handle_ws_message(
                 Some(c) => c,
                 None => return,
             };
+            let message_nonce = parsed.get("message_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
 
             // Must be a member of this DM channel.
             if !state.db.is_dm_member(dm_channel_id, user_id).unwrap_or(false) {
@@ -374,7 +379,7 @@ async fn handle_ws_message(
                 Err(_) => return,
             };
 
-            let message = match state.db.save_dm_message(dm_channel_id, user_id, &encrypted_content, &nonce) {
+            let message = match state.db.save_dm_message(dm_channel_id, user_id, &encrypted_content, &nonce, message_nonce.as_deref()) {
                 Ok(m) => m,
                 Err(e) => {
                     tracing::error!("Failed to save DM message: {}", e);
@@ -395,6 +400,7 @@ async fn handle_ws_message(
                     encrypted_content: encrypted_content_b64.to_string(),
                     nonce: nonce_b64.to_string(),
                     timestamp: message.timestamp,
+                    message_nonce: message.message_nonce,
                 }),
                 user_id: None,
                 username: None,

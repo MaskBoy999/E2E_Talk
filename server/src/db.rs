@@ -45,6 +45,7 @@ pub struct Message {
     pub encrypted_content: Vec<u8>,
     pub nonce: Vec<u8>,
     pub timestamp: String,
+    pub message_nonce: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +76,7 @@ pub struct DmMessage {
     pub encrypted_content: Vec<u8>,
     pub nonce: Vec<u8>,
     pub timestamp: String,
+    pub message_nonce: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -164,6 +166,9 @@ impl Database {
         }
         let _ = conn.execute_batch(include_str!("../migrations/006_hashed_codes.sql"));
         let _ = conn.execute_batch(include_str!("../migrations/007_files.sql"));
+        // Migration 008: run each ALTER TABLE separately so one failure doesn't block the other
+        let _ = conn.execute_batch("ALTER TABLE messages ADD COLUMN message_nonce TEXT");
+        let _ = conn.execute_batch("ALTER TABLE dm_messages ADD COLUMN message_nonce TEXT");
 
         // --- invite_code_hash on servers ---
         // First, make the old invite_code column nullable (SQLite can't DROP COLUMN easily)
@@ -783,9 +788,9 @@ impl Database {
         // first so the client can render top-to-bottom chronologically.
         let mut stmt = conn
             .prepare(
-                "SELECT m.id, m.channel_id, m.sender_id, u.username, m.encrypted_content, m.nonce, m.timestamp
+                "SELECT m.id, m.channel_id, m.sender_id, u.username, m.encrypted_content, m.nonce, m.timestamp, m.message_nonce
                  FROM (
-                     SELECT id, channel_id, sender_id, encrypted_content, nonce, timestamp
+                     SELECT id, channel_id, sender_id, encrypted_content, nonce, timestamp, message_nonce
                      FROM messages
                      WHERE channel_id = ?1
                      ORDER BY timestamp DESC
@@ -805,6 +810,7 @@ impl Database {
                     encrypted_content: row.get(4)?,
                     nonce: row.get(5)?,
                     timestamp: row.get(6)?,
+                    message_nonce: row.get(7)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -819,6 +825,7 @@ impl Database {
         sender_id: &str,
         encrypted_content: &[u8],
         nonce: &[u8],
+        message_nonce: Option<&str>,
     ) -> Result<Message, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let id = Uuid::new_v4().to_string();
@@ -832,8 +839,8 @@ impl Database {
             .map_err(|_| "Sender not found".to_string())?;
 
         conn.execute(
-            "INSERT INTO messages (id, channel_id, sender_id, encrypted_content, nonce) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![id, channel_id, sender_id, encrypted_content, nonce],
+            "INSERT INTO messages (id, channel_id, sender_id, encrypted_content, nonce, message_nonce) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, channel_id, sender_id, encrypted_content, nonce, message_nonce],
         )
         .map_err(|e| e.to_string())?;
 
@@ -845,6 +852,7 @@ impl Database {
             encrypted_content: encrypted_content.to_vec(),
             nonce: nonce.to_vec(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            message_nonce: message_nonce.map(|s| s.to_string()),
         })
     }
 
@@ -1069,6 +1077,20 @@ impl Database {
             .query_row(
                 "SELECT COUNT(*) FROM friendships WHERE user_id_a = ?1 AND user_id_b = ?2",
                 params![a, b],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(count > 0)
+    }
+
+    pub fn share_server(&self, user_a: &str, user_b: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM server_members sm1
+                 INNER JOIN server_members sm2 ON sm1.server_id = sm2.server_id
+                 WHERE sm1.user_id = ?1 AND sm2.user_id = ?2",
+                params![user_a, user_b],
                 |row| row.get(0),
             )
             .map_err(|e| e.to_string())?;
@@ -1516,9 +1538,9 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         // Newest `limit` rows, re-sorted oldest -> newest (same pattern as channel messages).
         let mut stmt = conn.prepare(
-            "SELECT m.id, m.dm_channel_id, m.sender_id, u.username, m.encrypted_content, m.nonce, m.timestamp
+            "SELECT m.id, m.dm_channel_id, m.sender_id, u.username, m.encrypted_content, m.nonce, m.timestamp, m.message_nonce
              FROM (
-                 SELECT id, dm_channel_id, sender_id, encrypted_content, nonce, timestamp
+                 SELECT id, dm_channel_id, sender_id, encrypted_content, nonce, timestamp, message_nonce
                  FROM dm_messages
                  WHERE dm_channel_id = ?1
                  ORDER BY timestamp DESC
@@ -1536,6 +1558,7 @@ impl Database {
                 encrypted_content: row.get(4)?,
                 nonce: row.get(5)?,
                 timestamp: row.get(6)?,
+                message_nonce: row.get(7)?,
             })
         }).map_err(|e| e.to_string())?;
         let mut out = Vec::new();
@@ -1551,6 +1574,7 @@ impl Database {
         sender_id: &str,
         encrypted_content: &[u8],
         nonce: &[u8],
+        message_nonce: Option<&str>,
     ) -> Result<DmMessage, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let id = Uuid::new_v4().to_string();
@@ -1562,9 +1586,9 @@ impl Database {
             )
             .map_err(|_| "Sender not found".to_string())?;
         conn.execute(
-            "INSERT INTO dm_messages (id, dm_channel_id, sender_id, encrypted_content, nonce)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![id, dm_channel_id, sender_id, encrypted_content, nonce],
+            "INSERT INTO dm_messages (id, dm_channel_id, sender_id, encrypted_content, nonce, message_nonce)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, dm_channel_id, sender_id, encrypted_content, nonce, message_nonce],
         )
         .map_err(|e| e.to_string())?;
         Ok(DmMessage {
@@ -1575,13 +1599,14 @@ impl Database {
             encrypted_content: encrypted_content.to_vec(),
             nonce: nonce.to_vec(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            message_nonce: message_nonce.map(|s| s.to_string()),
         })
     }
 
     pub fn get_dm_last_message(&self, dm_channel_id: &str) -> Result<Option<DmMessage>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let result = conn.query_row(
-            "SELECT m.id, m.dm_channel_id, m.sender_id, u.username, m.encrypted_content, m.nonce, m.timestamp
+            "SELECT m.id, m.dm_channel_id, m.sender_id, u.username, m.encrypted_content, m.nonce, m.timestamp, m.message_nonce
              FROM dm_messages m INNER JOIN users u ON m.sender_id = u.id
              WHERE m.dm_channel_id = ?1
              ORDER BY m.timestamp DESC LIMIT 1",
@@ -1595,6 +1620,7 @@ impl Database {
                     encrypted_content: row.get(4)?,
                     nonce: row.get(5)?,
                     timestamp: row.get(6)?,
+                    message_nonce: row.get(7)?,
                 })
             },
         );
@@ -1799,7 +1825,7 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT m.id, m.channel_id, m.sender_id, COALESCE(u.username, '?'), m.encrypted_content, m.nonce, m.timestamp
+                "SELECT m.id, m.channel_id, m.sender_id, COALESCE(u.username, '?'), m.encrypted_content, m.nonce, m.timestamp, m.message_nonce
                  FROM messages m LEFT JOIN users u ON m.sender_id = u.id ORDER BY m.timestamp DESC LIMIT 500",
             )
             .map_err(|e| e.to_string())?;
@@ -1813,6 +1839,7 @@ impl Database {
                     encrypted_content: row.get(4)?,
                     nonce: row.get(5)?,
                     timestamp: row.get(6)?,
+                    message_nonce: row.get(7)?,
                 })
             })
             .map_err(|e| e.to_string())?

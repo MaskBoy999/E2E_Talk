@@ -154,6 +154,7 @@ test.describe('Direct Messages', () => {
                 dm_channel_id: dmChannelId,
                 encrypted_content: encrypted.ciphertext,
                 nonce: encrypted.nonce,
+                message_nonce: encrypted.messageNonce || null,
             }));
         }, { dmChannelId, msg: 'Hello from DM, user2!' });
         await page.waitForTimeout(1000);
@@ -219,6 +220,7 @@ test.describe('Direct Messages', () => {
                 dm_channel_id: dmChannelId,
                 encrypted_content: encrypted.ciphertext,
                 nonce: encrypted.nonce,
+                message_nonce: encrypted.messageNonce || null,
             }));
         }, { dmChannelId, userId2, user2, msg: 'Secret DM message' });
         await page.waitForTimeout(1000);

@@ -102,6 +102,7 @@ async fn main() {
         .route("/api/keys/{user_id}", get(handlers::get_key_bundle))
         .route("/api/identity/{user_id}", get(handlers::get_identity_key))
         .route("/api/identity/upload", post(handlers::upload_identity_key))
+        .route("/api/identity/add-key", post(handlers::add_device_key))
         .route("/api/user/{username}", get(handlers::get_user_id))
         .route("/api/admin/login", post(handlers::admin_login))
         .route("/api/admin/users", get(handlers::admin_list_users))

@@ -546,8 +546,10 @@ const E2ECrypto = (() => {
         return randomBytes(32);
     }
 
-    function deriveChannelKey(serverKey, channelId) {
-        return hkdf(serverKey, serverKey, 'e2e-channel-v1:' + channelId, 32);
+    function deriveChannelKey(serverKey, channelId, messageNonce) {
+        var info = 'e2e-channel-v1:' + channelId;
+        if (messageNonce) info += ':' + messageNonce;
+        return hkdf(serverKey, serverKey, info, 32);
     }
 
     function deriveMetadataKey(serverKey) {
@@ -562,6 +564,17 @@ const E2ECrypto = (() => {
         return {
             ciphertext: arrayBufferToBase64(combined),
             nonce: arrayBufferToBase64(enc.nonce)
+        };
+    }
+
+    function encryptWithKeyAndNonce(plaintext, key, msgNonce) {
+        var plaintextBytes = new TextEncoder().encode(plaintext);
+        var enc = xchacha20poly1305Encrypt(key, plaintextBytes);
+        var combined = concatBuffers(enc.ciphertext, enc.tag);
+        return {
+            ciphertext: arrayBufferToBase64(combined),
+            nonce: arrayBufferToBase64(enc.nonce),
+            messageNonce: msgNonce
         };
     }
 
@@ -659,16 +672,17 @@ const E2ECrypto = (() => {
     function encrypt(plaintext, channelId, serverId) {
         var serverKey = getServerKey(serverId);
         if (!serverKey) throw new Error('No server key - cannot encrypt');
-        var key = deriveChannelKey(serverKey, channelId);
-        return encryptWithKey(plaintext, key);
+        var msgNonce = arrayBufferToBase64(randomBytes(16));
+        var key = deriveChannelKey(serverKey, channelId, msgNonce);
+        return encryptWithKeyAndNonce(plaintext, key, msgNonce);
     }
 
-    function decrypt(ciphertextB64, nonceB64, channelId, serverId) {
+    function decrypt(ciphertextB64, nonceB64, channelId, serverId, messageNonce) {
         var allKeys = getAllServerKeys(serverId);
         if (allKeys.length === 0) throw new Error('No server keys - cannot decrypt');
         for (var i = 0; i < allKeys.length; i++) {
             try {
-                var key = deriveChannelKey(allKeys[i], channelId);
+                var key = deriveChannelKey(allKeys[i], channelId, messageNonce);
                 return decryptWithKey(ciphertextB64, nonceB64, key);
             } catch (_) {}
         }
@@ -697,13 +711,16 @@ const E2ECrypto = (() => {
     // --- DM Encryption (ECDH shared secret + HKDF per-channel) ---
     function encryptDm(plaintext, dmChannelId, myPrivateKey, otherPublicKey) {
         var shared = x25519SharedSecret(myPrivateKey, otherPublicKey);
-        var key = hkdf(shared, shared, 'e2e-dm-v1:' + dmChannelId, 32);
-        return encryptWithKey(plaintext, key);
+        var msgNonce = arrayBufferToBase64(randomBytes(16));
+        var key = hkdf(shared, shared, 'e2e-dm-v1:' + dmChannelId + ':' + msgNonce, 32);
+        return encryptWithKeyAndNonce(plaintext, key, msgNonce);
     }
 
-    function decryptDm(ciphertextB64, nonceB64, dmChannelId, myPrivateKey, otherPublicKey) {
+    function decryptDm(ciphertextB64, nonceB64, dmChannelId, myPrivateKey, otherPublicKey, messageNonce) {
         var shared = x25519SharedSecret(myPrivateKey, otherPublicKey);
-        var key = hkdf(shared, shared, 'e2e-dm-v1:' + dmChannelId, 32);
+        var info = 'e2e-dm-v1:' + dmChannelId;
+        if (messageNonce) info += ':' + messageNonce;
+        var key = hkdf(shared, shared, info, 32);
         return decryptWithKey(ciphertextB64, nonceB64, key);
     }
 
@@ -728,6 +745,40 @@ const E2ECrypto = (() => {
         return xchacha20poly1305Decrypt(fileKey, ciphertext, tag, nonce);
     }
 
+    // --- TOFU Key Verification ---
+    function getKnownFingerprints() {
+        try { return JSON.parse(localStorage.getItem('known_key_fingerprints') || '{}'); }
+        catch { return {}; }
+    }
+    function saveKnownFingerprints(obj) {
+        localStorage.setItem('known_key_fingerprints', JSON.stringify(obj));
+    }
+    function fingerprintKey(pubKeyB64) {
+        var raw = base64ToArrayBuffer(pubKeyB64);
+        var bytes = new Uint8Array(raw);
+        var hash = [];
+        for (var i = 0; i < Math.min(bytes.length, 8); i++) hash.push(bytes[i].toString(16).padStart(2, '0'));
+        return hash.join(':');
+    }
+    function verifyKeyForUser(userId, pubKeyB64) {
+        var known = getKnownFingerprints();
+        var fp = fingerprintKey(pubKeyB64);
+        if (known[userId] === undefined) {
+            known[userId] = fp;
+            saveKnownFingerprints(known);
+            return { trusted: true, newKey: true };
+        }
+        if (known[userId] === fp) {
+            return { trusted: true, newKey: false };
+        }
+        return { trusted: false, newKey: false, storedFingerprint: known[userId], currentFingerprint: fp };
+    }
+    function trustCurrentKey(userId, pubKeyB64) {
+        var known = getKnownFingerprints();
+        known[userId] = fingerprintKey(pubKeyB64);
+        saveKnownFingerprints(known);
+    }
+
     return {
         sha256Hex: function(data) {
             var bytes = new TextEncoder().encode(data);
@@ -750,6 +801,7 @@ const E2ECrypto = (() => {
         deriveChannelKey: deriveChannelKey,
         deriveMetadataKey: deriveMetadataKey,
         encryptWithKey: encryptWithKey,
+        encryptWithKeyAndNonce: encryptWithKeyAndNonce,
         decryptWithKey: decryptWithKey,
         getIdentityKeyPair: getIdentityKeyPair,
         saveIdentityKeyPair: saveIdentityKeyPair,
@@ -766,6 +818,9 @@ const E2ECrypto = (() => {
         decryptDm: decryptDm,
         generateFileKey: generateFileKey,
         encryptFileChunk: encryptFileChunk,
-        decryptFileChunk: decryptFileChunk
+        decryptFileChunk: decryptFileChunk,
+        verifyKeyForUser: verifyKeyForUser,
+        trustCurrentKey: trustCurrentKey,
+        fingerprintKey: fingerprintKey
     };
 })();

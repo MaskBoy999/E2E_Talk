@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::{
@@ -12,6 +12,35 @@ use serde::Deserialize;
 use base64::Engine;
 use crate::auth;
 use crate::AppState;
+
+// --- Rate Limiting ---
+struct RateLimiter {
+    attempts: Mutex<HashMap<String, (u32, Instant)>>,
+}
+
+impl RateLimiter {
+    fn check_and_increment(&self, key: &str, max_attempts: u32, window: Duration) -> bool {
+        let mut map = self.attempts.lock().unwrap();
+        let now = Instant::now();
+        if let Some(&(count, first_attempt)) = map.get(key) {
+            if now.duration_since(first_attempt) > window {
+                map.insert(key.to_string(), (1, now));
+                return true;
+            }
+            if count >= max_attempts {
+                return false;
+            }
+            map.insert(key.to_string(), (count + 1, first_attempt));
+        } else {
+            map.insert(key.to_string(), (1, now));
+        }
+        true
+    }
+}
+
+static LOGIN_RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(|| RateLimiter {
+    attempts: Mutex::new(HashMap::new()),
+});
 
 static ADMIN_TOKENS: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
 
@@ -115,18 +144,29 @@ pub async fn register(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RegisterRequest>,
 ) -> impl IntoResponse {
+    let rate_key = format!("reg:{}", req.username);
+    if !LOGIN_RATE_LIMITER.check_and_increment(&rate_key, 10, Duration::from_secs(300)) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "Too many registration attempts. Try again in 5 minutes."})),
+        )
+            .into_response();
+    }
+
     if req.username.is_empty() || req.password.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": "Username and password are required"})),
-        );
+        )
+            .into_response();
     }
 
     if req.password.len() < 6 {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": "Password must be at least 6 characters"})),
-        );
+        )
+            .into_response();
     }
 
     let password_hash = match auth::hash_password(&req.password) {
@@ -135,7 +175,8 @@ pub async fn register(
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": e})),
-            );
+            )
+                .into_response();
         }
     };
 
@@ -149,7 +190,8 @@ pub async fn register(
             return (
                 StatusCode::CONFLICT,
                 Json(serde_json::json!({"error": e})),
-            );
+            )
+                .into_response();
         }
     };
 
@@ -164,7 +206,8 @@ pub async fn register(
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": e})),
-            );
+            )
+                .into_response();
         }
     };
 
@@ -175,12 +218,22 @@ pub async fn register(
             "user": { "id": user.id, "username": user.username }
         })),
     )
+        .into_response()
 }
 
 pub async fn login(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LoginRequest>,
 ) -> impl IntoResponse {
+    let rate_key = format!("login:{}", req.username);
+    if !LOGIN_RATE_LIMITER.check_and_increment(&rate_key, 10, Duration::from_secs(300)) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "Too many login attempts. Try again in 5 minutes."})),
+        )
+            .into_response();
+    }
+
     let password_hash = match state.db.get_password_hash(&req.username) {
         Ok(h) => h,
         Err(_) => {
@@ -916,7 +969,8 @@ pub async fn list_messages(
                 "sender_username": m.sender_username,
                 "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
                 "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
-                "timestamp": m.timestamp
+                "timestamp": m.timestamp,
+                "message_nonce": m.message_nonce
             })
         })
         .collect();
@@ -1043,6 +1097,59 @@ pub async fn upload_identity_key(
     let _ = state.db.add_user_public_key(&user_id, &key_bytes);
 
     (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct AddDeviceKeyRequest {
+    pub identity_public_key: String,
+}
+
+pub async fn add_device_key(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AddDeviceKeyRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    let key_bytes = match base64::engine::general_purpose::STANDARD.decode(&req.identity_public_key) {
+        Ok(b) => b,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid identity_public_key"})),
+            )
+                .into_response();
+        }
+    };
+
+    if key_bytes.len() != 32 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Key must be 32 bytes"})),
+        )
+            .into_response();
+    }
+
+    // Check for duplicate
+    if let Ok(existing) = state.db.get_all_user_public_keys(&user_id) {
+        for k in &existing {
+            if k == &key_bytes {
+                return (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response();
+            }
+        }
+    }
+
+    match state.db.add_user_public_key(&user_id, &key_bytes) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
 }
 
 #[derive(Deserialize)]
@@ -1938,14 +2045,14 @@ pub async fn download_file(
             .into_response();
     }
 
-    // Authorization: user must be the uploader, or a member of at least one server
-    // (files are shared within server channels or DMs)
+    // Authorization: user must be the uploader, a member of a shared server, or a friend
     let is_uploader = file_info.uploader_id == user_id;
     if !is_uploader {
-        let is_member = state.db.list_user_servers(&user_id)
-            .map(|s| !s.is_empty())
-            .unwrap_or(false);
-        if !is_member {
+        let authorized = state.db.are_friends(&user_id, &file_info.uploader_id)
+            .unwrap_or(false)
+            || state.db.share_server(&user_id, &file_info.uploader_id)
+                .unwrap_or(false);
+        if !authorized {
             return (
                 StatusCode::FORBIDDEN,
                 Json(serde_json::json!({"error": "Not authorized to access this file"})),
@@ -2381,6 +2488,7 @@ pub async fn list_dm_messages(
                         "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
                         "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
                         "timestamp": m.timestamp,
+                        "message_nonce": m.message_nonce,
                     })
                 })
                 .collect();

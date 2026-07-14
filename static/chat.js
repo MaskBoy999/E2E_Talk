@@ -428,7 +428,11 @@ document.addEventListener('DOMContentLoaded', () => {
 // --- WebSocket ---
 
 function connectWebSocket(t) {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const isSecure = window.location.protocol === 'https:';
+    if (!isSecure && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+        console.warn('WARNING: WebSocket running over unencrypted ws://. Use HTTPS for secure connections.');
+    }
+    const protocol = isSecure ? 'wss:' : 'ws:';
     ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
 
     ws.onopen = () => {
@@ -885,7 +889,7 @@ async function appendMessage(msg) {
     let fileData = null;
     if (msg.encrypted_content && msg.nonce && currentChannelId && currentServerId) {
         try {
-            textContent = E2ECrypto.decrypt(msg.encrypted_content, msg.nonce, currentChannelId, currentServerId);
+            textContent = E2ECrypto.decrypt(msg.encrypted_content, msg.nonce, currentChannelId, currentServerId, msg.message_nonce);
             // Check if it's a file message
             try {
                 const parsed = JSON.parse(textContent);
@@ -954,6 +958,7 @@ async function sendMessage() {
         channel_id: currentChannelId,
         encrypted_content: encrypted.ciphertext,
         nonce: encrypted.nonce,
+        message_nonce: encrypted.messageNonce || null,
     }));
 
     input.value = '';
@@ -1029,7 +1034,8 @@ function renderDmSidebar() {
                 const decrypted = E2ECrypto.decryptDm(
                     c.last_message.encrypted_content, c.last_message.nonce,
                     c.dm_channel_id, kp.privateKey,
-                    c.other_public_key ? new Uint8Array(E2ECrypto.base64ToArrayBuffer(c.other_public_key)) : null
+                    c.other_public_key ? new Uint8Array(E2ECrypto.base64ToArrayBuffer(c.other_public_key)) : null,
+                    c.last_message.message_nonce
                 );
                 try {
                     const parsed = JSON.parse(decrypted);
@@ -1121,6 +1127,20 @@ async function loadDmMessages(dmChannelId, otherUserId) {
         const otherUserData = await otherUserRes.json();
         const otherPublicKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(otherUserData.identity_public_key));
 
+        // TOFU key verification
+        const verification = E2ECrypto.verifyKeyForUser(otherUserId, otherUserData.identity_public_key);
+        if (!verification.trusted) {
+            const banner = document.createElement('div');
+            banner.className = 'message system';
+            banner.style.cssText = 'background:#ff9800;color:#fff;padding:10px;border-radius:6px;margin:10px 0;text-align:center';
+            banner.innerHTML = '⚠ <b>Key Changed!</b> The identity key for this user has changed since you last communicated. ' +
+                '<button onclick="if(confirm(\'Trust the new key?\')){E2ECrypto.trustCurrentKey(\'' + otherUserId + '\',\'' + otherUserData.identity_public_key + '\');this.parentElement.remove();}" ' +
+                'style="margin-left:8px;background:#fff;color:#e65100;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-weight:bold">Trust New Key</button>';
+            list.appendChild(banner);
+        } else if (verification.newKey) {
+            console.log('TOFU: First time seeing key for user', otherUserId, '- stored for future verification');
+        }
+
         for (const msg of messages) {
             await appendDmMessage(msg, kp, otherPublicKey);
         }
@@ -1148,7 +1168,7 @@ function appendDmMessage(msg, kp, otherPublicKey) {
     if (msg.encrypted_content && msg.nonce && kp && otherPublicKey) {
         try {
             const dmId = msg.dm_channel_id || currentDmChannelId;
-            textContent = E2ECrypto.decryptDm(msg.encrypted_content, msg.nonce, dmId, kp.privateKey, otherPublicKey);
+            textContent = E2ECrypto.decryptDm(msg.encrypted_content, msg.nonce, dmId, kp.privateKey, otherPublicKey, msg.message_nonce);
             // Check if it's a file message
             try {
                 const parsed = JSON.parse(textContent);
@@ -1221,6 +1241,7 @@ async function sendDmMessage() {
         dm_channel_id: currentDmChannelId,
         encrypted_content: encrypted.ciphertext,
         nonce: encrypted.nonce,
+        message_nonce: encrypted.messageNonce || null,
     }));
 
     input.value = '';
@@ -2128,6 +2149,7 @@ async function startFileUpload() {
                 dm_channel_id: currentDmChannelId,
                 encrypted_content: encrypted.ciphertext,
                 nonce: encrypted.nonce,
+                message_nonce: encrypted.messageNonce || null,
             }));
         } else {
             encrypted = E2ECrypto.encrypt(filePayload, currentChannelId, currentServerId);
@@ -2136,6 +2158,7 @@ async function startFileUpload() {
                 channel_id: currentChannelId,
                 encrypted_content: encrypted.ciphertext,
                 nonce: encrypted.nonce,
+                message_nonce: encrypted.messageNonce || null,
             }));
         }
 

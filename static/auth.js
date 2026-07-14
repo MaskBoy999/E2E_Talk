@@ -94,6 +94,25 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             } catch (_) {}
 
+            // If no local identity key exists for this account, generate a new
+            // one and register it with the server so this device can encrypt/decrypt.
+            let identityKeyPair = E2ECrypto.getIdentityKeyPair(data.user.id);
+            if (!identityKeyPair) {
+                try {
+                    identityKeyPair = E2ECrypto.x25519GenerateKeyPair();
+                    const pubB64 = E2ECrypto.arrayBufferToBase64(identityKeyPair.publicKey);
+                    await fetch('/api/identity/add-key', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': 'Bearer ' + data.token
+                        },
+                        body: JSON.stringify({ identity_public_key: pubB64 })
+                    });
+                    E2ECrypto.saveIdentityKeyPair(identityKeyPair, data.user.id);
+                } catch (_) {}
+            }
+
             localStorage.setItem('token', data.token);
             localStorage.setItem('user', JSON.stringify(data.user));
             window.location.href = 'index.html';
