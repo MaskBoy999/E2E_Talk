@@ -2357,38 +2357,214 @@ function highlightGeneric(text, lang, c) {
 }
 
 function renderMarkdown(text) {
-    const escaped = text
+    const s = text
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;');
 
-    let html = escaped;
+    let html = '';
 
-    html = html.replace(/^### (.+)$/gm, '<h3 style="color:#e0e0e0;margin:12px 0 6px;font-size:15px">$1</h3>');
-    html = html.replace(/^## (.+)$/gm, '<h2 style="color:#e0e0e0;margin:16px 0 8px;font-size:17px">$1</h2>');
-    html = html.replace(/^# (.+)$/gm, '<h1 style="color:#e0e0e0;margin:20px 0 10px;font-size:20px">$1</h1>');
+    const lines = s.split('\n');
+    let inCodeBlock = false;
+    let codeBlockLang = '';
+    let codeBlockContent = '';
+    let inTable = false;
+    let tableRows = [];
+    let inBlockquote = false;
+    let blockquoteContent = '';
+    let inList = false;
+    let listItems = [];
+    let listOrdered = false;
+    let footnoteRefs = {};
+    let footnoteDefIdx = 0;
 
-    html = html.replace(/\*\*(.+?)\*\*/g, '<strong style="color:#e0e0e0">$1</strong>');
-    html = html.replace(/\*(.+?)\*/g, '<em style="color:#d0d0d0">$1</em>');
-    html = html.replace(/~~(.+?)~~/g, '<del style="color:#888">$1</del>');
-    html = html.replace(/`(.+?)`/g, '<code style="background:#2d2d2d;padding:2px 6px;border-radius:3px;font-family:monospace;color:#e06c75;font-size:12px">$1</code>');
+    function closeBlockquote() {
+        if (inBlockquote && blockquoteContent) {
+            html += '<div style="border-left:3px solid #569cd6;padding:8px 12px;color:#aaa;margin:8px 0;background:rgba(86,156,214,0.06);border-radius:0 4px 4px 0">' + blockquoteContent + '</div>';
+            blockquoteContent = '';
+        }
+        inBlockquote = false;
+    }
 
-    html = html.replace(/^(-{3,})$/gm, '<hr style="border:none;border-top:1px solid #3d3d3d;margin:12px 0">');
-    html = html.replace(/^(\*{3,})$/gm, '<hr style="border:none;border-top:1px solid #3d3d3d;margin:12px 0">');
+    function closeList() {
+        if (inList && listItems.length > 0) {
+            listItems.forEach((item, idx) => {
+                const check = item.checked !== null ? '<input type="checkbox" disabled' + (item.checked ? ' checked' : '') + ' style="margin-right:6px;vertical-align:middle">' : '';
+                const num = listOrdered ? '<span style="color:#888;margin-right:6px;min-width:20px;display:inline-block">' + (idx + 1) + '.</span>' : '';
+                const bullet = !listOrdered && item.checked === null ? '<span style="color:#569cd6;margin-right:6px">•</span>' : '';
+                const prefix = check || num || bullet;
+                const indent = item.indent ? 'padding-left:' + (item.indent * 20) + 'px' : 'padding-left:4px';
+                html += '<div style="' + indent + ';margin:3px 0;line-height:1.6">' + prefix + inlineFormat(item.text) + '</div>';
+            });
+            listItems = [];
+        }
+        inList = false;
+        listOrdered = false;
+    }
 
-    html = html.replace(/^\s*[-*+]\s+(.+)$/gm, '<div style="padding-left:16px;margin:2px 0">• $1</div>');
-    html = html.replace(/^\s*\d+\.\s+(.+)$/gm, '<div style="padding-left:16px;margin:2px 0">$1</div>');
+    function closeTable() {
+        if (inTable && tableRows.length > 0) {
+            const alignments = [];
+            if (tableRows.length > 1) {
+                const sepCells = tableRows[1].cells;
+                sepCells.forEach(cell => {
+                    const trimmed = cell.trim();
+                    if (trimmed.startsWith(':') && trimmed.endsWith(':')) alignments.push('center');
+                    else if (trimmed.endsWith(':')) alignments.push('right');
+                    else alignments.push('left');
+                });
+            }
+            html += '<div style="overflow-x:auto;margin:8px 0"><table style="border-collapse:collapse;width:100%;font-size:13px">';
+            tableRows.forEach((row, rIdx) => {
+                if (rIdx === 1) return;
+                html += '<tr>';
+                row.cells.forEach((cell, cIdx) => {
+                    const tag = rIdx === 0 ? 'th' : 'td';
+                    const align = alignments[cIdx] || 'left';
+                    const border = rIdx === 0 ? 'border-bottom:2px solid #3d3d3d;font-weight:600' : 'border-bottom:1px solid #2d2d2d';
+                    const bg = rIdx === 0 ? 'background:#252526' : (rIdx % 2 === 0 ? 'background:#1e1e1e' : 'background:#252526');
+                    html += '<' + tag + ' style="padding:6px 12px;text-align:' + align + ';' + border + ';' + bg + ';color:#d4d4d4">' + inlineFormat(cell.trim()) + '</' + tag + '>';
+                });
+                html += '</tr>';
+            });
+            html += '</table></div>';
+            tableRows = [];
+        }
+        inTable = false;
+    }
 
-    html = html.replace(/^>\s*(.+)$/gm, '<div style="border-left:3px solid #569cd6;padding-left:12px;color:#aaa;margin:4px 0">$1</div>');
+    function inlineFormat(t) {
+        t = t.replace(/\*\*(.+?)\*\*/g, '<strong style="color:#e0e0e0">$1</strong>');
+        t = t.replace(/\*(.+?)\*/g, '<em style="color:#d0d0d0">$1</em>');
+        t = t.replace(/~~(.+?)~~/g, '<del style="color:#888">$1</del>');
+        t = t.replace(/==(.+?)==/g, '<mark style="background:#5a4a18;color:#e0e0e0;padding:1px 4px;border-radius:2px">$1</mark>');
+        t = t.replace(/`(.+?)`/g, '<code style="background:#2d2d2d;padding:2px 6px;border-radius:3px;font-family:monospace;color:#e06c75;font-size:12px">$1</code>');
+        t = t.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" style="color:#569cd6;text-decoration:none;border-bottom:1px solid #569cd666" target="_blank" rel="noopener">$1</a>');
+        t = t.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" style="max-width:100%;border-radius:4px;margin:4px 0">');
+        t = t.replace(/H~2~O/g, 'H<sub style="font-size:0.8em">2</sub>O');
+        t = t.replace(/~(.+?)~/g, '<sub style="font-size:0.8em">$1</sub>');
+        t = t.replace(/\^(.+?)\^/g, '<sup style="font-size:0.8em">$1</sup>');
+        t = t.replace(/:([\w+-]+):/g, function(m) {
+            const emojis = { 'smile': '😄', 'heart': '❤️', 'thumbsup': '👍', 'rocket': '🚀', 'fire': '🔥', 'check': '✅', 'warning': '⚠️', 'info': 'ℹ️', 'star': '⭐', 'bug': '🐛', 'sparkles': '✨', 'tada': '🎉', 'wave': '👋', 'eyes': '👀', 'clap': '👏', 'think': '🤔', 'muscle': '💪', 'pray': '🙏', 'rainbow': '🌈', 'party': '🎉', 'white_check_mark': '✅', 'x': '❌', 'heavy_check_mark': '✔️', 'memo': '📝', 'pushpin': '📌', 'bulb': '💡', 'zap': '⚡', 'book': '📚', 'wrench': '🔧', 'gear': '⚙️', 'hammer': '🔨', 'lock': '🔒', 'key': '🔑', 'package': '📦', 'robot': '🤖', 'alien': '👽', 'ghost': '👻', 'skull': '💀', 'poop': '💩', 'clown': '🤡', 'sunglasses': '😎', 'nerd': '🤓', 'thinking': '🤔', 'shushing': '🤫', 'money': '💰', 'crown': '👑', 'gem': '💎', 'trophy': '🏆', 'medal': '🥇', 'soccer': '⚽', 'basketball': '🏀', 'baseball': '⚾', 'football': '🏈', 'tennis': '🎾', 'video_game': '🎮', 'joystick': '🕹️', 'dart': '🎯', 'art': '🎨', 'camera': '📷', 'video': 'VIDEO', 'microphone': '🎤', 'headphones': '🎧', 'guitar': '🎸', 'piano': '🎹', 'trumpet': '🎺', 'violin': '🎻', 'drum': '🥁', 'coffee': '☕', 'pizza': '🍕', 'hamburger': '🍔', 'fries': '🍟', 'taco': '🌮', 'sushi': '🍣', 'cookie': '🍪', 'cake': '🎂', 'pie': '🥧', 'icecream': '🍦', 'candy': '🍬', 'lollipop': '🍭', 'apple': '🍎', 'banana': '🍌', 'grapes': '🍇', 'watermelon': '🍉', 'orange': '🍊', 'lemon': '🍋', 'strawberry': '🍓', 'peach': '🍑', 'coconut': '🥥', 'avocado': '🥑', 'carrot': '🥕', 'corn': '🌽', 'broccoli': '🥦', 'hotdog': '🌭', 'pretzel': '🥨', 'bread': '🍞', 'cheese': '🧀', 'egg': '🥚', 'bacon': '🥓', 'steak': '🥩', 'poultry': '🍗', 'seafood': '🦞', 'crab': '🦀', 'shrimp': '🦐', 'octopus': '🐙', 'fish': '🐟', 'dolphin': '🐬', 'whale': '🐳', 'shark': '🦈', 'crocodile': '🐊', 'snake': '🐍', 'lizard': '🦎', 'turtle': '🐢', 'frog': '🐸', 'monkey': '🐒', 'gorilla': '🦍', 'dog': '🐕', 'cat': '🐈', 'mouse': '🐁', 'rabbit': '🐇', 'hamster': '🐹', 'bear': '🐻', 'panda': '🐼', 'tiger': '🐯', 'lion': '🦁', 'cow': '🐄', 'pig': '🐷', 'chicken': '🐔', 'penguin': '🐧', 'bird': '🐦', 'eagle': '🦅', 'duck': '🦆', 'owl': '🦉', 'bat': '🦇', 'butterfly': '🦋', 'bee': '🐝', 'ladybug': '🐞', 'ant': '🐜', 'spider': '🕷️', 'scorpion': '🦂', 'snail': '🐌', 'worm': '🐛', 'flower': '🌸', 'rose': '🌹', 'tulip': '🌷', 'sunflower': '🌻', 'tree': '🌳', 'palm': '🌴', 'cactus': '🌵', 'mushroom': '🍄', 'leaf': '🍃', 'seedling': '🌱', 'earth': '🌍', 'moon': '🌙', 'sun': '☀️', 'star': '⭐', 'comet': '☄️', 'cloud': '☁️', 'storm': '⛈️', 'rain': '🌧️', 'snow': '❄️', 'wind': '💨', 'tornado': '🌪️', 'fire': '🔥', 'droplet': '💧', 'ocean': '🌊', 'diamond': '💎', 'crystal': '🔮', ' magnet': '🧲', 'battery': '🔋', 'bulb': '💡', 'wire': '🔌', 'computer': '💻', 'laptop': '💻', 'desktop': '🖥️', 'phone': '📱', 'tablet': '📟', 'keyboard': '⌨️', 'mouse': '🖱️', 'floppy': '💾', 'cd': '💿', 'dvd': '📀', 'camera': '📷', 'tv': '📺', 'radio': '📻', 'satellite': '📡', 'telescope': '🔭', 'microscope': '🔬', 'test_tube': '🧪', 'dna': '🧬', 'pill': '💊', 'syringe': '💉', 'thermometer': '🌡️', 'stethoscope': '🩺', 'mortar': '⚗️', 'rocket': '🚀', 'airplane': '✈️', 'helicopter': '🚁', 'boat': '⛵', 'ship': '🚢', 'car': '🚗', 'truck': '🚚', 'bus': '🚌', 'ambulance': '🚑', 'fire': '🚒', 'police': '🚔', 'taxi': '🚕', 'bicycle': '🚲', 'motorcycle': '🏍️', 'train': '🚂', 'subway': '🚇', 'ticket': '🎫', 'compass': '🧭', 'map': '🗺️', 'pin': '📍', 'flag': '🚩', 'anchor': '⚓', 'chain': '🔗', 'lock': '🔒', 'unlock': '🔓', 'key': '🔑', 'shield': '🛡️', 'sword': '⚔️', 'crossed_swords': '⚔️', 'wand': '🪄', 'crystal_ball': '🔮', 'mystery': '🔮', 'speech': '💬', 'thought': '💭', 'envelope': '✉️', 'email': '📧', 'inbox': '📥', 'outbox': '📤', 'package': '📦', 'mailbox': '📫', 'bell': '🔔', 'no_bell': '🔕', 'heart': '❤️', 'broken_heart': '💔', 'sparkling_heart': '💖', 'grow_heart': '💗', 'blue_heart': '💙', 'green_heart': '💚', 'purple_heart': '💜', 'black_heart': '🖤', 'white_heart': '🤍', 'brown_heart': '🤎', 'orange_heart': '🧡', 'yellow_heart': '💛', '100': '💯', 'infinity': '♾️', 'check_mark': '✔️', 'x_mark': '❌', 'warning': '⚠️', 'no_entry': '🚫', 'prohibited': '禁止', 'question': '❓', 'exclamation': '❗', 'bangbang': '‼️', 'interrobang': '⁉️', 'recycle': '♻️', 'atom': '⚛️', 'wheelchair': '♿', 'globe': '🌐', 'atom_symbol': '⚛️', 'fleur_de_lis': '⚜️', 'radioactive': '☢️', 'biohazard': '☣️', 'trident': '🔱', 'name_badge': '📛', 'beginner': '🔰', 'o': '⭕', 'white_check': '✅', 'cyclone': '🌀', 'sparkle': '❇️', 'maggie': '✳️', 'eight_spoked': '✳️', 'vs': '🆚', 'up': '🆙', 'cool': '🆒', 'new': '🆕', 'free': '🆓', 'koko': '🈁', 'sa': '🈂️', 'u7121': '🈚', 'u6307': '🈯', 'u7981': '🈲', 'u7533': '🈸', 'u5408': '🈴', 'u7a7a': '🈳', 'congratulations': '㊗️', 'secret': '㊙️', 'u55b6': '🈺', 'u6e80': '🈵', 'elevator': '🛗', 'wheelchair2': '♿', 'men_room': '🚹', 'women_room': '🚺', 'restroom': '🚻', 'baby_symbol': '🚼', 'wc': '🚾', 'passport': '🛂', 'baggage': '🛅', 'left_luggage': '🛅', 'customs': '🛃', 'mantelpiece': '🗝️', 'old_key': '🗝️', 'couch': '🛋️', 'bed': '🛏️', 'sleeping': '🛌', 'teddy': '🧸', 'framed': '🖼️', 'mirror': '🪞', 'shower': '🚿', 'bathtub': '🛁', 'toothbrush': '🪥', 'toilet': '🚽', 'plunger': '🪠', 'shampoo': '🧴', 'sponge': '🧽', 'lotion': '🧴', 'ring': '💍', 'lipstick': '💄', 'purse': '👛', 'handbag': '👜', 'briefcase': '💼', 'backpack': '🎒', 'shoe': '👞', 'sandal': '👡', 'boot': '👢', 'hat': '👒', 'top_hat': '🎩', 'cap': '🧢', 'crown': '👑', 'scarf': '🧣', 'gloves': '🧤', 'coat': '🧥', 'dress': '👗', 'kimono': '👘', 'bikini': '👙', 'womans_clothes': '👚', 'pocket': '👛', 'folded': '🧎', 'open_hands': '👐', 'raised_hands': '🙌', 'clap': '👏', 'handshake': '🤝', 'pray': '🙏', 'writing': '✍️', 'nail': '💅', 'selfie': '🤳', 'muscle': '💪', 'leg': '🦵', 'foot': '🦶', 'ear': '👂', 'nose': '👃', 'brain': '🧠', 'eyes': '👀', 'eye': '👁️', 'tongue': '👅', 'lips': '👄', 'kiss': '💋', 'love_letter': '💌', 'cupid': '💘', 'gift_heart': '💝', 'revolving_hearts': '💞', 'two_hearts': '💕', 'heartbeat': '💓', 'pulse': '💗', 'sparkling_heart': '💖', 'gift': '🎁', 'balloon': '🎈', 'confetti': '🎊', 'tada': '🎉', 'wind_chime': '🎐', 'izakaya': '🏮', 'red_envelope': '🧧', 'ribbon': '🎀', 'reminder': '🔖', 'tickets': '🎟️', 'military': '🎖️', 'medal_sports': '🏅', 'medal_first': '🥇', 'medal_second': '🥈', 'medal_third': '🥉', 'soccer_ball': '⚽', 'baseball': '⚾', 'golf': '⛳', 'ice_hockey': '🏒', 'ski': '🎿', 'cricket': '🏏', 'volleyball': '🏐', 'rugby': '🏉', 'tennis': '🎾', 'ping_pong': '🏓', 'badminton': '🏸', 'hockey': '🏒', 'goal': '🥅', 'ice_skate': '⛸️', 'fishing': '🎣', 'mask': '🎭', 'art': '🎨', 'clapper': '🎬', 'microphone': '🎤', 'headphones': '🎧', 'musical_score': '🎼', 'musical_keyboard': '🎹', 'drum': '🥁', 'saxophone': '🎷', 'trumpet': '🎺', 'guitar': '🎸', 'violin': '🎻', 'video_game': '🎮', 'slot_machine': '🎰', 'dice': '🎲', 'puzzle': '🧩', 'teddy_bear': '🧸', 'framed_picture': '🖼️', 'thread': '🧵', 'yarn': '🧶', 'scissors': '✂️', 'knife': '🔪', 'dagger': '🗡️', 'crossed_swords': '⚔️', 'shield': '🛡️', 'smoking': '🚬', 'coffin': '⚰️', 'funeral': '⚱️', 'memento': '🗿', 'placard': '🪧', ' identification': '🪪', 'oil': '🛢️', 'bowl': '🥣', 'cup_straw': '🥤', 'chopsticks': '🥢', 'fork_knife': '🍽️', 'spoon': '🥄', 'cooking': '🍳', 'popcorn': '🍿', 'salt': '🧂', 'can': '🥫', 'bento': '🍱', 'rice': '🍙', 'onigiri': '🍙', 'dango': '🍡', 'crab': '🦀', 'lobster': '🦞', 'shrimp': '🦐', 'squid': '🦑', 'fried': '🍟', 'donut': '🍩', 'cookie': '🍪', 'chocolate': '🍫', 'candy': '🍬', 'lollipop': '🍭', 'custard': '🍮', 'honey': '🍯', 'baby_bottle': '🍼', 'milk': '🥛', 'coffee2': '☕', 'tea': '🍵', 'sake': '🍶', 'champagne': '🍾', 'wine': '🍷', 'cocktail': '🍸', 'tropical': '🍹', 'beer': '🍺', 'beers': '🍻', 'clinking': '🥂', 'whisky': '🥃', 'ice_cube': '🧊', 'spoon_straw': '🥄', 'bottle': '🫗', 'cup': '🫖', 'mate': '🧉', 'ice': '🧊', 'chopsticks2': '🥢', 'bowl2': '🍜', 'plate_cutlery': '🍽️', 'fork': '🍴', 'spoon2': '🥄', 'knife2': '🔪', 'amphora': '🏺', 'world_map': '🗺️', 'moyai': '🗿', 'nazar': '🧿', 'ocarina': '🪈', 'diya': '🪔', 'card': '💳', 'atm': '🏧', 'receipt': '🧾', 'abacus': '🧮', 'abacus2': '🧮', 'chart': '📈', 'bar_chart': '📊', 'clipboard': '📋', 'pushpin': '📌', 'round_pushpin': '📍', 'paperclip': '📎', 'scissors2': '✂️', 'triangular_ruler': '📐', 'straight_ruler': '📏', 'bookmark': '🔖', 'label': '🏷️', 'envelope2': '✉️', 'email2': '📧', 'incoming': '📥', 'outgoing': '📤', 'package2': '📦', 'mailbox_closed': '📪', 'mailbox_open': '📬', 'newspaper': '📰', 'rolled_up': '🗞️', 'bookmark_tabs': '📑', 'page_facing_up': '📄', 'page_with_curl': '📃', 'receipt': '🧾', 'ledger': '📒', 'notebook': '📓', 'closed_book': '📕', 'green_book': '📗', 'blue_book': '📘', 'orange_book': '📙', 'books': '📚', 'notebook_with_decorative': '📔', 'bookmark2': '🔖', 'money_with_wings': '💸', 'dollar': '💵', 'yen': '💴', 'euro': '💶', 'pound': '💷', 'coin': '🪙', 'yen2': '💰', 'wallet': '👛', 'purse2': '👛', 'credit_card': '💳', 'handbag2': '👜', 'briefcase2': '💼', 'receipt2': '🧾', 'chart2': '📈', 'chart_down': '📉', 'bar_chart2': '📊', 'pie_chart': '🥧', 'boxing': '🥊', 'martial': '🥋', 'running_shoe': '👟', 'ski2': '🎿', 'sled': '🛷', 'curling_stone': '🥌', 'trophy': '🏆', 'gold': '🥇', 'silver': '🥈', 'bronze': '🥉', 'medal2': '🏅', 'medal3': '🎖️', 'rosette': '🏵️', 'ribbon2': '🎀', 'reminder_ribbon': 'reminder_ribbon', 'ticket2': '🎟️', 'tickets2': '🎟️', 'admission': '🎫', 'pass': '🎫', 'passport2': '🛂', 'baggage_claim': '🛅', 'left_luggage2': '🛅', 'customs2': '🛃', 'warning2': '⚠️', 'children_crossing': '🚸', 'construction': '🚧', 'no_entry2': '🚫', 'no_bicycles': '🚳', 'no_smoking': '🚭', 'do_not': '🚯', 'no_pedestrians': '🚷', 'no_mobile': '📵', 'underage': '🔞', 'radioactive2': '☢️', 'biohazard2': '☣️', 'arrow_up': '⬆️', 'arrow_down': '⬇️', 'arrow_left': '⬅️', 'arrow_right': '➡️', 'arrow_upper_right': '↗️', 'arrow_lower_right': '↘️', 'arrow_lower_left': '↙️', 'arrow_upper_left': '↖️', 'arrow_up_down': '↕️', 'left_right': '↔️', 'arrow_right_hook': '↪️', 'leftwards_arrow': '↩️', 'arrow_heading_up': '⤴️', 'arrow_heading_down': '⤵️', 'arrow_clockwise': '🔄', 'arrow_counterclockwise': '🔃', 'arrow_back': '🔙', 'arrow_end': '🔚', 'arrow_on': '🔛', 'arrow_top': '🔝', 'soon': '🔜', 'arrow_doubles': '➿', 'arrow_doubles2': '➿', 'arrow_doubles3': '➿', 'arrow_doubles4': '➿', 'arrow_doubles5': '➿', 'arrow_doubles6': '➿', 'arrow_doubles7': '➿', 'arrow_doubles8': '➿' };
+            const key = m.slice(1, -1);
+            return emojis[key] || m;
+        });
+        return t;
+    }
 
-    html = html.replace(/```(\w*)\n([\s\S]*?)```/g, function(_, lang, code) {
-        return '<pre style="background:#1e1e1e;border:1px solid #3d3d3d;border-radius:6px;padding:12px;margin:8px 0;overflow-x:auto;font-family:monospace;font-size:13px;color:#d4d4d4;line-height:1.5"><code>' + code + '</code></pre>';
-    });
-    html = html.replace(/```([\s\S]*?)```/g, '<pre style="background:#1e1e1e;border:1px solid #3d3d3d;border-radius:6px;padding:12px;margin:8px 0;overflow-x:auto;font-family:monospace;font-size:13px;color:#d4d4d4;line-height:1.5"><code>$1</code></pre>');
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
 
-    html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" style="color:#569cd6;text-decoration:none" target="_blank" rel="noopener">$1</a>');
+        if (inCodeBlock) {
+            if (line.trim() === '```') {
+                const langAttr = codeBlockLang ? ' data-lang="' + codeBlockLang + '"' : '';
+                html += '<div style="position:relative;margin:8px 0"><pre style="background:#1e1e1e;border:1px solid #3d3d3d;border-radius:6px;padding:12px;margin:0;overflow-x:auto;font-family:monospace;font-size:13px;color:#d4d4d4;line-height:1.5"' + langAttr + '><code>' + codeBlockContent + '</code></pre></div>';
+                codeBlockContent = '';
+                codeBlockLang = '';
+                inCodeBlock = false;
+            } else {
+                codeBlockContent += (codeBlockContent ? '\n' : '') + line;
+            }
+            continue;
+        }
 
-    html = html.replace(/\n/g, '<br>');
+        if (line.trim().startsWith('```')) {
+            closeBlockquote();
+            closeList();
+            closeTable();
+            inCodeBlock = true;
+            codeBlockLang = line.trim().slice(3).trim();
+            codeBlockContent = '';
+            continue;
+        }
+
+        if (line.match(/^\|(.+)\|$/)) {
+            closeBlockquote();
+            closeList();
+            if (!inTable) {
+                inTable = true;
+                tableRows = [];
+            }
+            const cells = line.trim().slice(1, -1).split('|');
+            tableRows.push({ cells: cells });
+            continue;
+        } else {
+            closeTable();
+        }
+
+        if (line.match(/^>\s/)) {
+            closeList();
+            const content = line.replace(/^>\s*/, '');
+            inBlockquote = true;
+            blockquoteContent += (blockquoteContent ? '<br>' : '') + inlineFormat(content);
+            continue;
+        } else {
+            closeBlockquote();
+        }
+
+        const taskMatch = line.match(/^(\s*)[-*+]\s+\[([ xX])\]\s+(.*)/);
+        if (taskMatch) {
+            closeTable();
+            if (!inList) { inList = true; listOrdered = false; listItems = []; }
+            const indent = taskMatch[1].length;
+            const checked = taskMatch[2] !== ' ';
+            listItems.push({ text: taskMatch[3], checked: checked, indent: Math.floor(indent / 2) });
+            continue;
+        }
+
+        const bulletMatch = line.match(/^(\s*)[-*+]\s+(.*)/);
+        if (bulletMatch) {
+            closeTable();
+            if (!inList) { inList = true; listOrdered = false; listItems = []; }
+            const indent = bulletMatch[1].length;
+            listItems.push({ text: bulletMatch[2], checked: null, indent: Math.floor(indent / 2) });
+            continue;
+        }
+
+        const orderedMatch = line.match(/^(\s*)\d+\.\s+(.*)/);
+        if (orderedMatch) {
+            closeTable();
+            if (!inList || !listOrdered) {
+                closeList();
+                inList = true;
+                listOrdered = true;
+                listItems = [];
+            }
+            const indent = orderedMatch[1].length;
+            listItems.push({ text: orderedMatch[2], checked: null, indent: Math.floor(indent / 2) });
+            continue;
+        }
+
+        closeList();
+
+        if (line.match(/^#{1,6}\s/)) {
+            const level = line.match(/^(#{1,6})\s/)[1].length;
+            const content = line.replace(/^#{1,6}\s+/, '');
+            const sizes = { 1: '22px', 2: '19px', 3: '16px', 4: '15px', 5: '14px', 6: '13px' };
+            const weights = { 1: '700', 2: '600', 3: '600', 4: '500', 5: '500', 6: '500' };
+            const margins = { 1: '16px 0 8px', 2: '14px 0 6px', 3: '12px 0 6px', 4: '10px 0 4px', 5: '8px 0 4px', 6: '6px 0 4px' };
+            html += '<h' + level + ' style="color:#e0e0e0;margin:' + margins[level] + ';font-size:' + sizes[level] + ';font-weight:' + weights[level] + '">' + inlineFormat(content) + '</h' + level + '>';
+            continue;
+        }
+
+        if (line.match(/^(-{3,}|\*{3,}|_{3,})$/)) {
+            closeTable();
+            html += '<hr style="border:none;border-top:1px solid #3d3d3d;margin:12px 0">';
+            continue;
+        }
+
+        if (line.trim() === '') {
+            closeList();
+            closeBlockquote();
+            continue;
+        }
+
+        html += '<div style="margin:4px 0;line-height:1.6">' + inlineFormat(line) + '</div>';
+    }
+
+    closeBlockquote();
+    closeList();
+    closeTable();
 
     return html;
 }
@@ -2401,7 +2577,7 @@ function normalizeAudioMimeType(mime) {
     return mime;
 }
 
-function getFileIcon(mimeType) {
+function getFileIcon(mimeType, filename) {
     if (!mimeType) return '📄';
     if (mimeType.startsWith('image/')) return '🖼️';
     if (mimeType.startsWith('video/')) return '🎬';
@@ -2411,8 +2587,43 @@ function getFileIcon(mimeType) {
     if (mimeType.includes('word') || mimeType.includes('document')) return '📝';
     if (mimeType.includes('sheet') || mimeType.includes('excel')) return '📊';
     if (mimeType.includes('presentation') || mimeType.includes('powerpoint')) return '📽️';
-    if (mimeType.startsWith('text/')) return '📄';
-    return '📄';
+
+    const ext = filename ? filename.split('.').pop().toLowerCase() : '';
+    const iconMap = {
+        'js': '🟨', 'mjs': '🟨', 'jsx': '⚛️',
+        'ts': '🔷', 'tsx': '⚛️',
+        'py': '🐍', 'pyw': '🐍',
+        'c': '©️', 'h': '©️',
+        'cpp': '➕', 'cxx': '➕', 'cc': '➕', 'hpp': '➕',
+        'java': '☕',
+        'rs': '🦀',
+        'go': '🐹',
+        'sh': '🖥️', 'bash': '🖥️', 'zsh': '🖥️',
+        'sql': '🗃️',
+        'html': '🌐', 'htm': '🌐',
+        'css': '🎨',
+        'json': '📋',
+        'xml': '📋',
+        'rb': '💎',
+        'php': '🐘',
+        'swift': '🐦',
+        'kt': '🟣',
+        'cs': '🟩',
+        'lua': '🌙',
+        'pl': '🐪',
+        'r': '📈',
+        'm': '🍎', 'mm': '🍎',
+        'yaml': '⚙️', 'yml': '⚙️',
+        'toml': '⚙️',
+        'md': '📖', 'mdx': '📖', 'markdown': '📖',
+        'txt': '📄', 'log': '📄',
+        'csv': '📊',
+        'svg': '🎨',
+        'dockerfile': '🐳', 'docker-compose': '🐳',
+        'env': '🔒',
+        'ini': '⚙️', 'cfg': '⚙️', 'conf': '⚙️',
+    };
+    return iconMap[ext] || '📄';
 }
 
 // ===== Drag and Drop =====
@@ -2796,7 +3007,7 @@ function buildFileCardHtml(fileData) {
     const isVideo = fileData.mime_type && fileData.mime_type.startsWith('video/');
     const isText = isTextFile(fileData.filename, fileData.mime_type);
     const isAudio = !isText && fileData.mime_type && fileData.mime_type.startsWith('audio/');
-    const icon = getFileIcon(fileData.mime_type);
+    const icon = getFileIcon(fileData.mime_type, fileData.filename);
 
     // Audio: render as a full-width player (same as upload modal), not crammed inside a file-card
     if (isAudio) {
@@ -2905,7 +3116,7 @@ function buildMultiFileCardHtml(files) {
     // File list strip
     html += '<div class="msg-gallery-strip">';
     files.forEach((f, idx) => {
-        const icon = getFileIcon(f.mime_type);
+        const icon = getFileIcon(f.mime_type, f.filename);
         html += '<div class="msg-gallery-strip-item' + (idx === 0 ? ' active' : '') + '" data-idx="' + idx + '" title="' + escapeHtml(f.filename) + '">';
         html += '<span class="msg-strip-icon">' + icon + '</span>';
         html += '<span class="msg-strip-name">' + escapeHtml(f.filename) + '</span>';
