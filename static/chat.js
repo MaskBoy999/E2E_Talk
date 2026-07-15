@@ -2090,6 +2090,53 @@ function formatFileSize(bytes) {
     return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
 }
 
+function isCodeFile(filename, mime) {
+    if (mime === 'application/javascript' || mime === 'application/json' || mime === 'application/xml') return true;
+    if (mime === 'text/x-python' || mime === 'text/x-c' || mime === 'text/x-c++' || mime === 'text/x-java' || mime === 'text/x-rust' || mime === 'text/x-go' || mime === 'text/x-shellscript' || mime === 'text/x-sql') return true;
+    if (mime === 'text/html' || mime === 'text/css' || mime === 'text/markdown') return true;
+    if (!filename) return false;
+    const ext = filename.split('.').pop().toLowerCase();
+    return ['js','ts','jsx','tsx','py','cpp','c','h','hpp','java','rs','go','sh','sql','html','css','json','xml','rb','php','swift','kt','cs','lua','pl','r','m','mm','yaml','yml','toml','ini','cfg','conf','md','txt'].includes(ext);
+}
+
+function highlightSyntax(text, filename, mime) {
+    const ext = filename ? filename.split('.').pop().toLowerCase() : '';
+    const escaped = text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+
+    const lines = escaped.split('\n');
+    const result = [];
+
+    for (let i = 0; i < lines.length; i++) {
+        let line = lines[i];
+
+        // Single-line comments
+        line = line.replace(/(\/\/.*$|#.*$)/gm, '<span class="syn-comment">$1</span>');
+
+        // Multi-line comment start/end (simplified — per-line)
+        line = line.replace(/(\/\*|\*\/)/g, '<span class="syn-comment">$1</span>');
+
+        // Strings (double and single quotes, backticks)
+        line = line.replace(/(&quot;[^&]*?&quot;|&#39;[^&]*?&#39;|`[^`]*?`|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)/g, '<span class="syn-string">$1</span>');
+
+        // Keywords (common across languages)
+        const keywords = /\b(function|return|if|else|elif|for|while|do|switch|case|break|continue|class|struct|enum|typedef|using|namespace|import|from|export|default|public|private|protected|static|const|let|var|new|this|self|super|async|await|try|catch|throw|finally|yield|in|of|true|false|null|undefined|None|True|False|void|int|float|double|char|string|bool|bool|long|short|unsigned|signed|size_t|auto|def|print|printf|include|define|nullptr|delete|virtual|override|abstract|interface|implements|extends|final|synchronized|volatile|transient|native|strictfp|assert|package|throws|instanceof|as|type|func|go|chan|map|range|defer|select|make|len|cap|append|panic|recover)\b/g;
+        line = line.replace(keywords, '<span class="syn-keyword">$1</span>');
+
+        // Numbers
+        line = line.replace(/\b(\d+\.?\d*(?:e[+-]?\d+)?)\b/gi, '<span class="syn-number">$1</span>');
+
+        // Function calls
+        line = line.replace(/\b([a-zA-Z_]\w*)\s*\(/g, '<span class="syn-function">$1</span>(');
+
+        result.push(line);
+    }
+
+    return result.join('\n');
+}
+
 function normalizeAudioMimeType(mime) {
     if (!mime) return 'audio/mpeg';
     const m = mime.toLowerCase().trim();
@@ -2648,6 +2695,11 @@ async function loadMediaPreview(container, fileData) {
                             const t = mime.startsWith('image/') ? 'image' : mime.startsWith('video/') ? 'video' : 'audio';
                             gallery.push({ url: mediaEl.src, type: t, fileData: { file_id: p.dataset.fileId, file_key: p.dataset.key, mime_type: mime, filename: p.dataset.filename, file_size: parseInt(p.dataset.size || '0') } });
                         }
+                    } else if (mime.startsWith('text/') || mime === 'application/json' || mime === 'application/javascript' || mime === 'application/xml') {
+                        const textEl = p.querySelector('.text-preview');
+                        if (textEl && p.dataset.fullText) {
+                            gallery.push({ url: null, type: 'text', fileData: { file_id: p.dataset.fileId, file_key: p.dataset.key, mime_type: mime, filename: p.dataset.filename, file_size: parseInt(p.dataset.size || '0') }, fullText: p.dataset.fullText });
+                        }
                     }
                 });
                 openMediaViewer(url, 'image', fileData, gallery.length > 0 ? gallery : [{url, type: 'image', fileData}]);
@@ -2670,6 +2722,11 @@ async function loadMediaPreview(container, fileData) {
                         if (mediaEl && mediaEl.src) {
                             const t = mime.startsWith('image/') ? 'image' : mime.startsWith('video/') ? 'video' : 'audio';
                             gallery.push({ url: mediaEl.src, type: t, fileData: { file_id: p.dataset.fileId, file_key: p.dataset.key, mime_type: mime, filename: p.dataset.filename, file_size: parseInt(p.dataset.size || '0') } });
+                        }
+                    } else if (mime.startsWith('text/') || mime === 'application/json' || mime === 'application/javascript' || mime === 'application/xml') {
+                        const textEl = p.querySelector('.text-preview');
+                        if (textEl && p.dataset.fullText) {
+                            gallery.push({ url: null, type: 'text', fileData: { file_id: p.dataset.fileId, file_key: p.dataset.key, mime_type: mime, filename: p.dataset.filename, file_size: parseInt(p.dataset.size || '0') }, fullText: p.dataset.fullText });
                         }
                     }
                 });
@@ -2703,12 +2760,32 @@ async function loadMediaPreview(container, fileData) {
                 pre.className = 'text-preview';
                 pre.textContent = preview;
                 container.appendChild(pre);
-                if (text.length > 2048) {
-                    const more = document.createElement('div');
-                    more.className = 'text-preview-more';
-                    more.textContent = '... (' + formatFileSize(text.length) + ' total)';
-                    container.appendChild(more);
-                }
+
+                // Fullscreen button overlay
+                const fsBtn = document.createElement('button');
+                fsBtn.className = 'text-fullscreen-btn';
+                fsBtn.innerHTML = '&#x26F6;';
+                fsBtn.title = 'View full text';
+                fsBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const parentMsg = container.closest('.message');
+                    const allPreviews = parentMsg ? parentMsg.querySelectorAll('.file-preview') : [container];
+                    const gallery = [];
+                    allPreviews.forEach(p => {
+                        const mime = p.dataset.mime || '';
+                        if (mime.startsWith('text/') || mime === 'application/json' || mime === 'application/javascript' || mime === 'application/xml') {
+                            if (p.dataset.fullText) {
+                                gallery.push({ url: null, type: 'text', fileData: { file_id: p.dataset.fileId, file_key: p.dataset.key, mime_type: mime, filename: p.dataset.filename, file_size: parseInt(p.dataset.size || '0') }, fullText: p.dataset.fullText });
+                            }
+                        }
+                    });
+                    container.dataset.fullText = text;
+                    openMediaViewer(null, 'text', { ...fileData, fullText: text }, gallery.length > 0 ? gallery : [{ url: null, type: 'text', fileData: { ...fileData }, fullText: text }]);
+                });
+                container.appendChild(fsBtn);
+
+                // Store full text for gallery access
+                container.dataset.fullText = text;
             } catch (_) {
                 container.innerHTML = '<div class="file-type-icon">📄</div>';
             }
@@ -2891,6 +2968,33 @@ function openMediaViewer(url, type, fileData, galleryItems) {
         const audioControls = document.getElementById('audio-controls');
         audioControls.style.display = 'flex';
         setupAudioControls(audio);
+    } else if (type === 'text') {
+        controls.style.display = 'none';
+        document.getElementById('audio-controls').style.display = 'none';
+
+        const fullText = (fileData && fileData.fullText) ? fileData.fullText : '';
+        const filename = (fileData && fileData.filename) ? fileData.filename : '';
+        const mime = (fileData && fileData.mime_type) ? fileData.mime_type : '';
+        const isCode = isCodeFile(filename, mime);
+
+        const wrapper = document.createElement('div');
+        wrapper.className = 'text-viewer-wrapper';
+
+        const header = document.createElement('div');
+        header.className = 'text-viewer-header';
+        header.innerHTML = '<span class="text-viewer-icon">📄</span><span class="text-viewer-filename">' + escapeHtml(filename) + '</span><span class="text-viewer-meta">' + formatFileSize(fullText.length) + '</span>';
+        wrapper.appendChild(header);
+
+        const codeEl = document.createElement('pre');
+        codeEl.className = 'text-viewer-content';
+        if (isCode) {
+            codeEl.innerHTML = highlightSyntax(fullText, filename, mime);
+        } else {
+            codeEl.textContent = fullText;
+        }
+        wrapper.appendChild(codeEl);
+
+        content.appendChild(wrapper);
     }
 
     // Gallery navigation arrows
@@ -2903,7 +3007,7 @@ function openMediaViewer(url, type, fileData, galleryItems) {
         prevBtn.innerHTML = '&#8249;';
         prevBtn.title = 'Previous';
         prevBtn.style.cssText = 'position:absolute;left:12px;top:50%;transform:translateY(-50%);z-index:10002;width:48px;height:48px;background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.2);border-radius:50%;color:#fff;font-size:28px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s';
-        if (viewerCurrentIndex === 0) { prevBtn.style.opacity = '0.3'; prevBtn.style.pointerEvents = 'none'; }
+        if (viewerCurrentIndex === 0) { prevBtn.classList.add('disabled'); }
         prevBtn.addEventListener('click', (e) => { e.stopPropagation(); navigateViewer(-1); });
         parent.appendChild(prevBtn);
 
@@ -2912,7 +3016,7 @@ function openMediaViewer(url, type, fileData, galleryItems) {
         nextBtn.innerHTML = '&#8250;';
         nextBtn.title = 'Next';
         nextBtn.style.cssText = 'position:absolute;right:12px;top:50%;transform:translateY(-50%);z-index:10002;width:48px;height:48px;background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.2);border-radius:50%;color:#fff;font-size:28px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s';
-        if (viewerCurrentIndex === viewerMediaItems.length - 1) { nextBtn.style.opacity = '0.3'; nextBtn.style.pointerEvents = 'none'; }
+        if (viewerCurrentIndex === viewerMediaItems.length - 1) { nextBtn.classList.add('disabled'); }
         nextBtn.addEventListener('click', (e) => { e.stopPropagation(); navigateViewer(1); });
         parent.appendChild(nextBtn);
 
@@ -3003,6 +3107,34 @@ function navigateViewer(direction) {
         videoControls.style.display = 'none';
         audioControls.style.display = 'flex';
         setupAudioControls(audio);
+    } else if (item.type === 'text') {
+        videoControls.style.display = 'none';
+        audioControls.style.display = 'none';
+
+        const fullText = item.fullText || '';
+        const fileData = item.fileData || {};
+        const filename = fileData.filename || '';
+        const mime = fileData.mime_type || '';
+        const isCode = isCodeFile(filename, mime);
+
+        const wrapper = document.createElement('div');
+        wrapper.className = 'text-viewer-wrapper';
+
+        const header = document.createElement('div');
+        header.className = 'text-viewer-header';
+        header.innerHTML = '<span class="text-viewer-icon">📄</span><span class="text-viewer-filename">' + escapeHtml(filename) + '</span><span class="text-viewer-meta">' + formatFileSize(fullText.length) + '</span>';
+        wrapper.appendChild(header);
+
+        const codeEl = document.createElement('pre');
+        codeEl.className = 'text-viewer-content';
+        if (isCode) {
+            codeEl.innerHTML = highlightSyntax(fullText, filename, mime);
+        } else {
+            codeEl.textContent = fullText;
+        }
+        wrapper.appendChild(codeEl);
+
+        content.appendChild(wrapper);
     }
 
     // Update gallery arrows and counter
@@ -3021,7 +3153,7 @@ function updateGalleryNav() {
     prevBtn.innerHTML = '&#8249;';
     prevBtn.title = 'Previous';
     prevBtn.style.cssText = 'position:absolute;left:12px;top:50%;transform:translateY(-50%);z-index:10002;width:48px;height:48px;background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.2);border-radius:50%;color:#fff;font-size:28px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s';
-    if (viewerCurrentIndex === 0) { prevBtn.style.opacity = '0.3'; prevBtn.style.pointerEvents = 'none'; }
+    if (viewerCurrentIndex === 0) { prevBtn.classList.add('disabled'); }
     prevBtn.addEventListener('click', (e) => { e.stopPropagation(); navigateViewer(-1); });
     parent.appendChild(prevBtn);
 
@@ -3030,7 +3162,7 @@ function updateGalleryNav() {
     nextBtn.innerHTML = '&#8250;';
     nextBtn.title = 'Next';
     nextBtn.style.cssText = 'position:absolute;right:12px;top:50%;transform:translateY(-50%);z-index:10002;width:48px;height:48px;background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.2);border-radius:50%;color:#fff;font-size:28px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s';
-    if (viewerCurrentIndex === viewerMediaItems.length - 1) { nextBtn.style.opacity = '0.3'; nextBtn.style.pointerEvents = 'none'; }
+    if (viewerCurrentIndex === viewerMediaItems.length - 1) { nextBtn.classList.add('disabled'); }
     nextBtn.addEventListener('click', (e) => { e.stopPropagation(); navigateViewer(1); });
     parent.appendChild(nextBtn);
 
@@ -3066,6 +3198,7 @@ function closeMediaViewer() {
     viewerZoomed = false;
     document.getElementById('video-controls').style.display = 'none';
     document.getElementById('audio-controls').style.display = 'none';
+    viewer.classList.remove('cinema-mode', 'cinema-hide');
     // Remove keyboard listener
     document.removeEventListener('keydown', viewerKeyHandler);
     viewerMediaItems = [];
@@ -3095,6 +3228,7 @@ function setupVideoControls(video) {
 
     video.onclick = (e) => {
         e.stopPropagation();
+        startCinemaTimer();
         if (video.paused) { video.play(); } else { video.pause(); }
     };
 
@@ -3145,9 +3279,57 @@ function setupVideoControls(video) {
 
     fullscreenBtn.onclick = () => {
         const viewer = document.getElementById('media-viewer');
-        if (viewer.requestFullscreen) viewer.requestFullscreen();
-        else if (viewer.webkitRequestFullscreen) viewer.webkitRequestFullscreen();
+        if (document.fullscreenElement || document.webkitFullscreenElement) {
+            if (document.exitFullscreen) document.exitFullscreen();
+            else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+        } else {
+            if (viewer.requestFullscreen) viewer.requestFullscreen();
+            else if (viewer.webkitRequestFullscreen) viewer.webkitRequestFullscreen();
+        }
     };
+
+    // Cinema mode: auto-hide UI in fullscreen
+    let cinemaTimer = null;
+    const viewer = document.getElementById('media-viewer');
+    function startCinemaTimer() {
+        clearTimeout(cinemaTimer);
+        viewer.classList.remove('cinema-hide');
+        cinemaTimer = setTimeout(() => {
+            if (document.fullscreenElement || document.webkitFullscreenElement) {
+                viewer.classList.add('cinema-hide');
+            }
+        }, 3000);
+    }
+    function cinemaClickHandler(e) {
+        if (e.target.closest('.video-controls') || e.target.closest('.audio-controls') || e.target.closest('.gallery-nav-btn-viewer') || e.target.closest('.media-viewer-close') || e.target.closest('.gallery-counter-viewer') || e.target.tagName === 'VIDEO') return;
+        if (document.fullscreenElement || document.webkitFullscreenElement) {
+            if (document.exitFullscreen) document.exitFullscreen();
+            else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+        }
+        startCinemaTimer();
+    }
+    if (window._cinemaFullscreenHandler) {
+        document.removeEventListener('fullscreenchange', window._cinemaFullscreenHandler);
+        document.removeEventListener('webkitfullscreenchange', window._cinemaFullscreenHandler);
+    }
+    function onFullscreenChange() {
+        const isFs = document.fullscreenElement || document.webkitFullscreenElement;
+        if (isFs) {
+            viewer.classList.add('cinema-mode');
+            viewer.addEventListener('mousemove', startCinemaTimer);
+            viewer.addEventListener('click', cinemaClickHandler);
+            startCinemaTimer();
+        } else {
+            viewer.classList.remove('cinema-mode');
+            viewer.classList.remove('cinema-hide');
+            clearTimeout(cinemaTimer);
+            viewer.removeEventListener('mousemove', startCinemaTimer);
+            viewer.removeEventListener('click', cinemaClickHandler);
+        }
+    }
+    window._cinemaFullscreenHandler = onFullscreenChange;
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+    document.addEventListener('webkitfullscreenchange', onFullscreenChange);
 }
 
 function updateVolumeIcon(btn, volume) {

@@ -1930,6 +1930,105 @@ body {
     line-height: 1.4;
 }
 
+/* Fullscreen button on text previews */
+.file-preview .text-fullscreen-btn {
+    position: absolute;
+    bottom: 8px;
+    right: 8px;
+    width: 32px;
+    height: 32px;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.6);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    color: #fff;
+    font-size: 16px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transition: opacity 0.15s, background 0.15s;
+    z-index: 5;
+}
+.file-preview:hover .text-fullscreen-btn {
+    opacity: 1;
+}
+.file-preview .text-fullscreen-btn:hover {
+    background: rgba(0, 0, 0, 0.8);
+}
+
+/* Fullscreen text viewer */
+.text-viewer-wrapper {
+    display: flex;
+    flex-direction: column;
+    width: 90vw;
+    height: 85vh;
+    background: #1e1e1e;
+    border-radius: 8px;
+    overflow: hidden;
+}
+.text-viewer-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 16px;
+    background: #2d2d2d;
+    border-bottom: 1px solid #3d3d3d;
+    flex-shrink: 0;
+}
+.text-viewer-icon {
+    font-size: 18px;
+}
+.text-viewer-filename {
+    color: #e0e0e0;
+    font-size: 14px;
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.text-viewer-meta {
+    color: #888;
+    font-size: 12px;
+    margin-left: auto;
+}
+.text-viewer-content {
+    flex: 1;
+    overflow: auto;
+    padding: 16px;
+    margin: 0;
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 13px;
+    line-height: 1.5;
+    color: #d4d4d4;
+    background: #1e1e1e;
+    white-space: pre;
+    tab-size: 4;
+    border-radius: 0;
+}
+.text-viewer-content::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+.text-viewer-content::-webkit-scrollbar-track {
+    background: #1e1e1e;
+}
+.text-viewer-content::-webkit-scrollbar-thumb {
+    background: #555;
+    border-radius: 4px;
+}
+.text-viewer-content::-webkit-scrollbar-thumb:hover {
+    background: #777;
+}
+
+/* Syntax highlighting colors */
+.syn-keyword { color: #569cd6; }
+.syn-string { color: #ce9178; }
+.syn-number { color: #b5cea8; }
+.syn-comment { color: #6a9955; font-style: italic; }
+.syn-function { color: #dcdcaa; }
+.syn-type { color: #4ec9b0; }
+
 .file-preview audio {
     width: 100%;
     border-radius: 6px;
@@ -2158,6 +2257,42 @@ body {
     max-height: 80vh;
     border-radius: 4px;
     outline: none;
+}
+
+/* Cinema mode: fullscreen auto-hide */
+.media-viewer.cinema-mode .media-viewer-backdrop {
+    transition: background 0.5s ease;
+}
+.media-viewer.cinema-mode.cinema-hide .media-viewer-backdrop {
+    background: #000;
+}
+.media-viewer.cinema-mode .media-viewer-content video {
+    max-width: 100vw;
+    max-height: 100vh;
+    border-radius: 0;
+}
+.media-viewer.cinema-mode .video-controls,
+.media-viewer.cinema-mode .media-viewer-close,
+.media-viewer.cinema-mode .gallery-counter-viewer {
+    opacity: 1;
+    transition: opacity 0.5s ease;
+    pointer-events: auto;
+}
+.media-viewer.cinema-mode .gallery-nav-btn-viewer:not(.disabled) {
+    opacity: 1;
+    transition: opacity 0.5s ease;
+    pointer-events: auto;
+}
+.gallery-nav-btn-viewer.disabled {
+    opacity: 0.3;
+    pointer-events: none;
+}
+.media-viewer.cinema-mode.cinema-hide .video-controls,
+.media-viewer.cinema-mode.cinema-hide .media-viewer-close,
+.media-viewer.cinema-mode.cinema-hide .gallery-nav-btn-viewer,
+.media-viewer.cinema-mode.cinema-hide .gallery-counter-viewer {
+    opacity: 0;
+    pointer-events: none;
 }
 
 /* ===== Video Controls ===== */
