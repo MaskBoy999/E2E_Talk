@@ -2191,33 +2191,33 @@ function getLangFromExt(ext) {
 
 function getLangColors(lang) {
     const themes = {
-        javascript: { keyword: '#c586c0', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', type: '#4ec9b0', operator: '#d4d4d4', tag: '#569cd6', attr: '#9cdcfe', punctuation: '#d4d4d4' },
-        typescript: { keyword: '#c586c0', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', type: '#4ec9b0', operator: '#d4d4d4', tag: '#569cd6', attr: '#9cdcfe', punctuation: '#d4d4d4' },
-        python:     { keyword: '#c586c0', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', type: '#4ec9b0', decorator: '#dcdcaa', builtin: '#4ec9b0', punctuation: '#d4d4d4' },
-        c:          { keyword: '#569cd6', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', type: '#4ec9b0', preprocessor: '#c586c0', punctuation: '#d4d4d4' },
-        cpp:        { keyword: '#569cd6', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', type: '#4ec9b0', preprocessor: '#c586c0', punctuation: '#d4d4d4' },
-        java:       { keyword: '#c586c0', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', type: '#4ec9b0', annotation: '#dcdcaa', punctuation: '#d4d4d4' },
-        rust:       { keyword: '#c586c0', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', type: '#4ec9b0', macro: '#dcdcaa', punctuation: '#d4d4d4' },
-        go:         { keyword: '#c586c0', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', type: '#4ec9b0', punctuation: '#d4d4d4' },
-        shell:      { keyword: '#c586c0', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', variable: '#9cdcfe', punctuation: '#d4d4d4' },
-        sql:        { keyword: '#569cd6', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', type: '#4ec9b0', punctuation: '#d4d4d4' },
-        html:       { tag: '#569cd6', attr: '#9cdcfe', string: '#ce9178', comment: '#6a9955', punctuation: '#808080' },
-        css:        { keyword: '#569cd6', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', property: '#9cdcfe', function: '#dcdcaa', punctuation: '#d4d4d4' },
-        json:       { key: '#9cdcfe', string: '#ce9178', number: '#b5cea8', boolean: '#569cd6', null: '#569cd6', punctuation: '#d4d4d4' },
-        xml:        { tag: '#569cd6', attr: '#9cdcfe', string: '#ce9178', comment: '#6a9955', punctuation: '#808080' },
-        ruby:       { keyword: '#c586c0', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', symbol: '#569cd6', punctuation: '#d4d4d4' },
-        php:        { keyword: '#c586c0', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', variable: '#9cdcfe', punctuation: '#d4d4d4' },
-        swift:      { keyword: '#c586c0', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', type: '#4ec9b0', punctuation: '#d4d4d4' },
-        kotlin:     { keyword: '#c586c0', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', type: '#4ec9b0', annotation: '#dcdcaa', punctuation: '#d4d4d4' },
-        csharp:     { keyword: '#c586c0', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', type: '#4ec9b0', punctuation: '#d4d4d4' },
-        lua:        { keyword: '#c586c0', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', punctuation: '#d4d4d4' },
-        perl:       { keyword: '#c586c0', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', variable: '#9cdcfe', punctuation: '#d4d4d4' },
-        r:          { keyword: '#c586c0', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', punctuation: '#d4d4d4' },
-        objectivec: { keyword: '#569cd6', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', type: '#4ec9b0', punctuation: '#d4d4d4' },
-        yaml:       { key: '#9cdcfe', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', boolean: '#569cd6', punctuation: '#d4d4d4' },
-        toml:       { key: '#9cdcfe', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', boolean: '#569cd6', punctuation: '#d4d4d4' },
-        dockerfile: { keyword: '#c586c0', string: '#ce9178', comment: '#6a9955', punctuation: '#d4d4d4' },
-        generic:    { keyword: '#569cd6', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', punctuation: '#d4d4d4' },
+        javascript: { keyword: '#c678dd', string: '#98c379', number: '#d19a66', comment: '#5c6370', function: '#61afef', type: '#e5c07b', operator: '#56b6c2', tag: '#e06c75', attr: '#d19a66', punctuation: '#abb2bf', constant: '#d19a66', parameter: '#e06c75', property: '#e06c75', regex: '#98c379' },
+        typescript: { keyword: '#c678dd', string: '#98c379', number: '#d19a66', comment: '#5c6370', function: '#61afef', type: '#e5c07b', operator: '#56b6c2', tag: '#e06c75', attr: '#d19a66', punctuation: '#abb2bf', constant: '#d19a66', parameter: '#e06c75', property: '#e06c75', regex: '#98c379' },
+        python:     { keyword: '#c678dd', string: '#98c379', number: '#d19a66', comment: '#5c6370', function: '#61afef', type: '#e5c07b', decorator: '#e5c07b', builtin: '#e5c07b', punctuation: '#abb2bf', constant: '#d19a66', parameter: '#e06c75', property: '#e06c75', self: '#e06c75', magic: '#56b6c2' },
+        c:          { keyword: '#c678dd', string: '#98c379', number: '#d19a66', comment: '#5c6370', function: '#61afef', type: '#e5c07b', preprocessor: '#c678dd', punctuation: '#abb2bf', constant: '#d19a66', parameter: '#e06c75', macro: '#e5c07b' },
+        cpp:        { keyword: '#c678dd', string: '#98c379', number: '#d19a66', comment: '#5c6370', function: '#61afef', type: '#e5c07b', preprocessor: '#c678dd', punctuation: '#abb2bf', constant: '#d19a66', parameter: '#e06c75', macro: '#e5c07b', namespace: '#e5c07b' },
+        java:       { keyword: '#c678dd', string: '#98c379', number: '#d19a66', comment: '#5c6370', function: '#61afef', type: '#e5c07b', annotation: '#e5c07b', punctuation: '#abb2bf', constant: '#d19a66', parameter: '#e06c75', static: '#e5c07b' },
+        rust:       { keyword: '#c678dd', string: '#98c379', number: '#d19a66', comment: '#5c6370', function: '#61afef', type: '#e5c07b', macro: '#61afef', punctuation: '#abb2bf', constant: '#d19a66', parameter: '#e06c75', lifetime: '#e06c75', attribute: '#e5c07b' },
+        go:         { keyword: '#c678dd', string: '#98c379', number: '#d19a66', comment: '#5c6370', function: '#61afef', type: '#e5c07b', punctuation: '#abb2bf', constant: '#d19a66', parameter: '#e06c75', builtin: '#e5c07b', format: '#56b6c2' },
+        shell:      { keyword: '#c678dd', string: '#98c379', number: '#d19a66', comment: '#5c6370', function: '#61afef', variable: '#e06c75', punctuation: '#abb2bf', constant: '#d19a66', flag: '#d19a66', operator: '#56b6c2' },
+        sql:        { keyword: '#c678dd', string: '#98c379', number: '#d19a66', comment: '#5c6370', function: '#61afef', type: '#e5c07b', punctuation: '#abb2bf', constant: '#d19a66', operator: '#56b6c2', table: '#e5c07b' },
+        html:       { tag: '#e06c75', attr: '#d19a66', string: '#98c379', comment: '#5c6370', punctuation: '#abb2bf', entity: '#56b6c2', attribute: '#d19a66' },
+        css:        { keyword: '#c678dd', string: '#98c379', number: '#d19a66', comment: '#5c6370', property: '#e06c75', function: '#61afef', punctuation: '#abb2bf', selector: '#e06c75', unit: '#d19a66', constant: '#d19a66', important: '#e06c75' },
+        json:       { key: '#e06c75', string: '#98c379', number: '#d19a66', boolean: '#c678dd', null: '#c678dd', punctuation: '#abb2bf' },
+        xml:        { tag: '#e06c75', attr: '#d19a66', string: '#98c379', comment: '#5c6370', punctuation: '#abb2bf', entity: '#56b6c2', cdata: '#5c6370' },
+        ruby:       { keyword: '#c678dd', string: '#98c379', number: '#d19a66', comment: '#5c6370', function: '#61afef', symbol: '#d19a66', punctuation: '#abb2bf', constant: '#e5c07b', instance: '#e06c75', regex: '#98c379' },
+        php:        { keyword: '#c678dd', string: '#98c379', number: '#d19a66', comment: '#5c6370', function: '#61afef', variable: '#e06c75', punctuation: '#abb2bf', constant: '#d19a66', tag: '#e06c75', attribute: '#d19a66' },
+        swift:      { keyword: '#c678dd', string: '#98c379', number: '#d19a66', comment: '#5c6370', function: '#61afef', type: '#e5c07b', punctuation: '#abb2bf', constant: '#d19a66', parameter: '#e06c75', attribute: '#e5c07b', interpolation: '#56b6c2' },
+        kotlin:     { keyword: '#c678dd', string: '#98c379', number: '#d19a66', comment: '#5c6370', function: '#61afef', type: '#e5c07b', annotation: '#e5c07b', punctuation: '#abb2bf', constant: '#d19a66', parameter: '#e06c75', property: '#e06c75' },
+        csharp:     { keyword: '#c678dd', string: '#98c379', number: '#d19a66', comment: '#5c6370', function: '#61afef', type: '#e5c07b', punctuation: '#abb2bf', constant: '#d19a66', parameter: '#e06c75', attribute: '#e5c07b', delegate: '#61afef' },
+        lua:        { keyword: '#c678dd', string: '#98c379', number: '#d19a66', comment: '#5c6370', function: '#61afef', punctuation: '#abb2bf', constant: '#d19a66', global: '#e06c75', field: '#e06c75', builtin: '#e5c07b' },
+        perl:       { keyword: '#c678dd', string: '#98c379', number: '#d19a66', comment: '#5c6370', function: '#61afef', variable: '#e06c75', punctuation: '#abb2bf', constant: '#d19a66', regex: '#98c379', operator: '#56b6c2', sigil: '#e06c75' },
+        r:          { keyword: '#c678dd', string: '#98c379', number: '#d19a66', comment: '#5c6370', function: '#61afef', punctuation: '#abb2bf', constant: '#d19a66', logical: '#56b6c2', operator: '#56b6c2', NA: '#d19a66' },
+        objectivec: { keyword: '#c678dd', string: '#98c379', number: '#d19a66', comment: '#5c6370', function: '#61afef', type: '#e5c07b', punctuation: '#abb2bf', constant: '#d19a66', parameter: '#e06c75', method: '#61afef', property: '#e06c75' },
+        yaml:       { key: '#e06c75', string: '#98c379', number: '#d19a66', comment: '#5c6370', boolean: '#c678dd', punctuation: '#abb2bf', anchor: '#56b6c2', alias: '#56b6c2', tag: '#e5c07b' },
+        toml:       { key: '#e06c75', string: '#98c379', number: '#d19a66', comment: '#5c6370', boolean: '#c678dd', punctuation: '#abb2bf', datetime: '#56b6c2' },
+        dockerfile: { keyword: '#c678dd', string: '#98c379', comment: '#5c6370', punctuation: '#abb2bf', instruction: '#e06c75', flag: '#d19a66' },
+        generic:    { keyword: '#c678dd', string: '#98c379', number: '#d19a66', comment: '#5c6370', function: '#61afef', punctuation: '#abb2bf', constant: '#d19a66' },
     };
     return themes[lang] || themes.generic;
 }
@@ -2251,9 +2251,11 @@ function highlightSyntax(text, filename, mime) {
 function highlightHtml(text, c) {
     let result = text;
     result = result.replace(/(&lt;!--[\s\S]*?--&gt;)/g, '<span style="color:' + c.comment + ';font-style:italic">$1</span>');
+    result = result.replace(/(&lt;!\[CDATA\[[\s\S]*?\]\]&gt;)/g, '<span style="color:' + (c.cdata || c.comment) + '">$1</span>');
     result = result.replace(/(&lt;\/?)([\w:-]+)/g, '$1<span style="color:' + c.tag + '">$2</span>');
-    result = result.replace(/\s([\w:-]+)(=)/g, ' <span style="color:' + c.attr + '">$1</span>$2');
+    result = result.replace(/\s([\w:-]+)(=)/g, ' <span style="color:' + (c.attribute || c.attr) + '">$1</span>$2');
     result = result.replace(/(=)(&quot;[^&]*?&quot;|&#39;[^&]*?&#39;|"[^"]*?"|'[^']*?')/g, '$1<span style="color:' + c.string + '">$2</span>');
+    result = result.replace(/(&amp;#\d+;|&amp;#x[\da-f]+;|&amp;\w+;)/g, '<span style="color:' + (c.entity || c.constant) + '">$1</span>');
     return result;
 }
 
@@ -2270,20 +2272,26 @@ function highlightJson(text, c) {
 function highlightCss(text, c) {
     let result = text;
     result = result.replace(/(\/\*[\s\S]*?\*\/)/g, '<span style="color:' + c.comment + ';font-style:italic">$1</span>');
-    result = result.replace(/([\.\#][\w-]+)(\s*\{)/g, '<span style="color:' + c.tag + '">$1</span>$2');
+    result = result.replace(/(!important)/g, '<span style="color:' + (c.important || '#e06c75') + ';font-weight:bold">$1</span>');
+    result = result.replace(/([\.\#][\w-]+)(\s*\{)/g, '<span style="color:' + (c.selector || c.tag) + '">$1</span>$2');
     result = result.replace(/([\w-]+)\s*:/g, '<span style="color:' + c.property + '">$1</span>:');
     result = result.replace(/:\s*([^;{}\n]+)/g, ': <span style="color:' + c.string + '">$1</span>');
-    result = result.replace(/(\d+\.?\d*(?:px|em|rem|%|vh|vw|s|ms)?)/g, '<span style="color:' + c.number + '">$1</span>');
+    result = result.replace(/(\d+\.?\d*(?:px|em|rem|%|vh|vw|vmin|vmax|ch|ex|cm|mm|in|pt|pc|s|ms|deg|rad|grad|turn|fr)?)/g, '<span style="color:' + (c.unit || c.number) + '">$1</span>');
+    result = result.replace(/([+#>*~,.]+)/g, '<span style="color:' + (c.operator || '#56b6c2') + '">$1</span>');
     return result;
 }
 
 function highlightKeyValue(text, c) {
     let result = text;
     result = result.replace(/(#.*$)/gm, '<span style="color:' + c.comment + ';font-style:italic">$1</span>');
+    result = result.replace(/(&amp;[\w-]+)/g, '<span style="color:' + (c.anchor || '#56b6c2') + '">$1</span>');
+    result = result.replace(/(\*[\w-]+)/g, '<span style="color:' + (c.alias || '#56b6c2') + '">$1</span>');
     result = result.replace(/^([\w.-]+)(\s*[:=])/gm, '<span style="color:' + c.key + '">$1</span>$2');
+    result = result.replace(/(&lt;[\w.-]+&gt;|!![\w.-]+)/g, '<span style="color:' + (c.tag || c.type) + '">$1</span>');
     result = result.replace(/(&quot;[^&]*?&quot;|"[^"]*?"|'[^']*?')/g, '<span style="color:' + c.string + '">$1</span>');
     result = result.replace(/\b(\d+\.?\d*)\b/g, '<span style="color:' + c.number + '">$1</span>');
-    result = result.replace(/\b(true|false)\b/g, '<span style="color:' + c.boolean + '">$1</span>');
+    result = result.replace(/\b(true|false|null|none|~|inf|-inf|nan)\b/gi, '<span style="color:' + c.boolean + '">$1</span>');
+    result = result.replace(/(~~[\w-]+)/g, '<span style="color:' + (c.merge || c.boolean) + '">$1</span>');
     return result;
 }
 
@@ -2294,7 +2302,7 @@ function highlightGeneric(text, lang, c) {
     const kwMap = {
         javascript: /\b(function|return|if|else|elif|for|while|do|switch|case|break|continue|class|extends|super|new|this|const|let|var|import|from|export|default|async|await|try|catch|throw|finally|typeof|instanceof|in|of|true|false|null|undefined|void|delete|yield|with|debugger)\b/g,
         typescript: /\b(function|return|if|else|elif|for|while|do|switch|case|break|continue|class|extends|super|new|this|const|let|var|import|from|export|default|async|await|try|catch|throw|finally|typeof|instanceof|in|of|true|false|null|undefined|void|type|interface|enum|implements|readonly|private|public|protected|abstract|as|keyof|never|unknown|any|asserts|infer|is|module|declare|namespace)\b/g,
-        python:     /\b(def|return|if|elif|else|for|while|break|continue|class|import|from|as|try|except|finally|raise|with|yield|lambda|pass|True|False|None|and|or|not|is|in|global|nonlocal|del|assert|print|self|cls|async|await|staticmethod|classmethod|property|super)\b/g,
+        python:     /\b(def|return|if|elif|else|for|while|break|continue|class|import|from|as|try|except|finally|raise|with|yield|lambda|pass|True|False|None|and|or|not|is|in|global|nonlocal|del|assert|print|async|await|staticmethod|classmethod|property|super)\b/g,
         c:          /\b(if|else|for|while|do|switch|case|break|continue|return|typedef|struct|enum|union|const|static|extern|register|volatile|auto|inline|restrict|sizeof|NULL|true|false|void|int|char|float|double|long|short|unsigned|signed|size_t|FILE|printf|scanf|malloc|free|memcpy|memset)\b/g,
         cpp:        /\b(if|else|for|while|do|switch|case|break|continue|return|class|struct|enum|union|namespace|using|template|typename|public|private|protected|virtual|override|const|static|extern|volatile|mutable|auto|inline|constexpr|noexcept|decltype|new|delete|nullptr|true|false|void|int|char|float|double|long|short|unsigned|signed|bool|string|vector|map|set|pair|shared_ptr|unique_ptr|make_shared|make_unique|std|cout|cin|endl|include|define|ifdef|ifndef|endif|pragma)\b/g,
         java:       /\b(if|else|for|while|do|switch|case|break|continue|return|class|interface|enum|extends|implements|public|private|protected|static|final|abstract|synchronized|volatile|transient|native|new|this|super|true|false|null|void|int|char|float|double|long|short|byte|boolean|String|System|out|println|import|package|throws|try|catch|finally|instanceof|assert|default|sealed|permits|var|record|yield)\b/g,
@@ -2331,24 +2339,51 @@ function highlightGeneric(text, lang, c) {
         }
 
         if (lang === 'python') {
-            line = line.replace(/(@[\w.]+)/g, '<span style="color:' + c.decorator + '">$1</span>');
-        }
-
-        if (lang === 'java') {
-            line = line.replace(/(@[\w.]+)/g, '<span style="color:' + c.annotation + '">$1</span>');
+            line = line.replace(/(@[\w.]+)/g, '<span style="color:' + c.decorator + ';font-style:italic">$1</span>');
+            line = line.replace(/\b(self|cls)\b/g, '<span style="color:' + (c.self || c.parameter) + ';font-style:italic">$1</span>');
+            line = line.replace(/(__(?:init|name|main|str__|repr__|enter__|exit__|call__|getitem__|setitem__|delitem__|len__|iter__|next__|eq__|ne__|lt__|le__|gt__|ge__|hash__|bool__|add__|sub__|mul__|truediv__|floordiv__|mod__|pow__|and__|or__|xor__|invert__|lshift__|rshift__|abs__|ceil__|floor__|round__|min__|max__|sum__|reversed__|sorted__|enumerate__|zip__|map__|filter__|type__|bases__|mro__|subclasses__|doc__|module__|dict__|class__|annotations__|qualname__|init_subclass__|set_name__|class_getitem__|copy__|deepcopy__|reduce__|getstate__|setstate__|sizeof__| subclasshook__)__)/g, '<span style="color:' + (c.magic || c.function) + ';font-style:italic">$1</span>');
         }
 
         if (lang === 'rust') {
             line = line.replace(/(r#?\w*"[^"]*"#?|r"[^"]*")/g, '<span style="color:' + c.string + '">$1</span>');
+            line = line.replace(/('#?\w+)/g, '<span style="color:' + (c.lifetime || c.type) + ';font-style:italic">$1</span>');
+            line = line.replace(/(#\[.*?\])/g, '<span style="color:' + (c.attribute || c.decorator) + ';font-style:italic">$1</span>');
+            line = line.replace(/\b([a-z_]\w*)!/g, '<span style="color:' + (c.macro || c.function) + '">$1</span>!');
+        }
+
+        if (lang === 'go') {
+            line = line.replace(/(&quot;[^&]*?&quot;|"[^"]*?")/g, function(m) {
+                if (m.includes('%')) return '<span style="color:' + (c.format || c.string) + '">$1</span>';
+                return '<span style="color:' + c.string + '">$1</span>';
+            });
+        }
+
+        if (lang === 'shell') {
+            line = line.replace(/(\$[\w{][\w}]*|\$\{[^}]+\})/g, '<span style="color:' + (c.variable || c.parameter) + '">$1</span>');
+        }
+
+        if (lang === 'ruby') {
+            line = line.replace(/(:[\w!?]+)/g, '<span style="color:' + (c.symbol || c.constant) + '">$1</span>');
+            line = line.replace(/(@@?[\w]+)/g, '<span style="color:' + (c.instance || c.parameter) + '">$1</span>');
+        }
+
+        if (lang === 'perl') {
+            line = line.replace(/([\$@%][\w]+)/g, '<span style="color:' + (c.sigil || c.variable) + '">$1</span>');
         }
 
         line = line.replace(/(&quot;[^&]*?&quot;|&#39;[^&]*?&#39;|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)/g, '<span style="color:' + c.string + '">$1</span>');
+
+        line = line.replace(/\b([A-Z][A-Z_0-9]{2,})\b/g, '<span style="color:' + (c.constant || c.number) + '">$1</span>');
 
         line = line.replace(kw, '<span style="color:' + c.keyword + '">$1</span>');
 
         line = line.replace(/\b(\d+\.?\d*(?:e[+-]?\d+)?(?:f|l|u|ll|ull)?)\b/gi, '<span style="color:' + c.number + '">$1</span>');
 
         line = line.replace(/\b([a-zA-Z_]\w*)\s*\(/g, '<span style="color:' + c.function + '">$1</span>(');
+
+        line = line.replace(/\.([a-zA-Z_]\w*)\b(?!\s*\()/g, '.<span style="color:' + (c.property || c.attr) + '">$1</span>');
+
+        line = line.replace(/([+\-*/%=!<>&|^~?:]+)/g, '<span style="color:' + (c.operator || '#56b6c2') + '">$1</span>');
 
         result.push(line);
     }
