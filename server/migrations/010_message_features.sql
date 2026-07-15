@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS server_stickers (
     file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
     uploaded_by TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     sticker_name TEXT NOT NULL,
+    file_key TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(server_id, file_id)
 );

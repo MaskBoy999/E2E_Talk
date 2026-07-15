@@ -34,3 +34,5 @@ server/.env
 
 # File uploads (encrypted chunks stored at runtime)
 server/uploads/
+NUL
+server/NUL

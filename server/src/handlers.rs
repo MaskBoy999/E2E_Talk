@@ -2272,6 +2272,7 @@ pub async fn download_file(
 pub struct AddStickerRequest {
     pub file_id: String,
     pub sticker_name: String,
+    pub file_key: Option<String>,
 }
 
 pub async fn list_server_stickers(
@@ -2290,13 +2291,14 @@ pub async fn list_server_stickers(
         Ok(stickers) => {
             let result: Vec<serde_json::Value> = stickers
                 .iter()
-                .map(|(id, file_id, name, mime, uploaded_by)| {
+                .map(|(id, file_id, name, mime, uploaded_by, file_key)| {
                     serde_json::json!({
                         "id": id,
                         "file_id": file_id,
                         "sticker_name": name,
                         "mime_type": mime,
                         "uploaded_by": uploaded_by,
+                        "file_key": file_key,
                     })
                 })
                 .collect();
@@ -2328,7 +2330,7 @@ pub async fn add_server_sticker(
         }
         Err(_) => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "File not found"}))).into_response(),
     }
-    match state.db.add_server_sticker(&server_id, &body.file_id, &user_id, &body.sticker_name) {
+    match state.db.add_server_sticker(&server_id, &body.file_id, &user_id, &body.sticker_name, body.file_key.as_deref().unwrap_or("")) {
         Ok(id) => (StatusCode::OK, Json(serde_json::json!({"id": id}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
@@ -2349,6 +2351,83 @@ pub async fn remove_server_sticker(
         return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Only server owner can remove stickers"}))).into_response();
     }
     match state.db.remove_server_sticker(&sticker_id, &server_id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+// ===== User Stickers/GIFs =====
+
+#[derive(Deserialize)]
+pub struct AddUserStickerRequest {
+    pub file_id: String,
+    pub sticker_name: String,
+    pub file_key: Option<String>,
+    pub mime_type: String,
+}
+
+pub async fn list_user_stickers(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    match state.db.list_user_stickers(&user_id) {
+        Ok(stickers) => {
+            let result: Vec<serde_json::Value> = stickers
+                .iter()
+                .map(|(id, file_id, name, mime, file_key)| {
+                    serde_json::json!({
+                        "id": id,
+                        "file_id": file_id,
+                        "sticker_name": name,
+                        "mime_type": mime,
+                        "file_key": file_key,
+                    })
+                })
+                .collect();
+            (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn add_user_sticker(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<AddUserStickerRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    // Verify file exists and is uploaded
+    match state.db.get_file_info(&body.file_id) {
+        Ok(f) => {
+            if !f.upload_complete {
+                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Upload not complete"}))).into_response();
+            }
+        }
+        Err(_) => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "File not found"}))).into_response(),
+    }
+    match state.db.add_user_sticker(&user_id, &body.file_id, &body.sticker_name, body.file_key.as_deref().unwrap_or(""), &body.mime_type) {
+        Ok(id) => (StatusCode::OK, Json(serde_json::json!({"id": id}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn remove_user_sticker(
+    Path(sticker_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    match state.db.remove_user_sticker(&sticker_id, &user_id) {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }

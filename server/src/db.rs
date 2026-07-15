@@ -311,6 +311,12 @@ impl Database {
         // Migration 010: edit tracking + server stickers
         let _ = conn.execute_batch(include_str!("../migrations/010_message_features.sql"));
 
+        // Migration 011: sticker file_key column
+        let _ = conn.execute_batch(include_str!("../migrations/011_sticker_file_key.sql"));
+
+        // Migration 012: per-user stickers/GIFs
+        let _ = conn.execute_batch(include_str!("../migrations/012_user_stickers.sql"));
+
         Ok(())
     }
 
@@ -1829,12 +1835,13 @@ impl Database {
         file_id: &str,
         uploaded_by: &str,
         sticker_name: &str,
+        file_key: &str,
     ) -> Result<String, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let id = Uuid::new_v4().to_string();
         conn.execute(
-            "INSERT INTO server_stickers (id, server_id, file_id, uploaded_by, sticker_name) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![id, server_id, file_id, uploaded_by, sticker_name],
+            "INSERT INTO server_stickers (id, server_id, file_id, uploaded_by, sticker_name, file_key) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, server_id, file_id, uploaded_by, sticker_name, file_key],
         )
         .map_err(|e| e.to_string())?;
         Ok(id)
@@ -1850,11 +1857,11 @@ impl Database {
         Ok(())
     }
 
-    pub fn list_server_stickers(&self, server_id: &str) -> Result<Vec<(String, String, String, String, String)>, String> {
+    pub fn list_server_stickers(&self, server_id: &str) -> Result<Vec<(String, String, String, String, String, Option<String>)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT s.id, s.file_id, s.sticker_name, f.mime_type, COALESCE(u.username, '?')
+                "SELECT s.id, s.file_id, s.sticker_name, f.mime_type, COALESCE(u.username, '?'), s.file_key
                  FROM server_stickers s
                  INNER JOIN files f ON s.file_id = f.id
                  LEFT JOIN users u ON s.uploaded_by = u.id
@@ -1864,6 +1871,65 @@ impl Database {
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map(params![server_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    // --- User Stickers ---
+
+    pub fn add_user_sticker(
+        &self,
+        user_id: &str,
+        file_id: &str,
+        sticker_name: &str,
+        file_key: &str,
+        mime_type: &str,
+    ) -> Result<String, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let id = Uuid::new_v4().to_string();
+        // file_key can be empty — the key is derived from the user's identity key on the client
+        conn.execute(
+            "INSERT INTO user_stickers (id, user_id, file_id, sticker_name, file_key, mime_type) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, user_id, file_id, sticker_name, file_key, mime_type],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(id)
+    }
+
+    pub fn remove_user_sticker(&self, sticker_id: &str, user_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM user_stickers WHERE id = ?1 AND user_id = ?2",
+            params![sticker_id, user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn list_user_stickers(&self, user_id: &str) -> Result<Vec<(String, String, String, String, String)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT s.id, s.file_id, s.sticker_name, f.mime_type, s.file_key
+                 FROM user_stickers s
+                 INNER JOIN files f ON s.file_id = f.id
+                 WHERE s.user_id = ?1
+                 ORDER BY s.created_at DESC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![user_id], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,

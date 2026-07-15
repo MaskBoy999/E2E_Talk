@@ -1,4 +1,4 @@
-console.log('chat.js v13 loaded - grouped files + inline audio');
+    console.log('chat.js v21 loaded - auto-load preview toggle + instant GIF send');
 
 function generateCode(len) {
     const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -21,8 +21,24 @@ let dmConversations = [];
 let unreadDms = {};
 let pendingFriendRequests = 0;
 let isUploading = false;
+let isSendingSticker = false;
 let selectedFiles = [];
 let currentFileIndex = 0;
+
+// Local file key cache (file_id → base64 file_key) for sticker previews
+const fileKeyCache = {
+    _prefix: 'fkc_',
+    get(fileId) { return localStorage.getItem(this._prefix + fileId); },
+    set(fileId, keyB64) { if (fileId && keyB64) localStorage.setItem(this._prefix + fileId, keyB64); },
+    getAll() {
+        const result = {};
+        for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            if (k && k.startsWith(this._prefix)) result[k.slice(this._prefix.length)] = localStorage.getItem(k);
+        }
+        return result;
+    }
+};
 
 const token = () => localStorage.getItem('token');
 const authFetch = (url, opts = {}) => {
@@ -129,6 +145,15 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 
+    // Auto-load previews setting
+    const autoLoadCheckbox = document.getElementById('auto-load-previews');
+    if (autoLoadCheckbox) {
+        autoLoadCheckbox.checked = localStorage.getItem('autoLoadPreviews') !== 'false';
+        autoLoadCheckbox.addEventListener('change', () => {
+            localStorage.setItem('autoLoadPreviews', autoLoadCheckbox.checked);
+        });
+    }
+
     // Delete account
     document.getElementById('delete-account-btn').addEventListener('click', async () => {
         if (!confirm('Are you sure you want to delete your account? This cannot be undone.')) return;
@@ -219,6 +244,7 @@ document.addEventListener('DOMContentLoaded', () => {
     connectWebSocket(t);
     setupMessageActions();
     setupForwardModal();
+    setupStickerPanel();
     loadServers();
     loadFriendRequestBadge();
 
@@ -275,6 +301,27 @@ document.addEventListener('DOMContentLoaded', () => {
                 );
             }
         }
+        // Download button for GIFs
+        const gifDlBtn = e.target.closest('.gif-message .media-download-btn');
+        if (gifDlBtn) {
+            const url = gifDlBtn.getAttribute('data-url');
+            const filename = gifDlBtn.getAttribute('data-filename') || 'sticker';
+            if (url) {
+                // Fetch the GIF and download as blob
+                fetch(url)
+                    .then(r => r.blob())
+                    .then(blob => {
+                        const blobUrl = URL.createObjectURL(blob);
+                        downloadBlobAs(blobUrl, filename, blob.type || 'image/gif');
+                        setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+                    })
+                    .catch(() => {
+                        // Fallback: open in new tab
+                        window.open(url, '_blank');
+                    });
+            }
+        }
+        // Sticker download buttons created by loadStickerPreview already have their own click handlers
     });
 
     // Event delegation for multi-file gallery navigation
@@ -1026,6 +1073,8 @@ async function appendMessage(msg) {
                 } else if (parsed && parsed.type === 'forward') {
                     forwardData = parsed;
                     textContent = '';
+                } else if (parsed && parsed.type === 'text') {
+                    textContent = parsed.text || '';
                 }
                 if (parsed && parsed.reply_to) {
                     replyTo = parsed.reply_to;
@@ -1057,7 +1106,10 @@ async function appendMessage(msg) {
             contentHtml += '<div class="forward-preview forward-unavailable">Preview unavailable</div>';
         }
     } else if (gifData) {
-        contentHtml += '<div class="gif-message"><img src="' + escapeHtml(gifData.url) + '" alt="' + escapeHtml(gifData.alt || 'GIF') + '" loading="lazy" style="max-width:300px;max-height:300px;border-radius:8px"></div>';
+        contentHtml += '<div class="gif-message">' +
+            '<img src="' + escapeHtml(gifData.url) + '" alt="' + escapeHtml(gifData.alt || 'GIF') + '" loading="lazy" style="max-width:300px;max-height:300px;border-radius:8px">' +
+            '<button class="media-download-btn" title="Download" data-url="' + escapeHtml(gifData.url) + '" data-filename="sticker.gif">⬇</button>' +
+            '</div>';
     } else if (stickerData) {
         contentHtml += '<div class="sticker-message"></div>';
     } else if (filesData) {
@@ -1072,7 +1124,8 @@ async function appendMessage(msg) {
 
     const actionsHtml = '<div class="message-actions">' +
         '<button class="msg-action-btn" data-action="reply" title="Reply">&#x21A9;</button>' +
-        '<button class="msg-action-btn" data-action="forward" title="Forward">&#x21AA;</button>' +
+        '<button class="msg-action-btn" data-action="forward" title="Forward to channel">&#x21AA;</button>' +
+        '<button class="msg-action-btn" data-action="forward-dm" title="Forward to DM">&#x1F4AC;</button>' +
         (isOwn ? '<button class="msg-action-btn" data-action="edit" title="Edit">&#x270E;</button>' : '') +
         (isOwn ? '<button class="msg-action-btn" data-action="delete" title="Delete">&#x2715;</button>' : '') +
         '</div>';
@@ -1088,19 +1141,48 @@ async function appendMessage(msg) {
         '</div>' +
         actionsHtml;
 
-    // Load media preview if applicable
+    // Load media preview if applicable (respect auto-load setting)
+    const autoLoad = localStorage.getItem('autoLoadPreviews') !== 'false';
     if (filesData) {
         div.querySelectorAll('.file-preview').forEach((container, idx) => {
             if (filesData[idx] && filesData[idx].file_key) {
-                loadMediaPreview(container, filesData[idx]);
+                if (autoLoad) {
+                    loadMediaPreview(container, filesData[idx]);
+                } else {
+                    // Show manual load button
+                    container.innerHTML = '<button class="load-preview-btn" data-file-idx="' + idx + '">Load preview</button>';
+                    container.querySelector('.load-preview-btn').addEventListener('click', () => {
+                        container.innerHTML = '';
+                        loadMediaPreview(container, filesData[idx]);
+                    });
+                }
             }
         });
     } else if (fileData && fileData.file_key) {
-        loadMediaPreview(div.querySelector('.file-preview'), fileData);
-    } else if (stickerData && stickerData.file_id && stickerData.file_key) {
+        const container = div.querySelector('.file-preview');
+        if (container) {
+            if (autoLoad) {
+                loadMediaPreview(container, fileData);
+            } else {
+                container.innerHTML = '<button class="load-preview-btn">Load preview</button>';
+                container.querySelector('.load-preview-btn').addEventListener('click', () => {
+                    container.innerHTML = '';
+                    loadMediaPreview(container, fileData);
+                });
+            }
+        }
+    } else if (stickerData && stickerData.file_id) {
         const stickerContainer = div.querySelector('.sticker-message');
         if (stickerContainer) {
-            loadStickerPreview(stickerContainer, stickerData);
+            if (autoLoad) {
+                loadStickerPreview(stickerContainer, stickerData);
+            } else {
+                stickerContainer.innerHTML = '<button class="load-preview-btn">Load sticker</button>';
+                stickerContainer.querySelector('.load-preview-btn').addEventListener('click', () => {
+                    stickerContainer.innerHTML = '';
+                    loadStickerPreview(stickerContainer, stickerData);
+                });
+            }
         }
     }
 
@@ -1126,13 +1208,19 @@ async function appendMessage(msg) {
 
 async function loadStickerPreview(container, stickerData) {
     try {
-        const response = await authFetch('/api/files/' + stickerData.file_id + '/download');
-        if (!response.ok) throw new Error('Download failed');
-        const encryptedChunks = await response.arrayBuffer();
-        const fileKeyBytes = E2ECrypto.base64ToArrayBuffer(stickerData.file_key);
-        const decrypted = E2ECrypto.decryptFileChunk(fileKeyBytes, new Uint8Array(encryptedChunks));
-        const blob = new Blob([decrypted], { type: stickerData.mime_type || 'image/png' });
+        // New stickers: derive key from identity. Old stickers: use stored file_key.
+        let fileKeyBytes;
+        if (stickerData.file_key) {
+            fileKeyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(stickerData.file_key));
+        } else {
+            const identity = E2ECrypto.getIdentityKeyPair();
+            if (!identity) throw new Error('No identity key');
+            fileKeyBytes = identity.privateKey;
+        }
+
+        const blob = await downloadAndDecryptStickerData(stickerData.file_id, fileKeyBytes, stickerData.mime_type || 'image/png');
         const url = URL.createObjectURL(blob);
+        blobUrls.push(url);
         const img = document.createElement('img');
         img.src = url;
         img.alt = stickerData.sticker_name || 'Sticker';
@@ -1140,6 +1228,16 @@ async function loadStickerPreview(container, stickerData) {
         img.style.maxHeight = '192px';
         img.style.borderRadius = '8px';
         container.appendChild(img);
+        // Add download button
+        const dlBtn = document.createElement('button');
+        dlBtn.className = 'media-download-btn';
+        dlBtn.title = 'Download';
+        dlBtn.textContent = '⬇';
+        dlBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            downloadBlobAs(url, stickerData.sticker_name || 'sticker', stickerData.mime_type || 'image/png');
+        });
+        container.appendChild(dlBtn);
     } catch (e) {
         container.textContent = '[sticker unavailable]';
     }
@@ -1165,6 +1263,8 @@ function setupMessageActions() {
             handleReply(messageId, msgDiv);
         } else if (action === 'forward') {
             handleForward(messageId, msgDiv);
+        } else if (action === 'forward-dm') {
+            handleForwardToDm(messageId, msgDiv);
         } else if (action === 'edit') {
             handleEdit(messageId, msgDiv);
         } else if (action === 'delete') {
@@ -1193,6 +1293,11 @@ function handleReply(messageId, msgDiv) {
 function handleForward(messageId, msgDiv) {
     pendingForward = { messageId, msgDiv };
     showForwardModal();
+}
+
+function handleForwardToDm(messageId, msgDiv) {
+    pendingForward = { messageId, msgDiv, toDm: true };
+    showDmForwardModal();
 }
 
 function handleEdit(messageId, msgDiv) {
@@ -1647,11 +1752,13 @@ function appendDmMessage(msg, kp, otherPublicKey) {
     let textContent = '';
     let fileData = null;
     let filesData = null;
+    let stickerData = null;
+    let gifData = null;
     if (msg.encrypted_content && msg.nonce && kp && otherPublicKey) {
         try {
             const dmId = msg.dm_channel_id || currentDmChannelId;
             textContent = E2ECrypto.decryptDm(msg.encrypted_content, msg.nonce, dmId, kp.privateKey, otherPublicKey, msg.message_nonce);
-            // Check if it's a file message
+            // Check if it's a structured message
             try {
                 const parsed = JSON.parse(textContent);
                 if (parsed && parsed.type === 'files' && Array.isArray(parsed.files)) {
@@ -1659,6 +1766,12 @@ function appendDmMessage(msg, kp, otherPublicKey) {
                     textContent = '';
                 } else if (parsed && parsed.type === 'file') {
                     fileData = parsed;
+                    textContent = '';
+                } else if (parsed && parsed.type === 'sticker') {
+                    stickerData = parsed;
+                    textContent = '';
+                } else if (parsed && parsed.type === 'gif') {
+                    gifData = parsed;
                     textContent = '';
                 }
             } catch (_) {}
@@ -1668,7 +1781,14 @@ function appendDmMessage(msg, kp, otherPublicKey) {
     }
 
     let contentHtml = '';
-    if (filesData) {
+    if (gifData) {
+        contentHtml = '<div class="gif-message">' +
+            '<img src="' + escapeHtml(gifData.url) + '" alt="' + escapeHtml(gifData.alt || 'GIF') + '" loading="lazy" style="max-width:300px;max-height:300px;border-radius:8px">' +
+            '<button class="media-download-btn" title="Download" data-url="' + escapeHtml(gifData.url) + '" data-filename="sticker.gif">⬇</button>' +
+            '</div>';
+    } else if (stickerData) {
+        contentHtml = '<div class="sticker-message"></div>';
+    } else if (filesData) {
         contentHtml = buildMultiFileCardHtml(filesData);
     } else if (fileData) {
         contentHtml = buildFileCardHtml(fileData);
@@ -1686,15 +1806,48 @@ function appendDmMessage(msg, kp, otherPublicKey) {
             contentHtml +
         '</div>';
 
-    // Load media preview if applicable
-    if (filesData) {
+    // Load media preview if applicable (respect auto-load setting)
+    const autoLoad = localStorage.getItem('autoLoadPreviews') !== 'false';
+    if (stickerData && stickerData.file_id) {
+        const stickerContainer = div.querySelector('.sticker-message');
+        if (stickerContainer) {
+            if (autoLoad) {
+                loadStickerPreview(stickerContainer, stickerData);
+            } else {
+                stickerContainer.innerHTML = '<button class="load-preview-btn">Load sticker</button>';
+                stickerContainer.querySelector('.load-preview-btn').addEventListener('click', () => {
+                    stickerContainer.innerHTML = '';
+                    loadStickerPreview(stickerContainer, stickerData);
+                });
+            }
+        }
+    } else if (filesData) {
         div.querySelectorAll('.file-preview').forEach((container, idx) => {
             if (filesData[idx] && filesData[idx].file_key) {
-                loadMediaPreview(container, filesData[idx]);
+                if (autoLoad) {
+                    loadMediaPreview(container, filesData[idx]);
+                } else {
+                    container.innerHTML = '<button class="load-preview-btn" data-file-idx="' + idx + '">Load preview</button>';
+                    container.querySelector('.load-preview-btn').addEventListener('click', () => {
+                        container.innerHTML = '';
+                        loadMediaPreview(container, filesData[idx]);
+                    });
+                }
             }
         });
     } else if (fileData && fileData.file_key) {
-        loadMediaPreview(div.querySelector('.file-preview'), fileData);
+        const container = div.querySelector('.file-preview');
+        if (container) {
+            if (autoLoad) {
+                loadMediaPreview(container, fileData);
+            } else {
+                container.innerHTML = '<button class="load-preview-btn">Load preview</button>';
+                container.querySelector('.load-preview-btn').addEventListener('click', () => {
+                    container.innerHTML = '';
+                    loadMediaPreview(container, fileData);
+                });
+            }
+        }
     }
 
     list.appendChild(div);
@@ -3474,6 +3627,7 @@ function buildFileCardHtml(fileData) {
         'data-file-mime="' + escapeAttr(fileData.mime_type) + '" ' +
         'data-file-size="' + fileData.file_size + '">' +
         '<button class="file-download-btn" title="Download">⬇</button>' +
+
         '<div class="file-details">' +
             '<div class="file-name">' + icon + ' ' + escapeHtml(fileData.filename) + '</div>' +
             '<div class="file-meta">' + formatFileSize(fileData.file_size) + (fileData.mime_type ? ' • ' + escapeHtml(fileData.mime_type) : '') + '</div>' +
@@ -3734,6 +3888,44 @@ async function downloadAndDecryptFile(fileId, fileKeyB64, mimeType, fileSize) {
     return new Blob([result], { type: normalizedMime });
 }
 
+// Same multi-chunk decryption as downloadAndDecryptFile, but accepts Uint8Array key directly
+async function downloadAndDecryptStickerData(fileId, fileKey, mimeType) {
+    const res = await authFetch('/api/files/' + fileId + '/download');
+    if (!res.ok) throw new Error('Failed to download');
+
+    const data = new Uint8Array(await res.arrayBuffer());
+    if (data.length === 0) throw new Error('Empty file data');
+
+    const CHUNK_PLAINTEXT = 65536;
+    const CHUNK_ENCRYPTED_FULL = CHUNK_PLAINTEXT + 16 + 24; // 65576
+    const totalChunks = Math.ceil(data.length / CHUNK_ENCRYPTED_FULL);
+
+    const decryptedChunks = [];
+    for (let i = 0; i < totalChunks; i++) {
+        const start = i * CHUNK_ENCRYPTED_FULL;
+        let chunkData;
+        if (i < totalChunks - 1) {
+            chunkData = data.slice(start, start + CHUNK_ENCRYPTED_FULL);
+        } else {
+            chunkData = data.slice(start);
+        }
+        if (chunkData.length < 40) throw new Error('Encrypted chunk too short');
+        const decrypted = E2ECrypto.decryptFileChunk(fileKey, chunkData);
+        decryptedChunks.push(decrypted);
+    }
+
+    let totalLength = 0;
+    for (const c of decryptedChunks) totalLength += c.length;
+    const result = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const c of decryptedChunks) {
+        result.set(c, offset);
+        offset += c.length;
+    }
+
+    return new Blob([result], { type: mimeType || 'image/png' });
+}
+
 async function downloadFileById(fileId, fileKeyB64, filename, mimeType, fileSize) {
     try {
         const blob = await downloadAndDecryptFile(fileId, fileKeyB64, mimeType, fileSize);
@@ -3753,6 +3945,16 @@ async function downloadFileById(fileId, fileKeyB64, filename, mimeType, fileSize
         console.error('Download failed:', e);
         alert('Failed to download file: ' + e.message);
     }
+}
+
+function downloadBlobAs(url, filename, mimeType) {
+    const a = document.createElement('a');
+    a.href = url;
+    const ext = mimeType ? mimeType.split('/')[1] || 'png' : 'png';
+    a.download = filename + '.' + ext;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
 }
 
 // ===== Fullscreen Media Viewer =====
@@ -4317,3 +4519,904 @@ function setupAudioControls(audio) {
         updateVolumeIcon(muteBtn, audio.muted ? 0 : audio.volume);
     });
 }
+
+// ===== Sticker / Emoji / GIF Panel =====
+
+const EMOJI_DATA = [
+    { cat: 'Smileys', emojis: ['😀','😃','😄','😁','😆','😅','🤣','😂','🙂','😊','😇','🥰','😍','🤩','😘','😗','😚','😙','🥲','😋','😛','😜','🤪','😝','🤑','🤗','🤭','🫢','🫣','🤫','🤔','🫡','🤐','🤨','😐','😑','😶','🫥','😏','😒','🙄','😬','🤥','😌','😔','😪','🤤','😴','😷','🤒','🤕','🤢','🤮','🥵','🥶','🥴','😵','🤯','🥳','🥸','😎','🤓','🧐','😕','🫤','😟','🙁','😮','😯','😲','😳','🥺','🥹','😦','😧','😨','😰','😥','😢','😭','😱','😖','😣','😞','😓','😩','😫','🥱','😤','😡','😠','🤬','😈','👿','💀','☠️','💩','🤡','👹','👺','👻','👽','👾','🤖'] },
+    { cat: 'Gestures', emojis: ['👋','🤚','🖐️','✋','🖖','🫱','🫲','🫳','🫴','👌','🤌','🤏','✌️','🤞','🫰','🤟','🤘','🤙','👈','👉','👆','🖕','👇','☝️','🫵','👍','👎','✊','👊','🤛','🤜','👏','🙌','🫶','👐','🤲','🤝','🙏'] },
+    { cat: 'Hearts', emojis: ['❤️','🧡','💛','💚','💙','💜','🖤','🤍','🤎','💔','❣️','💕','💞','💓','💗','💖','💘','💝','💟'] },
+    { cat: 'Animals', emojis: ['🐶','🐱','🐭','🐹','🐰','🦊','🐻','🐼','🐻‍❄️','🐨','🐯','🦁','🐮','🐷','🐸','🐵','🙈','🙉','🙊','🐒','🐔','🐧','🐦','🐤','🐣','🦆','🦅','🦉','🦇','🐺','🐗','🐴','🦄','🐝','🪱','🐛','🦋','🐌','🐞','🐜','🪳','🦂','🕷️','🐍','🦎','🐢','🐊'] },
+    { cat: 'Food', emojis: ['🍎','🍐','🍊','🍋','🍌','🍉','🍇','🍓','🫐','🍈','🍒','🍑','🥭','🍍','🥥','🥝','🍅','🥑','🍆','🥦','🥬','🌶️','🫑','🌽','🥕','🫒','🧄','🧅','🥔','🍠','🫘','🥐','🍞','🥖','🥨','🧀','🥚','🍳','🧈','🥞','🧇','🥓','🥩','🍗','🍖','🌭','🍔','🍟','🍕','🫓','🥪','🌮','🌯','🫔','🥙','🧆','🥚','🍝','🍜','🍲','🍛','🍣','🍱','🥟','🦪','🍤','🍙','🍚','🍘','🍥','🥠','🥮','🍢','🍡','🍧','🍨','🍦','🥧','🧁','🍰','🎂','🍮','🍭','🍬','🍫','🍿','🧂','🥤','🧋','🧃','🍼','🥛','☕','🫖','🍵','🍶','🍺','🍻','🥂','🍷','🥃','🍸','🍹','🧉','🍾'] },
+    { cat: 'Activities', emojis: ['⚽','🏀','🏈','⚾','🥎','🎾','🏐','🏉','🥏','🎱','🪀','🏓','🏸','🏒','🥅','⛳','🪁','🏹','🎣','🤿','🥊','🥋','🎽','🛹','🛼','🛷','⛸️','🥌','🎿','🎯','🪃','🏆','🥇','🥈','🥉','🏅','🎖️','🏵️','🎗️','🎫','🎟️','🎪','🤹','🎭','🎨','🧵','🧶','🪡'] },
+    { cat: 'Travel', emojis: ['🚗','🚕','🚌','🏎️','🚓','🚑','🚒','🚐','🛻','🚚','🚛','🚜','🛵','🏍️','🛺','🚲','🛴','🛹','🛼','🚁','✈️','🛩️','🚀','🛸','🛰️','🚢','⛵','🛶','🗺️','🧭','🏔️','⛰️','🌋','🗻','🏕️','🏖️','🏜️','🏝️','🏞️','🏟️','🏛️','🏗️','🧱','🪨','🪵','🛖','🏠','🏡','🏢','🏣','🏤','🏥','🏦','🏨','🏩','🏪','🏫','🏬','🏭','🏯','🏰','💒','🗼','🗽','⛪','🕌','🛕','🕍','⛩️','🕋','⛲','⛺','🌁','🌃','🏙️','🌄','🌅','🌆','🌇','🌉','🌌','🎆','🎇','🌠','🎇'] },
+    { cat: 'Objects', emojis: ['⌚','📱','💻','⌨️','🖥️','🖨️','🖱️','🖲️','🕹️','🗜️','💽','💾','💿','📀','📼','📷','📸','📹','🎥','📽️','🎞️','📞','☎️','📟','📠','📺','📻','🎙️','🎚️','🎛️','🧭','⏱️','⏲️','⏰','🕰️','⌛','⏳','📡','🔋','🔌','💡','🔦','🕯️','🪔','🧯','🛢️','💸','💵','💴','💶','💷','🪙','💰','💳','💎','⚖️','🪜','🧰','🪛','🔧','🔨','⚒️','🛠️','⛏️','🪚','🔩','⚙️','🪤','🧱','⛓️','🧲','🔫','💣','🧨','🪓','🔪','🗡️','⚔️','🛡️','🚬','⚰️','🪦','⚱️','🏺','🔮','📿','🧿','🪬','💈','⚗️','🔭','🔬','🕳️','🩹','🩺','💊','💉','🩸','🧬','🦠','🧫','🧪','🌡️','🧹','🪠','🧺','🧻','🚽','🚰','🚿','🛁','🛀','🧼','🪥','🪒','🧽','🪣','🧴','🛎️','🔑','🗝️','🚪','🪑','🛋️','🛏️','🛌','🧸','🪆','🖼️','🪞','🪟','🛍️','🛒','🎁','🎈','🎏','🎀','🪄','🪅','🎊','🎉','🎎','🏮','🎐','🧧','✉️','📩','📨','📧','💌','📥','📤','📦','🏷️','🪧','📪','📫','📬','📭','📮','📯','📜','📃','📄','📑','🧾','📊','📈','📉','🗒️','🗓️','📆','📅','🗑️','📇','🗃️','🗳️','🗄️','📋','📁','📂','🗂️','🗞️','📰','📓','📔','📒','📕','📖','📗','📘','📙','📚','📚','🔬','🔭','📡'] },
+    { cat: 'Symbols', emojis: ['❤️','🧡','💛','💚','💙','💜','🖤','🤍','🤎','💔','❣️','💕','💞','💓','💗','💖','💘','💝','💟','☮️','✝️','☪️','🕉️','☸️','✡️','🔯','🕎','☯️','☦️','🛐','⛎','♈','♉','♊','♋','♌','♍','♎','♏','♐','♑','♒','♓','🆔','⚛️','🉑','☢️','☣️','📴','📳','🈶','🈚','🈸','🈺','🈷️','✴️','🆚','💮','🉐','㊙️','㊗️','🈴','🈵','🈹','🈲','🅰️','🅱️','🆎','🆑','🅾️','🆘','❌','⭕','🛑','⛔','📛','🚫','💯','💢','♨️','🚷','🚯','🚳','🚱','🔞','📵','🚭','❗','❕','❓','❔','‼️','⁉️','🔅','🔆','〽️','⚠️','🚸','🔱','⚜️','🔰','♻️','✅','🈯','💹','❇️','✳️','❎','🌐','💠','Ⓜ️','🌀','💤','🏧','🚾','♿','🅿️','🛗','🈳','🈂️','🛂','🛃','🛄','🛅','🚹','🚺','🚼','⚧️','🚻','🚮','🎦','📶','🈁','🔣','ℹ️','🔤','🔡','🔠','🆖','🆗','🆙','🆒','🆕','🆓','0️⃣','1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟','🔢','#️⃣','*️⃣','⏏️','▶️','⏸️','⏯️','⏹️','⏺️','⏭️','⏮️','⏩','⏪','⏫','⏬','◀️','🔼','🔽','➡️','⬅️','⬆️','⬇️','↗️','↘️','↙️','↖️','↕️','↔️','↪️','↩️','⤴️','⤵️','🔀','🔁','🔂','🔄','🔃','🎵','🎶','➕','➖','➗','✖️','🟰','♾️','💲','💱','™️','©️','®️','〰️','➰','➿','🔚','🔙','🔛','🔝','🔜','✔️','☑️','🔘','🔴','🟠','🟡','🟢','🔵','🟣','⚫','⚪','🟤','🔺','🔻','🔸','🔶','🔷','🔳','🔲','▪️','▫️','◾','◽','◼️','◻️','🟥','🟧','🟨','🟩','🟦','🟪','⬛','⬜','🟫','🔈','🔇','🔉','🔊','🔔','🔕','📣','📢'] },
+];
+
+let stickerPanelOpen = false;
+let activePanelTab = 'emojis';
+let userStickersCache = []; // cached list of user's stickers from /api/users/me/stickers
+
+function setupStickerPanel() {
+    const panel = document.getElementById('sticker-panel');
+    const btn = document.getElementById('sticker-btn');
+    if (!panel || !btn) return;
+
+    btn.addEventListener('click', () => {
+        stickerPanelOpen = !stickerPanelOpen;
+        panel.style.display = stickerPanelOpen ? 'flex' : 'none';
+        if (stickerPanelOpen) renderPanelTab(activePanelTab);
+    });
+
+    document.addEventListener('click', (e) => {
+        if (stickerPanelOpen && !panel.contains(e.target) && e.target !== btn && !btn.contains(e.target)) {
+            stickerPanelOpen = false;
+            panel.style.display = 'none';
+        }
+    });
+
+    panel.querySelectorAll('.sticker-tab').forEach(tab => {
+        tab.addEventListener('click', () => {
+            panel.querySelectorAll('.sticker-tab').forEach(t => t.classList.remove('active'));
+            tab.classList.add('active');
+            activePanelTab = tab.dataset.tab;
+            renderPanelTab(activePanelTab);
+        });
+    });
+
+    // Setup sticker upload modal
+    setupStickerUploadModal();
+}
+
+function renderPanelTab(tab) {
+    const content = document.getElementById('sticker-panel-content');
+    if (!content) return;
+    content.innerHTML = '';
+
+    if (tab === 'emojis') renderEmojiGrid(content);
+    else if (tab === 'stickers') renderStickerGrid(content);
+    else if (tab === 'gifs') renderGifPanel(content);
+    else if (tab === 'upload') renderUploadStickerPanel(content);
+}
+
+function renderEmojiGrid(container) {
+    const grid = document.createElement('div');
+    grid.className = 'emoji-grid';
+
+    EMOJI_DATA.forEach(group => {
+        const header = document.createElement('div');
+        header.style.cssText = 'grid-column:1/-1;font-size:12px;color:#888;font-weight:600;padding:8px 0 4px;text-transform:uppercase;';
+        header.textContent = group.cat;
+        grid.appendChild(header);
+
+        group.emojis.forEach(emoji => {
+            const item = document.createElement('div');
+            item.className = 'emoji-item';
+            item.textContent = emoji;
+            item.title = emoji;
+            item.addEventListener('click', () => insertEmojiIntoInput(emoji));
+            grid.appendChild(item);
+        });
+    });
+
+    container.appendChild(grid);
+}
+
+function insertEmojiIntoInput(emoji) {
+    const input = document.getElementById('message-input');
+    if (!input) return;
+    const start = input.selectionStart;
+    const end = input.selectionEnd;
+    input.value = input.value.substring(0, start) + emoji + input.value.substring(end);
+    input.selectionStart = input.selectionEnd = start + emoji.length;
+    input.focus();
+}
+
+// Load user's own stickers from /api/users/me/stickers
+async function loadUserStickers() {
+    try {
+        const res = await authFetch('/api/users/me/stickers');
+        if (res.ok) {
+            userStickersCache = await res.json();
+        } else {
+            userStickersCache = [];
+        }
+    } catch (e) {
+        userStickersCache = [];
+    }
+    return userStickersCache;
+}
+
+function renderStickerGrid(container) {
+    loadUserStickers().then(stickers => {
+        container.innerHTML = '';
+        if (!stickers || stickers.length === 0) {
+            container.innerHTML = '<div style="text-align:center;color:#888;padding:20px;font-size:13px;">No stickers yet. Use the + tab to upload one.</div>';
+            return;
+        }
+        const searchBar = document.createElement('div');
+        searchBar.style.cssText = 'padding:8px 12px;position:sticky;top:0;background:var(--bg-secondary);z-index:1;';
+        searchBar.innerHTML = '<input type="text" id="sticker-search-input" placeholder="Search stickers..." style="width:100%;padding:6px 10px;border-radius:6px;border:1px solid #2a2a4a;background:#1a1a2e;color:#e0e0e0;font-size:12px;box-sizing:border-box;">';
+        container.appendChild(searchBar);
+
+        const grid = document.createElement('div');
+        grid.className = 'sticker-grid';
+        grid.id = 'user-sticker-grid';
+        container.appendChild(grid);
+
+        // Filter out GIFs — they have their own tab
+        const nonGifStickers = stickers.filter(s => !/gif/i.test(s.mime_type));
+        renderStickerItems(grid, nonGifStickers);
+
+        document.getElementById('sticker-search-input')?.addEventListener('input', (e) => {
+            const q = e.target.value.toLowerCase();
+            const filtered = nonGifStickers.filter(s => s.sticker_name.toLowerCase().includes(q));
+            grid.innerHTML = '';
+            renderStickerItems(grid, filtered);
+        });
+    });
+}
+
+function renderStickerItems(grid, stickers) {
+    stickers.forEach(sticker => {
+        const item = document.createElement('div');
+        item.className = 'sticker-grid-item';
+        item.style.position = 'relative';
+        item.title = sticker.sticker_name;
+
+        const img = document.createElement('img');
+        img.alt = sticker.sticker_name;
+        img.style.cssText = 'width:100%;height:100%;object-fit:contain;background:#1e1e1e;';
+        (async () => {
+            const identity = E2ECrypto.getIdentityKeyPair();
+            if (!identity) return;
+            const stickerKey = identity.privateKey;
+            try {
+                const blob = await downloadAndDecryptStickerData(sticker.file_id, stickerKey, sticker.mime_type || 'image/png');
+                img.src = URL.createObjectURL(blob);
+            } catch (_) {}
+        })();
+
+        // Delete button
+        const delBtn = document.createElement('button');
+        delBtn.innerHTML = '&#128465;';
+        delBtn.title = 'Delete sticker';
+        delBtn.style.cssText = 'position:absolute;top:2px;right:2px;width:20px;height:20px;border-radius:50%;background:rgba(244,67,54,0.85);color:#fff;border:none;font-size:11px;line-height:20px;text-align:center;cursor:pointer;display:none;z-index:2;padding:0;';
+        delBtn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            if (!confirm('Delete sticker "' + sticker.sticker_name + '"?')) return;
+            try {
+                const res = await authFetch('/api/users/me/stickers/' + sticker.id, { method: 'DELETE' });
+                if (res.ok) item.remove();
+            } catch (_) {}
+        });
+        item.appendChild(delBtn);
+        item.addEventListener('mouseenter', () => delBtn.style.display = 'block');
+        item.addEventListener('mouseleave', () => delBtn.style.display = 'none');
+
+        item.appendChild(img);
+        item.addEventListener('click', () => sendStickerMessage(sticker));
+        grid.appendChild(item);
+    });
+}
+
+function renderGifPanel(container) {
+    // GIFs are just stickers with image/gif mime type - show user's GIF stickers
+    const header = document.createElement('div');
+    header.style.cssText = 'padding:8px 12px;font-size:12px;color:#888;';
+    header.textContent = 'Your GIFs';
+    container.appendChild(header);
+
+    const grid = document.createElement('div');
+    grid.className = 'gif-grid';
+    container.appendChild(grid);
+
+    loadUserStickers().then(stickers => {
+        const gifs = stickers.filter(s => /gif/i.test(s.mime_type));
+        if (gifs.length === 0) {
+            grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:#888;padding:20px;font-size:13px;">No GIFs yet. Upload one from the + tab.</div>';
+            return;
+        }
+        gifs.forEach(sticker => {
+            const item = document.createElement('div');
+            item.className = 'gif-grid-item';
+            item.style.position = 'relative';
+
+            const img = document.createElement('img');
+            img.alt = sticker.sticker_name;
+            img.loading = 'lazy';
+            (async () => {
+                const identity = E2ECrypto.getIdentityKeyPair();
+                if (!identity) return;
+                const stickerKey = identity.privateKey;
+                try {
+                    const blob = await downloadAndDecryptStickerData(sticker.file_id, stickerKey, sticker.mime_type || 'image/gif');
+                    img.src = URL.createObjectURL(blob);
+                } catch (_) {}
+            })();
+            item.appendChild(img);
+
+            // Delete button
+            const delBtn = document.createElement('button');
+            delBtn.innerHTML = '&#128465;';
+            delBtn.title = 'Delete GIF';
+            delBtn.style.cssText = 'position:absolute;top:2px;right:2px;width:20px;height:20px;border-radius:50%;background:rgba(244,67,54,0.85);color:#fff;border:none;font-size:11px;line-height:20px;text-align:center;cursor:pointer;display:none;z-index:2;padding:0;';
+            delBtn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                if (!confirm('Delete "' + sticker.sticker_name + '"?')) return;
+                try {
+                    const res = await authFetch('/api/users/me/stickers/' + sticker.id, { method: 'DELETE' });
+                    if (res.ok) item.remove();
+                } catch (_) {}
+            });
+            item.appendChild(delBtn);
+            item.addEventListener('mouseenter', () => delBtn.style.display = 'block');
+            item.addEventListener('mouseleave', () => delBtn.style.display = 'none');
+
+            item.addEventListener('click', () => sendStickerMessage(sticker));
+            grid.appendChild(item);
+        });
+    });
+}
+
+function showStickerProgress(label, pct) {
+    const container = document.getElementById('sticker-send-progress');
+    const fill = document.getElementById('sticker-send-fill');
+    const labelEl = container ? container.querySelector('.sticker-send-label') : null;
+    if (!container || !fill) return;
+    container.style.display = 'block';
+    if (labelEl) labelEl.textContent = label || 'Sending sticker...';
+    fill.style.width = Math.min(100, Math.max(0, pct)) + '%';
+}
+
+function hideStickerProgress() {
+    const container = document.getElementById('sticker-send-progress');
+    if (container) container.style.display = 'none';
+}
+
+function setStickerSendingCooldown(active) {
+    isSendingSticker = active;
+    // Visually disable the sticker grid items during send
+    const panel = document.getElementById('sticker-panel');
+    if (!panel) return;
+    const grid = panel.querySelector('.sticker-grid, .gif-grid');
+    if (grid) {
+        grid.style.pointerEvents = active ? 'none' : '';
+        grid.style.opacity = active ? '0.5' : '';
+    }
+}
+
+async function sendStickerMessage(sticker) {
+    if (!currentChannelId && !currentDmChannelId) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    // Cooldown: prevent sending another sticker while one is in progress
+    if (isSendingSticker) return;
+
+    setStickerSendingCooldown(true);
+    showStickerProgress('Preparing...', 0);
+
+    try {
+        let filePayload;
+        if (sticker.file_key) {
+            // Optimized: reuse existing file — no need to download/re-encrypt/re-upload
+            showStickerProgress('Sending...', 50);
+            filePayload = JSON.stringify({
+                type: 'sticker',
+                file_id: sticker.file_id,
+                sticker_name: sticker.sticker_name,
+                mime_type: sticker.mime_type || 'image/png',
+                file_key: sticker.file_key,
+            });
+        } else {
+            // Fallback for old stickers without file_key: download, decrypt, re-encrypt, re-upload
+            showStickerProgress('Decrypting...', 5);
+            const identity = E2ECrypto.getIdentityKeyPair();
+            if (!identity) { console.error('sendStickerMessage: no identity key'); hideStickerProgress(); setStickerSendingCooldown(false); return; }
+            const stickerKey = identity.privateKey;
+            const stickerMime = sticker.mime_type || 'image/png';
+            const decryptedBlob = await downloadAndDecryptStickerData(sticker.file_id, stickerKey, stickerMime);
+            const decrypted = new Uint8Array(await decryptedBlob.arrayBuffer());
+
+            showStickerProgress('Re-encrypting...', 15);
+            const freshKey = E2ECrypto.generateFileKey();
+            const freshKeyB64 = E2ECrypto.arrayBufferToBase64(freshKey);
+            const mime = sticker.mime_type || 'image/png';
+
+            showStickerProgress('Uploading...', 20);
+            const initRes = await authFetch('/api/files/init', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ size: decrypted.length, mime })
+            });
+            if (!initRes.ok) { console.error('sendStickerMessage: init failed', await initRes.text()); hideStickerProgress(); setStickerSendingCooldown(false); return; }
+            const { file_id: newFileId } = await initRes.json();
+
+            const CHUNK_SIZE = 64 * 1024;
+            const totalChunks = Math.ceil(decrypted.length / CHUNK_SIZE);
+            for (let i = 0; i < totalChunks; i++) {
+                const start = i * CHUNK_SIZE;
+                const end = Math.min(start + CHUNK_SIZE, decrypted.length);
+                const chunkData = decrypted.slice(start, end);
+                const encryptedChunk = E2ECrypto.encryptFileChunk(freshKey, chunkData);
+                const chunkRes = await authFetch('/api/files/' + newFileId + '/chunk/' + i, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/octet-stream' },
+                    body: encryptedChunk
+                });
+                if (!chunkRes.ok) { console.error('sendStickerMessage: chunk ' + i + ' failed', await chunkRes.text()); hideStickerProgress(); setStickerSendingCooldown(false); return; }
+                showStickerProgress('Uploading...', 20 + Math.round(70 * (i + 1) / totalChunks));
+            }
+
+            showStickerProgress('Finalizing...', 95);
+            const completeRes = await authFetch('/api/files/' + newFileId + '/complete', { method: 'POST' });
+            if (!completeRes.ok) { console.error('sendStickerMessage: complete failed', await completeRes.text()); hideStickerProgress(); setStickerSendingCooldown(false); return; }
+
+            filePayload = JSON.stringify({
+                type: 'sticker',
+                file_id: newFileId,
+                sticker_name: sticker.sticker_name,
+                mime_type: mime,
+                file_key: freshKeyB64,
+            });
+        }
+
+        showStickerProgress('Sending...', 90);
+
+        if (viewMode === 'dms') {
+            const kp = E2ECrypto.getIdentityKeyPair();
+            if (!kp) { hideStickerProgress(); setStickerSendingCooldown(false); return; }
+            let otherPubKey;
+            try {
+                const res = await authFetch('/api/identity/' + currentDmOtherUser.id);
+                const d = await res.json();
+                otherPubKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(d.identity_public_key));
+            } catch (e) { hideStickerProgress(); setStickerSendingCooldown(false); return; }
+            const encrypted = E2ECrypto.encryptDm(filePayload, currentDmChannelId, kp.privateKey, otherPubKey);
+            ws.send(JSON.stringify({ type: 'dm_send', dm_channel_id: currentDmChannelId, encrypted_content: encrypted.ciphertext, nonce: encrypted.nonce, message_nonce: encrypted.messageNonce || null }));
+            // Brief success glow then cleanup
+            const fill = document.getElementById('sticker-send-fill');
+            if (fill) { fill.classList.add('success'); fill.style.width = '100%'; }
+            await new Promise(r => setTimeout(r, 600));
+        } else if (currentChannelId && currentServerId) {
+            if (!E2ECrypto.getServerKey(currentServerId)) { hideStickerProgress(); setStickerSendingCooldown(false); return; }
+            const encrypted = E2ECrypto.encrypt(filePayload, currentChannelId, currentServerId);
+            ws.send(JSON.stringify({
+                type: 'message_send',
+                channel_id: currentChannelId,
+                encrypted_content: encrypted.ciphertext,
+                nonce: encrypted.nonce,
+                message_nonce: encrypted.messageNonce || null,
+            }));
+            // Brief success glow then cleanup
+            const fill = document.getElementById('sticker-send-fill');
+            if (fill) { fill.classList.add('success'); fill.style.width = '100%'; }
+            await new Promise(r => setTimeout(r, 600));
+        }
+    } catch (e) {
+        console.error('Failed to send sticker:', e);
+    }
+
+    hideStickerProgress();
+    setStickerSendingCooldown(false);
+    stickerPanelOpen = false;
+    const panel = document.getElementById('sticker-panel');
+    if (panel) panel.style.display = 'none';
+}
+
+// ===== Upload Sticker/GIF Panel (opens the crop modal) =====
+function renderUploadStickerPanel(container) {
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'padding:16px;text-align:center;';
+    wrap.innerHTML = '<p style="color:#888;font-size:13px;margin-bottom:12px;">Add to your personal collection</p>' +
+        '<div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">' +
+        '<button id="sticker-upload-trigger" style="background:var(--accent);color:var(--bg-primary);border:none;padding:10px 18px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;">🖼️ Upload Sticker</button>' +
+        '<button id="gif-upload-trigger" style="background:#2a6a3a;color:#fff;border:none;padding:10px 18px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;">🎬 Upload GIF</button>' +
+        '</div>' +
+        '<p style="color:#666;font-size:11px;margin-top:10px;">Stickers: cropped/resized to 420×420 • GIFs preserved if ≤420, cropped if larger</p>';
+    container.appendChild(wrap);
+
+    wrap.querySelector('#sticker-upload-trigger').addEventListener('click', () => {
+        const modal = document.getElementById('sticker-upload-modal');
+        if (!modal) return;
+        modal.style.display = 'flex';
+        document.getElementById('sticker-upload-step-choose').style.display = '';
+        document.getElementById('sticker-upload-step-crop').style.display = 'none';
+        resetStickerUpload();
+        stickerUploadMode = 'sticker'; // set AFTER reset
+        document.getElementById('sticker-upload-input').accept = 'image/*';
+        const title = document.querySelector('#sticker-upload-modal h3');
+        if (title) title.textContent = 'Upload Sticker';
+        const confirmBtn = document.getElementById('confirm-sticker-upload');
+        if (confirmBtn) confirmBtn.textContent = 'Crop & Upload';
+        document.getElementById('sticker-upload-input').click();
+    });
+
+    wrap.querySelector('#gif-upload-trigger').addEventListener('click', () => {
+        const modal = document.getElementById('sticker-upload-modal');
+        if (!modal) return;
+        modal.style.display = 'flex';
+        document.getElementById('sticker-upload-step-choose').style.display = '';
+        document.getElementById('sticker-upload-step-crop').style.display = 'none';
+        resetStickerUpload();
+        stickerUploadMode = 'gif'; // set AFTER reset so it doesn't get overwritten
+        document.getElementById('sticker-upload-input').accept = '.gif,image/gif';
+        const title = document.querySelector('#sticker-upload-modal h3');
+        if (title) title.textContent = 'Upload GIF';
+        const confirmBtn = document.getElementById('confirm-sticker-upload');
+        if (confirmBtn) confirmBtn.textContent = 'Upload GIF';
+        document.getElementById('sticker-upload-input').click();
+    });
+}
+
+// ===== Crop & Upload =====
+
+// Crop state
+let stickerCropState = {
+    file: null,
+    image: null,
+    naturalWidth: 0,
+    naturalHeight: 0,
+    needsCrop: false,
+    cropX: 0,
+    cropY: 0,
+    cropSize: 0,
+    maxCropSize: 420,
+};
+let stickerUploadMode = 'sticker'; // 'sticker' or 'gif'
+
+function setupStickerUploadModal() {
+    const fileInput = document.getElementById('sticker-upload-input');
+    const confirmBtn = document.getElementById('confirm-sticker-upload');
+    const cancelBtn = document.getElementById('cancel-sticker-upload');
+    const dropzone = document.getElementById('sticker-upload-dropzone');
+
+    if (!fileInput) return;
+
+    // Click dropzone to open file picker
+    if (dropzone) {
+        dropzone.addEventListener('click', () => fileInput.click());
+    }
+
+    fileInput.addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        stickerCropState.file = file;
+        loadImageForCrop(file);
+    });
+
+    if (cancelBtn) {
+        cancelBtn.addEventListener('click', () => {
+            document.getElementById('sticker-upload-modal').style.display = 'none';
+            resetStickerUpload();
+        });
+    }
+
+    if (confirmBtn) {
+        confirmBtn.addEventListener('click', processAndUploadSticker);
+    }
+}
+
+function loadImageForCrop(file) {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        const img = new Image();
+        img.onload = () => {
+            stickerCropState.image = img;
+            stickerCropState.naturalWidth = img.naturalWidth;
+            stickerCropState.naturalHeight = img.naturalHeight;
+
+            // Hide step 1, show step 2
+            document.getElementById('sticker-upload-step-choose').style.display = 'none';
+            document.getElementById('sticker-upload-step-crop').style.display = 'block';
+
+            const cropImg = document.getElementById('sticker-crop-image');
+            cropImg.src = e.target.result;
+            cropImg.onload = () => {
+                if (stickerUploadMode === 'gif') {
+                    // GIFs are always uploaded as-is to preserve animation (canvas can't encode GIF)
+                    document.getElementById('sticker-crop-overlay').style.display = 'none';
+                    const sizeNote = (img.naturalWidth > 420 || img.naturalHeight > 420)
+                        ? ' (larger than 420×420)' : '';
+                    document.getElementById('sticker-crop-info').textContent =
+                        'GIF: ' + img.naturalWidth + '×' + img.naturalHeight + sizeNote + ' — uploaded as-is with animation preserved.';
+                } else {
+                    const needsCrop = img.naturalWidth > 420 || img.naturalHeight > 420;
+                    if (needsCrop) {
+                        initCropBox(cropImg);
+                    } else {
+                        // Image within limit — no adjustable crop box; show full image
+                        document.getElementById('sticker-crop-overlay').style.display = 'none';
+                        document.getElementById('sticker-crop-info').textContent =
+                            'Image is already ' + img.naturalWidth + '×' + img.naturalHeight + '. It will be saved as-is.';
+                        const confirmBtn = document.getElementById('confirm-sticker-upload');
+                        if (confirmBtn) confirmBtn.textContent = 'Save Sticker';
+                        const w = cropImg.naturalWidth;
+                        const h = cropImg.naturalHeight;
+                        stickerCropState.cropX = 0;
+                        stickerCropState.cropY = 0;
+                        stickerCropState.cropSize = Math.min(w, h);
+                        stickerCropState.maxCropSize = Math.min(w, h);
+                    }
+                }
+
+                // Set default name from file
+                const nameInput = document.getElementById('sticker-upload-name');
+                if (nameInput && !nameInput.value) {
+                    nameInput.value = stickerCropState.file.name.replace(/\.[^.]+$/, '');
+                }
+            };
+        };
+        img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+}
+
+function initCropBox(cropImg) {
+    const frame = document.getElementById('sticker-crop-frame');
+    const overlay = document.getElementById('sticker-crop-overlay');
+    const box = document.getElementById('sticker-crop-box');
+    const handle = document.getElementById('sticker-crop-handle');
+    const container = document.getElementById('sticker-crop-container');
+
+    overlay.style.display = '';
+
+    const displayW = cropImg.offsetWidth || cropImg.clientWidth;
+    const displayH = cropImg.offsetHeight || cropImg.clientHeight;
+    const natW = cropImg.naturalWidth;
+    const natH = cropImg.naturalHeight;
+
+    // Scale factor from display to natural
+    const scaleX = natW / displayW;
+    const scaleY = natH / displayH;
+
+    // Initial crop box: centered, starts at 420px display or the full shorter side
+    const initSize = Math.min(Math.min(displayW, displayH), 420);
+    const x = (displayW - initSize) / 2;
+    const y = (displayH - initSize) / 2;
+
+    box.style.width = initSize + 'px';
+    box.style.height = initSize + 'px';
+    box.style.left = x + 'px';
+    box.style.top = y + 'px';
+
+    stickerCropState.cropX = Math.round(x * scaleX);
+    stickerCropState.cropY = Math.round(y * scaleY);
+    stickerCropState.cropSize = Math.round(initSize * scaleX);
+    // User can select ANY area of the image — it gets scaled down to 420x420
+    stickerCropState.maxCropSize = Math.min(natW, natH);
+    delete stickerCropState.needsCrop;
+    // Always show the crop box for images > 420
+    document.getElementById('sticker-crop-info').textContent =
+        'Drag or resize the square to select the area to keep. The selection will be resized to 420×420.';
+
+    // Drag state
+    let isDragging = false;
+    let isResizing = false;
+    let startX, startY, startLeft, startTop, startSize;
+
+    // Shared pointer handler: works for both mouse and touch events
+    function getPointerClient(e) {
+        if (e.touches && e.touches.length > 0) {
+            return { x: e.touches[0].clientX, y: e.touches[0].clientY };
+        }
+        if (e.changedTouches && e.changedTouches.length > 0) {
+            return { x: e.changedTouches[0].clientX, y: e.changedTouches[0].clientY };
+        }
+        return { x: e.clientX, y: e.clientY };
+    }
+
+    const onPointerDown = (e, resize) => {
+        isDragging = !resize;
+        isResizing = resize;
+        const pt = getPointerClient(e);
+        startX = pt.x;
+        startY = pt.y;
+        startLeft = parseInt(box.style.left);
+        startTop = parseInt(box.style.top);
+        startSize = parseInt(box.style.width);
+        e.preventDefault();
+        e.stopPropagation();
+
+        const onPointerMove = (me) => {
+            me.preventDefault();
+            const pt2 = getPointerClient(me);
+            const dx = pt2.x - startX;
+            const dy = pt2.y - startY;
+
+            if (isDragging) {
+                let newLeft = startLeft + dx;
+                let newTop = startTop + dy;
+                newLeft = Math.max(0, Math.min(displayW - parseInt(box.style.width), newLeft));
+                newTop = Math.max(0, Math.min(displayH - parseInt(box.style.height), newTop));
+                box.style.left = newLeft + 'px';
+                box.style.top = newTop + 'px';
+                stickerCropState.cropX = Math.round(newLeft * scaleX);
+                stickerCropState.cropY = Math.round(newTop * scaleY);
+            } else if (isResizing) {
+                let newSize = startSize + Math.max(dx, dy);
+                const maxDisplaySize = Math.min(displayW - startLeft, displayH - startTop, stickerCropState.maxCropSize / Math.max(scaleX, scaleY));
+                newSize = Math.max(32, Math.min(maxDisplaySize, newSize));
+                box.style.width = newSize + 'px';
+                box.style.height = newSize + 'px';
+                stickerCropState.cropSize = Math.round(newSize * scaleX);
+            }
+        };
+
+        const onPointerUp = () => {
+            isDragging = false;
+            isResizing = false;
+            document.removeEventListener('mousemove', onPointerMove);
+            document.removeEventListener('mouseup', onPointerUp);
+            document.removeEventListener('touchmove', onPointerMove);
+            document.removeEventListener('touchend', onPointerUp);
+            document.removeEventListener('touchcancel', onPointerUp);
+        };
+
+        document.addEventListener('mousemove', onPointerMove);
+        document.addEventListener('mouseup', onPointerUp);
+        document.addEventListener('touchmove', onPointerMove, { passive: false });
+        document.addEventListener('touchend', onPointerUp);
+        document.addEventListener('touchcancel', onPointerUp);
+    };
+
+    // Mouse events
+    box.addEventListener('mousedown', (e) => onPointerDown(e, false));
+    handle.addEventListener('mousedown', (e) => {
+        e.stopPropagation();
+        onPointerDown(e, true);
+    });
+    // Touch events (mobile)
+    box.addEventListener('touchstart', (e) => onPointerDown(e, false), { passive: false });
+    handle.addEventListener('touchstart', (e) => {
+        e.stopPropagation();
+        onPointerDown(e, true);
+    }, { passive: false });
+}
+
+function resetStickerUpload() {
+    stickerCropState = {
+        file: null, image: null, naturalWidth: 0, naturalHeight: 0,
+        needsCrop: false, cropX: 0, cropY: 0, cropSize: 0, maxCropSize: 420,
+    };
+    stickerUploadMode = 'sticker';
+    document.getElementById('sticker-upload-step-choose').style.display = '';
+    document.getElementById('sticker-upload-step-crop').style.display = 'none';
+    document.getElementById('sticker-crop-overlay').style.display = '';
+    document.getElementById('sticker-upload-input').value = '';
+    document.getElementById('sticker-upload-input').accept = 'image/*';
+    document.getElementById('sticker-upload-name').value = '';
+    document.getElementById('sticker-upload-error').style.display = 'none';
+    document.getElementById('sticker-upload-progress').style.display = 'none';
+    // Reset modal title
+    const title = document.querySelector('#sticker-upload-modal h3');
+    if (title) title.textContent = 'Upload Sticker/GIF';
+}
+
+async function processAndUploadSticker() {
+    const nameInput = document.getElementById('sticker-upload-name');
+    const progressContainer = document.getElementById('sticker-upload-progress');
+    const progressFill = document.getElementById('sticker-progress-fill');
+    const progressText = document.getElementById('sticker-progress-text');
+    const errorDiv = document.getElementById('sticker-upload-error');
+
+    const name = (nameInput && nameInput.value.trim()) || stickerCropState.file.name.replace(/\.[^.]+$/, '');
+    if (!name) {
+        if (errorDiv) { errorDiv.textContent = 'Enter a sticker name'; errorDiv.style.display = 'block'; }
+        return;
+    }
+
+    if (errorDiv) errorDiv.style.display = 'none';
+    if (progressContainer) progressContainer.style.display = 'block';
+    if (progressText) progressText.textContent = 'Processing image...';
+    if (progressFill) progressFill.style.width = '2%';
+
+    try {
+        const img = stickerCropState.image;
+        const originalFile = stickerCropState.file;
+
+        let blob, mimeType;
+
+        // Create a canvas and crop/resize the image
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+
+        let cropX = stickerCropState.cropX;
+        let cropY = stickerCropState.cropY;
+        let cropSize = stickerCropState.cropSize;
+
+        if (stickerUploadMode === 'gif' && img.naturalWidth <= 420 && img.naturalHeight <= 420) {
+            // Small GIF: upload original file as-is to preserve animation
+            blob = originalFile;
+            mimeType = 'image/gif';
+        } else {
+            // For images ≤ 420, preserve original non-square dimensions
+            // For larger images (GIF or sticker), scale the cropped square area down to 420x420
+            if (img.naturalWidth <= 420 && img.naturalHeight <= 420) {
+                canvas.width = img.naturalWidth;
+                canvas.height = img.naturalHeight;
+                ctx.drawImage(img, 0, 0);
+            } else {
+                canvas.width = 420;
+                canvas.height = 420;
+                ctx.drawImage(img, cropX, cropY, cropSize, cropSize, 0, 0, 420, 420);
+            }
+
+            // Convert to blob (canvas can only encode PNG/JPEG/WebP, never animated GIF)
+            const outputMime = 'image/png';
+            blob = await new Promise(resolve => canvas.toBlob(resolve, outputMime));
+            if (!blob) throw new Error('Failed to process image');
+
+            mimeType = blob.type || outputMime;
+        }
+
+        if (progressText) progressText.textContent = 'Encrypting...';
+        if (progressFill) progressFill.style.width = '10%';
+
+        // Upload as encrypted file using the standard upload flow
+        if (progressText) progressText.textContent = 'Uploading...';
+        if (progressFill) progressFill.style.width = '15%';
+
+        // Use identity private key directly — it's a 32-byte X25519 key synced across devices
+        const identity = E2ECrypto.getIdentityKeyPair();
+        if (!identity) throw new Error('No identity key - cannot encrypt sticker');
+        const fileKey = identity.privateKey;
+
+        // Init file upload
+        const initRes = await authFetch('/api/files/init', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ size: blob.size, mime: mimeType })
+        });
+        if (!initRes.ok) { const errText = await initRes.text(); console.error('Upload init failed:', initRes.status, errText); throw new Error('Failed to initialize upload (HTTP ' + initRes.status + ')'); }
+        const { file_id } = await initRes.json();
+
+        // Read blob and upload in 64KB encrypted chunks
+        const fileData = new Uint8Array(await blob.arrayBuffer());
+        const CHUNK_SIZE = 64 * 1024;
+        const totalChunks = Math.ceil(fileData.length / CHUNK_SIZE);
+
+        for (let i = 0; i < totalChunks; i++) {
+            const start = i * CHUNK_SIZE;
+            const end = Math.min(start + CHUNK_SIZE, fileData.length);
+            const chunkData = fileData.slice(start, end);
+            const encryptedChunk = E2ECrypto.encryptFileChunk(fileKey, chunkData);
+            if (progressText) progressText.textContent = 'Uploading... (' + (i + 1) + '/' + totalChunks + ')';
+            if (progressFill) progressFill.style.width = (15 + Math.round(75 * (i + 1) / totalChunks)) + '%';
+            const chunkRes = await authFetch('/api/files/' + file_id + '/chunk/' + i, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/octet-stream' },
+                body: encryptedChunk
+            });
+            if (!chunkRes.ok) throw new Error('Failed to upload chunk ' + (i + 1));
+        }
+
+        const completeRes = await authFetch('/api/files/' + file_id + '/complete', { method: 'POST' });
+        if (!completeRes.ok) throw new Error('Failed to finalize upload');
+
+        // Register as user sticker (NO file_key sent — key derived from identity)
+        if (progressText) progressText.textContent = 'Registering sticker...';
+        if (progressFill) progressFill.style.width = '95%';
+        const stickerRes = await authFetch('/api/users/me/stickers', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                file_id: file_id,
+                sticker_name: name,
+                file_key: null,
+                mime_type: mimeType,
+            }),
+        });
+        if (!stickerRes.ok) {
+            const errData = await stickerRes.json().catch(() => ({}));
+            console.error('Sticker register failed:', stickerRes.status, errData);
+            throw new Error(errData.error || 'Failed to register sticker (HTTP ' + stickerRes.status + ')');
+        }
+
+        // Success: close modal and refresh sticker cache
+        document.getElementById('sticker-upload-modal').style.display = 'none';
+        resetStickerUpload();
+        await loadUserStickers(); // refresh cache for next time
+
+    } catch (e) {
+        if (errorDiv) { errorDiv.textContent = e.message || 'Upload failed'; errorDiv.style.display = 'block'; }
+        if (progressContainer) progressContainer.style.display = 'none';
+    }
+}
+
+// ===== DM Forward =====
+function showDmForwardModal() {
+    const modal = document.getElementById('dm-forward-modal');
+    if (!modal) return;
+    modal.style.display = 'flex';
+    loadDmForwardList();
+    // Setup cancel button (if not already set up)
+    const cancelBtn = document.getElementById('cancel-dm-forward');
+    if (cancelBtn && !cancelBtn._dmfSetup) {
+        cancelBtn._dmfSetup = true;
+        cancelBtn.addEventListener('click', () => {
+            modal.style.display = 'none';
+            pendingForward = null;
+        });
+    }
+    // Click outside to close
+    if (!modal._dmfSetup) {
+        modal._dmfSetup = true;
+        modal.addEventListener('click', (e) => {
+            if (e.target === modal) {
+                modal.style.display = 'none';
+                pendingForward = null;
+            }
+        });
+    }
+}
+
+async function loadDmForwardList() {
+    const list = document.getElementById('dm-forward-list');
+    if (!list) return;
+    list.innerHTML = '<div style="color:#888;padding:12px;">Loading friends...</div>';
+    try {
+        // Use already-loaded dmConversations data
+        if (!dmConversations || dmConversations.length === 0) {
+            await loadDmConversations();
+        }
+        if (!Array.isArray(dmConversations) || dmConversations.length === 0) {
+            list.innerHTML = '<div style="color:#666;padding:12px;font-size:13px;">No friends to forward to.</div>';
+            return;
+        }
+        let html = '';
+        for (const c of dmConversations) {
+            const initial = (c.other_username || '?').charAt(0).toUpperCase();
+            html += '<div class="dm-forward-item" data-user-id="' + c.other_user_id + '" data-username="' + escapeHtml(c.other_username) + '" style="display:flex;align-items:center;gap:10px;padding:10px 12px;cursor:pointer;border-radius:6px;border-bottom:1px solid var(--bg-border);transition:background .15s;">' +
+                '<div style="width:32px;height:32px;border-radius:50%;background:var(--accent);color:var(--bg-primary);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;flex-shrink:0;">' + initial + '</div>' +
+                '<span style="font-size:14px;color:var(--text-primary);">' + escapeHtml(c.other_username) + '</span>' +
+                '</div>';
+        }
+        list.innerHTML = html;
+        list.querySelectorAll('.dm-forward-item').forEach(item => {
+            item.addEventListener('mouseenter', () => item.style.background = 'rgba(79,195,247,0.08)');
+            item.addEventListener('mouseleave', () => item.style.background = '');
+            item.addEventListener('click', () => {
+                const userId = item.dataset.userId;
+                const username = item.dataset.username;
+                executeDmForward(userId, username);
+                document.getElementById('dm-forward-modal').style.display = 'none';
+                pendingForward = null;
+            });
+        });
+    } catch (e) {
+        list.innerHTML = '<div style="color:#666;padding:12px;">Failed to load friends.</div>';
+    }
+}
+
+async function executeDmForward(targetUserId, targetUsername) {
+    if (!pendingForward || !ws || ws.readyState !== WebSocket.OPEN) return;
+    const msgDiv = pendingForward.msgDiv;
+    const senderUsername = msgDiv.querySelector('.username')?.textContent || 'unknown';
+    const textEl = msgDiv.querySelector('.text');
+    const originalText = textEl ? textEl.textContent : '';
+
+    let previewText = originalText.substring(0, 80);
+    if (msgDiv.querySelector('.gif-message')) previewText = 'GIF';
+    if (msgDiv.querySelector('.sticker-message')) previewText = 'Sticker';
+    if (msgDiv.querySelector('.file-card')) previewText = 'File attachment';
+
+    try {
+        const dmPayload = {
+            type: 'dm_forward',
+            target_user_id: targetUserId,
+            target_username: targetUsername,
+            source_server_id: currentServerId,
+            source_channel_id: currentChannelId,
+            source_server_name: document.getElementById('server-name')?.textContent || 'Server',
+            source_channel_name: document.getElementById('channel-name')?.textContent || 'channel',
+            sender_username: senderUsername,
+            preview: previewText,
+        };
+        ws.send(JSON.stringify(dmPayload));
+    } catch (e) {
+        console.error('DM forward failed:', e);
+    }
+}
+
+// ===== Favorite GIF on .gif file cards =====

@@ -862,6 +862,6 @@ const E2ECrypto = (() => {
         trustCurrentKey: trustCurrentKey,
         fingerprintKey: fingerprintKey,
         encryptKeyForEscrow: encryptKeyForEscrow,
-        decryptKeyFromEscrow: decryptKeyFromEscrow
+        decryptKeyFromEscrow: decryptKeyFromEscrow,
     };
 })();
