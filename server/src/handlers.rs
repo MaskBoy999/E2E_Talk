@@ -1139,11 +1139,13 @@ pub async fn list_messages(
         .map(|m| {
             serde_json::json!({
                 "id": m.id,
+                "sender_id": m.sender_id,
                 "sender_username": m.sender_username,
                 "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
                 "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
                 "timestamp": m.timestamp,
-                "message_nonce": m.message_nonce
+                "message_nonce": m.message_nonce,
+                "edited_at": m.edited_at
             })
         })
         .collect();
@@ -2264,6 +2266,94 @@ pub async fn download_file(
         .into_response()
 }
 
+// ===== Server Stickers =====
+
+#[derive(Deserialize)]
+pub struct AddStickerRequest {
+    pub file_id: String,
+    pub sticker_name: String,
+}
+
+pub async fn list_server_stickers(
+    Path(server_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    if !state.db.is_member_of_server(&user_id, &server_id).unwrap_or(false) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Not a member"}))).into_response();
+    }
+    match state.db.list_server_stickers(&server_id) {
+        Ok(stickers) => {
+            let result: Vec<serde_json::Value> = stickers
+                .iter()
+                .map(|(id, file_id, name, mime, uploaded_by)| {
+                    serde_json::json!({
+                        "id": id,
+                        "file_id": file_id,
+                        "sticker_name": name,
+                        "mime_type": mime,
+                        "uploaded_by": uploaded_by,
+                    })
+                })
+                .collect();
+            (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn add_server_sticker(
+    Path(server_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<AddStickerRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    if !state.db.is_member_of_server(&user_id, &server_id).unwrap_or(false) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Not a member"}))).into_response();
+    }
+    // Verify file exists and is uploaded
+    match state.db.get_file_info(&body.file_id) {
+        Ok(f) => {
+            if !f.upload_complete {
+                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Upload not complete"}))).into_response();
+            }
+        }
+        Err(_) => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "File not found"}))).into_response(),
+    }
+    match state.db.add_server_sticker(&server_id, &body.file_id, &user_id, &body.sticker_name) {
+        Ok(id) => (StatusCode::OK, Json(serde_json::json!({"id": id}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn remove_server_sticker(
+    Path((server_id, sticker_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    // Only server owner or sticker uploader can remove
+    let is_owner = state.db.is_server_owner(&user_id, &server_id).unwrap_or(false);
+    if !is_owner {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Only server owner can remove stickers"}))).into_response();
+    }
+    match state.db.remove_server_sticker(&sticker_id, &server_id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
 // ===== Phase 4: Friends + Direct Messages =====
 
 // --- Current user / friend code ---
@@ -2662,6 +2752,7 @@ pub async fn list_dm_messages(
                         "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
                         "timestamp": m.timestamp,
                         "message_nonce": m.message_nonce,
+                        "edited_at": m.edited_at,
                     })
                 })
                 .collect();

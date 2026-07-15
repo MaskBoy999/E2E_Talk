@@ -94,6 +94,8 @@ struct OutgoingChatMessage {
     timestamp: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     message_nonce: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    edited_at: Option<String>,
 }
 
 pub async fn ws_handler(
@@ -289,6 +291,7 @@ async fn handle_ws_message(
                     nonce: nonce_b64.to_string(),
                     timestamp: message.timestamp,
                     message_nonce: message.message_nonce,
+                    edited_at: None,
                 }),
                 user_id: None,
                 username: None,
@@ -401,6 +404,7 @@ async fn handle_ws_message(
                     nonce: nonce_b64.to_string(),
                     timestamp: message.timestamp,
                     message_nonce: message.message_nonce,
+                    edited_at: None,
                 }),
                 user_id: None,
                 username: None,
@@ -411,6 +415,212 @@ async fn handle_ws_message(
 
             // Broadcast to both DM members.
             match state.db.get_dm_members(dm_channel_id) {
+                Ok(members) => {
+                    state.ws_manager.broadcast_to_users(&members, &json).await;
+                }
+                Err(e) => {
+                    tracing::error!("Failed to get DM members: {}", e);
+                }
+            }
+        }
+        "message_edit" => {
+            let message_id = match parsed.get("message_id").and_then(|c| c.as_str()) {
+                Some(c) => c,
+                None => return,
+            };
+            let encrypted_content_b64 = match parsed.get("encrypted_content").and_then(|c| c.as_str()) {
+                Some(c) => c,
+                None => return,
+            };
+            let nonce_b64 = match parsed.get("nonce").and_then(|c| c.as_str()) {
+                Some(c) => c,
+                None => return,
+            };
+            let message_nonce = parsed.get("message_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
+
+            let encrypted_content = match base64::engine::general_purpose::STANDARD.decode(encrypted_content_b64) {
+                Ok(b) => b,
+                Err(_) => return,
+            };
+            let nonce = match base64::engine::general_purpose::STANDARD.decode(nonce_b64) {
+                Ok(b) => b,
+                Err(_) => return,
+            };
+
+            let message = match state.db.edit_encrypted_message(message_id, user_id, &encrypted_content, &nonce, message_nonce.as_deref()) {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::error!("Failed to edit message: {}", e);
+                    return;
+                }
+            };
+
+            let server_id = match state.db.get_server_id_for_channel(&message.channel_id) {
+                Ok(id) => id,
+                Err(_) => return,
+            };
+
+            let outgoing = OutgoingMessage {
+                msg_type: "message_edited".to_string(),
+                channel_id: Some(message.channel_id.clone()),
+                dm_channel_id: None,
+                message: Some(OutgoingChatMessage {
+                    id: message.id,
+                    channel_id: message.channel_id,
+                    dm_channel_id: None,
+                    sender_id: message.sender_id,
+                    sender_username: message.sender_username,
+                    encrypted_content: encrypted_content_b64.to_string(),
+                    nonce: nonce_b64.to_string(),
+                    timestamp: message.timestamp,
+                    message_nonce: message.message_nonce,
+                    edited_at: message.edited_at,
+                }),
+                user_id: None,
+                username: None,
+                error: None,
+            };
+
+            let json = serde_json::to_string(&outgoing).unwrap();
+            match state.db.get_server_members(&server_id) {
+                Ok(members) => {
+                    state.ws_manager.broadcast_to_users(&members, &json).await;
+                }
+                Err(e) => {
+                    tracing::error!("Failed to get server members: {}", e);
+                }
+            }
+        }
+        "message_delete" => {
+            let message_id = match parsed.get("message_id").and_then(|c| c.as_str()) {
+                Some(c) => c,
+                None => return,
+            };
+
+            let channel_id = match state.db.get_message_channel_id(message_id) {
+                Ok(cid) => cid,
+                Err(_) => return,
+            };
+
+            match state.db.delete_message(message_id, user_id) {
+                Ok(()) => {}
+                Err(e) => {
+                    tracing::error!("Failed to delete message: {}", e);
+                    return;
+                }
+            };
+
+            let server_id = match state.db.get_server_id_for_channel(&channel_id) {
+                Ok(id) => id,
+                Err(_) => return,
+            };
+
+            let outgoing = serde_json::json!({
+                "type": "message_deleted",
+                "channel_id": channel_id,
+                "message_id": message_id,
+            });
+
+            let json = outgoing.to_string();
+            match state.db.get_server_members(&server_id) {
+                Ok(members) => {
+                    state.ws_manager.broadcast_to_users(&members, &json).await;
+                }
+                Err(e) => {
+                    tracing::error!("Failed to get server members: {}", e);
+                }
+            }
+        }
+        "dm_edit" => {
+            let message_id = match parsed.get("message_id").and_then(|c| c.as_str()) {
+                Some(c) => c,
+                None => return,
+            };
+            let encrypted_content_b64 = match parsed.get("encrypted_content").and_then(|c| c.as_str()) {
+                Some(c) => c,
+                None => return,
+            };
+            let nonce_b64 = match parsed.get("nonce").and_then(|c| c.as_str()) {
+                Some(c) => c,
+                None => return,
+            };
+            let message_nonce = parsed.get("message_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
+
+            let encrypted_content = match base64::engine::general_purpose::STANDARD.decode(encrypted_content_b64) {
+                Ok(b) => b,
+                Err(_) => return,
+            };
+            let nonce = match base64::engine::general_purpose::STANDARD.decode(nonce_b64) {
+                Ok(b) => b,
+                Err(_) => return,
+            };
+
+            let message = match state.db.edit_dm_message(message_id, user_id, &encrypted_content, &nonce, message_nonce.as_deref()) {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::error!("Failed to edit DM message: {}", e);
+                    return;
+                }
+            };
+
+            let outgoing = OutgoingMessage {
+                msg_type: "dm_edited".to_string(),
+                channel_id: None,
+                dm_channel_id: Some(message.dm_channel_id.clone()),
+                message: Some(OutgoingChatMessage {
+                    id: message.id,
+                    channel_id: String::new(),
+                    dm_channel_id: Some(message.dm_channel_id.clone()),
+                    sender_id: message.sender_id,
+                    sender_username: message.sender_username,
+                    encrypted_content: encrypted_content_b64.to_string(),
+                    nonce: nonce_b64.to_string(),
+                    timestamp: message.timestamp,
+                    message_nonce: message.message_nonce,
+                    edited_at: message.edited_at,
+                }),
+                user_id: None,
+                username: None,
+                error: None,
+            };
+
+            let json = serde_json::to_string(&outgoing).unwrap();
+            match state.db.get_dm_members(&message.dm_channel_id) {
+                Ok(members) => {
+                    state.ws_manager.broadcast_to_users(&members, &json).await;
+                }
+                Err(e) => {
+                    tracing::error!("Failed to get DM members: {}", e);
+                }
+            }
+        }
+        "dm_delete" => {
+            let message_id = match parsed.get("message_id").and_then(|c| c.as_str()) {
+                Some(c) => c,
+                None => return,
+            };
+
+            let dm_channel_id = match state.db.get_dm_message_channel_id(message_id) {
+                Ok(cid) => cid,
+                Err(_) => return,
+            };
+
+            match state.db.delete_dm_message(message_id, user_id) {
+                Ok(()) => {}
+                Err(e) => {
+                    tracing::error!("Failed to delete DM message: {}", e);
+                    return;
+                }
+            };
+
+            let outgoing = serde_json::json!({
+                "type": "dm_deleted",
+                "dm_channel_id": dm_channel_id,
+                "message_id": message_id,
+            });
+
+            let json = outgoing.to_string();
+            match state.db.get_dm_members(&dm_channel_id) {
                 Ok(members) => {
                     state.ws_manager.broadcast_to_users(&members, &json).await;
                 }

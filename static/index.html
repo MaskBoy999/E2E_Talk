@@ -61,8 +61,10 @@
                     <div id="member-list" class="member-list"></div>
                 </div>
             </div>
+            <div class="reply-bar" id="reply-bar" style="display:none"></div>
             <div class="chat-input">
                 <button class="attach-btn" id="attach-btn" title="Attach file">+</button>
+                <button class="sticker-btn" id="sticker-btn" title="Emojis, Stickers, GIFs">&#x1F600;</button>
                 <input type="file" id="file-input" style="display:none" multiple>
                 <input type="text" id="message-input" placeholder="Type a message..." disabled>
                 <button id="send-btn" disabled>Send</button>
@@ -322,9 +324,30 @@
         </div>
     </div>
 
+    <!-- Forward Modal -->
+    <div class="modal-overlay" id="forward-modal" style="display:none">
+        <div class="modal-content" style="max-width:400px;max-height:60vh;overflow-y:auto">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+                <h3 style="margin:0;color:#d4d4d4">Forward message to...</h3>
+                <button id="cancel-forward" style="background:none;border:none;color:#aaa;font-size:20px;cursor:pointer">&times;</button>
+            </div>
+            <div id="forward-channel-list"></div>
+        </div>
+    </div>
+
+    <!-- Sticker/Emoji/GIF Panel -->
+    <div class="sticker-panel" id="sticker-panel" style="display:none">
+        <div class="sticker-panel-tabs">
+            <button class="sticker-tab active" data-tab="emojis">&#x1F600;</button>
+            <button class="sticker-tab" data-tab="stickers">&#x1F3A8;</button>
+            <button class="sticker-tab" data-tab="gifs">GIF</button>
+        </div>
+        <div class="sticker-panel-content" id="sticker-panel-content"></div>
+    </div>
+
     <script src="crypto.js?v=6"></script>
     <script src="qrcode.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
-    <script src="chat.js?v=15"></script>
+    <script src="chat.js?v=16"></script>
 </body>
 </html>

@@ -203,6 +203,9 @@ async fn main() {
         .route("/api/files/{file_id}/chunk/{index}", post(handlers::upload_file_chunk))
         .route("/api/files/{file_id}/complete", post(handlers::complete_file_upload))
         .route("/api/files/{file_id}/download", get(handlers::download_file))
+        // Phase 10: Server Stickers
+        .route("/api/servers/{server_id}/stickers", get(handlers::list_server_stickers).post(handlers::add_server_sticker))
+        .route("/api/servers/{server_id}/stickers/{sticker_id}", delete(handlers::remove_server_sticker))
         .route("/ws", get(ws::ws_handler))
         .fallback(get(serve_static))
         .with_state(state);

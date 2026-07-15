@@ -46,6 +46,7 @@ pub struct Message {
     pub nonce: Vec<u8>,
     pub timestamp: String,
     pub message_nonce: Option<String>,
+    pub edited_at: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -77,6 +78,7 @@ pub struct DmMessage {
     pub nonce: Vec<u8>,
     pub timestamp: String,
     pub message_nonce: Option<String>,
+    pub edited_at: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -305,6 +307,9 @@ impl Database {
 
         // Migration 009: key escrow
         let _ = conn.execute_batch(include_str!("../migrations/009_key_escrow.sql"));
+
+        // Migration 010: edit tracking + server stickers
+        let _ = conn.execute_batch(include_str!("../migrations/010_message_features.sql"));
 
         Ok(())
     }
@@ -801,9 +806,9 @@ impl Database {
         // first so the client can render top-to-bottom chronologically.
         let mut stmt = conn
             .prepare(
-                "SELECT m.id, m.channel_id, m.sender_id, u.username, m.encrypted_content, m.nonce, m.timestamp, m.message_nonce
+                "SELECT m.id, m.channel_id, m.sender_id, u.username, m.encrypted_content, m.nonce, m.timestamp, m.message_nonce, m.edited_at
                  FROM (
-                     SELECT id, channel_id, sender_id, encrypted_content, nonce, timestamp, message_nonce
+                     SELECT id, channel_id, sender_id, encrypted_content, nonce, timestamp, message_nonce, edited_at
                      FROM messages
                      WHERE channel_id = ?1
                      ORDER BY timestamp DESC
@@ -824,6 +829,7 @@ impl Database {
                     nonce: row.get(5)?,
                     timestamp: row.get(6)?,
                     message_nonce: row.get(7)?,
+                    edited_at: row.get(8)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -866,6 +872,7 @@ impl Database {
             nonce: nonce.to_vec(),
             timestamp: chrono::Utc::now().to_rfc3339(),
             message_nonce: message_nonce.map(|s| s.to_string()),
+            edited_at: None,
         })
     }
 
@@ -1583,9 +1590,9 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         // Newest `limit` rows, re-sorted oldest -> newest (same pattern as channel messages).
         let mut stmt = conn.prepare(
-            "SELECT m.id, m.dm_channel_id, m.sender_id, u.username, m.encrypted_content, m.nonce, m.timestamp, m.message_nonce
+            "SELECT m.id, m.dm_channel_id, m.sender_id, u.username, m.encrypted_content, m.nonce, m.timestamp, m.message_nonce, m.edited_at
              FROM (
-                 SELECT id, dm_channel_id, sender_id, encrypted_content, nonce, timestamp, message_nonce
+                 SELECT id, dm_channel_id, sender_id, encrypted_content, nonce, timestamp, message_nonce, edited_at
                  FROM dm_messages
                  WHERE dm_channel_id = ?1
                  ORDER BY timestamp DESC
@@ -1604,6 +1611,7 @@ impl Database {
                 nonce: row.get(5)?,
                 timestamp: row.get(6)?,
                 message_nonce: row.get(7)?,
+                edited_at: row.get(8)?,
             })
         }).map_err(|e| e.to_string())?;
         let mut out = Vec::new();
@@ -1645,13 +1653,235 @@ impl Database {
             nonce: nonce.to_vec(),
             timestamp: chrono::Utc::now().to_rfc3339(),
             message_nonce: message_nonce.map(|s| s.to_string()),
+            edited_at: None,
         })
+    }
+
+    pub fn edit_encrypted_message(
+        &self,
+        message_id: &str,
+        sender_id: &str,
+        new_encrypted_content: &[u8],
+        new_nonce: &[u8],
+        new_message_nonce: Option<&str>,
+    ) -> Result<Message, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        // Verify sender owns this message
+        let existing_sender: String = conn
+            .query_row(
+                "SELECT sender_id FROM messages WHERE id = ?1",
+                params![message_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| "Message not found".to_string())?;
+        if existing_sender != sender_id {
+            return Err("Not authorized to edit this message".to_string());
+        }
+        conn.execute(
+            "UPDATE messages SET encrypted_content = ?1, nonce = ?2, message_nonce = ?3, edited_at = CURRENT_TIMESTAMP WHERE id = ?4",
+            params![new_encrypted_content, new_nonce, new_message_nonce, message_id],
+        )
+        .map_err(|e| e.to_string())?;
+        // Return updated message
+        let username: String = conn
+            .query_row(
+                "SELECT u.username FROM messages m INNER JOIN users u ON m.sender_id = u.id WHERE m.id = ?1",
+                params![message_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        let msg = conn
+            .query_row(
+                "SELECT m.id, m.channel_id, m.sender_id, m.encrypted_content, m.nonce, m.timestamp, m.message_nonce, m.edited_at
+                 FROM messages m WHERE m.id = ?1",
+                params![message_id],
+                |row| {
+                    Ok(Message {
+                        id: row.get(0)?,
+                        channel_id: row.get(1)?,
+                        sender_id: row.get(2)?,
+                        sender_username: username.clone(),
+                        encrypted_content: row.get(3)?,
+                        nonce: row.get(4)?,
+                        timestamp: row.get(5)?,
+                        message_nonce: row.get(6)?,
+                        edited_at: row.get(7)?,
+                    })
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(msg)
+    }
+
+    pub fn delete_message(&self, message_id: &str, sender_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let existing_sender: String = conn
+            .query_row(
+                "SELECT sender_id FROM messages WHERE id = ?1",
+                params![message_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| "Message not found".to_string())?;
+        if existing_sender != sender_id {
+            return Err("Not authorized to delete this message".to_string());
+        }
+        conn.execute("DELETE FROM messages WHERE id = ?1", params![message_id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn edit_dm_message(
+        &self,
+        message_id: &str,
+        sender_id: &str,
+        new_encrypted_content: &[u8],
+        new_nonce: &[u8],
+        new_message_nonce: Option<&str>,
+    ) -> Result<DmMessage, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let existing_sender: String = conn
+            .query_row(
+                "SELECT sender_id FROM dm_messages WHERE id = ?1",
+                params![message_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| "Message not found".to_string())?;
+        if existing_sender != sender_id {
+            return Err("Not authorized to edit this message".to_string());
+        }
+        conn.execute(
+            "UPDATE dm_messages SET encrypted_content = ?1, nonce = ?2, message_nonce = ?3, edited_at = CURRENT_TIMESTAMP WHERE id = ?4",
+            params![new_encrypted_content, new_nonce, new_message_nonce, message_id],
+        )
+        .map_err(|e| e.to_string())?;
+        let username: String = conn
+            .query_row(
+                "SELECT u.username FROM dm_messages m INNER JOIN users u ON m.sender_id = u.id WHERE m.id = ?1",
+                params![message_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        let msg = conn
+            .query_row(
+                "SELECT m.id, m.dm_channel_id, m.sender_id, m.encrypted_content, m.nonce, m.timestamp, m.message_nonce, m.edited_at
+                 FROM dm_messages m WHERE m.id = ?1",
+                params![message_id],
+                |row| {
+                    Ok(DmMessage {
+                        id: row.get(0)?,
+                        dm_channel_id: row.get(1)?,
+                        sender_id: row.get(2)?,
+                        sender_username: username.clone(),
+                        encrypted_content: row.get(3)?,
+                        nonce: row.get(4)?,
+                        timestamp: row.get(5)?,
+                        message_nonce: row.get(6)?,
+                        edited_at: row.get(7)?,
+                    })
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(msg)
+    }
+
+    pub fn delete_dm_message(&self, message_id: &str, sender_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let existing_sender: String = conn
+            .query_row(
+                "SELECT sender_id FROM dm_messages WHERE id = ?1",
+                params![message_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| "Message not found".to_string())?;
+        if existing_sender != sender_id {
+            return Err("Not authorized to delete this message".to_string());
+        }
+        conn.execute("DELETE FROM dm_messages WHERE id = ?1", params![message_id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn get_message_channel_id(&self, message_id: &str) -> Result<String, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT channel_id FROM messages WHERE id = ?1",
+            params![message_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| "Message not found".to_string())
+    }
+
+    pub fn get_dm_message_channel_id(&self, message_id: &str) -> Result<String, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT dm_channel_id FROM dm_messages WHERE id = ?1",
+            params![message_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| "Message not found".to_string())
+    }
+
+    // --- Server Stickers ---
+
+    pub fn add_server_sticker(
+        &self,
+        server_id: &str,
+        file_id: &str,
+        uploaded_by: &str,
+        sticker_name: &str,
+    ) -> Result<String, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let id = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO server_stickers (id, server_id, file_id, uploaded_by, sticker_name) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, server_id, file_id, uploaded_by, sticker_name],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(id)
+    }
+
+    pub fn remove_server_sticker(&self, sticker_id: &str, server_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM server_stickers WHERE id = ?1 AND server_id = ?2",
+            params![sticker_id, server_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn list_server_stickers(&self, server_id: &str) -> Result<Vec<(String, String, String, String, String)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT s.id, s.file_id, s.sticker_name, f.mime_type, COALESCE(u.username, '?')
+                 FROM server_stickers s
+                 INNER JOIN files f ON s.file_id = f.id
+                 LEFT JOIN users u ON s.uploaded_by = u.id
+                 WHERE s.server_id = ?1
+                 ORDER BY s.created_at DESC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![server_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
     }
 
     pub fn get_dm_last_message(&self, dm_channel_id: &str) -> Result<Option<DmMessage>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let result = conn.query_row(
-            "SELECT m.id, m.dm_channel_id, m.sender_id, u.username, m.encrypted_content, m.nonce, m.timestamp, m.message_nonce
+            "SELECT m.id, m.dm_channel_id, m.sender_id, u.username, m.encrypted_content, m.nonce, m.timestamp, m.message_nonce, m.edited_at
              FROM dm_messages m INNER JOIN users u ON m.sender_id = u.id
              WHERE m.dm_channel_id = ?1
              ORDER BY m.timestamp DESC LIMIT 1",
@@ -1666,6 +1896,7 @@ impl Database {
                     nonce: row.get(5)?,
                     timestamp: row.get(6)?,
                     message_nonce: row.get(7)?,
+                    edited_at: row.get(8)?,
                 })
             },
         );
@@ -1870,7 +2101,7 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT m.id, m.channel_id, m.sender_id, COALESCE(u.username, '?'), m.encrypted_content, m.nonce, m.timestamp, m.message_nonce
+                "SELECT m.id, m.channel_id, m.sender_id, COALESCE(u.username, '?'), m.encrypted_content, m.nonce, m.timestamp, m.message_nonce, m.edited_at
                  FROM messages m LEFT JOIN users u ON m.sender_id = u.id ORDER BY m.timestamp DESC LIMIT 500",
             )
             .map_err(|e| e.to_string())?;
@@ -1885,6 +2116,7 @@ impl Database {
                     nonce: row.get(5)?,
                     timestamp: row.get(6)?,
                     message_nonce: row.get(7)?,
+                    edited_at: row.get(8)?,
                 })
             })
             .map_err(|e| e.to_string())?

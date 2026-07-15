@@ -217,6 +217,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     connectWebSocket(t);
+    setupMessageActions();
+    setupForwardModal();
     loadServers();
     loadFriendRequestBadge();
 
@@ -565,6 +567,26 @@ function connectWebSocket(t) {
                         if (viewMode === 'dms') renderDmSidebar();
                     }
                     if (viewMode === 'dms') loadDmConversations();
+                }
+                break;
+            case 'message_edited':
+                if (data.channel_id === currentChannelId && data.message) {
+                    handleEditedMessage(data.message, 'channel');
+                }
+                break;
+            case 'message_deleted':
+                if (data.channel_id === currentChannelId && data.message_id) {
+                    handleDeletedMessage(data.message_id);
+                }
+                break;
+            case 'dm_edited':
+                if (data.dm_channel_id === currentDmChannelId && data.message) {
+                    handleEditedMessage(data.message, 'dm');
+                }
+                break;
+            case 'dm_deleted':
+                if (data.dm_channel_id === currentDmChannelId && data.message_id) {
+                    handleDeletedMessage(data.message_id);
                 }
                 break;
             case 'server_key_rotated':
@@ -963,6 +985,11 @@ async function appendMessage(msg) {
     const list = document.getElementById('message-list');
     const div = document.createElement('div');
     div.className = 'message';
+    if (msg.id) div.setAttribute('data-message-id', msg.id);
+    if (msg.sender_id) div.setAttribute('data-sender-id', msg.sender_id);
+
+    const myUserId = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')).id : '';
+    const isOwn = msg.sender_id === myUserId;
 
     const initial = (msg.sender_username || '?').charAt(0).toUpperCase();
     let time = '';
@@ -975,10 +1002,13 @@ async function appendMessage(msg) {
     let textContent = '';
     let fileData = null;
     let filesData = null;
+    let replyTo = null;
+    let forwardData = null;
+    let gifData = null;
+    let stickerData = null;
     if (msg.encrypted_content && msg.nonce && currentChannelId && currentServerId) {
         try {
             textContent = E2ECrypto.decrypt(msg.encrypted_content, msg.nonce, currentChannelId, currentServerId, msg.message_nonce);
-            // Check if it's a file message
             try {
                 const parsed = JSON.parse(textContent);
                 if (parsed && parsed.type === 'files' && Array.isArray(parsed.files)) {
@@ -987,6 +1017,18 @@ async function appendMessage(msg) {
                 } else if (parsed && parsed.type === 'file') {
                     fileData = parsed;
                     textContent = '';
+                } else if (parsed && parsed.type === 'gif') {
+                    gifData = parsed;
+                    textContent = '';
+                } else if (parsed && parsed.type === 'sticker') {
+                    stickerData = parsed;
+                    textContent = '';
+                } else if (parsed && parsed.type === 'forward') {
+                    forwardData = parsed;
+                    textContent = '';
+                }
+                if (parsed && parsed.reply_to) {
+                    replyTo = parsed.reply_to;
                 }
             } catch (_) {}
         } catch (e) {
@@ -996,23 +1038,55 @@ async function appendMessage(msg) {
     }
 
     let contentHtml = '';
-    if (filesData) {
-        contentHtml = buildMultiFileCardHtml(filesData);
-    } else if (fileData) {
-        contentHtml = buildFileCardHtml(fileData);
-    } else {
-        contentHtml = '<div class="text">' + escapeHtml(textContent) + '</div>';
+    if (replyTo) {
+        contentHtml += '<div class="reply-quote" data-reply-to="' + escapeHtml(replyTo.message_id || '') + '">' +
+            '<span class="reply-author">@' + escapeHtml(replyTo.author || 'unknown') + '</span> ' +
+            '<span class="reply-preview">' + escapeHtml(replyTo.preview || '') + '</span>' +
+            '</div>';
     }
+    if (forwardData) {
+        contentHtml += '<div class="forward-label">Forwarded from <strong>#' + escapeHtml(forwardData.source_channel_name || 'unknown') + '</strong> in <strong>' + escapeHtml(forwardData.source_server_name || 'unknown') + '</strong></div>';
+        if (forwardData.preview_content && forwardData.preview_nonce && currentServerId) {
+            try {
+                const previewText = E2ECrypto.decrypt(forwardData.preview_content, forwardData.preview_nonce, forwardData.source_channel_id, forwardData.source_server_id, forwardData.preview_message_nonce);
+                contentHtml += '<div class="forward-preview"><div class="text">' + escapeHtml(previewText) + '</div></div>';
+            } catch (_) {
+                contentHtml += '<div class="forward-preview forward-unavailable">Preview unavailable</div>';
+            }
+        } else {
+            contentHtml += '<div class="forward-preview forward-unavailable">Preview unavailable</div>';
+        }
+    } else if (gifData) {
+        contentHtml += '<div class="gif-message"><img src="' + escapeHtml(gifData.url) + '" alt="' + escapeHtml(gifData.alt || 'GIF') + '" loading="lazy" style="max-width:300px;max-height:300px;border-radius:8px"></div>';
+    } else if (stickerData) {
+        contentHtml += '<div class="sticker-message"></div>';
+    } else if (filesData) {
+        contentHtml += buildMultiFileCardHtml(filesData);
+    } else if (fileData) {
+        contentHtml += buildFileCardHtml(fileData);
+    } else if (textContent) {
+        contentHtml += '<div class="text">' + escapeHtml(textContent) + '</div>';
+    }
+
+    const editedLabel = msg.edited_at ? '<span class="edited-label">(edited)</span>' : '';
+
+    const actionsHtml = '<div class="message-actions">' +
+        '<button class="msg-action-btn" data-action="reply" title="Reply">&#x21A9;</button>' +
+        '<button class="msg-action-btn" data-action="forward" title="Forward">&#x21AA;</button>' +
+        (isOwn ? '<button class="msg-action-btn" data-action="edit" title="Edit">&#x270E;</button>' : '') +
+        (isOwn ? '<button class="msg-action-btn" data-action="delete" title="Delete">&#x2715;</button>' : '') +
+        '</div>';
 
     div.innerHTML =
         '<div class="avatar">' + initial + '</div>' +
         '<div class="content">' +
             '<div class="header">' +
                 '<span class="username">' + escapeHtml(msg.sender_username || 'unknown') + '</span>' +
-                '<span class="time">' + time + '</span>' +
+                '<span class="time">' + time + editedLabel + '</span>' +
             '</div>' +
             contentHtml +
-        '</div>';
+        '</div>' +
+        actionsHtml;
 
     // Load media preview if applicable
     if (filesData) {
@@ -1023,10 +1097,308 @@ async function appendMessage(msg) {
         });
     } else if (fileData && fileData.file_key) {
         loadMediaPreview(div.querySelector('.file-preview'), fileData);
+    } else if (stickerData && stickerData.file_id && stickerData.file_key) {
+        const stickerContainer = div.querySelector('.sticker-message');
+        if (stickerContainer) {
+            loadStickerPreview(stickerContainer, stickerData);
+        }
+    }
+
+    // Reply quote click → scroll to original
+    const replyQuote = div.querySelector('.reply-quote');
+    if (replyQuote) {
+        replyQuote.addEventListener('click', () => {
+            const targetId = replyQuote.getAttribute('data-reply-to');
+            if (targetId) {
+                const target = list.querySelector('[data-message-id="' + targetId + '"]');
+                if (target) {
+                    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    target.classList.add('flash-highlight');
+                    setTimeout(() => target.classList.remove('flash-highlight'), 1500);
+                }
+            }
+        });
     }
 
     list.appendChild(div);
     list.scrollTop = list.scrollHeight;
+}
+
+async function loadStickerPreview(container, stickerData) {
+    try {
+        const response = await authFetch('/api/files/' + stickerData.file_id + '/download');
+        if (!response.ok) throw new Error('Download failed');
+        const encryptedChunks = await response.arrayBuffer();
+        const fileKeyBytes = E2ECrypto.base64ToArrayBuffer(stickerData.file_key);
+        const decrypted = E2ECrypto.decryptFileChunk(fileKeyBytes, new Uint8Array(encryptedChunks));
+        const blob = new Blob([decrypted], { type: stickerData.mime_type || 'image/png' });
+        const url = URL.createObjectURL(blob);
+        const img = document.createElement('img');
+        img.src = url;
+        img.alt = stickerData.sticker_name || 'Sticker';
+        img.style.maxWidth = '192px';
+        img.style.maxHeight = '192px';
+        img.style.borderRadius = '8px';
+        container.appendChild(img);
+    } catch (e) {
+        container.textContent = '[sticker unavailable]';
+    }
+}
+
+// --- Message Actions ---
+
+let pendingReply = null;
+let pendingForward = null;
+
+function setupMessageActions() {
+    const list = document.getElementById('message-list');
+    list.addEventListener('click', (e) => {
+        const btn = e.target.closest('.msg-action-btn');
+        if (!btn) return;
+        const msgDiv = btn.closest('.message');
+        if (!msgDiv) return;
+        const messageId = msgDiv.getAttribute('data-message-id');
+        const senderId = msgDiv.getAttribute('data-sender-id');
+        const action = btn.getAttribute('data-action');
+
+        if (action === 'reply') {
+            handleReply(messageId, msgDiv);
+        } else if (action === 'forward') {
+            handleForward(messageId, msgDiv);
+        } else if (action === 'edit') {
+            handleEdit(messageId, msgDiv);
+        } else if (action === 'delete') {
+            handleDelete(messageId, msgDiv);
+        }
+    });
+}
+
+function handleReply(messageId, msgDiv) {
+    const username = msgDiv.querySelector('.username')?.textContent || 'unknown';
+    const textEl = msgDiv.querySelector('.text');
+    const preview = textEl ? textEl.textContent.substring(0, 80) : '';
+    pendingReply = { message_id: messageId, author: username, preview: preview };
+    const replyBar = document.getElementById('reply-bar');
+    if (replyBar) {
+        replyBar.innerHTML = 'Replying to <strong>@' + escapeHtml(username) + '</strong>: ' + escapeHtml(preview) + ' <button id="cancel-reply" style="margin-left:8px;background:none;border:none;color:#aaa;cursor:pointer">&#x2715;</button>';
+        replyBar.style.display = 'flex';
+        document.getElementById('cancel-reply')?.addEventListener('click', () => {
+            pendingReply = null;
+            replyBar.style.display = 'none';
+        });
+    }
+    document.getElementById('message-input')?.focus();
+}
+
+function handleForward(messageId, msgDiv) {
+    pendingForward = { messageId, msgDiv };
+    showForwardModal();
+}
+
+function handleEdit(messageId, msgDiv) {
+    const textEl = msgDiv.querySelector('.text');
+    if (!textEl) return;
+    const originalText = textEl.textContent;
+    const contentEl = msgDiv.querySelector('.content');
+    if (!contentEl) return;
+
+    const headerEl = contentEl.querySelector('.header');
+    const textarea = document.createElement('textarea');
+    textarea.className = 'edit-textarea';
+    textarea.value = originalText;
+    textarea.style.cssText = 'width:100%;min-height:60px;background:#2d2d2d;color:#d4d4d4;border:1px solid #569cd6;border-radius:4px;padding:8px;font-family:inherit;resize:vertical';
+
+    const btnRow = document.createElement('div');
+    btnRow.className = 'edit-buttons';
+    btnRow.style.cssText = 'display:flex;gap:8px;margin-top:6px';
+    btnRow.innerHTML = '<button class="edit-save-btn" style="background:#569cd6;color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer">Save</button>' +
+        '<button class="edit-cancel-btn" style="background:#666;color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer">Cancel</button>';
+
+    // Remove old text and actions
+    const oldText = contentEl.querySelector('.text');
+    const oldReply = contentEl.querySelector('.reply-quote');
+    const oldForward = contentEl.querySelector('.forward-label');
+    const actionsEl = msgDiv.querySelector('.message-actions');
+    if (oldText) oldText.style.display = 'none';
+    if (oldReply) oldReply.style.display = 'none';
+    if (oldForward) oldForward.style.display = 'none';
+    if (actionsEl) actionsEl.style.display = 'none';
+
+    contentEl.appendChild(textarea);
+    contentEl.appendChild(btnRow);
+    textarea.focus();
+
+    btnRow.querySelector('.edit-save-btn').addEventListener('click', async () => {
+        const newText = textarea.value.trim();
+        if (!newText || !currentChannelId || !currentServerId) return;
+        try {
+            const encrypted = E2ECrypto.encrypt(newText, currentChannelId, currentServerId);
+            ws.send(JSON.stringify({
+                type: 'message_edit',
+                message_id: messageId,
+                encrypted_content: encrypted.ciphertext,
+                nonce: encrypted.nonce,
+                message_nonce: encrypted.messageNonce || null,
+            }));
+        } catch (e) {
+            console.error('Edit encrypt failed:', e);
+        }
+        textarea.remove();
+        btnRow.remove();
+        if (actionsEl) actionsEl.style.display = '';
+    });
+
+    btnRow.querySelector('.edit-cancel-btn').addEventListener('click', () => {
+        textarea.remove();
+        btnRow.remove();
+        if (oldText) oldText.style.display = '';
+        if (oldReply) oldReply.style.display = '';
+        if (oldForward) oldForward.style.display = '';
+        if (actionsEl) actionsEl.style.display = '';
+    });
+}
+
+function handleDelete(messageId, msgDiv) {
+    if (!confirm('Delete this message?')) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (viewMode === 'dms') {
+        ws.send(JSON.stringify({ type: 'dm_delete', message_id: messageId }));
+    } else {
+        ws.send(JSON.stringify({ type: 'message_delete', message_id: messageId }));
+    }
+}
+
+function handleEditedMessage(msg, mode) {
+    const list = document.getElementById('message-list');
+    const existing = list.querySelector('[data-message-id="' + msg.id + '"]');
+    if (!existing) return;
+
+    const textEl = existing.querySelector('.text');
+    if (textEl && msg.encrypted_content && msg.nonce) {
+        try {
+            let decrypted;
+            if (mode === 'dm' && currentDmChannelId && currentDmOtherUser) {
+                const kp = E2ECrypto.getIdentityKeyPair();
+                let otherPubKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(currentDmOtherUser.identity_public_key || ''));
+                decrypted = E2ECrypto.decryptDm(msg.encrypted_content, msg.nonce, currentDmChannelId, kp.privateKey, otherPubKey, msg.message_nonce);
+            } else if (currentChannelId && currentServerId) {
+                decrypted = E2ECrypto.decrypt(msg.encrypted_content, msg.nonce, currentChannelId, currentServerId, msg.message_nonce);
+            }
+            if (decrypted) textEl.textContent = decrypted;
+        } catch (_) {}
+    }
+
+    const timeEl = existing.querySelector('.time');
+    if (timeEl && !timeEl.querySelector('.edited-label')) {
+        timeEl.insertAdjacentHTML('beforeend', ' <span class="edited-label">(edited)</span>');
+    }
+}
+
+function handleDeletedMessage(messageId) {
+    const list = document.getElementById('message-list');
+    const existing = list.querySelector('[data-message-id="' + messageId + '"]');
+    if (existing) existing.remove();
+}
+
+function showForwardModal() {
+    const modal = document.getElementById('forward-modal');
+    if (modal) {
+        modal.style.display = 'flex';
+        loadForwardChannels();
+    }
+}
+
+async function loadForwardChannels() {
+    const list = document.getElementById('forward-channel-list');
+    if (!list) return;
+    list.innerHTML = '<div style="color:#888">Loading...</div>';
+    try {
+        const res = await authFetch('/api/servers');
+        const servers = await res.json();
+        let html = '';
+        for (const server of servers) {
+            const chRes = await authFetch('/api/servers/' + server.id + '/channels');
+            const channels = await chRes.json();
+            html += '<div class="forward-server"><div class="forward-server-name">' + escapeHtml(server.name) + '</div>';
+            for (const ch of channels) {
+                html += '<div class="forward-channel-item" data-server-id="' + server.id + '" data-server-name="' + escapeHtml(server.name) + '" data-channel-id="' + ch.id + '" data-channel-name="' + escapeHtml(ch.name) + '">' + escapeHtml(ch.name) + '</div>';
+            }
+            html += '</div>';
+        }
+        list.innerHTML = html || '<div style="color:#888">No servers found</div>';
+    } catch (e) {
+        list.innerHTML = '<div style="color:#888">Failed to load</div>';
+    }
+}
+
+function setupForwardModal() {
+    const modal = document.getElementById('forward-modal');
+    if (!modal) return;
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal || e.target.id === 'cancel-forward') {
+            modal.style.display = 'none';
+            pendingForward = null;
+        }
+    });
+    const list = document.getElementById('forward-channel-list');
+    if (list) {
+        list.addEventListener('click', (e) => {
+            const item = e.target.closest('.forward-channel-item');
+            if (!item) return;
+            const targetServerId = item.getAttribute('data-server-id');
+            const targetServerName = item.getAttribute('data-server-name');
+            const targetChannelId = item.getAttribute('data-channel-id');
+            const targetChannelName = item.getAttribute('data-channel-name');
+            executeForward(targetServerId, targetServerName, targetChannelId, targetChannelName);
+            modal.style.display = 'none';
+            pendingForward = null;
+        });
+    }
+}
+
+async function executeForward(targetServerId, targetServerName, targetChannelId, targetChannelName) {
+    if (!pendingForward || !ws || ws.readyState !== WebSocket.OPEN) return;
+    const msgDiv = pendingForward.msgDiv;
+    const messageId = pendingForward.messageId;
+
+    const senderUsername = msgDiv.querySelector('.username')?.textContent || 'unknown';
+    const textEl = msgDiv.querySelector('.text');
+    const originalText = textEl ? textEl.textContent : '';
+
+    let previewText = originalText.substring(0, 80);
+    if (msgDiv.querySelector('.gif-message')) previewText = 'GIF';
+    if (msgDiv.querySelector('.sticker-message')) previewText = 'Sticker';
+    if (msgDiv.querySelector('.file-card')) previewText = 'File attachment';
+
+    try {
+        const previewEncrypted = E2ECrypto.encrypt(previewText, targetChannelId, targetServerId);
+        const sourceChannelId = currentChannelId;
+
+        const forwardPayload = {
+            type: 'forward',
+            source_server_id: currentServerId,
+            source_channel_id: sourceChannelId,
+            source_message_id: messageId,
+            source_server_name: document.getElementById('server-name')?.textContent || 'Server',
+            source_channel_name: document.getElementById('channel-name')?.textContent || 'channel',
+            sender_username: senderUsername,
+            timestamp: msgDiv.querySelector('.time')?.textContent || '',
+            preview_content: previewEncrypted.ciphertext,
+            preview_nonce: previewEncrypted.nonce,
+            preview_message_nonce: previewEncrypted.messageNonce || null,
+        };
+
+        const encrypted = E2ECrypto.encrypt(JSON.stringify(forwardPayload), targetChannelId, targetServerId);
+        ws.send(JSON.stringify({
+            type: 'message_send',
+            channel_id: targetChannelId,
+            encrypted_content: encrypted.ciphertext,
+            nonce: encrypted.nonce,
+            message_nonce: encrypted.messageNonce || null,
+        }));
+    } catch (e) {
+        console.error('Forward failed:', e);
+    }
 }
 
 // --- Send ---
@@ -1044,9 +1416,14 @@ async function sendMessage() {
         return;
     }
 
+    let plaintext = content;
+    if (pendingReply) {
+        plaintext = JSON.stringify({ type: 'text', text: content, reply_to: pendingReply });
+    }
+
     var encrypted;
     try {
-        encrypted = E2ECrypto.encrypt(content, currentChannelId, currentServerId);
+        encrypted = E2ECrypto.encrypt(plaintext, currentChannelId, currentServerId);
     } catch (e) {
         console.error('Encryption failed:', e);
         return;
@@ -1061,6 +1438,9 @@ async function sendMessage() {
     }));
 
     input.value = '';
+    pendingReply = null;
+    const replyBar = document.getElementById('reply-bar');
+    if (replyBar) replyBar.style.display = 'none';
 }
 
 // --- DM View ---
@@ -1341,9 +1721,14 @@ async function sendDmMessage() {
         return;
     }
 
+    let plaintext = content;
+    if (pendingReply) {
+        plaintext = JSON.stringify({ type: 'text', text: content, reply_to: pendingReply });
+    }
+
     var encrypted;
     try {
-        encrypted = E2ECrypto.encryptDm(content, currentDmChannelId, kp.privateKey, otherPublicKey);
+        encrypted = E2ECrypto.encryptDm(plaintext, currentDmChannelId, kp.privateKey, otherPublicKey);
     } catch (e) {
         console.error('DM encryption failed:', e);
         return;
@@ -1358,6 +1743,9 @@ async function sendDmMessage() {
     }));
 
     input.value = '';
+    pendingReply = null;
+    const replyBar = document.getElementById('reply-bar');
+    if (replyBar) replyBar.style.display = 'none';
 }
 
 async function unfriend(otherUserId, otherUsername) {
