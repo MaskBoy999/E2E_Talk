@@ -3029,7 +3029,13 @@ async function loadMediaPreview(container, fileData) {
                     const gallery = [];
                     allPreviews.forEach(p => {
                         const mime = p.dataset.mime || '';
-                        if (isTextFile(p.dataset.filename, mime)) {
+                        if (mime.startsWith('image/') || mime.startsWith('video/') || mime.startsWith('audio/')) {
+                            const mediaEl = p.querySelector('img, video, audio');
+                            if (mediaEl && mediaEl.src) {
+                                const t = mime.startsWith('image/') ? 'image' : mime.startsWith('video/') ? 'video' : 'audio';
+                                gallery.push({ url: mediaEl.src, type: t, fileData: { file_id: p.dataset.fileId, file_key: p.dataset.key, mime_type: mime, filename: p.dataset.filename, file_size: parseInt(p.dataset.size || '0') } });
+                            }
+                        } else if (isTextFile(p.dataset.filename, mime)) {
                             if (p.dataset.fullText) {
                                 gallery.push({ url: null, type: 'text', fileData: { file_id: p.dataset.fileId, file_key: p.dataset.key, mime_type: mime, filename: p.dataset.filename, file_size: parseInt(p.dataset.size || '0') }, fullText: p.dataset.fullText });
                             }
