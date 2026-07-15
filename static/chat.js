@@ -1,4 +1,4 @@
-    console.log('chat.js v21 loaded - auto-load preview toggle + instant GIF send');
+    console.log('chat.js v22 loaded - message grouping, GIF crop fix, emoji upload, reply highlight');
 
 function generateCode(len) {
     const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -23,6 +23,14 @@ let pendingFriendRequests = 0;
 let isUploading = false;
 let isSendingSticker = false;
 let selectedFiles = [];
+
+// Message grouping: track last message for 2-minute coalescing
+let lastMessageInfo = { senderId: null, channelId: null, time: 0 };
+let lastDmMessageInfo = { senderId: null, dmChannelId: null, time: 0 };
+
+// Emoji cache: name -> { file_id, file_key, mime_type }
+let emojiCache = null;
+let emojiBlobCache = {}; // name -> blob URL
 let currentFileIndex = 0;
 
 // Local file key cache (file_id → base64 file_key) for sticker previews
@@ -247,6 +255,8 @@ document.addEventListener('DOMContentLoaded', () => {
     setupStickerPanel();
     loadServers();
     loadFriendRequestBadge();
+    loadEmojiCache(); // Load custom emojis
+
 
     document.getElementById('send-btn').addEventListener('click', sendMessage);
     document.getElementById('message-input').addEventListener('keypress', (e) => {
@@ -1038,6 +1048,14 @@ async function appendMessage(msg) {
     const myUserId = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')).id : '';
     const isOwn = msg.sender_id === myUserId;
 
+    // Message grouping: same sender within 2 minutes in same channel
+    const msgTime = new Date(msg.timestamp).getTime();
+    const isGrouped = msg.sender_id === lastMessageInfo.senderId &&
+        currentChannelId === lastMessageInfo.channelId &&
+        msgTime - lastMessageInfo.time < 120000;
+    lastMessageInfo = { senderId: msg.sender_id, channelId: currentChannelId, time: msgTime };
+    if (isGrouped) div.classList.add('grouped');
+
     const initial = (msg.sender_username || '?').charAt(0).toUpperCase();
     let time = '';
     try {
@@ -1117,10 +1135,8 @@ async function appendMessage(msg) {
     } else if (fileData) {
         contentHtml += buildFileCardHtml(fileData);
     } else if (textContent) {
-        contentHtml += '<div class="text">' + escapeHtml(textContent) + '</div>';
+        contentHtml += '<div class="text"><span class="time-hover">' + time + '</span>' + renderEmojiText(textContent) + '</div>';
     }
-
-    const editedLabel = msg.edited_at ? '<span class="edited-label">(edited)</span>' : '';
 
     const actionsHtml = '<div class="message-actions">' +
         '<button class="msg-action-btn" data-action="reply" title="Reply">&#x21A9;</button>' +
@@ -1135,7 +1151,7 @@ async function appendMessage(msg) {
         '<div class="content">' +
             '<div class="header">' +
                 '<span class="username">' + escapeHtml(msg.sender_username || 'unknown') + '</span>' +
-                '<span class="time">' + time + editedLabel + '</span>' +
+                '<span class="edited-label">' + (msg.edited_at ? '(edited)' : '') + '</span>' +
             '</div>' +
             contentHtml +
         '</div>' +
@@ -1184,6 +1200,11 @@ async function appendMessage(msg) {
                 });
             }
         }
+    }
+
+    // Reply highlight: if this message replies to the current user, add yellow border
+    if (replyTo && replyTo.author && user && replyTo.author === user.username) {
+        div.classList.add('reply-highlighted');
     }
 
     // Reply quote click → scroll to original
@@ -1393,9 +1414,9 @@ function handleEditedMessage(msg, mode) {
         } catch (_) {}
     }
 
-    const timeEl = existing.querySelector('.time');
-    if (timeEl && !timeEl.querySelector('.edited-label')) {
-        timeEl.insertAdjacentHTML('beforeend', ' <span class="edited-label">(edited)</span>');
+    const headerEl = existing.querySelector('.header');
+    if (headerEl && !headerEl.querySelector('.edited-label')) {
+        headerEl.insertAdjacentHTML('beforeend', ' <span class="edited-label">(edited)</span>');
     }
 }
 
@@ -1740,6 +1761,16 @@ function appendDmMessage(msg, kp, otherPublicKey) {
     const list = document.getElementById('message-list');
     const div = document.createElement('div');
     div.className = 'message';
+    if (msg.id) div.setAttribute('data-message-id', msg.id);
+    if (msg.sender_id) div.setAttribute('data-sender-id', msg.sender_id);
+
+    // DM message grouping: same sender within 2 minutes in same DM channel
+    const msgTime = new Date(msg.timestamp).getTime();
+    const isGrouped = msg.sender_id === lastDmMessageInfo.senderId &&
+        currentDmChannelId === lastDmMessageInfo.dmChannelId &&
+        msgTime - lastDmMessageInfo.time < 120000;
+    lastDmMessageInfo = { senderId: msg.sender_id, dmChannelId: currentDmChannelId, time: msgTime };
+    if (isGrouped) div.classList.add('grouped');
 
     const initial = (msg.sender_username || '?').charAt(0).toUpperCase();
     let time = '';
@@ -1754,6 +1785,7 @@ function appendDmMessage(msg, kp, otherPublicKey) {
     let filesData = null;
     let stickerData = null;
     let gifData = null;
+    let replyTo = null;
     if (msg.encrypted_content && msg.nonce && kp && otherPublicKey) {
         try {
             const dmId = msg.dm_channel_id || currentDmChannelId;
@@ -1773,6 +1805,11 @@ function appendDmMessage(msg, kp, otherPublicKey) {
                 } else if (parsed && parsed.type === 'gif') {
                     gifData = parsed;
                     textContent = '';
+                } else if (parsed && parsed.type === 'text') {
+                    textContent = parsed.text || '';
+                }
+                if (parsed && parsed.reply_to) {
+                    replyTo = parsed.reply_to;
                 }
             } catch (_) {}
         } catch (e) {
@@ -1781,19 +1818,25 @@ function appendDmMessage(msg, kp, otherPublicKey) {
     }
 
     let contentHtml = '';
+    if (replyTo) {
+        contentHtml += '<div class="reply-quote" data-reply-to="' + escapeHtml(replyTo.message_id || '') + '">' +
+            '<span class="reply-author">@' + escapeHtml(replyTo.author || 'unknown') + '</span> ' +
+            '<span class="reply-preview">' + escapeHtml(replyTo.preview || '') + '</span>' +
+            '</div>';
+    }
     if (gifData) {
-        contentHtml = '<div class="gif-message">' +
+        contentHtml += '<div class="gif-message">' +
             '<img src="' + escapeHtml(gifData.url) + '" alt="' + escapeHtml(gifData.alt || 'GIF') + '" loading="lazy" style="max-width:300px;max-height:300px;border-radius:8px">' +
             '<button class="media-download-btn" title="Download" data-url="' + escapeHtml(gifData.url) + '" data-filename="sticker.gif">⬇</button>' +
             '</div>';
     } else if (stickerData) {
-        contentHtml = '<div class="sticker-message"></div>';
+        contentHtml += '<div class="sticker-message"></div>';
     } else if (filesData) {
-        contentHtml = buildMultiFileCardHtml(filesData);
+        contentHtml += buildMultiFileCardHtml(filesData);
     } else if (fileData) {
-        contentHtml = buildFileCardHtml(fileData);
-    } else {
-        contentHtml = '<div class="text">' + escapeHtml(textContent) + '</div>';
+        contentHtml += buildFileCardHtml(fileData);
+    } else if (textContent) {
+        contentHtml += '<div class="text"><span class="time-hover">' + time + '</span>' + renderEmojiText(textContent) + '</div>';
     }
 
     div.innerHTML =
@@ -1801,10 +1844,30 @@ function appendDmMessage(msg, kp, otherPublicKey) {
         '<div class="content">' +
             '<div class="header">' +
                 '<span class="username">' + escapeHtml(msg.sender_username || 'unknown') + '</span>' +
-                '<span class="time">' + time + '</span>' +
             '</div>' +
             contentHtml +
         '</div>';
+
+    // Reply highlight: if this message replies to the current user, add yellow border
+    if (replyTo && replyTo.author && user && replyTo.author === user.username) {
+        div.classList.add('reply-highlighted');
+    }
+
+    // Reply quote click -> scroll to original
+    const replyQuote = div.querySelector('.reply-quote');
+    if (replyQuote) {
+        replyQuote.addEventListener('click', () => {
+            const targetId = replyQuote.getAttribute('data-reply-to');
+            if (targetId) {
+                const target = list.querySelector('[data-message-id="' + targetId + '"]');
+                if (target) {
+                    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    target.classList.add('flash-highlight');
+                    setTimeout(() => target.classList.remove('flash-highlight'), 1500);
+                }
+            }
+        });
+    }
 
     // Load media preview if applicable (respect auto-load setting)
     const autoLoad = localStorage.getItem('autoLoadPreviews') !== 'false';
@@ -4581,6 +4644,104 @@ function renderPanelTab(tab) {
 }
 
 function renderEmojiGrid(container) {
+    container.innerHTML = '';
+
+    // Show custom uploaded emojis if available
+    const emojiNames = emojiCache ? Object.keys(emojiCache) : [];
+    if (emojiNames.length > 0) {
+        const uploadsSection = document.createElement('div');
+        uploadsSection.style.cssText = 'margin-bottom:8px;padding:8px;';
+        const header = document.createElement('div');
+        header.style.cssText = 'font-size:12px;color:#888;font-weight:600;padding:4px 0 8px;text-transform:uppercase;';
+        header.textContent = 'Custom Emojis';
+        uploadsSection.appendChild(header);
+
+        const grid = document.createElement('div');
+        grid.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;justify-content:flex-start;';
+
+        emojiNames.forEach(name => {
+            const cacheEntry = emojiCache[name];
+            const item = document.createElement('div');
+            item.className = 'emoji-item emoji-item-custom';
+            item.dataset.emojiName = name;
+            item.style.cssText = 'width:36px;height:36px;display:flex;align-items:center;justify-content:center;cursor:pointer;border-radius:6px;transition:background 0.15s;font-size:14px;overflow:hidden;position:relative;';
+            item.title = ':' + name + ':';
+
+            // Delete button (shown on hover)
+            const delBtn = document.createElement('button');
+            delBtn.className = 'emoji-del-btn';
+            delBtn.textContent = '×';
+            delBtn.title = 'Delete emoji :' + name + ':';
+            delBtn.style.cssText = 'position:absolute;top:0;right:0;width:16px;height:16px;background:#c62828;color:#fff;border:none;border-radius:0 6px 0 6px;font-size:11px;line-height:1;cursor:pointer;display:none;z-index:2;padding:0;';
+            delBtn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                if (!confirm('Delete emoji :' + name + ':?')) return;
+                if (cacheEntry && cacheEntry.id) {
+                    try {
+                        await authFetch('/api/users/me/stickers/' + cacheEntry.id, { method: 'DELETE' });
+                    } catch (_) {}
+                }
+                // Clean up blob URL
+                if (emojiBlobCache[name]) {
+                    URL.revokeObjectURL(emojiBlobCache[name]);
+                    delete emojiBlobCache[name];
+                }
+                delete emojiCache[name];
+                renderEmojiGrid(container);
+            });
+            item.appendChild(delBtn);
+
+            // Show delete button on hover
+            item.addEventListener('mouseenter', () => { delBtn.style.display = 'block'; });
+            item.addEventListener('mouseleave', () => { delBtn.style.display = 'none'; });
+
+            // Try to load the emoji preview (use cached blob if available)
+            if (cacheEntry) {
+                if (emojiBlobCache[name]) {
+                    const img = document.createElement('img');
+                    img.src = emojiBlobCache[name];
+                    img.alt = name;
+                    img.style.cssText = 'width:28px;height:28px;object-fit:contain;';
+                    item.appendChild(img);
+                } else {
+                    const identity = E2ECrypto.getIdentityKeyPair();
+                    if (identity && cacheEntry.file_id) {
+                        const fileKey = identity.privateKey;
+                        downloadAndDecryptStickerData(cacheEntry.file_id, fileKey, cacheEntry.mime_type || 'image/png')
+                            .then(blob => {
+                                const url = URL.createObjectURL(blob);
+                                emojiBlobCache[name] = url;
+                                const img = document.createElement('img');
+                                img.src = url;
+                                img.alt = name;
+                                img.style.cssText = 'width:28px;height:28px;object-fit:contain;';
+                                const existingImg = item.querySelector('img');
+                                if (!existingImg) {
+                                    item.appendChild(img);
+                                }
+                            })
+                            .catch(() => {
+                                if (!item.querySelector('img')) item.textContent = '?';
+                            });
+                    } else {
+                        if (!item.querySelector('img')) item.textContent = '?';
+                    }
+                }
+            } else {
+                if (!item.querySelector('img')) item.textContent = '?';
+            }
+
+            item.addEventListener('click', () => {
+                insertEmojiIntoInput(':' + name + ':');
+            });
+            grid.appendChild(item);
+        });
+
+        uploadsSection.appendChild(grid);
+        container.appendChild(uploadsSection);
+    }
+
+    // Built-in Unicode emojis
     const grid = document.createElement('div');
     grid.className = 'emoji-grid';
 
@@ -4626,6 +4787,97 @@ async function loadUserStickers() {
         userStickersCache = [];
     }
     return userStickersCache;
+}
+
+async function loadEmojiCache() {
+    try {
+        const res = await authFetch('/api/users/me/stickers');
+        if (res.ok) {
+            const stickers = await res.json();
+            // Filter for emoji entries (mime_type === 'image/emoji')
+            const emojis = stickers.filter(s => s.mime_type === 'image/emoji');
+            const cache = {};
+            for (const s of emojis) {
+                cache[s.sticker_name] = {
+                    id: s.id,
+                    file_id: s.file_id,
+                    file_key: s.file_key || null,
+                    mime_type: s.mime_type,
+                };
+            }
+            emojiCache = cache;
+        } else {
+            emojiCache = {};
+        }
+    } catch (e) {
+        emojiCache = {};
+    }
+    return emojiCache;
+}
+
+function renderEmojiText(text) {
+    if (!emojiCache || Object.keys(emojiCache).length === 0) return escapeHtml(text);
+
+    // Split by :name: patterns (word characters only)
+    const parts = text.split(/:([a-zA-Z0-9_]+):/);
+    if (parts.length <= 1) return escapeHtml(text);
+
+    // Determine if text is emoji-only (no non-emoji text content)
+    let hasTextContent = false;
+    for (let i = 0; i < parts.length; i++) {
+        if (i % 2 === 0 && parts[i].trim()) {
+            hasTextContent = true;
+            break;
+        }
+    }
+    const emojiOnly = !hasTextContent && parts.length > 1;
+    const emojiClass = emojiOnly ? 'emoji-inline emoji-alone' : 'emoji-inline';
+
+    let html = '';
+    for (let i = 0; i < parts.length; i++) {
+        if (i % 2 === 1) {
+            const name = parts[i];
+            if (emojiCache[name]) {
+                if (emojiBlobCache[name]) {
+                    html += '<img class="' + emojiClass + '" src="' + emojiBlobCache[name] + '" alt=":' + name + ':" title=":' + name + ':">';
+                } else {
+                    const spanClass = emojiOnly ? 'emoji-loading emoji-alone' : 'emoji-loading';
+                    html += '<span class="' + spanClass + '" data-emoji-name="' + escapeHtml(name) + '">:' + escapeHtml(name) + ':</span>';
+                    loadEmojiBlob(name);
+                }
+            } else {
+                html += ':' + escapeHtml(name) + ':';
+            }
+        } else {
+            html += escapeHtml(parts[i]);
+        }
+    }
+    return html;
+}
+
+async function loadEmojiBlob(name) {
+    const entry = emojiCache[name];
+    if (!entry || emojiBlobCache[name]) return;
+    try {
+        const identity = E2ECrypto.getIdentityKeyPair();
+        if (!identity || !entry.file_id) return;
+        const fileKey = identity.privateKey;
+        const mime = entry.mime_type || 'image/png';
+        const blob = await downloadAndDecryptStickerData(entry.file_id, fileKey, mime);
+        const url = URL.createObjectURL(blob);
+        emojiBlobCache[name] = url;
+        // Replace all loading placeholders in the DOM
+        document.querySelectorAll('.emoji-loading[data-emoji-name="' + name + '"]').forEach(el => {
+            const img = document.createElement('img');
+            img.className = 'emoji-inline';
+            img.src = url;
+            img.alt = ':' + name + ':';
+            img.title = ':' + name + ':';
+            el.replaceWith(img);
+        });
+    } catch (e) {
+        console.warn('Failed to load emoji blob:', name, e);
+    }
 }
 
 function renderStickerGrid(container) {
@@ -4912,8 +5164,10 @@ function renderUploadStickerPanel(container) {
         '<div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">' +
         '<button id="sticker-upload-trigger" style="background:var(--accent);color:var(--bg-primary);border:none;padding:10px 18px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;">🖼️ Upload Sticker</button>' +
         '<button id="gif-upload-trigger" style="background:#2a6a3a;color:#fff;border:none;padding:10px 18px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;">🎬 Upload GIF</button>' +
+        '<button id="emoji-upload-trigger" style="background:#6a3a8a;color:#fff;border:none;padding:10px 18px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;">😊 Upload Emoji</button>' +
         '</div>' +
-        '<p style="color:#666;font-size:11px;margin-top:10px;">Stickers: cropped/resized to 420×420 • GIFs preserved if ≤420, cropped if larger</p>';
+        '<p style="color:#666;font-size:11px;margin-top:10px;">Emoji: small inline images • use :emoji_name: in messages to insert</p>' +
+        '<p style="color:#666;font-size:11px;margin-top:4px;">Stickers: cropped/resized to 420×420 • GIFs always uploaded as-is</p>';
     container.appendChild(wrap);
 
     wrap.querySelector('#sticker-upload-trigger').addEventListener('click', () => {
@@ -4945,6 +5199,22 @@ function renderUploadStickerPanel(container) {
         if (title) title.textContent = 'Upload GIF';
         const confirmBtn = document.getElementById('confirm-sticker-upload');
         if (confirmBtn) confirmBtn.textContent = 'Upload GIF';
+        document.getElementById('sticker-upload-input').click();
+    });
+
+    wrap.querySelector('#emoji-upload-trigger').addEventListener('click', () => {
+        const modal = document.getElementById('sticker-upload-modal');
+        if (!modal) return;
+        modal.style.display = 'flex';
+        document.getElementById('sticker-upload-step-choose').style.display = '';
+        document.getElementById('sticker-upload-step-crop').style.display = 'none';
+        resetStickerUpload();
+        stickerUploadMode = 'emoji'; // set AFTER reset so it doesn't get overwritten
+        document.getElementById('sticker-upload-input').accept = 'image/*';
+        const title = document.querySelector('#sticker-upload-modal h3');
+        if (title) title.textContent = 'Upload Emoji';
+        const confirmBtn = document.getElementById('confirm-sticker-upload');
+        if (confirmBtn) confirmBtn.textContent = 'Save Emoji';
         document.getElementById('sticker-upload-input').click();
     });
 }
@@ -5013,13 +5283,19 @@ function loadImageForCrop(file) {
             const cropImg = document.getElementById('sticker-crop-image');
             cropImg.src = e.target.result;
             cropImg.onload = () => {
-                if (stickerUploadMode === 'gif') {
-                    // GIFs are always uploaded as-is to preserve animation (canvas can't encode GIF)
-                    document.getElementById('sticker-crop-overlay').style.display = 'none';
-                    const sizeNote = (img.naturalWidth > 420 || img.naturalHeight > 420)
-                        ? ' (larger than 420×420)' : '';
+                if (stickerUploadMode === 'emoji') {
+                    // Emoji: show crop UI, will be cropped to a square then resized to inline size
+                    document.getElementById('sticker-crop-overlay').style.display = '';
                     document.getElementById('sticker-crop-info').textContent =
-                        'GIF: ' + img.naturalWidth + '×' + img.naturalHeight + sizeNote + ' — uploaded as-is with animation preserved.';
+                        'Emoji: ' + img.naturalWidth + '×' + img.naturalHeight + ' — crop a square region. It will be resized to fit inline.';
+                    const confirmBtn = document.getElementById('confirm-sticker-upload');
+                    if (confirmBtn) confirmBtn.textContent = 'Save Emoji';
+                    initCropBox(cropImg);
+                } else if (stickerUploadMode === 'gif') {
+                    // GIFs are always uploaded as-is to preserve animation, no cropping
+                    document.getElementById('sticker-crop-overlay').style.display = 'none';
+                    document.getElementById('sticker-crop-info').textContent =
+                        'GIF: ' + img.naturalWidth + '×' + img.naturalHeight + ' — uploaded as-is with animation preserved.';
                 } else {
                     const needsCrop = img.naturalWidth > 420 || img.naturalHeight > 420;
                     if (needsCrop) {
@@ -5225,8 +5501,24 @@ async function processAndUploadSticker() {
         let cropY = stickerCropState.cropY;
         let cropSize = stickerCropState.cropSize;
 
-        if (stickerUploadMode === 'gif' && img.naturalWidth <= 420 && img.naturalHeight <= 420) {
-            // Small GIF: upload original file as-is to preserve animation
+        if (stickerUploadMode === 'emoji') {
+            // Emoji: crop the selected square region, then resize to fit within MAX_EMOJI_SIZE
+            const MAX_EMOJI_SIZE = 32;
+            let ew = cropSize, eh = cropSize;
+            if (ew > MAX_EMOJI_SIZE || eh > MAX_EMOJI_SIZE) {
+                const ratio = Math.min(MAX_EMOJI_SIZE / ew, MAX_EMOJI_SIZE / eh);
+                ew = Math.round(ew * ratio);
+                eh = Math.round(eh * ratio);
+            }
+            canvas.width = ew;
+            canvas.height = eh;
+            ctx.drawImage(img, cropX, cropY, cropSize, cropSize, 0, 0, ew, eh);
+            const outputMime = 'image/png';
+            blob = await new Promise(resolve => canvas.toBlob(resolve, outputMime));
+            if (!blob) throw new Error('Failed to process emoji');
+            mimeType = 'image/emoji';
+        } else if (stickerUploadMode === 'gif') {
+            // GIFs are always uploaded as-is to preserve animation, no cropping
             blob = originalFile;
             mimeType = 'image/gif';
         } else {
@@ -5313,10 +5605,14 @@ async function processAndUploadSticker() {
             throw new Error(errData.error || 'Failed to register sticker (HTTP ' + stickerRes.status + ')');
         }
 
-        // Success: close modal and refresh sticker cache
+        // Success: close modal and refresh sticker/emoji cache
+        const wasEmoji = stickerUploadMode === 'emoji';
         document.getElementById('sticker-upload-modal').style.display = 'none';
         resetStickerUpload();
         await loadUserStickers(); // refresh cache for next time
+        if (wasEmoji) {
+            await loadEmojiCache();
+        }
 
     } catch (e) {
         if (errorDiv) { errorDiv.textContent = e.message || 'Upload failed'; errorDiv.style.display = 'block'; }
