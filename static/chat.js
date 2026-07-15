@@ -2096,45 +2096,301 @@ function isCodeFile(filename, mime) {
     if (mime === 'text/html' || mime === 'text/css' || mime === 'text/markdown') return true;
     if (!filename) return false;
     const ext = filename.split('.').pop().toLowerCase();
-    return ['js','ts','jsx','tsx','py','cpp','c','h','hpp','java','rs','go','sh','sql','html','css','json','xml','rb','php','swift','kt','cs','lua','pl','r','m','mm','yaml','yml','toml','ini','cfg','conf','md','txt'].includes(ext);
+    return ['js','ts','jsx','tsx','py','cpp','c','h','hpp','java','rs','go','sh','sql','html','css','json','xml','rb','php','swift','kt','cs','lua','pl','r','m','mm','yaml','yml','toml','ini','cfg','conf','md'].includes(ext);
+}
+
+function isTextFile(filename, mime) {
+    if (mime && mime.startsWith('text/')) return true;
+    if (mime === 'application/json' || mime === 'application/javascript' || mime === 'application/xml') return true;
+    if (!filename) return false;
+    const ext = filename.split('.').pop().toLowerCase();
+    const textExts = ['txt','js','ts','jsx','tsx','py','cpp','c','h','hpp','java','rs','go','sh','sql','html','css','json','xml','rb','php','swift','kt','cs','lua','pl','r','m','mm','yaml','yml','toml','ini','cfg','conf','md','mdx','csv','log','env','svg','dockerfile','makefile'];
+    return textExts.includes(ext);
+}
+
+function isMarkdownFile(filename, mime) {
+    if (mime === 'text/markdown' || mime === 'text/x-markdown') return true;
+    if (!filename) return false;
+    const ext = filename.split('.').pop().toLowerCase();
+    return ext === 'md' || ext === 'mdx' || ext === 'markdown';
+}
+
+function getCorrectMimeType(filename, browserMime) {
+    if (!filename) return browserMime || 'application/octet-stream';
+    const ext = filename.split('.').pop().toLowerCase();
+    const mimeMap = {
+        'js': 'application/javascript', 'mjs': 'application/javascript', 'jsx': 'application/javascript',
+        'ts': 'application/typescript', 'tsx': 'application/typescript',
+        'py': 'text/x-python', 'pyw': 'text/x-python',
+        'c': 'text/x-c', 'h': 'text/x-c',
+        'cpp': 'text/x-c++', 'cxx': 'text/x-c++', 'cc': 'text/x-c++', 'hpp': 'text/x-c++',
+        'java': 'text/x-java',
+        'rs': 'text/x-rust',
+        'go': 'text/x-go',
+        'sh': 'text/x-shellscript', 'bash': 'text/x-shellscript', 'zsh': 'text/x-shellscript',
+        'sql': 'text/x-sql',
+        'html': 'text/html', 'htm': 'text/html',
+        'css': 'text/css',
+        'json': 'application/json',
+        'xml': 'application/xml',
+        'rb': 'text/x-ruby',
+        'php': 'text/x-php',
+        'swift': 'text/x-swift',
+        'kt': 'text/x-kotlin',
+        'cs': 'text/x-csharp',
+        'lua': 'text/x-lua',
+        'pl': 'text/x-perl',
+        'r': 'text/x-r',
+        'm': 'text/x-objectivec', 'mm': 'text/x-objectivec',
+        'yaml': 'text/yaml', 'yml': 'text/yaml',
+        'toml': 'text/x-toml',
+        'ini': 'text/plain', 'cfg': 'text/plain', 'conf': 'text/plain',
+        'txt': 'text/plain',
+        'md': 'text/markdown', 'mdx': 'text/markdown', 'markdown': 'text/markdown',
+        'svg': 'image/svg+xml',
+        'csv': 'text/csv',
+        'log': 'text/plain',
+        'env': 'text/plain',
+        'dockerfile': 'text/x-dockerfile',
+        'makefile': 'text/x-makefile',
+    };
+    return mimeMap[ext] || browserMime || 'application/octet-stream';
+}
+
+function getLangFromExt(ext) {
+    const map = {
+        'js': 'javascript', 'mjs': 'javascript', 'jsx': 'javascript', 'ts': 'typescript', 'tsx': 'typescript',
+        'py': 'python', 'pyw': 'python',
+        'c': 'c', 'h': 'c',
+        'cpp': 'cpp', 'cxx': 'cpp', 'cc': 'cpp', 'hpp': 'cpp',
+        'java': 'java',
+        'rs': 'rust',
+        'go': 'go',
+        'sh': 'shell', 'bash': 'shell', 'zsh': 'shell',
+        'sql': 'sql',
+        'html': 'html', 'htm': 'html',
+        'css': 'css',
+        'json': 'json',
+        'xml': 'xml',
+        'rb': 'ruby',
+        'php': 'php',
+        'swift': 'swift',
+        'kt': 'kotlin',
+        'cs': 'csharp',
+        'lua': 'lua',
+        'pl': 'perl',
+        'r': 'r',
+        'm': 'objectivec', 'mm': 'objectivec',
+        'yaml': 'yaml', 'yml': 'yaml',
+        'toml': 'toml',
+        'md': 'markdown', 'mdx': 'markdown',
+        'dockerfile': 'dockerfile',
+    };
+    return map[ext] || 'generic';
+}
+
+function getLangColors(lang) {
+    const themes = {
+        javascript: { keyword: '#c586c0', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', type: '#4ec9b0', operator: '#d4d4d4', tag: '#569cd6', attr: '#9cdcfe', punctuation: '#d4d4d4' },
+        typescript: { keyword: '#c586c0', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', type: '#4ec9b0', operator: '#d4d4d4', tag: '#569cd6', attr: '#9cdcfe', punctuation: '#d4d4d4' },
+        python:     { keyword: '#c586c0', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', type: '#4ec9b0', decorator: '#dcdcaa', builtin: '#4ec9b0', punctuation: '#d4d4d4' },
+        c:          { keyword: '#569cd6', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', type: '#4ec9b0', preprocessor: '#c586c0', punctuation: '#d4d4d4' },
+        cpp:        { keyword: '#569cd6', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', type: '#4ec9b0', preprocessor: '#c586c0', punctuation: '#d4d4d4' },
+        java:       { keyword: '#c586c0', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', type: '#4ec9b0', annotation: '#dcdcaa', punctuation: '#d4d4d4' },
+        rust:       { keyword: '#c586c0', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', type: '#4ec9b0', macro: '#dcdcaa', punctuation: '#d4d4d4' },
+        go:         { keyword: '#c586c0', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', type: '#4ec9b0', punctuation: '#d4d4d4' },
+        shell:      { keyword: '#c586c0', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', variable: '#9cdcfe', punctuation: '#d4d4d4' },
+        sql:        { keyword: '#569cd6', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', type: '#4ec9b0', punctuation: '#d4d4d4' },
+        html:       { tag: '#569cd6', attr: '#9cdcfe', string: '#ce9178', comment: '#6a9955', punctuation: '#808080' },
+        css:        { keyword: '#569cd6', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', property: '#9cdcfe', function: '#dcdcaa', punctuation: '#d4d4d4' },
+        json:       { key: '#9cdcfe', string: '#ce9178', number: '#b5cea8', boolean: '#569cd6', null: '#569cd6', punctuation: '#d4d4d4' },
+        xml:        { tag: '#569cd6', attr: '#9cdcfe', string: '#ce9178', comment: '#6a9955', punctuation: '#808080' },
+        ruby:       { keyword: '#c586c0', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', symbol: '#569cd6', punctuation: '#d4d4d4' },
+        php:        { keyword: '#c586c0', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', variable: '#9cdcfe', punctuation: '#d4d4d4' },
+        swift:      { keyword: '#c586c0', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', type: '#4ec9b0', punctuation: '#d4d4d4' },
+        kotlin:     { keyword: '#c586c0', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', type: '#4ec9b0', annotation: '#dcdcaa', punctuation: '#d4d4d4' },
+        csharp:     { keyword: '#c586c0', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', type: '#4ec9b0', punctuation: '#d4d4d4' },
+        lua:        { keyword: '#c586c0', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', punctuation: '#d4d4d4' },
+        perl:       { keyword: '#c586c0', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', variable: '#9cdcfe', punctuation: '#d4d4d4' },
+        r:          { keyword: '#c586c0', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', punctuation: '#d4d4d4' },
+        objectivec: { keyword: '#569cd6', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', type: '#4ec9b0', punctuation: '#d4d4d4' },
+        yaml:       { key: '#9cdcfe', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', boolean: '#569cd6', punctuation: '#d4d4d4' },
+        toml:       { key: '#9cdcfe', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', boolean: '#569cd6', punctuation: '#d4d4d4' },
+        dockerfile: { keyword: '#c586c0', string: '#ce9178', comment: '#6a9955', punctuation: '#d4d4d4' },
+        generic:    { keyword: '#569cd6', string: '#ce9178', number: '#b5cea8', comment: '#6a9955', function: '#dcdcaa', punctuation: '#d4d4d4' },
+    };
+    return themes[lang] || themes.generic;
 }
 
 function highlightSyntax(text, filename, mime) {
     const ext = filename ? filename.split('.').pop().toLowerCase() : '';
+    const lang = getLangFromExt(ext);
+    const c = getLangColors(lang);
+
     const escaped = text
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;');
 
-    const lines = escaped.split('\n');
+    if (lang === 'html' || lang === 'xml') {
+        return highlightHtml(escaped, c);
+    }
+    if (lang === 'json') {
+        return highlightJson(escaped, c);
+    }
+    if (lang === 'css') {
+        return highlightCss(escaped, c);
+    }
+    if (lang === 'yaml' || lang === 'toml') {
+        return highlightKeyValue(escaped, c);
+    }
+
+    return highlightGeneric(escaped, lang, c);
+}
+
+function highlightHtml(text, c) {
+    let result = text;
+    result = result.replace(/(&lt;!--[\s\S]*?--&gt;)/g, '<span style="color:' + c.comment + ';font-style:italic">$1</span>');
+    result = result.replace(/(&lt;\/?)([\w:-]+)/g, '$1<span style="color:' + c.tag + '">$2</span>');
+    result = result.replace(/\s([\w:-]+)(=)/g, ' <span style="color:' + c.attr + '">$1</span>$2');
+    result = result.replace(/(=)(&quot;[^&]*?&quot;|&#39;[^&]*?&#39;|"[^"]*?"|'[^']*?')/g, '$1<span style="color:' + c.string + '">$2</span>');
+    return result;
+}
+
+function highlightJson(text, c) {
+    let result = text;
+    result = result.replace(/(&quot;[^&]*?&quot;|"[^"]*?")\s*:/g, '<span style="color:' + c.key + '">$1</span>:');
+    result = result.replace(/:\s*(&quot;[^&]*?&quot;|"[^"]*?")/g, ': <span style="color:' + c.string + '">$1</span>');
+    result = result.replace(/:\s*(\d+\.?\d*)/g, ': <span style="color:' + c.number + '">$1</span>');
+    result = result.replace(/:\s*(true|false)/g, ': <span style="color:' + c.boolean + '">$1</span>');
+    result = result.replace(/:\s*(null)/g, ': <span style="color:' + c.null + '">$1</span>');
+    return result;
+}
+
+function highlightCss(text, c) {
+    let result = text;
+    result = result.replace(/(\/\*[\s\S]*?\*\/)/g, '<span style="color:' + c.comment + ';font-style:italic">$1</span>');
+    result = result.replace(/([\.\#][\w-]+)(\s*\{)/g, '<span style="color:' + c.tag + '">$1</span>$2');
+    result = result.replace(/([\w-]+)\s*:/g, '<span style="color:' + c.property + '">$1</span>:');
+    result = result.replace(/:\s*([^;{}\n]+)/g, ': <span style="color:' + c.string + '">$1</span>');
+    result = result.replace(/(\d+\.?\d*(?:px|em|rem|%|vh|vw|s|ms)?)/g, '<span style="color:' + c.number + '">$1</span>');
+    return result;
+}
+
+function highlightKeyValue(text, c) {
+    let result = text;
+    result = result.replace(/(#.*$)/gm, '<span style="color:' + c.comment + ';font-style:italic">$1</span>');
+    result = result.replace(/^([\w.-]+)(\s*[:=])/gm, '<span style="color:' + c.key + '">$1</span>$2');
+    result = result.replace(/(&quot;[^&]*?&quot;|"[^"]*?"|'[^']*?')/g, '<span style="color:' + c.string + '">$1</span>');
+    result = result.replace(/\b(\d+\.?\d*)\b/g, '<span style="color:' + c.number + '">$1</span>');
+    result = result.replace(/\b(true|false)\b/g, '<span style="color:' + c.boolean + '">$1</span>');
+    return result;
+}
+
+function highlightGeneric(text, lang, c) {
+    const lines = text.split('\n');
     const result = [];
+
+    const kwMap = {
+        javascript: /\b(function|return|if|else|elif|for|while|do|switch|case|break|continue|class|extends|super|new|this|const|let|var|import|from|export|default|async|await|try|catch|throw|finally|typeof|instanceof|in|of|true|false|null|undefined|void|delete|yield|with|debugger)\b/g,
+        typescript: /\b(function|return|if|else|elif|for|while|do|switch|case|break|continue|class|extends|super|new|this|const|let|var|import|from|export|default|async|await|try|catch|throw|finally|typeof|instanceof|in|of|true|false|null|undefined|void|type|interface|enum|implements|readonly|private|public|protected|abstract|as|keyof|never|unknown|any|asserts|infer|is|module|declare|namespace)\b/g,
+        python:     /\b(def|return|if|elif|else|for|while|break|continue|class|import|from|as|try|except|finally|raise|with|yield|lambda|pass|True|False|None|and|or|not|is|in|global|nonlocal|del|assert|print|self|cls|async|await|staticmethod|classmethod|property|super)\b/g,
+        c:          /\b(if|else|for|while|do|switch|case|break|continue|return|typedef|struct|enum|union|const|static|extern|register|volatile|auto|inline|restrict|sizeof|NULL|true|false|void|int|char|float|double|long|short|unsigned|signed|size_t|FILE|printf|scanf|malloc|free|memcpy|memset)\b/g,
+        cpp:        /\b(if|else|for|while|do|switch|case|break|continue|return|class|struct|enum|union|namespace|using|template|typename|public|private|protected|virtual|override|const|static|extern|volatile|mutable|auto|inline|constexpr|noexcept|decltype|new|delete|nullptr|true|false|void|int|char|float|double|long|short|unsigned|signed|bool|string|vector|map|set|pair|shared_ptr|unique_ptr|make_shared|make_unique|std|cout|cin|endl|include|define|ifdef|ifndef|endif|pragma)\b/g,
+        java:       /\b(if|else|for|while|do|switch|case|break|continue|return|class|interface|enum|extends|implements|public|private|protected|static|final|abstract|synchronized|volatile|transient|native|new|this|super|true|false|null|void|int|char|float|double|long|short|byte|boolean|String|System|out|println|import|package|throws|try|catch|finally|instanceof|assert|default|sealed|permits|var|record|yield)\b/g,
+        rust:       /\b(fn|let|mut|if|else|for|while|loop|match|return|break|continue|struct|enum|impl|trait|pub|use|mod|crate|self|super|where|as|ref|move|async|await|dyn|type|const|static|unsafe|extern|true|false|Some|None|Ok|Err|Self|String|Vec|Option|Result|Box|Rc|Arc|println|print|format|macro_rules)\b/g,
+        go:         /\b(func|return|if|else|for|range|switch|case|break|continue|package|import|type|struct|interface|map|chan|go|defer|select|var|const|true|false|null|iota|nil|make|len|cap|append|copy|delete|new|panic|recover|error|fmt|Println|Printf|Print|Sprintf|Errorf|strings|strconv|math|os|io|http|json)\b/g,
+        shell:      /\b(if|then|else|elif|fi|for|while|do|done|case|esac|function|return|exit|local|export|source|alias|unalias|echo|printf|read|shift|set|unset|eval|exec|test|true|false|grep|sed|awk|find|sort|uniq|wc|head|tail|cat|cp|mv|rm|mkdir|chmod|chown|curl|wget|sudo|apt|yum|dnf|pip|npm|git|docker)\b/g,
+        sql:        /\b(SELECT|FROM|WHERE|INSERT|INTO|VALUES|UPDATE|SET|DELETE|CREATE|TABLE|ALTER|DROP|INDEX|VIEW|JOIN|LEFT|RIGHT|INNER|OUTER|ON|AND|OR|NOT|IN|LIKE|BETWEEN|IS|NULL|AS|ORDER|BY|GROUP|HAVING|LIMIT|OFFSET|DISTINCT|COUNT|SUM|AVG|MIN|MAX|UNION|ALL|EXISTS|CASE|WHEN|THEN|ELSE|END|PRIMARY|KEY|FOREIGN|REFERENCES|CONSTRAINT|DEFAULT|CHECK|UNIQUE|INT|INTEGER|VARCHAR|TEXT|BOOLEAN|DATE|TIMESTAMP|FLOAT|DOUBLE|DECIMAL)\b/gi,
+        php:        /\b(function|return|if|else|elseif|for|foreach|while|do|switch|case|break|continue|class|extends|new|this|public|private|protected|static|const|var|echo|print|include|require|require_once|include_once|try|catch|finally|throw|true|false|null|void|int|float|string|bool|array|function|abstract|interface|trait|implements|namespace|use|as|global|yield|match|fn|readonly|enum|attribute)\b/g,
+        ruby:       /\b(def|end|if|elsif|else|unless|while|until|for|do|break|next|redo|retry|return|class|module|include|extend|require|require_relative|self|true|false|nil|and|or|not|in|is_a?|puts|print|raise|begin|rescue|ensure|lambda|proc|yield|attr_accessor|attr_reader|attr_writer|private|protected|public|super|yield|then|when|case|def|undef|alias)\b/g,
+        swift:      /\b(func|return|if|else|for|while|repeat|switch|case|break|continue|class|struct|enum|protocol|extension|import|public|private|internal|fileprivate|open|static|var|let|mutating|true|false|nil|self|Self|super|init|deinit|print|guard|defer|as|is|in|where|try|catch|throw|throws|async|await|actor|some|any|typealias|associatedtype|package)\b/g,
+        kotlin:     /\b(fun|return|if|else|for|while|do|when|break|continue|class|interface|object|enum|data|sealed|abstract|open|internal|private|protected|public|override|var|val|lateinit|by|lazy|companion|object|true|false|null|this|super|is|as|in|!in|!is|typealias|suspend|crossinline|noinline|reified|it|println|listOf|mapOf|setOf|arrayOf|mutableListOf|mutableMapOf|mutableSetOf|with|run|apply|also|let|takeIf|takeUnless)\b/g,
+        csharp:     /\b(function|return|if|else|for|foreach|while|do|switch|case|break|continue|class|struct|enum|interface|namespace|using|public|private|protected|internal|static|readonly|const|new|this|base|true|false|null|void|int|float|double|decimal|string|bool|object|var|dynamic|async|await|yield|lock|try|catch|finally|throw|checked|unchecked|params|out|ref|in|is|as|where|select|from|group|orderby|join|let|into|aggregate)\b/g,
+        lua:        /\b(function|end|if|then|else|elseif|for|while|do|repeat|until|break|return|local|true|false|nil|and|or|not|in|select|pcall|xpcall|require|print|pairs|ipairs|next|type|tostring|tonumber|error|assert|loadstring|load|setmetatable|getmetatable|string|table|math|io|os|coroutine|rawget|rawset|rawequal|rawlen|dofile|loadfile|setfenv|getfenv)\b/g,
+        perl:       /\b(sub|return|if|elsif|else|for|foreach|while|do|last|next|redo|break|continue|my|our|local|state|package|use|require|no|BEGIN|END|die|warn|print|say|open|close|read|write|seek|tell|eof|exists|delete|keys|values|each|push|pop|shift|unshift|splice|split|join|grep|map|sort|reverse|abs|int|exp|log|sqrt|sin|cos|rand|srand|length|substr|index|rindex|sprintf|printf|uc|lc| ucfirst|chomp|chop|chdir|chmod|chown|unlink|glob|system|exec|fork|wait|pipe|socket|bind|listen|accept|connect|send|recv|select)\b/g,
+        r:          /\b(function|return|if|else|for|while|repeat|break|next|library|require|source|c|list|matrix|data\.frame|TRUE|FALSE|NA|NULL|Inf|NaN|print|cat|paste|paste0|nchar|substr|grep|grepl|sub|gsub|strsplit|sprintf|format|round|floor|ceiling|abs|sqrt|log|exp|sin|cos|tan|min|max|sum|mean|median|sd|var|length|seq|rep|which|any|all|is\.na|is\.null|is\.numeric|is\.character|as\.numeric|as\.character|as\.integer|as\.logical|class|typeof|str|head|tail|View|read\.csv|write\.csv|read\.table|write\.table|list\.files|dir\.create|file\.exists|file\.remove|install\.packages|installed\.packages|help|example)\b/g,
+        objectivec: /\b(if|else|for|while|do|switch|case|break|continue|return|typedef|struct|enum|union|const|static|extern|volatile|auto|inline|sizeof|nil|NULL|true|false|YES|NO|self|super|class|public|private|protected|interface|implementation|protocol|selector|id|instancetype|void|int|char|float|double|long|short|unsigned|signed|BOOL|NSInteger|NSUInteger|CGFloat|NSString|NSArray|NSDictionary|NSNumber|NSLog|malloc|free|alloc|init|retain|release|autorelease|dealloc|@interface|@implementation|@end|@protocol|@selector|@property|@synthesize|@dynamic|@autoreleasepool|@try|@catch|@finally|@throw|@try)\b/g,
+        dockerfile: /\b(FROM|RUN|CMD|COPY|ADD|ENTRYPOINT|ENV|ARG|EXPOSE|VOLUME|WORKDIR|USER|LABEL|STOPSIGNAL|HEALTHCHECK|SHELL|ONBUILD|AS)\b/g,
+    };
+
+    const kw = kwMap[lang] || kwMap.javascript;
 
     for (let i = 0; i < lines.length; i++) {
         let line = lines[i];
 
-        // Single-line comments
-        line = line.replace(/(\/\/.*$|#.*$)/gm, '<span class="syn-comment">$1</span>');
+        if (lang === 'c' || lang === 'cpp' || lang === 'java') {
+            line = line.replace(/(#\s*\w+)/g, '<span style="color:' + c.preprocessor + '">$1</span>');
+        }
 
-        // Multi-line comment start/end (simplified — per-line)
-        line = line.replace(/(\/\*|\*\/)/g, '<span class="syn-comment">$1</span>');
+        line = line.replace(/(\/\/.*$)/gm, '<span style="color:' + c.comment + ';font-style:italic">$1</span>');
+        line = line.replace(/(\/\*[\s\S]*?\*\/)/g, '<span style="color:' + c.comment + ';font-style:italic">$1</span>');
 
-        // Strings (double and single quotes, backticks)
-        line = line.replace(/(&quot;[^&]*?&quot;|&#39;[^&]*?&#39;|`[^`]*?`|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)/g, '<span class="syn-string">$1</span>');
+        if (lang === 'python' || lang === 'shell' || lang === 'ruby' || lang === 'perl' || lang === 'r') {
+            line = line.replace(/(#.*$)/gm, '<span style="color:' + c.comment + ';font-style:italic">$1</span>');
+        }
 
-        // Keywords (common across languages)
-        const keywords = /\b(function|return|if|else|elif|for|while|do|switch|case|break|continue|class|struct|enum|typedef|using|namespace|import|from|export|default|public|private|protected|static|const|let|var|new|this|self|super|async|await|try|catch|throw|finally|yield|in|of|true|false|null|undefined|None|True|False|void|int|float|double|char|string|bool|bool|long|short|unsigned|signed|size_t|auto|def|print|printf|include|define|nullptr|delete|virtual|override|abstract|interface|implements|extends|final|synchronized|volatile|transient|native|strictfp|assert|package|throws|instanceof|as|type|func|go|chan|map|range|defer|select|make|len|cap|append|panic|recover)\b/g;
-        line = line.replace(keywords, '<span class="syn-keyword">$1</span>');
+        if (lang === 'python') {
+            line = line.replace(/(@[\w.]+)/g, '<span style="color:' + c.decorator + '">$1</span>');
+        }
 
-        // Numbers
-        line = line.replace(/\b(\d+\.?\d*(?:e[+-]?\d+)?)\b/gi, '<span class="syn-number">$1</span>');
+        if (lang === 'java') {
+            line = line.replace(/(@[\w.]+)/g, '<span style="color:' + c.annotation + '">$1</span>');
+        }
 
-        // Function calls
-        line = line.replace(/\b([a-zA-Z_]\w*)\s*\(/g, '<span class="syn-function">$1</span>(');
+        if (lang === 'rust') {
+            line = line.replace(/(r#?\w*"[^"]*"#?|r"[^"]*")/g, '<span style="color:' + c.string + '">$1</span>');
+        }
+
+        line = line.replace(/(&quot;[^&]*?&quot;|&#39;[^&]*?&#39;|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)/g, '<span style="color:' + c.string + '">$1</span>');
+
+        line = line.replace(kw, '<span style="color:' + c.keyword + '">$1</span>');
+
+        line = line.replace(/\b(\d+\.?\d*(?:e[+-]?\d+)?(?:f|l|u|ll|ull)?)\b/gi, '<span style="color:' + c.number + '">$1</span>');
+
+        line = line.replace(/\b([a-zA-Z_]\w*)\s*\(/g, '<span style="color:' + c.function + '">$1</span>(');
 
         result.push(line);
     }
 
     return result.join('\n');
+}
+
+function renderMarkdown(text) {
+    const escaped = text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+
+    let html = escaped;
+
+    html = html.replace(/^### (.+)$/gm, '<h3 style="color:#e0e0e0;margin:12px 0 6px;font-size:15px">$1</h3>');
+    html = html.replace(/^## (.+)$/gm, '<h2 style="color:#e0e0e0;margin:16px 0 8px;font-size:17px">$1</h2>');
+    html = html.replace(/^# (.+)$/gm, '<h1 style="color:#e0e0e0;margin:20px 0 10px;font-size:20px">$1</h1>');
+
+    html = html.replace(/\*\*(.+?)\*\*/g, '<strong style="color:#e0e0e0">$1</strong>');
+    html = html.replace(/\*(.+?)\*/g, '<em style="color:#d0d0d0">$1</em>');
+    html = html.replace(/~~(.+?)~~/g, '<del style="color:#888">$1</del>');
+    html = html.replace(/`(.+?)`/g, '<code style="background:#2d2d2d;padding:2px 6px;border-radius:3px;font-family:monospace;color:#e06c75;font-size:12px">$1</code>');
+
+    html = html.replace(/^(-{3,})$/gm, '<hr style="border:none;border-top:1px solid #3d3d3d;margin:12px 0">');
+    html = html.replace(/^(\*{3,})$/gm, '<hr style="border:none;border-top:1px solid #3d3d3d;margin:12px 0">');
+
+    html = html.replace(/^\s*[-*+]\s+(.+)$/gm, '<div style="padding-left:16px;margin:2px 0">• $1</div>');
+    html = html.replace(/^\s*\d+\.\s+(.+)$/gm, '<div style="padding-left:16px;margin:2px 0">$1</div>');
+
+    html = html.replace(/^>\s*(.+)$/gm, '<div style="border-left:3px solid #569cd6;padding-left:12px;color:#aaa;margin:4px 0">$1</div>');
+
+    html = html.replace(/```(\w*)\n([\s\S]*?)```/g, function(_, lang, code) {
+        return '<pre style="background:#1e1e1e;border:1px solid #3d3d3d;border-radius:6px;padding:12px;margin:8px 0;overflow-x:auto;font-family:monospace;font-size:13px;color:#d4d4d4;line-height:1.5"><code>' + code + '</code></pre>';
+    });
+    html = html.replace(/```([\s\S]*?)```/g, '<pre style="background:#1e1e1e;border:1px solid #3d3d3d;border-radius:6px;padding:12px;margin:8px 0;overflow-x:auto;font-family:monospace;font-size:13px;color:#d4d4d4;line-height:1.5"><code>$1</code></pre>');
+
+    html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" style="color:#569cd6;text-decoration:none" target="_blank" rel="noopener">$1</a>');
+
+    html = html.replace(/\n/g, '<br>');
+
+    return html;
 }
 
 function normalizeAudioMimeType(mime) {
@@ -2433,7 +2689,7 @@ async function uploadFileToServer(file) {
     const initRes = await authFetch('/api/files/init', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ size: file.size, mime: file.type || 'application/octet-stream' })
+        body: JSON.stringify({ size: file.size, mime: getCorrectMimeType(file.name, file.type) || 'application/octet-stream' })
     });
     if (!initRes.ok) {
         const err = await initRes.json();
@@ -2462,7 +2718,7 @@ async function uploadFileToServer(file) {
 
     return {
         type: 'file', file_id, filename: file.name,
-        mime_type: normalizeAudioMimeType(file.type) || 'application/octet-stream',
+        mime_type: getCorrectMimeType(file.name, file.type) || 'application/octet-stream',
         file_size: file.size, file_key: fileKeyB64
     };
 }
@@ -2538,8 +2794,8 @@ async function startFileUpload() {
 function buildFileCardHtml(fileData) {
     const isImage = fileData.mime_type && fileData.mime_type.startsWith('image/');
     const isVideo = fileData.mime_type && fileData.mime_type.startsWith('video/');
-    const isAudio = fileData.mime_type && fileData.mime_type.startsWith('audio/');
-    const isText = fileData.mime_type && (fileData.mime_type.startsWith('text/') || fileData.mime_type === 'application/json' || fileData.mime_type === 'application/javascript' || fileData.mime_type === 'application/xml');
+    const isText = isTextFile(fileData.filename, fileData.mime_type);
+    const isAudio = !isText && fileData.mime_type && fileData.mime_type.startsWith('audio/');
     const icon = getFileIcon(fileData.mime_type);
 
     // Audio: render as a full-width player (same as upload modal), not crammed inside a file-card
@@ -2665,8 +2921,8 @@ async function loadMediaPreview(container, fileData) {
     if (!container) return;
     const isImage = fileData.mime_type && fileData.mime_type.startsWith('image/');
     const isVideo = fileData.mime_type && fileData.mime_type.startsWith('video/');
-    const isAudio = fileData.mime_type && fileData.mime_type.startsWith('audio/');
-    const isText = fileData.mime_type && (fileData.mime_type.startsWith('text/') || fileData.mime_type === 'application/json' || fileData.mime_type === 'application/javascript' || fileData.mime_type === 'application/xml');
+    const isText = isTextFile(fileData.filename, fileData.mime_type);
+    const isAudio = !isText && fileData.mime_type && fileData.mime_type.startsWith('audio/');
     if (!isImage && !isVideo && !isAudio && !isText) return;
 
     // Show loading indicator
@@ -2695,7 +2951,7 @@ async function loadMediaPreview(container, fileData) {
                             const t = mime.startsWith('image/') ? 'image' : mime.startsWith('video/') ? 'video' : 'audio';
                             gallery.push({ url: mediaEl.src, type: t, fileData: { file_id: p.dataset.fileId, file_key: p.dataset.key, mime_type: mime, filename: p.dataset.filename, file_size: parseInt(p.dataset.size || '0') } });
                         }
-                    } else if (mime.startsWith('text/') || mime === 'application/json' || mime === 'application/javascript' || mime === 'application/xml') {
+                    } else if (isTextFile(p.dataset.filename, mime)) {
                         const textEl = p.querySelector('.text-preview');
                         if (textEl && p.dataset.fullText) {
                             gallery.push({ url: null, type: 'text', fileData: { file_id: p.dataset.fileId, file_key: p.dataset.key, mime_type: mime, filename: p.dataset.filename, file_size: parseInt(p.dataset.size || '0') }, fullText: p.dataset.fullText });
@@ -2723,7 +2979,7 @@ async function loadMediaPreview(container, fileData) {
                             const t = mime.startsWith('image/') ? 'image' : mime.startsWith('video/') ? 'video' : 'audio';
                             gallery.push({ url: mediaEl.src, type: t, fileData: { file_id: p.dataset.fileId, file_key: p.dataset.key, mime_type: mime, filename: p.dataset.filename, file_size: parseInt(p.dataset.size || '0') } });
                         }
-                    } else if (mime.startsWith('text/') || mime === 'application/json' || mime === 'application/javascript' || mime === 'application/xml') {
+                    } else if (isTextFile(p.dataset.filename, mime)) {
                         const textEl = p.querySelector('.text-preview');
                         if (textEl && p.dataset.fullText) {
                             gallery.push({ url: null, type: 'text', fileData: { file_id: p.dataset.fileId, file_key: p.dataset.key, mime_type: mime, filename: p.dataset.filename, file_size: parseInt(p.dataset.size || '0') }, fullText: p.dataset.fullText });
@@ -2773,7 +3029,7 @@ async function loadMediaPreview(container, fileData) {
                     const gallery = [];
                     allPreviews.forEach(p => {
                         const mime = p.dataset.mime || '';
-                        if (mime.startsWith('text/') || mime === 'application/json' || mime === 'application/javascript' || mime === 'application/xml') {
+                        if (isTextFile(p.dataset.filename, mime)) {
                             if (p.dataset.fullText) {
                                 gallery.push({ url: null, type: 'text', fileData: { file_id: p.dataset.fileId, file_key: p.dataset.key, mime_type: mime, filename: p.dataset.filename, file_size: parseInt(p.dataset.size || '0') }, fullText: p.dataset.fullText });
                             }
@@ -2975,19 +3231,22 @@ function openMediaViewer(url, type, fileData, galleryItems) {
         const fullText = (fileData && fileData.fullText) ? fileData.fullText : '';
         const filename = (fileData && fileData.filename) ? fileData.filename : '';
         const mime = (fileData && fileData.mime_type) ? fileData.mime_type : '';
-        const isCode = isCodeFile(filename, mime);
+        const isMd = isMarkdownFile(filename, mime);
+        const isCode = !isMd && isCodeFile(filename, mime);
 
         const wrapper = document.createElement('div');
         wrapper.className = 'text-viewer-wrapper';
 
         const header = document.createElement('div');
         header.className = 'text-viewer-header';
-        header.innerHTML = '<span class="text-viewer-icon">📄</span><span class="text-viewer-filename">' + escapeHtml(filename) + '</span><span class="text-viewer-meta">' + formatFileSize(fullText.length) + '</span>';
+        header.innerHTML = '<span class="text-viewer-icon">' + (isMd ? '📝' : '📄') + '</span><span class="text-viewer-filename">' + escapeHtml(filename) + '</span><span class="text-viewer-meta">' + formatFileSize(fullText.length) + '</span>';
         wrapper.appendChild(header);
 
-        const codeEl = document.createElement('pre');
+        const codeEl = document.createElement('div');
         codeEl.className = 'text-viewer-content';
-        if (isCode) {
+        if (isMd) {
+            codeEl.innerHTML = renderMarkdown(fullText);
+        } else if (isCode) {
             codeEl.innerHTML = highlightSyntax(fullText, filename, mime);
         } else {
             codeEl.textContent = fullText;
@@ -3115,19 +3374,22 @@ function navigateViewer(direction) {
         const fileData = item.fileData || {};
         const filename = fileData.filename || '';
         const mime = fileData.mime_type || '';
-        const isCode = isCodeFile(filename, mime);
+        const isMd = isMarkdownFile(filename, mime);
+        const isCode = !isMd && isCodeFile(filename, mime);
 
         const wrapper = document.createElement('div');
         wrapper.className = 'text-viewer-wrapper';
 
         const header = document.createElement('div');
         header.className = 'text-viewer-header';
-        header.innerHTML = '<span class="text-viewer-icon">📄</span><span class="text-viewer-filename">' + escapeHtml(filename) + '</span><span class="text-viewer-meta">' + formatFileSize(fullText.length) + '</span>';
+        header.innerHTML = '<span class="text-viewer-icon">' + (isMd ? '📝' : '📄') + '</span><span class="text-viewer-filename">' + escapeHtml(filename) + '</span><span class="text-viewer-meta">' + formatFileSize(fullText.length) + '</span>';
         wrapper.appendChild(header);
 
-        const codeEl = document.createElement('pre');
+        const codeEl = document.createElement('div');
         codeEl.className = 'text-viewer-content';
-        if (isCode) {
+        if (isMd) {
+            codeEl.innerHTML = renderMarkdown(fullText);
+        } else if (isCode) {
             codeEl.innerHTML = highlightSyntax(fullText, filename, mime);
         } else {
             codeEl.textContent = fullText;

@@ -2006,6 +2006,9 @@ body {
     tab-size: 4;
     border-radius: 0;
 }
+.text-viewer-content:has(> h1, > h2, > h3, > div) {
+    white-space: normal;
+}
 .text-viewer-content::-webkit-scrollbar {
     width: 8px;
     height: 8px;
@@ -2020,14 +2023,6 @@ body {
 .text-viewer-content::-webkit-scrollbar-thumb:hover {
     background: #777;
 }
-
-/* Syntax highlighting colors */
-.syn-keyword { color: #569cd6; }
-.syn-string { color: #ce9178; }
-.syn-number { color: #b5cea8; }
-.syn-comment { color: #6a9955; font-style: italic; }
-.syn-function { color: #dcdcaa; }
-.syn-type { color: #4ec9b0; }
 
 .file-preview audio {
     width: 100%;
