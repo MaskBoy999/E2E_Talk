@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { createHash } from 'crypto';
 
-const BASE = 'http://localhost:3000';
+const BASE = 'https://localhost:3443';
 
 function sha256Hex(data: string): string {
     return createHash('sha256').update(data).digest('hex');

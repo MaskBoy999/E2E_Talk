@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>E2E Chat</title>
-    <link rel="stylesheet" href="style.css?v=5">
+    <link rel="stylesheet" href="style.css?v=7">
 </head>
 <body>
     <div class="app">
@@ -66,6 +66,14 @@
                 <input type="file" id="file-input" style="display:none" multiple>
                 <input type="text" id="message-input" placeholder="Type a message..." disabled>
                 <button id="send-btn" disabled>Send</button>
+            </div>
+        </div>
+        <!-- Drop Zone Overlay (inside chat-body for proper positioning) -->
+        <div class="drop-zone-overlay" id="drop-zone-overlay">
+            <div class="drop-zone-content">
+                <div class="drop-zone-icon">&#128228;</div>
+                <div class="drop-zone-text">Drop files here to upload</div>
+                <div class="drop-zone-hint">Supports images, videos, audio, and documents</div>
             </div>
         </div>
     </div>
@@ -249,7 +257,11 @@
 
     <!-- File Upload Modal -->
     <div class="modal" id="upload-modal" style="display:none">
-        <div class="modal-content" style="max-width:480px">
+        <div class="modal-content" style="max-width:480px;position:relative;overflow:visible">
+            <div class="modal-drop-overlay" id="modal-drop-overlay">
+                <div class="modal-drop-icon">📂</div>
+                <div class="modal-drop-text">Drop files here to add</div>
+            </div>
             <h3 style="margin-bottom:12px;color:var(--accent)">Upload File</h3>
             <div id="upload-file-info" class="upload-file-info"></div>
             <div id="upload-preview" class="upload-preview"></div>
@@ -260,10 +272,14 @@
                 <div id="upload-progress-text" class="progress-text">0%</div>
             </div>
             <div id="upload-error" style="color:var(--danger);margin-bottom:12px;display:none;font-size:13px"></div>
-            <div class="modal-actions">
-                <button class="btn-cancel" id="cancel-upload">Cancel</button>
-                <button class="btn-invite" id="confirm-upload">Upload</button>
+            <div class="modal-actions" style="gap:8px;flex-wrap:wrap;justify-content:space-between">
+                <button class="btn-cancel" id="add-more-files" style="border-color:var(--accent);color:var(--accent)">+ Add Files</button>
+                <div style="display:flex;gap:8px">
+                    <button class="btn-cancel" id="cancel-upload">Cancel</button>
+                    <button class="btn-invite" id="confirm-upload">Upload</button>
+                </div>
             </div>
+            <input type="file" id="add-more-file-input" style="display:none" multiple>
         </div>
     </div>
 
@@ -282,13 +298,33 @@
                 <input type="range" class="video-progress-input" id="vc-seek" min="0" max="1000" value="0">
             </div>
             <span class="video-time-display" id="vc-time">0:00 / 0:00</span>
+            <div class="volume-control">
+                <button class="video-ctrl-btn" id="vc-mute" title="Mute/Unmute">&#128266;</button>
+                <input type="range" class="volume-slider" id="vc-volume" min="0" max="100" value="100">
+            </div>
             <button class="video-ctrl-btn" id="vc-fullscreen" title="Fullscreen">&#x26F6;</button>
+        </div>
+        <!-- Audio Controls (for inline audio playback) -->
+        <div class="audio-controls" id="audio-controls" style="display:none">
+            <button class="video-ctrl-btn" id="ac-play-pause" title="Play/Pause">&#9654;</button>
+            <div class="video-progress-wrap" id="audio-progress-wrap">
+                <div class="video-progress-bg">
+                    <div class="video-progress-buffered" id="ac-buffered"></div>
+                    <div class="video-progress-played" id="ac-played"></div>
+                </div>
+                <input type="range" class="video-progress-input" id="ac-seek" min="0" max="1000" value="0">
+            </div>
+            <span class="video-time-display" id="ac-time">0:00 / 0:00</span>
+            <div class="volume-control">
+                <button class="video-ctrl-btn" id="ac-mute" title="Mute/Unmute">&#128266;</button>
+                <input type="range" class="volume-slider" id="ac-volume" min="0" max="100" value="100">
+            </div>
         </div>
     </div>
 
     <script src="crypto.js?v=6"></script>
     <script src="qrcode.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
-    <script src="chat.js?v=9"></script>
+    <script src="chat.js?v=11"></script>
 </body>
 </html>

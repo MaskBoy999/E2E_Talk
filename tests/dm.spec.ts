@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 
-const BASE = 'http://localhost:3000';
+const BASE = 'https://localhost:3443';
 
 test.describe('Direct Messages', () => {
 

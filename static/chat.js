@@ -1,4 +1,4 @@
-console.log('chat.js v9 loaded - file sharing + media preview');
+console.log('chat.js v13 loaded - grouped files + inline audio');
 
 function generateCode(len) {
     const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -20,8 +20,9 @@ let currentDmOtherUser = null;
 let dmConversations = [];
 let unreadDms = {};
 let pendingFriendRequests = 0;
-let selectedFile = null;
 let isUploading = false;
+let selectedFiles = [];
+let currentFileIndex = 0;
 
 const token = () => localStorage.getItem('token');
 const authFetch = (url, opts = {}) => {
@@ -231,7 +232,29 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     document.getElementById('file-input').addEventListener('change', handleFileSelect);
     document.getElementById('cancel-upload').addEventListener('click', closeUploadModal);
+
+    // Drag and drop support for file uploads
+    setupDragAndDrop();
     document.getElementById('confirm-upload').addEventListener('click', startFileUpload);
+
+    // "Add More Files" button in upload modal
+    document.getElementById('add-more-files').addEventListener('click', () => {
+        document.getElementById('add-more-file-input').click();
+    });
+    document.getElementById('add-more-file-input').addEventListener('change', (e) => {
+        const newFiles = Array.from(e.target.files);
+        if (newFiles.length === 0) return;
+        const oversized = newFiles.find(f => f.size > 1024 * 1024 * 1024);
+        if (oversized) {
+            alert('File too large: ' + oversized.name + '. Maximum file size is 1 GB.');
+            e.target.value = '';
+            return;
+        }
+        selectedFiles = selectedFiles.concat(newFiles);
+        renderUploadPreview();
+        document.getElementById('confirm-upload').textContent = selectedFiles.length > 1 ? 'Upload All (' + selectedFiles.length + ')' : 'Upload';
+        e.target.value = '';
+    });
     document.getElementById('media-viewer-close').addEventListener('click', closeMediaViewer);
     document.getElementById('media-viewer-backdrop').addEventListener('click', closeMediaViewer);
 
@@ -239,7 +262,7 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('message-list').addEventListener('click', (e) => {
         const dlBtn = e.target.closest('.file-download-btn');
         if (dlBtn) {
-            const card = dlBtn.closest('.file-card');
+            const card = dlBtn.closest('.file-card, .audio-file-card');
             if (card) {
                 downloadFileById(
                     card.dataset.fileId,
@@ -249,6 +272,47 @@ document.addEventListener('DOMContentLoaded', () => {
                     parseInt(card.dataset.fileSize, 10) || 0
                 );
             }
+        }
+    });
+
+    // Event delegation for multi-file gallery navigation
+    document.getElementById('message-list').addEventListener('click', (e) => {
+        const navBtn = e.target.closest('.msg-gallery-btn');
+        if (navBtn) {
+            const gallery = navBtn.closest('.msg-file-gallery');
+            if (!gallery) return;
+            const dir = parseInt(navBtn.dataset.dir);
+            let idx = parseInt(gallery.dataset.index);
+            const total = parseInt(gallery.dataset.total);
+            idx = Math.max(0, Math.min(total - 1, idx + dir));
+            gallery.dataset.index = idx;
+            // Update active item
+            gallery.querySelectorAll('.msg-gallery-item').forEach(item => {
+                const isTarget = parseInt(item.dataset.idx) === idx;
+                item.classList.toggle('active', isTarget);
+                item.style.display = isTarget ? '' : 'none';
+            });
+            // Update strip
+            gallery.querySelectorAll('.msg-gallery-strip-item').forEach(item => {
+                item.classList.toggle('active', parseInt(item.dataset.idx) === idx);
+            });
+            // Update counter
+            const counter = gallery.querySelector('.msg-gallery-counter');
+            if (counter) counter.textContent = (idx + 1) + ' / ' + total;
+            // Update prev/next disabled state
+            const prev = gallery.querySelector('.msg-gallery-prev');
+            const next = gallery.querySelector('.msg-gallery-next');
+            if (prev) prev.disabled = idx === 0;
+            if (next) next.disabled = idx === total - 1;
+        }
+        // Click on strip item
+        const stripItem = e.target.closest('.msg-gallery-strip-item');
+        if (stripItem) {
+            const gallery = stripItem.closest('.msg-file-gallery');
+            if (!gallery) return;
+            const idx = parseInt(stripItem.dataset.idx);
+            gallery.dataset.index = idx;
+            updateGalleryState(gallery, idx);
         }
     });
 
@@ -437,6 +501,13 @@ document.addEventListener('DOMContentLoaded', () => {
         else if (action === 'ban') banMember(userId, username);
         else if (action === 'unban') unbanUser(userId, username);
     });
+
+    // Prevent browser from opening dropped files globally
+    document.addEventListener('dragover', (e) => { e.preventDefault(); });
+    document.addEventListener('drop', (e) => { e.preventDefault(); });
+    
+    // Setup drag-and-drop for the upload modal
+    setupModalDragAndDrop();
 
     // No polling needed — WebSocket handles all live updates
 });
@@ -903,13 +974,17 @@ async function appendMessage(msg) {
 
     let textContent = '';
     let fileData = null;
+    let filesData = null;
     if (msg.encrypted_content && msg.nonce && currentChannelId && currentServerId) {
         try {
             textContent = E2ECrypto.decrypt(msg.encrypted_content, msg.nonce, currentChannelId, currentServerId, msg.message_nonce);
             // Check if it's a file message
             try {
                 const parsed = JSON.parse(textContent);
-                if (parsed && parsed.type === 'file') {
+                if (parsed && parsed.type === 'files' && Array.isArray(parsed.files)) {
+                    filesData = parsed.files;
+                    textContent = '';
+                } else if (parsed && parsed.type === 'file') {
                     fileData = parsed;
                     textContent = '';
                 }
@@ -921,7 +996,9 @@ async function appendMessage(msg) {
     }
 
     let contentHtml = '';
-    if (fileData) {
+    if (filesData) {
+        contentHtml = buildMultiFileCardHtml(filesData);
+    } else if (fileData) {
         contentHtml = buildFileCardHtml(fileData);
     } else {
         contentHtml = '<div class="text">' + escapeHtml(textContent) + '</div>';
@@ -938,7 +1015,13 @@ async function appendMessage(msg) {
         '</div>';
 
     // Load media preview if applicable
-    if (fileData && fileData.file_key) {
+    if (filesData) {
+        div.querySelectorAll('.file-preview').forEach((container, idx) => {
+            if (filesData[idx] && filesData[idx].file_key) {
+                loadMediaPreview(container, filesData[idx]);
+            }
+        });
+    } else if (fileData && fileData.file_key) {
         loadMediaPreview(div.querySelector('.file-preview'), fileData);
     }
 
@@ -1055,7 +1138,9 @@ function renderDmSidebar() {
                 );
                 try {
                     const parsed = JSON.parse(decrypted);
-                    if (parsed && parsed.type === 'file') {
+                    if (parsed && parsed.type === 'files' && Array.isArray(parsed.files)) {
+                        preview = parsed.files.length + ' files';
+                    } else if (parsed && parsed.type === 'file') {
                         preview = getFileIcon(parsed.mime_type) + ' ' + (parsed.filename || 'File');
                     } else {
                         preview = decrypted.substring(0, 40);
@@ -1181,6 +1266,7 @@ function appendDmMessage(msg, kp, otherPublicKey) {
 
     let textContent = '';
     let fileData = null;
+    let filesData = null;
     if (msg.encrypted_content && msg.nonce && kp && otherPublicKey) {
         try {
             const dmId = msg.dm_channel_id || currentDmChannelId;
@@ -1188,7 +1274,10 @@ function appendDmMessage(msg, kp, otherPublicKey) {
             // Check if it's a file message
             try {
                 const parsed = JSON.parse(textContent);
-                if (parsed && parsed.type === 'file') {
+                if (parsed && parsed.type === 'files' && Array.isArray(parsed.files)) {
+                    filesData = parsed.files;
+                    textContent = '';
+                } else if (parsed && parsed.type === 'file') {
                     fileData = parsed;
                     textContent = '';
                 }
@@ -1199,7 +1288,9 @@ function appendDmMessage(msg, kp, otherPublicKey) {
     }
 
     let contentHtml = '';
-    if (fileData) {
+    if (filesData) {
+        contentHtml = buildMultiFileCardHtml(filesData);
+    } else if (fileData) {
         contentHtml = buildFileCardHtml(fileData);
     } else {
         contentHtml = '<div class="text">' + escapeHtml(textContent) + '</div>';
@@ -1216,7 +1307,13 @@ function appendDmMessage(msg, kp, otherPublicKey) {
         '</div>';
 
     // Load media preview if applicable
-    if (fileData && fileData.file_key) {
+    if (filesData) {
+        div.querySelectorAll('.file-preview').forEach((container, idx) => {
+            if (filesData[idx] && filesData[idx].file_key) {
+                loadMediaPreview(container, filesData[idx]);
+            }
+        });
+    } else if (fileData && fileData.file_key) {
         loadMediaPreview(div.querySelector('.file-preview'), fileData);
     }
 
@@ -1993,6 +2090,14 @@ function formatFileSize(bytes) {
     return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
 }
 
+function normalizeAudioMimeType(mime) {
+    if (!mime) return 'audio/mpeg';
+    const m = mime.toLowerCase().trim();
+    // audio/mp3 is non-standard, Chrome needs audio/mpeg
+    if (m === 'audio/mp3' || m === 'audio/mpeg3') return 'audio/mpeg';
+    return mime;
+}
+
 function getFileIcon(mimeType) {
     if (!mimeType) return '📄';
     if (mimeType.startsWith('image/')) return '🖼️';
@@ -2007,19 +2112,142 @@ function getFileIcon(mimeType) {
     return '📄';
 }
 
+// ===== Drag and Drop =====
+let dragCounter = 0;
+
+function setupDragAndDrop() {
+    const mainEl = document.querySelector('.main');
+    const overlay = document.getElementById('drop-zone-overlay');
+    if (!mainEl || !overlay) return;
+
+    mainEl.addEventListener('dragenter', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dragCounter++;
+        if ((currentChannelId || currentDmChannelId) && !isUploading) {
+            overlay.classList.add('active');
+        }
+    });
+
+    mainEl.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        e.dataTransfer.dropEffect = 'copy';
+    });
+
+    mainEl.addEventListener('dragleave', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dragCounter--;
+        if (dragCounter <= 0) {
+            dragCounter = 0;
+            overlay.classList.remove('active');
+        }
+    });
+
+    mainEl.addEventListener('drop', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dragCounter = 0;
+        overlay.classList.remove('active');
+
+        if (!currentChannelId && !currentDmChannelId) return;
+        if (isUploading) return;
+        // If modal is open, let modal handle the drop
+        if (document.getElementById('upload-modal').style.display === 'flex') return;
+
+        const files = Array.from(e.dataTransfer.files);
+        if (files.length === 0) return;
+
+        const oversized = files.find(f => f.size > 1024 * 1024 * 1024);
+        if (oversized) {
+            alert('File too large: ' + oversized.name + '. Maximum file size is 1 GB.');
+            return;
+        }
+
+        selectedFiles = files;
+        currentFileIndex = 0;
+        showUploadModal();
+    });
+}
+
+function setupModalDragAndDrop() {
+    const modal = document.getElementById('upload-modal');
+    const overlay = document.getElementById('modal-drop-overlay');
+    if (!modal || !overlay) return;
+
+    let modalDragCounter = 0;
+
+    modal.addEventListener('dragenter', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        modalDragCounter++;
+        if (isUploading) return;
+        overlay.classList.add('active');
+    });
+
+    modal.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        e.dataTransfer.dropEffect = 'copy';
+    });
+
+    modal.addEventListener('dragleave', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        modalDragCounter--;
+        if (modalDragCounter <= 0) {
+            modalDragCounter = 0;
+            overlay.classList.remove('active');
+        }
+    });
+
+    modal.addEventListener('drop', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        modalDragCounter = 0;
+        overlay.classList.remove('active');
+
+        if (isUploading) return;
+
+        const files = Array.from(e.dataTransfer.files);
+        if (files.length === 0) return;
+
+        const oversized = files.find(f => f.size > 1024 * 1024 * 1024);
+        if (oversized) {
+            alert('File too large: ' + oversized.name + '. Maximum file size is 1 GB.');
+            return;
+        }
+
+        // Append dropped files to existing selection
+        selectedFiles = selectedFiles.concat(files);
+        currentFileIndex = 0;
+        renderUploadPreview();
+        
+        // Update confirm button text
+        const confirmBtn = document.getElementById('confirm-upload');
+        if (confirmBtn) {
+            confirmBtn.textContent = selectedFiles.length > 1 ? 'Upload All (' + selectedFiles.length + ')' : 'Upload';
+        }
+    });
+}
+
 function handleFileSelect(e) {
-    const file = e.target.files[0];
-    if (!file) return;
-    if (file.size > 1024 * 1024 * 1024) {
-        alert('File too large. Maximum file size is 1 GB.');
+    const files = Array.from(e.target.files);
+    if (files.length === 0) return;
+    const oversized = files.find(f => f.size > 1024 * 1024 * 1024);
+    if (oversized) {
+        alert('File too large: ' + oversized.name + '. Maximum file size is 1 GB.');
+        e.target.value = '';
         return;
     }
-    selectedFile = file;
-    showUploadModal(file);
+    selectedFiles = files;
+    currentFileIndex = 0;
+    showUploadModal();
     e.target.value = '';
 }
 
-function showUploadModal(file) {
+function showUploadModal() {
     const modal = document.getElementById('upload-modal');
     const info = document.getElementById('upload-file-info');
     const preview = document.getElementById('upload-preview');
@@ -2027,10 +2255,86 @@ function showUploadModal(file) {
     const errorEl = document.getElementById('upload-error');
     const confirmBtn = document.getElementById('confirm-upload');
 
-    info.innerHTML = '<div class="ufi-name">' + escapeHtml(file.name) + '</div>' +
-        '<div class="ufi-meta">' + formatFileSize(file.size) + ' • ' + escapeHtml(file.type || 'Unknown') + '</div>';
+    progressContainer.style.display = 'none';
+    errorEl.style.display = 'none';
+    confirmBtn.disabled = false;
+    confirmBtn.textContent = selectedFiles.length > 1 ? 'Upload All (' + selectedFiles.length + ')' : 'Upload';
 
+    renderUploadPreview();
+    modal.style.display = 'flex';
+}
+
+function renderUploadPreview() {
+    const info = document.getElementById('upload-file-info');
+    const preview = document.getElementById('upload-preview');
+    if (!preview) return;
+
+    // Clean up old gallery nav
+    const oldGallery = document.querySelector('.upload-gallery');
+    if (oldGallery) oldGallery.remove();
+
+    // Revoke old URLs
+    preview.querySelectorAll('img, video, audio').forEach(el => {
+        if (el.src && el.src.startsWith('blob:')) URL.revokeObjectURL(el.src);
+    });
     preview.innerHTML = '';
+
+    if (selectedFiles.length === 0) return;
+    const file = selectedFiles[currentFileIndex];
+
+    // Build info + file list
+    let fileListHtml = '';
+    if (selectedFiles.length > 1) {
+        fileListHtml = '<div class="upload-file-list">';
+        selectedFiles.forEach((f, idx) => {
+            const active = idx === currentFileIndex ? ' active' : '';
+            fileListHtml += '<div class="upload-file-item' + active + '" data-idx="' + idx + '">' +
+                '<span class="ufi-icon">' + getFileIcon(f.type) + '</span>' +
+                '<span class="ufi-name">' + escapeHtml(f.name) + '</span>' +
+                '<button class="ufi-remove" data-idx="' + idx + '">&times;</button>' +
+                '</div>';
+        });
+        fileListHtml += '</div>';
+    }
+
+    info.innerHTML = '<div class="ufi-name">' + escapeHtml(file.name) + '</div>' +
+        '<div class="ufi-meta">' + formatFileSize(file.size) + ' • ' + escapeHtml(file.type || 'Unknown') +
+        (selectedFiles.length > 1 ? ' • File ' + (currentFileIndex + 1) + ' of ' + selectedFiles.length : '') + '</div>' +
+        fileListHtml;
+
+    // Gallery nav
+    if (selectedFiles.length > 1) {
+        const navHtml = '<div class="upload-gallery">' +
+            '<button class="gallery-nav-btn" id="gallery-prev" ' + (currentFileIndex === 0 ? 'disabled' : '') + '>&#8249;</button>' +
+            '<span class="gallery-counter">' + (currentFileIndex + 1) + ' / ' + selectedFiles.length + '</span>' +
+            '<button class="gallery-nav-btn" id="gallery-next" ' + (currentFileIndex === selectedFiles.length - 1 ? 'disabled' : '') + '>&#8250;</button>' +
+            '</div>';
+        preview.insertAdjacentHTML('beforebegin', navHtml);
+        document.getElementById('gallery-prev').addEventListener('click', () => { if (currentFileIndex > 0) { currentFileIndex--; renderUploadPreview(); } });
+        document.getElementById('gallery-next').addEventListener('click', () => { if (currentFileIndex < selectedFiles.length - 1) { currentFileIndex++; renderUploadPreview(); } });
+    }
+
+    // File list click/removal
+    info.querySelectorAll('.upload-file-item').forEach(item => {
+        item.addEventListener('click', (e) => {
+            if (e.target.closest('.ufi-remove')) return;
+            currentFileIndex = parseInt(item.dataset.idx);
+            renderUploadPreview();
+        });
+    });
+    info.querySelectorAll('.ufi-remove').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const idx = parseInt(btn.dataset.idx);
+            selectedFiles.splice(idx, 1);
+            if (currentFileIndex >= selectedFiles.length) currentFileIndex = Math.max(0, selectedFiles.length - 1);
+            if (selectedFiles.length === 0) { closeUploadModal(); return; }
+            renderUploadPreview();
+            document.getElementById('confirm-upload').textContent = selectedFiles.length > 1 ? 'Upload All (' + selectedFiles.length + ')' : 'Upload';
+        });
+    });
+
+    // Preview current file
     if (file.type && file.type.startsWith('image/')) {
         const img = document.createElement('img');
         img.src = URL.createObjectURL(file);
@@ -2043,32 +2347,81 @@ function showUploadModal(file) {
         video.style.maxHeight = '200px';
         video.style.borderRadius = '8px';
         preview.appendChild(video);
+    } else if (file.type && file.type.startsWith('audio/')) {
+        const audio = document.createElement('audio');
+        audio.src = URL.createObjectURL(file);
+        audio.controls = true;
+        audio.preload = 'metadata';
+        audio.style.width = '100%';
+        preview.appendChild(audio);
     }
-
-    progressContainer.style.display = 'none';
-    errorEl.style.display = 'none';
-    confirmBtn.disabled = false;
-    confirmBtn.textContent = 'Upload';
-    modal.style.display = 'flex';
 }
 
 function closeUploadModal() {
     const modal = document.getElementById('upload-modal');
-    // Revoke preview blob URLs
     const previewEl = document.getElementById('upload-preview');
     if (previewEl) {
-        previewEl.querySelectorAll('img, video').forEach(el => {
+        previewEl.querySelectorAll('img, video, audio').forEach(el => {
             if (el.src && el.src.startsWith('blob:')) URL.revokeObjectURL(el.src);
         });
         previewEl.innerHTML = '';
     }
+    // Also clean up the gallery nav
+    const galleryNav = document.querySelector('.upload-gallery');
+    if (galleryNav) galleryNav.remove();
     modal.style.display = 'none';
-    selectedFile = null;
+    selectedFiles = [];
+    currentFileIndex = 0;
     isUploading = false;
+    const addMoreInput = document.getElementById('add-more-file-input');
+    if (addMoreInput) addMoreInput.value = '';
+    const addMoreBtn = document.getElementById('add-more-files');
+    if (addMoreBtn) addMoreBtn.style.display = '';
+}
+
+async function uploadFileToServer(file) {
+    const fileKey = E2ECrypto.generateFileKey();
+    const fileKeyB64 = E2ECrypto.arrayBufferToBase64(fileKey);
+
+    const initRes = await authFetch('/api/files/init', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ size: file.size, mime: file.type || 'application/octet-stream' })
+    });
+    if (!initRes.ok) {
+        const err = await initRes.json();
+        throw new Error(err.error || 'Failed to initialize upload');
+    }
+    const { file_id } = await initRes.json();
+
+    const CHUNK_SIZE = 64 * 1024;
+    const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+
+    for (let i = 0; i < totalChunks; i++) {
+        const start = i * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, file.size);
+        const chunkData = new Uint8Array(await file.slice(start, end).arrayBuffer());
+        const encryptedChunk = E2ECrypto.encryptFileChunk(fileKey, chunkData);
+        const chunkRes = await authFetch('/api/files/' + file_id + '/chunk/' + i, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/octet-stream' },
+            body: encryptedChunk
+        });
+        if (!chunkRes.ok) throw new Error('Failed to upload chunk ' + (i + 1));
+    }
+
+    const completeRes = await authFetch('/api/files/' + file_id + '/complete', { method: 'POST' });
+    if (!completeRes.ok) throw new Error('Failed to finalize upload');
+
+    return {
+        type: 'file', file_id, filename: file.name,
+        mime_type: normalizeAudioMimeType(file.type) || 'application/octet-stream',
+        file_size: file.size, file_key: fileKeyB64
+    };
 }
 
 async function startFileUpload() {
-    if (!selectedFile || isUploading) return;
+    if (selectedFiles.length === 0 || isUploading) return;
     const isDm = viewMode === 'dms';
     if (!isDm && !currentChannelId) return;
     if (isDm && !currentDmChannelId) return;
@@ -2085,70 +2438,29 @@ async function startFileUpload() {
     confirmBtn.textContent = 'Uploading...';
     progressContainer.style.display = 'block';
     errorEl.style.display = 'none';
+    const addMoreBtn = document.getElementById('add-more-files');
+    if (addMoreBtn) addMoreBtn.style.display = 'none';
+
+    const totalFiles = selectedFiles.length;
+    let uploadedFiles = 0;
+    const filePayloads = [];
 
     try {
-        // Generate a random file encryption key
-        const fileKey = E2ECrypto.generateFileKey();
-        const fileKeyB64 = E2ECrypto.arrayBufferToBase64(fileKey);
-
-        // Initialize upload on server
-        const initRes = await authFetch('/api/files/init', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                size: selectedFile.size,
-                mime: selectedFile.type || 'application/octet-stream'
-            })
-        });
-        if (!initRes.ok) {
-            const err = await initRes.json();
-            throw new Error(err.error || 'Failed to initialize upload');
-        }
-        const { file_id } = await initRes.json();
-
-        // Read file and upload chunks
-        const CHUNK_SIZE = 64 * 1024; // 64 KB
-        const totalChunks = Math.ceil(selectedFile.size / CHUNK_SIZE);
-
-        for (let i = 0; i < totalChunks; i++) {
-            const start = i * CHUNK_SIZE;
-            const end = Math.min(start + CHUNK_SIZE, selectedFile.size);
-            const chunkData = new Uint8Array(await selectedFile.slice(start, end).arrayBuffer());
-
-            // Encrypt chunk with file key
-            const encryptedChunk = E2ECrypto.encryptFileChunk(fileKey, chunkData);
-
-            // Upload encrypted chunk
-            const chunkRes = await authFetch('/api/files/' + file_id + '/chunk/' + i, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/octet-stream' },
-                body: encryptedChunk
-            });
-            if (!chunkRes.ok) throw new Error('Failed to upload chunk ' + (i + 1));
-
-            // Update progress
-            const pct = Math.round(((i + 1) / totalChunks) * 100);
-            progressFill.style.width = pct + '%';
-            progressText.textContent = pct + '% (' + (i + 1) + '/' + totalChunks + ')';
+        for (const file of selectedFiles) {
+            progressText.textContent = 'File ' + (uploadedFiles + 1) + '/' + totalFiles + ': ' + file.name;
+            progressFill.style.width = Math.round(((uploadedFiles) / totalFiles) * 100) + '%';
+            const payload = await uploadFileToServer(file);
+            filePayloads.push(payload);
+            uploadedFiles++;
+            progressFill.style.width = Math.round((uploadedFiles / totalFiles) * 100) + '%';
         }
 
-        // Mark upload complete
-        const completeRes = await authFetch('/api/files/' + file_id + '/complete', {
-            method: 'POST'
-        });
-        if (!completeRes.ok) throw new Error('Failed to finalize upload');
+        // Build single message payload (grouped files)
+        const messagePayload = filePayloads.length === 1
+            ? JSON.stringify(filePayloads[0])
+            : JSON.stringify({ type: 'files', files: filePayloads });
 
-        // Build file message payload (will be encrypted as message content)
-        const filePayload = JSON.stringify({
-            type: 'file',
-            file_id: file_id,
-            filename: selectedFile.name,
-            mime_type: selectedFile.type || 'application/octet-stream',
-            file_size: selectedFile.size,
-            file_key: fileKeyB64
-        });
-
-        let encrypted;
+        // Send one encrypted message with all files
         if (isDm) {
             const kp = E2ECrypto.getIdentityKeyPair();
             let otherPublicKey;
@@ -2159,23 +2471,11 @@ async function startFileUpload() {
             } catch (e) {
                 throw new Error('Failed to fetch recipient key');
             }
-            encrypted = E2ECrypto.encryptDm(filePayload, currentDmChannelId, kp.privateKey, otherPublicKey);
-            ws.send(JSON.stringify({
-                type: 'dm_send',
-                dm_channel_id: currentDmChannelId,
-                encrypted_content: encrypted.ciphertext,
-                nonce: encrypted.nonce,
-                message_nonce: encrypted.messageNonce || null,
-            }));
+            const encrypted = E2ECrypto.encryptDm(messagePayload, currentDmChannelId, kp.privateKey, otherPublicKey);
+            ws.send(JSON.stringify({ type: 'dm_send', dm_channel_id: currentDmChannelId, encrypted_content: encrypted.ciphertext, nonce: encrypted.nonce, message_nonce: encrypted.messageNonce || null }));
         } else {
-            encrypted = E2ECrypto.encrypt(filePayload, currentChannelId, currentServerId);
-            ws.send(JSON.stringify({
-                type: 'message_send',
-                channel_id: currentChannelId,
-                encrypted_content: encrypted.ciphertext,
-                nonce: encrypted.nonce,
-                message_nonce: encrypted.messageNonce || null,
-            }));
+            const encrypted = E2ECrypto.encrypt(messagePayload, currentChannelId, currentServerId);
+            ws.send(JSON.stringify({ type: 'message_send', channel_id: currentChannelId, encrypted_content: encrypted.ciphertext, nonce: encrypted.nonce, message_nonce: encrypted.messageNonce || null }));
         }
 
         closeUploadModal();
@@ -2195,8 +2495,31 @@ function buildFileCardHtml(fileData) {
     const isText = fileData.mime_type && (fileData.mime_type.startsWith('text/') || fileData.mime_type === 'application/json' || fileData.mime_type === 'application/javascript' || fileData.mime_type === 'application/xml');
     const icon = getFileIcon(fileData.mime_type);
 
+    // Audio: render as a full-width player (same as upload modal), not crammed inside a file-card
+    if (isAudio) {
+        return '<div class="audio-file-card" ' +
+            'data-file-id="' + escapeAttr(fileData.file_id) + '" ' +
+            'data-file-key="' + escapeAttr(fileData.file_key) + '" ' +
+            'data-file-name="' + escapeAttr(fileData.filename) + '" ' +
+            'data-file-mime="' + escapeAttr(fileData.mime_type) + '" ' +
+            'data-file-size="' + fileData.file_size + '">' +
+            '<div class="audio-file-header">' +
+                '<span class="audio-file-icon">🎵</span>' +
+                '<span class="audio-file-name">' + escapeHtml(fileData.filename) + '</span>' +
+                '<span class="audio-file-meta">' + formatFileSize(fileData.file_size) + '</span>' +
+                '<button class="file-download-btn audio-download-btn" title="Download">⬇</button>' +
+            '</div>' +
+            '<div class="file-preview" ' +
+                'data-file-id="' + escapeAttr(fileData.file_id) + '" ' +
+                'data-mime="' + escapeAttr(fileData.mime_type) + '" ' +
+                'data-key="' + escapeAttr(fileData.file_key) + '" ' +
+                'data-filename="' + escapeAttr(fileData.filename) + '" ' +
+                'data-size="' + fileData.file_size + '"></div>' +
+        '</div>';
+    }
+
     let previewContainer = '';
-    if (isImage || isVideo || isAudio || isText) {
+    if (isImage || isVideo || isText) {
         previewContainer = '<div class="file-preview" ' +
             'data-file-id="' + escapeAttr(fileData.file_id) + '" ' +
             'data-mime="' + escapeAttr(fileData.mime_type) + '" ' +
@@ -2229,6 +2552,68 @@ function revokeBlobUrls() {
     blobUrls = [];
 }
 
+
+
+// ===== Gallery State Helper =====
+function updateGalleryState(gallery, idx) {
+    gallery.dataset.index = idx;
+    gallery.querySelectorAll('.msg-gallery-item').forEach(item => {
+        const isTarget = parseInt(item.dataset.idx) === idx;
+        item.classList.toggle('active', isTarget);
+        item.style.display = isTarget ? '' : 'none';
+    });
+    gallery.querySelectorAll('.msg-gallery-strip-item').forEach(item => {
+        item.classList.toggle('active', parseInt(item.dataset.idx) === idx);
+    });
+    const counter = gallery.querySelector('.msg-gallery-counter');
+    if (counter) counter.textContent = (idx + 1) + ' / ' + gallery.dataset.total;
+    const prev = gallery.querySelector('.msg-gallery-prev');
+    const next = gallery.querySelector('.msg-gallery-next');
+    if (prev) prev.disabled = idx === 0;
+    if (next) next.disabled = idx === parseInt(gallery.dataset.total) - 1;
+}
+
+// ===== Multi-File Gallery in Messages =====
+function buildMultiFileCardHtml(files) {
+    if (!files || files.length === 0) return '';
+    if (files.length === 1) return buildFileCardHtml(files[0]);
+
+    const galleryId = 'gallery-' + Date.now() + '-' + Math.random().toString(36).substr(2, 5);
+    let html = '<div class="msg-file-gallery" id="' + galleryId + '" data-index="0" data-total="' + files.length + '">';
+
+    // Navigation arrows
+    html += '<div class="msg-gallery-nav">';
+    html += '<button class="msg-gallery-btn msg-gallery-prev" data-dir="-1" disabled>&#8249;</button>';
+    html += '<span class="msg-gallery-counter">1 / ' + files.length + '</span>';
+    html += '<button class="msg-gallery-btn msg-gallery-next" data-dir="1">&#8250;</button>';
+    html += '</div>';
+
+    // File items container - only one visible at a time
+    html += '<div class="msg-gallery-items">';
+    files.forEach((f, idx) => {
+        const activeClass = idx === 0 ? ' active' : '';
+        const display = idx === 0 ? '' : ' style="display:none"';
+        html += '<div class="msg-gallery-item' + activeClass + '" data-idx="' + idx + '"' + display + '>';
+        html += buildFileCardHtml(f);
+        html += '</div>';
+    });
+    html += '</div>';
+
+    // File list strip
+    html += '<div class="msg-gallery-strip">';
+    files.forEach((f, idx) => {
+        const icon = getFileIcon(f.mime_type);
+        html += '<div class="msg-gallery-strip-item' + (idx === 0 ? ' active' : '') + '" data-idx="' + idx + '" title="' + escapeHtml(f.filename) + '">';
+        html += '<span class="msg-strip-icon">' + icon + '</span>';
+        html += '<span class="msg-strip-name">' + escapeHtml(f.filename) + '</span>';
+        html += '</div>';
+    });
+    html += '</div>';
+
+    html += '</div>';
+    return html;
+}
+
 async function loadMediaPreview(container, fileData) {
     if (!container) return;
     const isImage = fileData.mime_type && fileData.mime_type.startsWith('image/');
@@ -2251,7 +2636,22 @@ async function loadMediaPreview(container, fileData) {
             img.src = url;
             img.loading = 'lazy';
             img.alt = fileData.filename;
-            img.addEventListener('click', () => openMediaViewer(url, 'image', fileData));
+            img.addEventListener('click', () => {
+                const parentMsg = container.closest('.message');
+                const allPreviews = parentMsg ? parentMsg.querySelectorAll('.file-preview') : [container];
+                const gallery = [];
+                allPreviews.forEach(p => {
+                    const mime = p.dataset.mime || '';
+                    if (mime.startsWith('image/') || mime.startsWith('video/') || mime.startsWith('audio/')) {
+                        const mediaEl = p.querySelector('img, video, audio');
+                        if (mediaEl && mediaEl.src) {
+                            const t = mime.startsWith('image/') ? 'image' : mime.startsWith('video/') ? 'video' : 'audio';
+                            gallery.push({ url: mediaEl.src, type: t, fileData: { file_id: p.dataset.fileId, file_key: p.dataset.key, mime_type: mime, filename: p.dataset.filename, file_size: parseInt(p.dataset.size || '0') } });
+                        }
+                    }
+                });
+                openMediaViewer(url, 'image', fileData, gallery.length > 0 ? gallery : [{url, type: 'image', fileData}]);
+            });
             container.appendChild(img);
         } else if (isVideo) {
             const video = document.createElement('video');
@@ -2259,7 +2659,22 @@ async function loadMediaPreview(container, fileData) {
             video.preload = 'metadata';
             video.playsInline = true;
             video.muted = true;
-            video.addEventListener('click', () => openMediaViewer(url, 'video', fileData));
+            video.addEventListener('click', () => {
+                const parentMsg = container.closest('.message');
+                const allPreviews = parentMsg ? parentMsg.querySelectorAll('.file-preview') : [container];
+                const gallery = [];
+                allPreviews.forEach(p => {
+                    const mime = p.dataset.mime || '';
+                    if (mime.startsWith('image/') || mime.startsWith('video/') || mime.startsWith('audio/')) {
+                        const mediaEl = p.querySelector('img, video, audio');
+                        if (mediaEl && mediaEl.src) {
+                            const t = mime.startsWith('image/') ? 'image' : mime.startsWith('video/') ? 'video' : 'audio';
+                            gallery.push({ url: mediaEl.src, type: t, fileData: { file_id: p.dataset.fileId, file_key: p.dataset.key, mime_type: mime, filename: p.dataset.filename, file_size: parseInt(p.dataset.size || '0') } });
+                        }
+                    }
+                });
+                openMediaViewer(url, 'video', fileData, gallery.length > 0 ? gallery : [{url, type: 'video', fileData}]);
+            });
             const playOverlay = document.createElement('div');
             playOverlay.className = 'video-play-overlay';
             playOverlay.textContent = '▶';
@@ -2267,9 +2682,14 @@ async function loadMediaPreview(container, fileData) {
             container.appendChild(playOverlay);
         } else if (isAudio) {
             const audio = document.createElement('audio');
-            audio.src = url;
             audio.controls = true;
+            audio.preload = 'metadata';
+            audio.src = url;
             audio.style.width = '100%';
+            audio.onerror = () => {
+                console.warn('Audio preview failed:', blob.type, blob.size, 'file:', fileData.filename);
+                container.innerHTML = '<span style="font-size:24px">🎵</span><span style="color:var(--text-muted);font-size:13px">Audio preview unavailable</span>';
+            };
             container.appendChild(audio);
         } else if (isText) {
             try {
@@ -2337,7 +2757,8 @@ async function downloadAndDecryptFile(fileId, fileKeyB64, mimeType, fileSize) {
         offset += c.length;
     }
 
-    return new Blob([result], { type: mimeType || 'application/octet-stream' });
+    const normalizedMime = mimeType && mimeType.startsWith('audio/') ? normalizeAudioMimeType(mimeType) : (mimeType || 'application/octet-stream');
+    return new Blob([result], { type: normalizedMime });
 }
 
 async function downloadFileById(fileId, fileKeyB64, filename, mimeType, fileSize) {
@@ -2364,14 +2785,29 @@ async function downloadFileById(fileId, fileKeyB64, filename, mimeType, fileSize
 // ===== Fullscreen Media Viewer =====
 
 let viewerZoomed = false;
+let viewerMediaItems = []; // gallery items: [{url, type, fileData}]
+let viewerCurrentIndex = 0;
 
-function openMediaViewer(url, type, fileData) {
+function openMediaViewer(url, type, fileData, galleryItems) {
     const viewer = document.getElementById('media-viewer');
     const content = document.getElementById('media-viewer-content');
     const controls = document.getElementById('video-controls');
 
     content.innerHTML = '';
     viewerZoomed = false;
+
+    // Gallery support
+    if (galleryItems && galleryItems.length > 0) {
+        viewerMediaItems = galleryItems;
+        viewerCurrentIndex = galleryItems.findIndex(item => item.url === url);
+        if (viewerCurrentIndex === -1) viewerCurrentIndex = 0;
+    } else {
+        viewerMediaItems = [];
+        viewerCurrentIndex = 0;
+    }
+
+    // Remove old nav arrows
+    content.parentElement.querySelectorAll('.gallery-nav-btn-viewer').forEach(b => b.remove());
 
     if (type === 'image') {
         controls.style.display = 'none';
@@ -2435,11 +2871,174 @@ function openMediaViewer(url, type, fileData) {
         content.appendChild(video);
 
         controls.style.display = 'flex';
+        document.getElementById('audio-controls').style.display = 'none';
         setupVideoControls(video);
+    } else if (type === 'audio') {
+        const audio = document.createElement('audio');
+        // Show audio icon and filename in content area
+        const audioInfo = document.createElement('div');
+        audioInfo.style.cssText = 'text-align:center;color:#fff;padding:40px 20px;max-width:400px';
+        const audioFilename = (fileData && fileData.filename) ? escapeHtml(fileData.filename) : 'Audio';
+        audioInfo.innerHTML = '<div style="font-size:64px;margin-bottom:16px">&#127925;</div>' +
+            '<div style="font-size:16px;margin-bottom:20px;word-break:break-all;opacity:0.9">' + audioFilename + '</div>';
+        content.appendChild(audioInfo);
+        audio.src = url;
+        audio.controls = false;
+        audio.style.cssText = 'visibility:hidden;position:absolute;height:0;overflow:hidden';
+        content.appendChild(audio);
+
+        controls.style.display = 'none';
+        const audioControls = document.getElementById('audio-controls');
+        audioControls.style.display = 'flex';
+        setupAudioControls(audio);
+    }
+
+    // Gallery navigation arrows
+    if (viewerMediaItems.length > 1) {
+        const parent = document.getElementById('media-viewer');
+        parent.querySelectorAll('.gallery-nav-btn-viewer').forEach(b => b.remove());
+
+        const prevBtn = document.createElement('button');
+        prevBtn.className = 'gallery-nav-btn-viewer gallery-nav-prev';
+        prevBtn.innerHTML = '&#8249;';
+        prevBtn.title = 'Previous';
+        prevBtn.style.cssText = 'position:absolute;left:12px;top:50%;transform:translateY(-50%);z-index:10002;width:48px;height:48px;background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.2);border-radius:50%;color:#fff;font-size:28px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s';
+        if (viewerCurrentIndex === 0) { prevBtn.style.opacity = '0.3'; prevBtn.style.pointerEvents = 'none'; }
+        prevBtn.addEventListener('click', (e) => { e.stopPropagation(); navigateViewer(-1); });
+        parent.appendChild(prevBtn);
+
+        const nextBtn = document.createElement('button');
+        nextBtn.className = 'gallery-nav-btn-viewer gallery-nav-next';
+        nextBtn.innerHTML = '&#8250;';
+        nextBtn.title = 'Next';
+        nextBtn.style.cssText = 'position:absolute;right:12px;top:50%;transform:translateY(-50%);z-index:10002;width:48px;height:48px;background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.2);border-radius:50%;color:#fff;font-size:28px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s';
+        if (viewerCurrentIndex === viewerMediaItems.length - 1) { nextBtn.style.opacity = '0.3'; nextBtn.style.pointerEvents = 'none'; }
+        nextBtn.addEventListener('click', (e) => { e.stopPropagation(); navigateViewer(1); });
+        parent.appendChild(nextBtn);
+
+        // Counter badge
+        const counter = document.createElement('div');
+        counter.className = 'gallery-nav-btn-viewer gallery-counter-viewer';
+        counter.textContent = (viewerCurrentIndex + 1) + ' / ' + viewerMediaItems.length;
+        counter.style.cssText = 'position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:10002;background:rgba(0,0,0,0.6);color:#fff;padding:4px 12px;border-radius:12px;font-size:13px;pointer-events:none';
+        parent.appendChild(counter);
+    }
+
+    // Keyboard navigation for gallery
+    document.removeEventListener('keydown', viewerKeyHandler);
+    if (viewerMediaItems.length > 1) {
+        document.addEventListener('keydown', viewerKeyHandler);
     }
 
     viewer.style.display = 'flex';
     document.body.style.overflow = 'hidden';
+}
+
+function viewerKeyHandler(e) {
+    if (e.key === 'ArrowLeft') { e.preventDefault(); navigateViewer(-1); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); navigateViewer(1); }
+    else if (e.key === 'Escape') { closeMediaViewer(); }
+}
+
+function navigateViewer(direction) {
+    if (viewerMediaItems.length === 0) return;
+    const newIndex = viewerCurrentIndex + direction;
+    if (newIndex < 0 || newIndex >= viewerMediaItems.length) return;
+    viewerCurrentIndex = newIndex;
+    const item = viewerMediaItems[newIndex];
+
+    const viewer = document.getElementById('media-viewer');
+    const content = document.getElementById('media-viewer-content');
+    const videoControls = document.getElementById('video-controls');
+    const audioControls = document.getElementById('audio-controls');
+
+    // Pause any playing media
+    const oldVideo = content.querySelector('video');
+    const oldAudio = content.querySelector('audio');
+    if (oldVideo) { oldVideo.pause(); oldVideo.src = ''; }
+    if (oldAudio) { oldAudio.pause(); oldAudio.src = ''; }
+
+    viewerZoomed = false;
+    content.innerHTML = '';
+
+    if (item.type === 'image') {
+        videoControls.style.display = 'none';
+        audioControls.style.display = 'none';
+        const img = document.createElement('img');
+        img.src = item.url;
+        img.draggable = false;
+        img.onerror = () => { content.innerHTML = '<div style="color:#fff;text-align:center;padding:40px">Failed to load image</div>'; };
+        img.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            if (!viewerZoomed) {
+                viewerZoomed = true;
+                img.classList.add('zoomed');
+                updateZoomPosition(img, e);
+            } else {
+                viewerZoomed = false;
+                img.classList.remove('zoomed');
+                img.style.transform = '';
+            }
+        });
+        img.addEventListener('mousemove', (e) => {
+            if (viewerZoomed) updateZoomPosition(img, e);
+        });
+        content.appendChild(img);
+    } else if (item.type === 'video') {
+        const video = document.createElement('video');
+        video.src = item.url;
+        video.controls = false;
+        video.playsInline = true;
+        video.onerror = () => { content.innerHTML = '<div style="color:#fff;text-align:center;padding:40px">Failed to load video</div>'; };
+        content.appendChild(video);
+        videoControls.style.display = 'flex';
+        audioControls.style.display = 'none';
+        setupVideoControls(video);
+    } else if (item.type === 'audio') {
+        const audio = document.createElement('audio');
+        audio.src = item.url;
+        audio.controls = false;
+        audio.onerror = () => { content.innerHTML = '<div style="color:#fff;text-align:center;padding:40px">Failed to load audio</div>'; };
+        content.appendChild(audio);
+        videoControls.style.display = 'none';
+        audioControls.style.display = 'flex';
+        setupAudioControls(audio);
+    }
+
+    // Update gallery arrows and counter
+    updateGalleryNav();
+}
+
+function updateGalleryNav() {
+    const contentEl = document.getElementById('media-viewer-content');
+    const parent = contentEl.parentElement;
+    parent.querySelectorAll('.gallery-nav-btn-viewer').forEach(b => b.remove());
+
+    if (viewerMediaItems.length <= 1) return;
+
+    const prevBtn = document.createElement('button');
+    prevBtn.className = 'gallery-nav-btn-viewer gallery-nav-prev';
+    prevBtn.innerHTML = '&#8249;';
+    prevBtn.title = 'Previous';
+    prevBtn.style.cssText = 'position:absolute;left:12px;top:50%;transform:translateY(-50%);z-index:10002;width:48px;height:48px;background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.2);border-radius:50%;color:#fff;font-size:28px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s';
+    if (viewerCurrentIndex === 0) { prevBtn.style.opacity = '0.3'; prevBtn.style.pointerEvents = 'none'; }
+    prevBtn.addEventListener('click', (e) => { e.stopPropagation(); navigateViewer(-1); });
+    parent.appendChild(prevBtn);
+
+    const nextBtn = document.createElement('button');
+    nextBtn.className = 'gallery-nav-btn-viewer gallery-nav-next';
+    nextBtn.innerHTML = '&#8250;';
+    nextBtn.title = 'Next';
+    nextBtn.style.cssText = 'position:absolute;right:12px;top:50%;transform:translateY(-50%);z-index:10002;width:48px;height:48px;background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.2);border-radius:50%;color:#fff;font-size:28px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s';
+    if (viewerCurrentIndex === viewerMediaItems.length - 1) { nextBtn.style.opacity = '0.3'; nextBtn.style.pointerEvents = 'none'; }
+    nextBtn.addEventListener('click', (e) => { e.stopPropagation(); navigateViewer(1); });
+    parent.appendChild(nextBtn);
+
+    const counter = document.createElement('div');
+    counter.className = 'gallery-nav-btn-viewer gallery-counter-viewer';
+    counter.textContent = (viewerCurrentIndex + 1) + ' / ' + viewerMediaItems.length;
+    counter.style.cssText = 'position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:10002;background:rgba(0,0,0,0.6);color:#fff;padding:4px 12px;border-radius:12px;font-size:13px;pointer-events:none';
+    parent.appendChild(counter);
 }
 
 function updateZoomPosition(img, e) {
@@ -2466,6 +3065,11 @@ function closeMediaViewer() {
     document.body.style.overflow = '';
     viewerZoomed = false;
     document.getElementById('video-controls').style.display = 'none';
+    document.getElementById('audio-controls').style.display = 'none';
+    // Remove keyboard listener
+    document.removeEventListener('keydown', viewerKeyHandler);
+    viewerMediaItems = [];
+    viewerCurrentIndex = 0;
 }
 
 function setupVideoControls(video) {
@@ -2480,6 +3084,8 @@ function setupVideoControls(video) {
     const fullscreenBtn = document.getElementById('vc-fullscreen');
     const playedBar = document.getElementById('vc-played');
     const bufferedBar = document.getElementById('vc-buffered');
+    const volumeSlider = document.getElementById('vc-volume');
+    const muteBtn = document.getElementById('vc-mute');
 
     playPauseBtn.innerHTML = '▶';
 
@@ -2515,6 +3121,28 @@ function setupVideoControls(video) {
         }
     });
 
+    // Volume control
+    if (volumeSlider) {
+        volumeSlider.value = video.volume * 100;
+        volumeSlider.addEventListener('input', () => {
+            video.volume = volumeSlider.value / 100;
+            video.muted = false;
+            updateVolumeIcon(muteBtn, video.volume);
+        });
+    }
+
+    if (muteBtn) {
+        muteBtn.onclick = () => {
+            video.muted = !video.muted;
+            updateVolumeIcon(muteBtn, video.muted ? 0 : video.volume);
+        };
+    }
+
+    video.addEventListener('volumechange', () => {
+        if (volumeSlider) volumeSlider.value = video.muted ? 0 : video.volume * 100;
+        updateVolumeIcon(muteBtn, video.muted ? 0 : video.volume);
+    });
+
     fullscreenBtn.onclick = () => {
         const viewer = document.getElementById('media-viewer');
         if (viewer.requestFullscreen) viewer.requestFullscreen();
@@ -2522,9 +3150,86 @@ function setupVideoControls(video) {
     };
 }
 
+function updateVolumeIcon(btn, volume) {
+    if (!btn) return;
+    if (volume === 0 || volume === undefined) {
+        btn.innerHTML = '&#128263;'; // muted
+    } else if (volume < 0.5) {
+        btn.innerHTML = '&#128265;'; // low
+    } else {
+        btn.innerHTML = '&#128266;'; // high
+    }
+}
+
 function formatTime(seconds) {
     if (!isFinite(seconds)) return '0:00';
     const m = Math.floor(seconds / 60);
     const s = Math.floor(seconds % 60);
     return m + ':' + (s < 10 ? '0' : '') + s;
+}
+
+// ===== Audio Controls (inline, no fullscreen) =====
+function setupAudioControls(audio) {
+    const controls = document.getElementById('audio-controls');
+    const freshControls = controls.cloneNode(true);
+    controls.parentNode.replaceChild(freshControls, controls);
+
+    const playPauseBtn = document.getElementById('ac-play-pause');
+    const seekInput = document.getElementById('ac-seek');
+    const timeDisplay = document.getElementById('ac-time');
+    const playedBar = document.getElementById('ac-played');
+    const bufferedBar = document.getElementById('ac-buffered');
+    const volumeSlider = document.getElementById('ac-volume');
+    const muteBtn = document.getElementById('ac-mute');
+
+    playPauseBtn.innerHTML = '▶';
+
+    playPauseBtn.onclick = () => {
+        if (audio.paused) { audio.play(); } else { audio.pause(); }
+    };
+
+    audio.addEventListener('play', () => { playPauseBtn.innerHTML = '⏸'; });
+    audio.addEventListener('pause', () => { playPauseBtn.innerHTML = '▶'; });
+
+    audio.addEventListener('timeupdate', () => {
+        if (!audio.duration) return;
+        const pct = (audio.currentTime / audio.duration) * 1000;
+        seekInput.value = pct;
+        playedBar.style.width = (pct / 10) + '%';
+        timeDisplay.textContent = formatTime(audio.currentTime) + ' / ' + formatTime(audio.duration);
+    });
+
+    audio.addEventListener('progress', () => {
+        if (!audio.duration || !audio.buffered.length) return;
+        const buffEnd = audio.buffered.end(audio.buffered.length - 1);
+        bufferedBar.style.width = (buffEnd / audio.duration * 100) + '%';
+    });
+
+    seekInput.addEventListener('input', () => {
+        if (audio.duration) {
+            audio.currentTime = (seekInput.value / 1000) * audio.duration;
+        }
+    });
+
+    // Volume control
+    if (volumeSlider) {
+        volumeSlider.value = audio.volume * 100;
+        volumeSlider.addEventListener('input', () => {
+            audio.volume = volumeSlider.value / 100;
+            audio.muted = false;
+            updateVolumeIcon(muteBtn, audio.volume);
+        });
+    }
+
+    if (muteBtn) {
+        muteBtn.onclick = () => {
+            audio.muted = !audio.muted;
+            updateVolumeIcon(muteBtn, audio.muted ? 0 : audio.volume);
+        };
+    }
+
+    audio.addEventListener('volumechange', () => {
+        if (volumeSlider) volumeSlider.value = audio.muted ? 0 : audio.volume * 100;
+        updateVolumeIcon(muteBtn, audio.muted ? 0 : audio.volume);
+    });
 }
