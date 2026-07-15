@@ -183,8 +183,11 @@ async fn main() {
         .route("/api/admin/friend-requests", get(handlers::admin_list_friend_requests))
         .route("/api/admin/friendships", get(handlers::admin_list_friendships))
         .route("/api/admin/user-public-keys", get(handlers::admin_list_user_public_keys))
-        .route("/api/admin/files", get(handlers::admin_list_files))
-        .route("/api/admin/clear", post(handlers::admin_clear_all))
+.route("/api/admin/files", get(handlers::admin_list_files))
+.route("/api/admin/user-stickers", get(handlers::admin_list_user_stickers))
+.route("/api/admin/server-stickers", get(handlers::admin_list_server_stickers))
+.route("/api/admin/user-key-escrow", get(handlers::admin_list_user_key_escrow))
+.route("/api/admin/clear", post(handlers::admin_clear_all))
         // Phase 4: Friends + DMs
         .route("/api/me", get(handlers::get_me).delete(handlers::delete_me))
         .route("/api/friends", get(handlers::list_friends))

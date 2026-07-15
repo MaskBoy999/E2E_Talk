@@ -2752,8 +2752,90 @@ impl Database {
         .map_err(|e| e.to_string())
     }
 
+    // --- Admin: missing tables ---
+
+    pub fn list_all_user_stickers_admin(&self) -> Result<Vec<(String, String, String, String, String, String, String)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT us.id, us.user_id, COALESCE(u.username, '?'), us.file_id, us.sticker_name, us.file_key, COALESCE(us.mime_type, '')
+                 FROM user_stickers us LEFT JOIN users u ON us.user_id = u.id ORDER BY us.created_at DESC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    pub fn list_all_server_stickers_admin(&self) -> Result<Vec<(String, String, String, String, String, String, String)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT ss.id, ss.server_id, COALESCE(s.name, '?'), ss.file_id, ss.uploaded_by, ss.sticker_name, COALESCE(ss.file_key, '')
+                 FROM server_stickers ss LEFT JOIN servers s ON ss.server_id = s.id ORDER BY ss.created_at DESC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    pub fn list_all_user_key_escrow_admin(&self) -> Result<Vec<(String, String, String, String, String)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT eke.user_id, COALESCE(u.username, '?'), eke.created_at, eke.updated_at,
+                 CASE WHEN eke.encrypted_private_key IS NOT NULL THEN 1 ELSE 0 END
+                 FROM user_key_escrow eke LEFT JOIN users u ON eke.user_id = u.id ORDER BY eke.created_at",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i32>(4)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
     pub fn clear_all(&self) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM user_stickers", []).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM server_stickers", []).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM user_key_escrow", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM files", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM messages", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM server_keys", []).map_err(|e| e.to_string())?;

@@ -1071,6 +1071,7 @@ async function appendMessage(msg) {
     let forwardData = null;
     let gifData = null;
     let stickerData = null;
+    let extraEmojis = null; // emoji refs embedded in message payload by sender
     if (msg.encrypted_content && msg.nonce && currentChannelId && currentServerId) {
         try {
             textContent = E2ECrypto.decrypt(msg.encrypted_content, msg.nonce, currentChannelId, currentServerId, msg.message_nonce);
@@ -1096,6 +1097,18 @@ async function appendMessage(msg) {
                 }
                 if (parsed && parsed.reply_to) {
                     replyTo = parsed.reply_to;
+                }
+                if (parsed && Array.isArray(parsed.emojis) && parsed.emojis.length > 0) {
+                    extraEmojis = {};
+                    for (const ref of parsed.emojis) {
+                        if (ref.name && ref.file_id && ref.file_key) {
+                            extraEmojis[ref.name] = {
+                                file_id: ref.file_id,
+                                file_key: ref.file_key,
+                                mime_type: ref.mime_type || 'image/png',
+                            };
+                        }
+                    }
                 }
             } catch (_) {}
         } catch (e) {
@@ -1135,7 +1148,7 @@ async function appendMessage(msg) {
     } else if (fileData) {
         contentHtml += buildFileCardHtml(fileData);
     } else if (textContent) {
-        contentHtml += '<div class="text"><span class="time-hover">' + time + '</span>' + renderEmojiText(textContent) + '</div>';
+        contentHtml += '<div class="text"><span class="time-hover">' + time + '</span>' + renderEmojiText(textContent, extraEmojis) + '</div>';
     }
 
     const actionsHtml = '<div class="message-actions">' +
@@ -1543,8 +1556,12 @@ async function sendMessage() {
     }
 
     let plaintext = content;
-    if (pendingReply) {
-        plaintext = JSON.stringify({ type: 'text', text: content, reply_to: pendingReply });
+    const emojiRefs = collectEmojiRefs(content);
+    if (pendingReply || emojiRefs.length > 0) {
+        const payload = { type: 'text', text: content };
+        if (pendingReply) payload.reply_to = pendingReply;
+        if (emojiRefs.length > 0) payload.emojis = emojiRefs;
+        plaintext = JSON.stringify(payload);
     }
 
     var encrypted;
@@ -1786,6 +1803,7 @@ function appendDmMessage(msg, kp, otherPublicKey) {
     let stickerData = null;
     let gifData = null;
     let replyTo = null;
+    let extraEmojis = null; // emoji refs embedded in message payload by sender
     if (msg.encrypted_content && msg.nonce && kp && otherPublicKey) {
         try {
             const dmId = msg.dm_channel_id || currentDmChannelId;
@@ -1810,6 +1828,18 @@ function appendDmMessage(msg, kp, otherPublicKey) {
                 }
                 if (parsed && parsed.reply_to) {
                     replyTo = parsed.reply_to;
+                }
+                if (parsed && Array.isArray(parsed.emojis) && parsed.emojis.length > 0) {
+                    extraEmojis = {};
+                    for (const ref of parsed.emojis) {
+                        if (ref.name && ref.file_id && ref.file_key) {
+                            extraEmojis[ref.name] = {
+                                file_id: ref.file_id,
+                                file_key: ref.file_key,
+                                mime_type: ref.mime_type || 'image/png',
+                            };
+                        }
+                    }
                 }
             } catch (_) {}
         } catch (e) {
@@ -1836,7 +1866,7 @@ function appendDmMessage(msg, kp, otherPublicKey) {
     } else if (fileData) {
         contentHtml += buildFileCardHtml(fileData);
     } else if (textContent) {
-        contentHtml += '<div class="text"><span class="time-hover">' + time + '</span>' + renderEmojiText(textContent) + '</div>';
+        contentHtml += '<div class="text"><span class="time-hover">' + time + '</span>' + renderEmojiText(textContent, extraEmojis) + '</div>';
     }
 
     div.innerHTML =
@@ -1938,8 +1968,12 @@ async function sendDmMessage() {
     }
 
     let plaintext = content;
-    if (pendingReply) {
-        plaintext = JSON.stringify({ type: 'text', text: content, reply_to: pendingReply });
+    const emojiRefs = collectEmojiRefs(content);
+    if (pendingReply || emojiRefs.length > 0) {
+        const payload = { type: 'text', text: content };
+        if (pendingReply) payload.reply_to = pendingReply;
+        if (emojiRefs.length > 0) payload.emojis = emojiRefs;
+        plaintext = JSON.stringify(payload);
     }
 
     var encrypted;
@@ -4704,10 +4738,16 @@ function renderEmojiGrid(container) {
                     img.style.cssText = 'width:28px;height:28px;object-fit:contain;';
                     item.appendChild(img);
                 } else {
-                    const identity = E2ECrypto.getIdentityKeyPair();
-                    if (identity && cacheEntry.file_id) {
-                        const fileKey = identity.privateKey;
-                        downloadAndDecryptStickerData(cacheEntry.file_id, fileKey, cacheEntry.mime_type || 'image/png')
+                    let pickerKey = null;
+                    if (cacheEntry.file_key) {
+                        try { pickerKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(cacheEntry.file_key)); } catch (_) {}
+                    }
+                    if (!pickerKey) {
+                        const identity = E2ECrypto.getIdentityKeyPair();
+                        if (identity) pickerKey = identity.privateKey;
+                    }
+                    if (pickerKey && cacheEntry.file_id) {
+                        downloadAndDecryptStickerData(cacheEntry.file_id, pickerKey, cacheEntry.mime_type || 'image/png')
                             .then(blob => {
                                 const url = URL.createObjectURL(blob);
                                 emojiBlobCache[name] = url;
@@ -4815,8 +4855,45 @@ async function loadEmojiCache() {
     return emojiCache;
 }
 
-function renderEmojiText(text) {
-    if (!emojiCache || Object.keys(emojiCache).length === 0) return escapeHtml(text);
+// Collect shareable refs ({name, file_id, file_key, mime_type}) for every
+// :name: shortcode in `text` that exists in the local emoji registry. Only
+// entries with a shareable file_key are included, so recipients can decrypt them.
+function collectEmojiRefs(text) {
+    if (!emojiCache || Object.keys(emojiCache).length === 0) return [];
+    const parts = text.split(/:([a-zA-Z0-9_]+):/);
+    if (parts.length <= 1) return [];
+    const refs = [];
+    const seen = {};
+    for (let i = 1; i < parts.length; i += 2) {
+        const name = parts[i];
+        if (seen[name]) continue;
+        const entry = emojiCache[name];
+        if (entry && entry.file_id && entry.file_key) {
+            seen[name] = true;
+            refs.push({
+                name: name,
+                file_id: entry.file_id,
+                file_key: entry.file_key,
+                mime_type: entry.mime_type || 'image/png',
+            });
+        }
+    }
+    return refs;
+}
+
+// Resolve a custom-emoji entry by shortcode. Per-message refs (received from
+// other users) take priority over the local registry so shared emojis render
+// for recipients who never uploaded them.
+function getEmojiEntry(name, extraEmojis) {
+    if (extraEmojis && extraEmojis[name]) return extraEmojis[name];
+    if (emojiCache && emojiCache[name]) return emojiCache[name];
+    return null;
+}
+
+function renderEmojiText(text, extraEmojis) {
+    const hasKnown = (emojiCache && Object.keys(emojiCache).length > 0) ||
+        (extraEmojis && Object.keys(extraEmojis).length > 0);
+    if (!hasKnown) return escapeHtml(text);
 
     // Split by :name: patterns (word characters only)
     const parts = text.split(/:([a-zA-Z0-9_]+):/);
@@ -4837,13 +4914,14 @@ function renderEmojiText(text) {
     for (let i = 0; i < parts.length; i++) {
         if (i % 2 === 1) {
             const name = parts[i];
-            if (emojiCache[name]) {
+            const entry = getEmojiEntry(name, extraEmojis);
+            if (entry) {
                 if (emojiBlobCache[name]) {
                     html += '<img class="' + emojiClass + '" src="' + emojiBlobCache[name] + '" alt=":' + name + ':" title=":' + name + ':">';
                 } else {
                     const spanClass = emojiOnly ? 'emoji-loading emoji-alone' : 'emoji-loading';
                     html += '<span class="' + spanClass + '" data-emoji-name="' + escapeHtml(name) + '">:' + escapeHtml(name) + ':</span>';
-                    loadEmojiBlob(name);
+                    loadEmojiBlob(name, extraEmojis);
                 }
             } else {
                 html += ':' + escapeHtml(name) + ':';
@@ -4855,21 +4933,29 @@ function renderEmojiText(text) {
     return html;
 }
 
-async function loadEmojiBlob(name) {
-    const entry = emojiCache[name];
-    if (!entry || emojiBlobCache[name]) return;
+async function loadEmojiBlob(name, extraEmojis) {
+    const entry = getEmojiEntry(name, extraEmojis);
+    if (!entry || !entry.file_id || emojiBlobCache[name]) return;
     try {
-        const identity = E2ECrypto.getIdentityKeyPair();
-        if (!identity || !entry.file_id) return;
-        const fileKey = identity.privateKey;
+        // Prefer a stored shareable file_key; fall back to own identity key
+        // (legacy emoji uploads that were encrypted with the identity key).
+        let fileKey;
+        if (entry.file_key) {
+            fileKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(entry.file_key));
+        } else {
+            const identity = E2ECrypto.getIdentityKeyPair();
+            if (!identity) return;
+            fileKey = identity.privateKey;
+        }
         const mime = entry.mime_type || 'image/png';
         const blob = await downloadAndDecryptStickerData(entry.file_id, fileKey, mime);
         const url = URL.createObjectURL(blob);
         emojiBlobCache[name] = url;
-        // Replace all loading placeholders in the DOM
+        // Replace all loading placeholders in the DOM. Preserve the emoji-alone
+        // (large) class so a lone emoji doesn't shrink once it finishes loading.
         document.querySelectorAll('.emoji-loading[data-emoji-name="' + name + '"]').forEach(el => {
             const img = document.createElement('img');
-            img.className = 'emoji-inline';
+            img.className = el.classList.contains('emoji-alone') ? 'emoji-inline emoji-alone' : 'emoji-inline';
             img.src = url;
             img.alt = ':' + name + ':';
             img.title = ':' + name + ':';
@@ -5492,6 +5578,10 @@ async function processAndUploadSticker() {
         const originalFile = stickerCropState.file;
 
         let blob, mimeType;
+        // Emojis get a random shareable key so other users can decrypt them via
+        // the file_key embedded in messages; stickers/GIFs still use identity.
+        let emojiUploadFileKey = null;
+        let emojiUploadFileKeyB64 = null;
 
         // Create a canvas and crop/resize the image
         const canvas = document.createElement('canvas');
@@ -5517,6 +5607,10 @@ async function processAndUploadSticker() {
             blob = await new Promise(resolve => canvas.toBlob(resolve, outputMime));
             if (!blob) throw new Error('Failed to process emoji');
             mimeType = 'image/emoji';
+            // Emojis use a random shareable key (not the identity key) so that
+            // the file_key embedded in messages lets other users decrypt them.
+            emojiUploadFileKey = E2ECrypto.generateFileKey();
+            emojiUploadFileKeyB64 = E2ECrypto.arrayBufferToBase64(emojiUploadFileKey);
         } else if (stickerUploadMode === 'gif') {
             // GIFs are always uploaded as-is to preserve animation, no cropping
             blob = originalFile;
@@ -5549,10 +5643,11 @@ async function processAndUploadSticker() {
         if (progressText) progressText.textContent = 'Uploading...';
         if (progressFill) progressFill.style.width = '15%';
 
-        // Use identity private key directly — it's a 32-byte X25519 key synced across devices
+        // Use the random shareable key for emojis (set above), or the identity
+        // private key for stickers/GIFs (synced across devices).
         const identity = E2ECrypto.getIdentityKeyPair();
         if (!identity) throw new Error('No identity key - cannot encrypt sticker');
-        const fileKey = identity.privateKey;
+        const fileKey = emojiUploadFileKey || identity.privateKey;
 
         // Init file upload
         const initRes = await authFetch('/api/files/init', {
@@ -5586,7 +5681,8 @@ async function processAndUploadSticker() {
         const completeRes = await authFetch('/api/files/' + file_id + '/complete', { method: 'POST' });
         if (!completeRes.ok) throw new Error('Failed to finalize upload');
 
-        // Register as user sticker (NO file_key sent — key derived from identity)
+        // Register as user sticker. Emojis store their random shareable key so
+        // it can travel with messages; stickers/GIFs keep file_key null (identity-derived).
         if (progressText) progressText.textContent = 'Registering sticker...';
         if (progressFill) progressFill.style.width = '95%';
         const stickerRes = await authFetch('/api/users/me/stickers', {
@@ -5595,7 +5691,7 @@ async function processAndUploadSticker() {
             body: JSON.stringify({
                 file_id: file_id,
                 sticker_name: name,
-                file_key: null,
+                file_key: emojiUploadFileKeyB64,
                 mime_type: mimeType,
             }),
         });

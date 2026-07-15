@@ -2017,6 +2017,64 @@ pub async fn admin_delete_channel(
     }
 }
 
+pub async fn admin_list_user_stickers(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
+    let rows = match state.db.list_all_user_stickers_admin() {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let result: Vec<serde_json::Value> = rows.iter().map(|(id, uid, uname, fid, sname, fkey, mime)| {
+        serde_json::json!({
+            "id": id, "user_id": uid, "username": uname,
+            "file_id": fid, "sticker_name": sname,
+            "file_key": if fkey.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(fkey.clone()) },
+            "mime_type": mime,
+        })
+    }).collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
+pub async fn admin_list_server_stickers(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
+    let rows = match state.db.list_all_server_stickers_admin() {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let result: Vec<serde_json::Value> = rows.iter().map(|(id, sid, sname, fid, uby, stname, fkey)| {
+        serde_json::json!({
+            "id": id, "server_id": sid, "server_name": sname,
+            "file_id": fid, "uploaded_by": uby, "sticker_name": stname,
+            "file_key": if fkey.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(fkey.clone()) },
+        })
+    }).collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
+pub async fn admin_list_user_key_escrow(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
+    let rows = match state.db.list_all_user_key_escrow_admin() {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let result: Vec<serde_json::Value> = rows.iter().map(|(uid, uname, created, updated, has_key)| {
+        serde_json::json!({
+            "user_id": uid, "username": uname,
+            "created_at": created, "updated_at": updated,
+            "has_key": has_key != 0,
+        })
+    }).collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
 pub async fn admin_clear_all(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
