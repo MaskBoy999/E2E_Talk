@@ -548,6 +548,7 @@ pub async fn list_servers(
                 "id": s.id,
                 "name": s.name,
                 "is_owner": is_owner,
+                "joins_disabled": s.joins_disabled,
             })
         })
         .collect();
@@ -1009,6 +1010,28 @@ pub async fn list_server_bans(
     }
 }
 
+#[derive(Deserialize)]
+pub struct SetJoinsDisabledRequest {
+    pub disabled: bool,
+}
+
+pub async fn set_joins_disabled(
+    Path(server_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SetJoinsDisabledRequest>,
+) -> impl IntoResponse {
+    let caller_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    match state.db.set_joins_disabled(&server_id, &caller_id, req.disabled) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true, "joins_disabled": req.disabled}))).into_response(),
+        Err(e) => (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
 pub async fn delete_channel(
     Path(channel_id): Path<String>,
     headers: HeaderMap,
@@ -1124,6 +1147,65 @@ pub async fn list_messages(
     }
 
     let messages = match state.db.list_messages(&channel_id, 100) {
+        Ok(m) => m,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
+
+    let message_infos: Vec<serde_json::Value> = messages
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "id": m.id,
+                "sender_id": m.sender_id,
+                "sender_username": m.sender_username,
+                "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
+                "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
+                "timestamp": m.timestamp,
+                "message_nonce": m.message_nonce,
+                "edited_at": m.edited_at
+            })
+        })
+        .collect();
+
+    (StatusCode::OK, Json(serde_json::json!(message_infos))).into_response()
+}
+
+pub async fn list_messages_around(
+    Path((channel_id, message_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    let server_id = match state.db.get_server_id_for_channel(&channel_id) {
+        Ok(id) => id,
+        Err(e) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
+
+    if !state.db.is_member_of_server(&user_id, &server_id).unwrap_or(false) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Not a member of this server"})),
+        )
+            .into_response();
+    }
+
+    let messages = match state.db.list_messages_around(&channel_id, &message_id, 100) {
         Ok(m) => m,
         Err(e) => {
             return (
@@ -2069,7 +2151,7 @@ pub async fn admin_list_user_key_escrow(
         serde_json::json!({
             "user_id": uid, "username": uname,
             "created_at": created, "updated_at": updated,
-            "has_key": has_key != 0,
+            "has_key": *has_key != 0,
         })
     }).collect();
     (StatusCode::OK, Json(serde_json::json!(result))).into_response()
@@ -2559,10 +2641,12 @@ pub async fn send_friend_request(
 
     match state.db.create_friend_request(&user_id, &code) {
         Ok(target) => {
-            // Notify the recipient in real time (best-effort).
+            // Notify the recipient in real time (best-effort). Include sender username.
+            let sender_username = state.db.get_user_by_id(&user_id).ok().map(|u| u.username).unwrap_or_default();
             let notify = serde_json::json!({
                 "type": "friend_request_received",
                 "from_user_id": user_id,
+                "from_username": sender_username,
             });
             let _ = state
                 .ws_manager
@@ -2838,6 +2922,7 @@ pub async fn list_dm_conversations(
                         "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
                         "sender_id": m.sender_id,
                         "timestamp": m.timestamp,
+                        "message_nonce": m.message_nonce,
                     }),
                     None => serde_json::Value::Null,
                 };

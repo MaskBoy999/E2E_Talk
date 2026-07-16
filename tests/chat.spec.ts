@@ -821,8 +821,7 @@ test.describe('E2E Chat', () => {
         await input1.fill('Before kick');
         await page.click('#send-btn');
         await page.waitForTimeout(2000);
-        const user2MsgsBefore = await page2.locator('.message .text').allTextContents();
-        expect(user2MsgsBefore).toContain('Before kick');
+        await expect(page2.locator('.message .text').filter({ hasText: 'Before kick' })).toHaveCount(1);
 
         // User1 kicks user2 via API
         await page.request.post(`${BASE}/api/servers/${server.id}/members/kick`, {
@@ -837,9 +836,8 @@ test.describe('E2E Chat', () => {
         await page.waitForTimeout(2000);
 
         // User1 should see both messages
-        const user1Msgs = await page.locator('.message .text').allTextContents();
-        expect(user1Msgs).toContain('Before kick');
-        expect(user1Msgs).toContain('After kick');
+        await expect(page.locator('.message .text').filter({ hasText: 'Before kick' })).toHaveCount(1);
+        await expect(page.locator('.message .text').filter({ hasText: 'After kick' })).toHaveCount(1);
 
         await page2.close();
         await ctx2.close();

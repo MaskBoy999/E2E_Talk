@@ -88,6 +88,9 @@
                 <button class="tab-btn" data-tab="friendships">Friends</button>
                 <button class="tab-btn" data-tab="user-public-keys">Pub Keys</button>
                 <button class="tab-btn" data-tab="files">Files</button>
+                <button class="tab-btn" data-tab="user-stickers">User Stickers</button>
+                <button class="tab-btn" data-tab="server-stickers">Srv Stickers</button>
+                <button class="tab-btn" data-tab="user-key-escrow">Key Escrow</button>
             </div>
 
             <!-- Users Tab -->
@@ -100,8 +103,8 @@
                 </div>
                 <div class="table-scroll">
                     <table class="data-table">
-                        <thead><tr><th>Username</th><th>User ID</th><th>Actions</th></tr></thead>
-                        <tbody id="user-list"><tr><td colspan="3" class="empty-state">Loading...</td></tr></tbody>
+                        <thead><tr><th>Username</th><th>User ID</th></tr></thead>
+                        <tbody id="user-list"><tr><td colspan="2" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
             </div>
@@ -116,8 +119,8 @@
                 </div>
                 <div class="table-scroll">
                     <table class="data-table">
-                        <thead><tr><th>Name</th><th>Server ID</th><th>Owner ID</th><th>Actions</th></tr></thead>
-                        <tbody id="server-list"><tr><td colspan="4" class="empty-state">Loading...</td></tr></tbody>
+                        <thead><tr><th>Name</th><th>Server ID</th><th>Owner ID</th></tr></thead>
+                        <tbody id="server-list"><tr><td colspan="3" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
             </div>
@@ -132,8 +135,8 @@
                 </div>
                 <div class="table-scroll">
                     <table class="data-table">
-                        <thead><tr><th>Name</th><th>Channel ID</th><th>Server ID</th><th>Type</th><th>Actions</th></tr></thead>
-                        <tbody id="channel-list"><tr><td colspan="5" class="empty-state">Loading...</td></tr></tbody>
+                        <thead><tr><th>Name</th><th>Channel ID</th><th>Server ID</th><th>Type</th></tr></thead>
+                        <tbody id="channel-list"><tr><td colspan="4" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
             </div>
@@ -361,19 +364,53 @@
                     </table>
                 </div>
             </div>
-        </div>
-    </div>
 
-    <!-- Delete Confirmation Modal -->
-    <div id="confirm-modal" class="modal" style="display: none;">
-        <div class="modal-content">
-            <h3 id="confirm-title">Delete</h3>
-            <p id="confirm-message"></p>
-            <div id="cascade-stats" class="cascade-info" style="display: none;"></div>
-            <p class="warning" id="confirm-warning"></p>
-            <div class="modal-actions">
-                <button id="confirm-cancel" class="btn-cancel">Cancel</button>
-                <button id="confirm-delete" class="btn-delete">Delete</button>
+            <!-- User Stickers Tab -->
+            <div class="tab-content" id="tab-user-stickers">
+                <div class="table-header">
+                    <div class="search-bar">
+                        <input type="text" id="search-user-stickers" placeholder="Search by username, sticker name..." oninput="filterTab('user-stickers')">
+                        <span class="record-count" id="user-stickers-count"></span>
+                    </div>
+                </div>
+                <div class="table-scroll">
+                    <table class="data-table">
+                        <thead><tr><th>Username</th><th>Sticker Name</th><th>File ID</th><th>File Key</th><th>MIME</th></tr></thead>
+                        <tbody id="user-sticker-list"><tr><td colspan="5" class="empty-state">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Server Stickers Tab -->
+            <div class="tab-content" id="tab-server-stickers">
+                <div class="table-header">
+                    <div class="search-bar">
+                        <input type="text" id="search-server-stickers" placeholder="Search by server name, sticker name..." oninput="filterTab('server-stickers')">
+                        <span class="record-count" id="server-stickers-count"></span>
+                    </div>
+                </div>
+                <div class="table-scroll">
+                    <table class="data-table">
+                        <thead><tr><th>Server</th><th>Sticker Name</th><th>Uploaded By</th><th>File ID</th></tr></thead>
+                        <tbody id="server-sticker-list"><tr><td colspan="4" class="empty-state">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- User Key Escrow Tab -->
+            <div class="tab-content" id="tab-user-key-escrow">
+                <div class="table-header">
+                    <div class="search-bar">
+                        <input type="text" id="search-user-key-escrow" placeholder="Search by username or user ID..." oninput="filterTab('user-key-escrow')">
+                        <span class="record-count" id="user-key-escrow-count"></span>
+                    </div>
+                </div>
+                <div class="table-scroll">
+                    <table class="data-table">
+                        <thead><tr><th>Username</th><th>User ID</th><th>Created</th><th>Updated</th><th>Has Key</th></tr></thead>
+                        <tbody id="user-key-escrow-list"><tr><td colspan="5" class="empty-state">Loading...</td></tr></tbody>
+                    </table>
+                </div>
             </div>
         </div>
     </div>

@@ -277,6 +277,8 @@ async fn handle_ws_message(
                 }
             };
 
+            let msg_id = message.id.clone();
+            let msg_sender_username = message.sender_username.clone();
             let outgoing = OutgoingMessage {
                 msg_type: "message_new".to_string(),
                 channel_id: Some(message.channel_id.clone()),
@@ -307,6 +309,39 @@ async fn handle_ws_message(
                 }
                 Err(e) => {
                     tracing::error!("Failed to get server members: {}", e);
+                }
+            }
+
+            // Notify mentioned users
+            if let Some(mentions) = parsed.get("mentions").and_then(|m| m.as_array()) {
+                let mentioned_ids: Vec<String> = mentions
+                    .iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .filter(|id| id != user_id)
+                    .collect();
+                if !mentioned_ids.is_empty() {
+                    let mention_notification = serde_json::json!({
+                        "type": "mention_notification",
+                        "channel_id": channel_id,
+                        "server_id": server_id,
+                        "sender_username": msg_sender_username,
+                        "message_id": msg_id
+                    });
+                    state.ws_manager.broadcast_to_users(&mentioned_ids, &mention_notification.to_string()).await;
+                }
+            }
+
+            // Notify replied user
+            if let Some(reply_to_user_id) = parsed.get("reply_to_user_id").and_then(|r| r.as_str()) {
+                if reply_to_user_id != user_id {
+                    let reply_notification = serde_json::json!({
+                        "type": "reply_notification",
+                        "channel_id": channel_id,
+                        "server_id": server_id,
+                        "sender_username": msg_sender_username,
+                        "message_id": msg_id
+                    });
+                    state.ws_manager.broadcast_to_users(&[reply_to_user_id.to_string()], &reply_notification.to_string()).await;
                 }
             }
         }
@@ -390,6 +425,8 @@ async fn handle_ws_message(
                 }
             };
 
+            let msg_id = message.id.clone();
+            let msg_sender_username = message.sender_username.clone();
             let outgoing = OutgoingMessage {
                 msg_type: "dm_new".to_string(),
                 channel_id: None,
@@ -420,6 +457,37 @@ async fn handle_ws_message(
                 }
                 Err(e) => {
                     tracing::error!("Failed to get DM members: {}", e);
+                }
+            }
+
+            // Notify mentioned user in DM
+            if let Some(mentions) = parsed.get("mentions").and_then(|m| m.as_array()) {
+                let mentioned_ids: Vec<String> = mentions
+                    .iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .filter(|id| id != user_id)
+                    .collect();
+                if !mentioned_ids.is_empty() {
+                    let mention_notification = serde_json::json!({
+                        "type": "mention_notification",
+                        "dm_channel_id": dm_channel_id,
+                        "sender_username": msg_sender_username,
+                        "message_id": msg_id
+                    });
+                    state.ws_manager.broadcast_to_users(&mentioned_ids, &mention_notification.to_string()).await;
+                }
+            }
+
+            // Notify replied user in DM
+            if let Some(reply_to_user_id) = parsed.get("reply_to_user_id").and_then(|r| r.as_str()) {
+                if reply_to_user_id != user_id {
+                    let reply_notification = serde_json::json!({
+                        "type": "reply_notification",
+                        "dm_channel_id": dm_channel_id,
+                        "sender_username": msg_sender_username,
+                        "message_id": msg_id
+                    });
+                    state.ws_manager.broadcast_to_users(&[reply_to_user_id.to_string()], &reply_notification.to_string()).await;
                 }
             }
         }

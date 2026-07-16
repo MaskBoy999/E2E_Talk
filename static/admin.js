@@ -1,8 +1,8 @@
-let pendingDeleteAction = null;
 let rawData = {
     users: [], servers: [], channels: [], messages: [], serverKeys: [], serverMembers: [],
     prekeyBundles: [], sessions: [], serverBans: [], dmChannels: [], dmMembers: [],
-    dmMessages: [], dmKeys: [], friendRequests: [], friendships: [], userPublicKeys: [], files: []
+    dmMessages: [], dmKeys: [], friendRequests: [], friendships: [], userPublicKeys: [], files: [],
+    userStickers: [], serverStickers: [], userKeyEscrow: []
 };
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -67,26 +67,8 @@ document.addEventListener('DOMContentLoaded', () => {
             btn.classList.add('active');
             document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
         });
-    });
+    });    document.getElementById('clear-all-btn').addEventListener('click', clearAll);
 
-    document.getElementById('confirm-cancel').addEventListener('click', closeModal);
-    document.getElementById('confirm-modal').addEventListener('click', (e) => {
-        if (e.target === document.getElementById('confirm-modal')) closeModal();
-    });
-    document.getElementById('confirm-delete').addEventListener('click', executeDelete);
-
-    document.getElementById('clear-all-btn').addEventListener('click', clearAll);
-
-    document.addEventListener('click', (e) => {
-        const btn = e.target.closest('[data-action]');
-        if (!btn) return;
-        const action = btn.dataset.action;
-        const id = btn.dataset.id;
-        const name = btn.dataset.name;
-        if (action === 'delete-user') deleteUser(id, name);
-        else if (action === 'delete-server') deleteServer(id, name);
-        else if (action === 'delete-channel') deleteChannel(id, name);
-    });
 });
 
 function showError(msg) {
@@ -110,39 +92,6 @@ function escapeHtml(str) {
 function truncate(str, len) {
     if (!str) return '';
     return str.length > len ? str.substring(0, len) + '...' : str;
-}
-
-function openModal(title, message, warning, action) {
-    document.getElementById('confirm-title').textContent = title;
-    document.getElementById('confirm-message').innerHTML = message;
-    document.getElementById('confirm-warning').textContent = warning || '';
-    document.getElementById('cascade-stats').style.display = 'none';
-    pendingDeleteAction = action;
-    document.getElementById('confirm-modal').style.display = 'flex';
-}
-
-function closeModal() {
-    pendingDeleteAction = null;
-    document.getElementById('confirm-modal').style.display = 'none';
-}
-
-async function executeDelete() {
-    if (!pendingDeleteAction) return;
-    const btn = document.getElementById('confirm-delete');
-    const btnText = btn.textContent;
-    btn.disabled = true;
-    btn.textContent = 'Deleting...';
-    try {
-        await pendingDeleteAction();
-        closeModal();
-        await loadAllData();
-    } catch (err) {
-        alert('Delete failed: ' + err.message);
-        closeModal();
-    } finally {
-        btn.disabled = false;
-        btn.textContent = btnText;
-    }
 }
 
 async function apiFetch(url, method) {
@@ -194,6 +143,9 @@ function filterTab(tab) {
         case 'friendships': renderFriendships(rawData.friendships.filter(f => !q || f.username_1.toLowerCase().includes(q) || f.username_2.toLowerCase().includes(q))); break;
         case 'user-public-keys': renderUserPublicKeys(rawData.userPublicKeys.filter(k => !q || k.username.toLowerCase().includes(q) || k.user_id.toLowerCase().includes(q) || k.device_id.toLowerCase().includes(q))); break;
         case 'files': renderFiles(rawData.files.filter(f => !q || f.original_name.toLowerCase().includes(q) || f.uploader_username.toLowerCase().includes(q) || f.mime_type.toLowerCase().includes(q))); break;
+        case 'user-stickers': renderUserStickers(rawData.userStickers.filter(s => !q || s.username.toLowerCase().includes(q) || (s.sticker_name || '').toLowerCase().includes(q))); break;
+        case 'server-stickers': renderServerStickers(rawData.serverStickers.filter(s => !q || s.server_name.toLowerCase().includes(q) || (s.sticker_name || '').toLowerCase().includes(q))); break;
+        case 'user-key-escrow': renderUserKeyEscrow(rawData.userKeyEscrow.filter(e => !q || e.username.toLowerCase().includes(q) || e.user_id.toLowerCase().includes(q))); break;
     }
 }
 
@@ -216,6 +168,9 @@ async function loadAllData() {
         loadFriendships(),
         loadUserPublicKeys(),
         loadFiles(),
+        loadUserStickers(),
+        loadServerStickers(),
+        loadUserKeyEscrow(),
     ]);
 }
 
@@ -233,43 +188,13 @@ async function loadUsers() {
 
 function renderUsers(users) {
     updateCount('users-count', users.length);
-    renderTable('user-list', 3,
+    renderTable('user-list', 2,
         users.map(u =>
             '<td>' + escapeHtml(u.username) + '</td>' +
-            '<td class="id-cell" title="' + escapeHtml(u.id) + '">' + escapeHtml(truncate(u.id, 12)) + '</td>' +
-            '<td><button class="btn-delete-sm" data-action="delete-user" data-id="' + escapeHtml(u.id) + '" data-name="' + escapeHtml(u.username) + '">Delete</button></td>'
+            '<td class="id-cell" title="' + escapeHtml(u.id) + '">' + escapeHtml(truncate(u.id, 12)) + '</td>'
         ),
         'No users'
     );
-}
-
-async function deleteUser(userId, username) {
-    document.getElementById('confirm-title').textContent = 'Delete User: ' + username;
-    document.getElementById('confirm-message').innerHTML =
-        'Are you sure you want to delete <strong>' + escapeHtml(username) + '</strong>?';
-    document.getElementById('confirm-warning').textContent = 'This will permanently remove their account and ALL associated data.';
-    document.getElementById('cascade-stats').style.display = 'none';
-
-    document.getElementById('confirm-modal').style.display = 'flex';
-
-    try {
-        const stats = await apiFetch('/api/admin/users/' + userId + '/stats');
-        const statsDiv = document.getElementById('cascade-stats');
-        let html = 'This will cascade-delete: ';
-        html += '<span class="stat">' + stats.messages + ' messages</span>';
-        html += '<span class="stat">' + stats.memberships + ' memberships</span>';
-        html += '<span class="stat">' + stats.server_keys + ' server keys</span>';
-        if (stats.owned_servers > 0) {
-            html += '<span class="stat"><strong>' + stats.owned_servers + ' owned servers (deleted!)</strong></span>';
-        }
-        statsDiv.innerHTML = html;
-        statsDiv.style.display = 'block';
-    } catch (e) {}
-
-    pendingDeleteAction = async () => {
-        const res = await apiFetch('/api/admin/users/' + userId, 'DELETE');
-        if (!res.ok && res.error) throw new Error(res.error);
-    };
 }
 
 // --- Servers ---
@@ -286,26 +211,13 @@ async function loadServers() {
 
 function renderServers(servers) {
     updateCount('servers-count', servers.length);
-    renderTable('server-list', 4,
+    renderTable('server-list', 3,
         servers.map(s =>
             '<td>' + escapeHtml(s.name) + '</td>' +
             '<td class="id-cell" title="' + escapeHtml(s.id) + '">' + escapeHtml(truncate(s.id, 12)) + '</td>' +
-            '<td class="id-cell" title="' + escapeHtml(s.owner_id) + '">' + escapeHtml(truncate(s.owner_id, 12)) + '</td>' +
-            '<td><button class="btn-delete-sm" data-action="delete-server" data-id="' + escapeHtml(s.id) + '" data-name="' + escapeHtml(s.name) + '">Delete</button></td>'
+            '<td class="id-cell" title="' + escapeHtml(s.owner_id) + '">' + escapeHtml(truncate(s.owner_id, 12)) + '</td>'
         ),
         'No servers'
-    );
-}
-
-function deleteServer(serverId, name) {
-    openModal(
-        'Delete Server: ' + name,
-        'Are you sure you want to delete server <strong>' + escapeHtml(name) + '</strong>?',
-        'This will permanently delete all channels, messages, server keys, and memberships for this server.',
-        async () => {
-            const res = await apiFetch('/api/admin/servers/' + serverId, 'DELETE');
-            if (!res.ok && res.error) throw new Error(res.error);
-        }
     );
 }
 
@@ -323,27 +235,14 @@ async function loadChannels() {
 
 function renderChannels(channels) {
     updateCount('channels-count', channels.length);
-    renderTable('channel-list', 5,
+    renderTable('channel-list', 4,
         channels.map(c =>
             '<td>' + escapeHtml(c.name) + '</td>' +
             '<td class="id-cell" title="' + escapeHtml(c.id) + '">' + escapeHtml(truncate(c.id, 12)) + '</td>' +
             '<td class="id-cell" title="' + escapeHtml(c.server_id) + '">' + escapeHtml(truncate(c.server_id, 12)) + '</td>' +
-            '<td>' + escapeHtml(c.type) + '</td>' +
-            '<td><button class="btn-delete-sm" data-action="delete-channel" data-id="' + escapeHtml(c.id) + '" data-name="' + escapeHtml(c.name) + '">Delete</button></td>'
+            '<td>' + escapeHtml(c.type) + '</td>'
         ),
         'No channels'
-    );
-}
-
-function deleteChannel(channelId, name) {
-    openModal(
-        'Delete Channel: #' + name,
-        'Are you sure you want to delete channel <strong>#' + escapeHtml(name) + '</strong>?',
-        'This will permanently delete all messages in this channel.',
-        async () => {
-            const res = await apiFetch('/api/admin/channels/' + channelId, 'DELETE');
-            if (!res.ok && res.error) throw new Error(res.error);
-        }
     );
 }
 
@@ -695,6 +594,80 @@ function renderFiles(rows) {
             '<td class="ts-cell">' + escapeHtml(r.created_at) + '</td>';
         }),
         'No files'
+    );
+}
+
+// --- User Stickers ---
+async function loadUserStickers() {
+    try {
+        const rows = await apiFetch('/api/admin/user-stickers');
+        rawData.userStickers = Array.isArray(rows) ? rows : [];
+        renderUserStickers(rawData.userStickers);
+    } catch (err) {
+        rawData.userStickers = [];
+        renderUserStickers([]);
+    }
+}
+function renderUserStickers(rows) {
+    updateCount('user-stickers-count', rows.length);
+    renderTable('user-sticker-list', 5,
+        rows.map(r =>
+            '<td>' + escapeHtml(r.username) + '</td>' +
+            '<td>' + escapeHtml(r.sticker_name || '(unnamed)') + '</td>' +
+            '<td class="id-cell">' + escapeHtml(truncate(r.file_id, 12)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.file_key || '', 30)) + '</td>' +
+            '<td>' + escapeHtml(r.mime_type || '') + '</td>'
+        ),
+        'No user stickers'
+    );
+}
+
+// --- Server Stickers ---
+async function loadServerStickers() {
+    try {
+        const rows = await apiFetch('/api/admin/server-stickers');
+        rawData.serverStickers = Array.isArray(rows) ? rows : [];
+        renderServerStickers(rawData.serverStickers);
+    } catch (err) {
+        rawData.serverStickers = [];
+        renderServerStickers([]);
+    }
+}
+function renderServerStickers(rows) {
+    updateCount('server-stickers-count', rows.length);
+    renderTable('server-sticker-list', 4,
+        rows.map(r =>
+            '<td>' + escapeHtml(r.server_name) + '</td>' +
+            '<td>' + escapeHtml(r.sticker_name || '(unnamed)') + '</td>' +
+            '<td>' + escapeHtml(r.uploaded_by || '') + '</td>' +
+            '<td class="id-cell">' + escapeHtml(truncate(r.file_id, 12)) + '</td>'
+        ),
+        'No server stickers'
+    );
+}
+
+// --- User Key Escrow ---
+async function loadUserKeyEscrow() {
+    try {
+        const rows = await apiFetch('/api/admin/user-key-escrow');
+        rawData.userKeyEscrow = Array.isArray(rows) ? rows : [];
+        renderUserKeyEscrow(rawData.userKeyEscrow);
+    } catch (err) {
+        rawData.userKeyEscrow = [];
+        renderUserKeyEscrow([]);
+    }
+}
+function renderUserKeyEscrow(rows) {
+    updateCount('user-key-escrow-count', rows.length);
+    renderTable('user-key-escrow-list', 5,
+        rows.map(r =>
+            '<td>' + escapeHtml(r.username) + '</td>' +
+            '<td class="id-cell">' + escapeHtml(truncate(r.user_id, 12)) + '</td>' +
+            '<td class="ts-cell">' + escapeHtml(r.created_at || '') + '</td>' +
+            '<td class="ts-cell">' + escapeHtml(r.updated_at || '') + '</td>' +
+            '<td>' + (r.has_key ? 'Yes' : 'No') + '</td>'
+        ),
+        'No key escrow records'
     );
 }
 

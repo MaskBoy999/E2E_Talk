@@ -26,6 +26,7 @@ pub struct Server {
     pub name: String,
     pub owner_id: String,
     pub invite_code_hash: String,
+    pub joins_disabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -317,6 +318,17 @@ impl Database {
         // Migration 012: per-user stickers/GIFs
         let _ = conn.execute_batch(include_str!("../migrations/012_user_stickers.sql"));
 
+        // Migration 013: joins_disabled on servers
+        let joins_disabled_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('servers') WHERE name = 'joins_disabled'",
+                [],
+                |row| row.get(0),
+            )?;
+        if !joins_disabled_exists {
+            conn.execute("ALTER TABLE servers ADD COLUMN joins_disabled INTEGER NOT NULL DEFAULT 0", [])?;
+        }
+
         Ok(())
     }
 
@@ -437,6 +449,7 @@ impl Database {
             name: name.to_string(),
             owner_id: owner_id.to_string(),
             invite_code_hash: invite_code_hash.to_string(),
+            joins_disabled: false,
         })
     }
 
@@ -444,7 +457,7 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT s.id, s.name, s.owner_id, COALESCE(s.invite_code_hash, '')
+                "SELECT s.id, s.name, s.owner_id, COALESCE(s.invite_code_hash, ''), COALESCE(s.joins_disabled, 0)
                  FROM servers s
                  INNER JOIN server_members sm ON s.id = sm.server_id
                  WHERE sm.user_id = ?1
@@ -458,6 +471,7 @@ impl Database {
                     name: row.get(1)?,
                     owner_id: row.get(2)?,
                     invite_code_hash: row.get(3)?,
+                    joins_disabled: row.get::<_, i64>(4)? != 0,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -504,7 +518,7 @@ impl Database {
 
         let server: Server = conn
             .query_row(
-                "SELECT id, name, owner_id, COALESCE(invite_code_hash, '') FROM servers WHERE invite_code_hash = ?1",
+                "SELECT id, name, owner_id, COALESCE(invite_code_hash, ''), COALESCE(joins_disabled, 0) FROM servers WHERE invite_code_hash = ?1",
                 params![code_hash],
                 |row| {
                     Ok(Server {
@@ -512,10 +526,16 @@ impl Database {
                         name: row.get(1)?,
                         owner_id: row.get(2)?,
                         invite_code_hash: row.get(3)?,
+                        joins_disabled: row.get::<_, i64>(4)? != 0,
                     })
                 },
             )
             .map_err(|_| "Invalid invite code".to_string())?;
+
+        // Check if joins are disabled
+        if server.joins_disabled {
+            return Err("This server has disabled invites".to_string());
+        }
 
         // Check if user is banned from this server
         let banned: bool = conn
@@ -549,6 +569,22 @@ impl Database {
         }
 
         Ok(server)
+    }
+
+    pub fn set_joins_disabled(&self, server_id: &str, user_id: &str, disabled: bool) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+
+        if !Self::is_server_owner_c(&conn, user_id, server_id).unwrap_or(false) {
+            return Err("Only the server owner can change join settings".to_string());
+        }
+
+        conn.execute(
+            "UPDATE servers SET joins_disabled = ?1 WHERE id = ?2",
+            params![disabled as i64, server_id],
+        )
+        .map_err(|e| e.to_string())?;
+
+        Ok(())
     }
 
     pub fn regenerate_invite(&self, server_id: &str, user_id: &str, new_invite_code_hash: &str) -> Result<(), String> {
@@ -826,6 +862,53 @@ impl Database {
             .map_err(|e| e.to_string())?;
         let messages = stmt
             .query_map(params![channel_id, limit], |row| {
+                Ok(Message {
+                    id: row.get(0)?,
+                    channel_id: row.get(1)?,
+                    sender_id: row.get(2)?,
+                    sender_username: row.get(3)?,
+                    encrypted_content: row.get(4)?,
+                    nonce: row.get(5)?,
+                    timestamp: row.get(6)?,
+                    message_nonce: row.get(7)?,
+                    edited_at: row.get(8)?,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(messages)
+    }
+
+    /// Return up to `limit` messages centered around the message with ID `around_message_id`.
+    /// Half will be before (older than) the target and half after (newer than) the target.
+    pub fn list_messages_around(&self, channel_id: &str, around_message_id: &str, limit: i64) -> Result<Vec<Message>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let half = limit / 2;
+        let mut stmt = conn
+            .prepare(
+                "SELECT m.id, m.channel_id, m.sender_id, u.username, m.encrypted_content, m.nonce, m.timestamp, m.message_nonce, m.edited_at
+                 FROM (
+                     -- Get half_limit messages before-and-including the target
+                     SELECT id, channel_id, sender_id, encrypted_content, nonce, timestamp, message_nonce, edited_at
+                     FROM messages
+                     WHERE channel_id = ?1 AND timestamp <= (SELECT COALESCE(timestamp, '') FROM messages WHERE id = ?2)
+                     ORDER BY timestamp DESC
+                     LIMIT ?3
+                     UNION ALL
+                     -- Get half_limit messages after the target
+                     SELECT id, channel_id, sender_id, encrypted_content, nonce, timestamp, message_nonce, edited_at
+                     FROM messages
+                     WHERE channel_id = ?1 AND timestamp > (SELECT COALESCE(timestamp, '') FROM messages WHERE id = ?2)
+                     ORDER BY timestamp ASC
+                     LIMIT ?3
+                 ) m
+                 INNER JOIN users u ON m.sender_id = u.id
+                 ORDER BY m.timestamp ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        let messages = stmt
+            .query_map(params![channel_id, around_message_id, half], |row| {
                 Ok(Message {
                     id: row.get(0)?,
                     channel_id: row.get(1)?,
@@ -2126,7 +2209,7 @@ impl Database {
     pub fn list_all_servers_admin(&self) -> Result<Vec<Server>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT id, name, owner_id, COALESCE(invite_code_hash, '') FROM servers ORDER BY created_at")
+            .prepare("SELECT id, name, owner_id, COALESCE(invite_code_hash, ''), COALESCE(joins_disabled, 0) FROM servers ORDER BY created_at")
             .map_err(|e| e.to_string())?;
         let servers = stmt
             .query_map([], |row| {
@@ -2135,6 +2218,7 @@ impl Database {
                     name: row.get(1)?,
                     owner_id: row.get(2)?,
                     invite_code_hash: row.get(3)?,
+                    joins_disabled: row.get::<_, i64>(4)? != 0,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -2806,7 +2890,7 @@ impl Database {
         Ok(rows)
     }
 
-    pub fn list_all_user_key_escrow_admin(&self) -> Result<Vec<(String, String, String, String, String)>, String> {
+    pub fn list_all_user_key_escrow_admin(&self) -> Result<Vec<(String, String, String, String, i32)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(

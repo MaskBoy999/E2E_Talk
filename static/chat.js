@@ -1,4 +1,4 @@
-    console.log('chat.js v22 loaded - message grouping, GIF crop fix, emoji upload, reply highlight');
+    console.log('chat.js v23 loaded - bigger emoji, bigger text, GIF/sticker viewer, responsive panel');
 
 function generateCode(len) {
     const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -23,6 +23,7 @@ let pendingFriendRequests = 0;
 let isUploading = false;
 let isSendingSticker = false;
 let selectedFiles = [];
+let currentServerMemberList = [];
 
 // Message grouping: track last message for 2-minute coalescing
 let lastMessageInfo = { senderId: null, channelId: null, time: 0 };
@@ -256,11 +257,16 @@ document.addEventListener('DOMContentLoaded', () => {
     loadServers();
     loadFriendRequestBadge();
     loadEmojiCache(); // Load custom emojis
+    requestNotificationPermission();
+    setupMentionAutocomplete();
 
 
     document.getElementById('send-btn').addEventListener('click', sendMessage);
-    document.getElementById('message-input').addEventListener('keypress', (e) => {
-        if (e.key === 'Enter') sendMessage();
+    document.getElementById('message-input').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            sendMessage();
+        }
     });
 
     // File upload
@@ -571,6 +577,156 @@ document.addEventListener('DOMContentLoaded', () => {
     // No polling needed — WebSocket handles all live updates
 });
 
+// --- Notifications ---
+
+function requestNotificationPermission() {
+    if ('Notification' in window && Notification.permission === 'default') {
+        Notification.requestPermission();
+    }
+}
+
+function showBrowserNotification(title, body) {
+    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+    try {
+        new Notification(title, { body, icon: '/favicon.ico' });
+    } catch (e) {
+        console.warn('Notification failed:', e);
+    }
+}
+
+// --- Mention Support ---
+
+function findMentionsInText(text, memberList) {
+    if (!text || !memberList || memberList.length === 0) return [];
+    const ids = [];
+    const userId = user ? user.id : null;
+    for (const m of memberList) {
+        if (m.username && m.id && m.id !== userId && text.indexOf('@' + m.username) !== -1) {
+            ids.push(m.id);
+        }
+    }
+    return ids;
+}
+
+function highlightMentionsInHtml(html) {
+    if (!html) return html;
+    const currentUsername = user ? user.username : null;
+    if (!currentUsername) return html;
+    return html.replace(/@([\w]+)/g, (match, username) => {
+        return '<span class="mention">' + match + '</span>';
+    });
+}
+
+function setupMentionAutocomplete() {
+    const input = document.getElementById('message-input');
+    const container = document.createElement('div');
+    container.className = 'mention-dropdown';
+    container.style.display = 'none';
+    input.parentNode.appendChild(container);
+
+    let activeIndex = -1;
+    let filterText = '';
+    let isOpen = false;
+
+    function getCandidateList() {
+        if (viewMode === 'dms' && currentDmOtherUser) {
+            return [{ username: currentDmOtherUser.username, id: currentDmOtherUser.id }];
+        }
+        return currentServerMemberList.filter(m => m.id !== (user ? user.id : null));
+    }
+
+    function updateDropdown() {
+        const candidates = getCandidateList();
+        const filtered = candidates.filter(m =>
+            m.username && m.username.toLowerCase().startsWith(filterText.toLowerCase())
+        );
+        if (filtered.length === 0 || !isOpen) {
+            container.style.display = 'none';
+            return;
+        }
+        container.style.display = 'block';
+        container.innerHTML = '';
+        filtered.forEach((m, idx) => {
+            const item = document.createElement('div');
+            item.className = 'mention-item' + (idx === activeIndex ? ' active' : '');
+            const initial = (m.username || '?').charAt(0).toUpperCase();
+            item.innerHTML = '<span class="mention-item-avatar">' + initial + '</span><span class="mention-item-name">' + escapeHtml(m.username) + '</span>';
+            item.addEventListener('click', () => selectMention(m.username));
+            item.addEventListener('mouseenter', () => { activeIndex = idx; highlightItem(); });
+            container.appendChild(item);
+        });
+        highlightItem();
+    }
+
+    function highlightItem() {
+        const items = container.querySelectorAll('.mention-item');
+        items.forEach((el, idx) => el.classList.toggle('active', idx === activeIndex));
+    }
+
+    function selectMention(username) {
+        const cursorPos = input.selectionStart;
+        const text = input.value;
+        const lastAtIndex = text.lastIndexOf('@', cursorPos - 1);
+        if (lastAtIndex === -1) return;
+        const before = text.substring(0, lastAtIndex);
+        const after = text.substring(cursorPos);
+        input.value = before + '@' + username + ' ' + after;
+        const newPos = before.length + username.length + 2;
+        input.setSelectionRange(newPos, newPos);
+        container.style.display = 'none';
+        isOpen = false;
+        input.focus();
+    }
+
+    input.addEventListener('input', () => {
+        const cursorPos = input.selectionStart;
+        const text = input.value;
+        const lastAtIndex = text.lastIndexOf('@', cursorPos - 1);
+        if (lastAtIndex === -1 || (lastAtIndex > 0 && text[lastAtIndex - 1].match(/[a-zA-Z0-9_]/))) {
+            container.style.display = 'none';
+            isOpen = false;
+            return;
+        }
+        const afterAt = text.substring(lastAtIndex + 1, cursorPos);
+        if (afterAt.indexOf(' ') !== -1 || afterAt.indexOf('@') !== -1) {
+            container.style.display = 'none';
+            isOpen = false;
+            return;
+        }
+        isOpen = true;
+        filterText = afterAt;
+        activeIndex = 0;
+        updateDropdown();
+    });
+
+    input.addEventListener('keydown', (e) => {
+        if (!isOpen || container.style.display === 'none') return;
+        const items = container.querySelectorAll('.mention-item');
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            activeIndex = Math.min(activeIndex + 1, items.length - 1);
+            highlightItem();
+        } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            activeIndex = Math.max(activeIndex - 1, 0);
+            highlightItem();
+        } else if (e.key === 'Enter' || e.key === 'Tab') {
+            if (activeIndex >= 0 && activeIndex < items.length) {
+                e.preventDefault();
+                const username = items[activeIndex].querySelector('.mention-item-name')?.textContent;
+                if (username) selectMention(username);
+            }
+        } else if (e.key === 'Escape') {
+            container.style.display = 'none';
+            isOpen = false;
+        }
+    });
+
+    input.addEventListener('blur', () => {
+        setTimeout(() => { container.style.display = 'none'; isOpen = false; }, 200);
+    });
+}
+
 // --- WebSocket ---
 
 function connectWebSocket(t) {
@@ -622,13 +778,14 @@ function connectWebSocket(t) {
                         unreadDms[data.dm_channel_id] = (unreadDms[data.dm_channel_id] || 0) + 1;
                         updateDmStripBadge();
                         if (viewMode === 'dms') renderDmSidebar();
+                        showBrowserNotification('New DM', data.message.sender_username + ' sent you a message');
                     }
                     if (viewMode === 'dms') loadDmConversations();
                 }
                 break;
             case 'message_edited':
                 if (data.channel_id === currentChannelId && data.message) {
-                    handleEditedMessage(data.message, 'channel');
+                    await handleEditedMessage(data.message, 'channel');
                 }
                 break;
             case 'message_deleted':
@@ -638,7 +795,7 @@ function connectWebSocket(t) {
                 break;
             case 'dm_edited':
                 if (data.dm_channel_id === currentDmChannelId && data.message) {
-                    handleEditedMessage(data.message, 'dm');
+                    await handleEditedMessage(data.message, 'dm');
                 }
                 break;
             case 'dm_deleted':
@@ -656,8 +813,13 @@ function connectWebSocket(t) {
                 break;
             case 'member_joined':
                 if (data.server_id && data.user_id) {
-                    // Owner auto-uploads encrypted server key for new member
-                    if (isOwner) await uploadServerKeyForUser(data.server_id, data.user_id);
+                    // Owner auto-uploads encrypted server key for new member.
+                    // Check ownership from the servers list (not the isOwner global,
+                    // which only reflects the currently selected server)
+                    const ownedByMe = servers.some(s => s.id === data.server_id && s.is_owner);
+                    if (ownedByMe) {
+                        await uploadServerKeyForUser(data.server_id, data.user_id);
+                    }
                     // Auto-refresh member list for everyone viewing this server
                     if (data.server_id === currentServerId) {
                         await loadMembers(data.server_id);
@@ -712,6 +874,9 @@ function connectWebSocket(t) {
                 break;
             case 'friend_request_received':
                 loadFriendRequestBadge();
+                if (data.from_username) {
+                    showBrowserNotification('Friend Request', data.from_username + ' sent you a friend request');
+                }
                 break;
             case 'friend_request_accepted':
                 if (viewMode === 'dms') loadDmConversations();
@@ -725,6 +890,18 @@ function connectWebSocket(t) {
                     document.getElementById('message-input').disabled = true;
                     document.getElementById('send-btn').disabled = true;
                     document.getElementById('message-list').innerHTML = '<div class="welcome">Select a conversation to start chatting</div>';
+                }
+                break;
+            case 'mention_notification':
+                if (data.sender_username) {
+                    var mentionLocation = data.channel_id ? '#' + (data.channel_name || 'a channel') : 'your DM';
+                    showBrowserNotification('Mentioned by ' + data.sender_username, 'You were mentioned in ' + mentionLocation);
+                }
+                break;
+            case 'reply_notification':
+                if (data.sender_username) {
+                    var replyLocation = data.channel_id ? '#' + (data.channel_name || 'a channel') : 'your DM';
+                    showBrowserNotification('Reply from ' + data.sender_username, data.sender_username + ' replied to you in ' + replyLocation);
                 }
                 break;
         }
@@ -1012,14 +1189,18 @@ async function selectChannel(channelId, channelName, element) {
 
 // --- Messages ---
 
-async function loadMessages(channelId) {
+async function loadMessages(channelId, aroundMessageId) {
     // Clean up old blob URLs when switching channels
     revokeBlobUrls();
     const list = document.getElementById('message-list');
     list.innerHTML = '<div class="welcome">Loading messages...</div>';
 
     try {
-        const res = await authFetch(`/api/channels/${channelId}/messages`);
+        let url = `/api/channels/${channelId}/messages`;
+        if (aroundMessageId) {
+            url = `/api/channels/${channelId}/messages/around/${aroundMessageId}`;
+        }
+        const res = await authFetch(url);
         const messages = await res.json();
 
         list.innerHTML = '';
@@ -1121,34 +1302,70 @@ async function appendMessage(msg) {
     if (replyTo) {
         contentHtml += '<div class="reply-quote" data-reply-to="' + escapeHtml(replyTo.message_id || '') + '">' +
             '<span class="reply-author">@' + escapeHtml(replyTo.author || 'unknown') + '</span> ' +
-            '<span class="reply-preview">' + escapeHtml(replyTo.preview || '') + '</span>' +
+            '<span class="reply-preview">' + (replyTo.preview ? renderEmojiText(replyTo.preview) : '') + '</span>' +
             '</div>';
     }
+    const editedHtml = msg.edited_at ? '<span class="edited-label">(edited)</span>' : '';
     if (forwardData) {
-        contentHtml += '<div class="forward-label">Forwarded from <strong>#' + escapeHtml(forwardData.source_channel_name || 'unknown') + '</strong> in <strong>' + escapeHtml(forwardData.source_server_name || 'unknown') + '</strong></div>';
-        if (forwardData.preview_content && forwardData.preview_nonce && currentServerId) {
+        div.classList.add('forwarded');
+        contentHtml += '<div class="forward-label" data-source-server-id="' + escapeAttr(forwardData.source_server_id || '') + '" data-source-channel-id="' + escapeAttr(forwardData.source_channel_id || '') + '" data-source-message-id="' + escapeAttr(forwardData.source_message_id || '') + '"><strong>#' + escapeHtml(forwardData.source_channel_name || 'unknown') + '</strong> / <strong>' + escapeHtml(forwardData.source_server_name || 'unknown') + '</strong></div>';
+        // Forward text preview
+        if (forwardData.preview_content && forwardData.preview_nonce) {
             try {
-                const previewText = E2ECrypto.decrypt(forwardData.preview_content, forwardData.preview_nonce, forwardData.source_channel_id, forwardData.source_server_id, forwardData.preview_message_nonce);
-                contentHtml += '<div class="forward-preview"><div class="text">' + escapeHtml(previewText) + '</div></div>';
+                let previewText = E2ECrypto.decrypt(forwardData.preview_content, forwardData.preview_nonce, forwardData.source_channel_id, forwardData.source_server_id, forwardData.preview_message_nonce);
+                let previewEmojis = null;
+                try {
+                    const parsed = JSON.parse(previewText);
+                    if (parsed && parsed.type === 'text') {
+                        previewText = parsed.text || '';
+                        if (Array.isArray(parsed.emojis) && parsed.emojis.length > 0) {
+                            previewEmojis = {};
+                            for (const ref of parsed.emojis) {
+                                if (ref.name && ref.file_id && ref.file_key) {
+                                    previewEmojis[ref.name] = { file_id: ref.file_id, file_key: ref.file_key, mime_type: ref.mime_type || 'image/png' };
+                                }
+                            }
+                        }
+                    }
+                } catch (_) {}
+                contentHtml += '<div class="forward-preview"><div class="text"><span class="time-hover">' + time + '</span>' + renderEmojiText(previewText, previewEmojis) + editedHtml + '</div></div>';
             } catch (_) {
                 contentHtml += '<div class="forward-preview forward-unavailable">Preview unavailable</div>';
             }
-        } else {
-            contentHtml += '<div class="forward-preview forward-unavailable">Preview unavailable</div>';
+        }
+        // Render rich media preview for forwards that contain GIF/sticker/file
+        if (forwardData.gif) {
+            contentHtml += '<div class="gif-message" style="margin-top:4px">' +
+                '<img src="' + escapeHtml(forwardData.gif.url) + '" alt="' + escapeHtml(forwardData.gif.alt || 'GIF') + '" loading="lazy" style="max-width:300px;max-height:300px;border-radius:8px;cursor:pointer">' +
+                '</div>';
+        } else if (forwardData.sticker) {
+            contentHtml += '<div class="sticker-message" data-file-id="' + escapeAttr(forwardData.sticker.file_id) + '" data-file-key="' + escapeAttr(forwardData.sticker.file_key) + '" data-mime-type="' + escapeAttr(forwardData.sticker.mime_type) + '"></div>';
+        } else if (forwardData.file) {
+            contentHtml += buildFileCardHtml(forwardData.file);
         }
     } else if (gifData) {
+        if (gifData.text) contentHtml += '<div class="text"><span class="time-hover">' + time + '</span>' + renderEmojiText(gifData.text) + editedHtml + '</div>';
         contentHtml += '<div class="gif-message">' +
-            '<img src="' + escapeHtml(gifData.url) + '" alt="' + escapeHtml(gifData.alt || 'GIF') + '" loading="lazy" style="max-width:300px;max-height:300px;border-radius:8px">' +
+            '<img src="' + escapeHtml(gifData.url) + '" alt="' + escapeHtml(gifData.alt || 'GIF') + '" loading="lazy" style="max-width:300px;max-height:300px;border-radius:8px;cursor:pointer">' +
             '<button class="media-download-btn" title="Download" data-url="' + escapeHtml(gifData.url) + '" data-filename="sticker.gif">⬇</button>' +
             '</div>';
     } else if (stickerData) {
+        if (stickerData.text) contentHtml += '<div class="text"><span class="time-hover">' + time + '</span>' + renderEmojiText(stickerData.text) + editedHtml + '</div>';
         contentHtml += '<div class="sticker-message"></div>';
     } else if (filesData) {
         contentHtml += buildMultiFileCardHtml(filesData);
     } else if (fileData) {
         contentHtml += buildFileCardHtml(fileData);
     } else if (textContent) {
-        contentHtml += '<div class="text"><span class="time-hover">' + time + '</span>' + renderEmojiText(textContent, extraEmojis) + '</div>';
+        contentHtml += '<div class="text"><span class="time-hover">' + time + '</span>' + highlightMentionsInHtml(renderEmojiText(textContent, extraEmojis)) + editedHtml + '</div>';
+    }
+
+    // Check if current user is mentioned in text (for server messages)
+    if (textContent && user) {
+        var mentionPat = new RegExp('@' + user.username.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(\\b|$|\\s)');
+        if (mentionPat.test(textContent)) {
+            div.classList.add('mentioned');
+        }
     }
 
     const actionsHtml = '<div class="message-actions">' +
@@ -1164,7 +1381,6 @@ async function appendMessage(msg) {
         '<div class="content">' +
             '<div class="header">' +
                 '<span class="username">' + escapeHtml(msg.sender_username || 'unknown') + '</span>' +
-                '<span class="edited-label">' + (msg.edited_at ? '(edited)' : '') + '</span>' +
             '</div>' +
             contentHtml +
         '</div>' +
@@ -1210,6 +1426,32 @@ async function appendMessage(msg) {
                 stickerContainer.querySelector('.load-preview-btn').addEventListener('click', () => {
                     stickerContainer.innerHTML = '';
                     loadStickerPreview(stickerContainer, stickerData);
+                });
+            }
+        }
+    } else if (forwardData && forwardData.sticker) {
+        const fwdStickerContainer = div.querySelector('.sticker-message');
+        if (fwdStickerContainer) {
+            if (autoLoad) {
+                loadStickerPreview(fwdStickerContainer, forwardData.sticker);
+            } else {
+                fwdStickerContainer.innerHTML = '<button class="load-preview-btn">Load sticker</button>';
+                fwdStickerContainer.querySelector('.load-preview-btn').addEventListener('click', () => {
+                    fwdStickerContainer.innerHTML = '';
+                    loadStickerPreview(fwdStickerContainer, forwardData.sticker);
+                });
+            }
+        }
+    } else if (forwardData && forwardData.file && forwardData.file.file_key) {
+        const fwdFileContainer = div.querySelector('.file-preview');
+        if (fwdFileContainer) {
+            if (autoLoad) {
+                loadMediaPreview(fwdFileContainer, forwardData.file);
+            } else {
+                fwdFileContainer.innerHTML = '<button class="load-preview-btn">Load preview</button>';
+                fwdFileContainer.querySelector('.load-preview-btn').addEventListener('click', () => {
+                    fwdFileContainer.innerHTML = '';
+                    loadMediaPreview(fwdFileContainer, forwardData.file);
                 });
             }
         }
@@ -1261,6 +1503,15 @@ async function loadStickerPreview(container, stickerData) {
         img.style.maxWidth = '192px';
         img.style.maxHeight = '192px';
         img.style.borderRadius = '8px';
+        img.style.cursor = 'pointer';
+        img.addEventListener('click', (e) => {
+            e.stopPropagation();
+            openMediaViewer(url, 'image', null, [{ url: url, type: 'image' }]);
+        });
+        // Store sticker metadata on the container for forward extraction
+        container.setAttribute('data-file-id', stickerData.file_id || '');
+        container.setAttribute('data-file-key', stickerData.file_key || '');
+        container.setAttribute('data-mime-type', stickerData.mime_type || 'image/png');
         container.appendChild(img);
         // Add download button
         const dlBtn = document.createElement('button');
@@ -1284,7 +1535,35 @@ let pendingForward = null;
 
 function setupMessageActions() {
     const list = document.getElementById('message-list');
+    function handleForwardLabelClick(forwardLabel) {
+        const serverId = forwardLabel.dataset.sourceServerId;
+        const channelId = forwardLabel.dataset.sourceChannelId;
+        const messageId = forwardLabel.dataset.sourceMessageId;
+        if (channelId) {
+            navigateToMessage(serverId, channelId, messageId);
+        }
+    }
     list.addEventListener('click', (e) => {
+        // Forward label click → navigate to source server/channel/message
+        const forwardLabel = e.target.closest('.forward-label');
+        if (forwardLabel) {
+            handleForwardLabelClick(forwardLabel);
+            return;
+        }
+        // Emoji click → download as PNG
+        const emojiImg = e.target.closest('.emoji-inline');
+        if (emojiImg) {
+            const name = (emojiImg.getAttribute('alt') || '').replace(/^:|:$/g, '') || 'emoji';
+            downloadBlobAs(emojiImg.src, name + '.png', 'image/png');
+            return;
+        }
+        // GIF image click → open media viewer
+        const gifImg = e.target.closest('.gif-message img');
+        if (gifImg && !e.target.closest('.media-download-btn')) {
+            const url = gifImg.src;
+            openMediaViewer(url, 'image', null, [{ url: url, type: 'image' }]);
+            return;
+        }
         const btn = e.target.closest('.msg-action-btn');
         if (!btn) return;
         const msgDiv = btn.closest('.message');
@@ -1307,11 +1586,109 @@ function setupMessageActions() {
     });
 }
 
+async function navigateToMessage(serverId, channelId, messageId) {
+    // Switch to server view if currently in DMs
+    if (viewMode === 'dms') {
+        const dmStripBtn = document.getElementById('dm-strip-btn');
+        if (dmStripBtn) dmStripBtn.classList.remove('active');
+        viewMode = 'servers';
+    }
+
+    // If this is a DM forward (no serverId), handle it separately
+    if (!serverId) {
+        if (viewMode !== 'dms') {
+            const dmStripBtn = document.getElementById('dm-strip-btn');
+            if (dmStripBtn) dmStripBtn.classList.add('active');
+            viewMode = 'dms';
+        }
+        // Ensure DM conversations are loaded before looking up the channel
+        if (!dmConversations || dmConversations.length === 0) {
+            await loadDmConversations();
+        }
+        // Switch to the DM channel
+        currentDmChannelId = channelId;
+        currentChannelId = null;
+        currentServerId = null;
+        const conv = dmConversations.find(c => c.dm_channel_id === channelId);
+        const otherUser = conv ? { id: conv.other_user_id, username: conv.other_username } : null;
+        currentDmOtherUser = otherUser;
+        document.getElementById('channel-name').innerHTML = otherUser ? escapeHtml(otherUser.username) + ' <button class="btn-unfriend" id="unfriend-btn" title="Unfriend">Unfriend</button>' : 'DM';
+        document.getElementById('message-input').disabled = false;
+        document.getElementById('send-btn').disabled = false;
+        await loadDmMessages(channelId, otherUser ? otherUser.id : '');
+        if (window._closeSidebar) window._closeSidebar();
+        if (messageId) {
+            const target = await waitForElement('[data-message-id="' + messageId + '"]', 10000);
+            if (target) {
+                target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                target.classList.add('flash-highlight');
+                setTimeout(() => target.classList.remove('flash-highlight'), 2000);
+            }
+        }
+        return;
+    }
+
+    // Select the server (this will load channels)
+    const serverExists = servers.some(s => s.id === serverId);
+    if (!serverExists) {
+        await loadServers();
+    }
+    if (serverId !== currentServerId) {
+        await selectServer(serverId);
+    }
+
+    // Wait for channel element to appear
+    const channelEl = await waitForElement('.channel-item[data-id="' + channelId + '"]', 5000);
+    if (channelEl) {
+        // Select the channel manually
+        currentChannelId = channelId;
+        document.querySelectorAll('.channel-item').forEach(el => el.classList.remove('active'));
+        channelEl.classList.add('active');
+        const channelName = channelEl.dataset.name || 'channel';
+        document.getElementById('channel-name').textContent = '# ' + channelName;
+        document.getElementById('message-input').disabled = false;
+        document.getElementById('send-btn').disabled = false;
+        // Load all messages (no around param), then scroll to target
+        await loadMessages(channelId);
+        if (window._closeSidebar) window._closeSidebar();
+        // Now wait for the target message to appear, then scroll to it
+        if (messageId) {
+            const target = await waitForElement('[data-message-id="' + messageId + '"]', 10000);
+            if (target) {
+                target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                target.classList.add('flash-highlight');
+                setTimeout(() => target.classList.remove('flash-highlight'), 2000);
+            }
+        }
+    }
+}
+
+/** Wait up to `timeout` ms for an element matching `selector` to appear in the DOM. */
+function waitForElement(selector, timeout) {
+    return new Promise((resolve) => {
+        const el = document.querySelector(selector);
+        if (el) return resolve(el);
+        const observer = new MutationObserver(() => {
+            const found = document.querySelector(selector);
+            if (found) {
+                observer.disconnect();
+                resolve(found);
+            }
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+        setTimeout(() => {
+            observer.disconnect();
+            resolve(null);
+        }, timeout);
+    });
+}
+
 function handleReply(messageId, msgDiv) {
     const username = msgDiv.querySelector('.username')?.textContent || 'unknown';
     const textEl = msgDiv.querySelector('.text');
-    const preview = textEl ? textEl.textContent.substring(0, 80) : '';
-    pendingReply = { message_id: messageId, author: username, preview: preview };
+    const preview = textEl ? extractRawMessageText(textEl).substring(0, 80) : '';
+    const senderId = msgDiv.getAttribute('data-sender-id') || '';
+    pendingReply = { message_id: messageId, author: username, preview: preview, sender_id: senderId };
     const replyBar = document.getElementById('reply-bar');
     if (replyBar) {
         replyBar.innerHTML = 'Replying to <strong>@' + escapeHtml(username) + '</strong>: ' + escapeHtml(preview) + ' <button id="cancel-reply" style="margin-left:8px;background:none;border:none;color:#aaa;cursor:pointer">&#x2715;</button>';
@@ -1325,19 +1702,20 @@ function handleReply(messageId, msgDiv) {
 }
 
 function handleForward(messageId, msgDiv) {
-    pendingForward = { messageId, msgDiv };
+    pendingForward = { messageId, msgDiv, sourceServerId: currentServerId };
     showForwardModal();
 }
 
 function handleForwardToDm(messageId, msgDiv) {
-    pendingForward = { messageId, msgDiv, toDm: true };
+    pendingForward = { messageId, msgDiv, toDm: true, sourceServerId: currentServerId };
     showDmForwardModal();
 }
 
 function handleEdit(messageId, msgDiv) {
     const textEl = msgDiv.querySelector('.text');
     if (!textEl) return;
-    const originalText = textEl.textContent;
+    // Extract the raw text including emoji shortcodes (:name:) from alt attributes
+    const originalText = extractRawMessageText(textEl);
     const contentEl = msgDiv.querySelector('.content');
     if (!contentEl) return;
 
@@ -1367,23 +1745,151 @@ function handleEdit(messageId, msgDiv) {
     contentEl.appendChild(btnRow);
     textarea.focus();
 
+    // Shift+Enter for newline in edit textarea
+    textarea.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            btnRow.querySelector('.edit-save-btn').click();
+        }
+    });
+
     btnRow.querySelector('.edit-save-btn').addEventListener('click', async () => {
         const newText = textarea.value.trim();
-        if (!newText || !currentChannelId || !currentServerId) return;
-        try {
-            const encrypted = E2ECrypto.encrypt(newText, currentChannelId, currentServerId);
-            ws.send(JSON.stringify({
-                type: 'message_edit',
-                message_id: messageId,
-                encrypted_content: encrypted.ciphertext,
-                nonce: encrypted.nonce,
-                message_nonce: encrypted.messageNonce || null,
-            }));
-        } catch (e) {
-            console.error('Edit encrypt failed:', e);
+        if (!newText) {
+            textarea.remove();
+            btnRow.remove();
+            if (oldText) oldText.style.display = '';
+            if (oldReply) oldReply.style.display = '';
+            if (oldForward) oldForward.style.display = '';
+            if (actionsEl) actionsEl.style.display = '';
+            return;
+        }
+
+        // Preserve any existing GIF/sticker/file data from the original message
+        let existingGif = null;
+        let existingSticker = null;
+        const gifMsgEl = msgDiv.querySelector('.gif-message');
+        if (gifMsgEl) {
+            const img = gifMsgEl.querySelector('img');
+            if (img) {
+                existingGif = { url: img.getAttribute('src') || '', alt: img.getAttribute('alt') || 'GIF' };
+            }
+        }
+        const stickerMsgEl = msgDiv.querySelector('.sticker-message');
+        if (stickerMsgEl) {
+            existingSticker = {
+                file_id: stickerMsgEl.getAttribute('data-file-id') || '',
+                file_key: stickerMsgEl.getAttribute('data-file-key') || '',
+                mime_type: stickerMsgEl.getAttribute('data-mime-type') || 'image/png',
+            };
+        }
+
+        if (viewMode === 'dms') {
+            // DM edit: encrypt with DM E2E and send as dm_edit
+            if (!currentDmChannelId || !currentDmOtherUser) {
+                textarea.remove();
+                btnRow.remove();
+                if (oldText) oldText.style.display = '';
+                if (oldReply) oldReply.style.display = '';
+                if (oldForward) oldForward.style.display = '';
+                if (actionsEl) actionsEl.style.display = '';
+                return;
+            }
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                textarea.remove();
+                btnRow.remove();
+                if (oldText) oldText.style.display = '';
+                if (oldReply) oldReply.style.display = '';
+                if (oldForward) oldForward.style.display = '';
+                if (actionsEl) actionsEl.style.display = '';
+                return;
+            }
+            try {
+                const kp = E2ECrypto.getIdentityKeyPair();
+                if (!kp) {
+                    textarea.remove();
+                    btnRow.remove();
+                    if (oldText) oldText.style.display = '';
+                    if (oldReply) oldReply.style.display = '';
+                    if (oldForward) oldForward.style.display = '';
+                    if (actionsEl) actionsEl.style.display = '';
+                    return;
+                }
+                const res = await authFetch('/api/identity/' + currentDmOtherUser.id);
+                const data = await res.json();
+                const otherPubKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(data.identity_public_key));
+                // Preserve existing GIF/sticker data beside the new text
+                let plaintext = newText;
+                const emojiRefs = collectEmojiRefsFromMsgEl(msgDiv, newText);
+                const payload = { type: 'text', text: newText };
+                if (existingGif) {
+                    payload.type = 'gif';
+                    payload.url = existingGif.url;
+                    payload.alt = existingGif.alt;
+                    payload.text = newText;
+                } else if (existingSticker) {
+                    payload.type = 'sticker';
+                    payload.file_id = existingSticker.file_id;
+                    payload.file_key = existingSticker.file_key;
+                    payload.mime_type = existingSticker.mime_type;
+                    payload.text = newText;
+                }
+                if (pendingReply) payload.reply_to = pendingReply;
+                if (emojiRefs.length > 0) payload.emojis = emojiRefs;
+                plaintext = JSON.stringify(payload);
+                const encrypted = E2ECrypto.encryptDm(plaintext, currentDmChannelId, kp.privateKey, otherPubKey);
+                ws.send(JSON.stringify({
+                    type: 'dm_edit',
+                    message_id: messageId,
+                    encrypted_content: encrypted.ciphertext,
+                    nonce: encrypted.nonce,
+                    message_nonce: encrypted.messageNonce || null,
+                }));
+            } catch (e) {
+                console.error('DM edit encrypt failed:', e);
+            }
+        } else {
+            // Channel edit: encrypt with server key and send as message_edit
+            if (!currentChannelId || !currentServerId) return;
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            try {
+                // Preserve existing GIF/sticker data beside the new text
+                let plaintext = newText;
+                const emojiRefs = collectEmojiRefsFromMsgEl(msgDiv, newText);
+                const payload = { type: 'text', text: newText };
+                if (existingGif) {
+                    payload.type = 'gif';
+                    payload.url = existingGif.url;
+                    payload.alt = existingGif.alt;
+                    payload.text = newText;
+                } else if (existingSticker) {
+                    payload.type = 'sticker';
+                    payload.file_id = existingSticker.file_id;
+                    payload.file_key = existingSticker.file_key;
+                    payload.mime_type = existingSticker.mime_type;
+                    payload.text = newText;
+                }
+                if (pendingReply) payload.reply_to = pendingReply;
+                if (emojiRefs.length > 0) payload.emojis = emojiRefs;
+                plaintext = JSON.stringify(payload);
+                const encrypted = E2ECrypto.encrypt(plaintext, currentChannelId, currentServerId);
+                ws.send(JSON.stringify({
+                    type: 'message_edit',
+                    message_id: messageId,
+                    encrypted_content: encrypted.ciphertext,
+                    nonce: encrypted.nonce,
+                    message_nonce: encrypted.messageNonce || null,
+                }));
+            } catch (e) {
+                console.error('Edit encrypt failed:', e);
+            }
         }
         textarea.remove();
         btnRow.remove();
+        // Restore the old text display so it's visible while waiting for server confirmation
+        if (oldText) oldText.style.display = '';
+        if (oldReply) oldReply.style.display = '';
+        if (oldForward) oldForward.style.display = '';
         if (actionsEl) actionsEl.style.display = '';
     });
 
@@ -1407,7 +1913,7 @@ function handleDelete(messageId, msgDiv) {
     }
 }
 
-function handleEditedMessage(msg, mode) {
+async function handleEditedMessage(msg, mode) {
     const list = document.getElementById('message-list');
     const existing = list.querySelector('[data-message-id="' + msg.id + '"]');
     if (!existing) return;
@@ -1418,18 +1924,65 @@ function handleEditedMessage(msg, mode) {
             let decrypted;
             if (mode === 'dm' && currentDmChannelId && currentDmOtherUser) {
                 const kp = E2ECrypto.getIdentityKeyPair();
-                let otherPubKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(currentDmOtherUser.identity_public_key || ''));
+                if (!kp) return;
+                let otherPubKey;
+                try {
+                    const res = await authFetch('/api/identity/' + currentDmOtherUser.id);
+                    const data = await res.json();
+                    otherPubKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(data.identity_public_key));
+                } catch (e) {
+                    return;
+                }
                 decrypted = E2ECrypto.decryptDm(msg.encrypted_content, msg.nonce, currentDmChannelId, kp.privateKey, otherPubKey, msg.message_nonce);
             } else if (currentChannelId && currentServerId) {
                 decrypted = E2ECrypto.decrypt(msg.encrypted_content, msg.nonce, currentChannelId, currentServerId, msg.message_nonce);
             }
-            if (decrypted) textEl.textContent = decrypted;
+            if (decrypted) {
+                // Ensure the global emoji cache is loaded so renderEmojiText can find custom emojis
+                if (!emojiCache) {
+                    await loadEmojiCache();
+                }
+                // Parse JSON payload to extract emoji refs (same as appendMessage/appendDmMessage)
+                let renderText = decrypted;
+                let extraEmojis = null;
+                try {
+                    const parsed = JSON.parse(decrypted);
+                    if (parsed && parsed.text !== undefined) {
+                        renderText = parsed.text || '';
+                        if (Array.isArray(parsed.emojis) && parsed.emojis.length > 0) {
+                            extraEmojis = {};
+                            for (const ref of parsed.emojis) {
+                                if (ref.name && ref.file_id && ref.file_key) {
+                                    extraEmojis[ref.name] = {
+                                        file_id: ref.file_id,
+                                        file_key: ref.file_key,
+                                        mime_type: ref.mime_type || 'image/png',
+                                    };
+                                }
+                            }
+                        }
+                    }
+                } catch (_) {}
+                // Preserve the time-hover span and render emoji text properly
+                const timeEl = textEl.querySelector('.time-hover');
+                const timeHtml = timeEl ? timeEl.outerHTML : '';
+                textEl.innerHTML = timeHtml + renderEmojiText(renderText, extraEmojis);
+                // Ensure the text element is visible (it might have been hidden during editing)
+                textEl.style.display = '';
+            }
         } catch (_) {}
     }
 
-    const headerEl = existing.querySelector('.header');
-    if (headerEl && !headerEl.querySelector('.edited-label')) {
-        headerEl.insertAdjacentHTML('beforeend', ' <span class="edited-label">(edited)</span>');
+    const contentEl = existing.querySelector('.content');
+    if (contentEl) {
+        let existingLabel = contentEl.querySelector('.edited-label');
+        if (existingLabel) {
+            if (!existingLabel.textContent) {
+                existingLabel.textContent = '(edited)';
+            }
+        } else {
+            contentEl.insertAdjacentHTML('beforeend', '<span class="edited-label">(edited)</span>');
+        }
     }
 }
 
@@ -1452,19 +2005,22 @@ async function loadForwardChannels() {
     if (!list) return;
     list.innerHTML = '<div style="color:#888">Loading...</div>';
     try {
-        const res = await authFetch('/api/servers');
-        const servers = await res.json();
-        let html = '';
-        for (const server of servers) {
-            const chRes = await authFetch('/api/servers/' + server.id + '/channels');
-            const channels = await chRes.json();
-            html += '<div class="forward-server"><div class="forward-server-name">' + escapeHtml(server.name) + '</div>';
-            for (const ch of channels) {
-                html += '<div class="forward-channel-item" data-server-id="' + server.id + '" data-server-name="' + escapeHtml(server.name) + '" data-channel-id="' + ch.id + '" data-channel-name="' + escapeHtml(ch.name) + '">' + escapeHtml(ch.name) + '</div>';
-            }
-            html += '</div>';
+        // Only show channels from the same server as the forwarded message
+        const sourceServerId = pendingForward?.sourceServerId || currentServerId;
+        if (!sourceServerId) {
+            list.innerHTML = '<div style="color:#888">No source server</div>';
+            return;
         }
-        list.innerHTML = html || '<div style="color:#888">No servers found</div>';
+        const chRes = await authFetch('/api/servers/' + sourceServerId + '/channels');
+        const channels = await chRes.json();
+        const server = servers.find(s => s.id === sourceServerId);
+        const serverName = server ? server.name : 'Server';
+        let html = '<div class="forward-server"><div class="forward-server-name">' + escapeHtml(serverName) + '</div>';
+        for (const ch of channels) {
+            html += '<div class="forward-channel-item" data-server-id="' + sourceServerId + '" data-server-name="' + escapeHtml(serverName) + '" data-channel-id="' + ch.id + '" data-channel-name="' + escapeHtml(ch.name) + '">' + escapeHtml(ch.name) + '</div>';
+        }
+        html += '</div>';
+        list.innerHTML = html || '<div style="color:#888">No channels found</div>';
     } catch (e) {
         list.innerHTML = '<div style="color:#888">Failed to load</div>';
     }
@@ -1502,15 +2058,55 @@ async function executeForward(targetServerId, targetServerName, targetChannelId,
 
     const senderUsername = msgDiv.querySelector('.username')?.textContent || 'unknown';
     const textEl = msgDiv.querySelector('.text');
-    const originalText = textEl ? textEl.textContent : '';
+    const originalText = textEl ? extractRawMessageText(textEl) : '';
 
     let previewText = originalText.substring(0, 80);
-    if (msgDiv.querySelector('.gif-message')) previewText = 'GIF';
-    if (msgDiv.querySelector('.sticker-message')) previewText = 'Sticker';
-    if (msgDiv.querySelector('.file-card')) previewText = 'File attachment';
+    // Extract GIF/sticker/file data from the DOM for rich forward previews
+    let gifData = null;
+    let stickerData = null;
+    let fileData = null;
+    const gifMsgEl = msgDiv.querySelector('.gif-message');
+    if (gifMsgEl) {
+        const img = gifMsgEl.querySelector('img');
+        if (img) {
+            gifData = {
+                url: img.getAttribute('src') || '',
+                alt: img.getAttribute('alt') || 'GIF',
+            };
+        }
+    }
+    const stickerMsgEl = msgDiv.querySelector('.sticker-message');
+    if (stickerMsgEl) {
+        const img = stickerMsgEl.querySelector('img');
+        if (img) {
+            // Sticker images have blob URLs as src, but we store the original sticker data
+            // in a data attribute for forward purposes
+            stickerData = {
+                file_id: stickerMsgEl.getAttribute('data-file-id') || '',
+                file_key: stickerMsgEl.getAttribute('data-file-key') || '',
+                mime_type: stickerMsgEl.getAttribute('data-mime-type') || 'image/png',
+            };
+        }
+    }
+    const fileCardEl = msgDiv.querySelector('.file-card');
+    if (fileCardEl) {
+        fileData = {
+            file_id: fileCardEl.getAttribute('data-file-id') || '',
+            file_key: fileCardEl.getAttribute('data-file-key') || '',
+            file_name: fileCardEl.getAttribute('data-file-name') || 'File',
+            file_size: fileCardEl.getAttribute('data-file-size') || '0',
+            mime_type: fileCardEl.getAttribute('data-file-mime') || 'application/octet-stream',
+        };
+    }
 
     try {
-        const previewEncrypted = E2ECrypto.encrypt(previewText, targetChannelId, targetServerId);
+        // Wrap preview with emoji refs so recipients can render them
+        const previewEmojiRefs = collectEmojiRefsFromMsgEl(msgDiv, previewText);
+        let previewEncrypted = null;
+        if (previewText || previewEmojiRefs.length > 0) {
+            const previewPlaintext = JSON.stringify({ type: 'text', text: previewText || '', emojis: previewEmojiRefs });
+            previewEncrypted = E2ECrypto.encrypt(previewPlaintext, targetChannelId, targetServerId);
+        }
         const sourceChannelId = currentChannelId;
 
         const forwardPayload = {
@@ -1522,10 +2118,16 @@ async function executeForward(targetServerId, targetServerName, targetChannelId,
             source_channel_name: document.getElementById('channel-name')?.textContent || 'channel',
             sender_username: senderUsername,
             timestamp: msgDiv.querySelector('.time')?.textContent || '',
-            preview_content: previewEncrypted.ciphertext,
-            preview_nonce: previewEncrypted.nonce,
-            preview_message_nonce: previewEncrypted.messageNonce || null,
         };
+        if (previewEncrypted) {
+            forwardPayload.preview_content = previewEncrypted.ciphertext;
+            forwardPayload.preview_nonce = previewEncrypted.nonce;
+            forwardPayload.preview_message_nonce = previewEncrypted.messageNonce || null;
+        }
+        // Include rich media data in the forward payload if present
+        if (gifData) forwardPayload.gif = gifData;
+        if (stickerData) forwardPayload.sticker = stickerData;
+        if (fileData) forwardPayload.file = fileData;
 
         const encrypted = E2ECrypto.encrypt(JSON.stringify(forwardPayload), targetChannelId, targetServerId);
         ws.send(JSON.stringify({
@@ -1557,7 +2159,8 @@ async function sendMessage() {
 
     let plaintext = content;
     const emojiRefs = collectEmojiRefs(content);
-    if (pendingReply || emojiRefs.length > 0) {
+    const mentionIds = findMentionsInText(content, currentServerMemberList);
+    if (pendingReply || emojiRefs.length > 0 || mentionIds.length > 0) {
         const payload = { type: 'text', text: content };
         if (pendingReply) payload.reply_to = pendingReply;
         if (emojiRefs.length > 0) payload.emojis = emojiRefs;
@@ -1572,13 +2175,17 @@ async function sendMessage() {
         return;
     }
 
-    ws.send(JSON.stringify({
+    var msgPayload = {
         type: 'message_send',
         channel_id: currentChannelId,
         encrypted_content: encrypted.ciphertext,
         nonce: encrypted.nonce,
         message_nonce: encrypted.messageNonce || null,
-    }));
+    };
+    if (mentionIds.length > 0) msgPayload.mentions = mentionIds;
+    if (pendingReply && pendingReply.sender_id) msgPayload.reply_to_user_id = pendingReply.sender_id;
+
+    ws.send(JSON.stringify(msgPayload));
 
     input.value = '';
     pendingReply = null;
@@ -1747,22 +2354,35 @@ async function loadDmMessages(dmChannelId, otherUserId) {
         }
 
         const kp = E2ECrypto.getIdentityKeyPair();
-        const otherUserRes = await authFetch('/api/identity/' + otherUserId);
-        const otherUserData = await otherUserRes.json();
-        const otherPublicKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(otherUserData.identity_public_key));
 
-        // TOFU key verification
-        const verification = E2ECrypto.verifyKeyForUser(otherUserId, otherUserData.identity_public_key);
-        if (!verification.trusted) {
-            const banner = document.createElement('div');
-            banner.className = 'message system';
-            banner.style.cssText = 'background:#ff9800;color:#fff;padding:10px;border-radius:6px;margin:10px 0;text-align:center';
-            banner.innerHTML = '⚠ <b>Key Changed!</b> The identity key for this user has changed since you last communicated. ' +
-                '<button onclick="if(confirm(\'Trust the new key?\')){E2ECrypto.trustCurrentKey(\'' + otherUserId + '\',\'' + otherUserData.identity_public_key + '\');this.parentElement.remove();}" ' +
-                'style="margin-left:8px;background:#fff;color:#e65100;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-weight:bold">Trust New Key</button>';
-            list.appendChild(banner);
-        } else if (verification.newKey) {
-            console.log('TOFU: First time seeing key for user', otherUserId, '- stored for future verification');
+        // Resolve the other user's identity key so we can decrypt messages.
+        // If the fetch fails (e.g. the user has no public key yet),
+        // fall back to showing encrypted placeholders.
+        let otherPublicKey = null;
+        try {
+            const otherUserRes = await authFetch('/api/identity/' + otherUserId);
+            if (otherUserRes.ok) {
+                const otherUserData = await otherUserRes.json();
+                if (otherUserData.identity_public_key) {
+                    otherPublicKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(otherUserData.identity_public_key));
+
+                    // TOFU key verification
+                    const verification = E2ECrypto.verifyKeyForUser(otherUserId, otherUserData.identity_public_key);
+                    if (verification.trusted) {
+                        tofuTrusted = true;
+                    } else {
+                        const banner = document.createElement('div');
+                        banner.className = 'message system';
+                        banner.style.cssText = 'background:#ff9800;color:#fff;padding:10px;border-radius:6px;margin:10px 0;text-align:center';
+                        banner.innerHTML = '⚠ <b>Key Changed!</b> The identity key for this user has changed since you last communicated. ' +
+                            '<button onclick="if(confirm(\'Trust the new key?\')){E2ECrypto.trustCurrentKey(\'' + otherUserId + '\',\'' + otherUserData.identity_public_key + '\');this.parentElement.remove();}" ' +
+                            'style="margin-left:8px;background:#fff;color:#e65100;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-weight:bold">Trust New Key</button>';
+                        list.appendChild(banner);
+                    }
+                }
+            }
+        } catch (_) {
+            // Identity key unavailable — messages will show as encrypted
         }
 
         for (const msg of messages) {
@@ -1780,6 +2400,9 @@ function appendDmMessage(msg, kp, otherPublicKey) {
     div.className = 'message';
     if (msg.id) div.setAttribute('data-message-id', msg.id);
     if (msg.sender_id) div.setAttribute('data-sender-id', msg.sender_id);
+
+    const myUserId = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')).id : '';
+    const isOwn = msg.sender_id === myUserId;
 
     // DM message grouping: same sender within 2 minutes in same DM channel
     const msgTime = new Date(msg.timestamp).getTime();
@@ -1802,6 +2425,7 @@ function appendDmMessage(msg, kp, otherPublicKey) {
     let filesData = null;
     let stickerData = null;
     let gifData = null;
+    let forwardData = null;
     let replyTo = null;
     let extraEmojis = null; // emoji refs embedded in message payload by sender
     if (msg.encrypted_content && msg.nonce && kp && otherPublicKey) {
@@ -1822,6 +2446,9 @@ function appendDmMessage(msg, kp, otherPublicKey) {
                     textContent = '';
                 } else if (parsed && parsed.type === 'gif') {
                     gifData = parsed;
+                    textContent = '';
+                } else if (parsed && parsed.type === 'forward') {
+                    forwardData = parsed;
                     textContent = '';
                 } else if (parsed && parsed.type === 'text') {
                     textContent = parsed.text || '';
@@ -1851,24 +2478,72 @@ function appendDmMessage(msg, kp, otherPublicKey) {
     if (replyTo) {
         contentHtml += '<div class="reply-quote" data-reply-to="' + escapeHtml(replyTo.message_id || '') + '">' +
             '<span class="reply-author">@' + escapeHtml(replyTo.author || 'unknown') + '</span> ' +
-            '<span class="reply-preview">' + escapeHtml(replyTo.preview || '') + '</span>' +
+            '<span class="reply-preview">' + (replyTo.preview ? renderEmojiText(replyTo.preview) : '') + '</span>' +
             '</div>';
     }
-    if (gifData) {
+    if (forwardData) {
+        div.classList.add('forwarded');
+        contentHtml += '<div class="forward-label" data-source-server-id="' + escapeAttr(forwardData.source_server_id || '') + '" data-source-channel-id="' + escapeAttr(forwardData.source_channel_id || '') + '" data-source-message-id="' + escapeAttr(forwardData.source_message_id || '') + '"><strong>#' + escapeHtml(forwardData.source_channel_name || 'unknown') + '</strong> / <strong>' + escapeHtml(forwardData.source_server_name || 'unknown') + '</strong></div>';
+        // Forward text preview (decrypt with DM keys)
+        if (forwardData.preview_content && forwardData.preview_nonce && kp && otherPublicKey) {
+            try {
+                let previewText = E2ECrypto.decryptDm(forwardData.preview_content, forwardData.preview_nonce, currentDmChannelId, kp.privateKey, otherPublicKey, forwardData.preview_message_nonce);
+                let previewEmojis = null;
+                try {
+                    const parsed = JSON.parse(previewText);
+                    if (parsed && parsed.type === 'text') {
+                        previewText = parsed.text || '';
+                        if (Array.isArray(parsed.emojis) && parsed.emojis.length > 0) {
+                            previewEmojis = {};
+                            for (const ref of parsed.emojis) {
+                                if (ref.name && ref.file_id && ref.file_key) {
+                                    previewEmojis[ref.name] = { file_id: ref.file_id, file_key: ref.file_key, mime_type: ref.mime_type || 'image/png' };
+                                }
+                            }
+                        }
+                    }
+                } catch (_) {}
+                contentHtml += '<div class="forward-preview"><div class="text"><span class="time-hover">' + time + '</span>' + renderEmojiText(previewText, previewEmojis) + '</div></div>';
+            } catch (_) {
+                contentHtml += '<div class="forward-preview forward-unavailable">Preview unavailable</div>';
+            }
+        }
+        // Render rich media preview for forwards that contain GIF/sticker/file
+        if (forwardData.gif) {
+            contentHtml += '<div class="gif-message" style="margin-top:4px">' +
+                '<img src="' + escapeHtml(forwardData.gif.url) + '" alt="' + escapeHtml(forwardData.gif.alt || 'GIF') + '" loading="lazy" style="max-width:300px;max-height:300px;border-radius:8px;cursor:pointer">' +
+                '</div>';
+        } else if (forwardData.sticker) {
+            contentHtml += '<div class="sticker-message" data-file-id="' + escapeAttr(forwardData.sticker.file_id) + '" data-file-key="' + escapeAttr(forwardData.sticker.file_key) + '" data-mime-type="' + escapeAttr(forwardData.sticker.mime_type) + '"></div>';
+        } else if (forwardData.file) {
+            contentHtml += buildFileCardHtml(forwardData.file);
+        }
+    } else if (gifData) {
+        if (gifData.text) contentHtml += '<div class="text"><span class="time-hover">' + time + '</span>' + renderEmojiText(gifData.text) + '</div>';
         contentHtml += '<div class="gif-message">' +
-            '<img src="' + escapeHtml(gifData.url) + '" alt="' + escapeHtml(gifData.alt || 'GIF') + '" loading="lazy" style="max-width:300px;max-height:300px;border-radius:8px">' +
+            '<img src="' + escapeHtml(gifData.url) + '" alt="' + escapeHtml(gifData.alt || 'GIF') + '" loading="lazy" style="max-width:300px;max-height:300px;border-radius:8px;cursor:pointer">' +
             '<button class="media-download-btn" title="Download" data-url="' + escapeHtml(gifData.url) + '" data-filename="sticker.gif">⬇</button>' +
             '</div>';
     } else if (stickerData) {
+        if (stickerData.text) contentHtml += '<div class="text"><span class="time-hover">' + time + '</span>' + renderEmojiText(stickerData.text) + '</div>';
         contentHtml += '<div class="sticker-message"></div>';
     } else if (filesData) {
         contentHtml += buildMultiFileCardHtml(filesData);
     } else if (fileData) {
         contentHtml += buildFileCardHtml(fileData);
     } else if (textContent) {
-        contentHtml += '<div class="text"><span class="time-hover">' + time + '</span>' + renderEmojiText(textContent, extraEmojis) + '</div>';
+        contentHtml += '<div class="text"><span class="time-hover">' + time + '</span>' + highlightMentionsInHtml(renderEmojiText(textContent, extraEmojis)) + '</div>';
+    } else if (msg.encrypted_content && !otherPublicKey) {
+        const label = isOwn ? '[message sent]' : '[encrypted]';
+        contentHtml += '<div class="text" style="color:#888;font-style:italic">' + label + '</div>';
     }
 
+    const actionsHtml = '<div class="message-actions">' +
+        '<button class="msg-action-btn" data-action="reply" title="Reply">&#x21A9;</button>' +
+        (isOwn ? '<button class="msg-action-btn" data-action="edit" title="Edit">&#x270E;</button>' : '') +
+        '</div>';
+
+    const editedHtml = msg.edited_at ? '<span class="edited-label">(edited)</span>' : '';
     div.innerHTML =
         '<div class="avatar">' + initial + '</div>' +
         '<div class="content">' +
@@ -1876,11 +2551,21 @@ function appendDmMessage(msg, kp, otherPublicKey) {
                 '<span class="username">' + escapeHtml(msg.sender_username || 'unknown') + '</span>' +
             '</div>' +
             contentHtml +
-        '</div>';
+            editedHtml +
+        '</div>' +
+        actionsHtml;
 
     // Reply highlight: if this message replies to the current user, add yellow border
     if (replyTo && replyTo.author && user && replyTo.author === user.username) {
         div.classList.add('reply-highlighted');
+    }
+
+    // Check if current user is mentioned in text (for DM messages)
+    if (textContent && user) {
+        var dmMentionPat = new RegExp('@' + user.username.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(\\b|$|\\s)');
+        if (dmMentionPat.test(textContent)) {
+            div.classList.add('mentioned');
+        }
     }
 
     // Reply quote click -> scroll to original
@@ -1911,6 +2596,32 @@ function appendDmMessage(msg, kp, otherPublicKey) {
                 stickerContainer.querySelector('.load-preview-btn').addEventListener('click', () => {
                     stickerContainer.innerHTML = '';
                     loadStickerPreview(stickerContainer, stickerData);
+                });
+            }
+        }
+    } else if (forwardData && forwardData.sticker) {
+        const fwdStickerContainer = div.querySelector('.sticker-message');
+        if (fwdStickerContainer) {
+            if (autoLoad) {
+                loadStickerPreview(fwdStickerContainer, forwardData.sticker);
+            } else {
+                fwdStickerContainer.innerHTML = '<button class="load-preview-btn">Load sticker</button>';
+                fwdStickerContainer.querySelector('.load-preview-btn').addEventListener('click', () => {
+                    fwdStickerContainer.innerHTML = '';
+                    loadStickerPreview(fwdStickerContainer, forwardData.sticker);
+                });
+            }
+        }
+    } else if (forwardData && forwardData.file && forwardData.file.file_key) {
+        const fwdFileContainer = div.querySelector('.file-preview');
+        if (fwdFileContainer) {
+            if (autoLoad) {
+                loadMediaPreview(fwdFileContainer, forwardData.file);
+            } else {
+                fwdFileContainer.innerHTML = '<button class="load-preview-btn">Load preview</button>';
+                fwdFileContainer.querySelector('.load-preview-btn').addEventListener('click', () => {
+                    fwdFileContainer.innerHTML = '';
+                    loadMediaPreview(fwdFileContainer, forwardData.file);
                 });
             }
         }
@@ -1969,7 +2680,9 @@ async function sendDmMessage() {
 
     let plaintext = content;
     const emojiRefs = collectEmojiRefs(content);
-    if (pendingReply || emojiRefs.length > 0) {
+    const dmMemberList = currentDmOtherUser ? [{ username: currentDmOtherUser.username, id: currentDmOtherUser.id }] : [];
+    const mentionIds = findMentionsInText(content, dmMemberList);
+    if (pendingReply || emojiRefs.length > 0 || mentionIds.length > 0) {
         const payload = { type: 'text', text: content };
         if (pendingReply) payload.reply_to = pendingReply;
         if (emojiRefs.length > 0) payload.emojis = emojiRefs;
@@ -1984,13 +2697,17 @@ async function sendDmMessage() {
         return;
     }
 
-    ws.send(JSON.stringify({
+    var msgPayload = {
         type: 'dm_send',
         dm_channel_id: currentDmChannelId,
         encrypted_content: encrypted.ciphertext,
         nonce: encrypted.nonce,
         message_nonce: encrypted.messageNonce || null,
-    }));
+    };
+    if (mentionIds.length > 0) msgPayload.mentions = mentionIds;
+    if (pendingReply && pendingReply.sender_id) msgPayload.reply_to_user_id = pendingReply.sender_id;
+
+    ws.send(JSON.stringify(msgPayload));
 
     input.value = '';
     pendingReply = null;
@@ -2055,6 +2772,7 @@ async function loadMembers(serverId) {
     try {
         const res = await authFetch(`/api/servers/${serverId}/members`);
         const members = await res.json();
+        currentServerMemberList = Array.isArray(members) ? members : [];
         const list = document.getElementById('member-list');
         list.innerHTML = '';
 
@@ -2183,7 +2901,40 @@ async function deleteChannel(channelId, channelName) {
 async function openServerSettings() {
     if (!currentServerId || !isOwner) return;
     document.getElementById('server-settings-modal').style.display = 'flex';
+    await loadServerSettings();
     await loadBannedUsers();
+}
+
+async function loadServerSettings() {
+    const toggle = document.getElementById('disable-joins-toggle');
+    if (!toggle) return;
+    // Set toggle based on current server state (from the server list which already has joins_disabled)
+    const server = servers.find(s => s.id === currentServerId);
+    if (server && server.joins_disabled !== undefined) {
+        toggle.checked = server.joins_disabled;
+    }
+    toggle.onchange = async () => {
+        const disabled = toggle.checked;
+        try {
+            const res = await authFetch('/api/servers/' + currentServerId + '/settings', {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ disabled }),
+            });
+            if (res.ok) {
+                // Update the local server cache
+                const srv = servers.find(s => s.id === currentServerId);
+                if (srv) srv.joins_disabled = disabled;
+            } else {
+                const err = await res.json();
+                alert('Failed to update: ' + (err.error || 'Unknown error'));
+                toggle.checked = !disabled;
+            }
+        } catch (e) {
+            alert('Failed to update join settings');
+            toggle.checked = !disabled;
+        }
+    };
 }
 
 async function loadBannedUsers() {
@@ -3740,6 +4491,31 @@ function revokeBlobUrls() {
     blobUrls = [];
 }
 
+/**
+ * Extract the raw message text from a .text div, preserving emoji shortcodes (:name:)
+ * that are stored in the alt attributes of emoji <img> elements.
+ * Also strips the time-hover span from the result.
+ */
+function extractRawMessageText(textEl) {
+    let result = '';
+    for (const node of textEl.childNodes) {
+        if (node.nodeType === Node.TEXT_NODE) {
+            result += node.textContent;
+        } else if (node.nodeType === Node.ELEMENT_NODE) {
+            if (node.classList && node.classList.contains('time-hover')) {
+                // Skip time-hover spans
+                continue;
+            } else if (node.classList && node.classList.contains('emoji-inline')) {
+                // Use alt text which contains :emoji_name:
+                result += node.getAttribute('alt') || '';
+            } else {
+                result += node.textContent || '';
+            }
+        }
+    }
+    return result;
+}
+
 
 
 // ===== Gallery State Helper =====
@@ -4881,6 +5657,63 @@ function collectEmojiRefs(text) {
     return refs;
 }
 
+/**
+ * Collect emoji refs from both the local emoji cache AND from rendered
+ * &lt;img&gt; elements in the message DOM. This ensures that when a user edits
+ * or forwards a message containing an emoji they don't own (not in their
+ * local cache), the emoji metadata (file_id, file_key) is still extracted
+ * from the already-rendered image tags and included in the payload.
+ * @param {Element} msgEl - The .message DOM element containing rendered emoji images
+ * @param {string} text - The text content with :emoji_name: shortcodes
+ * @returns {Array} Array of emoji ref objects {name, file_id, file_key, mime_type}
+ */
+function collectEmojiRefsFromMsgEl(msgEl, text) {
+    // Step 1: Get refs from the local emoji cache (standard approach)
+    const cacheRefs = collectEmojiRefs(text);
+    const seen = {};
+    const refs = [];
+    for (const ref of cacheRefs) {
+        seen[ref.name] = true;
+        refs.push(ref);
+    }
+
+    // Step 2: For emoji names in the text that weren't in the local cache,
+    // look for rendered &lt;img&gt; elements in the message DOM that already
+    // display those emojis. Extract file_id and file_key from the src URL.
+    const parts = text.split(/:([a-zA-Z0-9_]+):/);
+    if (parts.length > 1 && msgEl) {
+        const emojiImgs = msgEl.querySelectorAll('.text .emoji-inline');
+        for (const img of emojiImgs) {
+            const alt = img.getAttribute('alt') || '';
+            const match = alt.match(/^:([a-zA-Z0-9_]+):$/);
+            if (match) {
+                const name = match[1];
+                if (!seen[name] && text.includes(':' + name + ':')) {
+                    // Parse the src URL to extract file_id and file_key
+                    // src format: /api/emojis/{file_id}/{file_key}
+                    const src = img.getAttribute('src') || '';
+                    const srcParts = src.split('/');
+                    if (srcParts.length >= 2) {
+                        const fileId = decodeURIComponent(srcParts[srcParts.length - 2]);
+                        const fileKey = decodeURIComponent(srcParts[srcParts.length - 1]);
+                        if (fileId && fileKey && fileId !== 'null' && fileKey !== 'null') {
+                            seen[name] = true;
+                            refs.push({
+                                name: name,
+                                file_id: fileId,
+                                file_key: fileKey,
+                                mime_type: 'image/png',
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return refs;
+}
+
 // Resolve a custom-emoji entry by shortcode. Per-message refs (received from
 // other users) take priority over the local registry so shared emojis render
 // for recipients who never uploaded them.
@@ -5134,18 +5967,24 @@ async function sendStickerMessage(sticker) {
     setStickerSendingCooldown(true);
     showStickerProgress('Preparing...', 0);
 
+    // If there's text in the input, combine it with the sticker
+    const stickerInput = document.getElementById('message-input');
+    const pendingText = stickerInput ? stickerInput.value.trim() : '';
+
     try {
         let filePayload;
         if (sticker.file_key) {
             // Optimized: reuse existing file — no need to download/re-encrypt/re-upload
             showStickerProgress('Sending...', 50);
-            filePayload = JSON.stringify({
+            const payload = {
                 type: 'sticker',
                 file_id: sticker.file_id,
                 sticker_name: sticker.sticker_name,
                 mime_type: sticker.mime_type || 'image/png',
                 file_key: sticker.file_key,
-            });
+            };
+            if (pendingText) payload.text = pendingText;
+            filePayload = JSON.stringify(payload);
         } else {
             // Fallback for old stickers without file_key: download, decrypt, re-encrypt, re-upload
             showStickerProgress('Decrypting...', 5);
@@ -5190,13 +6029,23 @@ async function sendStickerMessage(sticker) {
             const completeRes = await authFetch('/api/files/' + newFileId + '/complete', { method: 'POST' });
             if (!completeRes.ok) { console.error('sendStickerMessage: complete failed', await completeRes.text()); hideStickerProgress(); setStickerSendingCooldown(false); return; }
 
-            filePayload = JSON.stringify({
+            const fallbackPayload = {
                 type: 'sticker',
                 file_id: newFileId,
                 sticker_name: sticker.sticker_name,
                 mime_type: mime,
                 file_key: freshKeyB64,
-            });
+            };
+            if (pendingText) fallbackPayload.text = pendingText;
+            filePayload = JSON.stringify(fallbackPayload);
+        }
+
+        // Clear input after sending combined message
+        if (pendingText && stickerInput) {
+            stickerInput.value = '';
+            pendingReply = null;
+            const replyBar = document.getElementById('reply-bar');
+            if (replyBar) replyBar.style.display = 'none';
         }
 
         showStickerProgress('Sending...', 90);
@@ -5592,8 +6441,8 @@ async function processAndUploadSticker() {
         let cropSize = stickerCropState.cropSize;
 
         if (stickerUploadMode === 'emoji') {
-            // Emoji: crop the selected square region, then resize to fit within MAX_EMOJI_SIZE
-            const MAX_EMOJI_SIZE = 32;
+            // Emoji: crop the selected square region, then resize to fit within MAX_EMOJI_SIZE (max 420x420)
+            const MAX_EMOJI_SIZE = 420;
             let ew = cropSize, eh = cropSize;
             if (ew > MAX_EMOJI_SIZE || eh > MAX_EMOJI_SIZE) {
                 const ratio = Math.min(MAX_EMOJI_SIZE / ew, MAX_EMOJI_SIZE / eh);
@@ -5756,13 +6605,30 @@ async function loadDmForwardList() {
             list.innerHTML = '<div style="color:#666;padding:12px;font-size:13px;">No friends to forward to.</div>';
             return;
         }
+        // Only show users who are members of the source server
+        let allowedUserIds = null;
+        const sourceServerId = pendingForward?.sourceServerId;
+        if (sourceServerId) {
+            try {
+                const memRes = await authFetch('/api/servers/' + sourceServerId + '/members');
+                const members = await memRes.json();
+                if (Array.isArray(members)) {
+                    allowedUserIds = new Set(members.map(m => m.id));
+                }
+            } catch (_) {}
+        }
         let html = '';
         for (const c of dmConversations) {
+            if (allowedUserIds && !allowedUserIds.has(c.other_user_id)) continue;
             const initial = (c.other_username || '?').charAt(0).toUpperCase();
-            html += '<div class="dm-forward-item" data-user-id="' + c.other_user_id + '" data-username="' + escapeHtml(c.other_username) + '" style="display:flex;align-items:center;gap:10px;padding:10px 12px;cursor:pointer;border-radius:6px;border-bottom:1px solid var(--bg-border);transition:background .15s;">' +
+            html += '<div class="dm-forward-item" data-user-id="' + c.other_user_id + '" data-username="' + escapeHtml(c.other_username) + '" data-dm-channel-id="' + escapeAttr(c.dm_channel_id || '') + '" style="display:flex;align-items:center;gap:10px;padding:10px 12px;cursor:pointer;border-radius:6px;border-bottom:1px solid var(--bg-border);transition:background .15s;">' +
                 '<div style="width:32px;height:32px;border-radius:50%;background:var(--accent);color:var(--bg-primary);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;flex-shrink:0;">' + initial + '</div>' +
                 '<span style="font-size:14px;color:var(--text-primary);">' + escapeHtml(c.other_username) + '</span>' +
                 '</div>';
+        }
+        if (!html) {
+            list.innerHTML = '<div style="color:#666;padding:12px;font-size:13px;">No server members to forward to.</div>';
+            return;
         }
         list.innerHTML = html;
         list.querySelectorAll('.dm-forward-item').forEach(item => {
@@ -5771,7 +6637,8 @@ async function loadDmForwardList() {
             item.addEventListener('click', () => {
                 const userId = item.dataset.userId;
                 const username = item.dataset.username;
-                executeDmForward(userId, username);
+                const dmChannelId = item.dataset.dmChannelId;
+                executeDmForward(userId, username, dmChannelId);
                 document.getElementById('dm-forward-modal').style.display = 'none';
                 pendingForward = null;
             });
@@ -5781,33 +6648,119 @@ async function loadDmForwardList() {
     }
 }
 
-async function executeDmForward(targetUserId, targetUsername) {
+async function executeDmForward(targetUserId, targetUsername, dmChannelId) {
     if (!pendingForward || !ws || ws.readyState !== WebSocket.OPEN) return;
     const msgDiv = pendingForward.msgDiv;
+    const messageId = pendingForward.messageId;
+
+    // Get our identity key pair for DM encryption
+    const kp = E2ECrypto.getIdentityKeyPair();
+    if (!kp) return;
+
+    // If no dmChannelId was passed, look it up from dmConversations
+    if (!dmChannelId) {
+        const conv = dmConversations.find(c => c.other_user_id === targetUserId);
+        if (conv) dmChannelId = conv.dm_channel_id;
+    }
+    if (!dmChannelId) {
+        console.error('DM forward: no DM channel found for user', targetUserId);
+        return;
+    }
+
+    // Fetch the target user's identity key for E2E encryption
+    let otherPublicKey;
+    try {
+        const res = await authFetch('/api/identity/' + targetUserId);
+        const data = await res.json();
+        otherPublicKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(data.identity_public_key));
+    } catch (e) {
+        console.error('DM forward: failed to fetch recipient key:', e);
+        return;
+    }
+
     const senderUsername = msgDiv.querySelector('.username')?.textContent || 'unknown';
     const textEl = msgDiv.querySelector('.text');
-    const originalText = textEl ? textEl.textContent : '';
-
+    const originalText = textEl ? extractRawMessageText(textEl) : '';
     let previewText = originalText.substring(0, 80);
-    if (msgDiv.querySelector('.gif-message')) previewText = 'GIF';
-    if (msgDiv.querySelector('.sticker-message')) previewText = 'Sticker';
-    if (msgDiv.querySelector('.file-card')) previewText = 'File attachment';
+
+    // Extract GIF/sticker/file data from the DOM for rich forward previews
+    let gifData = null;
+    let stickerData = null;
+    let fileData = null;
+    const gifMsgEl = msgDiv.querySelector('.gif-message');
+    if (gifMsgEl) {
+        const img = gifMsgEl.querySelector('img');
+        if (img) {
+            gifData = {
+                url: img.getAttribute('src') || '',
+                alt: img.getAttribute('alt') || 'GIF',
+            };
+        }
+    }
+    const stickerMsgEl = msgDiv.querySelector('.sticker-message');
+    if (stickerMsgEl) {
+        const img = stickerMsgEl.querySelector('img');
+        if (img) {
+            stickerData = {
+                file_id: stickerMsgEl.getAttribute('data-file-id') || '',
+                file_key: stickerMsgEl.getAttribute('data-file-key') || '',
+                mime_type: stickerMsgEl.getAttribute('data-mime-type') || 'image/png',
+            };
+        }
+    }
+    const fileCardEl = msgDiv.querySelector('.file-card');
+    if (fileCardEl) {
+        fileData = {
+            file_id: fileCardEl.getAttribute('data-file-id') || '',
+            file_key: fileCardEl.getAttribute('data-file-key') || '',
+            file_name: fileCardEl.getAttribute('data-file-name') || 'File',
+            file_size: fileCardEl.getAttribute('data-file-size') || '0',
+            mime_type: fileCardEl.getAttribute('data-file-mime') || 'application/octet-stream',
+        };
+    }
 
     try {
-        const dmPayload = {
-            type: 'dm_forward',
-            target_user_id: targetUserId,
-            target_username: targetUsername,
+        // Wrap preview with emoji refs so recipients can render them
+        const previewEmojiRefs = collectEmojiRefsFromMsgEl(msgDiv, previewText);
+        let previewEncrypted = null;
+        if (previewText || previewEmojiRefs.length > 0) {
+            const previewPlaintext = JSON.stringify({ type: 'text', text: previewText || '', emojis: previewEmojiRefs });
+            previewEncrypted = E2ECrypto.encryptDm(previewPlaintext, dmChannelId, kp.privateKey, otherPublicKey);
+        }
+
+        // Build the forward payload (same structure as channel forwards, with encrypted preview)
+        const forwardPayload = {
+            type: 'forward',
             source_server_id: currentServerId,
             source_channel_id: currentChannelId,
+            source_message_id: messageId,
             source_server_name: document.getElementById('server-name')?.textContent || 'Server',
             source_channel_name: document.getElementById('channel-name')?.textContent || 'channel',
             sender_username: senderUsername,
-            preview: previewText,
         };
-        ws.send(JSON.stringify(dmPayload));
+        if (previewEncrypted) {
+            forwardPayload.preview_content = previewEncrypted.ciphertext;
+            forwardPayload.preview_nonce = previewEncrypted.nonce;
+            forwardPayload.preview_message_nonce = previewEncrypted.messageNonce || null;
+        }
+        // Include rich media data in the forward payload if present
+        if (gifData) forwardPayload.gif = gifData;
+        if (stickerData) forwardPayload.sticker = stickerData;
+        if (fileData) forwardPayload.file = fileData;
+
+        // Encrypt the entire forward payload with DM E2E encryption and send as a regular dm_send
+        const plaintext = JSON.stringify(forwardPayload);
+        const encrypted = E2ECrypto.encryptDm(plaintext, dmChannelId, kp.privateKey, otherPublicKey);
+
+        ws.send(JSON.stringify({
+            type: 'dm_send',
+            dm_channel_id: dmChannelId,
+            encrypted_content: encrypted.ciphertext,
+            nonce: encrypted.nonce,
+            message_nonce: encrypted.messageNonce || null,
+        }));
     } catch (e) {
-        console.error('DM forward failed:', e);
+        console.error('DM forward encrypt/send failed:', e);
     }
 }
 

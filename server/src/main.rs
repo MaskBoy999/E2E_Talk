@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::{
     http::{HeaderMap, HeaderValue},
-    routing::{get, post, delete},
+    routing::{get, post, delete, patch},
     Router,
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -152,7 +152,9 @@ async fn main() {
         .route("/api/servers/{server_id}/invite", get(handlers::get_invite).post(handlers::regenerate_invite))
         .route("/api/servers/{server_id}/keys", get(handlers::get_server_keys).post(handlers::upload_server_key))
         .route("/api/servers/{server_id}/keys/rotate", post(handlers::rotate_server_keys))
+        .route("/api/servers/{server_id}/settings", patch(handlers::set_joins_disabled))
         .route("/api/channels/{channel_id}/messages", get(handlers::list_messages))
+        .route("/api/channels/{channel_id}/messages/around/{message_id}", get(handlers::list_messages_around))
         .route("/api/channels/{channel_id}", delete(handlers::delete_channel))
         .route("/api/invites/join", post(handlers::join_server))
         .route("/api/keys/{user_id}", get(handlers::get_key_bundle))

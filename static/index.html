@@ -66,7 +66,7 @@
                 <button class="attach-btn" id="attach-btn" title="Attach file">+</button>
                 <button class="sticker-btn" id="sticker-btn" title="Emojis, Stickers, GIFs">&#x1F600;</button>
                 <input type="file" id="file-input" style="display:none" multiple>
-                <input type="text" id="message-input" placeholder="Type a message..." disabled>
+                <textarea id="message-input" placeholder="Type a message..." disabled rows="1" style="resize:none;overflow-y:auto;min-height:36px;max-height:120px;padding:8px 12px;"></textarea>
                 <button id="send-btn" disabled>Send</button>
             </div>
         </div>
@@ -171,6 +171,16 @@
     <div class="modal" id="server-settings-modal" style="display:none">
         <div class="modal-content" style="max-width:500px">
             <div class="settings-section">
+                <h3 style="margin-bottom:12px;color:var(--accent);font-size:15px;">Server Settings</h3>
+                <div class="settings-group" style="margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid var(--bg-border)">
+                    <label class="settings-toggle" style="display:flex;align-items:center;gap:10px;cursor:pointer">
+                        <input type="checkbox" id="disable-joins-toggle">
+                        <span class="toggle-slider"></span>
+                        <span class="toggle-label" style="font-size:14px;color:var(--text-primary)">Disable new joins</span>
+                    </label>
+                    <p class="settings-hint" style="margin-top:6px;font-size:12px;color:var(--text-muted)">When enabled, no one can join this server using the invite code.</p>
+                </div>
+                <h4 style="margin-bottom:8px;color:var(--text-primary);font-size:13px;">Banned Users</h4>
                 <div id="banned-users-list" class="banned-list"></div>
             </div>
             <div class="modal-actions">
@@ -419,6 +429,6 @@
     <script src="crypto.js?v=6"></script>
     <script src="qrcode.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
-    <script src="chat.js?v=21"></script>
+    <script src="chat.js?v=23"></script>
 </body>
 </html>

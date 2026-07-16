@@ -36,3 +36,4 @@ server/.env
 server/uploads/
 NUL
 server/NUL
+.freebuff/

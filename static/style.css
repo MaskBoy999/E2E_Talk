@@ -841,9 +841,14 @@ body {
 }
 
 .message.grouped {
-    margin-bottom: 2px;
+    margin-bottom: 0;
     padding-top: 0;
     padding-bottom: 0;
+}
+
+.message.forwarded {
+    background: rgba(79, 195, 247, 0.06);
+    border-left-color: rgba(79, 195, 247, 0.25);
 }
 .message.grouped .avatar {
     visibility: hidden;
@@ -860,6 +865,70 @@ body {
 .reply-highlighted {
     border-left-color: #f9a825 !important;
     background: rgba(249,168,37,0.08) !important;
+}
+
+.mentioned {
+    border-left-color: #f9a825 !important;
+    background: rgba(249,168,37,0.08) !important;
+}
+
+.mention {
+    color: #4fc3f7;
+    background: rgba(79,195,247,0.12);
+    padding: 0 2px;
+    border-radius: 3px;
+    font-weight: 500;
+}
+
+.chat-input {
+    position: relative;
+}
+
+.mention-dropdown {
+    position: absolute;
+    bottom: 100%;
+    left: 0;
+    right: 0;
+    background: #1e1e2e;
+    border: 1px solid #2a2a4a;
+    border-radius: 8px;
+    max-height: 180px;
+    overflow-y: auto;
+    z-index: 1000;
+    box-shadow: 0 -4px 16px rgba(0,0,0,0.4);
+}
+
+.mention-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    cursor: pointer;
+    transition: background 0.1s;
+}
+
+.mention-item:hover,
+.mention-item.active {
+    background: rgba(79,195,247,0.12);
+}
+
+.mention-item-avatar {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: var(--bg-primary);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 12px;
+    flex-shrink: 0;
+}
+
+.mention-item-name {
+    font-size: 14px;
+    color: var(--text-primary);
 }
 
 .message .avatar {
@@ -914,9 +983,10 @@ body {
 
 .message .text {
     color: var(--text-primary);
-    line-height: 1.5;
+    line-height: 1.6;
     word-break: break-word;
-    font-size: clamp(13px, 2.5vw, 15px);
+    font-size: clamp(15px, 2.8vw, 18px);
+    white-space: pre-wrap;
 }
 
 /* ===== Chat Input ===== */
@@ -930,23 +1000,30 @@ body {
     flex-shrink: 0;
 }
 
-.chat-input input {
+.chat-input textarea {
     flex: 1;
-    padding: clamp(10px, 2vw, 12px) clamp(10px, 2.5vw, 16px);
+    padding: clamp(8px, 1.5vw, 10px) clamp(10px, 2.5vw, 16px);
     border: 1px solid var(--bg-border);
     border-radius: clamp(6px, 1.5vw, 8px);
     background: var(--bg-secondary);
     color: var(--text-primary);
     font-size: 16px;
     min-width: 0;
+    font-family: inherit;
+    resize: none;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    min-height: 36px;
+    max-height: 120px;
+    line-height: 1.4;
 }
 
-.chat-input input:focus {
+.chat-input textarea:focus {
     outline: none;
     border-color: var(--accent);
 }
 
-.chat-input input:disabled {
+.chat-input textarea:disabled {
     opacity: 0.5;
     cursor: not-allowed;
 }
@@ -2977,6 +3054,12 @@ body {
     font-size: 12px;
     color: #888;
     margin-bottom: 4px;
+    cursor: pointer;
+    transition: color 0.15s;
+}
+.forward-label:hover {
+    color: #4fc3f7;
+    text-decoration: underline;
     padding: 2px 0;
 }
 .forward-preview {
@@ -2995,7 +3078,7 @@ body {
     color: #666;
     font-size: 11px;
     font-style: italic;
-    margin-left: 4px;
+    margin-left: 6px;
 }
 
 /* Flash highlight for reply scroll */
@@ -3150,15 +3233,25 @@ body {
     position: fixed;
     bottom: 60px;
     right: 20px;
-    width: 350px;
-    height: 420px;
+    width: min(90vw, 360px);
+    height: min(60vh, 440px);
     background: #2d2d2d;
     border: 1px solid #3d3d3d;
-    border-radius: 8px;
+    border-radius: 12px;
     z-index: 100;
     display: flex;
     flex-direction: column;
     box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+}
+
+@media (max-width: 480px) {
+    .sticker-panel {
+        right: 5px;
+        width: calc(100vw - 10px);
+        height: min(70vh, 400px);
+        bottom: 56px;
+        border-radius: 8px;
+    }
 }
 .sticker-panel-tabs {
     display: flex;
@@ -3185,20 +3278,22 @@ body {
 }
 .emoji-inline {
     display: inline;
-    width: 20px;
-    height: 20px;
+    width: 2em;
+    height: 2em;
     vertical-align: middle;
     margin: 0 1px;
+    image-rendering: auto;
 }
 
 .emoji-inline.emoji-alone {
-    width: 80px;
-    height: 80px;
-    margin: 2px;
+    width: 120px;
+    height: 120px;
+    margin: 4px;
+    image-rendering: auto;
 }
 
 .emoji-loading.emoji-alone {
-    font-size: 56px;
+    font-size: 80px;
 }
 
 .emoji-loading {
