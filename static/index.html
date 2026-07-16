@@ -14,8 +14,8 @@
                 <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z"/></svg>
                 <span class="badge" id="dm-strip-badge" style="display:none"></span>
             </div>
-            <div class="mentions-strip-btn" id="mentions-strip-btn" title="Mentions Inbox">
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10c2.83 0 5.37-1.16 7.19-3.03l-1.42-1.42A7.98 7.98 0 0112 20c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8c0 .68-.14 1.33-.37 1.93-.23.6-.44 1.16-.77 1.58-.33.42-.7.7-1.11.83-.42.13-.87.02-1.22-.33-.34-.35-.53-.83-.53-1.3V8h-2v.45A3.98 3.98 0 008 12c0 2.21 1.79 4 4 4 .82 0 1.58-.25 2.21-.67.21.85.77 1.52 1.57 1.89.8.37 1.67.37 2.51-.04.84-.41 1.49-1.11 1.9-1.89.41-.79.59-1.69.59-2.71 0-5.52-4.48-10-10-10zm0 14c-2.21 0-4-1.79-4-4s1.79-4 4-4 4 1.79 4 4-1.79 4-4 4z"/></svg>
+            <div class="mentions-strip-btn" id="mentions-strip-btn" title="Notifications">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.89 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>
                 <span class="badge" id="mentions-strip-badge" style="display:none"></span>
             </div>
             <div class="strip-divider"></div>
@@ -67,8 +67,26 @@
                 </div>
             </div>
             <div class="reply-bar" id="reply-bar" style="display:none"></div>
+            <div class="audio-recording-bar" id="audio-recording-bar" style="display:none">
+                <div class="recording-bar-left">
+                    <span class="recording-bar-indicator"></span>
+                    <span class="recording-bar-timer" id="recording-bar-timer">0:00</span>
+                    <span class="recording-bar-label">Recording...</span>
+                </div>
+                <div class="recording-bar-right">
+                    <button class="recording-bar-send" id="recording-bar-send">Send</button>
+                    <button class="recording-bar-cancel" id="recording-bar-cancel">Cancel</button>
+                </div>
+            </div>
             <div class="chat-input">
-                <button class="attach-btn" id="attach-btn" title="Attach file">+</button>
+                <div class="attach-wrap">
+                    <button class="attach-btn" id="attach-btn" title="Attach file">+</button>
+                    <div class="attach-popup" id="attach-popup" style="display:none">
+                        <button class="attach-popup-item" data-action="upload">📁 Upload Files</button>
+                        <button class="attach-popup-item" data-action="photo">📷 Take Photo</button>
+                        <button class="attach-popup-item" data-action="record-audio">🎤 Record Audio</button>
+                    </div>
+                </div>
                 <button class="sticker-btn" id="sticker-btn" title="Emojis, Stickers, GIFs">&#x1F600;</button>
                 <input type="file" id="file-input" style="display:none" multiple>
                 <textarea id="message-input" placeholder="Type a message..." disabled rows="1" style="resize:none;overflow-y:auto;min-height:36px;max-height:120px;padding:8px 12px;"></textarea>
@@ -128,6 +146,7 @@
             </div>
             <div class="qr-import-section">
                 <button id="join-import-qr-btn" class="btn-import-qr">📷 Import QR Code</button>
+                <button id="join-scan-qr-btn" class="btn-import-qr">📸 Scan QR Code</button>
                 <input type="file" id="join-qr-file-input" accept="image/*" style="display:none">
             </div>
             <div class="modal-actions">
@@ -204,6 +223,7 @@
             </div>
             <div class="qr-import-section">
                 <button id="friend-import-qr-btn" class="btn-import-qr">📷 Import QR Code</button>
+                <button id="friend-scan-qr-btn" class="btn-import-qr">📸 Scan QR Code</button>
                 <input type="file" id="friend-qr-file-input" accept="image/*" style="display:none">
             </div>
             <div id="add-friend-error" style="color:var(--danger);margin-bottom:12px;display:none;font-size:13px"></div>
@@ -221,6 +241,20 @@
             <div id="friend-requests-list" style="max-height:300px;overflow-y:auto"></div>
             <div class="modal-actions">
                 <button class="btn-cancel" id="close-friend-requests">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- QR Scanner Modal -->
+    <div class="modal" id="qr-scanner-modal" style="display:none;z-index:2000">
+        <div class="qr-scanner-content">
+            <button id="qr-scanner-close" class="qr-scanner-close">&times;</button>
+            <div class="qr-scanner-viewport">
+                <video id="qr-scanner-video" autoplay playsinline muted style="width:100%;height:100%;object-fit:cover;"></video>
+                <div class="qr-scanner-frame">
+                    <div class="qr-scanner-circle"></div>
+                </div>
+                <div class="qr-scanner-text">Position QR code inside the circle</div>
             </div>
         </div>
     </div>
@@ -272,10 +306,28 @@
                         <input type="file" id="notif-sound-input" accept="audio/*" style="display:none">
                         <button class="btn btn-primary" id="notif-sound-upload-btn">Choose Audio File</button>
                         <button class="btn btn-secondary" id="notif-sound-test-btn">Test Sound</button>
+                        <button class="btn btn-secondary" id="notif-sound-record-btn">🎤 Record</button>
                         <button class="btn btn-danger" id="notif-sound-reset-btn">Reset to Default</button>
+                    </div>
+                    <div id="notif-sound-recording" style="display:none;margin-top:8px;padding:8px 12px;background:rgba(244,67,54,0.1);border-radius:6px;border:1px solid rgba(244,67,54,0.3);font-size:13px;color:var(--text-primary);">
+                        <span id="notif-record-indicator" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#f44336;margin-right:8px;animation:pulse 1s infinite;"></span>
+                        Recording... <span id="notif-record-timer">0:00</span>
+                        <button class="btn btn-secondary" id="notif-record-stop-btn" style="margin-left:12px;padding:3px 12px;font-size:12px;background:#d32f2f;color:#fff;border:none;border-radius:4px;cursor:pointer;">Stop</button>
+                        <button class="btn-cancel" id="notif-record-cancel-btn" style="margin-left:6px;padding:3px 12px;font-size:12px;background:transparent;color:#aaa;border:1px solid #555;border-radius:4px;cursor:pointer;">Cancel</button>
                     </div>
                     <p class="notif-sound-file-name" id="notif-sound-file-name" style="display:none;margin-top:8px;"></p>
                     <p class="notif-sound-status" id="notif-sound-status" style="margin-top:4px;font-size:13px;"></p>
+                    <div class="notif-volume-row" style="display:flex;align-items:center;gap:10px;margin-top:8px;font-size:13px;color:var(--text-muted)">
+                        <label for="notif-volume-slider">Volume:</label>
+                        <input type="range" id="notif-volume-slider" min="0" max="100" value="50" class="notif-volume-slider">
+                        <span id="notif-volume-label">50%</span>
+                    </div>
+                    <canvas class="notif-visualizer" id="notif-visualizer" width="280" height="50" style="display:none;margin-top:8px;border-radius:6px;"></canvas>
+                    <label class="settings-toggle" style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-top:10px">
+                        <input type="checkbox" id="notif-background-only">
+                        <span class="toggle-slider"></span>
+                        <span class="toggle-label" style="font-size:13px;color:var(--text-muted)">Only play sound when app is in background</span>
+                    </label>
                 </div>
                 <div class="settings-group" style="margin-top:16px;border-top:1px solid var(--bg-border);padding-top:16px">
                     <h4>Muted Servers &amp; Channels</h4>
@@ -374,15 +426,15 @@
         </div>
     </div>
 
-    <!-- Mentions Inbox Panel -->
+    <!-- Notification Inbox Panel -->
     <div class="modal-overlay" id="mentions-panel" style="display:none">
         <div class="modal-content mentions-inbox-content">
             <div class="mentions-inbox-header">
-                <h3 style="margin:0;color:#d4d4d4">Mentions Inbox</h3>
+                <h3 style="margin:0;color:#d4d4d4">Notifications</h3>
                 <button id="close-mentions-inbox" style="background:none;border:none;color:#aaa;font-size:20px;cursor:pointer">&times;</button>
             </div>
             <div class="mentions-inbox-list" id="mentions-inbox-list">
-                <div style="color:#888;text-align:center;padding:40px 20px;font-size:14px;">No unread mentions or replies</div>
+                <div style="color:#888;text-align:center;padding:40px 20px;font-size:14px;">No unread notifications</div>
             </div>
             <div class="modal-actions" style="border-top:1px solid var(--bg-border);padding-top:12px;margin-top:12px">
                 <button class="btn-cancel" id="clear-mentions-inbox">Mark All Read</button>

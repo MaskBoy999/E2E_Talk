@@ -1854,6 +1854,50 @@ body {
     content: '\1F4C4 ';
 }
 
+.notif-visualizer {
+    display: block;
+    width: 100%;
+    height: 50px;
+    background: rgba(0,0,0,0.25);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    margin-top: 8px;
+}
+
+.notif-volume-slider {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 140px;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--bg-secondary);
+    outline: none;
+    cursor: pointer;
+}
+.notif-volume-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+    border: none;
+}
+.notif-volume-slider::-moz-range-thumb {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+    border: none;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(0.8); }
+}
+
 .notif-sound-status {
     font-size: 13px;
     min-height: 1.2em;
@@ -2352,23 +2396,98 @@ body {
 /* ===== QR Import Section ===== */
 .qr-import-section {
     margin-bottom: 12px;
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
 }
 
 .btn-import-qr {
-    width: 100%;
+    flex: 1;
+    min-width: 0;
     padding: 8px 12px;
     background: transparent;
     color: var(--accent);
     border: 1px dashed var(--bg-border);
     border-radius: 8px;
     cursor: pointer;
-    font-size: 13px;
+    font-size: 12px;
+    white-space: nowrap;
     transition: all 0.15s ease;
 }
 
 .btn-import-qr:hover {
     border-color: var(--accent);
     background: rgba(79, 195, 247, 0.05);
+}
+
+/* ===== QR Scanner Modal ===== */
+.qr-scanner-content {
+    width: 100%;
+    max-width: 420px;
+    background: #000;
+    border-radius: 12px;
+    overflow: hidden;
+    position: relative;
+}
+.qr-scanner-viewport {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 1;
+    background: #000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.qr-scanner-frame {
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.qr-scanner-circle {
+    width: 60%;
+    aspect-ratio: 1;
+    border-radius: 50%;
+    border: 3px solid rgba(79,195,247,0.7);
+    box-shadow: 0 0 0 9999px rgba(0,0,0,0.5);
+    pointer-events: none;
+    animation: qrScanPulse 2s ease-in-out infinite;
+}
+
+@keyframes qrScanPulse {
+    0%, 100% { box-shadow: 0 0 0 9999px rgba(0,0,0,0.5), 0 0 0 2px rgba(79,195,247,0.3); }
+    50% { box-shadow: 0 0 0 9999px rgba(0,0,0,0.5), 0 0 0 6px rgba(79,195,247,0.6); }
+}
+.qr-scanner-text {
+    position: absolute;
+    bottom: 16px;
+    left: 0;
+    right: 0;
+    text-align: center;
+    color: #fff;
+    font-size: 13px;
+    text-shadow: 0 1px 4px rgba(0,0,0,0.8);
+}
+.qr-scanner-close {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    width: 32px;
+    height: 32px;
+    background: rgba(0,0,0,0.5);
+    color: #fff;
+    border: none;
+    border-radius: 50%;
+    font-size: 20px;
+    cursor: pointer;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.qr-scanner-close:hover {
+    background: rgba(0,0,0,0.7);
 }
 
 /* ===== Attach / File Upload ===== */
@@ -2393,6 +2512,128 @@ body {
     color: var(--accent);
     border-color: var(--accent);
     background: rgba(79, 195, 247, 0.08);
+}
+
+/* ===== Attachment Popup ===== */
+.attach-wrap {
+    position: relative;
+    flex-shrink: 0;
+}
+.attach-popup {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 0;
+    background: #1e1e2e;
+    border: 1px solid #2a2a4a;
+    border-radius: 10px;
+    padding: 6px;
+    z-index: 100;
+    box-shadow: 0 -4px 20px rgba(0,0,0,0.5);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 190px;
+}
+.attach-popup-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    border: none;
+    border-radius: 6px;
+    background: none;
+    color: var(--text-primary);
+    font-size: 14px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.12s;
+}
+.attach-popup-item:hover {
+    background: rgba(79, 195, 247, 0.1);
+    color: var(--accent);
+}
+
+/* ===== Audio Recording Bar ===== */
+.audio-recording-bar {
+    padding: 10px clamp(10px, 3vw, 16px);
+    border-top: 1px solid var(--bg-border);
+    background: rgba(244, 67, 54, 0.06);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+    gap: 10px;
+}
+.recording-bar-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+.recording-bar-indicator {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #f44336;
+    animation: pulse 1s infinite;
+    flex-shrink: 0;
+}
+.recording-bar-timer {
+    color: var(--text-primary);
+    font-size: 14px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+.recording-bar-label {
+    color: var(--text-muted);
+    font-size: 13px;
+}
+.recording-bar-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.recording-bar-send {
+    background: #4caf50;
+    border: none;
+    border-radius: 6px;
+    padding: 5px 14px;
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+}
+.recording-bar-send:hover {
+    background: #388e3c;
+}
+.recording-bar-cancel {
+    background: none;
+    border: 1px solid #555;
+    border-radius: 6px;
+    padding: 5px 14px;
+    color: #aaa;
+    font-size: 13px;
+    cursor: pointer;
+}
+.recording-bar-cancel:hover {
+    border-color: #f44336;
+    color: #f44336;
+}
+
+/* ===== Camera Capture Modal ===== */
+.camera-flip-btn:hover {
+    background: rgba(255,255,255,0.3) !important;
+}
+.camera-capture-btn:hover {
+    transform: scale(1.05) !important;
+}
+.camera-capture-btn:active {
+    transform: scale(0.95) !important;
+}
+.camera-cancel-btn:hover {
+    background: rgba(244,67,54,0.3) !important;
+}
+.camera-capture-close:hover {
+    color: #f44336 !important;
 }
 
 /* ===== File Card in Chat ===== */

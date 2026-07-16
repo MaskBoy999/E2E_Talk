@@ -137,9 +137,6 @@ function updateServerMutedUI() {
     });
 }
 
-// Rate-limit for channel message notifications (per-channel, 30s cooldown)
-var _lastChannelNotifTime = {};
-
 // Message grouping: track last message for 2-minute coalescing
 let lastMessageInfo = { senderId: null, channelId: null, time: 0 };
 let lastDmMessageInfo = { senderId: null, dmChannelId: null, time: 0 };
@@ -313,15 +310,10 @@ document.addEventListener('DOMContentLoaded', () => {
             reader.onload = function (ev) {
                 try {
                     var dataUrl = ev.target.result;
-                    localStorage.setItem('notification_sound_url', dataUrl);
-                    localStorage.setItem('notification_sound_name', file.name);
-                    if (notifSoundFileName) { notifSoundFileName.textContent = file.name; notifSoundFileName.style.display = ''; }
-                    if (notifSoundStatus) { notifSoundStatus.textContent = 'Custom sound saved!'; notifSoundStatus.style.color = '#4caf50'; }
-                    setTimeout(function () { if (notifSoundStatus) notifSoundStatus.textContent = ''; }, 3000);
-                    // Also sync to the server for multi-device support
+                    saveNotifSoundData(dataUrl, file.name, 'Custom sound saved!');
                     syncNotificationSoundToServer(file);
                 } catch (err) {
-                    if (notifSoundStatus) { notifSoundStatus.textContent = 'File too large to store. Try a smaller MP3.'; notifSoundStatus.style.color = '#f44336'; }
+                    if (notifSoundStatus) { notifSoundStatus.textContent = 'Failed to save sound. IndexedDB may be unavailable.'; notifSoundStatus.style.color = '#f44336'; }
                 }
             };
             reader.readAsDataURL(file);
@@ -331,6 +323,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (notifSoundResetBtn) {
         notifSoundResetBtn.addEventListener('click', function () {
+            _notifCachedUrl = null;
+            _idbNotifDel('url').catch(function() {});
+            _idbNotifDel('name').catch(function() {});
             localStorage.removeItem('notification_sound_url');
             localStorage.removeItem('notification_sound_name');
             if (notifSoundFileName) { notifSoundFileName.style.display = 'none'; notifSoundFileName.textContent = ''; }
@@ -345,7 +340,147 @@ document.addEventListener('DOMContentLoaded', () => {
         notifSoundTestBtn.addEventListener('click', function () {
             if (notifSoundStatus) { notifSoundStatus.textContent = 'Playing...'; notifSoundStatus.style.color = 'var(--text-muted)'; }
             playNotificationSound(true);
+            startNotifVisualizer();
             setTimeout(function () { if (notifSoundStatus && notifSoundStatus.textContent === 'Playing...') notifSoundStatus.textContent = ''; }, 2000);
+        });
+    }
+
+    // Record from microphone
+    var notifRecordBtn = document.getElementById('notif-sound-record-btn');
+    var notifRecordingDiv = document.getElementById('notif-sound-recording');
+    var notifRecordStopBtn = document.getElementById('notif-record-stop-btn');
+    var notifRecordCancelBtn = document.getElementById('notif-record-cancel-btn');
+    var notifRecordTimer = document.getElementById('notif-record-timer');
+
+    function showNotifRecording(show) {
+        if (notifRecordBtn) notifRecordBtn.style.display = show ? 'none' : '';
+        if (notifRecordingDiv) notifRecordingDiv.style.display = show ? '' : 'none';
+    }
+
+    function updateNotifRecordTimer() {
+        if (!_notifRecordStartTime) return;
+        var elapsed = Math.floor((Date.now() - _notifRecordStartTime) / 1000);
+        var m = Math.floor(elapsed / 60);
+        var s = elapsed % 60;
+        if (notifRecordTimer) notifRecordTimer.textContent = m + ':' + (s < 10 ? '0' : '') + s;
+    }
+
+    function cleanupNotifRecording() {
+        if (_notifRecordTimer) { clearInterval(_notifRecordTimer); _notifRecordTimer = null; }
+        if (_notifMediaStream) { _notifMediaStream.getTracks().forEach(function(t) { t.stop(); }); _notifMediaStream = null; }
+        _notifMediaRecorder = null;
+        _notifRecordChunks = [];
+        showNotifRecording(false);
+    }
+
+    function saveNotifSoundData(dataUrl, fileName, statusMsg) {
+        _notifCachedUrl = dataUrl;
+        _idbNotifPut('url', dataUrl);
+        _idbNotifPut('name', fileName);
+        localStorage.setItem('notification_sound_name', fileName);
+        localStorage.removeItem('notification_sound_url');
+        if (notifSoundFileName) { notifSoundFileName.textContent = fileName; notifSoundFileName.style.display = ''; }
+        if (notifSoundStatus) { notifSoundStatus.textContent = statusMsg; notifSoundStatus.style.color = '#4caf50'; }
+        setTimeout(function () { if (notifSoundStatus) notifSoundStatus.textContent = ''; }, 3000);
+    }
+
+    function saveRecordedAudio(blob) {
+        var fileName = 'Recording.webm';
+        var file = new File([blob], fileName, { type: 'audio/webm' });
+        var reader = new FileReader();
+        reader.onload = function (ev) {
+            try {
+                saveNotifSoundData(ev.target.result, fileName, 'Recording saved as notification sound!');
+                syncNotificationSoundToServer(file);
+            } catch (err) {
+                if (notifSoundStatus) { notifSoundStatus.textContent = 'Failed to save recording.'; notifSoundStatus.style.color = '#f44336'; }
+            }
+        };
+        reader.readAsDataURL(blob);
+    }
+
+    if (notifRecordBtn) {
+        notifRecordBtn.addEventListener('click', function () {
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof MediaRecorder === 'undefined') {
+                if (notifSoundStatus) { notifSoundStatus.textContent = 'Recording not supported in this browser.'; notifSoundStatus.style.color = '#f44336'; }
+                return;
+            }
+            navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+                _notifMediaStream = stream;
+                _notifRecordChunks = [];
+                var mimeType = 'audio/webm;codecs=opus';
+                if (!MediaRecorder.isTypeSupported(mimeType)) {
+                    mimeType = 'audio/webm';
+                    if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = '';
+                }
+                _notifMediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType: mimeType } : {});
+                _notifMediaRecorder.ondataavailable = function (e) {
+                    if (e.data && e.data.size > 0) _notifRecordChunks.push(e.data);
+                };
+                _notifMediaRecorder.onstop = function () {
+                    var blob = new Blob(_notifRecordChunks, { type: 'audio/webm' });
+                    saveRecordedAudio(blob);
+                    cleanupNotifRecording();
+                };
+                _notifMediaRecorder.onerror = function () {
+                    if (notifSoundStatus) { notifSoundStatus.textContent = 'Recording error occurred.'; notifSoundStatus.style.color = '#f44336'; }
+                    cleanupNotifRecording();
+                };
+                _notifMediaRecorder.start();
+                _notifRecordStartTime = Date.now();
+                showNotifRecording(true);
+                updateNotifRecordTimer();
+                _notifRecordTimer = setInterval(updateNotifRecordTimer, 200);
+                if (notifSoundStatus) notifSoundStatus.textContent = '';
+            }).catch(function (err) {
+                if (notifSoundStatus) { notifSoundStatus.textContent = 'Microphone access denied. ' + err.message; notifSoundStatus.style.color = '#f44336'; }
+            });
+        });
+    }
+
+    if (notifRecordStopBtn) {
+        notifRecordStopBtn.addEventListener('click', function () {
+            if (_notifMediaRecorder && _notifMediaRecorder.state !== 'inactive') {
+                _notifMediaRecorder.stop();
+            }
+        });
+    }
+
+    if (notifRecordCancelBtn) {
+        notifRecordCancelBtn.addEventListener('click', function () {
+            if (_notifMediaRecorder && _notifMediaRecorder.state !== 'inactive') {
+                _notifMediaRecorder.ondataavailable = null;
+                _notifMediaRecorder.onstop = null;
+                _notifMediaRecorder.stop();
+            }
+            cleanupNotifRecording();
+            if (notifSoundStatus) { notifSoundStatus.textContent = 'Recording cancelled'; notifSoundStatus.style.color = 'var(--text-muted)'; }
+            setTimeout(function () { if (notifSoundStatus) notifSoundStatus.textContent = ''; }, 2000);
+        });
+    }
+
+    // Volume slider
+    var volumeSlider = document.getElementById('notif-volume-slider');
+    var volumeLabel = document.getElementById('notif-volume-label');
+    if (volumeSlider && volumeLabel) {
+        var savedVol = localStorage.getItem('notif_volume');
+        if (savedVol !== null) {
+            volumeSlider.value = savedVol;
+            volumeLabel.textContent = savedVol + '%';
+        }
+        volumeSlider.addEventListener('input', function () {
+            var val = parseInt(volumeSlider.value, 10);
+            volumeLabel.textContent = val + '%';
+            localStorage.setItem('notif_volume', val);
+        });
+    }
+
+    // Background-only toggle
+    var bgCheckbox = document.getElementById('notif-background-only');
+    if (bgCheckbox) {
+        bgCheckbox.checked = localStorage.getItem('notif_background_only') === 'true';
+        bgCheckbox.addEventListener('change', function () {
+            localStorage.setItem('notif_background_only', bgCheckbox.checked);
         });
     }
 
@@ -452,6 +587,20 @@ document.addEventListener('DOMContentLoaded', () => {
         updateServerMutedUI();
         updateChannelMutedUI();
     }, 500);
+    // Load cached notification sound: try localStorage (backward compat), then IndexedDB
+    try {
+        var oldUrl = localStorage.getItem('notification_sound_url');
+        if (oldUrl) {
+            _notifCachedUrl = oldUrl;
+            // Migrate old users to IDB
+            _idbNotifPut('url', oldUrl).catch(function() {});
+            localStorage.removeItem('notification_sound_url');
+        }
+    } catch (e) {}
+    // Also try loading from IDB (async — populates _notifCachedUrl for future plays)
+    _idbNotifGet('url').then(function(url) {
+        if (url) _notifCachedUrl = url;
+    }).catch(function() {});
     // Restore notification sound from server (syncs across devices)
     restoreNotificationSoundFromServer();
 
@@ -464,13 +613,272 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // File upload
-    document.getElementById('attach-btn').addEventListener('click', () => {
+    // Attachment popup menu
+    var attachPopup = document.getElementById('attach-popup');
+    var attachBtn = document.getElementById('attach-btn');
+    
+    function closeAttachPopup() {
+        if (attachPopup) attachPopup.style.display = 'none';
+    }
+    
+    function toggleAttachPopup() {
         if (!currentChannelId && !currentDmChannelId) return;
-        document.getElementById('file-input').click();
+        if (!attachPopup) return;
+        var isVisible = attachPopup.style.display !== 'none';
+        closeAttachPopup();
+        if (!isVisible) {
+            attachPopup.style.display = 'flex';
+        }
+    }
+    
+    if (attachBtn && attachPopup) {
+        attachBtn.addEventListener('click', function (e) {
+            e.stopPropagation();
+            toggleAttachPopup();
+        });
+        
+        // Popup item handlers (upload and photo only — record-audio uses gesture handler below)
+        attachPopup.addEventListener('click', function (e) {
+            var item = e.target.closest('.attach-popup-item');
+            if (!item) return;
+            var action = item.dataset.action;
+            closeAttachPopup();
+            if (action === 'upload') {
+                document.getElementById('file-input').click();
+            } else if (action === 'photo') {
+                openCameraCapture();
+            }
+            // 'record-audio' is handled by the record-audio click handler below
+        });
+    }
+    
+    // Close popup on click outside
+    document.addEventListener('click', function (e) {
+        if (!attachPopup || attachPopup.style.display === 'none') return;
+        var wrap = document.querySelector('.attach-wrap');
+        if (wrap && !wrap.contains(e.target)) {
+            closeAttachPopup();
+        }
     });
+    
     document.getElementById('file-input').addEventListener('change', handleFileSelect);
     document.getElementById('cancel-upload').addEventListener('click', closeUploadModal);
+    
+    // Camera capture via getUserMedia (opens actual camera, with flip)
+    var _cameraCaptureStream = null;
+    var _cameraCaptureFacing = 'environment';
+    var _cameraCaptureModal = null;
+    var _cameraCaptureVideo = null;
+    var _cameraCaptureCanvas = null;
+    var _cameraCaptureCtx = null;
+    
+    function openCameraCapture() {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            alert('Camera not supported in this browser.');
+            return;
+        }
+        closeCameraCapture();
+        
+        // Create modal dynamically
+        if (!_cameraCaptureModal) {
+            _cameraCaptureModal = document.createElement('div');
+            _cameraCaptureModal.className = 'modal';
+            _cameraCaptureModal.style.cssText = 'display:flex;z-index:2000;background:rgba(0,0,0,0.9);';
+            _cameraCaptureModal.innerHTML = '<div class="camera-capture-content" style="position:relative;width:100%;max-width:500px;margin:auto;text-align:center;">'
+                + '<button class="camera-capture-close" style="position:absolute;top:10px;right:14px;background:none;border:none;color:#fff;font-size:28px;cursor:pointer;z-index:10;line-height:1;">&times;</button>'
+                + '<video id="camera-capture-video" autoplay playsinline style="width:100%;max-height:70vh;border-radius:12px;object-fit:contain;background:#000;"></video>'
+                + '<div style="display:flex;align-items:center;justify-content:center;gap:40px;margin-top:16px;padding:0 20px;">'
+                + '<button class="camera-flip-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:48px;height:48px;color:#fff;font-size:20px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;">🔄</button>'
+                + '<button class="camera-capture-btn" style="background:#fff;border:none;border-radius:50%;width:64px;height:64px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 4px rgba(255,255,255,0.3);transition:transform 0.1s;"><div style="width:54px;height:54px;border-radius:50%;background:#fff;border:2px solid #333;"></div></button>'
+                + '<button class="camera-cancel-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:48px;height:48px;color:#fff;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;">✕</button>'
+                + '</div></div>';
+            document.body.appendChild(_cameraCaptureModal);
+            _cameraCaptureVideo = _cameraCaptureModal.querySelector('#camera-capture-video');
+            
+            // Close button
+            _cameraCaptureModal.querySelector('.camera-capture-close').addEventListener('click', closeCameraCapture);
+            // Cancel button
+            _cameraCaptureModal.querySelector('.camera-cancel-btn').addEventListener('click', closeCameraCapture);
+            // Flip button
+            _cameraCaptureModal.querySelector('.camera-flip-btn').addEventListener('click', function () {
+                _cameraCaptureFacing = _cameraCaptureFacing === 'environment' ? 'user' : 'environment';
+                startCameraCaptureStream();
+            });
+            // Capture button
+            _cameraCaptureModal.querySelector('.camera-capture-btn').addEventListener('click', captureCameraPhoto);
+        }
+        
+        _cameraCaptureModal.style.display = 'flex';
+        startCameraCaptureStream();
+    }
+    
+    function startCameraCaptureStream() {
+        closeCameraCaptureStream();
+        if (!_cameraCaptureVideo) return;
+        navigator.mediaDevices.getUserMedia({
+            video: { facingMode: _cameraCaptureFacing, width: { ideal: 1280 }, height: { ideal: 720 } }
+        }).then(function (stream) {
+            _cameraCaptureStream = stream;
+            _cameraCaptureVideo.srcObject = stream;
+            _cameraCaptureVideo.play().catch(function () {});
+        }).catch(function () {
+            alert('Camera access denied.');
+            closeCameraCapture();
+        });
+    }
+    
+    function closeCameraCaptureStream() {
+        if (_cameraCaptureStream) {
+            _cameraCaptureStream.getTracks().forEach(function (t) { t.stop(); });
+            _cameraCaptureStream = null;
+        }
+        if (_cameraCaptureVideo) _cameraCaptureVideo.srcObject = null;
+    }
+    
+    function captureCameraPhoto() {
+        if (!_cameraCaptureVideo || !_cameraCaptureVideo.videoWidth) return;
+        if (!_cameraCaptureCanvas) {
+            _cameraCaptureCanvas = document.createElement('canvas');
+            _cameraCaptureCtx = _cameraCaptureCanvas.getContext('2d');
+        }
+        _cameraCaptureCanvas.width = _cameraCaptureVideo.videoWidth;
+        _cameraCaptureCanvas.height = _cameraCaptureVideo.videoHeight;
+        _cameraCaptureCtx.drawImage(_cameraCaptureVideo, 0, 0);
+        _cameraCaptureCanvas.toBlob(function (blob) {
+            closeCameraCapture();
+            var file = new File([blob], 'Photo_' + Date.now() + '.png', { type: 'image/png' });
+            selectedFiles = [file];
+            currentFileIndex = 0;
+            showUploadModal();
+        }, 'image/png');
+    }
+    
+    function closeCameraCapture() {
+        closeCameraCaptureStream();
+        if (_cameraCaptureModal) _cameraCaptureModal.style.display = 'none';
+    }
+    
+    // Simple click-to-record audio (bar shows Send + Cancel immediately)
+    var chatRecorder = null;
+    var chatRecorderChunks = [];
+    var chatRecorderStream = null;
+    var chatRecordTimer = null;
+    var chatRecordStartTime = 0;
+    
+    var recordingBar = document.getElementById('audio-recording-bar');
+    var recordingTimer = document.getElementById('recording-bar-timer');
+    var recordingSendBtn = document.getElementById('recording-bar-send');
+    var recordingCancelBtn = document.getElementById('recording-bar-cancel');
+    
+    function updateRecordingTimer() {
+        if (!chatRecordStartTime) return;
+        var elapsed = Math.floor((Date.now() - chatRecordStartTime) / 1000);
+        var m = Math.floor(elapsed / 60);
+        var s = elapsed % 60;
+        if (recordingTimer) recordingTimer.textContent = m + ':' + (s < 10 ? '0' : '') + s;
+    }
+    
+    function showRecordingBar(show) {
+        if (recordingBar) recordingBar.style.display = show ? '' : 'none';
+        if (recordingSendBtn) recordingSendBtn.style.display = show ? '' : 'none';
+        if (recordingCancelBtn) recordingCancelBtn.style.display = show ? '' : 'none';
+    }
+    
+    function cleanupChatRecording() {
+        if (chatRecordTimer) { clearInterval(chatRecordTimer); chatRecordTimer = null; }
+        if (chatRecorderStream) { chatRecorderStream.getTracks().forEach(function(t) { t.stop(); }); chatRecorderStream = null; }
+        chatRecorder = null;
+        chatRecorderChunks = [];
+        showRecordingBar(false);
+    }
+    
+    function cancelChatRecording() {
+        if (chatRecorder && chatRecorder.state !== 'inactive') {
+            chatRecorder.ondataavailable = null;
+            chatRecorder.onstop = null;
+            chatRecorder.stop();
+        }
+        cleanupChatRecording();
+    }
+    
+    function sendChatRecording() {
+        if (!chatRecorder || chatRecorder.state === 'inactive') {
+            cleanupChatRecording();
+            return;
+        }
+        chatRecorder.stop();
+    }
+    
+    function finishChatRecording(blob) {
+        cleanupChatRecording();
+        var file = new File([blob], 'Recording.webm', { type: 'audio/webm' });
+        selectedFiles = [file];
+        currentFileIndex = 0;
+        showUploadModal();
+    }
+    
+    function startChatRecording() {
+        if (!currentChannelId && !currentDmChannelId) return;
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof MediaRecorder === 'undefined') {
+            alert('Recording not supported in this browser.');
+            return;
+        }
+        navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+            chatRecorderStream = stream;
+            chatRecorderChunks = [];
+            var mimeType = 'audio/webm;codecs=opus';
+            if (!MediaRecorder.isTypeSupported(mimeType)) {
+                mimeType = 'audio/webm';
+                if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = '';
+            }
+            chatRecorder = new MediaRecorder(stream, mimeType ? { mimeType: mimeType } : {});
+            chatRecorder.ondataavailable = function (e) {
+                if (e.data && e.data.size > 0) chatRecorderChunks.push(e.data);
+            };
+            chatRecorder.onstop = function () {
+                if (chatRecorderStream) { chatRecorderStream.getTracks().forEach(function(t) { t.stop(); }); chatRecorderStream = null; }
+                var blob = new Blob(chatRecorderChunks, { type: 'audio/webm' });
+                chatRecorderChunks = [];
+                finishChatRecording(blob);
+            };
+            chatRecorder.onerror = function () {
+                cleanupChatRecording();
+                alert('Recording error.');
+            };
+            chatRecorder.start();
+            chatRecordStartTime = Date.now();
+            updateRecordingTimer();
+            chatRecordTimer = setInterval(updateRecordingTimer, 200);
+            // Show bar with Send + Cancel buttons immediately
+            showRecordingBar(true);
+        }).catch(function () {
+            alert('Microphone access denied.');
+        });
+    }
+    
+    // Click handler for record-audio
+    if (attachPopup) {
+        attachPopup.addEventListener('click', function (e) {
+            var item = e.target.closest('.attach-popup-item[data-action="record-audio"]');
+            if (!item) return;
+            e.stopPropagation();
+            closeAttachPopup();
+            if (!currentChannelId && !currentDmChannelId) return;
+            startChatRecording();
+        });
+    }
+    
+    // Wire recording bar buttons
+    if (recordingSendBtn) {
+        recordingSendBtn.addEventListener('click', function () {
+            sendChatRecording();
+        });
+    }
+    if (recordingCancelBtn) {
+        recordingCancelBtn.addEventListener('click', function () {
+            cancelChatRecording();
+        });
+    }
 
     // Drag and drop support for file uploads
     setupDragAndDrop();
@@ -748,6 +1156,110 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    // QR Scanner via Camera
+    var qrScannerStream = null;
+    var qrScannerTimer = null;
+
+    function openQrScanner(inputEl) {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { alert('Camera not supported.'); return; }
+        var modal = document.getElementById('qr-scanner-modal');
+        var video = document.getElementById('qr-scanner-video');
+        if (!modal || !video) return;
+
+        closeQrScanner();
+        modal.style.display = 'flex';
+
+        navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 640 } } }).then(function (stream) {
+            qrScannerStream = stream;
+            video.srcObject = stream;
+            video.play().catch(function () { closeQrScanner(); alert('Camera could not start. Please try again.'); });
+
+            var canvas = document.createElement('canvas');
+            var ctx = canvas.getContext('2d');
+            var scanned = false;
+            var frameCount = 0;
+            // Create BarcodeDetector once (if available) — wrap in try/catch
+            var detector = null;
+            try {
+                if ('BarcodeDetector' in window) {
+                    detector = new BarcodeDetector({ formats: ['qr_code'] });
+                }
+            } catch (e) {
+                detector = null;
+            }
+
+            function scanFrame() {
+                if (scanned || modal.style.display === 'none') return;
+                // Bail early if no QR detection method is available
+                if (typeof jsQR === 'undefined' && !detector) { closeQrScanner(); alert('QR scanning not supported in this browser.'); return; }
+                if (video.readyState < 2) { qrScannerTimer = requestAnimationFrame(scanFrame); return; }
+                // Throttle: only run scan every 5th frame (~12fps) to save CPU
+                frameCount++;
+                if (frameCount % 5 !== 0) { qrScannerTimer = requestAnimationFrame(scanFrame); return; }
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                ctx.drawImage(video, 0, 0);
+                var imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                var code = null;
+                if (typeof jsQR !== 'undefined') {
+                    code = jsQR(imageData.data, imageData.width, imageData.height);
+                } else if (detector) {
+                    detector.detect(canvas).then(function (barcodes) {
+                        if (barcodes.length > 0 && !scanned) { scanned = true; closeQrScanner(); if (inputEl) inputEl.value = barcodes[0].rawValue; }
+                    }).catch(function () {});
+                    qrScannerTimer = requestAnimationFrame(scanFrame);
+                    return;
+                }
+                if (code && !scanned) {
+                    scanned = true;
+                    closeQrScanner();
+                    if (inputEl) { inputEl.type = 'password'; inputEl.value = code.data; }
+                    return;
+                }
+                qrScannerTimer = requestAnimationFrame(scanFrame);
+            }
+            qrScannerTimer = requestAnimationFrame(scanFrame);
+        }).catch(function () {
+            alert('Camera access denied.');
+            modal.style.display = 'none';
+        });
+    }
+
+    function closeQrScanner() {
+        if (qrScannerTimer) { cancelAnimationFrame(qrScannerTimer); qrScannerTimer = null; }
+        if (qrScannerStream) { qrScannerStream.getTracks().forEach(function (t) { t.stop(); }); qrScannerStream = null; }
+        var modal = document.getElementById('qr-scanner-modal');
+        var video = document.getElementById('qr-scanner-video');
+        if (video) video.srcObject = null;
+        if (modal) modal.style.display = 'none';
+    }
+
+    // Wire scan buttons
+    var friendScanBtn = document.getElementById('friend-scan-qr-btn');
+    if (friendScanBtn) {
+        friendScanBtn.addEventListener('click', function () {
+            var input = document.getElementById('friend-code-input');
+            if (input) openQrScanner(input);
+        });
+    }
+    var joinScanBtn = document.getElementById('join-scan-qr-btn');
+    if (joinScanBtn) {
+        joinScanBtn.addEventListener('click', function () {
+            var input = document.getElementById('invite-code-input');
+            if (input) openQrScanner(input);
+        });
+    }
+    var qrScannerClose = document.getElementById('qr-scanner-close');
+    if (qrScannerClose) {
+        qrScannerClose.addEventListener('click', closeQrScanner);
+    }
+    var qrScannerModal = document.getElementById('qr-scanner-modal');
+    if (qrScannerModal) {
+        qrScannerModal.addEventListener('click', function (e) {
+            if (e.target === qrScannerModal) closeQrScanner();
+        });
+    }
+
     document.getElementById('members-panel').classList.toggle('open', membersPanelOpen);
 
     // Event delegation for member action buttons (kick/ban/unban)
@@ -780,23 +1292,84 @@ function requestNotificationPermission() {
     }
 }
 
+// In-memory cache for custom notification sound URL (avoids sync reads from IDB)
+var _notifCachedUrl = null;
+
+// Minimal IndexedDB helpers for storing notification sound (localStorage quota is ~5MB, not enough for audio)
+function _idbNotifOpen() {
+    return new Promise(function(resolve, reject) {
+        var req = indexedDB.open('e2e_notif_sound', 1);
+        req.onupgradeneeded = function(e) {
+            var db = e.target.result;
+            if (!db.objectStoreNames.contains('store')) db.createObjectStore('store');
+        };
+        req.onsuccess = function(e) { resolve(e.target.result); };
+        req.onerror = function(e) { reject(e); };
+    });
+}
+
+function _idbNotifPut(key, val) {
+    return _idbNotifOpen().then(function(db) {
+        return new Promise(function(resolve, reject) {
+            var tx = db.transaction('store', 'readwrite');
+            tx.objectStore('store').put(val, key);
+            tx.oncomplete = function() { db.close(); resolve(); };
+            tx.onerror = function(e) { db.close(); reject(e); };
+        });
+    });
+}
+
+function _idbNotifGet(key) {
+    return _idbNotifOpen().then(function(db) {
+        return new Promise(function(resolve, reject) {
+            var req = db.transaction('store', 'readonly').objectStore('store').get(key);
+            req.onsuccess = function(e) { db.close(); resolve(e.target.result); };
+            req.onerror = function(e) { db.close(); reject(e); };
+        });
+    });
+}
+
+function _idbNotifDel(key) {
+    return _idbNotifOpen().then(function(db) {
+        return new Promise(function(resolve, reject) {
+            var tx = db.transaction('store', 'readwrite');
+            tx.objectStore('store').delete(key);
+            tx.oncomplete = function() { db.close(); resolve(); };
+            tx.onerror = function(e) { db.close(); reject(e); };
+        });
+    });
+}
+
 var _notifCtx = null;
 
-function playNotificationSound() {
-    // Play the notification sound (always plays, regardless of tab visibility)
-    try {
-        // Check if user uploaded a custom MP3
-        var customSoundUrl = localStorage.getItem('notification_sound_url');
-        if (customSoundUrl) {
+function playNotificationSound(force) {
+    // Skip sound if 'background only' setting is on and the tab is visible (unless forced)
+    if (!force && localStorage.getItem('notif_background_only') === 'true' && !document.hidden) return;
+    // Try custom MP3 first; if that fails, fall through to default AudioContext sound.
+    // Check in-memory cache first (fast), then localStorage as fallback for old users.
+    var customSoundUrl = _notifCachedUrl || localStorage.getItem('notification_sound_url');
+    if (customSoundUrl) {
+        try {
             var audio = new Audio(customSoundUrl);
-            audio.volume = 0.3;
-            audio.play().catch(function () {});
+            audio.volume = getNotifVolume();
+            var playPromise = audio.play();
+            if (playPromise !== undefined) {
+                playPromise.catch(function (err) {
+                    console.warn('Custom sound play failed, using default:', err);
+                    playDefaultChime();
+                });
+                return;
+            }
+            // Synchronous play succeeded (rare edge case)
             return;
+        } catch (e) {
+            console.warn('Custom sound error, using default:', e);
         }
-    } catch (e) {
-        // Fall through to default sound
     }
-    // Default chill sound: soft descending arpeggio
+    playDefaultChime();
+}
+
+function playDefaultChime() {
     try {
         if (!_notifCtx) {
             _notifCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -806,9 +1379,10 @@ function playNotificationSound() {
         }
         var g = _notifCtx.createGain();
         g.connect(_notifCtx.destination);
+        var vol = getNotifVolume();
         g.gain.setValueAtTime(0, _notifCtx.currentTime);
-        g.gain.linearRampToValueAtTime(0.08, _notifCtx.currentTime + 0.03);
-        g.gain.linearRampToValueAtTime(0.05, _notifCtx.currentTime + 0.3);
+        g.gain.linearRampToValueAtTime(0.12 * vol, _notifCtx.currentTime + 0.03);
+        g.gain.linearRampToValueAtTime(0.08 * vol, _notifCtx.currentTime + 0.3);
         g.gain.linearRampToValueAtTime(0, _notifCtx.currentTime + 0.6);
         // Soft descending arpeggio: C5, G4, E4
         [523, 392, 330].forEach(function (freq, i) {
@@ -822,8 +1396,94 @@ function playNotificationSound() {
         });
         setTimeout(function () { g.disconnect(); }, 800);
     } catch (e) {
-        // Audio not supported or blocked — silently ignore
+        console.warn('Default chime playback failed:', e);
     }
+}
+
+// Waveform visualizer for notification sound test button.
+// Uses AnalyserNode + probe oscillator so it works for both custom and default sounds.
+var _notifVisTimer = null;
+var _notifVisCtx = null;
+
+// Recording state for notification sound
+var _notifMediaRecorder = null;
+var _notifMediaStream = null;
+var _notifRecordChunks = [];
+var _notifRecordTimer = null;
+var _notifRecordStartTime = 0;
+
+function getNotifVolume() {
+    try {
+        var v = parseInt(localStorage.getItem('notif_volume'), 10);
+        if (isNaN(v)) return 0.5;
+        return Math.max(0, Math.min(1, v / 100));
+    } catch (e) { return 0.5; }
+}
+
+function startNotifVisualizer() {
+    var canvas = document.getElementById('notif-visualizer');
+    if (!canvas) return;
+    var ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    // Clear any previous visualizer
+    if (_notifVisTimer) { clearTimeout(_notifVisTimer); _notifVisTimer = null; }
+    if (_notifVisCtx) { try { _notifVisCtx.close(); } catch (e) {} _notifVisCtx = null; }
+
+    canvas.style.display = '';
+    canvas.width = canvas.offsetWidth || 280;
+    canvas.height = canvas.offsetHeight || 50;
+
+    // Create a probe oscillator to feed the analyser (no connection to destination = silent)
+    var audioCtx;
+    try {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        _notifVisCtx = audioCtx;
+    } catch (e) { canvas.style.display = 'none'; return; }
+    var analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 64;
+    var bufferLength = analyser.frequencyBinCount;
+    var dataArray = new Uint8Array(bufferLength);
+
+    // Sweep through frequencies for a nicer visual
+    var osc = audioCtx.createOscillator();
+    osc.type = 'sawtooth';  // rich harmonics fill more bars
+    osc.frequency.setValueAtTime(200, audioCtx.currentTime);
+    osc.frequency.linearRampToValueAtTime(3000, audioCtx.currentTime + 1.5);
+    osc.connect(analyser);
+    // DO NOT connect to destination — no audible output
+    osc.start();
+    osc.stop(audioCtx.currentTime + 1.6);
+
+    var startTime = Date.now();
+    var duration = 1500;
+
+    function draw() {
+        var elapsed = Date.now() - startTime;
+        if (elapsed > duration) {
+            audioCtx.close();
+            canvas.style.display = 'none';
+            _notifVisTimer = null;
+            return;
+        }
+        _notifVisTimer = setTimeout(draw, 50);
+
+        analyser.getByteFrequencyData(dataArray);
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        var barWidth = Math.max(2, (canvas.width / bufferLength) - 2);
+        var gap = 2;
+        var fade = Math.min(1, elapsed / 200); // fade in over 200ms
+
+        for (var i = 0; i < bufferLength; i++) {
+            var pct = dataArray[i] / 255;
+            var barHeight = Math.max(1, pct * canvas.height * fade);
+            var hue = 140 + (1 - pct) * 120; // green → red spectrum
+            ctx.fillStyle = 'hsla(' + hue + ', 80%, 55%, 0.85)';
+            ctx.fillRect(i * (barWidth + gap), canvas.height - barHeight, barWidth, barHeight);
+        }
+    }
+    draw();
 }
 
 function showBrowserNotification(title, body, onClick) {
@@ -988,23 +1648,24 @@ async function restoreNotificationSoundFromServer() {
         );
         if (!decryptedBytes || decryptedBytes.length === 0) return;
 
-        // Convert decrypted bytes to a data URL and save to localStorage
+        // Convert decrypted bytes to a data URL and save via IDB
         var blob = new Blob([decryptedBytes]);
         var reader = new FileReader();
         reader.onload = function (ev) {
-            try {
-                localStorage.setItem('notification_sound_url', ev.target.result);
-                if (data.file_name) {
-                    localStorage.setItem('notification_sound_name', data.file_name);
-                }
-                // Update the UI if settings is open
-                var fileNameEl = document.getElementById('notif-sound-file-name');
-                if (fileNameEl && data.file_name) {
-                    fileNameEl.textContent = data.file_name;
-                    fileNameEl.style.display = '';
-                }
-            } catch (e) {
-                console.warn('Failed to store restored notification sound:', e);
+            var dataUrl = ev.target.result;
+            _notifCachedUrl = dataUrl;
+            _idbNotifPut('url', dataUrl);
+            if (data.file_name) {
+                localStorage.setItem('notification_sound_name', data.file_name);
+                _idbNotifPut('name', data.file_name);
+            }
+            // Clear the old localStorage URL key
+            localStorage.removeItem('notification_sound_url');
+            // Update the UI if settings is open
+            var fileNameEl = document.getElementById('notif-sound-file-name');
+            if (fileNameEl && data.file_name) {
+                fileNameEl.textContent = data.file_name;
+                fileNameEl.style.display = '';
             }
         };
         reader.readAsDataURL(blob);
@@ -1111,7 +1772,7 @@ function renderMentionsInbox() {
     var list = document.getElementById('mentions-inbox-list');
     if (!list) return;
     if (mentionItems.length === 0) {
-        list.innerHTML = '<div style="color:#888;text-align:center;padding:40px 20px;font-size:14px;">No unread mentions or replies</div>';
+        list.innerHTML = '<div style="color:#888;text-align:center;padding:40px 20px;font-size:14px;">No unread notifications</div>';
         return;
     }
     var html = '';
@@ -1226,25 +1887,6 @@ function updateChannelBadges() {
             if (existing) existing.remove();
         }
     });
-}
-
-async function detectMentionInOtherChannel(data) {
-    if (!data.message || !data.message.encrypted_content || !data.message.nonce) return false;
-    if (!user || !data.server_id) return false;
-    // Rate-limit: once per 30s per channel
-    var now = Date.now();
-    var last = _lastChannelNotifTime[data.channel_id] || 0;
-    if (now - last < 30000) return false;
-    try {
-        var textContent = E2ECrypto.decrypt(data.message.encrypted_content, data.message.nonce, data.channel_id, data.server_id, data.message.message_nonce);
-        if (!textContent) return false;
-        var pat = new RegExp('@' + user.username.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(\\b|$|\\s)');
-        if (pat.test(textContent)) {
-            _lastChannelNotifTime[data.channel_id] = now;
-            return true;
-        }
-    } catch (_) {}
-    return false;
 }
 
 // --- Channel Context Menu (Right-click to mute) ---
@@ -1614,26 +2256,8 @@ function connectWebSocket(t) {
                             if (data.server_id) flashServerIcon(data.server_id);
                         }
                     } else if (data.server_id && data.message.encrypted_content) {
-                        // Message in a different channel — try to detect if it's a mention
-                        detectMentionInOtherChannel(data).then(function (isMention) {
-                            if (isMention) {
-                                // Look up channel name from the DOM
-                                var chEl = document.querySelector('.channel-item[data-id="' + data.channel_id + '"]');
-                                var chName = chEl ? chEl.dataset.name || 'a channel' : 'a channel';
-                                var svName = '';
-                                var sv = servers.find(function (s) { return s.id === data.server_id; });
-                                if (sv) svName = sv.name + ' ';
-                                showBrowserNotification('Mentioned by ' + data.message.sender_username, 'You were mentioned in ' + svName + '#' + chName, function () {
-                                    navigateToMessage(data.server_id, data.channel_id, null, data.message.id);
-                                });
-                                playNotificationSound();
-                                var sv = servers.find(function (s) { return s.id === data.server_id; });
-                                var svName = sv ? sv.name : '';
-                                var chEl = document.querySelector('.channel-item[data-id="' + data.channel_id + '"]');
-                                var chName = chEl ? chEl.dataset.name || 'a channel' : 'a channel';
-                                trackUnreadMention(data.server_id, data.channel_id, null, data.message.id, data.message.sender_username, chName, svName, 'mention');
-                            }
-                        });
+                        // Mention/reply notifications for other channels are handled by the
+                        // server-sent 'mention_notification' and 'reply_notification' events.
                     }
                 }
                 break;
