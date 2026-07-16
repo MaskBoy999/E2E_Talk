@@ -193,6 +193,7 @@ async fn main() {
         // Phase 4: Friends + DMs
         .route("/api/me", get(handlers::get_me).delete(handlers::delete_me))
         .route("/api/friends", get(handlers::list_friends))
+        .route("/api/notification-sound", post(handlers::upload_notification_sound).get(handlers::get_notification_sound).delete(handlers::delete_notification_sound))
         .route("/api/friends/remove", post(handlers::remove_friend))
         .route("/api/friends/request", post(handlers::send_friend_request))
         .route("/api/friends/requests/incoming", get(handlers::list_incoming_friend_requests))

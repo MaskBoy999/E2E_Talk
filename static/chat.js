@@ -27,6 +27,116 @@ let currentServerMemberList = [];
 let unreadMentionsByServer = {}; // serverId -> count
 let unreadMentionsByChannel = {}; // channelId -> { count, message_id }
 
+// Chronological mention inbox: [{ id, serverId, channelId, dmChannelId, messageId, senderUsername, channelName, serverName, type: 'mention'|'reply'|'dm', time }]
+let mentionItems = [];
+
+// Muted servers and channels (IDs stored in localStorage as JSON arrays)
+var mutedServers = [];
+var mutedChannels = [];
+
+function loadMutedState() {
+    try {
+        var s = localStorage.getItem('muted_servers');
+        mutedServers = s ? JSON.parse(s) : [];
+        var c = localStorage.getItem('muted_channels');
+        mutedChannels = c ? JSON.parse(c) : [];
+    } catch (e) {
+        mutedServers = [];
+        mutedChannels = [];
+    }
+}
+
+function saveMutedState() {
+    try {
+        localStorage.setItem('muted_servers', JSON.stringify(mutedServers));
+        localStorage.setItem('muted_channels', JSON.stringify(mutedChannels));
+    } catch (e) {}
+    renderMutedList();
+}
+
+function renderMutedList() {
+    var container = document.getElementById('muted-list');
+    if (!container) return;
+    var html = '';
+    // Muted servers
+    mutedServers.forEach(function (sid) {
+        var sv = servers.find(function (s) { return s.id === sid; });
+        var name = sv ? sv.name : sid.slice(0, 8);
+        html += '<div class="muted-list-item"><span>🔇 Server: ' + escapeHtml(name) + '</span><button class="unmute-btn" data-type="server" data-id="' + sid + '">Unmute</button></div>';
+    });
+    // Muted channels
+    mutedChannels.forEach(function (cid) {
+        var chEl = document.querySelector('.channel-item[data-id="' + cid + '"]');
+        var name = chEl ? chEl.dataset.name : cid.slice(0, 8);
+        html += '<div class="muted-list-item"><span>🔇 Channel: #' + escapeHtml(name) + '</span><button class="unmute-btn" data-type="channel" data-id="' + cid + '">Unmute</button></div>';
+    });
+    if (!html) {
+        container.innerHTML = '<div class="muted-empty">No muted servers or channels</div>';
+    } else {
+        container.innerHTML = html;
+        // Wire unmute buttons
+        container.querySelectorAll('.unmute-btn').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                var type = btn.dataset.type;
+                var id = btn.dataset.id;
+                if (type === 'server') toggleMuteServer(id);
+                else toggleMuteChannel(id, null);
+            });
+        });
+    }
+}
+
+function isMuted(serverId, channelId) {
+    if (serverId && mutedServers.indexOf(serverId) !== -1) return true;
+    if (channelId && mutedChannels.indexOf(channelId) !== -1) return true;
+    return false;
+}
+
+function toggleMuteChannel(channelId) {
+    var idx = mutedChannels.indexOf(channelId);
+    if (idx !== -1) {
+        mutedChannels.splice(idx, 1);
+    } else {
+        mutedChannels.push(channelId);
+    }
+    saveMutedState();
+    updateChannelMutedUI();
+}
+
+function toggleMuteServer(serverId) {
+    var idx = mutedServers.indexOf(serverId);
+    if (idx !== -1) {
+        mutedServers.splice(idx, 1);
+    } else {
+        mutedServers.push(serverId);
+    }
+    saveMutedState();
+    updateServerMutedUI();
+    updateChannelMutedUI();
+}
+
+function updateChannelMutedUI() {
+    document.querySelectorAll('.channel-item').forEach(function (el) {
+        var cid = el.dataset.id;
+        if (mutedChannels.indexOf(cid) !== -1) {
+            el.classList.add('muted');
+        } else {
+            el.classList.remove('muted');
+        }
+    });
+}
+
+function updateServerMutedUI() {
+    document.querySelectorAll('.server-icon').forEach(function (el) {
+        var sid = el.dataset.id;
+        if (mutedServers.indexOf(sid) !== -1) {
+            el.classList.add('muted');
+        } else {
+            el.classList.remove('muted');
+        }
+    });
+}
+
 // Rate-limit for channel message notifications (per-channel, 30s cooldown)
 var _lastChannelNotifTime = {};
 
@@ -168,6 +278,77 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    // Notification sound upload
+    var notifSoundInput = document.getElementById('notif-sound-input');
+    var notifSoundUploadBtn = document.getElementById('notif-sound-upload-btn');
+    var notifSoundResetBtn = document.getElementById('notif-sound-reset-btn');
+    var notifSoundTestBtn = document.getElementById('notif-sound-test-btn');
+    var notifSoundStatus = document.getElementById('notif-sound-status');
+    var notifSoundFileName = document.getElementById('notif-sound-file-name');
+
+    if (notifSoundUploadBtn && notifSoundInput) {
+        // Show current file name if one is saved
+        var savedName = localStorage.getItem('notification_sound_name');
+        if (savedName && notifSoundFileName) {
+            notifSoundFileName.textContent = savedName;
+            notifSoundFileName.style.display = '';
+        }
+
+        notifSoundUploadBtn.addEventListener('click', function () {
+            notifSoundInput.click();
+        });
+
+        notifSoundInput.addEventListener('change', function (e) {
+            var file = e.target.files[0];
+            if (!file) return;
+            if (!file.type.startsWith('audio/')) {
+                if (notifSoundStatus) { notifSoundStatus.textContent = 'Please select an audio file (MP3, WAV, etc.)'; notifSoundStatus.style.color = '#f44336'; }
+                return;
+            }
+            if (file.size > 50 * 1024 * 1024) {
+                if (notifSoundStatus) { notifSoundStatus.textContent = 'File too large (max 50 MB). Try a shorter or lower-quality audio file.'; notifSoundStatus.style.color = '#f44336'; }
+                return;
+            }
+            var reader = new FileReader();
+            reader.onload = function (ev) {
+                try {
+                    var dataUrl = ev.target.result;
+                    localStorage.setItem('notification_sound_url', dataUrl);
+                    localStorage.setItem('notification_sound_name', file.name);
+                    if (notifSoundFileName) { notifSoundFileName.textContent = file.name; notifSoundFileName.style.display = ''; }
+                    if (notifSoundStatus) { notifSoundStatus.textContent = 'Custom sound saved!'; notifSoundStatus.style.color = '#4caf50'; }
+                    setTimeout(function () { if (notifSoundStatus) notifSoundStatus.textContent = ''; }, 3000);
+                    // Also sync to the server for multi-device support
+                    syncNotificationSoundToServer(file);
+                } catch (err) {
+                    if (notifSoundStatus) { notifSoundStatus.textContent = 'File too large to store. Try a smaller MP3.'; notifSoundStatus.style.color = '#f44336'; }
+                }
+            };
+            reader.readAsDataURL(file);
+            e.target.value = '';
+        });
+    }
+
+    if (notifSoundResetBtn) {
+        notifSoundResetBtn.addEventListener('click', function () {
+            localStorage.removeItem('notification_sound_url');
+            localStorage.removeItem('notification_sound_name');
+            if (notifSoundFileName) { notifSoundFileName.style.display = 'none'; notifSoundFileName.textContent = ''; }
+            if (notifSoundStatus) { notifSoundStatus.textContent = 'Reset to default sound'; notifSoundStatus.style.color = '#4caf50'; }
+            setTimeout(function () { if (notifSoundStatus) notifSoundStatus.textContent = ''; }, 3000);
+            // Delete from server too
+            authFetch('/api/notification-sound', { method: 'DELETE' }).catch(function () {});
+        });
+    }
+
+    if (notifSoundTestBtn) {
+        notifSoundTestBtn.addEventListener('click', function () {
+            if (notifSoundStatus) { notifSoundStatus.textContent = 'Playing...'; notifSoundStatus.style.color = 'var(--text-muted)'; }
+            playNotificationSound(true);
+            setTimeout(function () { if (notifSoundStatus && notifSoundStatus.textContent === 'Playing...') notifSoundStatus.textContent = ''; }, 2000);
+        });
+    }
+
     // Delete account
     document.getElementById('delete-account-btn').addEventListener('click', async () => {
         if (!confirm('Are you sure you want to delete your account? This cannot be undone.')) return;
@@ -259,11 +440,20 @@ document.addEventListener('DOMContentLoaded', () => {
     setupMessageActions();
     setupForwardModal();
     setupStickerPanel();
+    loadMutedState();
     loadServers();
     loadFriendRequestBadge();
     loadEmojiCache(); // Load custom emojis
     requestNotificationPermission();
     setupMentionAutocomplete();
+    initMentionsInbox();
+    // Restore muted UI after servers/channels render
+    setTimeout(function () {
+        updateServerMutedUI();
+        updateChannelMutedUI();
+    }, 500);
+    // Restore notification sound from server (syncs across devices)
+    restoreNotificationSoundFromServer();
 
 
     document.getElementById('send-btn').addEventListener('click', sendMessage);
@@ -593,8 +783,20 @@ function requestNotificationPermission() {
 var _notifCtx = null;
 
 function playNotificationSound() {
-    // Only play when the tab is in the background
-    if (!document.hidden) return;
+    // Play the notification sound (always plays, regardless of tab visibility)
+    try {
+        // Check if user uploaded a custom MP3
+        var customSoundUrl = localStorage.getItem('notification_sound_url');
+        if (customSoundUrl) {
+            var audio = new Audio(customSoundUrl);
+            audio.volume = 0.3;
+            audio.play().catch(function () {});
+            return;
+        }
+    } catch (e) {
+        // Fall through to default sound
+    }
+    // Default chill sound: soft descending arpeggio
     try {
         if (!_notifCtx) {
             _notifCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -604,18 +806,21 @@ function playNotificationSound() {
         }
         var g = _notifCtx.createGain();
         g.connect(_notifCtx.destination);
-        g.gain.value = 0.15;
-        // Two-tone ping: C6 then E6
-        [1047, 1319].forEach(function (freq, i) {
+        g.gain.setValueAtTime(0, _notifCtx.currentTime);
+        g.gain.linearRampToValueAtTime(0.08, _notifCtx.currentTime + 0.03);
+        g.gain.linearRampToValueAtTime(0.05, _notifCtx.currentTime + 0.3);
+        g.gain.linearRampToValueAtTime(0, _notifCtx.currentTime + 0.6);
+        // Soft descending arpeggio: C5, G4, E4
+        [523, 392, 330].forEach(function (freq, i) {
             var o = _notifCtx.createOscillator();
             o.type = 'sine';
             o.frequency.value = freq;
             o.connect(g);
-            o.start(_notifCtx.currentTime + i * 0.12);
-            o.stop(_notifCtx.currentTime + i * 0.12 + 0.1);
+            var t = _notifCtx.currentTime + i * 0.18;
+            o.start(t);
+            o.stop(t + 0.25);
         });
-        // Disconnect gain after tones finish
-        setTimeout(function () { g.disconnect(); }, 600);
+        setTimeout(function () { g.disconnect(); }, 800);
     } catch (e) {
         // Audio not supported or blocked — silently ignore
     }
@@ -641,7 +846,9 @@ function showBrowserNotification(title, body, onClick) {
 
 // --- Unread mention tracking + badge rendering ---
 
-function trackUnreadMention(serverId, channelId, dmChannelId, messageId) {
+function trackUnreadMention(serverId, channelId, dmChannelId, messageId, senderUsername, channelName, serverName, notifType) {
+    // Skip notification if the server or channel is muted
+    if (isMuted(serverId, channelId)) return;
     if (channelId && serverId) {
         // Server channel mention/reply
         if (channelId === currentChannelId && serverId === currentServerId) return;
@@ -649,13 +856,41 @@ function trackUnreadMention(serverId, channelId, dmChannelId, messageId) {
         if (!unreadMentionsByChannel[channelId]) unreadMentionsByChannel[channelId] = { count: 0, message_id: messageId };
         unreadMentionsByChannel[channelId].count++;
         unreadMentionsByChannel[channelId].message_id = messageId;
+        // Push to chronological inbox
+        mentionItems.unshift({
+            id: messageId + '_' + Date.now(),
+            serverId: serverId,
+            channelId: channelId,
+            dmChannelId: null,
+            messageId: messageId,
+            senderUsername: senderUsername || 'Someone',
+            channelName: channelName || 'a channel',
+            serverName: serverName || '',
+            type: notifType || 'mention',
+            time: Date.now()
+        });
         updateServerBadges();
         updateChannelBadges();
+        updateMentionsBadge();
         saveMentionState();
     } else if (dmChannelId) {
         // DM mention/reply - increment the unread DM counter
         unreadDms[dmChannelId] = (unreadDms[dmChannelId] || 0) + 1;
+        // Push to chronological inbox
+        mentionItems.unshift({
+            id: messageId + '_' + Date.now(),
+            serverId: null,
+            channelId: null,
+            dmChannelId: dmChannelId,
+            messageId: messageId,
+            senderUsername: senderUsername || 'Someone',
+            channelName: '',
+            serverName: '',
+            type: notifType || 'dm',
+            time: Date.now()
+        });
         updateDmStripBadge();
+        updateMentionsBadge();
         if (viewMode === 'dms') renderDmSidebar();
         saveMentionState();
     }
@@ -670,18 +905,111 @@ function clearUnreadChannelMentions(channelId) {
             if (unreadMentionsByServer[serverId] <= 0) delete unreadMentionsByServer[serverId];
         }
         delete unreadMentionsByChannel[channelId];
+        // Remove inbox items for this channel
+        mentionItems = mentionItems.filter(function (item) {
+            return !(item.channelId === channelId && item.serverId === serverId);
+        });
         updateServerBadges();
         updateChannelBadges();
+        updateMentionsBadge();
         saveMentionState();
+        // Re-render inbox if it's open
+        var mentionsPanel = document.getElementById('mentions-panel');
+        if (mentionsPanel && mentionsPanel.style.display === 'flex') renderMentionsInbox();
     }
 }
 
 function clearUnreadDmMentions(dmChannelId) {
     if (dmChannelId && unreadDms[dmChannelId]) {
         delete unreadDms[dmChannelId];
+        // Remove inbox items for this DM
+        mentionItems = mentionItems.filter(function (item) {
+            return item.dmChannelId !== dmChannelId;
+        });
         updateDmStripBadge();
+        updateMentionsBadge();
         if (viewMode === 'dms') renderDmSidebar();
         saveMentionState();
+        // Re-render inbox if it's open
+        var mentionsPanel = document.getElementById('mentions-panel');
+        if (mentionsPanel && mentionsPanel.style.display === 'flex') renderMentionsInbox();
+    }
+}
+
+// --- Notification Sound Server Sync ---
+// Encrypt the sound file with the user's identity key and upload to the server
+// so it syncs across devices.
+
+async function syncNotificationSoundToServer(file) {
+    try {
+        // Read the File object directly as ArrayBuffer
+        var arrayBuffer = await file.arrayBuffer();
+        var soundBytes = new Uint8Array(arrayBuffer);
+
+        // Encrypt with own identity public key using envelope encryption
+        var identity = E2ECrypto.getIdentityKeyPair();
+        if (!identity) return;
+        var encrypted = E2ECrypto.envelopeEncryptRaw(soundBytes, identity.publicKey);
+
+        // Upload to server
+        var uploadRes = await authFetch('/api/notification-sound', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                encrypted_sound: encrypted.ciphertext,
+                nonce: encrypted.nonce,
+                sender_public_key: encrypted.ephemeralPublicKey,
+                file_name: file.name || 'notification.mp3',
+            }),
+        });
+        if (!uploadRes.ok) {
+            console.warn('Failed to sync notification sound to server');
+        }
+    } catch (e) {
+        console.warn('Failed to sync notification sound:', e);
+    }
+}
+
+async function restoreNotificationSoundFromServer() {
+    try {
+        var res = await authFetch('/api/notification-sound');
+        if (!res.ok) return; // No sound stored on server
+        var data = await res.json();
+        if (!data.encrypted_sound || !data.nonce || !data.sender_public_key) return;
+
+        // Decrypt with own identity private key
+        var identity = E2ECrypto.getIdentityKeyPair();
+        if (!identity) return;
+        var decryptedBytes = E2ECrypto.envelopeDecryptRaw(
+            data.encrypted_sound,
+            data.nonce,
+            data.sender_public_key,
+            identity.privateKey
+        );
+        if (!decryptedBytes || decryptedBytes.length === 0) return;
+
+        // Convert decrypted bytes to a data URL and save to localStorage
+        var blob = new Blob([decryptedBytes]);
+        var reader = new FileReader();
+        reader.onload = function (ev) {
+            try {
+                localStorage.setItem('notification_sound_url', ev.target.result);
+                if (data.file_name) {
+                    localStorage.setItem('notification_sound_name', data.file_name);
+                }
+                // Update the UI if settings is open
+                var fileNameEl = document.getElementById('notif-sound-file-name');
+                if (fileNameEl && data.file_name) {
+                    fileNameEl.textContent = data.file_name;
+                    fileNameEl.style.display = '';
+                }
+            } catch (e) {
+                console.warn('Failed to store restored notification sound:', e);
+            }
+        };
+        reader.readAsDataURL(blob);
+    } catch (e) {
+        console.warn('Failed to restore notification sound from server:', e);
     }
 }
 
@@ -690,6 +1018,7 @@ function saveMentionState() {
         localStorage.setItem('mention_unread_server', JSON.stringify(unreadMentionsByServer));
         localStorage.setItem('mention_unread_channel', JSON.stringify(unreadMentionsByChannel));
         localStorage.setItem('mention_unread_dms', JSON.stringify(unreadDms));
+        localStorage.setItem('mention_items', JSON.stringify(mentionItems.slice(0, 200)));
     } catch (e) {
         // localStorage full or unavailable — silently ignore
     }
@@ -717,11 +1046,151 @@ function restoreMentionState() {
         if (d) {
             unreadDms = JSON.parse(d);
         }
+        var mi = localStorage.getItem('mention_items');
+        if (mi) {
+            var parsed = JSON.parse(mi);
+            if (Array.isArray(parsed)) mentionItems = parsed;
+        }
     } catch (e) {
         // Corrupted data — reset
         unreadMentionsByServer = {};
         unreadMentionsByChannel = {};
         unreadDms = {};
+        mentionItems = [];
+    }
+}
+
+function updateMentionsBadge() {
+    var badge = document.getElementById('mentions-strip-badge');
+    if (!badge) return;
+    var total = 0;
+    for (var sid in unreadMentionsByServer) {
+        if (unreadMentionsByServer.hasOwnProperty(sid)) total += unreadMentionsByServer[sid];
+    }
+    for (var did in unreadDms) {
+        if (unreadDms.hasOwnProperty(did)) total += unreadDms[did];
+    }
+    if (total > 0) {
+        badge.textContent = total > 99 ? '99+' : total;
+        badge.style.display = '';
+    } else {
+        badge.style.display = 'none';
+    }
+}
+
+function clearAllMentionItems() {
+    mentionItems = [];
+    unreadMentionsByServer = {};
+    unreadMentionsByChannel = {};
+    unreadDms = {};
+    updateServerBadges();
+    updateChannelBadges();
+    updateDmStripBadge();
+    updateMentionsBadge();
+    saveMentionState();
+    renderMentionsInbox();
+    closeMentionsInbox();
+}
+
+function openMentionsInbox() {
+    var panel = document.getElementById('mentions-panel');
+    if (panel) panel.style.display = 'flex';
+    var btn = document.getElementById('mentions-strip-btn');
+    if (btn) btn.classList.add('active');
+    renderMentionsInbox();
+}
+
+function closeMentionsInbox() {
+    var panel = document.getElementById('mentions-panel');
+    if (panel) panel.style.display = 'none';
+    var btn = document.getElementById('mentions-strip-btn');
+    if (btn) btn.classList.remove('active');
+}
+
+function renderMentionsInbox() {
+    var list = document.getElementById('mentions-inbox-list');
+    if (!list) return;
+    if (mentionItems.length === 0) {
+        list.innerHTML = '<div style="color:#888;text-align:center;padding:40px 20px;font-size:14px;">No unread mentions or replies</div>';
+        return;
+    }
+    var html = '';
+    for (var i = 0; i < mentionItems.length; i++) {
+        var item = mentionItems[i];
+        var icon = '';
+        var iconClass = 'mention-inbox-icon';
+        if (item.type === 'mention') { icon = '@'; iconClass += ' mention'; }
+        else if (item.type === 'reply') { icon = '↩'; iconClass += ' reply'; }
+        else { icon = '💬'; iconClass += ' dm'; }
+        var title = item.senderUsername;
+        var subtitle = '';
+        if (item.serverName && item.channelName) {
+            subtitle = item.serverName + ' #' + item.channelName;
+        } else if (item.channelName) {
+            subtitle = '#' + item.channelName;
+        } else if (item.dmChannelId) {
+            subtitle = 'Direct message';
+        }
+        var timeStr = '';
+        try {
+            var d = new Date(item.time);
+            var now = new Date();
+            var diffMs = now - d;
+            var diffMin = Math.floor(diffMs / 60000);
+            if (diffMin < 1) timeStr = 'now';
+            else if (diffMin < 60) timeStr = diffMin + 'm';
+            else if (diffMin < 1440) timeStr = Math.floor(diffMin / 60) + 'h';
+            else timeStr = Math.floor(diffMin / 1440) + 'd';
+        } catch (_) { timeStr = ''; }
+        html += '<div class="mention-inbox-item" data-server-id="' + (item.serverId || '') + '" data-channel-id="' + (item.channelId || '') + '" data-dm-channel-id="' + (item.dmChannelId || '') + '" data-message-id="' + item.messageId + '">' +
+            '<div class="' + iconClass + '">' + icon + '</div>' +
+            '<div class="mention-inbox-body">' +
+                '<div class="mention-inbox-title">' + escapeHtml(title) + '</div>' +
+                '<div class="mention-inbox-subtitle">' + (item.type === 'reply' ? 'Replied to you in ' : 'Mentioned you in ') + escapeHtml(subtitle) + '</div>' +
+            '</div>' +
+            '<div class="mention-inbox-time">' + timeStr + '</div>' +
+        '</div>';
+    }
+    list.innerHTML = html;
+}
+
+function setupMentionsInboxEvents() {
+    var list = document.getElementById('mentions-inbox-list');
+    if (list) {
+        list.addEventListener('click', function (e) {
+            var itemEl = e.target.closest('.mention-inbox-item');
+            if (!itemEl) return;
+            var serverId = itemEl.dataset.serverId || null;
+            var channelId = itemEl.dataset.channelId || null;
+            var dmChannelId = itemEl.dataset.dmChannelId || null;
+            var messageId = itemEl.dataset.messageId;
+            closeMentionsInbox();
+            if (messageId) navigateToMessage(serverId, channelId, dmChannelId, messageId);
+        });
+    }
+    var closeBtn = document.getElementById('close-mentions-inbox');
+    if (closeBtn) closeBtn.addEventListener('click', closeMentionsInbox);
+    var clearBtn = document.getElementById('clear-mentions-inbox');
+    if (clearBtn) clearBtn.addEventListener('click', clearAllMentionItems);
+}
+
+// Called after DOMContentLoaded init to restore mention state and render
+function initMentionsInbox() {
+    var btn = document.getElementById('mentions-strip-btn');
+    if (btn) {
+        btn.addEventListener('click', function (e) {
+            e.stopPropagation();
+            openMentionsInbox();
+        });
+    }
+    setupMentionsInboxEvents();
+    updateMentionsBadge();
+    // Close mentions inbox when clicking outside the modal content
+    var panel = document.getElementById('mentions-panel');
+    if (panel) {
+        panel.addEventListener('click', function (e) {
+            if (e.target === panel) closeMentionsInbox();
+        });
     }
 }
 
@@ -776,6 +1245,165 @@ async function detectMentionInOtherChannel(data) {
         }
     } catch (_) {}
     return false;
+}
+
+// --- Channel Context Menu (Right-click to mute) ---
+
+function showChannelContextMenu(e, channelId, channelName) {
+    // Remove any existing context menu
+    var existing = document.querySelector('.channel-context-menu');
+    if (existing) existing.remove();
+
+    var isMutedChannel = mutedChannels.indexOf(channelId) !== -1;
+    var isMutedSrv = currentServerId ? mutedServers.indexOf(currentServerId) !== -1 : false;
+
+    var menu = document.createElement('div');
+    menu.className = 'channel-context-menu';
+    menu.style.left = e.clientX + 'px';
+    menu.style.top = e.clientY + 'px';
+
+    // Channel mute toggle
+    var chItem = document.createElement('div');
+    chItem.className = 'context-menu-item';
+    chItem.textContent = isMutedChannel ? 'Unmute #' + channelName : 'Mute #' + channelName;
+    chItem.addEventListener('click', function () {
+        toggleMuteChannel(channelId, currentServerId);
+        menu.remove();
+    });
+    menu.appendChild(chItem);
+
+    // Server mute toggle
+    if (currentServerId) {
+        var sv = servers.find(function (s) { return s.id === currentServerId; });
+        if (sv) {
+            var svItem = document.createElement('div');
+            svItem.className = 'context-menu-item';
+            svItem.textContent = isMutedSrv ? 'Unmute ' + sv.name : 'Mute ' + sv.name;
+            svItem.addEventListener('click', function () {
+                toggleMuteServer(currentServerId);
+                menu.remove();
+            });
+            menu.appendChild(svItem);
+        }
+    }
+
+    document.body.appendChild(menu);
+
+    // Close on click outside
+    function closeMenu(e2) {
+        if (!menu.contains(e2.target)) {
+            menu.remove();
+            document.removeEventListener('click', closeMenu);
+        }
+    }
+    setTimeout(function () { document.addEventListener('click', closeMenu); }, 0);
+}
+
+// --- Server Context Menu (Right-click to leave/mute) ---
+
+function showServerContextMenu(e, serverId, serverName) {
+    // Remove any existing context menu
+    var existing = document.querySelector('.channel-context-menu');
+    if (existing) existing.remove();
+
+    var sv = servers.find(function (s) { return s.id === serverId; });
+    var isOwnerOfServer = sv && sv.is_owner === true;
+    var isMutedSrv = mutedServers.indexOf(serverId) !== -1;
+
+    var menu = document.createElement('div');
+    menu.className = 'channel-context-menu';
+    menu.style.left = e.clientX + 'px';
+    menu.style.top = e.clientY + 'px';
+
+    // Leave/Delete Server
+    var leaveItem = document.createElement('div');
+    leaveItem.className = 'context-menu-item context-menu-danger';
+    leaveItem.textContent = isOwnerOfServer ? 'Delete ' + serverName : 'Leave ' + serverName;
+    leaveItem.addEventListener('click', async function () {
+        menu.remove();
+        var msg = isOwnerOfServer
+            ? 'Delete this server permanently? All channels, messages, and members will be removed. This cannot be undone.'
+            : 'Leave this server? You will lose access to all channels and messages.';
+        if (!confirm(msg)) return;
+        try {
+            var res = await authFetch('/api/servers/' + serverId + '/leave', { method: 'POST' });
+            var data = await res.json();
+            if (res.ok) {
+                // If this was the current server, reset the UI
+                if (serverId === currentServerId) {
+                    currentServerId = null;
+                    currentChannelId = null;
+                    document.getElementById('server-name').textContent = '';
+                    document.getElementById('channel-list').innerHTML = '<div class="channel-item" style="color:#666;cursor:default">Select a server</div>';
+                    document.getElementById('channel-name').textContent = 'Select a channel';
+                    document.getElementById('message-list').innerHTML = '<div class="welcome">' +
+                        (data.server_deleted ? 'Server has been deleted' : 'Select a server and channel to start chatting') + '</div>';
+                    document.getElementById('message-input').disabled = true;
+                    document.getElementById('send-btn').disabled = true;
+                }
+                await loadServers();
+            } else {
+                alert(data.error || 'Failed to leave server');
+            }
+        } catch (err) {
+            console.error('Leave server failed:', err);
+        }
+    });
+    menu.appendChild(leaveItem);
+
+    // Mute/Unmute Server
+    var muteItem = document.createElement('div');
+    muteItem.className = 'context-menu-item';
+    muteItem.textContent = isMutedSrv ? 'Unmute ' + serverName : 'Mute ' + serverName;
+    muteItem.addEventListener('click', function () {
+        toggleMuteServer(serverId);
+        menu.remove();
+    });
+    menu.appendChild(muteItem);
+
+    document.body.appendChild(menu);
+
+    // Close on click outside
+    function closeMenu(e2) {
+        if (!menu.contains(e2.target)) {
+            menu.remove();
+            document.removeEventListener('click', closeMenu);
+        }
+    }
+    setTimeout(function () { document.addEventListener('click', closeMenu); }, 0);
+}
+
+// --- Mention Toast + Server Icon Flash ---
+
+var _mentionToastTimer = null;
+
+function showMentionToast(username, serverId, channelId, messageId) {
+    var toast = document.getElementById('mention-toast');
+    if (!toast) return;
+    // Clear any previous auto-hide timeout to avoid race conditions
+    if (_mentionToastTimer) clearTimeout(_mentionToastTimer);
+    toast.textContent = 'New mention from @' + (username || 'Someone');
+    toast.style.display = '';
+    toast.style.animation = 'mentionToastSlideIn 0.25s ease-out';
+    toast.onclick = function () {
+        navigateToMessage(serverId, channelId, null, messageId);
+    };
+    // Auto-hide after 5 seconds
+    _mentionToastTimer = setTimeout(function () {
+        toast.style.animation = 'mentionToastFadeOut 0.3s ease-out';
+        setTimeout(function () { toast.style.display = 'none'; }, 300);
+    }, 5000);
+}
+
+function flashServerIcon(serverId) {
+    var icon = document.querySelector('.server-icon[data-id="' + serverId + '"]');
+    if (!icon) return;
+    icon.classList.remove('flash');
+    // Force reflow to restart animation
+    void icon.offsetWidth;
+    icon.classList.add('flash');
+    // Remove class after animation completes
+    setTimeout(function () { icon.classList.remove('flash'); }, 700);
 }
 
 function navigateToMessage(serverId, channelId, dmChannelId, messageId) {
@@ -978,6 +1606,13 @@ function connectWebSocket(t) {
                 if (data.channel_id && data.message) {
                     if (data.channel_id === currentChannelId) {
                         await appendMessage(data.message);
+                        // Check if the newly appended message mentions the current user
+                        var msgList = document.getElementById('message-list');
+                        var lastMsg = msgList ? msgList.lastElementChild : null;
+                        if (lastMsg && lastMsg.classList.contains('mentioned')) {
+                            showMentionToast(data.message.sender_username, data.server_id, data.channel_id, data.message.id);
+                            if (data.server_id) flashServerIcon(data.server_id);
+                        }
                     } else if (data.server_id && data.message.encrypted_content) {
                         // Message in a different channel — try to detect if it's a mention
                         detectMentionInOtherChannel(data).then(function (isMention) {
@@ -992,7 +1627,11 @@ function connectWebSocket(t) {
                                     navigateToMessage(data.server_id, data.channel_id, null, data.message.id);
                                 });
                                 playNotificationSound();
-                                trackUnreadMention(data.server_id, data.channel_id, null, data.message.id);
+                                var sv = servers.find(function (s) { return s.id === data.server_id; });
+                                var svName = sv ? sv.name : '';
+                                var chEl = document.querySelector('.channel-item[data-id="' + data.channel_id + '"]');
+                                var chName = chEl ? chEl.dataset.name || 'a channel' : 'a channel';
+                                trackUnreadMention(data.server_id, data.channel_id, null, data.message.id, data.message.sender_username, chName, svName, 'mention');
                             }
                         });
                     }
@@ -1136,22 +1775,31 @@ function connectWebSocket(t) {
                 break;
             case 'mention_notification':
                 if (data.sender_username) {
-                    trackUnreadMention(data.server_id, data.channel_id, data.dm_channel_id, data.message_id);
-                    playNotificationSound();
-                    var loc = data.channel_name ? '#' + data.channel_name : (data.dm_channel_id ? 'your DM' : 'a channel');
-                    showBrowserNotification('Mentioned by ' + data.sender_username, 'You were mentioned in ' + (data.server_name ? data.server_name + ' ' : '') + loc, function () {
-                        navigateToMessage(data.server_id, data.channel_id, data.dm_channel_id, data.message_id);
-                    });
+                    if (!isMuted(data.server_id, data.channel_id)) {
+                        trackUnreadMention(data.server_id, data.channel_id, data.dm_channel_id, data.message_id, data.sender_username, data.channel_name, data.server_name, 'mention');
+                        playNotificationSound();
+                        var loc = data.channel_name ? '#' + data.channel_name : (data.dm_channel_id ? 'your DM' : 'a channel');
+                        showBrowserNotification('Mentioned by ' + data.sender_username, 'You were mentioned in ' + (data.server_name ? data.server_name + ' ' : '') + loc, function () {
+                            navigateToMessage(data.server_id, data.channel_id, data.dm_channel_id, data.message_id);
+                        });
+                        // Show in-app toast + flash server icon if currently viewing this channel
+                        if (data.channel_id && data.channel_id === currentChannelId && data.server_id && data.server_id === currentServerId) {
+                            showMentionToast(data.sender_username, data.server_id, data.channel_id, data.message_id);
+                            flashServerIcon(data.server_id);
+                        }
+                    }
                 }
                 break;
             case 'reply_notification':
                 if (data.sender_username) {
-                    trackUnreadMention(data.server_id, data.channel_id, data.dm_channel_id, data.message_id);
-                    playNotificationSound();
-                    var loc = data.channel_name ? '#' + data.channel_name : (data.dm_channel_id ? 'your DM' : 'a channel');
-                    showBrowserNotification('Reply from ' + data.sender_username, data.sender_username + ' replied to you in ' + (data.server_name ? data.server_name + ' ' : '') + loc, function () {
-                        navigateToMessage(data.server_id, data.channel_id, data.dm_channel_id, data.message_id);
-                    });
+                    if (!isMuted(data.server_id, data.channel_id)) {
+                        trackUnreadMention(data.server_id, data.channel_id, data.dm_channel_id, data.message_id, data.sender_username, data.channel_name, data.server_name, 'reply');
+                        playNotificationSound();
+                        var loc = data.channel_name ? '#' + data.channel_name : (data.dm_channel_id ? 'your DM' : 'a channel');
+                        showBrowserNotification('Reply from ' + data.sender_username, data.sender_username + ' replied to you in ' + (data.server_name ? data.server_name + ' ' : '') + loc, function () {
+                            navigateToMessage(data.server_id, data.channel_id, data.dm_channel_id, data.message_id);
+                        });
+                    }
                 }
                 break;
         }
@@ -1305,10 +1953,15 @@ function renderServerList() {
         div.title = s.name;
         div.dataset.id = s.id;
         div.addEventListener('click', () => selectServer(s.id));
+        div.addEventListener('contextmenu', function (e) {
+            e.preventDefault();
+            showServerContextMenu(e, s.id, s.name);
+        });
         list.appendChild(div);
     });
     
     updateServerBadges();
+    updateServerMutedUI();
 }
 
 async function selectServer(serverId) {
@@ -1421,6 +2074,15 @@ async function loadChannels(serverId) {
         }
 
         updateChannelBadges();
+        updateChannelMutedUI();
+
+        // Add context menu (right-click) to each channel
+        list.querySelectorAll('.channel-item').forEach(function (ch) {
+            ch.addEventListener('contextmenu', function (e) {
+                e.preventDefault();
+                showChannelContextMenu(e, ch.dataset.id, ch.dataset.name);
+            });
+        });
 
         if (window.innerWidth > 768 && !currentChannelId) {
             list.children[0].click();

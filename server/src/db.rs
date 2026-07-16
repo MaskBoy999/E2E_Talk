@@ -329,6 +329,9 @@ impl Database {
             conn.execute("ALTER TABLE servers ADD COLUMN joins_disabled INTEGER NOT NULL DEFAULT 0", [])?;
         }
 
+        // Migration 013: notification sound sync
+        let _ = conn.execute_batch(include_str!("../migrations/013_notification_sound.sql"));
+
         Ok(())
     }
 
@@ -1192,6 +1195,49 @@ impl Database {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.to_string()),
         }
+    }
+
+    // --- Notification Sound Sync ---
+
+    pub fn save_notification_sound(&self, user_id: &str, encrypted_sound: &[u8], nonce: &[u8], sender_public_key: &[u8], file_name: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO notification_sounds (user_id, encrypted_sound, nonce, sender_public_key, file_name, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, CURRENT_TIMESTAMP)
+             ON CONFLICT(user_id) DO UPDATE SET
+                encrypted_sound = excluded.encrypted_sound,
+                nonce = excluded.nonce,
+                sender_public_key = excluded.sender_public_key,
+                file_name = excluded.file_name,
+                updated_at = CURRENT_TIMESTAMP",
+            params![user_id, encrypted_sound, nonce, sender_public_key, file_name],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn get_notification_sound(&self, user_id: &str) -> Result<Option<(Vec<u8>, Vec<u8>, Vec<u8>, String)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let result = conn.query_row(
+            "SELECT encrypted_sound, nonce, sender_public_key, file_name FROM notification_sounds WHERE user_id = ?1",
+            params![user_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        );
+        match result {
+            Ok(row) => Ok(Some(row)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    pub fn delete_notification_sound(&self, user_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM notification_sounds WHERE user_id = ?1",
+            params![user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     // --- Friend Codes ---
