@@ -4007,3 +4007,88 @@ body {
     border-color: var(--accent);
     background: rgba(79,195,247,0.05);
 }
+
+/* ===== QR Scanner Flip Button ===== */
+.qr-scanner-flip-btn {
+    position: absolute;
+    bottom: 16px;
+    right: 16px;
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    background: rgba(0,0,0,0.5);
+    border: 2px solid rgba(255,255,255,0.3);
+    color: #fff;
+    font-size: 20px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.2s, border-color 0.2s;
+    z-index: 10;
+    line-height: 1;
+}
+.qr-scanner-flip-btn:hover {
+    background: rgba(255,255,255,0.2);
+    border-color: #fff;
+}
+
+/* ===== Recording Waveform ===== */
+.recording-waveform {
+    flex: 0 0 120px;
+    height: 32px;
+    background: rgba(0,0,0,0.2);
+    border-radius: 4px;
+    margin: 0 8px;
+    display: none;
+}
+
+/* ===== Camera Timer Buttons ===== */
+.camera-timer-btn {
+    user-select: none;
+}
+.camera-timer-btn:hover {
+    opacity: 0.8;
+}
+#camera-custom-timer {
+    -moz-appearance: textfield;
+}
+#camera-custom-timer::-webkit-inner-spin-button,
+#camera-custom-timer::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+#camera-custom-timer:focus {
+    outline: none;
+    border-color: rgba(255,255,255,0.5);
+}
+#camera-custom-timer::placeholder {
+    color: rgba(255,255,255,0.4);
+}
+
+/* ===== Camera Zoom Slider ===== */
+#camera-zoom-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #4fc3f7;
+    cursor: pointer;
+    border: 2px solid #fff;
+    box-shadow: 0 0 4px rgba(0,0,0,0.3);
+}
+#camera-zoom-slider::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #4fc3f7;
+    cursor: pointer;
+    border: 2px solid #fff;
+}
+.camera-zoom-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+}

@@ -73,6 +73,7 @@
                     <span class="recording-bar-timer" id="recording-bar-timer">0:00</span>
                     <span class="recording-bar-label">Recording...</span>
                 </div>
+                <canvas id="recording-waveform" class="recording-waveform" width="120" height="32"></canvas>
                 <div class="recording-bar-right">
                     <button class="recording-bar-send" id="recording-bar-send">Send</button>
                     <button class="recording-bar-cancel" id="recording-bar-cancel">Cancel</button>
@@ -84,6 +85,7 @@
                     <div class="attach-popup" id="attach-popup" style="display:none">
                         <button class="attach-popup-item" data-action="upload">📁 Upload Files</button>
                         <button class="attach-popup-item" data-action="photo">📷 Take Photo</button>
+                        <button class="attach-popup-item" data-action="record-video">🎥 Record Video</button>
                         <button class="attach-popup-item" data-action="record-audio">🎤 Record Audio</button>
                     </div>
                 </div>
@@ -256,6 +258,7 @@
                 </div>
                 <div class="qr-scanner-text">Position QR code inside the circle</div>
             </div>
+            <button id="qr-scanner-flip" class="qr-scanner-flip-btn" title="Flip Camera">🔄</button>
         </div>
     </div>
 

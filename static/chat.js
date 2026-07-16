@@ -637,7 +637,7 @@ document.addEventListener('DOMContentLoaded', () => {
             toggleAttachPopup();
         });
         
-        // Popup item handlers (upload and photo only — record-audio uses gesture handler below)
+        // Popup item handlers (upload, photo, record-video — record-audio uses gesture handler below)
         attachPopup.addEventListener('click', function (e) {
             var item = e.target.closest('.attach-popup-item');
             if (!item) return;
@@ -647,6 +647,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 document.getElementById('file-input').click();
             } else if (action === 'photo') {
                 openCameraCapture();
+            } else if (action === 'record-video') {
+                startVideoRecording();
             }
             // 'record-audio' is handled by the record-audio click handler below
         });
@@ -664,13 +666,35 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('file-input').addEventListener('change', handleFileSelect);
     document.getElementById('cancel-upload').addEventListener('click', closeUploadModal);
     
-    // Camera capture via getUserMedia (opens actual camera, with flip)
+    // Camera capture via getUserMedia (opens actual camera, with timer, flash, preview)
     var _cameraCaptureStream = null;
     var _cameraCaptureFacing = 'environment';
     var _cameraCaptureModal = null;
     var _cameraCaptureVideo = null;
     var _cameraCaptureCanvas = null;
     var _cameraCaptureCtx = null;
+    var _cameraCaptureTimer = 0; // seconds, 0 = instant
+    var _cameraCaptureFlashOn = false;
+    var _cameraCaptureCountdownEl = null;
+    var _cameraCaptureCountdownTimer = null;
+    var _cameraCaptureFlashEl = null;
+    var _cameraCaptureFlashIntensity = 35; // 0-100, white overlay brightness percentage
+    var _cameraPhotoPreviewData = null; // { blob, url }
+    var _cameraPhotoPreviewEl = null;
+    var _cameraZoomLevel = 1;
+    var _cameraZoomMin = 1;
+    var _cameraZoomMax = 1;
+    var _cameraZoomSlider = null;
+    var _cameraZoomLabel = null;
+    var _cameraLastPinchDist = 0;
+    var _cameraWasPinching = false;
+    var _cameraCaptureMirror = false; // horizontal mirror toggle for preview and photo
+    var _cameraCaptureResolution = '720p';
+    var _cameraCaptureResolutions = {
+        '720p': { width: 1280, height: 720, label: '720p' },
+        '1080p': { width: 1920, height: 1080, label: '1080p' },
+        '4K': { width: 3840, height: 2160, label: '4K' }
+    };
     
     function openCameraCapture() {
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -686,14 +710,52 @@ document.addEventListener('DOMContentLoaded', () => {
             _cameraCaptureModal.style.cssText = 'display:flex;z-index:2000;background:rgba(0,0,0,0.9);';
             _cameraCaptureModal.innerHTML = '<div class="camera-capture-content" style="position:relative;width:100%;max-width:500px;margin:auto;text-align:center;">'
                 + '<button class="camera-capture-close" style="position:absolute;top:10px;right:14px;background:none;border:none;color:#fff;font-size:28px;cursor:pointer;z-index:10;line-height:1;">&times;</button>'
-                + '<video id="camera-capture-video" autoplay playsinline style="width:100%;max-height:70vh;border-radius:12px;object-fit:contain;background:#000;"></video>'
-                + '<div style="display:flex;align-items:center;justify-content:center;gap:40px;margin-top:16px;padding:0 20px;">'
-                + '<button class="camera-flip-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:48px;height:48px;color:#fff;font-size:20px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;">🔄</button>'
-                + '<button class="camera-capture-btn" style="background:#fff;border:none;border-radius:50%;width:64px;height:64px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 4px rgba(255,255,255,0.3);transition:transform 0.1s;"><div style="width:54px;height:54px;border-radius:50%;background:#fff;border:2px solid #333;"></div></button>'
-                + '<button class="camera-cancel-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:48px;height:48px;color:#fff;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;">✕</button>'
+                + '<video id="camera-capture-video" autoplay playsinline style="width:100%;max-height:60vh;border-radius:12px;object-fit:contain;background:#000;"></video>'
+                + '<div class="camera-countdown" id="camera-countdown" style="display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#fff;font-size:72px;font-weight:700;text-shadow:0 0 20px rgba(0,0,0,0.8);z-index:5;pointer-events:none;"></div>'
+                // Timer row
+                + '<div class="camera-timer-row" style="display:flex;align-items:center;justify-content:center;gap:8px;margin-top:10px;padding:0 16px;">'
+                + '<span style="color:#aaa;font-size:12px;">⏱</span>'
+                + '<button class="camera-timer-btn" data-timer="0" style="background:rgba(255,255,255,0.2);border:1px solid rgba(255,255,255,0.3);border-radius:4px;color:#fff;padding:4px 10px;font-size:11px;cursor:pointer;transition:all 0.15s;">Instant</button>'
+                + '<button class="camera-timer-btn" data-timer="3" style="background:transparent;border:1px solid rgba(255,255,255,0.2);border-radius:4px;color:#aaa;padding:4px 10px;font-size:11px;cursor:pointer;transition:all 0.15s;">3s</button>'
+                + '<button class="camera-timer-btn" data-timer="5" style="background:transparent;border:1px solid rgba(255,255,255,0.2);border-radius:4px;color:#aaa;padding:4px 10px;font-size:11px;cursor:pointer;transition:all 0.15s;">5s</button>'
+                + '<button class="camera-timer-btn" data-timer="10" style="background:transparent;border:1px solid rgba(255,255,255,0.2);border-radius:4px;color:#aaa;padding:4px 10px;font-size:11px;cursor:pointer;transition:all 0.15s;">10s</button>'
+                + '<input type="number" id="camera-custom-timer" min="1" max="99" placeholder="s" style="width:40px;padding:4px;border:1px solid rgba(255,255,255,0.2);border-radius:4px;background:transparent;color:#fff;font-size:11px;text-align:center;display:none;">'
+                + '</div>'
+                // Resolution selector for photo
+                + '<div class="camera-res-row" style="display:flex;align-items:center;justify-content:center;gap:6px;margin-top:8px;padding:0 16px;">'
+                + '<span style="color:#888;font-size:11px;">📺</span>'
+                + '<button class="camera-res-btn" data-res="720p" style="background:rgba(255,255,255,0.2);border:1px solid rgba(255,255,255,0.3);border-radius:4px;color:#fff;padding:4px 10px;font-size:11px;cursor:pointer;transition:all 0.15s;font-weight:600;">720p</button>'
+                + '<button class="camera-res-btn" data-res="1080p" style="background:transparent;border:1px solid rgba(255,255,255,0.2);border-radius:4px;color:#aaa;padding:4px 10px;font-size:11px;cursor:pointer;transition:all 0.15s;">1080p</button>'
+                + '<button class="camera-res-btn" data-res="4K" style="background:transparent;border:1px solid rgba(255,255,255,0.2);border-radius:4px;color:#aaa;padding:4px 10px;font-size:11px;cursor:pointer;transition:all 0.15s;">4K</button>'
+                + '</div>'
+                + '<div class="camera-zoom-row" style="display:none;align-items:center;justify-content:center;gap:8px;margin-top:8px;padding:0 20px;">'
+                + '<span style="color:#888;font-size:11px;">🔍</span>'
+                + '<input type="range" id="camera-zoom-slider" min="1" max="3" step="0.1" value="1" style="flex:1;max-width:140px;height:4px;-webkit-appearance:none;appearance:none;background:#555;border-radius:2px;outline:none;cursor:pointer;">'
+                + '<span id="camera-zoom-label" style="color:#aaa;font-size:11px;min-width:28px;text-align:center;">1.0×</span>'
+                + '</div>'
+                // Flash intensity slider row
+                + '<div class="camera-flash-intensity-row" style="display:none;align-items:center;justify-content:center;gap:8px;margin-top:4px;padding:0 20px;">'
+                + '<span style="color:#888;font-size:11px;">💡</span>'
+                + '<input type="range" id="camera-flash-intensity" min="0" max="100" step="1" value="35" style="flex:1;max-width:120px;height:4px;-webkit-appearance:none;appearance:none;background:#555;border-radius:2px;outline:none;cursor:pointer;">'
+                + '<span id="camera-flash-intensity-label" style="color:#FFD700;font-size:11px;min-width:28px;text-align:center;">35%</span>'
+                + '</div>'
+                + '<div style="display:flex;align-items:center;justify-content:center;gap:16px;margin-top:4px;padding:0 10px;">'
+                + '<button class="camera-flash-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:42px;height:42px;aspect-ratio:1;flex-shrink:0;color:#aaa;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.15s;" title="Flash">☀️</button>'
+                + '<button class="camera-mirror-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:42px;height:42px;aspect-ratio:1;flex-shrink:0;color:#aaa;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.15s;" title="Mirror">↔</button>'
+                + '<button class="camera-flip-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:42px;height:42px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;">🔄</button>'
+                + '<button class="camera-capture-btn" style="background:#fff;border:none;border-radius:50%;width:56px;height:56px;aspect-ratio:1;flex-shrink:0;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 4px rgba(255,255,255,0.3);transition:transform 0.1s;"><div style="width:46px;height:46px;border-radius:50%;background:#fff;border:2px solid #333;"></div></button>'
+                + '<button class="camera-cancel-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:42px;height:42px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;">✕</button>'
                 + '</div></div>';
             document.body.appendChild(_cameraCaptureModal);
             _cameraCaptureVideo = _cameraCaptureModal.querySelector('#camera-capture-video');
+            _cameraCaptureCountdownEl = document.getElementById('camera-countdown');
+            // Create flash overlay as a SEPARATE body element (not inside modal) so position:fixed covers full viewport
+            _cameraCaptureFlashEl = document.createElement('div');
+            _cameraCaptureFlashEl.id = 'camera-flash-overlay';
+            _cameraCaptureFlashEl.style.cssText = 'display:none;position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(255,255,255,' + (_cameraCaptureFlashIntensity / 100) + ');z-index:2003;pointer-events:none;';
+            document.body.appendChild(_cameraCaptureFlashEl);
+            
+            // Old floating brightness control removed - using modal-based intensity row instead
             
             // Close button
             _cameraCaptureModal.querySelector('.camera-capture-close').addEventListener('click', closeCameraCapture);
@@ -704,23 +766,377 @@ document.addEventListener('DOMContentLoaded', () => {
                 _cameraCaptureFacing = _cameraCaptureFacing === 'environment' ? 'user' : 'environment';
                 startCameraCaptureStream();
             });
+            // Mirror button
+            _cameraCaptureModal.querySelector('.camera-mirror-btn').addEventListener('click', function () {
+                _cameraCaptureMirror = !_cameraCaptureMirror;
+                var btn = _cameraCaptureModal.querySelector('.camera-mirror-btn');
+                btn.style.color = _cameraCaptureMirror ? '#4fc3f7' : '#aaa';
+                btn.style.background = _cameraCaptureMirror ? 'rgba(79,195,247,0.25)' : 'rgba(255,255,255,0.15)';
+                if (_cameraCaptureVideo) {
+                    _cameraCaptureVideo.style.transform = _cameraCaptureMirror ? 'scaleX(-1)' : '';
+                }
+            });
+            // Flash button
+            _cameraCaptureModal.querySelector('.camera-flash-btn').addEventListener('click', function () {
+                _cameraCaptureFlashOn = !_cameraCaptureFlashOn;
+                var btn = _cameraCaptureModal.querySelector('.camera-flash-btn');
+                btn.style.color = _cameraCaptureFlashOn ? '#FFD700' : '#aaa';
+                btn.style.background = _cameraCaptureFlashOn ? 'rgba(255,215,0,0.25)' : 'rgba(255,255,255,0.15)';
+                // Show/hide intensity slider row
+                var intensityRow = _cameraCaptureModal.querySelector('.camera-flash-intensity-row');
+                if (intensityRow) intensityRow.style.display = _cameraCaptureFlashOn ? '' : 'none';
+                // Apply torch to video track if available (back camera)
+                if (_cameraCaptureStream && _cameraCaptureFacing === 'environment') {
+                    var track = _cameraCaptureStream.getVideoTracks()[0];
+                    if (track && track.getCapabilities && track.getCapabilities().torch) {
+                        track.applyConstraints({ advanced: [{ torch: _cameraCaptureFlashOn }] }).catch(function(){});
+                    }
+                }
+                if (_cameraCaptureFlashEl) {
+                    _cameraCaptureFlashEl.style.background = 'rgba(255,255,255,' + (_cameraCaptureFlashIntensity / 100) + ')';
+                }
+            });
+            // Resolution buttons for photo
+            _cameraCaptureModal.querySelectorAll('.camera-res-btn').forEach(function (btn) {
+                btn.addEventListener('click', function () {
+                    _cameraCaptureModal.querySelectorAll('.camera-res-btn').forEach(function (b) {
+                        b.style.background = 'transparent';
+                        b.style.color = '#aaa';
+                        b.style.borderColor = 'rgba(255,255,255,0.2)';
+                        b.style.fontWeight = '400';
+                    });
+                    var res = btn.dataset.res;
+                    btn.style.background = 'rgba(255,255,255,0.2)';
+                    btn.style.color = '#fff';
+                    btn.style.borderColor = 'rgba(255,255,255,0.3)';
+                    btn.style.fontWeight = '600';
+                    if (res !== _cameraCaptureResolution) {
+                        _cameraCaptureResolution = res;
+                        // Restart stream with new resolution
+                        if (_cameraCaptureStream) startCameraCaptureStream();
+                    }
+                });
+            });
+            // Zoom slider
+            _cameraZoomSlider = document.getElementById('camera-zoom-slider');
+            _cameraZoomLabel = document.getElementById('camera-zoom-label');
+            if (_cameraZoomSlider) {
+                _cameraZoomSlider.addEventListener('input', function () {
+                    _cameraZoomLevel = parseFloat(_cameraZoomSlider.value);
+                    if (_cameraZoomLabel) _cameraZoomLabel.textContent = _cameraZoomLevel.toFixed(1) + '×';
+                    applyZoom();
+                });
+            }
+            // Flash intensity slider
+            var cameraFlashIntensitySlider = document.getElementById('camera-flash-intensity');
+            var cameraFlashIntensityLabel = document.getElementById('camera-flash-intensity-label');
+            if (cameraFlashIntensitySlider) {
+                cameraFlashIntensitySlider.addEventListener('input', function () {
+                    _cameraCaptureFlashIntensity = parseInt(cameraFlashIntensitySlider.value, 10);
+                    if (cameraFlashIntensityLabel) cameraFlashIntensityLabel.textContent = _cameraCaptureFlashIntensity + '%';
+                    if (_cameraCaptureFlashEl) {
+                        _cameraCaptureFlashEl.style.background = 'rgba(255,255,255,' + (_cameraCaptureFlashIntensity / 100) + ')';
+                    }
+                });
+            }
+            // Pinch-to-zoom and tap-to-focus on video
+            _cameraCaptureVideo.addEventListener('touchstart', function (e) {
+                if (e.touches.length === 2) {
+                    _cameraWasPinching = true;
+                    _cameraLastPinchDist = Math.hypot(
+                        e.touches[0].clientX - e.touches[1].clientX,
+                        e.touches[0].clientY - e.touches[1].clientY
+                    );
+                }
+            }, { passive: true });
+            _cameraCaptureVideo.addEventListener('touchmove', function (e) {
+                if (e.touches.length === 2 && _cameraLastPinchDist > 0) {
+                    e.preventDefault();
+                    var dist = Math.hypot(
+                        e.touches[0].clientX - e.touches[1].clientX,
+                        e.touches[0].clientY - e.touches[1].clientY
+                    );
+                    var scale = dist / _cameraLastPinchDist;
+                    var newZoom = Math.max(_cameraZoomMin, Math.min(_cameraZoomMax, _cameraZoomLevel * scale));
+                    if (Math.abs(newZoom - _cameraZoomLevel) > 0.05) {
+                        _cameraZoomLevel = newZoom;
+                        if (_cameraZoomSlider) _cameraZoomSlider.value = _cameraZoomLevel;
+                        if (_cameraZoomLabel) _cameraZoomLabel.textContent = _cameraZoomLevel.toFixed(1) + '×';
+                        applyZoom();
+                    }
+                    _cameraLastPinchDist = dist;
+                }
+            }, { passive: false });
+            _cameraCaptureVideo.addEventListener('touchend', function (e) {
+                // Single tap (not after pinch): set focus point
+                if (e.changedTouches.length === 1 && !_cameraWasPinching) {
+                    var touch = e.changedTouches[0];
+                    var rect = _cameraCaptureVideo.getBoundingClientRect();
+                    if (rect.width > 0 && rect.height > 0) {
+                        var x = (touch.clientX - rect.left) / rect.width;
+                        var y = (touch.clientY - rect.top) / rect.height;
+                        setFocusPoint(x, y);
+                    }
+                }
+                if (e.touches.length < 2) { _cameraLastPinchDist = 0; _cameraWasPinching = false; }
+            }, { passive: true });
+            _cameraCaptureVideo.addEventListener('dblclick', function (e) {
+                // Double-click to reset zoom
+                _cameraZoomLevel = 1;
+                if (_cameraZoomSlider) _cameraZoomSlider.value = 1;
+                if (_cameraZoomLabel) _cameraZoomLabel.textContent = '1.0×';
+                applyZoom();
+            });
             // Capture button
-            _cameraCaptureModal.querySelector('.camera-capture-btn').addEventListener('click', captureCameraPhoto);
+            _cameraCaptureModal.querySelector('.camera-capture-btn').addEventListener('click', function () {
+                if (_cameraCaptureTimer > 0) {
+                    startCountdown();
+                } else {
+                    captureCameraPhoto();
+                }
+            });
+            // Timer buttons
+            _cameraCaptureModal.querySelectorAll('.camera-timer-btn').forEach(function (btn) {
+                btn.addEventListener('click', function () {
+                    _cameraCaptureModal.querySelectorAll('.camera-timer-btn').forEach(function (b) {
+                        b.style.background = 'transparent';
+                        b.style.color = '#aaa';
+                        b.style.borderColor = 'rgba(255,255,255,0.2)';
+                    });
+                    var timer = parseInt(btn.dataset.timer, 10);
+                    btn.style.background = 'rgba(255,255,255,0.2)';
+                    btn.style.color = '#fff';
+                    btn.style.borderColor = 'rgba(255,255,255,0.3)';
+                    var customInput = document.getElementById('camera-custom-timer');
+                    if (timer === 0) {
+                        _cameraCaptureTimer = 0;
+                        if (customInput) { customInput.style.display = 'none'; customInput.value = ''; }
+                    } else {
+                        _cameraCaptureTimer = timer;
+                        if (customInput) { customInput.style.display = 'none'; customInput.value = ''; }
+                    }
+                });
+            });
+            // Custom timer input
+            var customTimerInput = document.getElementById('camera-custom-timer');
+            if (customTimerInput) {
+                customTimerInput.addEventListener('focus', function () {
+                    _cameraCaptureModal.querySelectorAll('.camera-timer-btn').forEach(function (b) {
+                        b.style.background = 'transparent';
+                        b.style.color = '#aaa';
+                        b.style.borderColor = 'rgba(255,255,255,0.2)';
+                    });
+                    customTimerInput.style.display = '';
+                });
+                customTimerInput.addEventListener('input', function () {
+                    var val = parseInt(customTimerInput.value, 10);
+                    if (!isNaN(val) && val > 0) {
+                        _cameraCaptureTimer = Math.min(val, 99);
+                    } else {
+                        _cameraCaptureTimer = 0;
+                    }
+                });
+                customTimerInput.addEventListener('keydown', function (e) {
+                    if (e.key === 'Enter') {
+                        e.preventDefault();
+                        if (_cameraCaptureTimer > 0) startCountdown();
+                        else captureCameraPhoto();
+                    }
+                });
+            }
+            
+            // Create photo preview overlay (hidden initially)
+            _cameraPhotoPreviewEl = document.createElement('div');
+            _cameraPhotoPreviewEl.className = 'modal';
+            _cameraPhotoPreviewEl.style.cssText = 'display:none;z-index:2001;background:rgba(0,0,0,0.95);';
+            _cameraPhotoPreviewEl.innerHTML = '<div class="camera-capture-content" style="position:relative;width:100%;max-width:500px;margin:auto;text-align:center;">'
+                + '<img id="camera-photo-preview-img" style="width:100%;max-height:70vh;border-radius:12px;object-fit:contain;background:#000;">'
+                + '<div style="display:flex;align-items:center;justify-content:center;gap:40px;margin-top:16px;padding:0 20px;">'
+                + '<button class="camera-retake-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:48px;height:48px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;">↩ Retake</button>'
+                + '<button class="camera-accept-btn" style="background:#4caf50;border:none;border-radius:50%;width:64px;height:64px;aspect-ratio:1;flex-shrink:0;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 4px rgba(76,175,80,0.3);transition:transform 0.1s;"><div style="width:54px;height:54px;border-radius:50%;background:#4caf50;border:2px solid #fff;display:flex;align-items:center;justify-content:center;color:#fff;font-size:28px;">✓</div></button>'
+                + '<button class="camera-cancel-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:48px;height:48px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;">✕</button>'
+                + '</div></div>';
+            document.body.appendChild(_cameraPhotoPreviewEl);
+            
+            _cameraPhotoPreviewEl.querySelector('.camera-retake-btn').addEventListener('click', function () {
+                _cameraPhotoPreviewEl.style.display = 'none';
+                if (_cameraPhotoPreviewData) {
+                    URL.revokeObjectURL(_cameraPhotoPreviewData.url);
+                    _cameraPhotoPreviewData = null;
+                }
+                _cameraCaptureModal.style.display = 'flex';
+                startCameraCaptureStream();
+            });
+            _cameraPhotoPreviewEl.querySelector('.camera-accept-btn').addEventListener('click', function () {
+                if (!_cameraPhotoPreviewData) return;
+                var blob = _cameraPhotoPreviewData.blob;
+                var url = _cameraPhotoPreviewData.url;
+                _cameraPhotoPreviewEl.style.display = 'none';
+                closeCameraCapture();
+                var file = new File([blob], 'Photo_' + Date.now() + '.png', { type: 'image/png' });
+                if (url) URL.revokeObjectURL(url);
+                selectedFiles = [file];
+                currentFileIndex = 0;
+                showUploadModal();
+            });
+            _cameraPhotoPreviewEl.querySelector('.camera-cancel-btn').addEventListener('click', function () {
+                _cameraPhotoPreviewEl.style.display = 'none';
+                if (_cameraPhotoPreviewData) {
+                    URL.revokeObjectURL(_cameraPhotoPreviewData.url);
+                    _cameraPhotoPreviewData = null;
+                }
+                closeCameraCapture();
+            });
         }
         
         _cameraCaptureModal.style.display = 'flex';
         startCameraCaptureStream();
     }
     
+    function startCountdown() {
+        if (!_cameraCaptureVideo) return;
+        var remaining = _cameraCaptureTimer;
+        _cameraCaptureCountdownEl.style.display = '';
+        _cameraCaptureCountdownEl.textContent = remaining;
+        if (_cameraCaptureCountdownTimer) { clearInterval(_cameraCaptureCountdownTimer); }
+        _cameraCaptureCountdownTimer = setInterval(function () {
+            remaining--;
+            if (remaining <= 0) {
+                clearInterval(_cameraCaptureCountdownTimer);
+                _cameraCaptureCountdownTimer = null;
+                _cameraCaptureCountdownEl.style.display = 'none';
+                captureCameraPhoto();
+            } else {
+                _cameraCaptureCountdownEl.textContent = remaining;
+            }
+        }, 1000);
+    }
+    
+    function applyZoom() {
+        if (!_cameraCaptureStream) return;
+        var track = _cameraCaptureStream.getVideoTracks()[0];
+        if (!track || !track.getCapabilities) return;
+        var caps = track.getCapabilities();
+        if (!caps.zoom) return;
+        var zoom = Math.max(caps.zoom.min || 1, Math.min(caps.zoom.max || 3, _cameraZoomLevel));
+        track.applyConstraints({ advanced: [{ zoom: zoom }] }).catch(function(){});
+    }
+
+    function applyVideoZoom() {
+        if (!_videoRecStream) return;
+        var track = _videoRecStream.getVideoTracks()[0];
+        if (!track || !track.getCapabilities) return;
+        var caps = track.getCapabilities();
+        if (!caps.zoom) return;
+        var zoom = Math.max(caps.zoom.min || 1, Math.min(caps.zoom.max || 3, _videoRecZoomLevel));
+        track.applyConstraints({ advanced: [{ zoom: zoom }] }).catch(function(){});
+    }
+
+    function setFocusPoint(x, y) {
+        if (!_cameraCaptureStream) return;
+        var track = _cameraCaptureStream.getVideoTracks()[0];
+        if (!track || !track.getCapabilities) return;
+        var caps = track.getCapabilities();
+        var constraints = {};
+        if (caps.focusMode && caps.focusMode.indexOf('single') !== -1) {
+            constraints.focusMode = 'single';
+        }
+        if (caps.pointsOfInterest) {
+            constraints.pointsOfInterest = [{ x: x, y: y }];
+        }
+        if (Object.keys(constraints).length > 0) {
+            track.applyConstraints({ advanced: [constraints] }).catch(function(){});
+        }
+        // Show focus indicator briefly
+        var focusEl = document.getElementById('camera-focus-indicator');
+        if (!focusEl) {
+            focusEl = document.createElement('div');
+            focusEl.id = 'camera-focus-indicator';
+            focusEl.style.cssText = 'position:absolute;width:60px;height:60px;border:2px solid #4fc3f7;border-radius:50%;transform:translate(-50%,-50%);pointer-events:none;z-index:6;transition:opacity 0.3s;';
+            _cameraCaptureModal.querySelector('.camera-capture-content').appendChild(focusEl);
+        }
+        // Position relative to video
+        var videoRect = _cameraCaptureVideo.getBoundingClientRect();
+        var contentRect = _cameraCaptureModal.querySelector('.camera-capture-content').getBoundingClientRect();
+        focusEl.style.left = (videoRect.left - contentRect.left + x * videoRect.width) + 'px';
+        focusEl.style.top = (videoRect.top - contentRect.top + y * videoRect.height) + 'px';
+        focusEl.style.opacity = '1';
+        setTimeout(function () { focusEl.style.opacity = '0'; }, 800);
+    }
+
+    function setVideoRecFocusPoint(x, y) {
+        if (!_videoRecStream) return;
+        var track = _videoRecStream.getVideoTracks()[0];
+        if (!track || !track.getCapabilities) return;
+        var caps = track.getCapabilities();
+        var constraints = {};
+        if (caps.focusMode && caps.focusMode.indexOf('single') !== -1) {
+            constraints.focusMode = 'single';
+        }
+        if (caps.pointsOfInterest) {
+            constraints.pointsOfInterest = [{ x: x, y: y }];
+        }
+        if (Object.keys(constraints).length > 0) {
+            track.applyConstraints({ advanced: [constraints] }).catch(function(){});
+        }
+        // Show focus indicator briefly
+        var focusEl = document.getElementById('video-rec-focus-indicator');
+        if (!focusEl) {
+            focusEl = document.createElement('div');
+            focusEl.id = 'video-rec-focus-indicator';
+            focusEl.style.cssText = 'position:absolute;width:60px;height:60px;border:2px solid #4fc3f7;border-radius:50%;transform:translate(-50%,-50%);pointer-events:none;z-index:6;transition:opacity 0.3s;';
+            if (_videoRecModal) {
+                var container = _videoRecModal.querySelector('div');
+                if (container) container.appendChild(focusEl);
+            }
+        }
+        // Position relative to video
+        var videoRect = _videoRecVideo.getBoundingClientRect();
+        var contentRect = (_videoRecModal.querySelector('div') || _videoRecVideo.parentElement).getBoundingClientRect();
+        focusEl.style.left = (videoRect.left - contentRect.left + x * videoRect.width) + 'px';
+        focusEl.style.top = (videoRect.top - contentRect.top + y * videoRect.height) + 'px';
+        focusEl.style.opacity = '1';
+        setTimeout(function () { focusEl.style.opacity = '0'; }, 800);
+    }
+
     function startCameraCaptureStream() {
         closeCameraCaptureStream();
         if (!_cameraCaptureVideo) return;
+        // Reset zoom
+        _cameraZoomLevel = 1;
+        if (_cameraZoomSlider) { _cameraZoomSlider.value = 1; _cameraZoomSlider.min = 1; _cameraZoomSlider.max = 3; }
+        if (_cameraZoomLabel) _cameraZoomLabel.textContent = '1.0×';
+        var res = _cameraCaptureResolutions[_cameraCaptureResolution] || _cameraCaptureResolutions['720p'];
         navigator.mediaDevices.getUserMedia({
-            video: { facingMode: _cameraCaptureFacing, width: { ideal: 1280 }, height: { ideal: 720 } }
+            video: { facingMode: _cameraCaptureFacing, width: { ideal: res.width }, height: { ideal: res.height } }
         }).then(function (stream) {
             _cameraCaptureStream = stream;
             _cameraCaptureVideo.srcObject = stream;
             _cameraCaptureVideo.play().catch(function () {});
+            // Read zoom capabilities from the track
+            var track = stream.getVideoTracks()[0];
+            if (track && track.getCapabilities) {
+                var caps = track.getCapabilities();
+                var zoomRow = _cameraCaptureModal && _cameraCaptureModal.querySelector('.camera-zoom-row');
+                if (caps.zoom) {
+                    _cameraZoomMin = caps.zoom.min || 1;
+                    _cameraZoomMax = caps.zoom.max || 3;
+                    if (_cameraZoomSlider) {
+                        _cameraZoomSlider.min = _cameraZoomMin;
+                        _cameraZoomSlider.max = _cameraZoomMax;
+                        _cameraZoomSlider.step = (caps.zoom.step !== undefined) ? caps.zoom.step : 0.1;
+                    }
+                    if (zoomRow) zoomRow.style.display = '';
+                } else {
+                    if (zoomRow) zoomRow.style.display = 'none';
+                }
+            }
+            // If flash was on and back camera, re-enable torch
+            if (_cameraCaptureFlashOn && _cameraCaptureFacing === 'environment') {
+                if (track && track.getCapabilities && track.getCapabilities().torch) {
+                    track.applyConstraints({ advanced: [{ torch: true }] }).catch(function(){});
+                }
+            }
         }).catch(function () {
             alert('Camera access denied.');
             closeCameraCapture();
@@ -728,6 +1144,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     
     function closeCameraCaptureStream() {
+        if (_cameraCaptureCountdownTimer) {
+            clearInterval(_cameraCaptureCountdownTimer);
+            _cameraCaptureCountdownTimer = null;
+        }
+        if (_cameraCaptureCountdownEl) _cameraCaptureCountdownEl.style.display = 'none';
+        if (_cameraCaptureFlashEl) _cameraCaptureFlashEl.style.display = 'none';
         if (_cameraCaptureStream) {
             _cameraCaptureStream.getTracks().forEach(function (t) { t.stop(); });
             _cameraCaptureStream = null;
@@ -735,40 +1157,669 @@ document.addEventListener('DOMContentLoaded', () => {
         if (_cameraCaptureVideo) _cameraCaptureVideo.srcObject = null;
     }
     
+    var _shutterCtx = null;
+
+    function playShutterSound() {
+        try {
+            if (!_shutterCtx) {
+                _shutterCtx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            if (_shutterCtx.state === 'suspended') {
+                _shutterCtx.resume();
+            }
+            var g = _shutterCtx.createGain();
+            g.connect(_shutterCtx.destination);
+            // Short noise burst shaped to sound like a shutter click
+            var bufferSize = _shutterCtx.sampleRate * 0.08; // 80ms
+            var buf = _shutterCtx.createBuffer(1, bufferSize, _shutterCtx.sampleRate);
+            var d = buf.getChannelData(0);
+            for (var i = 0; i < bufferSize; i++) {
+                var t = i / _shutterCtx.sampleRate;
+                d[i] = (Math.random() * 2 - 1) * Math.exp(-t * 60); // noise burst with fast decay
+            }
+            var src = _shutterCtx.createBufferSource();
+            src.buffer = buf;
+            src.connect(g);
+            g.gain.setValueAtTime(0.3, _shutterCtx.currentTime);
+            g.gain.exponentialRampToValueAtTime(0.001, _shutterCtx.currentTime + 0.08);
+            src.start();
+            // Cleanup gain after sound finishes
+            setTimeout(function () { g.disconnect(); }, 200);
+        } catch (e) { /* shutter sound not critical */ }
+    }
+
     function captureCameraPhoto() {
         if (!_cameraCaptureVideo || !_cameraCaptureVideo.videoWidth) return;
+        playShutterSound();
+        // Flash effect: white screen flash for all cameras when flash is on
+        if (_cameraCaptureFlashOn && _cameraCaptureFlashEl) {
+            _cameraCaptureFlashEl.style.display = '';
+            setTimeout(function () {
+                if (_cameraCaptureFlashEl) _cameraCaptureFlashEl.style.display = 'none';
+            }, 200);
+        }
         if (!_cameraCaptureCanvas) {
             _cameraCaptureCanvas = document.createElement('canvas');
             _cameraCaptureCtx = _cameraCaptureCanvas.getContext('2d');
         }
         _cameraCaptureCanvas.width = _cameraCaptureVideo.videoWidth;
         _cameraCaptureCanvas.height = _cameraCaptureVideo.videoHeight;
+        // Mirror the image if mirror toggle is on (horizontally flips the captured photo)
+        if (_cameraCaptureMirror) {
+            _cameraCaptureCtx.translate(_cameraCaptureCanvas.width, 0);
+            _cameraCaptureCtx.scale(-1, 1);
+        }
         _cameraCaptureCtx.drawImage(_cameraCaptureVideo, 0, 0);
+        // Reset transform if we mirrored
+        if (_cameraCaptureMirror) {
+            _cameraCaptureCtx.setTransform(1, 0, 0, 1, 0, 0);
+        }
         _cameraCaptureCanvas.toBlob(function (blob) {
-            closeCameraCapture();
-            var file = new File([blob], 'Photo_' + Date.now() + '.png', { type: 'image/png' });
-            selectedFiles = [file];
-            currentFileIndex = 0;
-            showUploadModal();
+            // Show preview instead of directly uploading
+            var url = URL.createObjectURL(blob);
+            _cameraPhotoPreviewData = { blob: blob, url: url };
+            var previewImg = document.getElementById('camera-photo-preview-img');
+            if (previewImg) previewImg.src = url;
+            _cameraCaptureModal.style.display = 'none';
+            closeCameraCaptureStream();
+            _cameraPhotoPreviewEl.style.display = 'flex';
         }, 'image/png');
     }
     
     function closeCameraCapture() {
         closeCameraCaptureStream();
         if (_cameraCaptureModal) _cameraCaptureModal.style.display = 'none';
+        if (_cameraPhotoPreviewEl) _cameraPhotoPreviewEl.style.display = 'none';
+        if (_cameraPhotoPreviewData) {
+            URL.revokeObjectURL(_cameraPhotoPreviewData.url);
+            _cameraPhotoPreviewData = null;
+        }
+        if (_cameraCaptureFlashEl) _cameraCaptureFlashEl.style.display = 'none';
     }
     
-    // Simple click-to-record audio (bar shows Send + Cancel immediately)
+    // --- Video recording ---
+    var _videoRecModal = null;
+    var _videoRecStream = null;
+    var _videoRecorder = null;
+    var _videoRecChunks = [];
+    var _videoRecTimer = null;
+    var _videoRecStartTime = 0;
+    var _videoRecVideo = null;
+    var _videoRecFlashOn = false;
+    var _videoRecFlashOverlay = null;
+    var _videoRecFacing = 'environment';
+    var _videoRecResolution = '720p';
+    var _videoRecResolutions = {
+        '720p': { width: 1280, height: 720, label: '720p' },
+        '1080p': { width: 1920, height: 1080, label: '1080p' },
+        '4K': { width: 3840, height: 2160, label: '4K' }
+    };
+    var _videoRecMirror = false; // horizontal mirror toggle for video preview
+    var _videoRecPreviewData = null; // { blob, url }
+    var _videoRecPreviewEl = null;
+    var _videoRecZoomLevel = 1;
+    var _videoRecZoomMin = 1;
+    var _videoRecZoomMax = 1;
+    var _videoRecZoomSlider = null;
+    var _videoRecZoomLabel = null;
+    var _videoRecMirrorOutput = false; // whether to actually mirror the recorded video/photo output
+    var _videoRecCanvasStream = null;
+    var _videoRecCanvasCtx = null;
+    var _videoRecMirrorCanvas = null;
+    var _videoRecLastPinchDist = 0;
+    var _videoRecWasPinching = false;
+    var _videoRecFlashIntensity = 25; // 0-100, white overlay brightness percentage
+    var _videoRecMirrorRAF = null; // requestAnimationFrame handle for canvas mirror drawing
+    
+    function setVideoRecFlash(enable) {
+        if (!_videoRecStream) return;
+        var track = _videoRecStream.getVideoTracks()[0];
+        var usedTorch = false;
+        // Back camera: use torch
+        if (_videoRecFacing === 'environment' && track && track.getCapabilities && track.getCapabilities().torch) {
+            track.applyConstraints({ advanced: [{ torch: enable }] }).catch(function(){});
+            usedTorch = true;
+        }
+        // Only show screen overlay for selfie camera or when torch is unsupported
+        if (!usedTorch) {
+            if (!_videoRecFlashOverlay) {
+                _videoRecFlashOverlay = document.getElementById('video-rec-brightness-overlay');
+            }
+            if (_videoRecFlashOverlay) {
+                _videoRecFlashOverlay.style.display = enable ? '' : 'none';
+            }
+        } else {
+            if (_videoRecFlashOverlay) _videoRecFlashOverlay.style.display = 'none';
+        }
+    }
+    
+    function startVideoRecording() {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof MediaRecorder === 'undefined') {
+            alert('Video recording not supported in this browser.');
+            return;
+        }
+        closeVideoRecording();
+        
+        // Create modal if first time
+        if (!_videoRecModal) {
+            _videoRecModal = document.createElement('div');
+            _videoRecModal.className = 'modal';
+            _videoRecModal.style.cssText = 'display:flex;z-index:2000;background:rgba(0,0,0,0.9);';
+            _videoRecModal.innerHTML = '<div style="position:relative;width:100%;max-width:500px;margin:auto;text-align:center;">'
+                + '<button class="video-rec-close" style="position:absolute;top:10px;right:14px;background:none;border:none;color:#fff;font-size:28px;cursor:pointer;z-index:10;line-height:1;">&times;</button>'
+                + '<video id="video-rec-preview" autoplay playsinline muted style="width:100%;max-height:55vh;border-radius:12px;object-fit:contain;background:#000;"></video>'
+                // Zoom row
+                + '<div class="video-rec-zoom-row" style="display:none;align-items:center;justify-content:center;gap:8px;margin-top:8px;padding:0 20px;">'
+                + '<span style="color:#888;font-size:11px;">🔍</span>'
+                + '<input type="range" id="video-rec-zoom-slider" min="1" max="3" step="0.1" value="1" style="flex:1;max-width:140px;height:4px;-webkit-appearance:none;appearance:none;background:#555;border-radius:2px;outline:none;cursor:pointer;">'
+                + '<span id="video-rec-zoom-label" style="color:#aaa;font-size:11px;min-width:28px;text-align:center;">1.0×</span>'
+                + '</div>'
+                // Resolution selector
+                + '<div class="video-rec-res-row" style="display:flex;align-items:center;justify-content:center;gap:6px;margin-top:8px;padding:0 16px;">'
+                + '<span style="color:#888;font-size:11px;">📺</span>'
+                + '<button class="video-rec-res-btn" data-res="720p" style="background:rgba(255,255,255,0.2);border:1px solid rgba(255,255,255,0.3);border-radius:4px;color:#fff;padding:4px 10px;font-size:11px;cursor:pointer;transition:all 0.15s;font-weight:600;">720p</button>'
+                + '<button class="video-rec-res-btn" data-res="1080p" style="background:transparent;border:1px solid rgba(255,255,255,0.2);border-radius:4px;color:#aaa;padding:4px 10px;font-size:11px;cursor:pointer;transition:all 0.15s;">1080p</button>'
+                + '<button class="video-rec-res-btn" data-res="4K" style="background:transparent;border:1px solid rgba(255,255,255,0.2);border-radius:4px;color:#aaa;padding:4px 10px;font-size:11px;cursor:pointer;transition:all 0.15s;">4K</button>'
+                + '</div>'
+                // Flash intensity slider row
+                + '<div class="video-rec-flash-intensity-row" style="display:none;align-items:center;justify-content:center;gap:8px;margin-top:4px;padding:0 20px;">'
+                + '<span style="color:#888;font-size:11px;">💡</span>'
+                + '<input type="range" id="video-rec-flash-intensity" min="0" max="100" step="1" value="25" style="flex:1;max-width:120px;height:4px;-webkit-appearance:none;appearance:none;background:#555;border-radius:2px;outline:none;cursor:pointer;">'
+                + '<span id="video-rec-flash-intensity-label" style="color:#FFD700;font-size:11px;min-width:28px;text-align:center;">25%</span>'
+                + '</div>'
+                + '<div style="display:flex;align-items:center;justify-content:center;gap:14px;margin-top:4px;padding:0 16px;">'
+                + '<span id="video-rec-timer" style="color:#fff;font-size:16px;font-weight:600;min-width:60px;font-variant-numeric:tabular-nums;">0:00</span>'
+                + '<button id="video-rec-flash-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:40px;height:40px;aspect-ratio:1;flex-shrink:0;color:#aaa;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.15s;" title="Flash">☀️</button>'
+                + '<button id="video-rec-mirror-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:40px;height:40px;aspect-ratio:1;flex-shrink:0;color:#aaa;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.15s;" title="Mirror">↔</button>'
+                + '<button id="video-rec-flip-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:40px;height:40px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;" title="Flip camera">🔄</button>'
+                + '<button id="video-rec-toggle-btn" style="background:#f44336;border:none;border-radius:50%;width:64px;height:64px;aspect-ratio:1;flex-shrink:0;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 4px rgba(244,67,54,0.3);transition:all 0.15s;"><div style="width:28px;height:28px;border-radius:50%;background:#fff;"></div></button>'
+                + '<button id="video-rec-finish-btn" style="display:none;background:#4caf50;border:none;border-radius:50%;width:48px;height:48px;aspect-ratio:1;flex-shrink:0;cursor:pointer;align-items:center;justify-content:center;box-shadow:0 0 0 4px rgba(76,175,80,0.3);transition:all 0.15s;color:#fff;font-size:22px;">✓</button>'
+                + '<button class="video-rec-cancel" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:40px;height:40px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;">✕</button>'
+                + '</div></div>';
+            document.body.appendChild(_videoRecModal);
+            _videoRecVideo = _videoRecModal.querySelector('#video-rec-preview');
+            // Create brightness overlay as a SEPARATE body element (not inside modal) so position:fixed covers full viewport for selfie flash
+            _videoRecFlashOverlay = document.createElement('div');
+            _videoRecFlashOverlay.id = 'video-rec-brightness-overlay';
+            _videoRecFlashOverlay.style.cssText = 'display:none;position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(255,255,255,' + (_videoRecFlashIntensity / 100) + ');z-index:2002;pointer-events:none;';
+            document.body.appendChild(_videoRecFlashOverlay);
+            
+            // Old floating brightness control removed - using modal-based intensity row instead
+            
+            // Zoom slider
+            _videoRecZoomSlider = document.getElementById('video-rec-zoom-slider');
+            _videoRecZoomLabel = document.getElementById('video-rec-zoom-label');
+            if (_videoRecZoomSlider) {
+                _videoRecZoomSlider.addEventListener('input', function () {
+                    _videoRecZoomLevel = parseFloat(_videoRecZoomSlider.value);
+                    if (_videoRecZoomLabel) _videoRecZoomLabel.textContent = _videoRecZoomLevel.toFixed(1) + '×';
+                    applyVideoZoom();
+                });
+            }
+            
+            // Flash intensity slider
+            var videoFlashIntensitySlider = document.getElementById('video-rec-flash-intensity');
+            var videoFlashIntensityLabel = document.getElementById('video-rec-flash-intensity-label');
+            if (videoFlashIntensitySlider) {
+                videoFlashIntensitySlider.addEventListener('input', function () {
+                    _videoRecFlashIntensity = parseInt(videoFlashIntensitySlider.value, 10);
+                    if (videoFlashIntensityLabel) videoFlashIntensityLabel.textContent = _videoRecFlashIntensity + '%';
+                    if (_videoRecFlashOverlay) {
+                        _videoRecFlashOverlay.style.background = 'rgba(255,255,255,' + (_videoRecFlashIntensity / 100) + ')';
+                    }
+                });
+            }
+            
+            // Pinch-to-zoom and tap-to-focus on video preview
+            _videoRecVideo.addEventListener('touchstart', function (e) {
+                if (e.touches.length === 2) {
+                    _videoRecWasPinching = true;
+                    _videoRecLastPinchDist = Math.hypot(
+                        e.touches[0].clientX - e.touches[1].clientX,
+                        e.touches[0].clientY - e.touches[1].clientY
+                    );
+                }
+            }, { passive: true });
+            _videoRecVideo.addEventListener('touchmove', function (e) {
+                if (e.touches.length === 2 && _videoRecLastPinchDist > 0) {
+                    e.preventDefault();
+                    var dist = Math.hypot(
+                        e.touches[0].clientX - e.touches[1].clientX,
+                        e.touches[0].clientY - e.touches[1].clientY
+                    );
+                    var scale = dist / _videoRecLastPinchDist;
+                    var newZoom = Math.max(_videoRecZoomMin, Math.min(_videoRecZoomMax, _videoRecZoomLevel * scale));
+                    if (Math.abs(newZoom - _videoRecZoomLevel) > 0.05) {
+                        _videoRecZoomLevel = newZoom;
+                        if (_videoRecZoomSlider) _videoRecZoomSlider.value = _videoRecZoomLevel;
+                        if (_videoRecZoomLabel) _videoRecZoomLabel.textContent = _videoRecZoomLevel.toFixed(1) + '×';
+                        applyVideoZoom();
+                    }
+                    _videoRecLastPinchDist = dist;
+                }
+            }, { passive: false });
+            _videoRecVideo.addEventListener('touchend', function (e) {
+                // Single tap (not after pinch): set focus point
+                if (e.changedTouches.length === 1 && !_videoRecWasPinching) {
+                    var touch = e.changedTouches[0];
+                    var rect = _videoRecVideo.getBoundingClientRect();
+                    if (rect.width > 0 && rect.height > 0) {
+                        var x = (touch.clientX - rect.left) / rect.width;
+                        var y = (touch.clientY - rect.top) / rect.height;
+                        setVideoRecFocusPoint(x, y);
+                    }
+                }
+                if (e.touches.length < 2) { _videoRecLastPinchDist = 0; _videoRecWasPinching = false; }
+            }, { passive: true });
+            _videoRecVideo.addEventListener('dblclick', function (e) {
+                // Double-click to reset zoom
+                _videoRecZoomLevel = 1;
+                if (_videoRecZoomSlider) _videoRecZoomSlider.value = 1;
+                if (_videoRecZoomLabel) _videoRecZoomLabel.textContent = '1.0×';
+                applyVideoZoom();
+            });
+            
+            // Close button
+            _videoRecModal.querySelector('.video-rec-close').addEventListener('click', closeVideoRecording);
+            // Cancel button
+            _videoRecModal.querySelector('.video-rec-cancel').addEventListener('click', closeVideoRecording);
+            // Record toggle button (pause/resume)
+            _videoRecModal.querySelector('#video-rec-toggle-btn').addEventListener('click', toggleVideoRecording);
+            // Finish button (stops recording for real)
+            _videoRecModal.querySelector('#video-rec-finish-btn').addEventListener('click', finishVideoAction);
+            // Mirror button
+            _videoRecModal.querySelector('#video-rec-mirror-btn').addEventListener('click', function () {
+                _videoRecMirror = !_videoRecMirror;
+                var btn = _videoRecModal.querySelector('#video-rec-mirror-btn');
+                btn.style.color = _videoRecMirror ? '#4fc3f7' : '#aaa';
+                btn.style.background = _videoRecMirror ? 'rgba(79,195,247,0.25)' : 'rgba(255,255,255,0.15)';
+                if (_videoRecVideo) {
+                    _videoRecVideo.style.transform = _videoRecMirror ? 'scaleX(-1)' : '';
+                }
+            });
+            // Flash button
+            _videoRecModal.querySelector('#video-rec-flash-btn').addEventListener('click', function () {
+                _videoRecFlashOn = !_videoRecFlashOn;
+                var btn = _videoRecModal.querySelector('#video-rec-flash-btn');
+                btn.style.color = _videoRecFlashOn ? '#FFD700' : '#aaa';
+                btn.style.background = _videoRecFlashOn ? 'rgba(255,215,0,0.25)' : 'rgba(255,255,255,0.15)';
+                // Show/hide intensity slider row
+                var intensityRow = _videoRecModal.querySelector('.video-rec-flash-intensity-row');
+                if (intensityRow) intensityRow.style.display = _videoRecFlashOn ? '' : 'none';
+                setVideoRecFlash(_videoRecFlashOn);
+                if (_videoRecFlashOverlay) {
+                    _videoRecFlashOverlay.style.background = 'rgba(255,255,255,' + (_videoRecFlashIntensity / 100) + ')';
+                }
+            });
+            // Flip camera button
+            _videoRecModal.querySelector('#video-rec-flip-btn').addEventListener('click', function () {
+                if (_videoRecorder && _videoRecorder.state !== 'inactive') return;
+                _videoRecFacing = _videoRecFacing === 'environment' ? 'user' : 'environment';
+                startCameraStreamForVideo();
+            });
+            // Resolution buttons
+            _videoRecModal.querySelectorAll('.video-rec-res-btn').forEach(function (btn) {
+                btn.addEventListener('click', function () {
+                    // Don't switch resolution while recording or paused — would break the MediaRecorder
+                    if (_videoRecorder && _videoRecorder.state !== 'inactive') return;
+                    _videoRecModal.querySelectorAll('.video-rec-res-btn').forEach(function (b) {
+                        b.style.background = 'transparent';
+                        b.style.color = '#aaa';
+                        b.style.borderColor = 'rgba(255,255,255,0.2)';
+                        b.style.fontWeight = '400';
+                    });
+                    var res = btn.dataset.res;
+                    btn.style.background = 'rgba(255,255,255,0.2)';
+                    btn.style.color = '#fff';
+                    btn.style.borderColor = 'rgba(255,255,255,0.3)';
+                    btn.style.fontWeight = '600';
+                    if (res !== _videoRecResolution) {
+                        _videoRecResolution = res;
+                        // Restart stream with new resolution
+                        startCameraStreamForVideo();
+                    }
+                });
+            });
+        }
+        
+        // Create video preview overlay (hidden initially)
+        if (!_videoRecPreviewEl) {
+            _videoRecPreviewEl = document.createElement('div');
+            _videoRecPreviewEl.className = 'modal';
+            _videoRecPreviewEl.style.cssText = 'display:none;z-index:2002;background:rgba(0,0,0,0.95);';
+            _videoRecPreviewEl.innerHTML = '<div style="position:relative;width:100%;max-width:500px;margin:auto;text-align:center;">'
+                + '<video id="video-rec-preview-playback" autoplay loop playsinline muted style="width:100%;max-height:60vh;border-radius:12px;object-fit:contain;background:#000;"></video>'
+                + '<div id="video-rec-preview-duration" style="color:#aaa;font-size:12px;margin-top:6px;"></div>'
+                + '<div style="display:flex;align-items:center;justify-content:center;gap:40px;margin-top:16px;padding:0 20px;">'
+                + '<button class="video-rec-preview-retake" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:48px;height:48px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;">↩ Retake</button>'
+                + '<button class="video-rec-preview-accept" style="background:#4caf50;border:none;border-radius:50%;width:64px;height:64px;aspect-ratio:1;flex-shrink:0;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 4px rgba(76,175,80,0.3);transition:transform 0.1s;"><div style="width:54px;height:54px;border-radius:50%;background:#4caf50;border:2px solid #fff;display:flex;align-items:center;justify-content:center;color:#fff;font-size:28px;">✓</div></button>'
+                + '<button class="video-rec-preview-cancel" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:48px;height:48px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;">✕</button>'
+                + '</div></div>';
+            document.body.appendChild(_videoRecPreviewEl);
+            
+            _videoRecPreviewEl.querySelector('.video-rec-preview-retake').addEventListener('click', function () {
+                _videoRecPreviewEl.style.display = 'none';
+                if (_videoRecPreviewData) {
+                    URL.revokeObjectURL(_videoRecPreviewData.url);
+                    _videoRecPreviewData = null;
+                }
+                _videoRecModal.style.display = 'flex';
+                _videoRecFacing = _videoRecFacing || 'environment';
+                startCameraStreamForVideo();
+            });
+            _videoRecPreviewEl.querySelector('.video-rec-preview-accept').addEventListener('click', function () {
+                if (!_videoRecPreviewData) return;
+                var blob = _videoRecPreviewData.blob;
+                var url = _videoRecPreviewData.url;
+                _videoRecPreviewEl.style.display = 'none';
+                // Close the recording modal if it's still visible
+                if (_videoRecModal) _videoRecModal.style.display = 'none';
+                closeVideoRecording();
+                var file = new File([blob], 'Video_' + Date.now() + '.webm', { type: 'video/webm' });
+                if (url) URL.revokeObjectURL(url);
+                selectedFiles = [file];
+                currentFileIndex = 0;
+                showUploadModal();
+            });
+            _videoRecPreviewEl.querySelector('.video-rec-preview-cancel').addEventListener('click', function () {
+                _videoRecPreviewEl.style.display = 'none';
+                if (_videoRecPreviewData) {
+                    URL.revokeObjectURL(_videoRecPreviewData.url);
+                    _videoRecPreviewData = null;
+                }
+                closeVideoRecording();
+            });
+        }
+        
+        _videoRecModal.style.display = 'flex';
+        _videoRecFacing = 'environment';
+        startCameraStreamForVideo();
+    }
+    
+    function startCameraStreamForVideo() {
+        closeCameraStreamForVideo();
+        if (!_videoRecVideo) _videoRecVideo = document.getElementById('video-rec-preview');
+        _videoRecZoomLevel = 1;
+        if (_videoRecZoomSlider) { _videoRecZoomSlider.value = 1; _videoRecZoomSlider.min = 1; _videoRecZoomSlider.max = 3; }
+        if (_videoRecZoomLabel) _videoRecZoomLabel.textContent = '1.0×';
+
+        var res = _videoRecResolutions[_videoRecResolution] || _videoRecResolutions['720p'];
+        navigator.mediaDevices.getUserMedia({
+            video: { facingMode: _videoRecFacing, width: { ideal: res.width }, height: { ideal: res.height } },
+            audio: true
+        }).then(function (stream) {
+            _videoRecStream = stream;
+            _videoRecVideo.srcObject = stream;
+            _videoRecVideo.play().catch(function () {});
+
+            // Read zoom capabilities
+            var track = stream.getVideoTracks()[0];
+            if (track && track.getCapabilities) {
+                var caps = track.getCapabilities();
+                var zoomRow = _videoRecModal && _videoRecModal.querySelector('.video-rec-zoom-row');
+                if (caps.zoom) {
+                    _videoRecZoomMin = caps.zoom.min || 1;
+                    _videoRecZoomMax = caps.zoom.max || 3;
+                    if (_videoRecZoomSlider) {
+                        _videoRecZoomSlider.min = _videoRecZoomMin;
+                        _videoRecZoomSlider.max = _videoRecZoomMax;
+                        _videoRecZoomSlider.step = (caps.zoom.step !== undefined) ? caps.zoom.step : 0.1;
+                    }
+                    if (zoomRow) zoomRow.style.display = '';
+                } else {
+                    if (zoomRow) zoomRow.style.display = 'none';
+                }
+            }
+            // Re-enable flash if it was on
+            if (_videoRecFlashOn) setVideoRecFlash(true);
+        }).catch(function () {
+            alert('Camera/microphone access denied.');
+            closeVideoRecording();
+        });
+    }
+    
+    function closeCameraStreamForVideo() {
+        if (_videoRecStream) {
+            var track = _videoRecStream.getVideoTracks()[0];
+            if (track && track.getCapabilities && track.getCapabilities().torch) {
+                try { track.applyConstraints({ advanced: [{ torch: false }] }); } catch(e) {}
+            }
+            _videoRecStream.getTracks().forEach(function (t) { t.stop(); });
+            _videoRecStream = null;
+        }
+        if (_videoRecVideo) _videoRecVideo.srcObject = null;
+        if (_videoRecMirrorRAF) {
+            cancelAnimationFrame(_videoRecMirrorRAF);
+            _videoRecMirrorRAF = null;
+        }
+        // Clean up canvas mirror stream
+        if (_videoRecCanvasStream) {
+            _videoRecCanvasStream.getTracks().forEach(function (t) { t.stop(); });
+            _videoRecCanvasStream = null;
+        }
+        _videoRecMirrorCanvas = null;
+        _videoRecCanvasCtx = null;
+        _videoRecMirrorOutput = false;
+    }
+    
+    function finishVideoAction() {
+        // Actually stop the recorder for real (finish the recording)
+        if (_videoRecorder && _videoRecorder.state !== 'inactive') {
+            // Resume first if paused so we get all chunks
+            if (_videoRecorder.state === 'paused') {
+                try { _videoRecorder.resume(); } catch(e) {}
+            }
+            _videoRecorder.stop();
+        }
+    }
+    
+    function toggleVideoRecording() {
+        if (_videoRecorder && _videoRecorder.state === 'recording') {
+            // Pause recording — button shows a play icon to resume
+            _videoRecorder.pause();
+            var btn = document.getElementById('video-rec-toggle-btn');
+            if (btn) {
+                btn.style.background = '#ff9800';
+                btn.innerHTML = '<div style="width:0;height:0;border-left:20px solid #fff;border-top:14px solid transparent;border-bottom:14px solid transparent;margin-left:4px;"></div>';
+                btn.style.boxShadow = '0 0 0 4px rgba(255,152,0,0.3)';
+            }
+            return;
+        }
+        if (_videoRecorder && _videoRecorder.state === 'paused') {
+            // Resume recording — button becomes a square again
+            _videoRecorder.resume();
+            var btn = document.getElementById('video-rec-toggle-btn');
+            if (btn) {
+                btn.style.background = '#fff';
+                btn.innerHTML = '<div style="width:26px;height:26px;border-radius:4px;background:#f44336;"></div>';
+                btn.style.boxShadow = '0 0 0 4px rgba(255,255,255,0.3)';
+            }
+            return;
+        }
+        // Start recording
+        if (!_videoRecStream) return;
+        _videoRecMirrorOutput = _videoRecMirror;
+        _videoRecChunks = [];
+        var mimeType = 'video/webm;codecs=vp9,opus';
+        if (!MediaRecorder.isTypeSupported(mimeType)) {
+            mimeType = 'video/webm';
+            if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = '';
+        }
+        // If mirror is on, create a canvas-based mirrored stream so the recorded output is actually mirrored
+        var streamToRecord = _videoRecStream;
+        if (_videoRecMirror) {
+            var vTrack = _videoRecStream.getVideoTracks()[0];
+            // Use actual video element dimensions for the canvas, which are more reliable than getSettings()
+            var width = _videoRecVideo.videoWidth || (vTrack ? vTrack.getSettings().width : 1280) || 1280;
+            var height = _videoRecVideo.videoHeight || (vTrack ? vTrack.getSettings().height : 720) || 720;
+            _videoRecMirrorCanvas = document.createElement('canvas');
+            _videoRecMirrorCanvas.width = width;
+            _videoRecMirrorCanvas.height = height;
+            _videoRecCanvasCtx = _videoRecMirrorCanvas.getContext('2d');
+            var audioTrack = _videoRecStream.getAudioTracks()[0];
+            // Start RAF drawing loop to mirror each frame onto the canvas
+            function drawMirrorFrame() {
+                if (!_videoRecMirrorCanvas || !_videoRecCanvasCtx || !_videoRecVideo) {
+                    _videoRecMirrorRAF = null;
+                    return;
+                }
+                _videoRecCanvasCtx.clearRect(0, 0, width, height);
+                _videoRecCanvasCtx.translate(width, 0);
+                _videoRecCanvasCtx.scale(-1, 1);
+                _videoRecCanvasCtx.drawImage(_videoRecVideo, 0, 0, width, height);
+                _videoRecCanvasCtx.setTransform(1, 0, 0, 1, 0, 0);
+                _videoRecMirrorRAF = requestAnimationFrame(drawMirrorFrame);
+            }
+            drawMirrorFrame();
+            // Capture canvas stream and combine with audio from original stream
+            var canvasStream = _videoRecMirrorCanvas.captureStream(30);
+            var canvasVideoTrack = canvasStream.getVideoTracks()[0];
+            if (canvasVideoTrack && audioTrack) {
+                streamToRecord = new MediaStream([canvasVideoTrack, audioTrack]);
+            } else if (canvasVideoTrack) {
+                streamToRecord = new MediaStream([canvasVideoTrack]);
+            }
+            _videoRecCanvasStream = streamToRecord;
+        }
+        _videoRecorder = new MediaRecorder(streamToRecord, mimeType ? { mimeType: mimeType } : {});
+        _videoRecorder.ondataavailable = function (e) {
+            if (e.data && e.data.size > 0) _videoRecChunks.push(e.data);
+        };
+        _videoRecorder.onstop = function () {
+            // Cancel mirror RAF if active
+            if (_videoRecMirrorRAF) {
+                cancelAnimationFrame(_videoRecMirrorRAF);
+                _videoRecMirrorRAF = null;
+            }
+            var blob = new Blob(_videoRecChunks, { type: 'video/webm' });
+            _videoRecChunks = [];
+            finishVideoRecording(blob);
+        };
+        _videoRecorder.onerror = function () {
+            if (_videoRecMirrorRAF) {
+                cancelAnimationFrame(_videoRecMirrorRAF);
+                _videoRecMirrorRAF = null;
+            }
+            closeVideoRecording();
+            alert('Video recording error.');
+        };
+        _videoRecorder.start();
+        _videoRecStartTime = Date.now();
+        updateVideoRecTimer();
+        if (_videoRecTimer) clearInterval(_videoRecTimer);
+        _videoRecTimer = setInterval(updateVideoRecTimer, 200);
+        // Show the finish (✓) button and hide cancel during recording
+        var finishBtn = document.getElementById('video-rec-finish-btn');
+        if (finishBtn) { finishBtn.style.display = 'flex'; }
+        var cancelBtn = document.querySelector('.video-rec-cancel');
+        if (cancelBtn) { cancelBtn.style.display = 'none'; }
+        // Change button to recording state: white circle with red square inside
+        var btn = document.getElementById('video-rec-toggle-btn');
+        if (btn) {
+            btn.style.background = '#fff';
+            btn.innerHTML = '<div style="width:26px;height:26px;border-radius:4px;background:#f44336;"></div>';
+            btn.style.boxShadow = '0 0 0 4px rgba(255,255,255,0.3)';
+        }
+    }
+    
+    function updateVideoRecTimer() {
+        if (!_videoRecStartTime) return;
+        var elapsed = Math.floor((Date.now() - _videoRecStartTime) / 1000);
+        var m = Math.floor(elapsed / 60);
+        var s = elapsed % 60;
+        var el = document.getElementById('video-rec-timer');
+        if (el) el.textContent = m + ':' + (s < 10 ? '0' : '') + s;
+    }
+    
+    function finishVideoRecording(blob) {
+        if (_videoRecTimer) { clearInterval(_videoRecTimer); _videoRecTimer = null; }
+        // Reset toggle button to initial state
+        var toggleBtn = document.getElementById('video-rec-toggle-btn');
+        if (toggleBtn) {
+            toggleBtn.style.background = '#f44336';
+            toggleBtn.innerHTML = '<div style="width:28px;height:28px;border-radius:50%;background:#fff;"></div>';
+            toggleBtn.style.boxShadow = '0 0 0 4px rgba(244,67,54,0.3)';
+        }
+        var finishBtn = document.getElementById('video-rec-finish-btn');
+        if (finishBtn) finishBtn.style.display = 'none';
+        var cancelBtn = document.querySelector('.video-rec-cancel');
+        if (cancelBtn) cancelBtn.style.display = 'flex';
+        closeCameraStreamForVideo();
+        _videoRecModal.style.display = 'none';
+        _videoRecorder = null;
+        // Show preview instead of directly uploading
+        var url = URL.createObjectURL(blob);
+        _videoRecPreviewData = { blob: blob, url: url };
+        var playbackVideo = document.getElementById('video-rec-preview-playback');
+        if (playbackVideo) {
+            playbackVideo.src = url;
+            // Recorded video is already mirrored in the data (via canvas), so no CSS transform needed
+            playbackVideo.style.transform = '';
+            playbackVideo.play().catch(function(){});
+        }
+        // Show duration
+        var durationEl = document.getElementById('video-rec-preview-duration');
+        if (durationEl && _videoRecStartTime) {
+            var elapsed = Math.floor((Date.now() - _videoRecStartTime) / 1000);
+            var m = Math.floor(elapsed / 60);
+            var s = elapsed % 60;
+            durationEl.textContent = 'Duration: ' + m + ':' + (s < 10 ? '0' : '') + s;
+        }
+        _videoRecPreviewEl.style.display = 'flex';
+    }
+    
+    function closeVideoRecording() {
+        if (_videoRecTimer) { clearInterval(_videoRecTimer); _videoRecTimer = null; }
+        if (_videoRecorder && _videoRecorder.state !== 'inactive') {
+            _videoRecorder.ondataavailable = null;
+            _videoRecorder.onstop = null;
+            _videoRecorder.onerror = null;
+            try { _videoRecorder.stop(); } catch(e) {}
+        }
+        if (_videoRecMirrorRAF) {
+            cancelAnimationFrame(_videoRecMirrorRAF);
+            _videoRecMirrorRAF = null;
+        }
+        _videoRecorder = null;
+        _videoRecChunks = [];
+        _videoRecFlashOn = false;
+        if (_videoRecFlashOverlay) _videoRecFlashOverlay.style.display = 'none';
+        
+        if (_videoRecStream) {
+            // Turn off torch before stopping
+            var track = _videoRecStream.getVideoTracks()[0];
+            if (track && track.getCapabilities && track.getCapabilities().torch) {
+                try { track.applyConstraints({ advanced: [{ torch: false }] }); } catch(e) {}
+            }
+            _videoRecStream.getTracks().forEach(function (t) { t.stop(); });
+            _videoRecStream = null;
+        }
+        if (_videoRecVideo) _videoRecVideo.srcObject = null;
+        // Clean up video preview overlay
+        if (_videoRecPreviewEl) _videoRecPreviewEl.style.display = 'none';
+        if (_videoRecPreviewData) {
+            URL.revokeObjectURL(_videoRecPreviewData.url);
+            _videoRecPreviewData = null;
+        }
+        if (_videoRecModal) _videoRecModal.style.display = 'none';
+    }
+    
+    // Simple click-to-record audio (bar shows Send + Cancel immediately) with live waveform
     var chatRecorder = null;
     var chatRecorderChunks = [];
     var chatRecorderStream = null;
     var chatRecordTimer = null;
     var chatRecordStartTime = 0;
+    var _recordingWaveformCtx = null;
+    var _recordingWaveformAnalyser = null;
+    var _recordingWaveformDataArray = null;
+    var _recordingWaveformDrawTimer = null;
     
     var recordingBar = document.getElementById('audio-recording-bar');
     var recordingTimer = document.getElementById('recording-bar-timer');
     var recordingSendBtn = document.getElementById('recording-bar-send');
     var recordingCancelBtn = document.getElementById('recording-bar-cancel');
+    var recordingWaveformCanvas = document.getElementById('recording-waveform');
     
     function updateRecordingTimer() {
         if (!chatRecordStartTime) return;
@@ -782,10 +1833,21 @@ document.addEventListener('DOMContentLoaded', () => {
         if (recordingBar) recordingBar.style.display = show ? '' : 'none';
         if (recordingSendBtn) recordingSendBtn.style.display = show ? '' : 'none';
         if (recordingCancelBtn) recordingCancelBtn.style.display = show ? '' : 'none';
+        if (recordingWaveformCanvas) {
+            recordingWaveformCanvas.style.display = show ? '' : 'none';
+            if (show) {
+                recordingWaveformCanvas.width = recordingWaveformCanvas.offsetWidth || 120;
+                recordingWaveformCanvas.height = recordingWaveformCanvas.offsetHeight || 32;
+            }
+        }
     }
     
     function cleanupChatRecording() {
         if (chatRecordTimer) { clearInterval(chatRecordTimer); chatRecordTimer = null; }
+        if (_recordingWaveformDrawTimer) { cancelAnimationFrame(_recordingWaveformDrawTimer); _recordingWaveformDrawTimer = null; }
+        if (_recordingWaveformCtx) { try { _recordingWaveformCtx.close(); } catch(e) {} _recordingWaveformCtx = null; }
+        _recordingWaveformAnalyser = null;
+        _recordingWaveformDataArray = null;
         if (chatRecorderStream) { chatRecorderStream.getTracks().forEach(function(t) { t.stop(); }); chatRecorderStream = null; }
         chatRecorder = null;
         chatRecorderChunks = [];
@@ -815,6 +1877,34 @@ document.addEventListener('DOMContentLoaded', () => {
         selectedFiles = [file];
         currentFileIndex = 0;
         showUploadModal();
+    }
+    
+    function drawWaveform() {
+        if (!_recordingWaveformAnalyser || !recordingWaveformCanvas) {
+            _recordingWaveformDrawTimer = null;
+            return;
+        }
+        _recordingWaveformAnalyser.getByteTimeDomainData(_recordingWaveformDataArray);
+        var canvas = recordingWaveformCanvas;
+        var ctx = canvas.getContext('2d');
+        var w = canvas.width;
+        var h = canvas.height;
+        ctx.clearRect(0, 0, w, h);
+        var bufferLength = _recordingWaveformDataArray.length;
+        var sliceWidth = w / bufferLength;
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#4fc3f7';
+        ctx.beginPath();
+        var x = 0;
+        for (var i = 0; i < bufferLength; i++) {
+            var v = _recordingWaveformDataArray[i] / 128.0;
+            var y = v * (h / 2);
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+            x += sliceWidth;
+        }
+        ctx.stroke();
+        _recordingWaveformDrawTimer = requestAnimationFrame(drawWaveform);
     }
     
     function startChatRecording() {
@@ -849,6 +1939,20 @@ document.addEventListener('DOMContentLoaded', () => {
             chatRecordStartTime = Date.now();
             updateRecordingTimer();
             chatRecordTimer = setInterval(updateRecordingTimer, 200);
+            // Setup waveform analyser
+            try {
+                var audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                var source = audioCtx.createMediaStreamSource(stream);
+                var analyser = audioCtx.createAnalyser();
+                analyser.fftSize = 128;
+                source.connect(analyser);
+                _recordingWaveformCtx = audioCtx;
+                _recordingWaveformAnalyser = analyser;
+                _recordingWaveformDataArray = new Uint8Array(analyser.frequencyBinCount);
+                drawWaveform();
+            } catch (e) {
+                // Waveform not critical
+            }
             // Show bar with Send + Cancel buttons immediately
             showRecordingBar(true);
         }).catch(function () {
@@ -1156,11 +2260,14 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // QR Scanner via Camera
+    // QR Scanner via Camera (with flip)
     var qrScannerStream = null;
     var qrScannerTimer = null;
+    var _qrScannerFacing = 'environment';
+    var _qrScannerInputEl = null;
 
     function openQrScanner(inputEl) {
+        _qrScannerInputEl = inputEl;
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { alert('Camera not supported.'); return; }
         var modal = document.getElementById('qr-scanner-modal');
         var video = document.getElementById('qr-scanner-video');
@@ -1169,7 +2276,7 @@ document.addEventListener('DOMContentLoaded', () => {
         closeQrScanner();
         modal.style.display = 'flex';
 
-        navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 640 } } }).then(function (stream) {
+        navigator.mediaDevices.getUserMedia({ video: { facingMode: _qrScannerFacing, width: { ideal: 640 }, height: { ideal: 640 } } }).then(function (stream) {
             qrScannerStream = stream;
             video.srcObject = stream;
             video.play().catch(function () { closeQrScanner(); alert('Camera could not start. Please try again.'); });
@@ -1257,6 +2364,14 @@ document.addEventListener('DOMContentLoaded', () => {
     if (qrScannerModal) {
         qrScannerModal.addEventListener('click', function (e) {
             if (e.target === qrScannerModal) closeQrScanner();
+        });
+    }
+    // QR scanner flip button
+    var qrFlipBtn = document.getElementById('qr-scanner-flip');
+    if (qrFlipBtn) {
+        qrFlipBtn.addEventListener('click', function () {
+            _qrScannerFacing = _qrScannerFacing === 'environment' ? 'user' : 'environment';
+            if (_qrScannerInputEl) openQrScanner(_qrScannerInputEl);
         });
     }
 
