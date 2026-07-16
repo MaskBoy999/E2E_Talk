@@ -70,6 +70,8 @@ struct OutgoingMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     channel_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    server_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     dm_channel_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<OutgoingChatMessage>,
@@ -119,6 +121,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                 let err = OutgoingMessage {
                                     msg_type: "auth_error".to_string(),
                                     channel_id: None,
+                                    server_id: None,
                                     dm_channel_id: None,
                                     message: None,
                                     user_id: None,
@@ -136,6 +139,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                         let err = OutgoingMessage {
                             msg_type: "auth_error".to_string(),
                             channel_id: None,
+                            server_id: None,
                             dm_channel_id: None,
                             message: None,
                             user_id: None,
@@ -159,6 +163,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
             let err = OutgoingMessage {
                 msg_type: "auth_error".to_string(),
                 channel_id: None,
+                server_id: None,
                 dm_channel_id: None,
                 message: None,
                 user_id: None,
@@ -175,6 +180,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     let auth_ok = OutgoingMessage {
         msg_type: "auth_ok".to_string(),
         channel_id: None,
+        server_id: None,
         dm_channel_id: None,
         message: None,
         user_id: Some(user.id.clone()),
@@ -277,11 +283,13 @@ async fn handle_ws_message(
                 }
             };
 
+            let server_id_clone = server_id.clone();
             let msg_id = message.id.clone();
             let msg_sender_username = message.sender_username.clone();
             let outgoing = OutgoingMessage {
                 msg_type: "message_new".to_string(),
                 channel_id: Some(message.channel_id.clone()),
+                server_id: Some(server_id_clone),
                 dm_channel_id: None,
                 message: Some(OutgoingChatMessage {
                     id: message.id,
@@ -320,10 +328,14 @@ async fn handle_ws_message(
                     .filter(|id| id != user_id)
                     .collect();
                 if !mentioned_ids.is_empty() {
+                    let channel_name = state.db.get_channel_name(channel_id).unwrap_or_default();
+                    let server_name = state.db.get_server_name(&server_id).unwrap_or_default();
                     let mention_notification = serde_json::json!({
                         "type": "mention_notification",
                         "channel_id": channel_id,
                         "server_id": server_id,
+                        "channel_name": channel_name,
+                        "server_name": server_name,
                         "sender_username": msg_sender_username,
                         "message_id": msg_id
                     });
@@ -334,10 +346,14 @@ async fn handle_ws_message(
             // Notify replied user
             if let Some(reply_to_user_id) = parsed.get("reply_to_user_id").and_then(|r| r.as_str()) {
                 if reply_to_user_id != user_id {
+                    let channel_name = state.db.get_channel_name(channel_id).unwrap_or_default();
+                    let server_name = state.db.get_server_name(&server_id).unwrap_or_default();
                     let reply_notification = serde_json::json!({
                         "type": "reply_notification",
                         "channel_id": channel_id,
                         "server_id": server_id,
+                        "channel_name": channel_name,
+                        "server_name": server_name,
                         "sender_username": msg_sender_username,
                         "message_id": msg_id
                     });
@@ -430,6 +446,7 @@ async fn handle_ws_message(
             let outgoing = OutgoingMessage {
                 msg_type: "dm_new".to_string(),
                 channel_id: None,
+                server_id: None,
                 dm_channel_id: Some(message.dm_channel_id.clone()),
                 message: Some(OutgoingChatMessage {
                     id: message.id,
@@ -531,6 +548,7 @@ async fn handle_ws_message(
             let outgoing = OutgoingMessage {
                 msg_type: "message_edited".to_string(),
                 channel_id: Some(message.channel_id.clone()),
+                server_id: None,
                 dm_channel_id: None,
                 message: Some(OutgoingChatMessage {
                     id: message.id,
@@ -634,6 +652,7 @@ async fn handle_ws_message(
             let outgoing = OutgoingMessage {
                 msg_type: "dm_edited".to_string(),
                 channel_id: None,
+                server_id: None,
                 dm_channel_id: Some(message.dm_channel_id.clone()),
                 message: Some(OutgoingChatMessage {
                     id: message.id,

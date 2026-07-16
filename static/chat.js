@@ -24,6 +24,11 @@ let isUploading = false;
 let isSendingSticker = false;
 let selectedFiles = [];
 let currentServerMemberList = [];
+let unreadMentionsByServer = {}; // serverId -> count
+let unreadMentionsByChannel = {}; // channelId -> { count, message_id }
+
+// Rate-limit for channel message notifications (per-channel, 30s cooldown)
+var _lastChannelNotifTime = {};
 
 // Message grouping: track last message for 2-minute coalescing
 let lastMessageInfo = { senderId: null, channelId: null, time: 0 };
@@ -585,12 +590,226 @@ function requestNotificationPermission() {
     }
 }
 
-function showBrowserNotification(title, body) {
+var _notifCtx = null;
+
+function playNotificationSound() {
+    // Only play when the tab is in the background
+    if (!document.hidden) return;
+    try {
+        if (!_notifCtx) {
+            _notifCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        if (_notifCtx.state === 'suspended') {
+            _notifCtx.resume();
+        }
+        var g = _notifCtx.createGain();
+        g.connect(_notifCtx.destination);
+        g.gain.value = 0.15;
+        // Two-tone ping: C6 then E6
+        [1047, 1319].forEach(function (freq, i) {
+            var o = _notifCtx.createOscillator();
+            o.type = 'sine';
+            o.frequency.value = freq;
+            o.connect(g);
+            o.start(_notifCtx.currentTime + i * 0.12);
+            o.stop(_notifCtx.currentTime + i * 0.12 + 0.1);
+        });
+        // Disconnect gain after tones finish
+        setTimeout(function () { g.disconnect(); }, 600);
+    } catch (e) {
+        // Audio not supported or blocked — silently ignore
+    }
+}
+
+function showBrowserNotification(title, body, onClick) {
     if (!('Notification' in window) || Notification.permission !== 'granted') return;
     try {
-        new Notification(title, { body, icon: '/favicon.ico' });
+        var notif = new Notification(title, { body, icon: '/favicon.ico' });
+        if (onClick) {
+            var cb = onClick;
+            notif.onclick = function () {
+                window.focus();
+                cb();
+                this.close();
+            };
+        }
+        setTimeout(function () { notif.close(); }, 10000);
     } catch (e) {
         console.warn('Notification failed:', e);
+    }
+}
+
+// --- Unread mention tracking + badge rendering ---
+
+function trackUnreadMention(serverId, channelId, dmChannelId, messageId) {
+    if (channelId && serverId) {
+        // Server channel mention/reply
+        if (channelId === currentChannelId && serverId === currentServerId) return;
+        unreadMentionsByServer[serverId] = (unreadMentionsByServer[serverId] || 0) + 1;
+        if (!unreadMentionsByChannel[channelId]) unreadMentionsByChannel[channelId] = { count: 0, message_id: messageId };
+        unreadMentionsByChannel[channelId].count++;
+        unreadMentionsByChannel[channelId].message_id = messageId;
+        updateServerBadges();
+        updateChannelBadges();
+        saveMentionState();
+    } else if (dmChannelId) {
+        // DM mention/reply - increment the unread DM counter
+        unreadDms[dmChannelId] = (unreadDms[dmChannelId] || 0) + 1;
+        updateDmStripBadge();
+        if (viewMode === 'dms') renderDmSidebar();
+        saveMentionState();
+    }
+}
+
+function clearUnreadChannelMentions(channelId) {
+    var info = unreadMentionsByChannel[channelId];
+    if (info) {
+        var serverId = currentServerId;
+        if (serverId && unreadMentionsByServer[serverId]) {
+            unreadMentionsByServer[serverId] = Math.max(0, unreadMentionsByServer[serverId] - info.count);
+            if (unreadMentionsByServer[serverId] <= 0) delete unreadMentionsByServer[serverId];
+        }
+        delete unreadMentionsByChannel[channelId];
+        updateServerBadges();
+        updateChannelBadges();
+        saveMentionState();
+    }
+}
+
+function clearUnreadDmMentions(dmChannelId) {
+    if (dmChannelId && unreadDms[dmChannelId]) {
+        delete unreadDms[dmChannelId];
+        updateDmStripBadge();
+        if (viewMode === 'dms') renderDmSidebar();
+        saveMentionState();
+    }
+}
+
+function saveMentionState() {
+    try {
+        localStorage.setItem('mention_unread_server', JSON.stringify(unreadMentionsByServer));
+        localStorage.setItem('mention_unread_channel', JSON.stringify(unreadMentionsByChannel));
+        localStorage.setItem('mention_unread_dms', JSON.stringify(unreadDms));
+    } catch (e) {
+        // localStorage full or unavailable — silently ignore
+    }
+}
+
+function restoreMentionState() {
+    try {
+        var s = localStorage.getItem('mention_unread_server');
+        if (s) {
+            var parsed = JSON.parse(s);
+            // Only keep entries for servers the user is still a member of
+            var serverIds = servers.map(function (sv) { return sv.id; });
+            unreadMentionsByServer = {};
+            for (var k in parsed) {
+                if (parsed.hasOwnProperty(k) && serverIds.indexOf(k) !== -1) {
+                    unreadMentionsByServer[k] = parsed[k];
+                }
+            }
+        }
+        var c = localStorage.getItem('mention_unread_channel');
+        if (c) {
+            unreadMentionsByChannel = JSON.parse(c);
+        }
+        var d = localStorage.getItem('mention_unread_dms');
+        if (d) {
+            unreadDms = JSON.parse(d);
+        }
+    } catch (e) {
+        // Corrupted data — reset
+        unreadMentionsByServer = {};
+        unreadMentionsByChannel = {};
+        unreadDms = {};
+    }
+}
+
+function updateServerBadges() {
+    document.querySelectorAll('.server-icon').forEach(function (el) {
+        var sid = el.dataset.id;
+        var count = unreadMentionsByServer[sid] || 0;
+        var existing = el.querySelector('.mention-badge');
+        if (count > 0) {
+            if (!existing) {
+                var badge = document.createElement('span');
+                badge.className = 'mention-badge';
+                el.appendChild(badge);
+            }
+        } else {
+            if (existing) existing.remove();
+        }
+    });
+}
+
+function updateChannelBadges() {
+    document.querySelectorAll('.channel-item').forEach(function (el) {
+        var cid = el.dataset.id;
+        var info = unreadMentionsByChannel[cid];
+        var existing = el.querySelector('.mention-badge');
+        if (info && info.count > 0) {
+            if (!existing) {
+                var badge = document.createElement('span');
+                badge.className = 'mention-badge';
+                el.appendChild(badge);
+            }
+        } else {
+            if (existing) existing.remove();
+        }
+    });
+}
+
+async function detectMentionInOtherChannel(data) {
+    if (!data.message || !data.message.encrypted_content || !data.message.nonce) return false;
+    if (!user || !data.server_id) return false;
+    // Rate-limit: once per 30s per channel
+    var now = Date.now();
+    var last = _lastChannelNotifTime[data.channel_id] || 0;
+    if (now - last < 30000) return false;
+    try {
+        var textContent = E2ECrypto.decrypt(data.message.encrypted_content, data.message.nonce, data.channel_id, data.server_id, data.message.message_nonce);
+        if (!textContent) return false;
+        var pat = new RegExp('@' + user.username.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(\\b|$|\\s)');
+        if (pat.test(textContent)) {
+            _lastChannelNotifTime[data.channel_id] = now;
+            return true;
+        }
+    } catch (_) {}
+    return false;
+}
+
+function navigateToMessage(serverId, channelId, dmChannelId, messageId) {
+    window.focus();
+    if (dmChannelId) {
+        // Clear the unread DM badge for this channel
+        clearUnreadDmMentions(dmChannelId);
+        // Navigate to DM
+        enterDmView();
+        // Find the DM channel in the list and select it
+        var dmItem = document.querySelector('.dm-item[data-dm-channel-id="' + dmChannelId + '"]');
+        if (dmItem) {
+            dmItem.click();
+        }
+        // Scroll to message after it loads
+        setTimeout(function () {
+            var msgEl = document.querySelector('[data-message-id="' + messageId + '"]');
+            if (msgEl) { msgEl.scrollIntoView({ behavior: 'smooth', block: 'center' }); msgEl.classList.add('flash-highlight'); setTimeout(function () { msgEl.classList.remove('flash-highlight'); }, 1500); }
+        }, 500);
+    } else if (serverId && channelId) {
+        // Navigate to channel
+        if (serverId !== currentServerId) {
+            selectServer(serverId);
+        }
+        // Select the channel
+        var chEl = document.querySelector('.channel-item[data-id="' + channelId + '"]');
+        if (chEl) {
+            chEl.click();
+            // Scroll to message after it loads
+            setTimeout(function () {
+                var msgEl = document.querySelector('[data-message-id="' + messageId + '"]');
+                if (msgEl) { msgEl.scrollIntoView({ behavior: 'smooth', block: 'center' }); msgEl.classList.add('flash-highlight'); setTimeout(function () { msgEl.classList.remove('flash-highlight'); }, 1500); }
+            }, 500);
+        }
     }
 }
 
@@ -756,13 +975,34 @@ function connectWebSocket(t) {
                 ws.send(JSON.stringify({ type: 'pong' }));
                 break;
             case 'message_new':
-                if (data.channel_id === currentChannelId && data.message) {
-                    await appendMessage(data.message);
+                if (data.channel_id && data.message) {
+                    if (data.channel_id === currentChannelId) {
+                        await appendMessage(data.message);
+                    } else if (data.server_id && data.message.encrypted_content) {
+                        // Message in a different channel — try to detect if it's a mention
+                        detectMentionInOtherChannel(data).then(function (isMention) {
+                            if (isMention) {
+                                // Look up channel name from the DOM
+                                var chEl = document.querySelector('.channel-item[data-id="' + data.channel_id + '"]');
+                                var chName = chEl ? chEl.dataset.name || 'a channel' : 'a channel';
+                                var svName = '';
+                                var sv = servers.find(function (s) { return s.id === data.server_id; });
+                                if (sv) svName = sv.name + ' ';
+                                showBrowserNotification('Mentioned by ' + data.message.sender_username, 'You were mentioned in ' + svName + '#' + chName, function () {
+                                    navigateToMessage(data.server_id, data.channel_id, null, data.message.id);
+                                });
+                                playNotificationSound();
+                                trackUnreadMention(data.server_id, data.channel_id, null, data.message.id);
+                            }
+                        });
+                    }
                 }
                 break;
             case 'dm_new':
                 if (data.dm_channel_id && data.message) {
                     if (data.dm_channel_id === currentDmChannelId) {
+                        // Clear any unread badge when viewing the DM
+                        clearUnreadDmMentions(data.dm_channel_id);
                         const kp = E2ECrypto.getIdentityKeyPair();
                         let otherPubKey = '';
                         if (currentDmOtherUser) {
@@ -779,6 +1019,7 @@ function connectWebSocket(t) {
                         updateDmStripBadge();
                         if (viewMode === 'dms') renderDmSidebar();
                         showBrowserNotification('New DM', data.message.sender_username + ' sent you a message');
+                        playNotificationSound();
                     }
                     if (viewMode === 'dms') loadDmConversations();
                 }
@@ -876,6 +1117,7 @@ function connectWebSocket(t) {
                 loadFriendRequestBadge();
                 if (data.from_username) {
                     showBrowserNotification('Friend Request', data.from_username + ' sent you a friend request');
+                    playNotificationSound();
                 }
                 break;
             case 'friend_request_accepted':
@@ -894,14 +1136,22 @@ function connectWebSocket(t) {
                 break;
             case 'mention_notification':
                 if (data.sender_username) {
-                    var mentionLocation = data.channel_id ? '#' + (data.channel_name || 'a channel') : 'your DM';
-                    showBrowserNotification('Mentioned by ' + data.sender_username, 'You were mentioned in ' + mentionLocation);
+                    trackUnreadMention(data.server_id, data.channel_id, data.dm_channel_id, data.message_id);
+                    playNotificationSound();
+                    var loc = data.channel_name ? '#' + data.channel_name : (data.dm_channel_id ? 'your DM' : 'a channel');
+                    showBrowserNotification('Mentioned by ' + data.sender_username, 'You were mentioned in ' + (data.server_name ? data.server_name + ' ' : '') + loc, function () {
+                        navigateToMessage(data.server_id, data.channel_id, data.dm_channel_id, data.message_id);
+                    });
                 }
                 break;
             case 'reply_notification':
                 if (data.sender_username) {
-                    var replyLocation = data.channel_id ? '#' + (data.channel_name || 'a channel') : 'your DM';
-                    showBrowserNotification('Reply from ' + data.sender_username, data.sender_username + ' replied to you in ' + replyLocation);
+                    trackUnreadMention(data.server_id, data.channel_id, data.dm_channel_id, data.message_id);
+                    playNotificationSound();
+                    var loc = data.channel_name ? '#' + data.channel_name : (data.dm_channel_id ? 'your DM' : 'a channel');
+                    showBrowserNotification('Reply from ' + data.sender_username, data.sender_username + ' replied to you in ' + (data.server_name ? data.server_name + ' ' : '') + loc, function () {
+                        navigateToMessage(data.server_id, data.channel_id, data.dm_channel_id, data.message_id);
+                    });
                 }
                 break;
         }
@@ -1021,6 +1271,10 @@ async function loadServers() {
         servers = await res.json();
         if (!Array.isArray(servers)) servers = [];
         renderServerList();
+        restoreMentionState();
+        updateServerBadges();
+        updateChannelBadges();
+        updateDmStripBadge();
 
         // Fetch server keys for all servers we're missing keys for
         for (const s of servers) {
@@ -1053,6 +1307,8 @@ function renderServerList() {
         div.addEventListener('click', () => selectServer(s.id));
         list.appendChild(div);
     });
+    
+    updateServerBadges();
 }
 
 async function selectServer(serverId) {
@@ -1102,7 +1358,7 @@ async function selectServer(serverId) {
 
     renderServerList();
     await loadChannels(serverId);
-    loadMembers(serverId);
+    await loadMembers(serverId);
 
     if (window.innerWidth <= 768 && window._openSidebar) {
         window._openSidebar();
@@ -1164,6 +1420,8 @@ async function loadChannels(serverId) {
             list.appendChild(btn);
         }
 
+        updateChannelBadges();
+
         if (window.innerWidth > 768 && !currentChannelId) {
             list.children[0].click();
         }
@@ -1181,6 +1439,9 @@ async function selectChannel(channelId, channelName, element) {
     document.getElementById('channel-name').textContent = `# ${channelName}`;
     document.getElementById('message-input').disabled = false;
     document.getElementById('send-btn').disabled = false;
+
+    // Clear mention badge for this channel
+    clearUnreadChannelMentions(channelId);
 
     await loadMessages(channelId);
 

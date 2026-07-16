@@ -613,6 +613,26 @@ impl Database {
         .map_err(|_| "Channel not found".to_string())
     }
 
+    pub fn get_channel_name(&self, channel_id: &str) -> Result<String, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT name FROM channels WHERE id = ?1",
+            params![channel_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| "Channel not found".to_string())
+    }
+
+    pub fn get_server_name(&self, server_id: &str) -> Result<String, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT name FROM servers WHERE id = ?1",
+            params![server_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| "Server not found".to_string())
+    }
+
     pub fn get_server_members(&self, server_id: &str) -> Result<Vec<String>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn

@@ -1579,6 +1579,48 @@ body {
     box-shadow: 0 0 0 2px var(--bg-secondary);
 }
 
+/* Red circle mention badge on server icons and channel items */
+.server-icon {
+    position: relative;
+}
+
+.mention-badge {
+    position: absolute;
+    top: -4px;
+    right: -4px;
+    width: 12px;
+    height: 12px;
+    background: var(--danger);
+    border: 2px solid #111127;
+    border-radius: 50%;
+    pointer-events: none;
+    z-index: 5;
+    box-shadow: 0 0 4px rgba(244,67,54,0.5);
+}
+
+.channel-item {
+    position: relative;
+}
+
+.channel-item .mention-badge {
+    top: 4px;
+    right: 4px;
+    width: 10px;
+    height: 10px;
+    border-width: 1px;
+    border-color: var(--bg-secondary);
+}
+
+/* Flash highlight for navigating to a mentioned message */
+@keyframes flashHighlight {
+    0% { background: rgba(79, 195, 247, 0.3); border-left-color: #4fc3f7; }
+    100% { background: transparent; border-left-color: transparent; }
+}
+
+.flash-highlight {
+    animation: flashHighlight 1.5s ease-out;
+}
+
 /* ===== Settings Modal ===== */
 
 .settings-gear {
