@@ -211,11 +211,22 @@ pub async fn register(
         }
     };
 
+    // Fetch profile data
+    let (display_name, profile_pic) = match state.db.get_user_profile(&user.id) {
+        Ok((_, _, dn, pp, _fk)) => (dn, pp),
+        Err(_) => (None, None),
+    };
+
     (
         StatusCode::CREATED,
         Json(serde_json::json!({
             "token": token,
-            "user": { "id": user.id, "username": user.username }
+            "user": {
+                "id": user.id,
+                "username": user.username,
+                "display_name": display_name,
+                "profile_picture_file_id": profile_pic
+            }
         })),
     )
         .into_response()
@@ -294,9 +305,20 @@ pub async fn login(
         ).unwrap(),
     );
 
+    // Fetch profile data
+    let (display_name, profile_pic) = match state.db.get_user_profile(&user.id) {
+        Ok((_, _, dn, pp, _fk)) => (dn, pp),
+        Err(_) => (None, None),
+    };
+
     (StatusCode::OK, headers, Json(serde_json::json!({
         "token": token,
-        "user": { "id": user.id, "username": user.username }
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "display_name": display_name,
+            "profile_picture_file_id": profile_pic
+        }
     }))).into_response()
 }
 
@@ -452,9 +474,20 @@ pub async fn reauth(
         ).unwrap(),
     );
 
+    // Fetch profile data
+    let (display_name, profile_pic) = match state.db.get_user_profile(&user.id) {
+        Ok((_, _, dn, pp, _fk)) => (dn, pp),
+        Err(_) => (None, None),
+    };
+
     (StatusCode::OK, headers, Json(serde_json::json!({
         "token": token,
-        "user": { "id": user.id, "username": user.username }
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "display_name": display_name,
+            "profile_picture_file_id": profile_pic
+        }
     }))).into_response()
 }
 
@@ -1178,11 +1211,13 @@ pub async fn list_server_members(
 
     let result: Vec<serde_json::Value> = members
         .iter()
-        .map(|(id, username, role)| {
+        .map(|(id, username, role, display_name, profile_pic)| {
             serde_json::json!({
                 "id": id,
                 "username": username,
                 "role": role,
+                "display_name": display_name,
+                "profile_picture_file_id": profile_pic,
             })
         })
         .collect();
@@ -1239,6 +1274,8 @@ pub async fn list_messages(
                 "id": m.id,
                 "sender_id": m.sender_id,
                 "sender_username": m.sender_username,
+                "sender_display_name": m.sender_display_name,
+                "sender_profile_pic": m.sender_profile_pic,
                 "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
                 "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
                 "timestamp": m.timestamp,
@@ -1298,6 +1335,8 @@ pub async fn list_messages_around(
                 "id": m.id,
                 "sender_id": m.sender_id,
                 "sender_username": m.sender_username,
+                "sender_display_name": m.sender_display_name,
+                "sender_profile_pic": m.sender_profile_pic,
                 "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
                 "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
                 "timestamp": m.timestamp,
@@ -2650,6 +2689,150 @@ pub async fn remove_user_sticker(
 
 // ===== Phase 4: Friends + Direct Messages =====
 
+// --- Profile (display name + profile picture) ---
+
+#[derive(Deserialize)]
+pub struct UpdateProfileRequest {
+    pub display_name: Option<String>,  // None = no change, Some("") = clear, Some("value") = set
+    pub remove_picture: Option<bool>,  // true = remove profile picture
+    pub profile_picture_file_id: Option<String>,  // Some("file_id") = set picture
+}
+
+pub async fn get_profile(
+    Path(user_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match state.db.get_user_profile(&user_id) {
+        Ok((id, _username, display_name, profile_picture_file_id, _file_key)) => {
+            (StatusCode::OK, Json(serde_json::json!({
+                "id": id,
+                "display_name": display_name,
+                "profile_picture_file_id": profile_picture_file_id,
+            }))).into_response()
+        }
+        Err(e) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn update_profile(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UpdateProfileRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    // Update display name if provided
+    if let Some(ref display_name) = req.display_name {
+        let trimmed = display_name.trim();
+        if trimmed.len() > 50 {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Display name too long (max 50 chars)"}))).into_response();
+        }
+        // Empty string means clear the display name
+        if trimmed.is_empty() {
+            if let Err(e) = state.db.update_display_name(&user_id, "") {
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
+            }
+        } else {
+            if let Err(e) = state.db.update_display_name(&user_id, trimmed) {
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
+            }
+        }
+    }
+
+    // Before changing profile picture, delete the old one's file from DB and disk
+    let delete_current_pic = || -> Result<(), String> {
+        let (_, _, _, old_file_id, _) = state.db.get_user_profile(&user_id)?;
+        if let Some(old_id) = old_file_id {
+            // Delete from DB (checks ownership)
+            if let Ok(old_info) = state.db.delete_file_record(&old_id) {
+                // Delete chunk files from disk
+                for i in 0..old_info.chunk_count {
+                    let chunk_path = format!("{}/{}/{}.enc", UPLOAD_DIR, old_id, i);
+                    let _ = std::fs::remove_file(&chunk_path);
+                }
+                // Remove the directory
+                let dir = format!("{}/{}", UPLOAD_DIR, old_id);
+                let _ = std::fs::remove_dir(&dir);
+            }
+        }
+        Ok(())
+    };
+
+    // Handle profile picture removal
+    if req.remove_picture.unwrap_or(false) {
+        let _ = delete_current_pic();
+        if let Err(e) = state.db.update_profile_picture(&user_id, None, None) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
+        }
+    }
+
+    // Handle profile picture set
+    if let Some(ref file_id) = req.profile_picture_file_id {
+        // Verify the file exists and is complete
+        let file_info = match state.db.get_file_info(file_id) {
+            Ok(f) => f,
+            Err(_) => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "File not found"}))).into_response(),
+        };
+        if !file_info.upload_complete {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Upload not complete"}))).into_response();
+        }
+        // Only allow image files
+        if !file_info.mime_type.starts_with("image/") {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Only image files allowed for profile picture"}))).into_response();
+        }
+        // Verify ownership
+        if file_info.uploader_id != user_id {
+            return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Not your file"}))).into_response();
+        }
+        // Delete old profile pic before setting new one
+        let _ = delete_current_pic();
+        if let Err(e) = state.db.update_profile_picture(&user_id, Some(file_id), None) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
+        }
+    }
+
+    // Broadcast profile update to the user, friends, and all server members
+    if let Ok(profile) = state.db.get_user_profile(&user_id) {
+        let (_id, username, display_name, profile_picture_file_id, _fk) = profile;
+        let profile_msg = serde_json::json!({
+            "type": "profile_updated",
+            "user_id": user_id,
+            "username": username,
+            "display_name": display_name,
+            "profile_picture_file_id": profile_picture_file_id,
+        });
+
+        let mut recipients: std::collections::HashSet<String> = std::collections::HashSet::new();
+        recipients.insert(user_id.clone());
+
+        // Add friends
+        if let Ok(friends) = state.db.list_friends(&user_id) {
+            for f in friends {
+                recipients.insert(f.user_id);
+            }
+        }
+
+        // Add members of all servers the user is in
+        if let Ok(servers) = state.db.list_user_servers(&user_id) {
+            for s in servers {
+                if let Ok(members) = state.db.get_server_members(&s.id) {
+                    for m in members {
+                        recipients.insert(m);
+                    }
+                }
+            }
+        }
+
+        let recipient_list: Vec<String> = recipients.into_iter().collect();
+        let _ = state.ws_manager.broadcast_to_users(&recipient_list, &profile_msg.to_string()).await;
+    }
+
+    (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+}
+
 // --- Current user / friend code ---
 
 pub async fn get_me(
@@ -2984,7 +3167,7 @@ pub async fn list_dm_conversations(
     match state.db.list_dm_channels_for_user(&user_id) {
         Ok(channels) => {
             let mut result: Vec<serde_json::Value> = Vec::new();
-            for (dm_id, other_id, other_username) in channels {
+            for (dm_id, other_id, other_username, other_display_name, other_profile_pic) in channels {
                 let identity_pub = state
                     .db
                     .get_identity_public_key(&other_id)
@@ -3005,6 +3188,8 @@ pub async fn list_dm_conversations(
                     "dm_channel_id": dm_id,
                     "other_user_id": other_id,
                     "other_username": other_username,
+                    "other_display_name": other_display_name,
+                    "other_profile_picture_file_id": other_profile_pic,
                     "other_public_key": identity_pub,
                     "last_message": last_json,
                 }));
@@ -3045,6 +3230,8 @@ pub async fn list_dm_messages(
                         "dm_channel_id": m.dm_channel_id,
                         "sender_id": m.sender_id,
                         "sender_username": m.sender_username,
+                        "sender_display_name": m.sender_display_name,
+                        "sender_profile_pic": m.sender_profile_pic,
                         "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
                         "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
                         "timestamp": m.timestamp,

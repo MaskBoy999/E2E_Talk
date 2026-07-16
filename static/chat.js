@@ -145,6 +145,9 @@ let lastDmMessageInfo = { senderId: null, dmChannelId: null, time: 0 };
 let emojiCache = null;
 let emojiBlobCache = {}; // name -> blob URL
 let currentFileIndex = 0;
+// Profile cache: file_id -> blob URL
+let profilePicCache = {};
+let myProfile = null; // { display_name, profile_picture_file_id }
 
 // Local file key cache (file_id → base64 file_key) for sticker previews
 const fileKeyCache = {
@@ -245,7 +248,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     user = JSON.parse(userStr);
-    document.getElementById('current-user').textContent = user.username;
+    document.getElementById("current-user").textContent = user.username;
+    updateSidebarFooter();
 
     // A missing key means this browser has not been linked to this account.
     // Never generate a replacement on login: doing that makes prior messages
@@ -253,7 +257,11 @@ document.addEventListener('DOMContentLoaded', () => {
     // Settings modal
     const settingsBtn = document.getElementById('settings-btn');
     const settingsModal = document.getElementById('settings-modal');
-    settingsBtn.addEventListener('click', () => { settingsModal.style.display = 'flex'; });
+    settingsBtn.addEventListener('click', () => { 
+        settingsModal.style.display = 'flex';
+        loadMyProfile();
+        loadDmConversations();
+    });
     document.getElementById('close-settings').addEventListener('click', () => { settingsModal.style.display = 'none'; });
 
     // Tab switching
@@ -579,6 +587,7 @@ document.addEventListener('DOMContentLoaded', () => {
     loadServers();
     loadFriendRequestBadge();
     loadEmojiCache(); // Load custom emojis
+    loadMyProfile(); // Load own profile for sidebar footer
     requestNotificationPermission();
     setupMentionAutocomplete();
     initMentionsInbox();
@@ -3258,7 +3267,8 @@ function setupMentionAutocomplete() {
             const item = document.createElement('div');
             item.className = 'mention-item' + (idx === activeIndex ? ' active' : '');
             const initial = (m.username || '?').charAt(0).toUpperCase();
-            item.innerHTML = '<span class="mention-item-avatar">' + initial + '</span><span class="mention-item-name">' + escapeHtml(m.username) + '</span>';
+            var mInitial = (m.username || '?').charAt(0).toUpperCase();
+            item.innerHTML = '<span class="mention-item-avatar">' + mInitial + '</span><span class="mention-item-name">' + escapeHtml(m.display_name || m.username) + '</span>';
             item.addEventListener('click', () => selectMention(m.username));
             item.addEventListener('mouseenter', () => { activeIndex = idx; highlightItem(); });
             container.appendChild(item);
@@ -3514,6 +3524,41 @@ function connectWebSocket(t) {
                     document.getElementById('message-input').disabled = true;
                     document.getElementById('send-btn').disabled = true;
                     document.getElementById('message-list').innerHTML = '<div class="welcome">Select a conversation to start chatting</div>';
+                }
+                break;
+            case 'profile_updated':
+                if (data.user_id && data.display_name !== undefined) {
+                    // Update our own profile in cache and localStorage
+                    if (data.user_id === user.id) {
+                        user.display_name = data.display_name;
+                        user.profile_picture_file_id = data.profile_picture_file_id;
+                        localStorage.setItem('user', JSON.stringify(user));
+                        updateSidebarFooter();
+                    }
+
+                    // Invalidate profile pic cache for this user
+                    for (var pk in profilePicCache) {
+                        if (pk.startsWith(data.user_id + ':')) {
+                            delete profilePicCache[pk];
+                        }
+                    }
+
+                    // Refresh DM conversations to show updated display name/pic
+                    if (viewMode === 'dms') {
+                        loadDmConversations();
+                    }
+
+                    // Refresh server member list if viewing a server
+                    if (currentServerId) {
+                        loadMembers(currentServerId);
+                    }
+
+                    // Refresh current messages to update sender display names
+                    if (currentChannelId && currentServerId) {
+                        loadMessages(currentChannelId);
+                    } else if (currentDmChannelId) {
+                        loadDmMessages(currentDmChannelId);
+                    }
                 }
                 break;
             case 'mention_notification':
@@ -3903,7 +3948,9 @@ async function appendMessage(msg) {
     lastMessageInfo = { senderId: msg.sender_id, channelId: currentChannelId, time: msgTime };
     if (isGrouped) div.classList.add('grouped');
 
-    const initial = (msg.sender_username || '?').charAt(0).toUpperCase();
+    const displayName = msg.sender_display_name || msg.sender_username || '?';
+    const initial = displayName.charAt(0).toUpperCase();
+    var senderPicUrl = msg.sender_profile_pic ? getProfilePicUrl(msg.sender_profile_pic, msg.sender_id) : null;
     let time = '';
     try {
         time = new Date(msg.timestamp).toLocaleTimeString();
@@ -4043,10 +4090,14 @@ async function appendMessage(msg) {
         '</div>';
 
     div.innerHTML =
-        '<div class="avatar">' + initial + '</div>' +
+        (senderPicUrl ?
+            '<div class="avatar"><img class="avatar-img" src="' + senderPicUrl + '" alt="" data-profile-pic="' + (msg.sender_id + ':' + msg.sender_profile_pic) + '"></div>' :
+            (msg.sender_profile_pic ?
+                '<div class="avatar" data-profile-pic-load="' + (msg.sender_id + ':' + msg.sender_profile_pic) + '">' + initial + '</div>' :
+                '<div class="avatar">' + initial + '</div>')) +
         '<div class="content">' +
             '<div class="header">' +
-                '<span class="username">' + escapeHtml(msg.sender_username || 'unknown') + '</span>' +
+                '<span class="display-name">' + escapeHtml(displayName) + '</span>' +
             '</div>' +
             contentHtml +
         '</div>' +
@@ -4276,9 +4327,10 @@ async function navigateToMessage(serverId, channelId, messageId) {
         currentChannelId = null;
         currentServerId = null;
         const conv = dmConversations.find(c => c.dm_channel_id === channelId);
-        const otherUser = conv ? { id: conv.other_user_id, username: conv.other_username } : null;
+        var displayName = conv ? (conv.other_display_name || conv.other_username) : 'DM';
+        const otherUser = conv ? { id: conv.other_user_id, username: conv.other_username, display_name: conv.other_display_name } : null;
         currentDmOtherUser = otherUser;
-        document.getElementById('channel-name').innerHTML = otherUser ? escapeHtml(otherUser.username) + ' <button class="btn-unfriend" id="unfriend-btn" title="Unfriend">Unfriend</button>' : 'DM';
+        document.getElementById('channel-name').innerHTML = escapeHtml(displayName) + ' <button class="btn-unfriend" id="unfriend-btn" title="Unfriend">Unfriend</button>';
         document.getElementById('message-input').disabled = false;
         document.getElementById('send-btn').disabled = false;
         await loadDmMessages(channelId, otherUser ? otherUser.id : '');
@@ -4921,7 +4973,21 @@ function renderDmSidebar() {
         html += '<div style="color:#666;padding:12px;font-size:13px">No conversations yet</div>';
     }
     for (const c of dmConversations) {
-        const initial = (c.other_username || '?').charAt(0).toUpperCase();
+        var displayName = c.other_display_name || c.other_username || '?';
+        const initial = displayName.charAt(0).toUpperCase();
+        // Profile pic URL for DM avatar
+        var dmAvatarHtml = '';
+        var dmPicCacheKey = c.other_profile_picture_file_id ? (c.other_user_id + ':' + c.other_profile_picture_file_id) : null;
+        var dmPicUrl = dmPicCacheKey ? profilePicCache[dmPicCacheKey] : null;
+        if (dmPicUrl) {
+            dmAvatarHtml = '<img class="avatar-img" src="' + dmPicUrl + '" alt="">';
+        } else if (dmPicCacheKey) {
+            dmAvatarHtml = initial;
+            // Trigger async fetch
+            getProfilePicUrl(c.other_profile_picture_file_id, c.other_user_id);
+        } else {
+            dmAvatarHtml = initial;
+        }
         let preview = '';
         if (c.last_message) {
             try {
@@ -4949,9 +5015,9 @@ function renderDmSidebar() {
             }
         }
         html += '<div class="channel-item dm-item" data-dm-id="' + c.dm_channel_id + '" data-user-id="' + escapeAttr(c.other_user_id) + '" data-username="' + escapeAttr(c.other_username) + '">' +
-            '<div class="dm-avatar">' + initial + '</div>' +
+            '<div class="dm-avatar' + (dmPicCacheKey ? ' profile-pic-target' : '') + '" data-profile-pic-load="' + (dmPicCacheKey || '') + '">' + dmAvatarHtml + '</div>' +
             '<div class="dm-info">' +
-                '<div class="dm-name">' + escapeHtml(c.other_username) + '</div>' +
+                '<div class="dm-name">' + escapeHtml(displayName) + '</div>' +
                 '<div class="dm-preview">' + escapeHtml(preview) + '</div>' +
             '</div>' +
             (unreadDms[c.dm_channel_id] ? '<span class="badge"></span>' : '') +
@@ -4980,14 +5046,17 @@ function renderDmSidebar() {
 
 async function selectDmChannel(dmChannelId, otherUserId, otherUsername, element) {
     currentDmChannelId = dmChannelId;
-    currentDmOtherUser = { id: otherUserId, username: otherUsername };
+    // Look up the user's display name
+    var conv = dmConversations.find(c => c.dm_channel_id === dmChannelId);
+    var displayName = conv ? (conv.other_display_name || conv.other_username || otherUsername) : otherUsername;
+    currentDmOtherUser = { id: otherUserId, username: otherUsername, display_name: conv ? conv.other_display_name : null };
     currentChannelId = null;
     currentServerId = null;
 
     document.querySelectorAll('.channel-item').forEach(el => el.classList.remove('active'));
     if (element) element.classList.add('active');
 
-    document.getElementById('channel-name').innerHTML = '<span>' + escapeHtml(otherUsername) + '</span>' +
+    document.getElementById('channel-name').innerHTML = '<span>' + escapeHtml(displayName) + '</span>' +
         ' <button class="btn-unfriend" id="unfriend-btn" title="Unfriend">Unfriend</button>';
     document.getElementById('message-input').disabled = false;
     document.getElementById('send-btn').disabled = false;
@@ -5078,7 +5147,9 @@ function appendDmMessage(msg, kp, otherPublicKey) {
     lastDmMessageInfo = { senderId: msg.sender_id, dmChannelId: currentDmChannelId, time: msgTime };
     if (isGrouped) div.classList.add('grouped');
 
-    const initial = (msg.sender_username || '?').charAt(0).toUpperCase();
+    const displayName = msg.sender_display_name || msg.sender_username || '?';
+    const initial = displayName.charAt(0).toUpperCase();
+    var senderPicUrl = msg.sender_profile_pic ? getProfilePicUrl(msg.sender_profile_pic, msg.sender_id) : null;
     let time = '';
     try {
         time = new Date(msg.timestamp).toLocaleTimeString();
@@ -5211,10 +5282,14 @@ function appendDmMessage(msg, kp, otherPublicKey) {
 
     const editedHtml = msg.edited_at ? '<span class="edited-label">(edited)</span>' : '';
     div.innerHTML =
-        '<div class="avatar">' + initial + '</div>' +
+        (senderPicUrl ?
+            '<div class="avatar"><img class="avatar-img" src="' + senderPicUrl + '" alt="" data-profile-pic="' + (msg.sender_id + ':' + msg.sender_profile_pic) + '"></div>' :
+            (msg.sender_profile_pic ?
+                '<div class="avatar" data-profile-pic-load="' + (msg.sender_id + ':' + msg.sender_profile_pic) + '">' + initial + '</div>' :
+                '<div class="avatar">' + initial + '</div>')) +
         '<div class="content">' +
             '<div class="header">' +
-                '<span class="username">' + escapeHtml(msg.sender_username || 'unknown') + '</span>' +
+                '<span class="display-name">' + escapeHtml(displayName) + '</span>' +
             '</div>' +
             contentHtml +
             editedHtml +
@@ -5458,10 +5533,18 @@ async function loadMembers(serverId) {
                     '<button class="btn-kick" data-action="kick" data-user-id="' + escapeAttr(m.id) + '" data-username="' + escapeAttr(m.username) + '" title="Kick">&#10005;</button>' +
                     '<button class="btn-ban" data-action="ban" data-user-id="' + escapeAttr(m.id) + '" data-username="' + escapeAttr(m.username) + '" title="Ban">&#9888;</button>';
             }
+            var memberInitial = (m.display_name || m.username || '?').charAt(0).toUpperCase();
+            var memberPicUrl = m.profile_picture_file_id ? getProfilePicUrl(m.profile_picture_file_id, m.id) : null;
+            var memberPicCacheKey = m.id + ':' + m.profile_picture_file_id;
+            var memberAvatarHtml = memberPicUrl ?
+                '<div class="member-avatar' + (isMemberOwner ? ' owner' : '') + '"><img src="' + memberPicUrl + '" alt="" data-profile-pic="' + memberPicCacheKey + '"></div>' :
+                (m.profile_picture_file_id ?
+                    '<div class="member-avatar' + (isMemberOwner ? ' owner' : '') + '" data-profile-pic-load="' + memberPicCacheKey + '">' + memberInitial + '</div>' :
+                    '<div class="member-avatar' + (isMemberOwner ? ' owner' : '') + '">' + memberInitial + '</div>');
             div.innerHTML =
-                '<div class="member-avatar' + (isMemberOwner ? ' owner' : '') + '">' + initial + '</div>' +
+                memberAvatarHtml +
                 '<div>' +
-                    '<div class="member-name">' + escapeHtml(m.username) + '</div>' +
+                    '<div class="member-name">' + escapeHtml(m.display_name || m.username) + '</div>' +
                     (isMemberOwner ? '<div class="member-role">Owner</div>' : '') +
                 '</div>' +
                 '<div class="member-actions">' + actionBtns + '</div>';
@@ -9286,10 +9369,11 @@ async function loadDmForwardList() {
         let html = '';
         for (const c of dmConversations) {
             if (allowedUserIds && !allowedUserIds.has(c.other_user_id)) continue;
-            const initial = (c.other_username || '?').charAt(0).toUpperCase();
-            html += '<div class="dm-forward-item" data-user-id="' + c.other_user_id + '" data-username="' + escapeHtml(c.other_username) + '" data-dm-channel-id="' + escapeAttr(c.dm_channel_id || '') + '" style="display:flex;align-items:center;gap:10px;padding:10px 12px;cursor:pointer;border-radius:6px;border-bottom:1px solid var(--bg-border);transition:background .15s;">' +
+            var fwdDisplayName = c.other_display_name || c.other_username || '?';
+            const initial = fwdDisplayName.charAt(0).toUpperCase();
+            html += '<div class="dm-forward-item" data-user-id="' + c.other_user_id + '" data-username="' + escapeAttr(c.other_username) + '" data-dm-channel-id="' + escapeAttr(c.dm_channel_id || '') + '" style="display:flex;align-items:center;gap:10px;padding:10px 12px;cursor:pointer;border-radius:6px;border-bottom:1px solid var(--bg-border);transition:background .15s;">' +
                 '<div style="width:32px;height:32px;border-radius:50%;background:var(--accent);color:var(--bg-primary);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;flex-shrink:0;">' + initial + '</div>' +
-                '<span style="font-size:14px;color:var(--text-primary);">' + escapeHtml(c.other_username) + '</span>' +
+                '<span style="font-size:14px;color:var(--text-primary);">' + escapeHtml(fwdDisplayName) + '</span>' +
                 '</div>';
         }
         if (!html) {
@@ -9429,5 +9513,294 @@ async function executeDmForward(targetUserId, targetUsername, dmChannelId) {
         console.error('DM forward encrypt/send failed:', e);
     }
 }
+
+// ===== Profile Functions =====
+
+// Fetch profile image from server and cache it as a blob URL
+function getProfilePicUrl(fileId, userId) {
+    if (!fileId || !userId) return null;
+    var cacheKey = userId + ':' + fileId;
+    if (profilePicCache[cacheKey]) return profilePicCache[cacheKey];
+    // Fetch and cache (async)
+    authFetch('/api/files/' + fileId + '/download').then(function (res) {
+        if (!res.ok) return null;
+        return res.blob();
+    }).then(function (blob) {
+        if (!blob) return;
+        var url = URL.createObjectURL(blob);
+        profilePicCache[cacheKey] = url;
+        // Update loaded avatars: img elements with data-profile-pic
+        document.querySelectorAll('[data-profile-pic="' + cacheKey + '"]').forEach(function (el) {
+            el.src = url;
+        });
+        // Update placeholder avatars: divs with data-profile-pic-load
+        document.querySelectorAll('[data-profile-pic-load="' + cacheKey + '"]').forEach(function (el) {
+            var initialText = el.textContent || '';
+            el.innerHTML = '<img class="avatar-img" src="' + url + '" alt="">';
+            if (initialText) {
+                var span = document.createElement('span');
+                span.className = 'avatar-initial';
+                span.style.display = 'none';
+                span.textContent = initialText;
+                el.appendChild(span);
+            }
+        });
+    }).catch(function () {});
+    return null; // Will be updated async when fetch completes
+}
+
+// Update sidebar footer with display name and avatar
+function updateSidebarFooter() {
+    var avatarEl = document.getElementById('footer-user-avatar');
+    var usernameEl = document.getElementById('current-user');
+    var subEl = document.getElementById('footer-username-sub');
+    if (!avatarEl || !usernameEl) return;
+    
+    var displayName = (myProfile && myProfile.display_name) || user.username;
+    var initial = displayName.charAt(0).toUpperCase();
+    
+    usernameEl.textContent = displayName;
+    if (subEl) subEl.textContent = '@' + user.username;
+    
+    // Remove stale data attributes
+    avatarEl.removeAttribute('data-profile-pic');
+    avatarEl.removeAttribute('data-profile-pic-load');
+    
+    if (myProfile && myProfile.profile_picture_file_id) {
+        var cacheKey = user.id + ':' + myProfile.profile_picture_file_id;
+        var picUrl = getProfilePicUrl(myProfile.profile_picture_file_id, user.id);
+        if (picUrl) {
+            avatarEl.innerHTML = '<img class="avatar-img" src="' + picUrl + '" alt="" data-profile-pic="' + cacheKey + '">';
+        } else {
+            avatarEl.innerHTML = initial;
+            avatarEl.setAttribute('data-profile-pic-load', cacheKey);
+        }
+    } else {
+        avatarEl.innerHTML = initial;
+    }
+}
+
+// Load own profile from server
+async function loadMyProfile() {
+    if (!user || !user.id) return;
+    try {
+        var res = await authFetch('/api/profile/' + user.id);
+        if (!res.ok) return;
+        var data = await res.json();
+        myProfile = data;
+        
+        // Update sidebar footer
+        updateSidebarFooter();
+        
+        // Update settings UI if open
+        updateProfileSettingsUI(data);
+    } catch (e) {
+        console.warn('Failed to load profile:', e);
+    }
+}
+
+// Update the profile settings UI with loaded data
+function updateProfileSettingsUI(data) {
+    var avatarEl = document.getElementById('settings-profile-avatar');
+    var usernameDisplay = document.getElementById('profile-username-display');
+    var displayNameDisplay = document.getElementById('profile-display-name-display');
+    var nameInput = document.getElementById('profile-display-name-input');
+    var saveStatus = document.getElementById('profile-save-status');
+    
+    if (!avatarEl) return;
+    
+    var displayName = (data && data.display_name) || user.username;
+    var initial = displayName.charAt(0).toUpperCase();
+    
+    if (usernameDisplay) usernameDisplay.textContent = '@' + user.username;
+    if (displayNameDisplay) displayNameDisplay.textContent = displayName;
+    if (nameInput) nameInput.value = data && data.display_name ? data.display_name : '';
+    if (saveStatus) saveStatus.textContent = '';
+    
+    if (data && data.profile_picture_file_id) {
+        var picUrl = getProfilePicUrl(data.profile_picture_file_id, user.id);
+        if (picUrl) {
+            avatarEl.innerHTML = '<img src="' + picUrl + '" alt="">';
+        } else {
+            // Async load - show initial while loading
+            avatarEl.innerHTML = initial;
+            // Try to fetch and cache
+            authFetch('/api/files/' + data.profile_picture_file_id + '/download').then(function (r) {
+                if (!r.ok) return null;
+                return r.blob();
+            }).then(function (blob) {
+                if (!blob) return;
+                var url = URL.createObjectURL(blob);
+                var cacheKey = user.id + ':' + data.profile_picture_file_id;
+                profilePicCache[cacheKey] = url;
+                avatarEl.innerHTML = '<img src="' + url + '" alt="">';
+                updateSidebarFooter();
+            }).catch(function () {});
+        }
+    } else {
+        avatarEl.innerHTML = initial;
+    }
+}
+
+// Save display name
+async function saveDisplayName() {
+    var input = document.getElementById('profile-display-name-input');
+    var status = document.getElementById('profile-save-status');
+    if (!input) return;
+    var name = input.value.trim();
+    if (name.length > 50) {
+        if (status) { status.textContent = 'Display name too long (max 50 chars)'; status.className = 'profile-save-status error'; }
+        return;
+    }
+    try {
+        var res = await authFetch('/api/profile', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ display_name: name })
+        });
+        if (!res.ok) {
+            var err = await res.json();
+            if (status) { status.textContent = err.error || 'Failed to save'; status.className = 'profile-save-status error'; }
+            return;
+        }
+        if (status) { status.textContent = 'Display name saved!'; status.className = 'profile-save-status'; }
+        setTimeout(function () { if (status) status.textContent = ''; }, 3000);
+        await loadMyProfile();
+        await loadDmConversations();
+    } catch (e) {
+        if (status) { status.textContent = 'Failed to connect to server'; status.className = 'profile-save-status error'; }
+    }
+}
+
+// Upload profile picture (uses chunked upload flow)
+async function uploadProfilePic(file) {
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+        var status = document.getElementById('profile-save-status');
+        if (status) { status.textContent = 'Please select an image file'; status.className = 'profile-save-status error'; }
+        return;
+    }
+    try {
+        // Step 1: Init upload (upload raw data - no encryption for profile pics)
+        var initRes = await authFetch('/api/files/init', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ size: file.size, mime: file.type || 'image/png' })
+        });
+        if (!initRes.ok) {
+            var status = document.getElementById('profile-save-status');
+            if (status) { status.textContent = 'Upload init failed'; status.className = 'profile-save-status error'; }
+            return;
+        }
+        var initData = await initRes.json();
+        var fileId = initData.file_id;
+        if (!fileId) {
+            var status = document.getElementById('profile-save-status');
+            if (status) { status.textContent = 'Upload response missing file ID'; status.className = 'profile-save-status error'; }
+            return;
+        }
+        
+        // Step 2: Upload raw chunks (no encryption so profile pic is viewable by all)
+        var CHUNK_SIZE = 64 * 1024;
+        var totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+        for (var i = 0; i < totalChunks; i++) {
+            var start = i * CHUNK_SIZE;
+            var end = Math.min(start + CHUNK_SIZE, file.size);
+            var rawChunk = await file.slice(start, end).arrayBuffer();
+            var chunkRes = await authFetch('/api/files/' + fileId + '/chunk/' + i, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/octet-stream' },
+                body: rawChunk
+            });
+            if (!chunkRes.ok) {
+                var status = document.getElementById('profile-save-status');
+                if (status) { status.textContent = 'Upload chunk ' + (i + 1) + ' failed'; status.className = 'profile-save-status error'; }
+                return;
+            }
+        }
+        
+        // Step 3: Complete upload
+        var completeRes = await authFetch('/api/files/' + fileId + '/complete', { method: 'POST' });
+        if (!completeRes.ok) {
+            var status = document.getElementById('profile-save-status');
+            if (status) { status.textContent = 'Upload finalize failed'; status.className = 'profile-save-status error'; }
+            return;
+        }
+        
+        // Step 4: Update profile with the file ID
+        var res = await authFetch('/api/profile', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ profile_picture_file_id: fileId })
+        });
+        if (!res.ok) {
+            var err = await res.json();
+            var status = document.getElementById('profile-save-status');
+            if (status) { status.textContent = err.error || 'Failed to set profile picture'; status.className = 'profile-save-status error'; }
+            return;
+        }
+        var status = document.getElementById('profile-save-status');
+        if (status) { status.textContent = 'Profile picture updated!'; status.className = 'profile-save-status'; }
+        setTimeout(function () { if (status) status.textContent = ''; }, 3000);
+        await loadMyProfile();
+        await loadDmConversations();
+    } catch (e) {
+        var status = document.getElementById('profile-save-status');
+        if (status) { status.textContent = 'Failed to upload profile picture'; status.className = 'profile-save-status error'; }
+    }
+}
+
+// Remove profile picture
+async function removeProfilePic() {
+    try {
+        var res = await authFetch('/api/profile', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ remove_picture: true })
+        });
+        if (!res.ok) {
+            var err = await res.json();
+            var status = document.getElementById('profile-save-status');
+            if (status) { status.textContent = err.error || 'Failed to remove picture'; status.className = 'profile-save-status error'; }
+            return;
+        }
+        var status = document.getElementById('profile-save-status');
+        if (status) { status.textContent = 'Profile picture removed'; status.className = 'profile-save-status'; }
+        setTimeout(function () { if (status) status.textContent = ''; }, 3000);
+        await loadMyProfile();
+        await loadDmConversations();
+    } catch (e) {
+        var status = document.getElementById('profile-save-status');
+        if (status) { status.textContent = 'Failed to connect to server'; status.className = 'profile-save-status error'; }
+    }
+}
+
+// Wire up profile settings event handlers
+function setupProfileSettings() {
+    var saveBtn = document.getElementById('profile-save-name-btn');
+    var uploadBtn = document.getElementById('profile-pic-upload-btn');
+    var removeBtn = document.getElementById('profile-pic-remove-btn');
+    var picInput = document.getElementById('profile-pic-input');
+    
+    if (saveBtn) {
+        saveBtn.addEventListener('click', saveDisplayName);
+    }
+    if (uploadBtn && picInput) {
+        uploadBtn.addEventListener('click', function () { picInput.click(); });
+        picInput.addEventListener('change', function (e) {
+            var file = e.target.files[0];
+            if (file) uploadProfilePic(file);
+            e.target.value = '';
+        });
+    }
+    if (removeBtn) {
+        removeBtn.addEventListener('click', removeProfilePic);
+    }
+}
+
+// Also call setupProfileSettings on load
+document.addEventListener('DOMContentLoaded', function () {
+    setupProfileSettings();
+});
 
 // ===== Favorite GIF on .gif file cards =====

@@ -91,6 +91,10 @@ struct OutgoingChatMessage {
     dm_channel_id: Option<String>,
     sender_id: String,
     sender_username: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sender_display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sender_profile_pic: Option<String>,
     encrypted_content: String,
     nonce: String,
     timestamp: String,
@@ -286,6 +290,11 @@ async fn handle_ws_message(
             let server_id_clone = server_id.clone();
             let msg_id = message.id.clone();
             let msg_sender_username = message.sender_username.clone();
+            // Fetch sender's profile data for display name and profile pic
+            let (sender_display_name, sender_profile_pic) = match state.db.get_user_profile(user_id) {
+                Ok((_, _, dn, pp, _fk)) => (dn, pp),
+                Err(_) => (None, None),
+            };
             let outgoing = OutgoingMessage {
                 msg_type: "message_new".to_string(),
                 channel_id: Some(message.channel_id.clone()),
@@ -297,6 +306,8 @@ async fn handle_ws_message(
                     dm_channel_id: None,
                     sender_id: message.sender_id,
                     sender_username: message.sender_username,
+                    sender_display_name,
+                    sender_profile_pic,
                     encrypted_content: encrypted_content_b64.to_string(),
                     nonce: nonce_b64.to_string(),
                     timestamp: message.timestamp,
@@ -443,6 +454,11 @@ async fn handle_ws_message(
 
             let msg_id = message.id.clone();
             let msg_sender_username = message.sender_username.clone();
+            // Fetch sender's profile data for display name and profile pic
+            let (sender_display_name, sender_profile_pic) = match state.db.get_user_profile(user_id) {
+                Ok((_, _, dn, pp, _fk)) => (dn, pp),
+                Err(_) => (None, None),
+            };
             let outgoing = OutgoingMessage {
                 msg_type: "dm_new".to_string(),
                 channel_id: None,
@@ -454,6 +470,8 @@ async fn handle_ws_message(
                     dm_channel_id: Some(message.dm_channel_id.clone()),
                     sender_id: message.sender_id,
                     sender_username: message.sender_username,
+                    sender_display_name,
+                    sender_profile_pic,
                     encrypted_content: encrypted_content_b64.to_string(),
                     nonce: nonce_b64.to_string(),
                     timestamp: message.timestamp,
@@ -544,7 +562,11 @@ async fn handle_ws_message(
                 Ok(id) => id,
                 Err(_) => return,
             };
-
+            // Fetch sender's profile data for display name and profile pic
+            let (sender_display_name, sender_profile_pic) = match state.db.get_user_profile(user_id) {
+                Ok((_, _, dn, pp, _fk)) => (dn, pp),
+                Err(_) => (None, None),
+            };
             let outgoing = OutgoingMessage {
                 msg_type: "message_edited".to_string(),
                 channel_id: Some(message.channel_id.clone()),
@@ -556,6 +578,8 @@ async fn handle_ws_message(
                     dm_channel_id: None,
                     sender_id: message.sender_id,
                     sender_username: message.sender_username,
+                    sender_display_name,
+                    sender_profile_pic,
                     encrypted_content: encrypted_content_b64.to_string(),
                     nonce: nonce_b64.to_string(),
                     timestamp: message.timestamp,
@@ -648,7 +672,11 @@ async fn handle_ws_message(
                     return;
                 }
             };
-
+            // Fetch sender's profile data for display name and profile pic
+            let (sender_display_name, sender_profile_pic) = match state.db.get_user_profile(user_id) {
+                Ok((_, _, dn, pp, _fk)) => (dn, pp),
+                Err(_) => (None, None),
+            };
             let outgoing = OutgoingMessage {
                 msg_type: "dm_edited".to_string(),
                 channel_id: None,
@@ -660,6 +688,8 @@ async fn handle_ws_message(
                     dm_channel_id: Some(message.dm_channel_id.clone()),
                     sender_id: message.sender_id,
                     sender_username: message.sender_username,
+                    sender_display_name,
+                    sender_profile_pic,
                     encrypted_content: encrypted_content_b64.to_string(),
                     nonce: nonce_b64.to_string(),
                     timestamp: message.timestamp,

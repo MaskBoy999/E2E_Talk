@@ -164,6 +164,8 @@ async fn main() {
         .route("/api/identity/escrow", post(handlers::upload_escrowed_key).get(handlers::get_escrowed_key))
         .route("/api/reauth", post(handlers::reauth))
         .route("/api/user/{username}", get(handlers::get_user_id))
+        .route("/api/profile/{user_id}", get(handlers::get_profile))
+        .route("/api/profile", patch(handlers::update_profile))
         .route("/api/admin/login", post(handlers::admin_login))
         .route("/api/admin/users", get(handlers::admin_list_users))
         .route("/api/admin/users/{user_id}", delete(handlers::admin_delete_user))

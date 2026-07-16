@@ -34,7 +34,13 @@
             </div>
             <div id="channel-list" class="channel-list"></div>
             <div class="sidebar-footer">
-                <span id="current-user"></span>
+                <div class="footer-user">
+                    <div class="footer-user-avatar" id="footer-user-avatar"></div>
+                    <div class="footer-user-name">
+                        <span id="current-user"></span>
+                        <span class="username-sub" id="footer-username-sub"></span>
+                    </div>
+                </div>
                 <div class="footer-actions">
                     <button id="settings-btn" class="settings-gear" title="Settings">&#9881;</button>
                     <button id="logout-btn">Logout</button>
@@ -274,6 +280,32 @@
 
             <!-- User Settings -->
             <div class="settings-panel" id="user-settings">
+                <div class="settings-group">
+                    <h4>Profile</h4>
+                    <p class="settings-hint">Set a display name and profile picture to protect your login username.</p>
+                    
+                    <div class="settings-profile">
+                        <div class="settings-profile-avatar" id="settings-profile-avatar"></div>
+                        <div class="settings-profile-info">
+                            <div class="profile-username" id="profile-username-display"></div>
+                            <div class="profile-display-name" id="profile-display-name-display"></div>
+                        </div>
+                    </div>
+
+                    <div class="settings-profile-actions" style="margin-bottom:12px;">
+                        <input type="file" id="profile-pic-input" class="profile-hidden-input" accept="image/*">
+                        <button class="btn-profile-action" id="profile-pic-upload-btn">📷 Upload Photo</button>
+                        <button class="btn-profile-action btn-danger" id="profile-pic-remove-btn">Remove Photo</button>
+                    </div>
+                    
+                    <div class="profile-input-row">
+                        <input type="text" id="profile-display-name-input" placeholder="Display name (visible to others)" maxlength="50">
+                        <button class="btn-profile-action btn-primary" id="profile-save-name-btn">Save</button>
+                    </div>
+                    
+                    <div class="profile-save-status" id="profile-save-status"></div>
+                </div>
+
                 <div class="settings-group settings-danger">
                     <h4>Danger Zone</h4>
                     <p class="settings-hint">Permanently delete your account and all associated data. This cannot be undone.</p>

@@ -43,6 +43,8 @@ pub struct Message {
     pub channel_id: String,
     pub sender_id: String,
     pub sender_username: String,
+    pub sender_display_name: Option<String>,
+    pub sender_profile_pic: Option<String>,
     pub encrypted_content: Vec<u8>,
     pub nonce: Vec<u8>,
     pub timestamp: String,
@@ -75,6 +77,8 @@ pub struct DmMessage {
     pub dm_channel_id: String,
     pub sender_id: String,
     pub sender_username: String,
+    pub sender_display_name: Option<String>,
+    pub sender_profile_pic: Option<String>,
     pub encrypted_content: Vec<u8>,
     pub nonce: Vec<u8>,
     pub timestamp: String,
@@ -332,6 +336,35 @@ impl Database {
         // Migration 013: notification sound sync
         let _ = conn.execute_batch(include_str!("../migrations/013_notification_sound.sql"));
 
+        // Migration 014: profile pictures and display names
+        let display_name_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('users') WHERE name = 'display_name'",
+                [],
+                |row| row.get(0),
+            )?;
+        if !display_name_exists {
+            conn.execute("ALTER TABLE users ADD COLUMN display_name TEXT", [])?;
+        }
+        let profile_pic_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('users') WHERE name = 'profile_picture_file_id'",
+                [],
+                |row| row.get(0),
+            )?;
+        if !profile_pic_exists {
+            conn.execute("ALTER TABLE users ADD COLUMN profile_picture_file_id TEXT REFERENCES files(id) ON DELETE SET NULL", [])?;
+        }
+        let profile_key_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('users') WHERE name = 'profile_picture_file_key'",
+                [],
+                |row| row.get(0),
+            )?;
+        if !profile_key_exists {
+            conn.execute("ALTER TABLE users ADD COLUMN profile_picture_file_key TEXT", [])?;
+        }
+
         Ok(())
     }
 
@@ -400,6 +433,44 @@ impl Database {
             },
         )
         .map_err(|_| "User not found".to_string())
+    }
+
+    pub fn get_user_profile(&self, id: &str) -> Result<(String, String, Option<String>, Option<String>, Option<String>), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT id, username, display_name, profile_picture_file_id, profile_picture_file_key FROM users WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            },
+        )
+        .map_err(|_| "User not found".to_string())
+    }
+
+    pub fn update_display_name(&self, user_id: &str, display_name: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE users SET display_name = ?1 WHERE id = ?2",
+            params![display_name, user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn update_profile_picture(&self, user_id: &str, file_id: Option<&str>, file_key: Option<&str>) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE users SET profile_picture_file_id = ?1, profile_picture_file_key = ?2 WHERE id = ?3",
+            params![file_id, file_key, user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     pub fn get_password_hash(&self, username: &str) -> Result<String, String> {
@@ -649,11 +720,11 @@ impl Database {
         Ok(members)
     }
 
-    pub fn get_server_members_with_names(&self, server_id: &str) -> Result<Vec<(String, String, String)>, String> {
+    pub fn get_server_members_with_names(&self, server_id: &str) -> Result<Vec<(String, String, String, Option<String>, Option<String>)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT u.id, u.username, sm.role
+                "SELECT u.id, u.username, sm.role, u.display_name, u.profile_picture_file_id
                  FROM server_members sm
                  INNER JOIN users u ON sm.user_id = u.id
                  WHERE sm.server_id = ?1
@@ -662,7 +733,7 @@ impl Database {
             .map_err(|e| e.to_string())?;
         let members = stmt
             .query_map(params![server_id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, Option<String>>(4)?))
             })
             .map_err(|e| e.to_string())?
             .filter_map(|r| r.ok())
@@ -871,7 +942,7 @@ impl Database {
         // first so the client can render top-to-bottom chronologically.
         let mut stmt = conn
             .prepare(
-                "SELECT m.id, m.channel_id, m.sender_id, u.username, m.encrypted_content, m.nonce, m.timestamp, m.message_nonce, m.edited_at
+                "SELECT m.id, m.channel_id, m.sender_id, u.username, u.display_name, u.profile_picture_file_id, m.encrypted_content, m.nonce, m.timestamp, m.message_nonce, m.edited_at
                  FROM (
                      SELECT id, channel_id, sender_id, encrypted_content, nonce, timestamp, message_nonce, edited_at
                      FROM messages
@@ -890,11 +961,13 @@ impl Database {
                     channel_id: row.get(1)?,
                     sender_id: row.get(2)?,
                     sender_username: row.get(3)?,
-                    encrypted_content: row.get(4)?,
-                    nonce: row.get(5)?,
-                    timestamp: row.get(6)?,
-                    message_nonce: row.get(7)?,
-                    edited_at: row.get(8)?,
+                sender_display_name: row.get(4)?,
+                sender_profile_pic: row.get(5)?,
+                    encrypted_content: row.get(6)?,
+                    nonce: row.get(7)?,
+                    timestamp: row.get(8)?,
+                    message_nonce: row.get(9)?,
+                    edited_at: row.get(10)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -910,7 +983,7 @@ impl Database {
         let half = limit / 2;
         let mut stmt = conn
             .prepare(
-                "SELECT m.id, m.channel_id, m.sender_id, u.username, m.encrypted_content, m.nonce, m.timestamp, m.message_nonce, m.edited_at
+                "SELECT m.id, m.channel_id, m.sender_id, u.username, u.display_name, u.profile_picture_file_id, m.encrypted_content, m.nonce, m.timestamp, m.message_nonce, m.edited_at
                  FROM (
                      -- Get half_limit messages before-and-including the target
                      SELECT id, channel_id, sender_id, encrypted_content, nonce, timestamp, message_nonce, edited_at
@@ -936,12 +1009,14 @@ impl Database {
                     id: row.get(0)?,
                     channel_id: row.get(1)?,
                     sender_id: row.get(2)?,
+                encrypted_content: row.get(6)?,
                     sender_username: row.get(3)?,
-                    encrypted_content: row.get(4)?,
-                    nonce: row.get(5)?,
-                    timestamp: row.get(6)?,
-                    message_nonce: row.get(7)?,
-                    edited_at: row.get(8)?,
+                sender_display_name: row.get(4)?,
+                sender_profile_pic: row.get(5)?,
+                    nonce: row.get(7)?,
+                    timestamp: row.get(8)?,
+                    message_nonce: row.get(9)?,
+                    edited_at: row.get(10)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -980,6 +1055,8 @@ impl Database {
             channel_id: channel_id.to_string(),
             sender_id: sender_id.to_string(),
             sender_username: username,
+            sender_display_name: None,
+            sender_profile_pic: None,
             encrypted_content: encrypted_content.to_vec(),
             nonce: nonce.to_vec(),
             timestamp: chrono::Utc::now().to_rfc3339(),
@@ -1648,11 +1725,11 @@ impl Database {
         }
     }
 
-    pub fn list_dm_channels_for_user(&self, user_id: &str) -> Result<Vec<(String, String, String)>, String> {
-        // Returns (dm_channel_id, other_user_id, other_username) ordered by most recent message.
+    pub fn list_dm_channels_for_user(&self, user_id: &str) -> Result<Vec<(String, String, String, Option<String>, Option<String>)>, String> {
+        // Returns (dm_channel_id, other_user_id, other_username, other_display_name, other_profile_pic) ordered by most recent message.
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn.prepare(
-             "SELECT dm.id, other.user_id, u.username
+             "SELECT dm.id, other.user_id, u.username, u.display_name, u.profile_picture_file_id
               FROM dm_members mine
              INNER JOIN dm_channels dm ON dm.id = mine.dm_channel_id
              INNER JOIN (
@@ -1669,6 +1746,8 @@ impl Database {
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
             ))
         }).map_err(|e| e.to_string())?;
         let mut out = Vec::new();
@@ -1745,7 +1824,7 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         // Newest `limit` rows, re-sorted oldest -> newest (same pattern as channel messages).
         let mut stmt = conn.prepare(
-            "SELECT m.id, m.dm_channel_id, m.sender_id, u.username, m.encrypted_content, m.nonce, m.timestamp, m.message_nonce, m.edited_at
+            "SELECT m.id, m.dm_channel_id, m.sender_id, u.username, u.display_name, u.profile_picture_file_id, m.encrypted_content, m.nonce, m.timestamp, m.message_nonce, m.edited_at
              FROM (
                  SELECT id, dm_channel_id, sender_id, encrypted_content, nonce, timestamp, message_nonce, edited_at
                  FROM dm_messages
@@ -1762,11 +1841,13 @@ impl Database {
                 dm_channel_id: row.get(1)?,
                 sender_id: row.get(2)?,
                 sender_username: row.get(3)?,
-                encrypted_content: row.get(4)?,
-                nonce: row.get(5)?,
-                timestamp: row.get(6)?,
-                message_nonce: row.get(7)?,
-                edited_at: row.get(8)?,
+                sender_display_name: row.get(4)?,
+                sender_profile_pic: row.get(5)?,
+                encrypted_content: row.get(6)?,
+                nonce: row.get(7)?,
+                timestamp: row.get(8)?,
+                message_nonce: row.get(9)?,
+                edited_at: row.get(10)?,
             })
         }).map_err(|e| e.to_string())?;
         let mut out = Vec::new();
@@ -1804,6 +1885,8 @@ impl Database {
             dm_channel_id: dm_channel_id.to_string(),
             sender_id: sender_id.to_string(),
             sender_username: username,
+            sender_display_name: None,
+            sender_profile_pic: None,
             encrypted_content: encrypted_content.to_vec(),
             nonce: nonce.to_vec(),
             timestamp: chrono::Utc::now().to_rfc3339(),
@@ -1856,6 +1939,8 @@ impl Database {
                         channel_id: row.get(1)?,
                         sender_id: row.get(2)?,
                         sender_username: username.clone(),
+            sender_display_name: None,
+            sender_profile_pic: None,
                         encrypted_content: row.get(3)?,
                         nonce: row.get(4)?,
                         timestamp: row.get(5)?,
@@ -1926,6 +2011,8 @@ impl Database {
                         id: row.get(0)?,
                         dm_channel_id: row.get(1)?,
                         sender_id: row.get(2)?,
+            sender_display_name: None,
+            sender_profile_pic: None,
                         sender_username: username.clone(),
                         encrypted_content: row.get(3)?,
                         nonce: row.get(4)?,
@@ -2096,7 +2183,7 @@ impl Database {
     pub fn get_dm_last_message(&self, dm_channel_id: &str) -> Result<Option<DmMessage>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let result = conn.query_row(
-            "SELECT m.id, m.dm_channel_id, m.sender_id, u.username, m.encrypted_content, m.nonce, m.timestamp, m.message_nonce, m.edited_at
+            "SELECT m.id, m.dm_channel_id, m.sender_id, u.username, u.display_name, u.profile_picture_file_id, m.encrypted_content, m.nonce, m.timestamp, m.message_nonce, m.edited_at
              FROM dm_messages m INNER JOIN users u ON m.sender_id = u.id
              WHERE m.dm_channel_id = ?1
              ORDER BY m.timestamp DESC LIMIT 1",
@@ -2107,11 +2194,13 @@ impl Database {
                     dm_channel_id: row.get(1)?,
                     sender_id: row.get(2)?,
                     sender_username: row.get(3)?,
-                    encrypted_content: row.get(4)?,
-                    nonce: row.get(5)?,
-                    timestamp: row.get(6)?,
-                    message_nonce: row.get(7)?,
-                    edited_at: row.get(8)?,
+                sender_display_name: row.get(4)?,
+                sender_profile_pic: row.get(5)?,
+                    encrypted_content: row.get(6)?,
+                    nonce: row.get(7)?,
+                    timestamp: row.get(8)?,
+                    message_nonce: row.get(9)?,
+                    edited_at: row.get(10)?,
                 })
             },
         );
@@ -2317,7 +2406,7 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT m.id, m.channel_id, m.sender_id, COALESCE(u.username, '?'), m.encrypted_content, m.nonce, m.timestamp, m.message_nonce, m.edited_at
+                "SELECT m.id, m.channel_id, m.sender_id, COALESCE(u.username, '?'), u.display_name, u.profile_picture_file_id, m.encrypted_content, m.nonce, m.timestamp, m.message_nonce, m.edited_at
                  FROM messages m LEFT JOIN users u ON m.sender_id = u.id ORDER BY m.timestamp DESC LIMIT 500",
             )
             .map_err(|e| e.to_string())?;
@@ -2328,11 +2417,13 @@ impl Database {
                     channel_id: row.get(1)?,
                     sender_id: row.get(2)?,
                     sender_username: row.get(3)?,
-                    encrypted_content: row.get(4)?,
-                    nonce: row.get(5)?,
-                    timestamp: row.get(6)?,
-                    message_nonce: row.get(7)?,
-                    edited_at: row.get(8)?,
+                sender_display_name: row.get(4)?,
+                sender_profile_pic: row.get(5)?,
+                    encrypted_content: row.get(6)?,
+                    nonce: row.get(7)?,
+                    timestamp: row.get(8)?,
+                    message_nonce: row.get(9)?,
+                    edited_at: row.get(10)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -2863,6 +2954,15 @@ impl Database {
         )
         .map_err(|e| e.to_string())?;
         Ok(id)
+    }
+
+    pub fn delete_file_record(&self, file_id: &str) -> Result<FileRecord, String> {
+        // Returns the deleted file info so caller can clean up chunks
+        let info = self.get_file_info(file_id)?;
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM files WHERE id = ?1", params![file_id])
+            .map_err(|e| e.to_string())?;
+        Ok(info)
     }
 
     pub fn update_file_chunks(&self, file_id: &str, chunk_count: i32) -> Result<(), String> {
