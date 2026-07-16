@@ -679,6 +679,7 @@ document.addEventListener('DOMContentLoaded', () => {
     var _cameraCaptureCountdownTimer = null;
     var _cameraCaptureFlashEl = null;
     var _cameraCaptureFlashIntensity = 35; // 0-100, white overlay brightness percentage
+    var _cameraBrightnessCtrl = null; // Floating brightness control (root-level, above overlay)
     var _cameraPhotoPreviewData = null; // { blob, url }
     var _cameraPhotoPreviewEl = null;
     var _cameraZoomLevel = 1;
@@ -733,12 +734,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 + '<input type="range" id="camera-zoom-slider" min="1" max="3" step="0.1" value="1" style="flex:1;max-width:140px;height:4px;-webkit-appearance:none;appearance:none;background:#555;border-radius:2px;outline:none;cursor:pointer;">'
                 + '<span id="camera-zoom-label" style="color:#aaa;font-size:11px;min-width:28px;text-align:center;">1.0×</span>'
                 + '</div>'
-                // Flash intensity slider row
-                + '<div class="camera-flash-intensity-row" style="display:none;align-items:center;justify-content:center;gap:8px;margin-top:4px;padding:0 20px;">'
-                + '<span style="color:#888;font-size:11px;">💡</span>'
-                + '<input type="range" id="camera-flash-intensity" min="0" max="100" step="1" value="35" style="flex:1;max-width:120px;height:4px;-webkit-appearance:none;appearance:none;background:#555;border-radius:2px;outline:none;cursor:pointer;">'
-                + '<span id="camera-flash-intensity-label" style="color:#FFD700;font-size:11px;min-width:28px;text-align:center;">35%</span>'
-                + '</div>'
                 + '<div style="display:flex;align-items:center;justify-content:center;gap:16px;margin-top:4px;padding:0 10px;">'
                 + '<button class="camera-flash-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:42px;height:42px;aspect-ratio:1;flex-shrink:0;color:#aaa;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.15s;" title="Flash">☀️</button>'
                 + '<button class="camera-mirror-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:42px;height:42px;aspect-ratio:1;flex-shrink:0;color:#aaa;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.15s;" title="Mirror">↔</button>'
@@ -755,7 +750,14 @@ document.addEventListener('DOMContentLoaded', () => {
             _cameraCaptureFlashEl.style.cssText = 'display:none;position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(255,255,255,' + (_cameraCaptureFlashIntensity / 100) + ');z-index:2003;pointer-events:none;';
             document.body.appendChild(_cameraCaptureFlashEl);
             
-            // Old floating brightness control removed - using modal-based intensity row instead
+            // Create floating brightness control ABOVE the white overlay (root-level, higher z-index)
+            _cameraBrightnessCtrl = document.createElement('div');
+            _cameraBrightnessCtrl.id = 'camera-brightness-ctrl';
+            _cameraBrightnessCtrl.style.cssText = 'display:none;position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:2004;background:rgba(0,0,0,0.6);border-radius:10px;padding:8px 16px;align-items:center;gap:8px;';
+            _cameraBrightnessCtrl.innerHTML = '<span style="color:#FFD700;font-size:14px;">💡</span>'
+                + '<input type="range" id="camera-flash-intensity" min="0" max="100" step="1" value="35" style="width:120px;height:4px;-webkit-appearance:none;appearance:none;background:#555;border-radius:2px;outline:none;cursor:pointer;">'
+                + '<span id="camera-flash-intensity-label" style="color:#FFD700;font-size:12px;min-width:32px;text-align:center;">35%</span>';
+            document.body.appendChild(_cameraBrightnessCtrl);
             
             // Close button
             _cameraCaptureModal.querySelector('.camera-capture-close').addEventListener('click', closeCameraCapture);
@@ -782,9 +784,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 var btn = _cameraCaptureModal.querySelector('.camera-flash-btn');
                 btn.style.color = _cameraCaptureFlashOn ? '#FFD700' : '#aaa';
                 btn.style.background = _cameraCaptureFlashOn ? 'rgba(255,215,0,0.25)' : 'rgba(255,255,255,0.15)';
-                // Show/hide intensity slider row
-                var intensityRow = _cameraCaptureModal.querySelector('.camera-flash-intensity-row');
-                if (intensityRow) intensityRow.style.display = _cameraCaptureFlashOn ? '' : 'none';
+                // Show/hide floating brightness control (root-level, above overlay)
+                if (_cameraBrightnessCtrl) _cameraBrightnessCtrl.style.display = _cameraCaptureFlashOn ? 'flex' : 'none';
                 // Apply torch to video track if available (back camera)
                 if (_cameraCaptureStream && _cameraCaptureFacing === 'environment') {
                     var track = _cameraCaptureStream.getVideoTracks()[0];
@@ -1235,6 +1236,7 @@ document.addEventListener('DOMContentLoaded', () => {
             _cameraPhotoPreviewData = null;
         }
         if (_cameraCaptureFlashEl) _cameraCaptureFlashEl.style.display = 'none';
+        if (_cameraBrightnessCtrl) _cameraBrightnessCtrl.style.display = 'none';
     }
     
     // --- Video recording ---
@@ -1270,6 +1272,7 @@ document.addEventListener('DOMContentLoaded', () => {
     var _videoRecWasPinching = false;
     var _videoRecFlashIntensity = 25; // 0-100, white overlay brightness percentage
     var _videoRecMirrorRAF = null; // requestAnimationFrame handle for canvas mirror drawing
+    var _videoBrightnessCtrl = null; // Floating brightness control (root-level, above overlay)
     
     function setVideoRecFlash(enable) {
         if (!_videoRecStream) return;
@@ -1321,12 +1324,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 + '<button class="video-rec-res-btn" data-res="1080p" style="background:transparent;border:1px solid rgba(255,255,255,0.2);border-radius:4px;color:#aaa;padding:4px 10px;font-size:11px;cursor:pointer;transition:all 0.15s;">1080p</button>'
                 + '<button class="video-rec-res-btn" data-res="4K" style="background:transparent;border:1px solid rgba(255,255,255,0.2);border-radius:4px;color:#aaa;padding:4px 10px;font-size:11px;cursor:pointer;transition:all 0.15s;">4K</button>'
                 + '</div>'
-                // Flash intensity slider row
-                + '<div class="video-rec-flash-intensity-row" style="display:none;align-items:center;justify-content:center;gap:8px;margin-top:4px;padding:0 20px;">'
-                + '<span style="color:#888;font-size:11px;">💡</span>'
-                + '<input type="range" id="video-rec-flash-intensity" min="0" max="100" step="1" value="25" style="flex:1;max-width:120px;height:4px;-webkit-appearance:none;appearance:none;background:#555;border-radius:2px;outline:none;cursor:pointer;">'
-                + '<span id="video-rec-flash-intensity-label" style="color:#FFD700;font-size:11px;min-width:28px;text-align:center;">25%</span>'
-                + '</div>'
                 + '<div style="display:flex;align-items:center;justify-content:center;gap:14px;margin-top:4px;padding:0 16px;">'
                 + '<span id="video-rec-timer" style="color:#fff;font-size:16px;font-weight:600;min-width:60px;font-variant-numeric:tabular-nums;">0:00</span>'
                 + '<button id="video-rec-flash-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:40px;height:40px;aspect-ratio:1;flex-shrink:0;color:#aaa;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.15s;" title="Flash">☀️</button>'
@@ -1344,7 +1341,14 @@ document.addEventListener('DOMContentLoaded', () => {
             _videoRecFlashOverlay.style.cssText = 'display:none;position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(255,255,255,' + (_videoRecFlashIntensity / 100) + ');z-index:2002;pointer-events:none;';
             document.body.appendChild(_videoRecFlashOverlay);
             
-            // Old floating brightness control removed - using modal-based intensity row instead
+            // Create floating brightness control ABOVE the white overlay (root-level, higher z-index)
+            _videoBrightnessCtrl = document.createElement('div');
+            _videoBrightnessCtrl.id = 'video-rec-brightness-ctrl';
+            _videoBrightnessCtrl.style.cssText = 'display:none;position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:2003;background:rgba(0,0,0,0.6);border-radius:10px;padding:8px 16px;align-items:center;gap:8px;';
+            _videoBrightnessCtrl.innerHTML = '<span style="color:#FFD700;font-size:14px;">💡</span>'
+                + '<input type="range" id="video-rec-flash-intensity" min="0" max="100" step="1" value="25" style="width:120px;height:4px;-webkit-appearance:none;appearance:none;background:#555;border-radius:2px;outline:none;cursor:pointer;">'
+                + '<span id="video-rec-flash-intensity-label" style="color:#FFD700;font-size:12px;min-width:32px;text-align:center;">25%</span>';
+            document.body.appendChild(_videoBrightnessCtrl);
             
             // Zoom slider
             _videoRecZoomSlider = document.getElementById('video-rec-zoom-slider');
@@ -1443,9 +1447,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 var btn = _videoRecModal.querySelector('#video-rec-flash-btn');
                 btn.style.color = _videoRecFlashOn ? '#FFD700' : '#aaa';
                 btn.style.background = _videoRecFlashOn ? 'rgba(255,215,0,0.25)' : 'rgba(255,255,255,0.15)';
-                // Show/hide intensity slider row
-                var intensityRow = _videoRecModal.querySelector('.video-rec-flash-intensity-row');
-                if (intensityRow) intensityRow.style.display = _videoRecFlashOn ? '' : 'none';
+                // Show/hide floating brightness control (root-level, above overlay)
+                if (_videoBrightnessCtrl) _videoBrightnessCtrl.style.display = _videoRecFlashOn ? 'flex' : 'none';
                 setVideoRecFlash(_videoRecFlashOn);
                 if (_videoRecFlashOverlay) {
                     _videoRecFlashOverlay.style.background = 'rgba(255,255,255,' + (_videoRecFlashIntensity / 100) + ')';
@@ -1784,6 +1787,7 @@ document.addEventListener('DOMContentLoaded', () => {
         _videoRecChunks = [];
         _videoRecFlashOn = false;
         if (_videoRecFlashOverlay) _videoRecFlashOverlay.style.display = 'none';
+        if (_videoBrightnessCtrl) _videoBrightnessCtrl.style.display = 'none';
         
         if (_videoRecStream) {
             // Turn off torch before stopping

@@ -2842,6 +2842,10 @@ impl Database {
         )
         .map_err(|e| e.to_string())?;
 
+        // 4c. Clean up files owned by user (files.uploader_id has no ON DELETE CASCADE)
+        conn.execute("DELETE FROM files WHERE uploader_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+
         // 5. Delete the user
         conn.execute("DELETE FROM users WHERE id = ?1", params![user_id])
             .map_err(|e| e.to_string())?;
