@@ -4063,7 +4063,9 @@ async function appendMessage(msg) {
     const editedHtml = msg.edited_at ? '<span class="edited-label">(edited)</span>' : '';
     if (forwardData) {
         div.classList.add('forwarded');
-        var fwdSenderPicUrl = forwardData.sender_profile_pic ? getProfilePicUrl(forwardData.sender_profile_pic, forwardData.source_server_id) : null;
+        var fwdFileId = forwardData.sender_profile_pic_file_id || forwardData.sender_profile_pic || '';
+        var fwdUserId = forwardData.sender_id || forwardData.source_server_id || '';
+        var fwdSenderPicUrl = fwdFileId && fwdUserId ? getProfilePicUrl(fwdFileId, fwdUserId) : null;
         var fwdPicHtml = fwdSenderPicUrl ? '<img class="forward-sender-pic" src="' + fwdSenderPicUrl + '" alt="">' : '<span class="forward-sender-initial">' + (forwardData.sender_username ? forwardData.sender_username.charAt(0).toUpperCase() : '?') + '</span>';
         contentHtml += '<div class="forward-label" data-source-server-id="' + escapeAttr(forwardData.source_server_id || '') + '" data-source-channel-id="' + escapeAttr(forwardData.source_channel_id || '') + '" data-source-message-id="' + escapeAttr(forwardData.source_message_id || '') + '">' +
             '<div class="forward-sender-info">' + fwdPicHtml + '<span class="forward-sender-name"' + (forwardData.sender_color ? ' style="color:' + forwardData.sender_color + '"' : '') + '>' + escapeHtml(forwardData.sender_username || 'unknown') + '</span></div>' +
@@ -4821,9 +4823,9 @@ async function executeForward(targetServerId, targetServerName, targetChannelId,
     const messageId = pendingForward.messageId;
 
     const senderUsername = msgDiv.querySelector('.display-name')?.textContent || msgDiv.querySelector('.username')?.textContent || 'unknown';
-    const avatarImg = msgDiv.querySelector('.avatar img.avatar-img');
-    const senderPic = avatarImg ? (avatarImg.getAttribute('data-profile-pic') || avatarImg.getAttribute('src') || '') : '';
-    const senderPicUrl = msgDiv.querySelector('.avatar')?.getAttribute('data-profile-pic-load') || senderPic || '';
+    const senderId = msgDiv.getAttribute('data-sender-id') || '';
+    var avatarPicAttr = (msgDiv.querySelector('.avatar img.avatar-img')?.getAttribute('data-profile-pic')) || (msgDiv.querySelector('.avatar')?.getAttribute('data-profile-pic-load')) || '';
+    var senderPicFileId = avatarPicAttr ? avatarPicAttr.split(':')[1] || '' : '';
     const senderColor = msgDiv.querySelector('.display-name')?.style?.color || '';
     const textEl = msgDiv.querySelector('.text');
     const originalText = textEl ? extractRawMessageText(textEl) : '';
@@ -4885,7 +4887,8 @@ async function executeForward(targetServerId, targetServerName, targetChannelId,
             source_server_name: document.getElementById('server-name')?.textContent || 'Server',
             source_channel_name: document.getElementById('channel-name')?.textContent || 'channel',
             sender_username: senderUsername,
-            sender_profile_pic: senderPicUrl,
+            sender_id: senderId,
+            sender_profile_pic_file_id: senderPicFileId,
             sender_color: senderColor,
             timestamp: msgDiv.querySelector('.time')?.textContent || '',
         };
@@ -5273,7 +5276,9 @@ function appendDmMessage(msg, kp, otherPublicKey) {
     }
     if (forwardData) {
         div.classList.add('forwarded');
-        var fwdSenderPicUrl = forwardData.sender_profile_pic ? getProfilePicUrl(forwardData.sender_profile_pic, forwardData.source_server_id) : null;
+        var fwdFileId = forwardData.sender_profile_pic_file_id || forwardData.sender_profile_pic || '';
+        var fwdUserId = forwardData.sender_id || forwardData.source_server_id || '';
+        var fwdSenderPicUrl = fwdFileId && fwdUserId ? getProfilePicUrl(fwdFileId, fwdUserId) : null;
         var fwdPicHtml = fwdSenderPicUrl ? '<img class="forward-sender-pic" src="' + fwdSenderPicUrl + '" alt="">' : '<span class="forward-sender-initial">' + (forwardData.sender_username ? forwardData.sender_username.charAt(0).toUpperCase() : '?') + '</span>';
         contentHtml += '<div class="forward-label" data-source-server-id="' + escapeAttr(forwardData.source_server_id || '') + '" data-source-channel-id="' + escapeAttr(forwardData.source_channel_id || '') + '" data-source-message-id="' + escapeAttr(forwardData.source_message_id || '') + '">' +
             '<div class="forward-sender-info">' + fwdPicHtml + '<span class="forward-sender-name"' + (forwardData.sender_color ? ' style="color:' + forwardData.sender_color + '"' : '') + '>' + escapeHtml(forwardData.sender_username || 'unknown') + '</span></div>' +
@@ -9488,9 +9493,9 @@ async function executeDmForward(targetUserId, targetUsername, dmChannelId) {
     }
 
     const senderUsername = msgDiv.querySelector('.display-name')?.textContent || msgDiv.querySelector('.username')?.textContent || 'unknown';
-    const avatarImg = msgDiv.querySelector('.avatar img.avatar-img');
-    const senderPic = avatarImg ? (avatarImg.getAttribute('data-profile-pic') || avatarImg.getAttribute('src') || '') : '';
-    const senderPicUrl = msgDiv.querySelector('.avatar')?.getAttribute('data-profile-pic-load') || senderPic || '';
+    const senderId = msgDiv.getAttribute('data-sender-id') || '';
+    var avatarPicAttr = (msgDiv.querySelector('.avatar img.avatar-img')?.getAttribute('data-profile-pic')) || (msgDiv.querySelector('.avatar')?.getAttribute('data-profile-pic-load')) || '';
+    var senderPicFileId = avatarPicAttr ? avatarPicAttr.split(':')[1] || '' : '';
     const senderColor = msgDiv.querySelector('.display-name')?.style?.color || '';
     const textEl = msgDiv.querySelector('.text');
     const originalText = textEl ? extractRawMessageText(textEl) : '';
@@ -9551,7 +9556,8 @@ async function executeDmForward(targetUserId, targetUsername, dmChannelId) {
             source_server_name: document.getElementById('server-name')?.textContent || 'Server',
             source_channel_name: document.getElementById('channel-name')?.textContent || 'channel',
             sender_username: senderUsername,
-            sender_profile_pic: senderPicUrl,
+            sender_id: senderId,
+            sender_profile_pic_file_id: senderPicFileId,
             sender_color: senderColor,
         };
         if (previewEncrypted) {
