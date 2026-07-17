@@ -2256,6 +2256,56 @@ body {
     display: none;
 }
 
+/* ===== Username Color Picker ===== */
+.username-color-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+    flex-wrap: wrap;
+}
+
+.username-color-input {
+    width: 42px;
+    height: 42px;
+    border: 2px solid var(--bg-border);
+    border-radius: 8px;
+    padding: 2px;
+    background: var(--bg-primary);
+    cursor: pointer;
+    -webkit-appearance: none;
+    appearance: none;
+    flex-shrink: 0;
+}
+
+.username-color-input::-webkit-color-swatch-wrapper {
+    padding: 0;
+}
+
+.username-color-input::-webkit-color-swatch {
+    border: none;
+    border-radius: 4px;
+}
+
+.username-color-input::-moz-color-swatch {
+    border: none;
+    border-radius: 4px;
+}
+
+.username-color-preview {
+    font-size: 16px;
+    font-weight: 600;
+    padding: 6px 14px;
+    border: 2px solid var(--accent);
+    border-radius: 6px;
+    color: var(--accent);
+    transition: color 0.2s, border-color 0.2s;
+    min-width: 80px;
+    text-align: center;
+}
+
+
+
 /* Message avatar with profile picture */
 .message .avatar {
     position: relative;

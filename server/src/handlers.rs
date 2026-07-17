@@ -213,7 +213,7 @@ pub async fn register(
 
     // Fetch profile data
     let (display_name, profile_pic) = match state.db.get_user_profile(&user.id) {
-        Ok((_, _, dn, pp, _fk)) => (dn, pp),
+        Ok((_, _, dn, pp, _fk, _uc)) => (dn, pp),
         Err(_) => (None, None),
     };
 
@@ -307,7 +307,7 @@ pub async fn login(
 
     // Fetch profile data
     let (display_name, profile_pic) = match state.db.get_user_profile(&user.id) {
-        Ok((_, _, dn, pp, _fk)) => (dn, pp),
+        Ok((_, _, dn, pp, _fk, _uc)) => (dn, pp),
         Err(_) => (None, None),
     };
 
@@ -476,7 +476,7 @@ pub async fn reauth(
 
     // Fetch profile data
     let (display_name, profile_pic) = match state.db.get_user_profile(&user.id) {
-        Ok((_, _, dn, pp, _fk)) => (dn, pp),
+        Ok((_, _, dn, pp, _fk, _uc)) => (dn, pp),
         Err(_) => (None, None),
     };
 
@@ -2696,6 +2696,8 @@ pub struct UpdateProfileRequest {
     pub display_name: Option<String>,  // None = no change, Some("") = clear, Some("value") = set
     pub remove_picture: Option<bool>,  // true = remove profile picture
     pub profile_picture_file_id: Option<String>,  // Some("file_id") = set picture
+    pub profile_picture_file_key: Option<String>,  // file encryption key (base64)
+    pub username_color: Option<String>,  // hex color for username
 }
 
 pub async fn get_profile(
@@ -2703,11 +2705,13 @@ pub async fn get_profile(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     match state.db.get_user_profile(&user_id) {
-        Ok((id, _username, display_name, profile_picture_file_id, _file_key)) => {
+        Ok((id, _username, display_name, profile_picture_file_id, _file_key, username_color)) => {
             (StatusCode::OK, Json(serde_json::json!({
                 "id": id,
                 "display_name": display_name,
                 "profile_picture_file_id": profile_picture_file_id,
+                "profile_picture_file_key": _file_key,
+                "username_color": username_color.unwrap_or("#4fc3f7".to_string()),
             }))).into_response()
         }
         Err(e) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": e}))).into_response(),
@@ -2744,7 +2748,7 @@ pub async fn update_profile(
 
     // Before changing profile picture, delete the old one's file from DB and disk
     let delete_current_pic = || -> Result<(), String> {
-        let (_, _, _, old_file_id, _) = state.db.get_user_profile(&user_id)?;
+        let (_, _, _, old_file_id, _, _) = state.db.get_user_profile(&user_id)?;
         if let Some(old_id) = old_file_id {
             // Delete from DB (checks ownership)
             if let Ok(old_info) = state.db.delete_file_record(&old_id) {
@@ -2789,20 +2793,33 @@ pub async fn update_profile(
         }
         // Delete old profile pic before setting new one
         let _ = delete_current_pic();
-        if let Err(e) = state.db.update_profile_picture(&user_id, Some(file_id), None) {
+        let file_key = req.profile_picture_file_key.as_deref();
+        if let Err(e) = state.db.update_profile_picture(&user_id, Some(file_id), file_key) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
+        }
+    }
+
+    // Handle username color update
+    if let Some(ref color) = req.username_color {
+        let trimmed = color.trim();
+        if !trimmed.starts_with("#") || (trimmed.len() != 7 && trimmed.len() != 4) {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid color format. Use hex e.g. #4fc3f7"}))).into_response();
+        }
+        if let Err(e) = state.db.update_username_color(&user_id, trimmed) {
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
         }
     }
 
     // Broadcast profile update to the user, friends, and all server members
     if let Ok(profile) = state.db.get_user_profile(&user_id) {
-        let (_id, username, display_name, profile_picture_file_id, _fk) = profile;
+        let (_id, username, display_name, profile_picture_file_id, _fk, username_color) = profile;
         let profile_msg = serde_json::json!({
             "type": "profile_updated",
             "user_id": user_id,
             "username": username,
             "display_name": display_name,
             "profile_picture_file_id": profile_picture_file_id,
+            "username_color": username_color.unwrap_or("#4fc3f7".to_string()),
         });
 
         let mut recipients: std::collections::HashSet<String> = std::collections::HashSet::new();

@@ -306,6 +306,17 @@
                     <div class="profile-save-status" id="profile-save-status"></div>
                 </div>
 
+                <div class="settings-group">
+                    <h4>Username Color</h4>
+                    <p class="settings-hint">Choose a color for your username that others will see in chat.</p>
+                    <div class="username-color-row">
+                        <input type="color" id="username-color-picker" class="username-color-input" value="#4fc3f7">
+                        <span class="username-color-preview" id="username-color-preview">Preview</span>
+                        <button class="btn-profile-action btn-primary" id="username-color-save-btn">Save Color</button>
+                    </div>
+
+                </div>
+
                 <div class="settings-group settings-danger">
                     <h4>Danger Zone</h4>
                     <p class="settings-hint">Permanently delete your account and all associated data. This cannot be undone.</p>
@@ -560,9 +571,38 @@
         </div>
     </div>
 
+    <!-- Profile Picture Crop Modal -->
+    <div class="modal" id="profile-crop-modal" style="display:none">
+        <div class="modal-content sticker-upload-content">
+            <h3 style="margin-bottom:12px;color:var(--accent)">Crop Profile Picture</h3>
+            <div id="profile-crop-container" class="sticker-crop-container">
+                <div class="sticker-crop-frame" id="profile-crop-frame">
+                    <img id="profile-crop-image" style="max-width:100%;max-height:50vh;">
+                    <div class="sticker-crop-overlay" id="profile-crop-overlay">
+                        <div class="sticker-crop-box" id="profile-crop-box">
+                            <div class="sticker-crop-handle" id="profile-crop-handle"></div>
+                        </div>
+                    </div>
+                </div>
+                <div id="profile-crop-info" style="color:#888;font-size:12px;margin-top:6px;">
+                    Drag to select the area to keep. The picture will be resized to 420×420.
+                </div>
+            </div>
+            <div id="profile-crop-progress" style="display:none;margin-bottom:12px">
+                <div class="progress-bar-container"><div class="progress-bar-fill" id="profile-crop-progress-fill"></div></div>
+                <div class="progress-text" id="profile-crop-progress-text">0%</div>
+            </div>
+            <div id="profile-crop-error" style="color:var(--danger);margin-bottom:12px;display:none;font-size:13px"></div>
+            <div class="modal-actions">
+                <button class="btn-cancel" id="cancel-profile-crop">Cancel</button>
+                <button class="btn-invite" id="confirm-profile-crop">Crop & Set Picture</button>
+            </div>
+        </div>
+    </div>
+
     <script src="crypto.js?v=6"></script>
     <script src="qrcode.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
-    <script src="chat.js?v=23"></script>
+    <script src="chat.js?v=24"></script>
 </body>
 </html>

@@ -365,6 +365,17 @@ impl Database {
             conn.execute("ALTER TABLE users ADD COLUMN profile_picture_file_key TEXT", [])?;
         }
 
+        // Migration 015: username color
+        let username_color_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('users') WHERE name = 'username_color'",
+                [],
+                |row| row.get(0),
+            )?;
+        if !username_color_exists {
+            conn.execute("ALTER TABLE users ADD COLUMN username_color TEXT DEFAULT '#4fc3f7'", [])?;
+        }
+
         Ok(())
     }
 
@@ -435,22 +446,51 @@ impl Database {
         .map_err(|_| "User not found".to_string())
     }
 
-    pub fn get_user_profile(&self, id: &str) -> Result<(String, String, Option<String>, Option<String>, Option<String>), String> {
+    pub fn get_user_profile(&self, id: &str) -> Result<(String, String, Option<String>, Option<String>, Option<String>, Option<String>), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.query_row(
-            "SELECT id, username, display_name, profile_picture_file_id, profile_picture_file_key FROM users WHERE id = ?1",
-            params![id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                ))
-            },
-        )
-        .map_err(|_| "User not found".to_string())
+        // Check if username_color column exists (older DBs might not have it yet)
+        let color_col_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('users') WHERE name = 'username_color'",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap_or(false);
+
+        if color_col_exists {
+            conn.query_row(
+                "SELECT id, username, display_name, profile_picture_file_id, profile_picture_file_key, username_color FROM users WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                    ))
+                },
+            )
+            .map_err(|_| "User not found".to_string())
+        } else {
+            conn.query_row(
+                "SELECT id, username, display_name, profile_picture_file_id, profile_picture_file_key FROM users WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        None, // username_color not available
+                    ))
+                },
+            )
+            .map_err(|_| "User not found".to_string())
+        }
     }
 
     pub fn update_display_name(&self, user_id: &str, display_name: &str) -> Result<(), String> {
@@ -458,6 +498,16 @@ impl Database {
         conn.execute(
             "UPDATE users SET display_name = ?1 WHERE id = ?2",
             params![display_name, user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn update_username_color(&self, user_id: &str, color: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE users SET username_color = ?1 WHERE id = ?2",
+            params![color, user_id],
         )
         .map_err(|e| e.to_string())?;
         Ok(())

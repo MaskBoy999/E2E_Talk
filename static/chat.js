@@ -144,10 +144,12 @@ let lastDmMessageInfo = { senderId: null, dmChannelId: null, time: 0 };
 // Emoji cache: name -> { file_id, file_key, mime_type }
 let emojiCache = null;
 let emojiBlobCache = {}; // name -> blob URL
-let currentFileIndex = 0;
-// Profile cache: file_id -> blob URL
+let currentFileIndex = 0;    // Profile cache: file_id -> blob URL
 let profilePicCache = {};
 let myProfile = null; // { display_name, profile_picture_file_id }
+
+// Cache for user display names, profile pics, and colors
+let userDisplayNameCache = {}; // user_id -> { display_name, profile_picture_file_id, username_color }
 
 // Local file key cache (file_id → base64 file_key) for sticker previews
 const fileKeyCache = {
@@ -2634,7 +2636,7 @@ function showBrowserNotification(title, body, onClick) {
 
 // --- Unread mention tracking + badge rendering ---
 
-function trackUnreadMention(serverId, channelId, dmChannelId, messageId, senderUsername, channelName, serverName, notifType) {
+function trackUnreadMention(serverId, channelId, dmChannelId, messageId, senderUsername, channelName, serverName, notifType, senderId, senderProfilePic) {
     // Skip notification if the server or channel is muted
     if (isMuted(serverId, channelId)) return;
     if (channelId && serverId) {
@@ -2652,6 +2654,8 @@ function trackUnreadMention(serverId, channelId, dmChannelId, messageId, senderU
             dmChannelId: null,
             messageId: messageId,
             senderUsername: senderUsername || 'Someone',
+            senderId: senderId || null,
+            senderProfilePic: senderProfilePic || null,
             channelName: channelName || 'a channel',
             serverName: serverName || '',
             type: notifType || 'mention',
@@ -2672,6 +2676,8 @@ function trackUnreadMention(serverId, channelId, dmChannelId, messageId, senderU
             dmChannelId: dmChannelId,
             messageId: messageId,
             senderUsername: senderUsername || 'Someone',
+            senderId: senderId || null,
+            senderProfilePic: senderProfilePic || null,
             channelName: '',
             serverName: '',
             type: notifType || 'dm',
@@ -2912,6 +2918,16 @@ function renderMentionsInbox() {
         else if (item.type === 'reply') { icon = '↩'; iconClass += ' reply'; }
         else { icon = '💬'; iconClass += ' dm'; }
         var title = item.senderUsername;
+        var senderAvatar = '';
+        if (item.senderId && item.senderProfilePic) {
+            var picCacheKey = item.senderId + ':' + item.senderProfilePic;
+            if (profilePicCache[picCacheKey]) {
+                senderAvatar = '<img src="' + profilePicCache[picCacheKey] + '" style="width:36px;height:36px;border-radius:50%;object-fit:cover;flex-shrink:0;">';
+            } else {
+                senderAvatar = '<div data-profile-pic-load="' + picCacheKey + '" style="width:36px;height:36px;border-radius:50%;background:var(--accent);color:var(--bg-primary);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;flex-shrink:0;overflow:hidden;">' + (item.senderUsername || '?').charAt(0).toUpperCase() + '</div>';
+                getProfilePicUrl(item.senderProfilePic, item.senderId);
+            }
+        }
         var subtitle = '';
         if (item.serverName && item.channelName) {
             subtitle = item.serverName + ' #' + item.channelName;
@@ -2932,7 +2948,7 @@ function renderMentionsInbox() {
             else timeStr = Math.floor(diffMin / 1440) + 'd';
         } catch (_) { timeStr = ''; }
         html += '<div class="mention-inbox-item" data-server-id="' + (item.serverId || '') + '" data-channel-id="' + (item.channelId || '') + '" data-dm-channel-id="' + (item.dmChannelId || '') + '" data-message-id="' + item.messageId + '">' +
-            '<div class="' + iconClass + '">' + icon + '</div>' +
+            (senderAvatar || '<div class="' + iconClass + '">' + icon + '</div>') +
             '<div class="mention-inbox-body">' +
                 '<div class="mention-inbox-title">' + escapeHtml(title) + '</div>' +
                 '<div class="mention-inbox-subtitle">' + (item.type === 'reply' ? 'Replied to you in ' : 'Mentioned you in ') + escapeHtml(subtitle) + '</div>' +
@@ -3255,7 +3271,8 @@ function setupMentionAutocomplete() {
     function updateDropdown() {
         const candidates = getCandidateList();
         const filtered = candidates.filter(m =>
-            m.username && m.username.toLowerCase().startsWith(filterText.toLowerCase())
+            (m.username && m.username.toLowerCase().startsWith(filterText.toLowerCase())) ||
+            (m.display_name && m.display_name.toLowerCase().startsWith(filterText.toLowerCase()))
         );
         if (filtered.length === 0 || !isOpen) {
             container.style.display = 'none';
@@ -3268,6 +3285,7 @@ function setupMentionAutocomplete() {
             item.className = 'mention-item' + (idx === activeIndex ? ' active' : '');
             const initial = (m.username || '?').charAt(0).toUpperCase();
             var mInitial = (m.username || '?').charAt(0).toUpperCase();
+            item.dataset.username = m.username;
             item.innerHTML = '<span class="mention-item-avatar">' + mInitial + '</span><span class="mention-item-name">' + escapeHtml(m.display_name || m.username) + '</span>';
             item.addEventListener('click', () => selectMention(m.username));
             item.addEventListener('mouseenter', () => { activeIndex = idx; highlightItem(); });
@@ -3331,7 +3349,7 @@ function setupMentionAutocomplete() {
         } else if (e.key === 'Enter' || e.key === 'Tab') {
             if (activeIndex >= 0 && activeIndex < items.length) {
                 e.preventDefault();
-                const username = items[activeIndex].querySelector('.mention-item-name')?.textContent;
+                const username = items[activeIndex].dataset.username || items[activeIndex].querySelector('.mention-item-name')?.textContent;
                 if (username) selectMention(username);
             }
         } else if (e.key === 'Escape') {
@@ -3532,9 +3550,23 @@ function connectWebSocket(t) {
                     if (data.user_id === user.id) {
                         user.display_name = data.display_name;
                         user.profile_picture_file_id = data.profile_picture_file_id;
+                        user.profile_picture_file_key = data.profile_picture_file_key;
+                        user.username_color = data.username_color;
+                        if (myProfile) {
+                            myProfile.display_name = data.display_name;
+                            myProfile.profile_picture_file_id = data.profile_picture_file_id;
+                            myProfile.profile_picture_file_key = data.profile_picture_file_key;
+                            myProfile.username_color = data.username_color;
+                        }
                         localStorage.setItem('user', JSON.stringify(user));
                         updateSidebarFooter();
                     }
+
+                    // Update display name cache for all users
+                    if (!userDisplayNameCache[data.user_id]) userDisplayNameCache[data.user_id] = {};
+                    if (data.display_name !== undefined) userDisplayNameCache[data.user_id].display_name = data.display_name;
+                    if (data.profile_picture_file_id !== undefined) userDisplayNameCache[data.user_id].profile_picture_file_id = data.profile_picture_file_id;
+                    if (data.username_color !== undefined) userDisplayNameCache[data.user_id].username_color = data.username_color;
 
                     // Invalidate profile pic cache for this user
                     for (var pk in profilePicCache) {
@@ -3564,7 +3596,7 @@ function connectWebSocket(t) {
             case 'mention_notification':
                 if (data.sender_username) {
                     if (!isMuted(data.server_id, data.channel_id)) {
-                        trackUnreadMention(data.server_id, data.channel_id, data.dm_channel_id, data.message_id, data.sender_username, data.channel_name, data.server_name, 'mention');
+                        trackUnreadMention(data.server_id, data.channel_id, data.dm_channel_id, data.message_id, data.sender_username, data.channel_name, data.server_name, 'mention', data.sender_id, data.sender_profile_pic);
                         playNotificationSound();
                         var loc = data.channel_name ? '#' + data.channel_name : (data.dm_channel_id ? 'your DM' : 'a channel');
                         showBrowserNotification('Mentioned by ' + data.sender_username, 'You were mentioned in ' + (data.server_name ? data.server_name + ' ' : '') + loc, function () {
@@ -3581,7 +3613,7 @@ function connectWebSocket(t) {
             case 'reply_notification':
                 if (data.sender_username) {
                     if (!isMuted(data.server_id, data.channel_id)) {
-                        trackUnreadMention(data.server_id, data.channel_id, data.dm_channel_id, data.message_id, data.sender_username, data.channel_name, data.server_name, 'reply');
+                        trackUnreadMention(data.server_id, data.channel_id, data.dm_channel_id, data.message_id, data.sender_username, data.channel_name, data.server_name, 'reply', data.sender_id, data.sender_profile_pic);
                         playNotificationSound();
                         var loc = data.channel_name ? '#' + data.channel_name : (data.dm_channel_id ? 'your DM' : 'a channel');
                         showBrowserNotification('Reply from ' + data.sender_username, data.sender_username + ' replied to you in ' + (data.server_name ? data.server_name + ' ' : '') + loc, function () {
@@ -3958,6 +3990,14 @@ async function appendMessage(msg) {
         time = msg.timestamp || '';
     }
 
+    // Get username color for this sender
+    var senderColor = null;
+    if (msg.sender_username_color) {
+        senderColor = msg.sender_username_color;
+    } else if (userDisplayNameCache[msg.sender_id]) {
+        senderColor = userDisplayNameCache[msg.sender_id].username_color;
+    }
+
     let textContent = '';
     let fileData = null;
     let filesData = null;
@@ -4097,7 +4137,7 @@ async function appendMessage(msg) {
                 '<div class="avatar">' + initial + '</div>')) +
         '<div class="content">' +
             '<div class="header">' +
-                '<span class="display-name">' + escapeHtml(displayName) + '</span>' +
+                '<span class="display-name"' + (senderColor ? ' style="color:' + senderColor + '"' : '') + '>' + escapeHtml(displayName) + '</span>' +
             '</div>' +
             contentHtml +
         '</div>' +
@@ -9370,9 +9410,14 @@ async function loadDmForwardList() {
         for (const c of dmConversations) {
             if (allowedUserIds && !allowedUserIds.has(c.other_user_id)) continue;
             var fwdDisplayName = c.other_display_name || c.other_username || '?';
+            var fwdPicCacheKey = c.other_profile_picture_file_id ? (c.other_user_id + ':' + c.other_profile_picture_file_id) : null;
             const initial = fwdDisplayName.charAt(0).toUpperCase();
+            var avatarHtml = '<div data-profile-pic-load="' + (fwdPicCacheKey || '') + '" style="width:32px;height:32px;border-radius:50%;background:var(--accent);color:var(--bg-primary);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;flex-shrink:0;overflow:hidden;">' + initial + '</div>';
+            if (fwdPicCacheKey) {
+                getProfilePicUrl(c.other_profile_picture_file_id, c.other_user_id);
+            }
             html += '<div class="dm-forward-item" data-user-id="' + c.other_user_id + '" data-username="' + escapeAttr(c.other_username) + '" data-dm-channel-id="' + escapeAttr(c.dm_channel_id || '') + '" style="display:flex;align-items:center;gap:10px;padding:10px 12px;cursor:pointer;border-radius:6px;border-bottom:1px solid var(--bg-border);transition:background .15s;">' +
-                '<div style="width:32px;height:32px;border-radius:50%;background:var(--accent);color:var(--bg-primary);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;flex-shrink:0;">' + initial + '</div>' +
+                avatarHtml +
                 '<span style="font-size:14px;color:var(--text-primary);">' + escapeHtml(fwdDisplayName) + '</span>' +
                 '</div>';
         }
@@ -9517,16 +9562,112 @@ async function executeDmForward(targetUserId, targetUsername, dmChannelId) {
 // ===== Profile Functions =====
 
 // Fetch profile image from server and cache it as a blob URL
+// Decrypt profile pic data using same pattern as downloadAndDecryptStickerData
+async function decryptProfilePicData(fileKey, data) {
+    const CHUNK_PLAINTEXT = 65536;
+    const CHUNK_ENCRYPTED_FULL = CHUNK_PLAINTEXT + 16 + 24; // 65576
+    const totalChunks = Math.ceil(data.length / CHUNK_ENCRYPTED_FULL);
+
+    const decryptedChunks = [];
+    for (let i = 0; i < totalChunks; i++) {
+        const start = i * CHUNK_ENCRYPTED_FULL;
+        let chunkData;
+        if (i < totalChunks - 1) {
+            chunkData = data.slice(start, start + CHUNK_ENCRYPTED_FULL);
+        } else {
+            chunkData = data.slice(start);
+        }
+        if (chunkData.length < 40) {
+            // Too small to be an encrypted chunk - probably not encrypted data
+            return null;
+        }
+        try {
+            const decrypted = E2ECrypto.decryptFileChunk(fileKey, chunkData);
+            decryptedChunks.push(decrypted);
+        } catch (e) {
+            return null; // Decryption failed - not encrypted or wrong key
+        }
+    }
+
+    let totalLength = 0;
+    for (const c of decryptedChunks) totalLength += c.length;
+    const result = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const c of decryptedChunks) {
+        result.set(c, offset);
+        offset += c.length;
+    }
+    return result;
+}
+
 function getProfilePicUrl(fileId, userId) {
     if (!fileId || !userId) return null;
     var cacheKey = userId + ':' + fileId;
     if (profilePicCache[cacheKey]) return profilePicCache[cacheKey];
-    // Fetch and cache (async)
-    authFetch('/api/files/' + fileId + '/download').then(function (res) {
+    
+    // Fetch encrypted file
+    authFetch('/api/files/' + fileId + '/download').then(async function (res) {
         if (!res.ok) return null;
-        return res.blob();
-    }).then(function (blob) {
-        if (!blob) return;
+        var encryptedArray = new Uint8Array(await res.arrayBuffer());
+        
+        // Get the file key from cache, own profile, or fetch user's profile
+        var fileKeyB64 = null;
+        
+        // Try own profile first
+        if (myProfile && myProfile.profile_picture_file_id === fileId && myProfile.profile_picture_file_key) {
+            fileKeyB64 = myProfile.profile_picture_file_key;
+        }
+        
+        // Try fileKeyCache
+        if (!fileKeyB64) {
+            fileKeyB64 = fileKeyCache.get(fileId);
+        }
+        
+        // Try userDisplayNameCache (might have file_key from profile_updated events)
+        if (!fileKeyB64 && userDisplayNameCache[userId] && userDisplayNameCache[userId].profile_picture_file_key) {
+            fileKeyB64 = userDisplayNameCache[userId].profile_picture_file_key;
+        }
+        
+        // Fetch user's profile to get the file key (for OTHER users' profile pics)
+        if (!fileKeyB64) {
+            try {
+                var profileRes = await authFetch('/api/profile/' + userId);
+                if (profileRes.ok) {
+                    var profileData = await profileRes.json();
+                    if (profileData && profileData.profile_picture_file_key) {
+                        fileKeyB64 = profileData.profile_picture_file_key;
+                        // Cache it for future use
+                        fileKeyCache.set(fileId, fileKeyB64);
+                        // Also store in userDisplayNameCache
+                        if (!userDisplayNameCache[userId]) userDisplayNameCache[userId] = {};
+                        userDisplayNameCache[userId].profile_picture_file_key = fileKeyB64;
+                    }
+                }
+            } catch (e) {
+                console.warn('Failed to fetch profile for pic key:', e);
+            }
+        }
+        
+        var blob;
+        if (fileKeyB64) {
+            try {
+                var fileKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(fileKeyB64));
+                var decrypted = await decryptProfilePicData(fileKey, encryptedArray);
+                if (decrypted) {
+                    blob = new Blob([decrypted], { type: 'image/png' });
+                } else {
+                    // Decryption failed - fall back to raw blob (for backward compat)
+                    blob = new Blob([encryptedArray], { type: 'image/png' });
+                }
+            } catch (e) {
+                console.warn('Profile pic decrypt failed:', e);
+                blob = new Blob([encryptedArray], { type: 'image/png' });
+            }
+        } else {
+            // No file key - use raw blob (for backward compat with unencrypted pics)
+            blob = new Blob([encryptedArray], { type: 'image/png' });
+        }
+        
         var url = URL.createObjectURL(blob);
         profilePicCache[cacheKey] = url;
         // Update loaded avatars: img elements with data-profile-pic
@@ -9536,7 +9677,7 @@ function getProfilePicUrl(fileId, userId) {
         // Update placeholder avatars: divs with data-profile-pic-load
         document.querySelectorAll('[data-profile-pic-load="' + cacheKey + '"]').forEach(function (el) {
             var initialText = el.textContent || '';
-            el.innerHTML = '<img class="avatar-img" src="' + url + '" alt="">';
+            el.innerHTML = '<img src="' + url + '" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:50%;display:block;">';
             if (initialText) {
                 var span = document.createElement('span');
                 span.className = 'avatar-initial';
@@ -9560,7 +9701,13 @@ function updateSidebarFooter() {
     var initial = displayName.charAt(0).toUpperCase();
     
     usernameEl.textContent = displayName;
-    if (subEl) subEl.textContent = '@' + user.username;
+    // Apply username color to sidebar display name
+    var userColor = (myProfile && myProfile.username_color) || '#4fc3f7';
+    usernameEl.style.color = userColor;
+    if (subEl) {
+        subEl.textContent = '@' + user.username;
+        subEl.style.color = ''; // keep subtitle default muted color
+    }
     
     // Remove stale data attributes
     avatarEl.removeAttribute('data-profile-pic');
@@ -9606,6 +9753,8 @@ function updateProfileSettingsUI(data) {
     var displayNameDisplay = document.getElementById('profile-display-name-display');
     var nameInput = document.getElementById('profile-display-name-input');
     var saveStatus = document.getElementById('profile-save-status');
+    var colorPicker = document.getElementById('username-color-picker');
+    var colorPreview = document.getElementById('username-color-preview');
     
     if (!avatarEl) return;
     
@@ -9613,9 +9762,22 @@ function updateProfileSettingsUI(data) {
     var initial = displayName.charAt(0).toUpperCase();
     
     if (usernameDisplay) usernameDisplay.textContent = '@' + user.username;
-    if (displayNameDisplay) displayNameDisplay.textContent = displayName;
+    if (displayNameDisplay) {
+        displayNameDisplay.textContent = displayName;
+        // Apply username color to preview
+        var color = (data && data.username_color) || '#4fc3f7';
+        displayNameDisplay.style.color = color;
+    }
     if (nameInput) nameInput.value = data && data.display_name ? data.display_name : '';
     if (saveStatus) saveStatus.textContent = '';
+    
+    // Set color picker value
+    var userColor = (data && data.username_color) || '#4fc3f7';
+    if (colorPicker) colorPicker.value = userColor;
+    if (colorPreview) {
+        colorPreview.style.color = userColor;
+        colorPreview.style.borderColor = userColor;
+    }
     
     if (data && data.profile_picture_file_id) {
         var picUrl = getProfilePicUrl(data.profile_picture_file_id, user.id);
@@ -9624,18 +9786,18 @@ function updateProfileSettingsUI(data) {
         } else {
             // Async load - show initial while loading
             avatarEl.innerHTML = initial;
-            // Try to fetch and cache
-            authFetch('/api/files/' + data.profile_picture_file_id + '/download').then(function (r) {
-                if (!r.ok) return null;
-                return r.blob();
-            }).then(function (blob) {
-                if (!blob) return;
-                var url = URL.createObjectURL(blob);
+            // Decrypted load using getProfilePicUrl which now handles decryption
+            getProfilePicUrl(data.profile_picture_file_id, user.id);
+            // Poll for cache
+            var checkCache = setInterval(function () {
                 var cacheKey = user.id + ':' + data.profile_picture_file_id;
-                profilePicCache[cacheKey] = url;
-                avatarEl.innerHTML = '<img src="' + url + '" alt="">';
-                updateSidebarFooter();
-            }).catch(function () {});
+                if (profilePicCache[cacheKey]) {
+                    avatarEl.innerHTML = '<img src="' + profilePicCache[cacheKey] + '" alt="">';
+                    updateSidebarFooter();
+                    clearInterval(checkCache);
+                }
+            }, 200);
+            setTimeout(function () { clearInterval(checkCache); }, 10000);
         }
     } else {
         avatarEl.innerHTML = initial;
@@ -9672,81 +9834,309 @@ async function saveDisplayName() {
     }
 }
 
-// Upload profile picture (uses chunked upload flow)
-async function uploadProfilePic(file) {
-    if (!file) return;
-    if (!file.type.startsWith('image/')) {
+// ===== Profile Picture Crop Modal =====
+let profileCropState = {
+    file: null,
+    image: null,
+    naturalWidth: 0,
+    naturalHeight: 0,
+    cropX: 0,
+    cropY: 0,
+    cropSize: 420,
+    maxCropSize: 0,
+    isDragging: false,
+    isResizing: false,
+    dragStartX: 0,
+    dragStartY: 0,
+    startLeft: 0,
+    startTop: 0,
+    startSize: 0
+};
+
+function setupProfileCropModal() {
+    var modal = document.getElementById('profile-crop-modal');
+    if (!modal) return;
+    
+    document.getElementById('cancel-profile-crop')?.addEventListener('click', function () {
+        modal.style.display = 'none';
+        profileCropState = { file: null, image: null, naturalWidth: 0, naturalHeight: 0, cropX: 0, cropY: 0, cropSize: 420, maxCropSize: 0, isDragging: false, isResizing: false, dragStartX: 0, dragStartY: 0, startLeft: 0, startTop: 0, startSize: 0 };
+    });
+    
+    document.getElementById('confirm-profile-crop')?.addEventListener('click', processAndUploadProfilePic);
+}
+
+function openProfileCrop(file) {
+    if (!file || !file.type.startsWith('image/')) {
         var status = document.getElementById('profile-save-status');
         if (status) { status.textContent = 'Please select an image file'; status.className = 'profile-save-status error'; }
         return;
     }
+    
+    profileCropState.file = file;
+    var reader = new FileReader();
+    reader.onload = function (e) {
+        var img = new Image();
+        img.onload = function () {
+            profileCropState.image = img;
+            profileCropState.naturalWidth = img.naturalWidth;
+            profileCropState.naturalHeight = img.naturalHeight;
+            
+            var cropImg = document.getElementById('profile-crop-image');
+            cropImg.src = e.target.result;
+            
+            // Show crop step
+            document.getElementById('profile-crop-modal').style.display = 'flex';
+            document.getElementById('profile-crop-progress').style.display = 'none';
+            document.getElementById('profile-crop-error').style.display = 'none';
+            
+            // Init crop box centered
+            setTimeout(function () {
+                initProfileCropBox(cropImg);
+            }, 100);
+        };
+        img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+}
+
+function initProfileCropBox(cropImg) {
+    var frame = document.getElementById('profile-crop-frame');
+    var overlay = document.getElementById('profile-crop-overlay');
+    var cropBox = document.getElementById('profile-crop-box');
+    var handle = document.getElementById('profile-crop-handle');
+    
+    // Calculate display size based on image natural dimensions
+    var maxW = frame.clientWidth - 4;
+    var maxH = frame.clientHeight - 4;
+    var displayW = Math.min(cropImg.naturalWidth, maxW);
+    var displayH = Math.min(cropImg.naturalHeight, maxH);
+    var imgRatio = cropImg.naturalWidth / cropImg.naturalHeight;
+    if (displayW / displayH > imgRatio) {
+        displayW = displayH * imgRatio;
+    } else {
+        displayH = displayW / imgRatio;
+    }
+    
+    cropImg.style.width = displayW + 'px';
+    cropImg.style.height = displayH + 'px';
+    
+    // Initial crop: centered square
+    var initSize = Math.min(displayW, displayH);
+    var startLeft = Math.round((displayW - initSize) / 2);
+    var startTop = Math.round((displayH - initSize) / 2);
+    
+    cropBox.style.left = startLeft + 'px';
+    cropBox.style.top = startTop + 'px';
+    cropBox.style.width = initSize + 'px';
+    cropBox.style.height = initSize + 'px';
+    overlay.style.display = '';
+    
+    // Store crop state in natural image coordinates
+    var scaleX = cropImg.naturalWidth / displayW;
+    var scaleY = cropImg.naturalHeight / displayH;
+    profileCropState.cropX = Math.round(startLeft * scaleX);
+    profileCropState.cropY = Math.round(startTop * scaleY);
+    profileCropState.cropSize = Math.round(initSize * scaleX);
+    profileCropState.maxCropSize = Math.min(cropImg.naturalWidth, cropImg.naturalHeight);
+    
+    // Mouse/touch drag for crop box
+    function startDrag(e) {
+        var ev = e.touches ? e.touches[0] : e;
+        profileCropState.isDragging = true;
+        profileCropState.dragStartX = ev.clientX;
+        profileCropState.dragStartY = ev.clientY;
+        profileCropState.startLeft = parseInt(cropBox.style.left) || 0;
+        profileCropState.startTop = parseInt(cropBox.style.top) || 0;
+        e.preventDefault();
+    }
+    
+    function onDrag(e) {
+        if (!profileCropState.isDragging) return;
+        var ev = e.touches ? e.touches[0] : e;
+        var dx = ev.clientX - profileCropState.dragStartX;
+        var dy = ev.clientY - profileCropState.dragStartY;
+        var newLeft = Math.max(0, Math.min(displayW - parseInt(cropBox.style.width), profileCropState.startLeft + dx));
+        var newTop = Math.max(0, Math.min(displayH - parseInt(cropBox.style.height), profileCropState.startTop + dy));
+        cropBox.style.left = newLeft + 'px';
+        cropBox.style.top = newTop + 'px';
+        
+        var scaleX = cropImg.naturalWidth / displayW;
+        var scaleY = cropImg.naturalHeight / displayH;
+        profileCropState.cropX = Math.round(newLeft * scaleX);
+        profileCropState.cropY = Math.round(newTop * scaleY);
+        e.preventDefault();
+    }
+    
+    function endDrag() {
+        profileCropState.isDragging = false;
+        profileCropState.isResizing = false;
+    }
+    
+    // Resize via handle
+    function startResize(e) {
+        var ev = e.touches ? e.touches[0] : e;
+        profileCropState.isResizing = true;
+        profileCropState.dragStartX = ev.clientX;
+        profileCropState.dragStartY = ev.clientY;
+        profileCropState.startSize = parseInt(cropBox.style.width) || initSize;
+        profileCropState.startLeft = parseInt(cropBox.style.left) || 0;
+        profileCropState.startTop = parseInt(cropBox.style.top) || 0;
+        e.preventDefault();
+        e.stopPropagation();
+    }
+    
+    function onResize(e) {
+        if (!profileCropState.isResizing) return;
+        var ev = e.touches ? e.touches[0] : e;
+        var dx = ev.clientX - profileCropState.dragStartX;
+        var dy = ev.clientY - profileCropState.dragStartY;
+        var maxDisplaySize = Math.min(displayW - profileCropState.startLeft, displayH - profileCropState.startTop,
+            profileCropState.maxCropSize / Math.max(scaleX, scaleY));
+        var newSize = Math.max(30, Math.min(maxDisplaySize, profileCropState.startSize + Math.max(dx, dy)));
+        cropBox.style.width = newSize + 'px';
+        cropBox.style.height = newSize + 'px';
+        
+        var natX = Math.round((profileCropState.startLeft) * scaleX);
+        var natY = Math.round((profileCropState.startTop) * scaleY);
+        profileCropState.cropX = natX;
+        profileCropState.cropY = natY;
+        profileCropState.cropSize = Math.round(newSize * scaleX);
+        e.preventDefault();
+    }
+    
+    cropBox.addEventListener('mousedown', startDrag);
+    cropBox.addEventListener('touchstart', startDrag, { passive: false });
+    document.addEventListener('mousemove', onDrag);
+    document.addEventListener('touchmove', onDrag, { passive: false });
+    document.addEventListener('mouseup', endDrag);
+    document.addEventListener('touchend', endDrag);
+    
+    handle.addEventListener('mousedown', startResize);
+    handle.addEventListener('touchstart', startResize, { passive: false });
+    document.addEventListener('mousemove', onResize);
+    document.addEventListener('touchmove', onResize, { passive: false });
+    document.addEventListener('mouseup', endDrag);
+    document.addEventListener('touchend', endDrag);
+}
+
+// Process and upload cropped profile picture with encryption
+async function processAndUploadProfilePic() {
+    var progressContainer = document.getElementById('profile-crop-progress');
+    var progressFill = document.getElementById('profile-crop-progress-fill');
+    var progressText = document.getElementById('profile-crop-progress-text');
+    var errorDiv = document.getElementById('profile-crop-error');
+    
+    if (!profileCropState.image) return;
+    if (errorDiv) errorDiv.style.display = 'none';
+    if (progressContainer) progressContainer.style.display = 'block';
+    if (progressText) progressText.textContent = 'Processing image...';
+    if (progressFill) progressFill.style.width = '2%';
+    
     try {
-        // Step 1: Init upload (upload raw data - no encryption for profile pics)
+        var img = profileCropState.image;
+        
+        // Crop the selected square region and resize to 420x420 max
+        var cropX = profileCropState.cropX || 0;
+        var cropY = profileCropState.cropY || 0;
+        var cropSize = profileCropState.cropSize || Math.min(profileCropState.naturalWidth || 420, profileCropState.naturalHeight || 420);
+        
+        var canvas = document.createElement('canvas');
+        var ctx = canvas.getContext('2d');
+        
+        var MAX_PIC_SIZE = 420;
+        var finalSize = Math.min(cropSize, MAX_PIC_SIZE);
+        if (finalSize < 1) finalSize = Math.min(profileCropState.naturalWidth || 420, profileCropState.naturalHeight || 420, MAX_PIC_SIZE);
+        canvas.width = finalSize;
+        canvas.height = finalSize;
+        ctx.drawImage(img, cropX, cropY, cropSize, cropSize, 0, 0, finalSize, finalSize);
+        
+        var blob = await new Promise(function (resolve) { canvas.toBlob(resolve, 'image/png'); });
+        if (!blob) throw new Error('Failed to process image');
+        
+        if (progressText) progressText.textContent = 'Encrypting...';
+        if (progressFill) progressFill.style.width = '10%';
+        
+        // Generate a file key for encryption
+        var fileKey = E2ECrypto.generateFileKey();
+        var fileKeyB64 = E2ECrypto.arrayBufferToBase64(fileKey);
+        
+        if (progressText) progressText.textContent = 'Uploading...';
+        if (progressFill) progressFill.style.width = '15%';
+        
+        // Init file upload
         var initRes = await authFetch('/api/files/init', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ size: file.size, mime: file.type || 'image/png' })
+            body: JSON.stringify({ size: blob.size, mime: 'image/png' })
         });
-        if (!initRes.ok) {
-            var status = document.getElementById('profile-save-status');
-            if (status) { status.textContent = 'Upload init failed'; status.className = 'profile-save-status error'; }
-            return;
-        }
+        if (!initRes.ok) throw new Error('Upload init failed');
         var initData = await initRes.json();
         var fileId = initData.file_id;
-        if (!fileId) {
-            var status = document.getElementById('profile-save-status');
-            if (status) { status.textContent = 'Upload response missing file ID'; status.className = 'profile-save-status error'; }
-            return;
-        }
+        if (!fileId) throw new Error('No file ID received');
         
-        // Step 2: Upload raw chunks (no encryption so profile pic is viewable by all)
+        // Upload encrypted chunks
         var CHUNK_SIZE = 64 * 1024;
-        var totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+        var totalChunks = Math.ceil(blob.size / CHUNK_SIZE);
+        var arrayBuffer = await blob.arrayBuffer();
+        var bytes = new Uint8Array(arrayBuffer);
+        
         for (var i = 0; i < totalChunks; i++) {
             var start = i * CHUNK_SIZE;
-            var end = Math.min(start + CHUNK_SIZE, file.size);
-            var rawChunk = await file.slice(start, end).arrayBuffer();
+            var end = Math.min(start + CHUNK_SIZE, bytes.length);
+            var chunkData = bytes.slice(start, end);
+            
+            // Encrypt chunk
+            var encryptedChunk = E2ECrypto.encryptFileChunk(fileKey, chunkData);
+            
             var chunkRes = await authFetch('/api/files/' + fileId + '/chunk/' + i, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/octet-stream' },
-                body: rawChunk
+                body: encryptedChunk
             });
-            if (!chunkRes.ok) {
-                var status = document.getElementById('profile-save-status');
-                if (status) { status.textContent = 'Upload chunk ' + (i + 1) + ' failed'; status.className = 'profile-save-status error'; }
-                return;
+            if (!chunkRes.ok) throw new Error('Chunk ' + (i + 1) + ' upload failed');
+            
+            if (progressFill) {
+                var pct = 15 + ((i + 1) / totalChunks) * 70;
+                progressFill.style.width = Math.min(pct, 85) + '%';
             }
         }
         
-        // Step 3: Complete upload
-        var completeRes = await authFetch('/api/files/' + fileId + '/complete', { method: 'POST' });
-        if (!completeRes.ok) {
-            var status = document.getElementById('profile-save-status');
-            if (status) { status.textContent = 'Upload finalize failed'; status.className = 'profile-save-status error'; }
-            return;
-        }
+        if (progressText) progressText.textContent = 'Finalizing...';
+        if (progressFill) progressFill.style.width = '90%';
         
-        // Step 4: Update profile with the file ID
+        // Complete upload
+        var completeRes = await authFetch('/api/files/' + fileId + '/complete', { method: 'POST' });
+        if (!completeRes.ok) throw new Error('Upload finalize failed');
+        
+        // Cache file key for future decryption
+        fileKeyCache.set(fileId, fileKeyB64);
+        
+        // Update profile with file ID and file key
         var res = await authFetch('/api/profile', {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ profile_picture_file_id: fileId })
+            body: JSON.stringify({ 
+                profile_picture_file_id: fileId,
+                profile_picture_file_key: fileKeyB64
+            })
         });
         if (!res.ok) {
-            var err = await res.json();
-            var status = document.getElementById('profile-save-status');
-            if (status) { status.textContent = err.error || 'Failed to set profile picture'; status.className = 'profile-save-status error'; }
-            return;
+            var errData = await res.json();
+            throw new Error(errData.error || 'Failed to set profile picture');
         }
+        
+        // Close modal
+        document.getElementById('profile-crop-modal').style.display = 'none';
+        profileCropState = { file: null, image: null, naturalWidth: 0, naturalHeight: 0, cropX: 0, cropY: 0, cropSize: 420, maxCropSize: 0, isDragging: false, isResizing: false, dragStartX: 0, dragStartY: 0, startLeft: 0, startTop: 0, startSize: 0 };
+        
         var status = document.getElementById('profile-save-status');
         if (status) { status.textContent = 'Profile picture updated!'; status.className = 'profile-save-status'; }
         setTimeout(function () { if (status) status.textContent = ''; }, 3000);
         await loadMyProfile();
         await loadDmConversations();
     } catch (e) {
-        var status = document.getElementById('profile-save-status');
-        if (status) { status.textContent = 'Failed to upload profile picture'; status.className = 'profile-save-status error'; }
+        if (errorDiv) { errorDiv.textContent = e.message || 'Failed to upload profile picture'; errorDiv.style.display = 'block'; }
+        if (progressContainer) progressContainer.style.display = 'none';
     }
 }
 
@@ -9776,31 +10166,89 @@ async function removeProfilePic() {
 }
 
 // Wire up profile settings event handlers
+// Save username color
+async function saveUsernameColor() {
+    var colorPicker = document.getElementById('username-color-picker');
+    var status = document.getElementById('profile-save-status');
+    var color = colorPicker ? colorPicker.value : '#4fc3f7';
+    try {
+        var res = await authFetch('/api/profile', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username_color: color })
+        });
+        if (!res.ok) {
+            var err = await res.json();
+            if (status) { status.textContent = err.error || 'Failed to save color'; status.className = 'profile-save-status error'; }
+            return;
+        }
+        if (status) { status.textContent = 'Username color saved!'; status.className = 'profile-save-status'; }
+        setTimeout(function () { if (status) status.textContent = ''; }, 3000);
+        await loadMyProfile();
+    } catch (e) {
+        if (status) { status.textContent = 'Failed to connect to server'; status.className = 'profile-save-status error'; }
+    }
+}
+
 function setupProfileSettings() {
     var saveBtn = document.getElementById('profile-save-name-btn');
     var uploadBtn = document.getElementById('profile-pic-upload-btn');
     var removeBtn = document.getElementById('profile-pic-remove-btn');
     var picInput = document.getElementById('profile-pic-input');
+    var colorSaveBtn = document.getElementById('username-color-save-btn');
+    var colorPicker = document.getElementById('username-color-picker');
+    var colorPreview = document.getElementById('username-color-preview');
     
+    // Profile name save
     if (saveBtn) {
         saveBtn.addEventListener('click', saveDisplayName);
     }
+    
+    // Profile picture upload with crop
     if (uploadBtn && picInput) {
         uploadBtn.addEventListener('click', function () { picInput.click(); });
         picInput.addEventListener('change', function (e) {
             var file = e.target.files[0];
-            if (file) uploadProfilePic(file);
+            if (file) openProfileCrop(file);
             e.target.value = '';
         });
     }
     if (removeBtn) {
         removeBtn.addEventListener('click', removeProfilePic);
     }
+    
+    // Username color
+    if (colorPicker && colorPreview) {
+        colorPicker.addEventListener('input', function () {
+            colorPreview.style.color = colorPicker.value;
+            colorPreview.style.borderColor = colorPicker.value;
+        });
+    }
+    if (colorSaveBtn) {
+        colorSaveBtn.addEventListener('click', saveUsernameColor);
+    }
+    
+    // Color presets
+    document.querySelectorAll('.color-preset').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            var color = btn.dataset.color;
+            if (colorPicker) {
+                colorPicker.value = color;
+                if (colorPreview) {
+                    colorPreview.style.color = color;
+                    colorPreview.style.borderColor = color;
+                }
+            }
+        });
+    });
+    
+    // Profile crop modal
+    setupProfileCropModal();
 }
 
 // Also call setupProfileSettings on load
 document.addEventListener('DOMContentLoaded', function () {
-    setupProfileSettings();
+    setTimeout(setupProfileSettings, 500);
 });
 
 // ===== Favorite GIF on .gif file cards =====
