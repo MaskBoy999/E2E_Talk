@@ -3290,8 +3290,9 @@ async function navigateToMessage(serverId, channelId, dmChannelId, messageId) {
         }, 1200);
     } else if (serverId && channelId) {
         if (serverId !== currentServerId) {
-            selectServer(serverId);
+            await selectServer(serverId);
         }
+        clearUnreadChannelMentions(channelId);
         var chEl = document.querySelector('.channel-item[data-id="' + channelId + '"]');
         if (chEl) {
             chEl.click();
@@ -4481,6 +4482,9 @@ async function navigateToMessage(serverId, channelId, messageId) {
     if (serverId !== currentServerId) {
         await selectServer(serverId);
     }
+
+    // Clear mention badge for this channel
+    clearUnreadChannelMentions(channelId);
 
     // Wait for channel element to appear
     const channelEl = await waitForElement('.channel-item[data-id="' + channelId + '"]', 5000);
