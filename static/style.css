@@ -1718,6 +1718,21 @@ body {
     pointer-events: none;
 }
 
+/* Muted DM styling */
+.dm-item.muted {
+    opacity: 0.5;
+}
+.dm-item.muted::after {
+    content: '🔇';
+    font-size: 11px;
+    margin-left: 4px;
+    opacity: 0.7;
+    position: absolute;
+    right: 16px;
+    top: 50%;
+    transform: translateY(-50%);
+}
+
 .btn-unfriend {
     background: none;
     border: 1px solid var(--danger);
@@ -1908,6 +1923,8 @@ body {
 
 .settings-modal-content {
     max-width: 460px;
+    max-height: 85vh;
+    overflow-y: auto;
 }
 
 .settings-tabs {
@@ -2293,11 +2310,79 @@ body {
     border: 2px solid var(--accent);
     border-radius: 6px;
     color: var(--accent);
-    transition: color 0.2s, border-color 0.2s;
+    transition: color 0.2s, border-color 0.2s, text-shadow 0.2s;
     min-width: 80px;
     text-align: center;
+    text-shadow: 0 0 4px rgba(0,0,0,0.7), 0 0 8px rgba(0,0,0,0.5);
 }
 
+/* ===== Border Glow Options ===== */
+.glow-options-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+    gap: 6px;
+    margin: 8px 0;
+}
+
+.glow-option-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 8px 4px;
+    background: var(--bg-primary);
+    border: 2px solid var(--bg-border);
+    border-radius: 8px;
+    cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease, transform 0.1s ease;
+}
+
+.glow-option-btn:hover {
+    border-color: var(--accent);
+    background: rgba(79, 195, 247, 0.08);
+    transform: translateY(-1px);
+}
+
+.glow-option-btn.selected {
+    border-color: var(--accent);
+    background: rgba(79, 195, 247, 0.15);
+    box-shadow: 0 0 8px rgba(79, 195, 247, 0.3);
+}
+
+.glow-option-swatch {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    display: block;
+    flex-shrink: 0;
+    border: 1px solid rgba(255,255,255,0.1);
+    transition: transform 0.1s ease;
+}
+
+.glow-option-btn:hover .glow-option-swatch {
+    transform: scale(1.2);
+}
+
+.glow-option-btn.selected .glow-option-swatch {
+    transform: scale(1.1);
+    box-shadow: 0 0 6px rgba(255,255,255,0.2);
+}
+
+.glow-option-name {
+    font-size: 9px;
+    color: var(--text-muted);
+    text-align: center;
+    line-height: 1.2;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+}
+
+.glow-option-btn.selected .glow-option-name {
+    color: var(--accent);
+    font-weight: 600;
+}
 
 
 /* Message avatar with profile picture */
@@ -2326,11 +2411,41 @@ body {
     color: var(--accent);
     font-size: clamp(13px, 2.5vw, 15px);
     text-shadow: 0 0 3px rgba(0,0,0,0.8), 0 0 2px rgba(0,0,0,0.6);
+    /* Dynamic text-shadow applied via JS with getDisplayNameTextShadow() for color-specific glow */
+    transition: text-shadow 0.2s ease;
+}
+.message .display-name:hover {
+    text-shadow: 0 0 6px rgba(0,0,0,0.9), 0 0 12px rgba(0,0,0,0.6), 0 0 20px rgba(0,0,0,0.3) !important;
 }
 
 /* Sidebar footer with avatar */
 .sidebar-footer {
     gap: 6px;
+}
+
+/* DM Chat Header Profile Picture */
+.dm-chat-header-pic {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    object-fit: cover;
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    vertical-align: middle;
+    margin-right: 6px;
+    background: var(--accent);
+    color: var(--bg-primary);
+    font-weight: 700;
+    font-size: 12px;
+    overflow: hidden;
+}
+.dm-chat-header-pic img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: 50%;
 }
 
 .footer-user {
@@ -3970,9 +4085,30 @@ body {
     font-size: 11px;
     color: #888;
     padding-left: 24px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: wrap;
 }
 .forward-label:hover .forward-source-label {
     color: #4fc3f7;
+}
+.forward-channel-badge {
+    display: inline-block;
+    background: rgba(79, 195, 247, 0.12);
+    color: #4fc3f7;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 600;
+}
+.forward-server-badge {
+    display: inline-block;
+    background: rgba(255,255,255,0.08);
+    color: #aaa;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 10px;
 }
 .forward-preview {
     border-left: 3px solid #888;

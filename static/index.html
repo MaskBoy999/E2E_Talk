@@ -317,6 +317,18 @@
 
                 </div>
 
+                <div class="settings-group">
+                    <h4>Username Glow / Border</h4>
+                    <p class="settings-hint">Choose a contrasting glow color for your display name. This helps your name stand out against any background.</p>
+                    <div class="border-glow-options" id="border-glow-options">
+                        <div style="color:#888;font-size:13px;padding:8px 0;">Select a username color first to see glow options</div>
+                    </div>
+                    <div class="username-color-row" style="margin-top:8px;">
+                        <span class="username-color-preview" id="border-glow-preview">Glow Preview</span>
+                        <button class="btn-profile-action btn-primary" id="border-glow-save-btn">Save Glow</button>
+                    </div>
+                </div>
+
                 <div class="settings-group settings-danger">
                     <h4>Danger Zone</h4>
                     <p class="settings-hint">Permanently delete your account and all associated data. This cannot be undone.</p>
@@ -397,6 +409,11 @@
                         <button class="btn-reauth-confirm" id="reauth-confirm-btn">Confirm</button>
                         <p id="reauth-error" class="error-text" style="display:none;margin-top:8px;"></p>
                     </div>
+                </div>
+                <div class="settings-group" style="margin-top:16px;border-top:1px solid var(--bg-border);padding-top:16px">
+                    <h4>Clear All Local Data</h4>
+                    <p class="settings-hint">Clears all stored logins, keys, settings, cookies, and cached data. Use this if you encounter login or account issues such as constraint errors when creating a new account after logging out.</p>
+                    <button class="btn-delete-account" id="clear-all-data-btn">🗑️ Clear All Data &amp; Sign Out</button>
                 </div>
             </div>
 

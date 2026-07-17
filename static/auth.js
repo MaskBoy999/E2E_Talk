@@ -31,6 +31,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
     showRegister.addEventListener('click', (e) => {
         e.preventDefault();
+        // Clear stale data to avoid FK constraint issues on new registration
+        localStorage.removeItem('e2e_friend_code');
+        // Remove old E2E identity keys tied to the previous account
+        // (keys are account-scoped by user ID suffix, but stale ones may conflict)
+        var oldUser = JSON.parse(localStorage.getItem('user') || '{}');
+        if (oldUser && oldUser.id) {
+            localStorage.removeItem('e2e_identity_private_' + oldUser.id);
+            localStorage.removeItem('e2e_identity_public_' + oldUser.id);
+        }
         loginForm.style.display = 'none';
         registerForm.style.display = 'block';
         errorDiv.style.display = 'none';
@@ -47,6 +56,24 @@ document.addEventListener('DOMContentLoaded', () => {
         errorDiv.textContent = msg;
         errorDiv.style.display = 'block';
     }
+
+    // Clear all client-side data: localStorage, sessionStorage, and cookies
+    function clearAllClientData() {
+        localStorage.clear();
+        try { sessionStorage.clear(); } catch (_) {}
+        document.cookie.split(';').forEach(function(c) {
+            document.cookie = c.replace(/^ +/, '').replace(/=.*/, '=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/');
+        });
+    }
+
+    // Clear All Data button - nuke everything and reload
+    document.getElementById('clear-all-data-btn').addEventListener('click', function () {
+        if (!confirm('This will clear ALL local data (logins, keys, settings) and reload the page. Continue?')) return;
+        // Call server logout to clear HttpOnly cookie
+        fetch('/api/logout', { method: 'POST' }).catch(function() {});
+        clearAllClientData();
+        window.location.reload();
+    });
 
     function setLoading(form, loading) {
         const btn = form.querySelector('button[type="submit"]');

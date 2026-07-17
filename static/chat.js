@@ -1,4 +1,4 @@
-    console.log('chat.js v23 loaded - bigger emoji, bigger text, GIF/sticker viewer, responsive panel');
+    console.log('chat.js v26 loaded - proportional contrast glow');
 
 function generateCode(len) {
     const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -30,9 +30,10 @@ let unreadMentionsByChannel = {}; // channelId -> { count, message_id }
 // Chronological mention inbox: [{ id, serverId, channelId, dmChannelId, messageId, senderUsername, channelName, serverName, type: 'mention'|'reply'|'dm', time }]
 let mentionItems = [];
 
-// Muted servers and channels (IDs stored in localStorage as JSON arrays)
+// Muted servers, channels, and DMs (IDs stored in localStorage as JSON arrays)
 var mutedServers = [];
 var mutedChannels = [];
+var mutedDms = [];
 
 function loadMutedState() {
     try {
@@ -40,9 +41,12 @@ function loadMutedState() {
         mutedServers = s ? JSON.parse(s) : [];
         var c = localStorage.getItem('muted_channels');
         mutedChannels = c ? JSON.parse(c) : [];
+        var d = localStorage.getItem('muted_dms');
+        mutedDms = d ? JSON.parse(d) : [];
     } catch (e) {
         mutedServers = [];
         mutedChannels = [];
+        mutedDms = [];
     }
 }
 
@@ -50,6 +54,7 @@ function saveMutedState() {
     try {
         localStorage.setItem('muted_servers', JSON.stringify(mutedServers));
         localStorage.setItem('muted_channels', JSON.stringify(mutedChannels));
+        localStorage.setItem('muted_dms', JSON.stringify(mutedDms));
     } catch (e) {}
     renderMutedList();
 }
@@ -70,6 +75,12 @@ function renderMutedList() {
         var name = chEl ? chEl.dataset.name : cid.slice(0, 8);
         html += '<div class="muted-list-item"><span>🔇 Channel: #' + escapeHtml(name) + '</span><button class="unmute-btn" data-type="channel" data-id="' + cid + '">Unmute</button></div>';
     });
+    // Muted DMs
+    mutedDms.forEach(function (did) {
+        var dmConv = dmConversations.find(function (c) { return c.dm_channel_id === did; });
+        var name = dmConv ? (dmConv.other_display_name || dmConv.other_username) : did.slice(0, 8);
+        html += '<div class="muted-list-item"><span>🔇 DM: ' + escapeHtml(name) + '</span><button class="unmute-btn" data-type="dm" data-id="' + escapeAttr(did) + '">Unmute</button></div>';
+    });
     if (!html) {
         container.innerHTML = '<div class="muted-empty">No muted servers or channels</div>';
     } else {
@@ -80,7 +91,8 @@ function renderMutedList() {
                 var type = btn.dataset.type;
                 var id = btn.dataset.id;
                 if (type === 'server') toggleMuteServer(id);
-                else toggleMuteChannel(id, null);
+                else if (type === 'channel') toggleMuteChannel(id, null);
+                else if (type === 'dm') toggleMuteDm(id);
             });
         });
     }
@@ -89,6 +101,23 @@ function renderMutedList() {
 function isMuted(serverId, channelId) {
     if (serverId && mutedServers.indexOf(serverId) !== -1) return true;
     if (channelId && mutedChannels.indexOf(channelId) !== -1) return true;
+    return false;
+}
+
+function isDmMuted(dmChannelId) {
+    return dmChannelId && mutedDms.indexOf(dmChannelId) !== -1;
+}
+
+// Check if a user (by ID) has their DM muted — used to suppress
+// server notifications (mentions, replies) from that user too.
+function isUserMuted(userId) {
+    if (!userId || mutedDms.length === 0 || !dmConversations) return false;
+    for (var i = 0; i < dmConversations.length; i++) {
+        var conv = dmConversations[i];
+        if (conv && conv.other_user_id === userId && mutedDms.indexOf(conv.dm_channel_id) !== -1) {
+            return true;
+        }
+    }
     return false;
 }
 
@@ -115,10 +144,32 @@ function toggleMuteServer(serverId) {
     updateChannelMutedUI();
 }
 
+function toggleMuteDm(dmChannelId) {
+    var idx = mutedDms.indexOf(dmChannelId);
+    if (idx !== -1) {
+        mutedDms.splice(idx, 1);
+    } else {
+        mutedDms.push(dmChannelId);
+    }
+    saveMutedState();
+    updateDmMutedUI();
+}
+
 function updateChannelMutedUI() {
     document.querySelectorAll('.channel-item').forEach(function (el) {
         var cid = el.dataset.id;
         if (mutedChannels.indexOf(cid) !== -1) {
+            el.classList.add('muted');
+        } else {
+            el.classList.remove('muted');
+        }
+    });
+}
+
+function updateDmMutedUI() {
+    document.querySelectorAll('.dm-item').forEach(function (el) {
+        var did = el.dataset.dmId;
+        if (did && mutedDms.indexOf(did) !== -1) {
             el.classList.add('muted');
         } else {
             el.classList.remove('muted');
@@ -504,13 +555,31 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // Delete account
+    // Clear all client-side data: localStorage, sessionStorage, and cookies
+    function clearAllClientData() {
+        localStorage.clear();
+        try { sessionStorage.clear(); } catch (_) {}
+        // Clear all cookies for this domain (including HttpOnly ones via the server)
+        document.cookie.split(';').forEach(function(c) {
+            document.cookie = c.replace(/^ +/, '').replace(/=.*/, '=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/');
+        });
+    }
+
+    // Call the server-side logout endpoint to clear the HttpOnly cookie
+    async function serverLogout() {
+        try {
+            await fetch('/api/logout', { method: 'POST', headers: { 'Authorization': 'Bearer ' + token() } });
+        } catch (_) {}
+    }
+
     document.getElementById('delete-account-btn').addEventListener('click', async () => {
         if (!confirm('Are you sure you want to delete your account? This cannot be undone.')) return;
         if (!confirm('Really? All your messages, servers, and keys will be permanently lost.')) return;
         try {
             const res = await authFetch('/api/me', { method: 'DELETE' });
             if (res.ok) {
-                localStorage.clear();
+                clearAllClientData();
+                await serverLogout();
                 if (ws) ws.close();
                 window.location.href = 'login.html';
             } else {
@@ -522,9 +591,18 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    document.getElementById('logout-btn').addEventListener('click', () => {
-        localStorage.removeItem('token');
-        localStorage.removeItem('user');
+    document.getElementById('logout-btn').addEventListener('click', async () => {
+        await serverLogout();
+        clearAllClientData();
+        if (ws) ws.close();
+        window.location.href = 'login.html';
+    });
+
+    // Clear all data button in settings
+    document.getElementById('clear-all-data-btn').addEventListener('click', async () => {
+        if (!confirm('This will clear ALL local data (logins, keys, settings) and sign you out. Continue?')) return;
+        await serverLogout();
+        clearAllClientData();
         if (ws) ws.close();
         window.location.href = 'login.html';
     });
@@ -683,6 +761,7 @@ document.addEventListener('DOMContentLoaded', () => {
     var _cameraCaptureFlashOn = false;
     var _cameraCaptureCountdownEl = null;
     var _cameraCaptureCountdownTimer = null;
+    var _cameraFlashTimer = null;
     var _cameraCaptureFlashEl = null;
     var _cameraCaptureFlashIntensity = 35; // 0-100, white overlay brightness percentage
     var _cameraBrightnessCtrl = null; // Floating brightness control (root-level, above overlay)
@@ -1198,39 +1277,63 @@ document.addEventListener('DOMContentLoaded', () => {
     function captureCameraPhoto() {
         if (!_cameraCaptureVideo || !_cameraCaptureVideo.videoWidth) return;
         playShutterSound();
-        // Flash effect: white screen flash for all cameras when flash is on
+        // Flash effect: Flash BEFORE capturing the image so it's visible on screen
+        // before the frame is grabbed. We use requestAnimationFrame to let the
+        // browser paint the flash overlay before we draw to the canvas.
         if (_cameraCaptureFlashOn && _cameraCaptureFlashEl) {
             _cameraCaptureFlashEl.style.display = '';
-            setTimeout(function () {
-                if (_cameraCaptureFlashEl) _cameraCaptureFlashEl.style.display = 'none';
-            }, 500);
         }
-        if (!_cameraCaptureCanvas) {
-            _cameraCaptureCanvas = document.createElement('canvas');
-            _cameraCaptureCtx = _cameraCaptureCanvas.getContext('2d');
+        // Use requestAnimationFrame to let the browser composite the flash overlay
+        // before we capture the frame. If rAF isn't available, capture immediately.
+        var doCapture = function () {
+            if (!_cameraCaptureCanvas) {
+                _cameraCaptureCanvas = document.createElement('canvas');
+                _cameraCaptureCtx = _cameraCaptureCanvas.getContext('2d');
+            }
+            _cameraCaptureCanvas.width = _cameraCaptureVideo.videoWidth;
+            _cameraCaptureCanvas.height = _cameraCaptureVideo.videoHeight;
+            // Mirror the image if mirror toggle is on (horizontally flips the captured photo)
+            if (_cameraCaptureMirror) {
+                _cameraCaptureCtx.translate(_cameraCaptureCanvas.width, 0);
+                _cameraCaptureCtx.scale(-1, 1);
+            }
+            _cameraCaptureCtx.drawImage(_cameraCaptureVideo, 0, 0);
+            // Reset transform if we mirrored
+            if (_cameraCaptureMirror) {
+                _cameraCaptureCtx.setTransform(1, 0, 0, 1, 0, 0);
+            }
+            // Keep flash on for 800ms total from when it was first shown
+            // so it covers the entire capture moment and fades smoothly
+            if (_cameraCaptureFlashOn && _cameraCaptureFlashEl) {
+                // Cancel any existing flash timer
+                if (_cameraFlashTimer) {
+                    clearTimeout(_cameraFlashTimer);
+                }
+                _cameraFlashTimer = setTimeout(function () {
+                    if (_cameraCaptureFlashEl) _cameraCaptureFlashEl.style.display = 'none';
+                    _cameraFlashTimer = null;
+                }, 800);
+            }
+            _cameraCaptureCanvas.toBlob(function (blob) {
+                // Keep flash on a bit longer during the preview transition
+                if (_cameraCaptureFlashOn && _cameraCaptureFlashEl) {
+                    // Flash already has a timer running, let it finish naturally
+                }
+                var url = URL.createObjectURL(blob);
+                _cameraPhotoPreviewData = { blob: blob, url: url };
+                var previewImg = document.getElementById('camera-photo-preview-img');
+                if (previewImg) previewImg.src = url;
+                _cameraCaptureModal.style.display = 'none';
+                closeCameraCaptureStream();
+                _cameraPhotoPreviewEl.style.display = 'flex';
+            }, 'image/png');
+        };
+        // Use requestAnimationFrame to ensure the flash is painted before capture
+        if (typeof requestAnimationFrame !== 'undefined') {
+            requestAnimationFrame(doCapture);
+        } else {
+            doCapture();
         }
-        _cameraCaptureCanvas.width = _cameraCaptureVideo.videoWidth;
-        _cameraCaptureCanvas.height = _cameraCaptureVideo.videoHeight;
-        // Mirror the image if mirror toggle is on (horizontally flips the captured photo)
-        if (_cameraCaptureMirror) {
-            _cameraCaptureCtx.translate(_cameraCaptureCanvas.width, 0);
-            _cameraCaptureCtx.scale(-1, 1);
-        }
-        _cameraCaptureCtx.drawImage(_cameraCaptureVideo, 0, 0);
-        // Reset transform if we mirrored
-        if (_cameraCaptureMirror) {
-            _cameraCaptureCtx.setTransform(1, 0, 0, 1, 0, 0);
-        }
-        _cameraCaptureCanvas.toBlob(function (blob) {
-            // Show preview instead of directly uploading
-            var url = URL.createObjectURL(blob);
-            _cameraPhotoPreviewData = { blob: blob, url: url };
-            var previewImg = document.getElementById('camera-photo-preview-img');
-            if (previewImg) previewImg.src = url;
-            _cameraCaptureModal.style.display = 'none';
-            closeCameraCaptureStream();
-            _cameraPhotoPreviewEl.style.display = 'flex';
-        }, 'image/png');
     }
     
     function closeCameraCapture() {
@@ -2735,6 +2838,8 @@ function showBrowserNotification(title, body, onClick) {
 function trackUnreadMention(serverId, channelId, dmChannelId, messageId, senderUsername, channelName, serverName, notifType, senderId, senderProfilePic) {
     // Skip notification if the server or channel is muted
     if (isMuted(serverId, channelId)) return;
+    // Skip notification if the sender's DM is muted (cross-mute)
+    if (senderId && isUserMuted(senderId)) return;
     if (channelId && serverId) {
         // Server channel mention/reply
         if (channelId === currentChannelId && serverId === currentServerId) return;
@@ -3105,6 +3210,40 @@ function updateChannelBadges() {
 
 // --- Channel Context Menu (Right-click to mute) ---
 
+function showDmContextMenu(e, dmChannelId, otherUsername) {
+    // Remove any existing context menu
+    var existing = document.querySelector('.channel-context-menu');
+    if (existing) existing.remove();
+
+    var isMutedDm = mutedDms.indexOf(dmChannelId) !== -1;
+
+    var menu = document.createElement('div');
+    menu.className = 'channel-context-menu';
+    menu.style.left = e.clientX + 'px';
+    menu.style.top = e.clientY + 'px';
+
+    // DM mute toggle
+    var muteItem = document.createElement('div');
+    muteItem.className = 'context-menu-item';
+    muteItem.textContent = isMutedDm ? '🔇 Unmute DM with ' + otherUsername : '🔇 Mute DM with ' + otherUsername;
+    muteItem.addEventListener('click', function () {
+        toggleMuteDm(dmChannelId);
+        menu.remove();
+    });
+    menu.appendChild(muteItem);
+
+    document.body.appendChild(menu);
+
+    // Close on click outside
+    function closeMenu(e2) {
+        if (!menu.contains(e2.target)) {
+            menu.remove();
+            document.removeEventListener('click', closeMenu);
+        }
+    }
+    setTimeout(function () { document.addEventListener('click', closeMenu); }, 0);
+}
+
 function showChannelContextMenu(e, channelId, channelName) {
     // Remove any existing context menu
     var existing = document.querySelector('.channel-context-menu');
@@ -3276,7 +3415,9 @@ async function navigateToMessage(serverId, channelId, dmChannelId, messageId) {
             document.querySelectorAll('.channel-item').forEach(function (el) { el.classList.remove('active'); });
             var dmEl = document.querySelector('.dm-item[data-dm-id="' + dmChannelId + '"]');
             if (dmEl) dmEl.classList.add('active');
-            document.getElementById('channel-name').innerHTML = '<span>' + escapeHtml(conv.other_display_name || conv.other_username) + '</span><button class="btn-unfriend" id="unfriend-btn" title="Unfriend">Unfriend</button>';
+            var dmPicUrl = conv.other_profile_picture_file_id ? getProfilePicUrl(conv.other_profile_picture_file_id, conv.other_user_id) : null;
+            var dmChatHeaderPicHtml = dmPicUrl ? '<img class="dm-chat-header-pic" src="' + dmPicUrl + '" alt="">' : (conv.other_profile_picture_file_id ? '<div class="dm-chat-header-pic dm-chat-header-pic-load" data-profile-pic-load="' + conv.other_user_id + ':' + conv.other_profile_picture_file_id + '">' + (conv.other_display_name || conv.other_username || '?').charAt(0).toUpperCase() + '</div>' : '');
+            document.getElementById('channel-name').innerHTML = dmChatHeaderPicHtml + '<span>' + escapeHtml(conv.other_display_name || conv.other_username) + '</span><button class="btn-unfriend" id="unfriend-btn" title="Unfriend">Unfriend</button>';
             document.getElementById('message-input').disabled = false;
             document.getElementById('send-btn').disabled = false;
             clearUnreadDmMentions(dmChannelId);
@@ -3478,8 +3619,11 @@ function connectWebSocket(t) {
                         var msgList = document.getElementById('message-list');
                         var lastMsg = msgList ? msgList.lastElementChild : null;
                         if (lastMsg && lastMsg.classList.contains('mentioned')) {
-                            showMentionToast(data.message.sender_username, data.server_id, data.channel_id, data.message.id);
-                            if (data.server_id) flashServerIcon(data.server_id);
+                            // Skip toast/flash if the sender's DM is muted (cross-mute)
+                            if (!isUserMuted(data.message.sender_id)) {
+                                showMentionToast(data.message.sender_username, data.server_id, data.channel_id, data.message.id);
+                                if (data.server_id) flashServerIcon(data.server_id);
+                            }
                         }
                     } else if (data.server_id && data.message.encrypted_content) {
                         // Mention/reply notifications for other channels are handled by the
@@ -3503,14 +3647,19 @@ function connectWebSocket(t) {
                         }
                         await appendDmMessage(data.message, kp, otherPubKey);
                     } else {
-                        // Message is for a different DM channel - mark as unread
-                        unreadDms[data.dm_channel_id] = (unreadDms[data.dm_channel_id] || 0) + 1;
-                        updateDmStripBadge();
-                        updateMentionsBadge();
+                        // Message is for a different DM channel
+                        // Don't notify self (e.g. when forwarding a message to own DM)
+                        var isOwnMessage = data.message && data.message.sender_id === user.id;
+                        if (!isDmMuted(data.dm_channel_id) && !isOwnMessage) {
+                            // Only track unread + notify if not muted and not own message
+                            unreadDms[data.dm_channel_id] = (unreadDms[data.dm_channel_id] || 0) + 1;
+                            updateDmStripBadge();
+                            updateMentionsBadge();
+                            saveMentionState();
+                            showBrowserNotification('New DM', data.message.sender_username + ' sent you a message');
+                            playNotificationSound();
+                        }
                         if (viewMode === 'dms') renderDmSidebar();
-                        saveMentionState();
-                        showBrowserNotification('New DM', data.message.sender_username + ' sent you a message');
-                        playNotificationSound();
                     }
                     if (viewMode === 'dms') loadDmConversations();
                 }
@@ -3638,6 +3787,7 @@ function connectWebSocket(t) {
                             myProfile.profile_picture_file_id = data.profile_picture_file_id;
                             myProfile.profile_picture_file_key = data.profile_picture_file_key;
                             myProfile.username_color = data.username_color;
+                            myProfile.username_border_color = data.username_border_color;
                         }
                         localStorage.setItem('user', JSON.stringify(user));
                         updateSidebarFooter();
@@ -3648,6 +3798,7 @@ function connectWebSocket(t) {
                     if (data.display_name !== undefined) userDisplayNameCache[data.user_id].display_name = data.display_name;
                     if (data.profile_picture_file_id !== undefined) userDisplayNameCache[data.user_id].profile_picture_file_id = data.profile_picture_file_id;
                     if (data.username_color !== undefined) userDisplayNameCache[data.user_id].username_color = data.username_color;
+                    if (data.username_border_color !== undefined) userDisplayNameCache[data.user_id].username_border_color = data.username_border_color;
 
                     // Invalidate profile pic cache for this user
                     for (var pk in profilePicCache) {
@@ -3676,7 +3827,7 @@ function connectWebSocket(t) {
                 break;
             case 'mention_notification':
                 if (data.sender_username) {
-                    if (!isMuted(data.server_id, data.channel_id)) {
+                    if (!isMuted(data.server_id, data.channel_id) && !isUserMuted(data.sender_id)) {
                         trackUnreadMention(data.server_id, data.channel_id, data.dm_channel_id, data.message_id, data.sender_username, data.channel_name, data.server_name, 'mention', data.sender_id, data.sender_profile_pic);
                         playNotificationSound();
                         var loc = data.channel_name ? '#' + data.channel_name : (data.dm_channel_id ? 'your DM' : 'a channel');
@@ -3685,15 +3836,17 @@ function connectWebSocket(t) {
                         });
                         // Show in-app toast + flash server icon if currently viewing this channel
                         if (data.channel_id && data.channel_id === currentChannelId && data.server_id && data.server_id === currentServerId) {
-                            showMentionToast(data.sender_username, data.server_id, data.channel_id, data.message_id);
-                            flashServerIcon(data.server_id);
+                            if (!isUserMuted(data.sender_id)) {
+                                showMentionToast(data.sender_username, data.server_id, data.channel_id, data.message_id);
+                                flashServerIcon(data.server_id);
+                            }
                         }
                     }
                 }
                 break;
             case 'reply_notification':
                 if (data.sender_username) {
-                    if (!isMuted(data.server_id, data.channel_id)) {
+                    if (!isMuted(data.server_id, data.channel_id) && !isUserMuted(data.sender_id)) {
                         trackUnreadMention(data.server_id, data.channel_id, data.dm_channel_id, data.message_id, data.sender_username, data.channel_name, data.server_name, 'reply', data.sender_id, data.sender_profile_pic);
                         playNotificationSound();
                         var loc = data.channel_name ? '#' + data.channel_name : (data.dm_channel_id ? 'your DM' : 'a channel');
@@ -4072,12 +4225,15 @@ async function appendMessage(msg) {
         time = msg.timestamp || '';
     }
 
-    // Get username color for this sender
+    // Get username color and border color for this sender
     var senderColor = null;
+    var senderBorderColor = null;
     if (msg.sender_username_color) {
         senderColor = msg.sender_username_color;
+        senderBorderColor = msg.sender_border_color || null;
     } else if (userDisplayNameCache[msg.sender_id]) {
         senderColor = userDisplayNameCache[msg.sender_id].username_color;
+        senderBorderColor = userDisplayNameCache[msg.sender_id].username_border_color || null;
     }
 
     let textContent = '';
@@ -4148,8 +4304,8 @@ async function appendMessage(msg) {
         var fwdSenderPicUrl = fwdFileId && fwdUserId ? getProfilePicUrl(fwdFileId, fwdUserId) : null;
         var fwdPicHtml = fwdSenderPicUrl ? '<img class="forward-sender-pic" src="' + fwdSenderPicUrl + '" alt="">' : '<span class="forward-sender-initial">' + (forwardData.sender_username ? forwardData.sender_username.charAt(0).toUpperCase() : '?') + '</span>';
         contentHtml += '<div class="forward-label" data-source-server-id="' + escapeAttr(forwardData.source_server_id || '') + '" data-source-channel-id="' + escapeAttr(forwardData.source_channel_id || '') + '" data-source-message-id="' + escapeAttr(forwardData.source_message_id || '') + '">' +
-            '<div class="forward-sender-info">' + fwdPicHtml + '<span class="forward-sender-name"' + (forwardData.sender_color ? ' style="color:' + forwardData.sender_color + '"' : '') + '>' + escapeHtml(forwardData.sender_username || 'unknown') + '</span></div>' +
-            '<div class="forward-source-label"><strong>#' + escapeHtml(forwardData.source_channel_name || 'unknown') + '</strong> / <strong>' + escapeHtml(forwardData.source_server_name || 'unknown') + '</strong></div></div>';
+            '<div class="forward-sender-info">' + fwdPicHtml + '<span class="forward-sender-name"' + (forwardData.sender_color ? ' style="color:' + forwardData.sender_color + (forwardData.sender_border_color ? ';text-shadow:' + forwardData.sender_border_color : ';text-shadow:' + getDisplayNameTextShadow(forwardData.sender_color)) + '"' : '') + '>' + escapeHtml(forwardData.sender_username || 'unknown') + '</span></div>' +
+            '<div class="forward-source-label"><span class="forward-channel-badge">#' + escapeHtml(forwardData.source_channel_name || 'unknown') + '</span> <span class="forward-server-badge">' + escapeHtml(forwardData.source_server_name || 'unknown') + '</span></div></div>';
         // Forward text preview
         if (forwardData.preview_content && forwardData.preview_nonce) {
             try {
@@ -4225,7 +4381,7 @@ async function appendMessage(msg) {
                 '<div class="avatar">' + initial + '</div>')) +
         '<div class="content">' +
             '<div class="header">' +
-                '<span class="display-name"' + (senderColor ? ' style="color:' + senderColor + '"' : '') + '>' + escapeHtml(displayName) + '</span>' +
+                '<span class="display-name"' + (senderColor ? ' style="color:' + senderColor + ';text-shadow:' + getDisplayNameTextShadow(senderColor, senderBorderColor) + '"' : '') + '>' + escapeHtml(displayName) + '</span>' +
             '</div>' +
             contentHtml +
         '</div>' +
@@ -4458,7 +4614,9 @@ async function navigateToMessage(serverId, channelId, messageId) {
         var displayName = conv ? (conv.other_display_name || conv.other_username) : 'DM';
         const otherUser = conv ? { id: conv.other_user_id, username: conv.other_username, display_name: conv.other_display_name } : null;
         currentDmOtherUser = otherUser;
-        document.getElementById('channel-name').innerHTML = escapeHtml(displayName) + ' <button class="btn-unfriend" id="unfriend-btn" title="Unfriend">Unfriend</button>';
+        var dmPicUrl2 = conv && conv.other_profile_picture_file_id ? getProfilePicUrl(conv.other_profile_picture_file_id, conv.other_user_id) : null;
+        var dmChatHeaderPicHtml2 = dmPicUrl2 ? '<img class="dm-chat-header-pic" src="' + dmPicUrl2 + '" alt="">' : (conv && conv.other_profile_picture_file_id ? '<div class="dm-chat-header-pic dm-chat-header-pic-load" data-profile-pic-load="' + conv.other_user_id + ':' + conv.other_profile_picture_file_id + '">' + displayName.charAt(0).toUpperCase() + '</div>' : '');
+        document.getElementById('channel-name').innerHTML = dmChatHeaderPicHtml2 + escapeHtml(displayName) + ' <button class="btn-unfriend" id="unfriend-btn" title="Unfriend">Unfriend</button>';
         document.getElementById('message-input').disabled = false;
         document.getElementById('send-btn').disabled = false;
         await loadDmMessages(channelId, otherUser ? otherUser.id : '');
@@ -4973,6 +5131,7 @@ async function executeForward(targetServerId, targetServerName, targetChannelId,
             sender_id: senderId,
             sender_profile_pic_file_id: senderPicFileId,
             sender_color: senderColor,
+            sender_border_color: msgDiv.querySelector('.display-name')?.style?.textShadow || '',
             timestamp: msgDiv.querySelector('.time')?.textContent || '',
         };
         if (previewEncrypted) {
@@ -5169,7 +5328,19 @@ function renderDmSidebar() {
         item.addEventListener('click', () => {
             selectDmChannel(item.dataset.dmId, item.dataset.userId, item.dataset.username, item);
         });
+        // Right-click context menu for mute/unmute
+        item.addEventListener('contextmenu', function (e) {
+            e.preventDefault();
+            var dmId = item.dataset.dmId;
+            var username = item.dataset.username || 'user';
+            showDmContextMenu(e, dmId, username);
+        });
     });
+    
+    // Restore DM muted UI after render
+    updateDmMutedUI();
+
+    // Re-bind context menu to DM items after async profile pic loads change their content
 
     document.getElementById('add-friend-btn').addEventListener('click', () => {
         document.getElementById('friend-code-input').value = '';
@@ -5194,7 +5365,11 @@ async function selectDmChannel(dmChannelId, otherUserId, otherUsername, element)
     document.querySelectorAll('.channel-item').forEach(el => el.classList.remove('active'));
     if (element) element.classList.add('active');
 
-    document.getElementById('channel-name').innerHTML = '<span>' + escapeHtml(displayName) + '</span>' +
+    var convForPic = dmConversations.find(function (c) { return c.dm_channel_id === dmChannelId; });
+    var dmHeaderPicFileId = convForPic ? convForPic.other_profile_picture_file_id : null;
+    var dmHeaderPicUrl = dmHeaderPicFileId ? getProfilePicUrl(dmHeaderPicFileId, otherUserId) : null;
+    var dmHeaderPicHtml = dmHeaderPicUrl ? '<img class="dm-chat-header-pic" src="' + dmHeaderPicUrl + '" alt="">' : (dmHeaderPicFileId ? '<div class="dm-chat-header-pic dm-chat-header-pic-load" data-profile-pic-load="' + otherUserId + ':' + dmHeaderPicFileId + '">' + displayName.charAt(0).toUpperCase() + '</div>' : '');
+    document.getElementById('channel-name').innerHTML = dmHeaderPicHtml + '<span>' + escapeHtml(displayName) + '</span>' +
         ' <button class="btn-unfriend" id="unfriend-btn" title="Unfriend">Unfriend</button>';
     document.getElementById('message-input').disabled = false;
     document.getElementById('send-btn').disabled = false;
@@ -5291,6 +5466,10 @@ function appendDmMessage(msg, kp, otherPublicKey) {
     const initial = displayName.charAt(0).toUpperCase();
     var senderPicUrl = msg.sender_profile_pic ? getProfilePicUrl(msg.sender_profile_pic, msg.sender_id) : null;
     var senderColor = msg.sender_username_color || null;
+    var senderBorderColor = msg.sender_border_color || null;
+    if (!senderBorderColor && msg.sender_id && userDisplayNameCache[msg.sender_id]) {
+        senderBorderColor = userDisplayNameCache[msg.sender_id].username_border_color || null;
+    }
     let time = '';
     try {
         time = new Date(msg.timestamp).toLocaleTimeString();
@@ -5366,8 +5545,8 @@ function appendDmMessage(msg, kp, otherPublicKey) {
         var fwdSenderPicUrl = fwdFileId && fwdUserId ? getProfilePicUrl(fwdFileId, fwdUserId) : null;
         var fwdPicHtml = fwdSenderPicUrl ? '<img class="forward-sender-pic" src="' + fwdSenderPicUrl + '" alt="">' : '<span class="forward-sender-initial">' + (forwardData.sender_username ? forwardData.sender_username.charAt(0).toUpperCase() : '?') + '</span>';
         contentHtml += '<div class="forward-label" data-source-server-id="' + escapeAttr(forwardData.source_server_id || '') + '" data-source-channel-id="' + escapeAttr(forwardData.source_channel_id || '') + '" data-source-message-id="' + escapeAttr(forwardData.source_message_id || '') + '">' +
-            '<div class="forward-sender-info">' + fwdPicHtml + '<span class="forward-sender-name"' + (forwardData.sender_color ? ' style="color:' + forwardData.sender_color + '"' : '') + '>' + escapeHtml(forwardData.sender_username || 'unknown') + '</span></div>' +
-            '<div class="forward-source-label"><strong>#' + escapeHtml(forwardData.source_channel_name || 'unknown') + '</strong> / <strong>' + escapeHtml(forwardData.source_server_name || 'unknown') + '</strong></div></div>';
+            '<div class="forward-sender-info">' + fwdPicHtml + '<span class="forward-sender-name"' + (forwardData.sender_color ? ' style="color:' + forwardData.sender_color + (forwardData.sender_border_color ? ';text-shadow:' + forwardData.sender_border_color : ';text-shadow:' + getDisplayNameTextShadow(forwardData.sender_color)) + '"' : '') + '>' + escapeHtml(forwardData.sender_username || 'unknown') + '</span></div>' +
+            '<div class="forward-source-label"><span class="forward-channel-badge">#' + escapeHtml(forwardData.source_channel_name || 'unknown') + '</span> <span class="forward-server-badge">' + escapeHtml(forwardData.source_server_name || 'unknown') + '</span></div></div>';
         // Forward text preview (decrypt with DM keys)
         if (forwardData.preview_content && forwardData.preview_nonce && kp && otherPublicKey) {
             try {
@@ -5436,7 +5615,7 @@ function appendDmMessage(msg, kp, otherPublicKey) {
                 '<div class="avatar">' + initial + '</div>')) +
         '<div class="content">' +
             '<div class="header">' +
-                '<span class="display-name"' + (senderColor ? ' style="color:' + senderColor + '"' : '') + '>' + escapeHtml(displayName) + '</span>' +
+                '<span class="display-name"' + (senderColor ? ' style="color:' + senderColor + ';text-shadow:' + getDisplayNameTextShadow(senderColor, senderBorderColor) + '"' : '') + '>' + escapeHtml(displayName) + '</span>' +
             '</div>' +
             contentHtml +
             editedHtml +
@@ -6320,15 +6499,123 @@ function showModal(id) {
     if (el) {
         el.style.display = 'flex';
     }
-}
-
-function escapeHtml(str) {
+}function escapeHtml(str) {
     const div = document.createElement('div');
     div.textContent = str;
     return div.innerHTML;
 }
+
 function escapeAttr(str) {
     return escapeHtml(str).replace(/"/g, '&quot;');
+}
+
+// Get a contrasting glow color that ensures the display name is always visible
+// against any background. Generates a text-shadow glow with the complementary/inverted color.
+function getContrastGlowColor(hexColor) {
+    if (!hexColor) return 'rgba(0,0,0,0.8)';
+    // Remove # if present
+    var color = hexColor.replace('#', '');
+    // Handle short hex
+    if (color.length === 3) color = color[0] + color[0] + color[1] + color[1] + color[2] + color[2];
+    if (color.length !== 6) return 'rgba(0,0,0,0.8)';
+    
+    var r = parseInt(color.substr(0, 2), 16);
+    var g = parseInt(color.substr(2, 2), 16);
+    var b = parseInt(color.substr(4, 2), 16);
+    
+    // Compute perceived luminance (relative brightness using sRGB coefficients)
+    var luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+    
+    // Smooth proportional transition from white to black glow based on luminance.
+    // Instead of a hard binary cutoff at 0.5 (which causes jarring flips),
+    // we blend continuously across the whole luminance range with a tighter
+    // transition zone for more pronounced contrast:
+    //
+    //   Very dark (lum < 0.35) → pure white glow, strong opacity
+    //   Dark-mid  (0.35 - 0.5) → white → light gray, moderate opacity
+    //   Mid-range (0.5 - 0.65) → darker gray, moderate opacity
+    //   Light-mid (0.65 - 0.9) → dark gray → black, strong opacity
+    //   Very light (lum > 0.9)  → pure black glow, strong opacity
+    //
+    // This ensures the glow contrast is always proportional to how much
+    // contrast the text actually needs. The transition is tighter so
+    // mid-range colors get a more distinct glow that doesn't flip too soon.
+    
+    // Map luminance to a blend factor: 0 = white, 1 = black
+    // Spread the transition from 0.35 to 0.9 for a late, tight ramp
+    // that keeps the glow strongly contrasting before flipping.
+    var t = (luminance - 0.35) / 0.55;
+    t = Math.max(0, Math.min(1, t)); // Clamp to [0, 1]
+    
+    // Apply smoothstep (cubic Hermite) for a more natural S-curve
+    // Gentle at the ends, steeper in the middle
+    t = t * t * (3 - 2 * t);
+    
+    // Interpolate glow color: 255 (white) → 0 (black)
+    var glowVal = Math.round(255 * (1 - t));
+    
+    // Opacity: stronger at luminance extremes where the text needs
+    // more help being visible against varied backgrounds, softer in
+    // the mid-range where the text is already moderately visible.
+    var distanceFromMid = Math.abs(luminance - 0.5) * 2; // 0 at 0.5, 1 at extremes
+    var opacity = Math.min(0.88, 0.50 + 0.38 * distanceFromMid);
+    
+    return 'rgba(' + glowVal + ',' + glowVal + ',' + glowVal + ',' + opacity.toFixed(2) + ')';
+}
+
+// Generate a CSS text-shadow value for the airbrush-like glow effect
+// If borderColor is provided, use it directly; otherwise auto-calculate from hexColor
+function getDisplayNameTextShadow(hexColor, borderColor) {
+    var glowColor = borderColor || getContrastGlowColor(hexColor);
+    // Multi-layer shadow for a soft airbrush-like glow
+    return '0 0 4px ' + glowColor + ', 0 0 8px ' + glowColor + ', 0 0 16px ' + glowColor;
+}
+
+// Generate 10 contrasting border/glow color options based on a base color
+function generateBorderGlowOptions(baseColor) {
+    if (!baseColor) return [];
+    var color = baseColor.replace('#', '');
+    if (color.length === 3) color = color[0] + color[0] + color[1] + color[1] + color[2] + color[2];
+    if (color.length !== 6) return [{ hex: 'rgba(0,0,0,0.8)', name: 'Dark Ink' }];
+    
+    var r = parseInt(color.substr(0, 2), 16);
+    var g = parseInt(color.substr(2, 2), 16);
+    var b = parseInt(color.substr(4, 2), 16);
+    var luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+    
+    var options = [];
+    
+    // For light colors, generate dark glow options; for dark colors, generate light options
+    if (luminance > 0.5) {
+        // Light base color → dark glow options
+        options = [
+            { hex: 'rgba(0,0,0,0.85)', name: 'Deep Shadow' },
+            { hex: 'rgba(0,0,0,0.65)', name: 'Soft Shadow' },
+            { hex: 'rgba(20,20,30,0.8)', name: 'Midnight' },
+            { hex: 'rgba(10,10,20,0.75)', name: 'Charcoal' },
+            { hex: 'rgba(33,33,33,0.7)', name: 'Slate' },
+            { hex: 'rgba(0,20,40,0.7)', name: 'Deep Blue' },
+            { hex: 'rgba(40,0,20,0.6)', name: 'Plum' },
+            { hex: 'rgba(20,40,0,0.65)', name: 'Forest' },
+            { hex: 'rgba(60,30,0,0.6)', name: 'Warm Brown' },
+            { hex: 'rgba(80,80,80,0.5)', name: 'Smoke' }
+        ];
+    } else {
+        // Dark base color → light glow options
+        options = [
+            { hex: 'rgba(255,255,255,0.85)', name: 'Bright Glow' },
+            { hex: 'rgba(255,255,255,0.65)', name: 'Soft Glow' },
+            { hex: 'rgba(240,240,255,0.7)', name: 'Moonlight' },
+            { hex: 'rgba(200,220,255,0.6)', name: 'Ice' },
+            { hex: 'rgba(255,240,200,0.65)', name: 'Warm Light' },
+            { hex: 'rgba(220,255,220,0.6)', name: 'Pale Green' },
+            { hex: 'rgba(255,200,220,0.55)', name: 'Blush' },
+            { hex: 'rgba(200,200,255,0.65)', name: 'Lavender' },
+            { hex: 'rgba(255,220,180,0.6)', name: 'Peach' },
+            { hex: 'rgba(220,240,255,0.7)', name: 'Sky' }
+        ];
+    }
+    return options;
 }
 function escapeJsStr(str) {
     if (!str) return '';
@@ -9644,6 +9931,7 @@ async function executeDmForward(targetUserId, targetUsername, dmChannelId) {
             sender_id: senderId,
             sender_profile_pic_file_id: senderPicFileId,
             sender_color: senderColor,
+            sender_border_color: msgDiv.querySelector('.display-name')?.style?.textShadow || '',
         };
         if (previewEncrypted) {
             forwardPayload.preview_content = previewEncrypted.ciphertext;
@@ -9889,7 +10177,11 @@ function updateProfileSettingsUI(data) {
     if (colorPreview) {
         colorPreview.style.color = userColor;
         colorPreview.style.borderColor = userColor;
+        colorPreview.style.textShadow = getDisplayNameTextShadow(userColor);
     }
+    
+    // Render border glow options
+    renderBorderGlowOptions(userColor, data && data.username_border_color);
     
     if (data && data.profile_picture_file_id) {
         var picUrl = getProfilePicUrl(data.profile_picture_file_id, user.id);
@@ -10297,6 +10589,103 @@ async function saveUsernameColor() {
         if (status) { status.textContent = 'Username color saved!'; status.className = 'profile-save-status'; }
         setTimeout(function () { if (status) status.textContent = ''; }, 3000);
         await loadMyProfile();
+        // Regenerate glow options with the saved color
+        var borderColor = null;
+        if (myProfile && myProfile.username_border_color) {
+            borderColor = myProfile.username_border_color;
+        }
+        renderBorderGlowOptions(color, borderColor);
+    } catch (e) {
+        if (status) { status.textContent = 'Failed to connect to server'; status.className = 'profile-save-status error'; }
+    }
+}
+
+// Render the 10 border glow option swatches in the settings
+function renderBorderGlowOptions(baseColor, selectedBorderColor) {
+    var container = document.getElementById('border-glow-options');
+    var previewEl = document.getElementById('border-glow-preview');
+    if (!container) return;
+    
+    var options = generateBorderGlowOptions(baseColor);
+    if (!options || options.length === 0) {
+        container.innerHTML = '<div style="color:#888;font-size:13px;padding:8px 0;">Select a username color first to see glow options</div>';
+        return;
+    }
+    
+    // Store selected option in container dataset for later use
+    container.dataset.baseColor = baseColor || '#4fc3f7';
+    
+    var html = '<div class="glow-options-grid">';
+    options.forEach(function (opt) {
+        var isSelected = selectedBorderColor && (opt.hex === selectedBorderColor);
+        html += '<button class="glow-option-btn' + (isSelected ? ' selected' : '') + '" data-glow="' + escapeAttr(opt.hex) + '" title="' + escapeHtml(opt.name) + '">' +
+            '<span class="glow-option-swatch" style="background:' + opt.hex + ';"></span>' +
+            '<span class="glow-option-name">' + escapeHtml(opt.name) + '</span>' +
+            '</button>';
+    });
+    html += '</div>';
+    container.innerHTML = html;
+    
+    // Wire click handlers
+    container.querySelectorAll('.glow-option-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            container.querySelectorAll('.glow-option-btn').forEach(function (b) { b.classList.remove('selected'); });
+            btn.classList.add('selected');
+            var glow = btn.dataset.glow;
+            // Update preview
+            if (previewEl) {
+                previewEl.style.color = baseColor || '#4fc3f7';
+                previewEl.style.textShadow = getDisplayNameTextShadow(baseColor || '#4fc3f7', glow);
+                previewEl.dataset.selectedGlow = glow;
+            }
+        });
+    });
+    
+    // If there's a selected border color, update the preview
+    if (previewEl) {
+        previewEl.style.color = baseColor || '#4fc3f7';
+        if (selectedBorderColor) {
+            previewEl.style.textShadow = getDisplayNameTextShadow(baseColor || '#4fc3f7', selectedBorderColor);
+            previewEl.dataset.selectedGlow = selectedBorderColor;
+        } else if (options.length > 0) {
+            // Default to the first option's shadow
+            previewEl.style.textShadow = getDisplayNameTextShadow(baseColor || '#4fc3f7', options[0].hex);
+            previewEl.dataset.selectedGlow = options[0].hex;
+            // Also select the first button
+            var firstBtn = container.querySelector('.glow-option-btn');
+            if (firstBtn) firstBtn.classList.add('selected');
+        }
+    }
+}
+
+// Save the selected border glow color
+async function saveBorderGlowColor() {
+    var previewEl = document.getElementById('border-glow-preview');
+    var status = document.getElementById('profile-save-status');
+    var selectedGlow = previewEl ? previewEl.dataset.selectedGlow : null;
+    if (!selectedGlow) {
+        // Try to find selected button
+        var selectedBtn = document.querySelector('.glow-option-btn.selected');
+        selectedGlow = selectedBtn ? selectedBtn.dataset.glow : null;
+    }
+    if (!selectedGlow) {
+        if (status) { status.textContent = 'Select a glow option first'; status.className = 'profile-save-status error'; }
+        return;
+    }
+    try {
+        var res = await authFetch('/api/profile', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username_border_color: selectedGlow })
+        });
+        if (!res.ok) {
+            var err = await res.json();
+            if (status) { status.textContent = err.error || 'Failed to save glow'; status.className = 'profile-save-status error'; }
+            return;
+        }
+        if (status) { status.textContent = 'Glow color saved!'; status.className = 'profile-save-status'; }
+        setTimeout(function () { if (status) status.textContent = ''; }, 3000);
+        await loadMyProfile();
     } catch (e) {
         if (status) { status.textContent = 'Failed to connect to server'; status.className = 'profile-save-status error'; }
     }
@@ -10330,10 +10719,17 @@ function setupProfileSettings() {
     }
     
     // Username color
+    var borderGlowSaveBtn = document.getElementById('border-glow-save-btn');
+    
     if (colorPicker && colorPreview) {
         colorPicker.addEventListener('input', function () {
             colorPreview.style.color = colorPicker.value;
             colorPreview.style.borderColor = colorPicker.value;
+            colorPreview.style.textShadow = getDisplayNameTextShadow(colorPicker.value);
+            // Regenerate border glow options when color changes
+            var selectedBtn = document.querySelector('.glow-option-btn.selected');
+            var currentGlow = selectedBtn ? selectedBtn.dataset.glow : null;
+            renderBorderGlowOptions(colorPicker.value, currentGlow);
         });
     }
     if (colorSaveBtn) {
@@ -10349,10 +10745,20 @@ function setupProfileSettings() {
                 if (colorPreview) {
                     colorPreview.style.color = color;
                     colorPreview.style.borderColor = color;
+                    colorPreview.style.textShadow = getDisplayNameTextShadow(color);
                 }
+                // Regenerate border glow options
+                var selectedBtn = document.querySelector('.glow-option-btn.selected');
+                var currentGlow = selectedBtn ? selectedBtn.dataset.glow : null;
+                renderBorderGlowOptions(color, currentGlow);
             }
         });
     });
+    
+    // Border glow save button
+    if (borderGlowSaveBtn) {
+        borderGlowSaveBtn.addEventListener('click', saveBorderGlowColor);
+    }
     
     // Profile crop modal
     setupProfileCropModal();

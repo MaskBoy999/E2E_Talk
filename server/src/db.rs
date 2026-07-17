@@ -378,6 +378,35 @@ impl Database {
             conn.execute("ALTER TABLE users ADD COLUMN username_color TEXT DEFAULT '#4fc3f7'", [])?;
         }
 
+        // Migration 017: username border color (contrasting glow)
+        let border_color_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('users') WHERE name = 'username_border_color'",
+                [],
+                |row| row.get(0),
+            )?;
+        if !border_color_exists {
+            conn.execute("ALTER TABLE users ADD COLUMN username_border_color TEXT", [])?;
+        }
+
+        // Migration 018: profile banner, description, nickname
+        for (col, def) in [
+            ("profile_banner_file_id", "TEXT REFERENCES files(id) ON DELETE SET NULL"),
+            ("profile_banner_file_key", "TEXT"),
+            ("description", "TEXT DEFAULT ''"),
+            ("nickname", "TEXT DEFAULT ''"),
+        ] {
+            let col_exists: bool = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) > 0 FROM pragma_table_info('users') WHERE name = '{}'", col),
+                    [],
+                    |row| row.get::<_, i32>(0),
+                )?;
+            if !col_exists {
+                conn.execute(&format!("ALTER TABLE users ADD COLUMN {} {}", col, def), [])?;
+            }
+        }
+
         Ok(())
     }
 
@@ -448,51 +477,70 @@ impl Database {
         .map_err(|_| "User not found".to_string())
     }
 
-    pub fn get_user_profile(&self, id: &str) -> Result<(String, String, Option<String>, Option<String>, Option<String>, Option<String>), String> {
+    pub fn get_user_profile(&self, id: &str) -> Result<(String, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        // Check if username_color column exists (older DBs might not have it yet)
-        let color_col_exists: bool = conn
-            .query_row(
-                "SELECT COUNT(*) > 0 FROM pragma_table_info('users') WHERE name = 'username_color'",
-                [],
-                |row| row.get::<_, i32>(0),
-            )
-            .map(|c| c > 0)
-            .unwrap_or(false);
 
-        if color_col_exists {
-            conn.query_row(
-                "SELECT id, username, display_name, profile_picture_file_id, profile_picture_file_key, username_color FROM users WHERE id = ?1",
-                params![id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                        row.get::<_, Option<String>>(4)?,
-                        row.get::<_, Option<String>>(5)?,
-                    ))
-                },
-            )
-            .map_err(|_| "User not found".to_string())
-        } else {
-            conn.query_row(
-                "SELECT id, username, display_name, profile_picture_file_id, profile_picture_file_key FROM users WHERE id = ?1",
-                params![id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                        row.get::<_, Option<String>>(4)?,
-                        None, // username_color not available
-                    ))
-                },
-            )
-            .map_err(|_| "User not found".to_string())
+        // Build column list dynamically — check which columns exist
+        let cols = vec!["username_border_color", "profile_banner_file_id", "profile_banner_file_key", "description", "nickname", "username_color"];
+        let mut present: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+        for col in &cols {
+            let exists: bool = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) > 0 FROM pragma_table_info('users') WHERE name = '{}'", col),
+                    [],
+                    |row| row.get::<_, i32>(0),
+                )
+                .map(|c| c > 0)
+                .unwrap_or(false);
+            present.insert(col.to_string(), exists);
         }
+
+        let has_border = *present.get("username_border_color").unwrap_or(&false);
+        let has_banner = *present.get("profile_banner_file_id").unwrap_or(&false);
+        let has_banner_key = *present.get("profile_banner_file_key").unwrap_or(&false);
+        let has_desc = *present.get("description").unwrap_or(&false);
+        let has_nick = *present.get("nickname").unwrap_or(&false);
+        let has_color = *present.get("username_color").unwrap_or(&false);
+
+        let sql = if has_border && has_banner && has_banner_key && has_desc && has_nick {
+            format!(
+                "SELECT id, username, display_name, profile_picture_file_id, profile_picture_file_key,
+                        username_color, username_border_color,
+                        profile_banner_file_id, profile_banner_file_key, description, nickname
+                 FROM users WHERE id = ?1"
+            )
+        } else if has_color && has_border {
+            format!(
+                "SELECT id, username, display_name, profile_picture_file_id, profile_picture_file_key,
+                        username_color, username_border_color,
+                        NULL as banner_id, NULL as banner_key, '' as descr, '' as nick
+                 FROM users WHERE id = ?1"
+            )
+        } else {
+            format!(
+                "SELECT id, username, display_name, profile_picture_file_id, profile_picture_file_key,
+                        NULL as color, NULL as border,
+                        NULL as banner_id, NULL as banner_key, '' as descr, '' as nick
+                 FROM users WHERE id = ?1"
+            )
+        };
+
+        conn.query_row(&sql, params![id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, Option<String>>(10)?,
+            ))
+        })
+        .map_err(|_| "User not found".to_string())
     }
 
     pub fn update_display_name(&self, user_id: &str, display_name: &str) -> Result<(), String> {
@@ -515,11 +563,51 @@ impl Database {
         Ok(())
     }
 
+    pub fn update_username_border_color(&self, user_id: &str, border_color: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE users SET username_border_color = ?1 WHERE id = ?2",
+            params![border_color, user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     pub fn update_profile_picture(&self, user_id: &str, file_id: Option<&str>, file_key: Option<&str>) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
             "UPDATE users SET profile_picture_file_id = ?1, profile_picture_file_key = ?2 WHERE id = ?3",
             params![file_id, file_key, user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn update_profile_banner(&self, user_id: &str, file_id: Option<&str>, file_key: Option<&str>) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE users SET profile_banner_file_id = ?1, profile_banner_file_key = ?2 WHERE id = ?3",
+            params![file_id, file_key, user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn update_description(&self, user_id: &str, description: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE users SET description = ?1 WHERE id = ?2",
+            params![description, user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn update_nickname(&self, user_id: &str, nickname: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE users SET nickname = ?1 WHERE id = ?2",
+            params![nickname, user_id],
         )
         .map_err(|e| e.to_string())?;
         Ok(())

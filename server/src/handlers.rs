@@ -55,23 +55,27 @@ fn store_admin_token(token: String) {
 }
 
 fn extract_user(headers: &HeaderMap, state: &AppState) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
-    // Check HttpOnly cookie first
+    // Prefer the Authorization: Bearer header over the HttpOnly cookie.
+    // A stale/expired HttpOnly cookie from a previous login session can
+    // persist even after logout (JS can't clear HttpOnly cookies). By
+    // preferring the Bearer header (which is bound to the current user
+    // session), we avoid accidentally authenticating as the old user.
     let token = headers
-        .get("cookie")
+        .get("authorization")
         .and_then(|v| v.to_str().ok())
-        .and_then(|cookie_str| {
-            cookie_str.split(';')
-                .find_map(|part| {
-                    let trimmed = part.trim();
-                    trimmed.strip_prefix("token=").map(|v| v.to_string())
-                })
-        })
+        .and_then(|v| v.strip_prefix("Bearer ").map(|s| s.to_string()))
         .or_else(|| {
-            // Fall back to Authorization: Bearer header
+            // Fall back to HttpOnly cookie (legacy support)
             headers
-                .get("authorization")
+                .get("cookie")
                 .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.strip_prefix("Bearer ").map(|s| s.to_string()))
+                .and_then(|cookie_str| {
+                    cookie_str.split(';')
+                        .find_map(|part| {
+                            let trimmed = part.trim();
+                            trimmed.strip_prefix("token=").map(|v| v.to_string())
+                        })
+                })
         })
         .ok_or_else(|| {
             (
@@ -88,6 +92,25 @@ fn extract_user(headers: &HeaderMap, state: &AppState) -> Result<String, (Status
     })?;
 
     Ok(claims.sub)
+}
+
+pub async fn logout(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    // Validate the token if present (optional, just to make sure it's valid)
+    let _ = extract_user(&headers, &state);
+
+    // Clear the HttpOnly cookie by setting Max-Age=0
+    let mut resp_headers = HeaderMap::new();
+    resp_headers.insert(
+        "set-cookie",
+        HeaderValue::from_str(
+            "token=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0"
+        ).unwrap(),
+    );
+
+    (StatusCode::OK, resp_headers, Json(serde_json::json!({"ok": true})))
 }
 
 fn extract_admin_token(headers: &HeaderMap) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
@@ -213,7 +236,7 @@ pub async fn register(
 
     // Fetch profile data
     let (display_name, profile_pic) = match state.db.get_user_profile(&user.id) {
-        Ok((_, _, dn, pp, _fk, _uc)) => (dn, pp),
+        Ok((_, _, dn, pp, _fk, _uc, _bc)) => (dn, pp),
         Err(_) => (None, None),
     };
 
@@ -307,7 +330,7 @@ pub async fn login(
 
     // Fetch profile data
     let (display_name, profile_pic) = match state.db.get_user_profile(&user.id) {
-        Ok((_, _, dn, pp, _fk, _uc)) => (dn, pp),
+        Ok((_, _, dn, pp, _fk, _uc, _bc)) => (dn, pp),
         Err(_) => (None, None),
     };
 
@@ -476,7 +499,7 @@ pub async fn reauth(
 
     // Fetch profile data
     let (display_name, profile_pic) = match state.db.get_user_profile(&user.id) {
-        Ok((_, _, dn, pp, _fk, _uc)) => (dn, pp),
+        Ok((_, _, dn, pp, _fk, _uc, _bc)) => (dn, pp),
         Err(_) => (None, None),
     };
 
@@ -2721,6 +2744,12 @@ pub struct UpdateProfileRequest {
     pub profile_picture_file_id: Option<String>,  // Some("file_id") = set picture
     pub profile_picture_file_key: Option<String>,  // file encryption key (base64)
     pub username_color: Option<String>,  // hex color for username
+    pub username_border_color: Option<String>,  // hex color for display name glow/border
+    // Profile v2 fields
+    pub profile_banner_file_id: Option<String>,
+    pub profile_banner_file_key: Option<String>,
+    pub description: Option<String>,
+    pub nickname: Option<String>,
 }
 
 pub async fn get_profile(
@@ -2728,13 +2757,18 @@ pub async fn get_profile(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     match state.db.get_user_profile(&user_id) {
-        Ok((id, _username, display_name, profile_picture_file_id, _file_key, username_color)) => {
+        Ok((id, _username, display_name, profile_picture_file_id, _file_key, username_color, username_border_color, banner_id, banner_key, description, nickname)) => {
             (StatusCode::OK, Json(serde_json::json!({
                 "id": id,
                 "display_name": display_name,
                 "profile_picture_file_id": profile_picture_file_id,
                 "profile_picture_file_key": _file_key,
                 "username_color": username_color.unwrap_or("#4fc3f7".to_string()),
+                "username_border_color": username_border_color,
+                "profile_banner_file_id": banner_id,
+                "profile_banner_file_key": banner_key,
+                "description": description.unwrap_or_default(),
+                "nickname": nickname.unwrap_or_default(),
             }))).into_response()
         }
         Err(e) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": e}))).into_response(),
@@ -2771,7 +2805,7 @@ pub async fn update_profile(
 
     // Before changing profile picture, delete the old one's file from DB and disk
     let delete_current_pic = || -> Result<(), String> {
-        let (_, _, _, old_file_id, _, _) = state.db.get_user_profile(&user_id)?;
+        let (_, _, _, old_file_id, _, _, _) = state.db.get_user_profile(&user_id)?;
         if let Some(old_id) = old_file_id {
             // Delete from DB (checks ownership)
             if let Ok(old_info) = state.db.delete_file_record(&old_id) {
@@ -2822,6 +2856,19 @@ pub async fn update_profile(
         }
     }
 
+    // Handle username border color update
+    if let Some(ref border_color) = req.username_border_color {
+        let trimmed = border_color.trim();
+        let is_valid_hex = trimmed.starts_with("#") && (trimmed.len() == 7 || trimmed.len() == 4);
+        let is_valid_rgba = trimmed.starts_with("rgba(") && trimmed.ends_with(")");
+        if !is_valid_hex && !is_valid_rgba {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid border color format. Use hex e.g. #000000 or rgba e.g. rgba(0,0,0,0.8)"}))).into_response();
+        }
+        if let Err(e) = state.db.update_username_border_color(&user_id, trimmed) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
+        }
+    }
+
     // Handle username color update
     if let Some(ref color) = req.username_color {
         let trimmed = color.trim();
@@ -2835,7 +2882,7 @@ pub async fn update_profile(
 
     // Broadcast profile update to the user, friends, and all server members
     if let Ok(profile) = state.db.get_user_profile(&user_id) {
-        let (_id, username, display_name, profile_picture_file_id, _fk, username_color) = profile;
+        let (_id, username, display_name, profile_picture_file_id, _fk, username_color, username_border_color) = profile;
         let profile_msg = serde_json::json!({
             "type": "profile_updated",
             "user_id": user_id,
@@ -2843,6 +2890,7 @@ pub async fn update_profile(
             "display_name": display_name,
             "profile_picture_file_id": profile_picture_file_id,
             "username_color": username_color.unwrap_or("#4fc3f7".to_string()),
+            "username_border_color": username_border_color,
         });
 
         let mut recipients: std::collections::HashSet<String> = std::collections::HashSet::new();

@@ -162,6 +162,7 @@ async fn main() {
         .route("/api/identity/upload", post(handlers::upload_identity_key))
         .route("/api/identity/add-key", post(handlers::add_device_key))
         .route("/api/identity/escrow", post(handlers::upload_escrowed_key).get(handlers::get_escrowed_key))
+        .route("/api/logout", post(handlers::logout))
         .route("/api/reauth", post(handlers::reauth))
         .route("/api/user/{username}", get(handlers::get_user_id))
         .route("/api/profile/{user_id}", get(handlers::get_profile))
