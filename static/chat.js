@@ -346,12 +346,21 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    var notifSoundStopBtn = document.getElementById('notif-sound-stop-btn');
+
     if (notifSoundTestBtn) {
         notifSoundTestBtn.addEventListener('click', function () {
             if (notifSoundStatus) { notifSoundStatus.textContent = 'Playing...'; notifSoundStatus.style.color = 'var(--text-muted)'; }
             playNotificationSound(true);
-            startNotifVisualizer();
-            setTimeout(function () { if (notifSoundStatus && notifSoundStatus.textContent === 'Playing...') notifSoundStatus.textContent = ''; }, 2000);
+            setTimeout(function () { if (notifSoundStatus && notifSoundStatus.textContent === 'Playing...') notifSoundStatus.textContent = ''; }, _notifCurrentDuration > 0 ? _notifCurrentDuration * 1000 + 500 : 2500);
+        });
+    }
+
+    if (notifSoundStopBtn) {
+        notifSoundStopBtn.addEventListener('click', function () {
+            stopNotificationSound();
+            if (notifSoundStatus) { notifSoundStatus.textContent = 'Stopped'; notifSoundStatus.style.color = '#ff9800'; }
+            setTimeout(function () { if (notifSoundStatus) notifSoundStatus.textContent = ''; }, 2000);
         });
     }
 
@@ -598,20 +607,6 @@ document.addEventListener('DOMContentLoaded', () => {
         updateServerMutedUI();
         updateChannelMutedUI();
     }, 500);
-    // Load cached notification sound: try localStorage (backward compat), then IndexedDB
-    try {
-        var oldUrl = localStorage.getItem('notification_sound_url');
-        if (oldUrl) {
-            _notifCachedUrl = oldUrl;
-            // Migrate old users to IDB
-            _idbNotifPut('url', oldUrl).catch(function() {});
-            localStorage.removeItem('notification_sound_url');
-        }
-    } catch (e) {}
-    // Also try loading from IDB (async — populates _notifCachedUrl for future plays)
-    _idbNotifGet('url').then(function(url) {
-        if (url) _notifCachedUrl = url;
-    }).catch(function() {});
     // Restore notification sound from server (syncs across devices)
     restoreNotificationSoundFromServer();
 
@@ -2472,31 +2467,114 @@ function _idbNotifDel(key) {
 
 var _notifCtx = null;
 
+function showNotifPlaying() {
+    var stopBtn = document.getElementById('notif-sound-stop-btn');
+    if (stopBtn) stopBtn.style.display = '';
+    var testBtn = document.getElementById('notif-sound-test-btn');
+    if (testBtn) testBtn.style.display = 'none';
+    var dur = _notifCurrentDuration > 0 ? _notifCurrentDuration * 1000 : 1500;
+    startNotifVisualizer(dur);
+}
+
+function stopNotificationSound() {
+    if (_notifCurrentStop) {
+        try { _notifCurrentStop(); } catch (e) {}
+        _notifCurrentStop = null;
+    }
+    _notifCurrentDuration = 0;
+    stopNotifVisualizer();
+}
+
+function stopNotifVisualizer() {
+    if (_notifVisTimer) { clearTimeout(_notifVisTimer); _notifVisTimer = null; }
+    if (_notifVisCtx) { try { _notifVisCtx.close(); } catch (e) {} _notifVisCtx = null; }
+    var canvas = document.getElementById('notif-visualizer');
+    if (canvas) canvas.style.display = 'none';
+    var stopBtn = document.getElementById('notif-sound-stop-btn');
+    if (stopBtn) stopBtn.style.display = 'none';
+    var testBtn = document.getElementById('notif-sound-test-btn');
+    if (testBtn) testBtn.style.display = '';
+}
+
 function playNotificationSound(force) {
-    // Skip sound if 'background only' setting is on and the tab is visible (unless forced)
     if (!force && localStorage.getItem('notif_background_only') === 'true' && !document.hidden) return;
-    // Try custom MP3 first; if that fails, fall through to default AudioContext sound.
-    // Check in-memory cache first (fast), then localStorage as fallback for old users.
+    stopNotificationSound();
     var customSoundUrl = _notifCachedUrl || localStorage.getItem('notification_sound_url');
     if (customSoundUrl) {
-        try {
-            var audio = new Audio(customSoundUrl);
-            audio.volume = getNotifVolume();
-            var playPromise = audio.play();
-            if (playPromise !== undefined) {
-                playPromise.catch(function (err) {
-                    console.warn('Custom sound play failed, using default:', err);
-                    playDefaultChime();
-                });
-                return;
-            }
-            // Synchronous play succeeded (rare edge case)
-            return;
-        } catch (e) {
-            console.warn('Custom sound error, using default:', e);
-        }
+        playDataUrlSound(customSoundUrl);
+        return;
     }
     playDefaultChime();
+}
+
+function playDataUrlSound(dataUrl) {
+    try {
+        if (!_notifCtx) {
+            _notifCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        if (_notifCtx.state === 'suspended') {
+            _notifCtx.resume();
+        }
+        var blob = dataUrlToBlob(dataUrl);
+        if (!blob) { playDefaultChime(); return; }
+        var reader = new FileReader();
+        reader.onload = function (e) {
+            try {
+                _notifCtx.decodeAudioData(e.target.result, function (buffer) {
+                    try {
+                        var source = _notifCtx.createBufferSource();
+                        source.buffer = buffer;
+                        var gain = _notifCtx.createGain();
+                        gain.gain.value = getNotifVolume() * 0.5;
+                        source.connect(gain);
+                        gain.connect(_notifCtx.destination);
+                        source.start(0);
+                        _notifCurrentDuration = buffer.duration;
+                        _notifCurrentStop = function () {
+                            try { source.stop(); } catch (e) {}
+                            try { source.disconnect(); } catch (e) {}
+                            try { gain.disconnect(); } catch (e) {}
+                        };
+                        showNotifPlaying();
+                    } catch (err) {
+                        console.warn('Custom sound AudioContext play failed:', err);
+                        playDefaultChime();
+                    }
+                }, function () {
+                    console.warn('Custom sound decode failed, using default');
+                    playDefaultChime();
+                });
+            } catch (err) {
+                console.warn('Custom sound decode error:', err);
+                playDefaultChime();
+            }
+        };
+        reader.onerror = function () {
+            console.warn('Custom sound blob read failed, using default');
+            playDefaultChime();
+        };
+        reader.readAsArrayBuffer(blob);
+    } catch (e) {
+        console.warn('Custom sound error, using default:', e);
+        playDefaultChime();
+    }
+}
+
+function dataUrlToBlob(dataUrl) {
+    try {
+        var parts = dataUrl.split(',');
+        var mimeMatch = parts[0].match(/:(.*?);/);
+        if (!mimeMatch) return null;
+        var mime = mimeMatch[1];
+        var b64 = parts[1];
+        var byteStr = atob(b64);
+        var ab = new ArrayBuffer(byteStr.length);
+        var ia = new Uint8Array(ab);
+        for (var i = 0; i < byteStr.length; i++) ia[i] = byteStr.charCodeAt(i);
+        return new Blob([ab], { type: mime });
+    } catch (e) {
+        return null;
+    }
 }
 
 function playDefaultChime() {
@@ -2514,7 +2592,7 @@ function playDefaultChime() {
         g.gain.linearRampToValueAtTime(0.12 * vol, _notifCtx.currentTime + 0.03);
         g.gain.linearRampToValueAtTime(0.08 * vol, _notifCtx.currentTime + 0.3);
         g.gain.linearRampToValueAtTime(0, _notifCtx.currentTime + 0.6);
-        // Soft descending arpeggio: C5, G4, E4
+        var oscillators = [];
         [523, 392, 330].forEach(function (freq, i) {
             var o = _notifCtx.createOscillator();
             o.type = 'sine';
@@ -2523,8 +2601,23 @@ function playDefaultChime() {
             var t = _notifCtx.currentTime + i * 0.18;
             o.start(t);
             o.stop(t + 0.25);
+            oscillators.push(o);
         });
-        setTimeout(function () { g.disconnect(); }, 800);
+        _notifCurrentDuration = 0.8;
+        var myStop = function () {
+            try { g.gain.cancelScheduledValues(0); g.gain.setValueAtTime(0, _notifCtx.currentTime); } catch (e) {}
+            oscillators.forEach(function (o) { try { o.stop(); o.disconnect(); } catch (e) {} });
+            try { g.disconnect(); } catch (e) {}
+        };
+        _notifCurrentStop = myStop;
+        showNotifPlaying();
+        setTimeout(function () {
+            if (_notifCurrentStop === myStop) {
+                _notifCurrentStop = null;
+                _notifCurrentDuration = 0;
+            }
+            try { g.disconnect(); } catch (e) {}
+        }, 1000);
     } catch (e) {
         console.warn('Default chime playback failed:', e);
     }
@@ -2534,6 +2627,8 @@ function playDefaultChime() {
 // Uses AnalyserNode + probe oscillator so it works for both custom and default sounds.
 var _notifVisTimer = null;
 var _notifVisCtx = null;
+var _notifCurrentStop = null;
+var _notifCurrentDuration = 0;
 
 // Recording state for notification sound
 var _notifMediaRecorder = null;
@@ -2550,7 +2645,7 @@ function getNotifVolume() {
     } catch (e) { return 0.5; }
 }
 
-function startNotifVisualizer() {
+function startNotifVisualizer(durationMs) {
     var canvas = document.getElementById('notif-visualizer');
     if (!canvas) return;
     var ctx = canvas.getContext('2d');
@@ -2562,6 +2657,8 @@ function startNotifVisualizer() {
     canvas.style.display = '';
     canvas.width = canvas.offsetWidth || 280;
     canvas.height = canvas.offsetHeight || 50;
+
+    var duration = durationMs || 1500;
 
     // Create a probe oscillator to feed the analyser (no connection to destination = silent)
     var audioCtx;
@@ -2578,14 +2675,13 @@ function startNotifVisualizer() {
     var osc = audioCtx.createOscillator();
     osc.type = 'sawtooth';  // rich harmonics fill more bars
     osc.frequency.setValueAtTime(200, audioCtx.currentTime);
-    osc.frequency.linearRampToValueAtTime(3000, audioCtx.currentTime + 1.5);
+    osc.frequency.linearRampToValueAtTime(3000, audioCtx.currentTime + duration / 1000);
     osc.connect(analyser);
     // DO NOT connect to destination — no audible output
     osc.start();
-    osc.stop(audioCtx.currentTime + 1.6);
+    osc.stop(audioCtx.currentTime + duration / 1000 + 0.1);
 
     var startTime = Date.now();
-    var duration = 1500;
 
     function draw() {
         var elapsed = Date.now() - startTime;
@@ -2666,23 +2762,7 @@ function trackUnreadMention(serverId, channelId, dmChannelId, messageId, senderU
         updateMentionsBadge();
         saveMentionState();
     } else if (dmChannelId) {
-        // DM mention/reply - increment the unread DM counter
         unreadDms[dmChannelId] = (unreadDms[dmChannelId] || 0) + 1;
-        // Push to chronological inbox
-        mentionItems.unshift({
-            id: messageId + '_' + Date.now(),
-            serverId: null,
-            channelId: null,
-            dmChannelId: dmChannelId,
-            messageId: messageId,
-            senderUsername: senderUsername || 'Someone',
-            senderId: senderId || null,
-            senderProfilePic: senderProfilePic || null,
-            channelName: '',
-            serverName: '',
-            type: notifType || 'dm',
-            time: Date.now()
-        });
         updateDmStripBadge();
         updateMentionsBadge();
         if (viewMode === 'dms') renderDmSidebar();
@@ -2736,16 +2816,15 @@ function clearUnreadDmMentions(dmChannelId) {
 
 async function syncNotificationSoundToServer(file) {
     try {
-        // Read the File object directly as ArrayBuffer
         var arrayBuffer = await file.arrayBuffer();
         var soundBytes = new Uint8Array(arrayBuffer);
-
-        // Encrypt with own identity public key using envelope encryption
         var identity = E2ECrypto.getIdentityKeyPair();
-        if (!identity) return;
+        if (!identity) {
+            var statusEl = document.getElementById('notif-sound-status');
+            if (statusEl) { statusEl.textContent = 'Encryption keys not ready, sound not synced to server'; statusEl.style.color = '#f44336'; }
+            return;
+        }
         var encrypted = E2ECrypto.envelopeEncryptRaw(soundBytes, identity.publicKey);
-
-        // Upload to server
         var uploadRes = await authFetch('/api/notification-sound', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -2757,7 +2836,8 @@ async function syncNotificationSoundToServer(file) {
             }),
         });
         if (!uploadRes.ok) {
-            console.warn('Failed to sync notification sound to server');
+            var statusEl = document.getElementById('notif-sound-status');
+            if (statusEl) { statusEl.textContent = 'Server sync failed, sound may not persist across refresh'; statusEl.style.color = '#f44336'; }
         }
     } catch (e) {
         console.warn('Failed to sync notification sound:', e);
@@ -2767,11 +2847,9 @@ async function syncNotificationSoundToServer(file) {
 async function restoreNotificationSoundFromServer() {
     try {
         var res = await authFetch('/api/notification-sound');
-        if (!res.ok) return; // No sound stored on server
+        if (!res.ok) return;
         var data = await res.json();
         if (!data.encrypted_sound || !data.nonce || !data.sender_public_key) return;
-
-        // Decrypt with own identity private key
         var identity = E2ECrypto.getIdentityKeyPair();
         if (!identity) return;
         var decryptedBytes = E2ECrypto.envelopeDecryptRaw(
@@ -2781,28 +2859,28 @@ async function restoreNotificationSoundFromServer() {
             identity.privateKey
         );
         if (!decryptedBytes || decryptedBytes.length === 0) return;
-
-        // Convert decrypted bytes to a data URL and save via IDB
         var blob = new Blob([decryptedBytes]);
-        var reader = new FileReader();
-        reader.onload = function (ev) {
-            var dataUrl = ev.target.result;
-            _notifCachedUrl = dataUrl;
-            _idbNotifPut('url', dataUrl);
-            if (data.file_name) {
-                localStorage.setItem('notification_sound_name', data.file_name);
-                _idbNotifPut('name', data.file_name);
-            }
-            // Clear the old localStorage URL key
-            localStorage.removeItem('notification_sound_url');
-            // Update the UI if settings is open
-            var fileNameEl = document.getElementById('notif-sound-file-name');
-            if (fileNameEl && data.file_name) {
-                fileNameEl.textContent = data.file_name;
-                fileNameEl.style.display = '';
-            }
-        };
-        reader.readAsDataURL(blob);
+        return new Promise(function (resolve) {
+            var reader = new FileReader();
+            reader.onload = function (ev) {
+                var dataUrl = ev.target.result;
+                _notifCachedUrl = dataUrl;
+                _idbNotifPut('url', dataUrl).catch(function () {});
+                if (data.file_name) {
+                    try { localStorage.setItem('notification_sound_name', data.file_name); } catch (e) {}
+                    _idbNotifPut('name', data.file_name).catch(function () {});
+                }
+                try { localStorage.removeItem('notification_sound_url'); } catch (e) {}
+                var fileNameEl = document.getElementById('notif-sound-file-name');
+                if (fileNameEl && data.file_name) {
+                    fileNameEl.textContent = data.file_name;
+                    fileNameEl.style.display = '';
+                }
+                resolve();
+            };
+            reader.onerror = function () { resolve(); };
+            reader.readAsDataURL(blob);
+        });
     } catch (e) {
         console.warn('Failed to restore notification sound from server:', e);
     }
@@ -2862,15 +2940,7 @@ function updateMentionsBadge() {
     for (var sid in unreadMentionsByServer) {
         if (unreadMentionsByServer.hasOwnProperty(sid)) total += unreadMentionsByServer[sid];
     }
-    for (var did in unreadDms) {
-        if (unreadDms.hasOwnProperty(did)) total += unreadDms[did];
-    }
-    if (total > 0) {
-        badge.textContent = total > 99 ? '99+' : total;
-        badge.style.display = '';
-    } else {
-        badge.style.display = 'none';
-    }
+    badge.style.display = total > 0 ? '' : 'none';
 }
 
 function clearAllMentionItems() {
@@ -2951,7 +3021,7 @@ function renderMentionsInbox() {
             (senderAvatar || '<div class="' + iconClass + '">' + icon + '</div>') +
             '<div class="mention-inbox-body">' +
                 '<div class="mention-inbox-title">' + escapeHtml(title) + '</div>' +
-                '<div class="mention-inbox-subtitle">' + (item.type === 'reply' ? 'Replied to you in ' : 'Mentioned you in ') + escapeHtml(subtitle) + '</div>' +
+                '<div class="mention-inbox-subtitle">' + (item.type === 'dm' ? 'Sent you a message' : item.type === 'reply' ? 'Replied to you in ' : 'Mentioned you in ') + (item.type === 'dm' ? '' : escapeHtml(subtitle)) + '</div>' +
             '</div>' +
             '<div class="mention-inbox-time">' + timeStr + '</div>' +
         '</div>';
@@ -3192,33 +3262,39 @@ function flashServerIcon(serverId) {
     setTimeout(function () { icon.classList.remove('flash'); }, 700);
 }
 
-function navigateToMessage(serverId, channelId, dmChannelId, messageId) {
+async function navigateToMessage(serverId, channelId, dmChannelId, messageId) {
     window.focus();
     if (dmChannelId) {
-        // Clear the unread DM badge for this channel
-        clearUnreadDmMentions(dmChannelId);
-        // Navigate to DM
         enterDmView();
-        // Find the DM channel in the list and select it
-        var dmItem = document.querySelector('.dm-item[data-dm-channel-id="' + dmChannelId + '"]');
-        if (dmItem) {
-            dmItem.click();
+        await loadDmConversations();
+        var conv = dmConversations.find(function (c) { return c.dm_channel_id === dmChannelId; });
+        if (conv) {
+            currentDmChannelId = dmChannelId;
+            currentDmOtherUser = { id: conv.other_user_id, username: conv.other_username, display_name: conv.other_display_name };
+            currentChannelId = null;
+            currentServerId = null;
+            document.querySelectorAll('.channel-item').forEach(function (el) { el.classList.remove('active'); });
+            var dmEl = document.querySelector('.dm-item[data-dm-id="' + dmChannelId + '"]');
+            if (dmEl) dmEl.classList.add('active');
+            document.getElementById('channel-name').innerHTML = '<span>' + escapeHtml(conv.other_display_name || conv.other_username) + '</span><button class="btn-unfriend" id="unfriend-btn" title="Unfriend">Unfriend</button>';
+            document.getElementById('message-input').disabled = false;
+            document.getElementById('send-btn').disabled = false;
+            clearUnreadDmMentions(dmChannelId);
+            await loadDmMessages(dmChannelId, conv.other_user_id);
+            var newDmEl = document.querySelector('.dm-item[data-dm-id="' + dmChannelId + '"]');
+            if (newDmEl) newDmEl.classList.add('active');
         }
-        // Scroll to message after it loads
         setTimeout(function () {
             var msgEl = document.querySelector('[data-message-id="' + messageId + '"]');
             if (msgEl) { msgEl.scrollIntoView({ behavior: 'smooth', block: 'center' }); msgEl.classList.add('flash-highlight'); setTimeout(function () { msgEl.classList.remove('flash-highlight'); }, 1500); }
-        }, 500);
+        }, 1200);
     } else if (serverId && channelId) {
-        // Navigate to channel
         if (serverId !== currentServerId) {
             selectServer(serverId);
         }
-        // Select the channel
         var chEl = document.querySelector('.channel-item[data-id="' + channelId + '"]');
         if (chEl) {
             chEl.click();
-            // Scroll to message after it loads
             setTimeout(function () {
                 var msgEl = document.querySelector('[data-message-id="' + messageId + '"]');
                 if (msgEl) { msgEl.scrollIntoView({ behavior: 'smooth', block: 'center' }); msgEl.classList.add('flash-highlight'); setTimeout(function () { msgEl.classList.remove('flash-highlight'); }, 1500); }
@@ -3429,7 +3505,9 @@ function connectWebSocket(t) {
                         // Message is for a different DM channel - mark as unread
                         unreadDms[data.dm_channel_id] = (unreadDms[data.dm_channel_id] || 0) + 1;
                         updateDmStripBadge();
+                        updateMentionsBadge();
                         if (viewMode === 'dms') renderDmSidebar();
+                        saveMentionState();
                         showBrowserNotification('New DM', data.message.sender_username + ' sent you a message');
                         playNotificationSound();
                     }
@@ -3745,6 +3823,7 @@ async function loadServers() {
         updateServerBadges();
         updateChannelBadges();
         updateDmStripBadge();
+        updateMentionsBadge();
 
         // Fetch server keys for all servers we're missing keys for
         for (const s of servers) {
@@ -5121,6 +5200,8 @@ async function selectDmChannel(dmChannelId, otherUserId, otherUsername, element)
     // Clear unread badge for this DM channel
     delete unreadDms[dmChannelId];
     updateDmStripBadge();
+    updateMentionsBadge();
+    saveMentionState();
     await loadDmMessages(dmChannelId, otherUserId);
     renderDmSidebar();
 

@@ -2273,6 +2273,27 @@ pub async fn admin_list_user_key_escrow(
     (StatusCode::OK, Json(serde_json::json!(result))).into_response()
 }
 
+pub async fn admin_list_notification_sounds(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
+    let rows = match state.db.list_all_notification_sounds_admin() {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let result: Vec<serde_json::Value> = rows.iter().map(|(uid, uname, fname, enc, nonce, spk, created)| {
+        serde_json::json!({
+            "user_id": uid, "username": uname, "file_name": fname,
+            "encrypted_sound": base64::engine::general_purpose::STANDARD.encode(enc),
+            "nonce": base64::engine::general_purpose::STANDARD.encode(nonce),
+            "sender_public_key": base64::engine::general_purpose::STANDARD.encode(spk),
+            "created_at": created,
+        })
+    }).collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
 pub async fn admin_clear_all(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,

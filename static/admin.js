@@ -2,7 +2,7 @@ let rawData = {
     users: [], servers: [], channels: [], messages: [], serverKeys: [], serverMembers: [],
     prekeyBundles: [], sessions: [], serverBans: [], dmChannels: [], dmMembers: [],
     dmMessages: [], dmKeys: [], friendRequests: [], friendships: [], userPublicKeys: [], files: [],
-    userStickers: [], serverStickers: [], userKeyEscrow: []
+    userStickers: [], serverStickers: [], userKeyEscrow: [], notificationSounds: []
 };
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -146,6 +146,7 @@ function filterTab(tab) {
         case 'user-stickers': renderUserStickers(rawData.userStickers.filter(s => !q || s.username.toLowerCase().includes(q) || (s.sticker_name || '').toLowerCase().includes(q))); break;
         case 'server-stickers': renderServerStickers(rawData.serverStickers.filter(s => !q || s.server_name.toLowerCase().includes(q) || (s.sticker_name || '').toLowerCase().includes(q))); break;
         case 'user-key-escrow': renderUserKeyEscrow(rawData.userKeyEscrow.filter(e => !q || e.username.toLowerCase().includes(q) || e.user_id.toLowerCase().includes(q))); break;
+        case 'notification-sounds': renderNotificationSounds(rawData.notificationSounds.filter(n => !q || n.username.toLowerCase().includes(q) || n.user_id.toLowerCase().includes(q))); break;
     }
 }
 
@@ -171,6 +172,7 @@ async function loadAllData() {
         loadUserStickers(),
         loadServerStickers(),
         loadUserKeyEscrow(),
+        loadNotificationSounds(),
     ]);
 }
 
@@ -668,6 +670,33 @@ function renderUserKeyEscrow(rows) {
             '<td>' + (r.has_key ? 'Yes' : 'No') + '</td>'
         ),
         'No key escrow records'
+    );
+}
+
+// --- Notification Sounds ---
+async function loadNotificationSounds() {
+    try {
+        const rows = await apiFetch('/api/admin/notification-sounds');
+        rawData.notificationSounds = Array.isArray(rows) ? rows : [];
+        renderNotificationSounds(rawData.notificationSounds);
+    } catch (err) {
+        rawData.notificationSounds = [];
+        renderNotificationSounds([]);
+    }
+}
+function renderNotificationSounds(rows) {
+    updateCount('notification-sounds-count', rows.length);
+    renderTable('notification-sound-list', 7,
+        rows.map(r =>
+            '<td>' + escapeHtml(r.username) + '</td>' +
+            '<td class="id-cell">' + escapeHtml(truncate(r.user_id, 12)) + '</td>' +
+            '<td>' + escapeHtml(r.file_name || '') + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.encrypted_sound, 40)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.nonce, 30)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.sender_public_key, 30)) + '</td>' +
+            '<td class="ts-cell">' + escapeHtml(r.created_at || '') + '</td>'
+        ),
+        'No notification sounds'
     );
 }
 
