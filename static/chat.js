@@ -1208,7 +1208,7 @@ document.addEventListener('DOMContentLoaded', () => {
             _cameraCaptureFlashEl.style.display = '';
             setTimeout(function () {
                 if (_cameraCaptureFlashEl) _cameraCaptureFlashEl.style.display = 'none';
-            }, 200);
+            }, 500);
         }
         if (!_cameraCaptureCanvas) {
             _cameraCaptureCanvas = document.createElement('canvas');
@@ -3285,8 +3285,10 @@ function setupMentionAutocomplete() {
             item.className = 'mention-item' + (idx === activeIndex ? ' active' : '');
             const initial = (m.username || '?').charAt(0).toUpperCase();
             var mInitial = (m.username || '?').charAt(0).toUpperCase();
+            var mPicUrl = m.profile_picture_file_id ? getProfilePicUrl(m.profile_picture_file_id, m.id) : null;
             item.dataset.username = m.username;
-            item.innerHTML = '<span class="mention-item-avatar">' + mInitial + '</span><span class="mention-item-name">' + escapeHtml(m.display_name || m.username) + '</span>';
+            var mAvatarHtml = mPicUrl ? '<img class="mention-item-avatar" src="' + mPicUrl + '" alt="">' : '<span class="mention-item-avatar">' + mInitial + '</span>';
+            item.innerHTML = mAvatarHtml + '<span class="mention-item-name">' + escapeHtml(m.display_name || m.username) + '</span>';
             item.addEventListener('click', () => selectMention(m.username));
             item.addEventListener('mouseenter', () => { activeIndex = idx; highlightItem(); });
             container.appendChild(item);
@@ -4061,7 +4063,11 @@ async function appendMessage(msg) {
     const editedHtml = msg.edited_at ? '<span class="edited-label">(edited)</span>' : '';
     if (forwardData) {
         div.classList.add('forwarded');
-        contentHtml += '<div class="forward-label" data-source-server-id="' + escapeAttr(forwardData.source_server_id || '') + '" data-source-channel-id="' + escapeAttr(forwardData.source_channel_id || '') + '" data-source-message-id="' + escapeAttr(forwardData.source_message_id || '') + '"><strong>#' + escapeHtml(forwardData.source_channel_name || 'unknown') + '</strong> / <strong>' + escapeHtml(forwardData.source_server_name || 'unknown') + '</strong></div>';
+        var fwdSenderPicUrl = forwardData.sender_profile_pic ? getProfilePicUrl(forwardData.sender_profile_pic, forwardData.source_server_id) : null;
+        var fwdPicHtml = fwdSenderPicUrl ? '<img class="forward-sender-pic" src="' + fwdSenderPicUrl + '" alt="">' : '<span class="forward-sender-initial">' + (forwardData.sender_username ? forwardData.sender_username.charAt(0).toUpperCase() : '?') + '</span>';
+        contentHtml += '<div class="forward-label" data-source-server-id="' + escapeAttr(forwardData.source_server_id || '') + '" data-source-channel-id="' + escapeAttr(forwardData.source_channel_id || '') + '" data-source-message-id="' + escapeAttr(forwardData.source_message_id || '') + '">' +
+            '<div class="forward-sender-info">' + fwdPicHtml + '<span class="forward-sender-name"' + (forwardData.sender_color ? ' style="color:' + forwardData.sender_color + '"' : '') + '>' + escapeHtml(forwardData.sender_username || 'unknown') + '</span></div>' +
+            '<div class="forward-source-label"><strong>#' + escapeHtml(forwardData.source_channel_name || 'unknown') + '</strong> / <strong>' + escapeHtml(forwardData.source_server_name || 'unknown') + '</strong></div></div>';
         // Forward text preview
         if (forwardData.preview_content && forwardData.preview_nonce) {
             try {
@@ -4814,7 +4820,11 @@ async function executeForward(targetServerId, targetServerName, targetChannelId,
     const msgDiv = pendingForward.msgDiv;
     const messageId = pendingForward.messageId;
 
-    const senderUsername = msgDiv.querySelector('.username')?.textContent || 'unknown';
+    const senderUsername = msgDiv.querySelector('.display-name')?.textContent || msgDiv.querySelector('.username')?.textContent || 'unknown';
+    const avatarImg = msgDiv.querySelector('.avatar img.avatar-img');
+    const senderPic = avatarImg ? (avatarImg.getAttribute('data-profile-pic') || avatarImg.getAttribute('src') || '') : '';
+    const senderPicUrl = msgDiv.querySelector('.avatar')?.getAttribute('data-profile-pic-load') || senderPic || '';
+    const senderColor = msgDiv.querySelector('.display-name')?.style?.color || '';
     const textEl = msgDiv.querySelector('.text');
     const originalText = textEl ? extractRawMessageText(textEl) : '';
 
@@ -4875,6 +4885,8 @@ async function executeForward(targetServerId, targetServerName, targetChannelId,
             source_server_name: document.getElementById('server-name')?.textContent || 'Server',
             source_channel_name: document.getElementById('channel-name')?.textContent || 'channel',
             sender_username: senderUsername,
+            sender_profile_pic: senderPicUrl,
+            sender_color: senderColor,
             timestamp: msgDiv.querySelector('.time')?.textContent || '',
         };
         if (previewEncrypted) {
@@ -5190,6 +5202,7 @@ function appendDmMessage(msg, kp, otherPublicKey) {
     const displayName = msg.sender_display_name || msg.sender_username || '?';
     const initial = displayName.charAt(0).toUpperCase();
     var senderPicUrl = msg.sender_profile_pic ? getProfilePicUrl(msg.sender_profile_pic, msg.sender_id) : null;
+    var senderColor = msg.sender_username_color || null;
     let time = '';
     try {
         time = new Date(msg.timestamp).toLocaleTimeString();
@@ -5260,7 +5273,11 @@ function appendDmMessage(msg, kp, otherPublicKey) {
     }
     if (forwardData) {
         div.classList.add('forwarded');
-        contentHtml += '<div class="forward-label" data-source-server-id="' + escapeAttr(forwardData.source_server_id || '') + '" data-source-channel-id="' + escapeAttr(forwardData.source_channel_id || '') + '" data-source-message-id="' + escapeAttr(forwardData.source_message_id || '') + '"><strong>#' + escapeHtml(forwardData.source_channel_name || 'unknown') + '</strong> / <strong>' + escapeHtml(forwardData.source_server_name || 'unknown') + '</strong></div>';
+        var fwdSenderPicUrl = forwardData.sender_profile_pic ? getProfilePicUrl(forwardData.sender_profile_pic, forwardData.source_server_id) : null;
+        var fwdPicHtml = fwdSenderPicUrl ? '<img class="forward-sender-pic" src="' + fwdSenderPicUrl + '" alt="">' : '<span class="forward-sender-initial">' + (forwardData.sender_username ? forwardData.sender_username.charAt(0).toUpperCase() : '?') + '</span>';
+        contentHtml += '<div class="forward-label" data-source-server-id="' + escapeAttr(forwardData.source_server_id || '') + '" data-source-channel-id="' + escapeAttr(forwardData.source_channel_id || '') + '" data-source-message-id="' + escapeAttr(forwardData.source_message_id || '') + '">' +
+            '<div class="forward-sender-info">' + fwdPicHtml + '<span class="forward-sender-name"' + (forwardData.sender_color ? ' style="color:' + forwardData.sender_color + '"' : '') + '>' + escapeHtml(forwardData.sender_username || 'unknown') + '</span></div>' +
+            '<div class="forward-source-label"><strong>#' + escapeHtml(forwardData.source_channel_name || 'unknown') + '</strong> / <strong>' + escapeHtml(forwardData.source_server_name || 'unknown') + '</strong></div></div>';
         // Forward text preview (decrypt with DM keys)
         if (forwardData.preview_content && forwardData.preview_nonce && kp && otherPublicKey) {
             try {
@@ -5329,7 +5346,7 @@ function appendDmMessage(msg, kp, otherPublicKey) {
                 '<div class="avatar">' + initial + '</div>')) +
         '<div class="content">' +
             '<div class="header">' +
-                '<span class="display-name">' + escapeHtml(displayName) + '</span>' +
+                '<span class="display-name"' + (senderColor ? ' style="color:' + senderColor + '"' : '') + '>' + escapeHtml(displayName) + '</span>' +
             '</div>' +
             contentHtml +
             editedHtml +
@@ -8425,7 +8442,7 @@ async function loadEmojiCache() {
 // entries with a shareable file_key are included, so recipients can decrypt them.
 function collectEmojiRefs(text) {
     if (!emojiCache || Object.keys(emojiCache).length === 0) return [];
-    const parts = text.split(/:([a-zA-Z0-9_]+):/);
+    const parts = text.split(/:([^:]+):/);
     if (parts.length <= 1) return [];
     const refs = [];
     const seen = {};
@@ -8469,12 +8486,12 @@ function collectEmojiRefsFromMsgEl(msgEl, text) {
     // Step 2: For emoji names in the text that weren't in the local cache,
     // look for rendered &lt;img&gt; elements in the message DOM that already
     // display those emojis. Extract file_id and file_key from the src URL.
-    const parts = text.split(/:([a-zA-Z0-9_]+):/);
+    const parts = text.split(/:([^:]+):/);
     if (parts.length > 1 && msgEl) {
         const emojiImgs = msgEl.querySelectorAll('.text .emoji-inline');
         for (const img of emojiImgs) {
             const alt = img.getAttribute('alt') || '';
-            const match = alt.match(/^:([a-zA-Z0-9_]+):$/);
+            const match = alt.match(/^:([^:]+):$/);
             if (match) {
                 const name = match[1];
                 if (!seen[name] && text.includes(':' + name + ':')) {
@@ -8517,8 +8534,8 @@ function renderEmojiText(text, extraEmojis) {
         (extraEmojis && Object.keys(extraEmojis).length > 0);
     if (!hasKnown) return escapeHtml(text);
 
-    // Split by :name: patterns (word characters only)
-    const parts = text.split(/:([a-zA-Z0-9_]+):/);
+    // Split by :name: patterns (any characters except colon)
+    const parts = text.split(/:([^:]+):/);
     if (parts.length <= 1) return escapeHtml(text);
 
     // Determine if text is emoji-only (no non-emoji text content)
@@ -9200,7 +9217,7 @@ async function processAndUploadSticker() {
     const progressText = document.getElementById('sticker-progress-text');
     const errorDiv = document.getElementById('sticker-upload-error');
 
-    const name = (nameInput && nameInput.value.trim()) || stickerCropState.file.name.replace(/\.[^.]+$/, '');
+    const name = ((nameInput && nameInput.value.trim()) || stickerCropState.file.name.replace(/\.[^.]+$/, '')).replace(/[^a-zA-Z0-9_]/g, '_');
     if (!name) {
         if (errorDiv) { errorDiv.textContent = 'Enter a sticker name'; errorDiv.style.display = 'block'; }
         return;
@@ -9410,12 +9427,9 @@ async function loadDmForwardList() {
         for (const c of dmConversations) {
             if (allowedUserIds && !allowedUserIds.has(c.other_user_id)) continue;
             var fwdDisplayName = c.other_display_name || c.other_username || '?';
-            var fwdPicCacheKey = c.other_profile_picture_file_id ? (c.other_user_id + ':' + c.other_profile_picture_file_id) : null;
             const initial = fwdDisplayName.charAt(0).toUpperCase();
-            var avatarHtml = '<div data-profile-pic-load="' + (fwdPicCacheKey || '') + '" style="width:32px;height:32px;border-radius:50%;background:var(--accent);color:var(--bg-primary);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;flex-shrink:0;overflow:hidden;">' + initial + '</div>';
-            if (fwdPicCacheKey) {
-                getProfilePicUrl(c.other_profile_picture_file_id, c.other_user_id);
-            }
+            var fwdPicUrl = c.other_profile_picture_file_id ? getProfilePicUrl(c.other_profile_picture_file_id, c.other_user_id) : null;
+            var avatarHtml = fwdPicUrl ? '<img src="' + fwdPicUrl + '" alt="" style="width:32px;height:32px;border-radius:50%;object-fit:cover;flex-shrink:0;">' : '<div style="width:32px;height:32px;border-radius:50%;background:var(--accent);color:var(--bg-primary);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;flex-shrink:0;overflow:hidden;">' + initial + '</div>';
             html += '<div class="dm-forward-item" data-user-id="' + c.other_user_id + '" data-username="' + escapeAttr(c.other_username) + '" data-dm-channel-id="' + escapeAttr(c.dm_channel_id || '') + '" style="display:flex;align-items:center;gap:10px;padding:10px 12px;cursor:pointer;border-radius:6px;border-bottom:1px solid var(--bg-border);transition:background .15s;">' +
                 avatarHtml +
                 '<span style="font-size:14px;color:var(--text-primary);">' + escapeHtml(fwdDisplayName) + '</span>' +
@@ -9473,9 +9487,14 @@ async function executeDmForward(targetUserId, targetUsername, dmChannelId) {
         return;
     }
 
-    const senderUsername = msgDiv.querySelector('.username')?.textContent || 'unknown';
+    const senderUsername = msgDiv.querySelector('.display-name')?.textContent || msgDiv.querySelector('.username')?.textContent || 'unknown';
+    const avatarImg = msgDiv.querySelector('.avatar img.avatar-img');
+    const senderPic = avatarImg ? (avatarImg.getAttribute('data-profile-pic') || avatarImg.getAttribute('src') || '') : '';
+    const senderPicUrl = msgDiv.querySelector('.avatar')?.getAttribute('data-profile-pic-load') || senderPic || '';
+    const senderColor = msgDiv.querySelector('.display-name')?.style?.color || '';
     const textEl = msgDiv.querySelector('.text');
     const originalText = textEl ? extractRawMessageText(textEl) : '';
+
     let previewText = originalText.substring(0, 80);
 
     // Extract GIF/sticker/file data from the DOM for rich forward previews
@@ -9532,6 +9551,8 @@ async function executeDmForward(targetUserId, targetUsername, dmChannelId) {
             source_server_name: document.getElementById('server-name')?.textContent || 'Server',
             source_channel_name: document.getElementById('channel-name')?.textContent || 'channel',
             sender_username: senderUsername,
+            sender_profile_pic: senderPicUrl,
+            sender_color: senderColor,
         };
         if (previewEncrypted) {
             forwardPayload.preview_content = previewEncrypted.ciphertext;

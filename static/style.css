@@ -2331,6 +2331,7 @@ body {
     font-weight: 600;
     color: var(--accent);
     font-size: clamp(13px, 2.5vw, 15px);
+    text-shadow: 0 0 3px rgba(0,0,0,0.8), 0 0 2px rgba(0,0,0,0.6);
 }
 
 /* Sidebar footer with avatar */
@@ -3945,7 +3946,39 @@ body {
 .forward-label:hover {
     color: #4fc3f7;
     text-decoration: underline;
-    padding: 2px 0;
+}
+.forward-sender-info {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 2px;
+}
+.forward-sender-pic,
+.forward-sender-initial {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    object-fit: cover;
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-secondary, #3a3a3a);
+    font-size: 10px;
+    font-weight: 600;
+    color: #ccc;
+}
+.forward-sender-name {
+    font-weight: 600;
+    font-size: 12px;
+}
+.forward-source-label {
+    font-size: 11px;
+    color: #888;
+    padding-left: 24px;
+}
+.forward-label:hover .forward-source-label {
+    color: #4fc3f7;
 }
 .forward-preview {
     border-left: 3px solid #888;
