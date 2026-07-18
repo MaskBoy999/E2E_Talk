@@ -3187,6 +3187,10 @@ impl Database {
                 .map_err(|e| e.to_string())?;
             conn.execute("DELETE FROM channels WHERE server_id = ?1", params![sid])
                 .map_err(|e| e.to_string())?;
+            conn.execute("DELETE FROM server_bans WHERE server_id = ?1", params![sid])
+                .map_err(|e| e.to_string())?;
+            conn.execute("DELETE FROM server_stickers WHERE server_id = ?1", params![sid])
+                .map_err(|e| e.to_string())?;
             conn.execute("DELETE FROM servers WHERE id = ?1", params![sid])
                 .map_err(|e| e.to_string())?;
         }
@@ -3206,6 +3210,29 @@ impl Database {
         )
         .map_err(|e| e.to_string())?;
 
+        // 4a. Clean up DM channels where user is a member (removes dm_messages, dm_keys, dm_members via CASCADE)
+        let dm_channel_ids: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT dm_channel_id FROM dm_members WHERE user_id = ?1")
+                .map_err(|e| e.to_string())?;
+            let rows: Vec<String> = stmt
+                .query_map(params![user_id], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?
+                .filter_map(|r| r.ok())
+                .collect();
+            rows
+        };
+        for dm_id in &dm_channel_ids {
+            conn.execute("DELETE FROM dm_keys WHERE dm_channel_id = ?1", params![dm_id])
+                .map_err(|e| e.to_string())?;
+            conn.execute("DELETE FROM dm_messages WHERE dm_channel_id = ?1", params![dm_id])
+                .map_err(|e| e.to_string())?;
+            conn.execute("DELETE FROM dm_members WHERE dm_channel_id = ?1", params![dm_id])
+                .map_err(|e| e.to_string())?;
+            conn.execute("DELETE FROM dm_channels WHERE id = ?1", params![dm_id])
+                .map_err(|e| e.to_string())?;
+        }
+
         // 4b. Clean up DM + friend data. dm_messages/dm_keys/dm_members cascade on user delete,
         //     but friendships + friend_requests are bidirectional so handle both directions.
         conn.execute(
@@ -3221,6 +3248,22 @@ impl Database {
 
         // 4c. Clean up files owned by user (files.uploader_id has no ON DELETE CASCADE)
         conn.execute("DELETE FROM files WHERE uploader_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+
+        // 4d. Clean up notification sounds (has ON DELETE CASCADE, but explicit is safer)
+        conn.execute("DELETE FROM notification_sounds WHERE user_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+
+        // 4e. Clean up user stickers (has ON DELETE CASCADE, but explicit is safer)
+        conn.execute("DELETE FROM user_stickers WHERE user_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+
+        // 4f. Clean up server_bans where user is the banned user
+        conn.execute("DELETE FROM server_bans WHERE user_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+
+        // 4g. Clean up server_stickers where user was uploader
+        conn.execute("DELETE FROM server_stickers WHERE uploaded_by = ?1", params![user_id])
             .map_err(|e| e.to_string())?;
 
         // 5. Delete the user

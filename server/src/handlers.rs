@@ -1003,7 +1003,10 @@ pub async fn kick_member(
                 "user_id": req.user_id,
             });
             if let Ok(members) = state.db.get_server_members(&server_id) {
-                let _ = state.ws_manager.broadcast_to_users(&members, &kick_msg.to_string()).await;
+                // Also broadcast to the kicked user so their UI updates without refresh
+                let mut broadcast_users = members.clone();
+                broadcast_users.push(req.user_id.clone());
+                let _ = state.ws_manager.broadcast_to_users(&broadcast_users, &kick_msg.to_string()).await;
             }
             (
                 StatusCode::OK,
@@ -1029,6 +1032,9 @@ pub async fn leave_server(
         Err(e) => return e.into_response(),
     };
 
+    // Collect members BEFORE leaving (owner case deletes the server from DB, making get_server_members fail)
+    let server_members = state.db.get_server_members(&server_id).ok();
+
     match state.db.leave_server(&server_id, &user_id) {
         Ok(server_deleted) => {
             if server_deleted {
@@ -1037,7 +1043,7 @@ pub async fn leave_server(
                     "type": "server_deleted",
                     "server_id": server_id,
                 });
-                if let Ok(members) = state.db.get_server_members(&server_id) {
+                if let Some(members) = server_members {
                     let _ = state.ws_manager.broadcast_to_users(&members, &del_msg.to_string()).await;
                 }
             } else {
@@ -1105,7 +1111,10 @@ pub async fn ban_member(
                 "user_id": req.user_id,
             });
             if let Ok(members) = state.db.get_server_members(&server_id) {
-                let _ = state.ws_manager.broadcast_to_users(&members, &ban_msg.to_string()).await;
+                // Also broadcast to the banned user so their UI updates without refresh
+                let mut broadcast_users = members.clone();
+                broadcast_users.push(req.user_id.clone());
+                let _ = state.ws_manager.broadcast_to_users(&broadcast_users, &ban_msg.to_string()).await;
             }
             (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
         }
@@ -2959,8 +2968,12 @@ pub async fn update_profile(
         }
     }
 
-    // Handle description update
+    // Handle description update with 300-word hard cap
     if let Some(ref description) = req.description {
+        let word_count = description.trim().split_whitespace().count();
+        if word_count > 300 {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Description too long (max 300 words)"}))).into_response();
+        }
         if let Err(e) = state.db.update_description(&user_id, description) {
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
         }
@@ -3076,8 +3089,46 @@ pub async fn delete_me(
         Ok(id) => id,
         Err(e) => return e.into_response(),
     };
+
+    // Collect affected users BEFORE deletion so we can broadcast "user_deleted"
+    let mut affected_users: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Add all server members from servers the user is in
+    if let Ok(servers) = state.db.list_user_servers(&user_id) {
+        for s in &servers {
+            if let Ok(members) = state.db.get_server_members(&s.id) {
+                for m in members {
+                    affected_users.insert(m);
+                }
+            }
+        }
+    }
+    // Add all DM conversation partners
+    if let Ok(dm_channels) = state.db.list_dm_channels_for_user(&user_id) {
+        for (_dm_id, other_id, _username, _dn, _pp) in dm_channels {
+            affected_users.insert(other_id);
+        }
+    }
+    // Add friends
+    if let Ok(friends) = state.db.list_friends(&user_id) {
+        for f in friends {
+            affected_users.insert(f.user_id);
+        }
+    }
+    // Remove self from broadcast list
+    affected_users.remove(&user_id);
+
     match state.db.delete_user(&user_id) {
         Ok(()) => {
+            // Broadcast "user_deleted" to all affected users so they can clean up UI
+            let user_deleted_msg = serde_json::json!({
+                "type": "user_deleted",
+                "user_id": user_id,
+            });
+            let affected: Vec<String> = affected_users.into_iter().collect();
+            if !affected.is_empty() {
+                state.ws_manager.broadcast_to_users(&affected, &user_deleted_msg.to_string()).await;
+            }
+
             // Clear all cookies so the user is fully logged out
             let mut resp_headers = HeaderMap::new();
             for cookie_name in &["token", "session", "connect.sid", "xsrf-token"] {

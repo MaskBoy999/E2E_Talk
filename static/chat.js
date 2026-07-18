@@ -797,6 +797,11 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('profile-edit-bg-preview').style.background = color;
             var card = document.querySelector('#profile-edit-modal .profile-edit-preview-card');
             if (card) card.style.background = color;
+            // Make edit avatar border match background color
+            var editAvatarEl = document.getElementById('profile-edit-avatar');
+            if (editAvatarEl) {
+                editAvatarEl.style.borderColor = color || '#16213e';
+            }
         });
         // Description word count
         document.getElementById('profile-edit-description').addEventListener('input', function () {
@@ -4010,21 +4015,94 @@ function connectWebSocket(t) {
                     if (data.server_id === currentServerId) {
                         await loadMembers(data.server_id);
                     }
-                    if (data.user_id === user.id && data.server_id === currentServerId) {
+                    if (data.user_id === user.id) {
+                        // This user was kicked/banned/left — remove the server from their sidebar
+                        if (data.server_id === currentServerId) {
+                            // Currently viewing this server — clear the view
+                            currentServerId = null;
+                            currentChannelId = null;
+                            document.getElementById('server-name').textContent = '';
+                            document.getElementById('channel-list').innerHTML = '<div class="channel-item" style="color:#666;cursor:default">Select a server</div>';
+                            document.getElementById('channel-name').textContent = 'Select a channel';
+                            document.getElementById('message-list').innerHTML = '<div class="welcome">Select a server and channel to start chatting</div>';
+                            document.getElementById('message-input').disabled = true;
+                            document.getElementById('send-btn').disabled = true;
+                        }
+                        // Always reload server list so the server icon disappears from the sidebar
+                        await loadServers();
+                    }
+                }
+                break;
+            case 'user_deleted':
+                if (data.user_id) {
+                    var deletedUserId = data.user_id;
+                    // Remove all messages from this user in the current channel
+                    document.querySelectorAll('.message[data-sender-id="' + deletedUserId + '"]').forEach(function(el) {
+                        el.remove();
+                    });
+                    // Remove DM conversations with this user from memory
+                    dmConversations = dmConversations.filter(function(c) {
+                        return c.other_user_id !== deletedUserId;
+                    });
+                    // If currently viewing a DM with the deleted user, clear the view
+                    if (viewMode === 'dms' && currentDmOtherUser && currentDmOtherUser.id === deletedUserId) {
+                        currentDmChannelId = null;
+                        currentDmOtherUser = null;
+                        document.getElementById('message-list').innerHTML = '<div class="welcome">This user has deleted their account</div>';
+                        document.getElementById('message-input').disabled = true;
+                        document.getElementById('send-btn').disabled = true;
+                        document.getElementById('dm-chat-header-name').textContent = '';
+                    }
+                    // Also check by dmChannelId: if the current DM channel no longer exists
+                    if (viewMode === 'dms' && currentDmChannelId && !dmConversations.find(function(c) { return c.dm_channel_id === currentDmChannelId; })) {
+                        currentDmChannelId = null;
+                        currentDmOtherUser = null;
+                        document.getElementById('message-list').innerHTML = '<div class="welcome">This user has deleted their account</div>';
+                        document.getElementById('message-input').disabled = true;
+                        document.getElementById('send-btn').disabled = true;
+                        document.getElementById('dm-chat-header-name').textContent = '';
+                    }
+                    // Remove from member lists
+                    document.querySelectorAll('.member-item[data-user-id="' + deletedUserId + '"]').forEach(function(el) {
+                        el.remove();
+                    });
+                    // Refresh DM list and server list
+                    await loadDmConversations();
+                    if (viewMode === 'dms') {
+                        renderDmSidebar();
+                    }
+                    // Save viewMode so loadServers doesn't auto-select a server when in DM view
+                    var prevViewMode = viewMode;
+                    await loadServers();
+                    // If we were in DM view, stay in DM view (loadServers may have auto-selected a server)
+                    if (prevViewMode === 'dms' && viewMode !== 'dms') {
+                        viewMode = 'dms';
+                        document.getElementById('server-name').textContent = 'Direct Messages';
+                        document.getElementById('invite-btn').style.display = 'none';
+                        document.getElementById('server-settings-btn').style.display = 'none';
+                        document.getElementById('members-toggle').style.display = 'none';
+                        document.getElementById('members-panel').classList.remove('open');
+                        membersPanelOpen = false;
+                        // Re-render DM sidebar since loadServers may have overwritten the channel list
+                        renderDmSidebar();
+                    }
+                    // If the current server no longer exists in the server list (deleted user was owner), clear the view
+                    if (currentServerId && !servers.find(function(s) { return s.id === currentServerId; })) {
                         currentServerId = null;
                         currentChannelId = null;
+                        viewMode = 'servers';
                         document.getElementById('server-name').textContent = '';
                         document.getElementById('channel-list').innerHTML = '<div class="channel-item" style="color:#666;cursor:default">Select a server</div>';
                         document.getElementById('channel-name').textContent = 'Select a channel';
                         document.getElementById('message-list').innerHTML = '<div class="welcome">Select a server and channel to start chatting</div>';
                         document.getElementById('message-input').disabled = true;
                         document.getElementById('send-btn').disabled = true;
-                        await loadServers();
                     }
                 }
                 break;
             case 'server_deleted':
                 if (data.server_id) {
+                    var wasInDmView = viewMode === 'dms';
                     if (data.server_id === currentServerId) {
                         currentServerId = null;
                         currentChannelId = null;
@@ -4036,6 +4114,17 @@ function connectWebSocket(t) {
                         document.getElementById('send-btn').disabled = true;
                     }
                     await loadServers();
+                    // If we were in DM view before, restore it (loadServers may have auto-selected a server)
+                    if (wasInDmView && viewMode !== 'dms') {
+                        viewMode = 'dms';
+                        document.getElementById('server-name').textContent = 'Direct Messages';
+                        document.getElementById('invite-btn').style.display = 'none';
+                        document.getElementById('server-settings-btn').style.display = 'none';
+                        document.getElementById('members-toggle').style.display = 'none';
+                        document.getElementById('members-panel').classList.remove('open');
+                        membersPanelOpen = false;
+                        renderDmSidebar();
+                    }
                 }
                 break;
             case 'channel_created':
@@ -4057,7 +4146,15 @@ function connectWebSocket(t) {
                 if (viewMode === 'dms') loadDmConversations();
                 break;
             case 'friend_removed':
-                if (viewMode === 'dms') loadDmConversations();
+                // Filter out the DM conversation with the unfriended user
+                dmConversations = dmConversations.filter(function(c) {
+                    return c.other_user_id !== data.by_user_id;
+                });
+                if (viewMode === 'dms') {
+                    await loadDmConversations();
+                    renderDmSidebar();
+                }
+                // currentDmOtherUser is an object { id, username, ... }, compare by .id
                 if (data.by_user_id && currentDmOtherUser && data.by_user_id === currentDmOtherUser.id) {
                     currentDmChannelId = null;
                     currentDmOtherUser = null;
@@ -4315,6 +4412,7 @@ async function selectServer(serverId) {
     currentServerId = serverId;
     currentChannelId = null;
     document.getElementById('dm-strip-btn').classList.remove('active');
+    document.querySelectorAll('.dm-item').forEach(el => el.classList.remove('active'));
 
     const server = servers.find(s => s.id === serverId);
     isOwner = server && server.is_owner;
@@ -5505,6 +5603,7 @@ function enterDmView() {
     currentServerId = null;
     document.getElementById('dm-strip-btn').classList.add('active');
     document.querySelectorAll('.server-icon:not(.add-server):not(.dm-strip-btn)').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.dm-item').forEach(el => el.classList.remove('active'));
     document.getElementById('server-name').textContent = 'Direct Messages';
     document.getElementById('invite-btn').style.display = 'none';
     document.getElementById('server-settings-btn').style.display = 'none';
@@ -5654,8 +5753,7 @@ async function selectDmChannel(dmChannelId, otherUserId, otherUsername, element)
     currentChannelId = null;
     currentServerId = null;
 
-    document.querySelectorAll('.channel-item').forEach(el => el.classList.remove('active'));
-    if (element) element.classList.add('active');
+    document.querySelectorAll('.channel-item, .dm-item').forEach(el => el.classList.remove('active'));
 
     var convForPic = dmConversations.find(function (c) { return c.dm_channel_id === dmChannelId; });
     var dmHeaderPicFileId = convForPic ? convForPic.other_profile_picture_file_id : null;
@@ -5675,6 +5773,10 @@ async function selectDmChannel(dmChannelId, otherUserId, otherUsername, element)
     saveMentionState();
     await loadDmMessages(dmChannelId, otherUserId);
     renderDmSidebar();
+
+    // Re-add active class after renderDmSidebar re-creates DOM
+    var newDmEl = document.querySelector('.dm-item[data-dm-id="' + dmChannelId + '"]');
+    if (newDmEl) newDmEl.classList.add('active');
 
     if (window._closeSidebar) window._closeSidebar();
 }
@@ -6106,6 +6208,7 @@ function enterServerView() {
     currentChannelId = null;
     currentServerId = null;
     document.getElementById('dm-strip-btn').classList.remove('active');
+    document.querySelectorAll('.dm-item').forEach(el => el.classList.remove('active'));
     document.getElementById('server-name').textContent = 'Select a server';
     document.getElementById('channel-name').textContent = 'Select a channel';
     document.getElementById('message-list').innerHTML = '<div class="welcome">Select a server and channel to start chatting</div>';
@@ -11446,6 +11549,12 @@ function renderProfileView(data, decrypted, uid) {
         cardEl.style.background = bgColor || '';
     }
     
+    // Make avatar border match background color
+    var avatarEl = document.getElementById('profile-modal-avatar');
+    if (avatarEl) {
+        avatarEl.style.borderColor = bgColor || '#16213e';
+    }
+    
     // Set display name with color
     var dnEl = document.getElementById('profile-modal-display-name');
     dnEl.textContent = displayName;
@@ -11688,6 +11797,11 @@ function updateProfileEditPreview() {
     var bgColor = document.getElementById('profile-edit-bg-color').value || '';
     var card = document.querySelector('#profile-edit-modal .profile-edit-preview-card');
     if (card) card.style.background = bgColor || '';
+    // Make edit avatar border match background color
+    var editAvatarEl = document.getElementById('profile-edit-avatar');
+    if (editAvatarEl) {
+        editAvatarEl.style.borderColor = bgColor || '#16213e';
+    }
     
     // Update banner preview from current profile
     var bannerImg = document.getElementById('profile-edit-banner-img');
@@ -11921,6 +12035,17 @@ async function saveProfile() {
     // Validate
     if (displayName.length > 32) { statusEl.textContent = 'Display name too long (max 32 chars)'; statusEl.style.color = 'var(--danger)'; return; }
     if (nickname.length > 32) { statusEl.textContent = 'Nickname too long (max 32 chars)'; statusEl.style.color = 'var(--danger)'; return; }
+    // Hard-cap description at 300 words — truncate if over
+    if (description) {
+        var words = description.split(/\s+/);
+        if (words.length > 300) {
+            words = words.slice(0, 300);
+            description = words.join(' ');
+            // Update the input field so the user sees the truncated value
+            document.getElementById('profile-edit-description').value = description;
+            updateDescriptionWordCount();
+        }
+    }
     var wordCount = description ? description.trim().split(/\s+/).length : 0;
     if (wordCount > 300) { statusEl.textContent = 'Description too long (max 300 words)'; statusEl.style.color = 'var(--danger)'; return; }
     
@@ -12161,10 +12286,7 @@ function openBannerCrop(file) {
                 if (!bannerCropState.isResizing) return;
                 var e = ev.touches ? ev.touches[0] : ev;
                 var dx = e.clientX - bannerCropState.dragStartX;
-                var maxW = bannerCropState.dispW - bannerCropState.startLeft;
-                var maxH = bannerCropState.dispH - bannerCropState.startTop;
-                var maxSize = Math.min(maxW, maxH);
-                var newW = Math.max(40, Math.min(maxSize, bannerCropState.startSize + dx));
+                var newW = Math.max(40, bannerCropState.startSize + dx);
                 var newH = Math.round(newW * (bannerCropState.height / bannerCropState.width));
                 if (newH > bannerCropState.dispH - bannerCropState.startTop) {
                     newH = bannerCropState.dispH - bannerCropState.startTop;
