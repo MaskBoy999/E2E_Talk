@@ -9462,6 +9462,16 @@ async function loadUserStickers() {
         const res = await authFetch('/api/users/me/stickers');
         if (res.ok) {
             userStickersCache = await res.json();
+            // Decrypt encrypted file_keys using user's identity key
+            const identity = E2ECrypto.getIdentityKeyPair();
+            if (identity) {
+                for (const s of userStickersCache) {
+                    if (s.file_key) {
+                        var decrypted = E2ECrypto.decodeEncryptedFileKey(s.file_key, identity.privateKey);
+                        if (decrypted) s.file_key = decrypted;
+                    }
+                }
+            }
         } else {
             userStickersCache = [];
         }
@@ -9478,12 +9488,18 @@ async function loadEmojiCache() {
             const stickers = await res.json();
             // Filter for emoji entries (mime_type === 'image/emoji')
             const emojis = stickers.filter(s => s.mime_type === 'image/emoji');
+            const identity = E2ECrypto.getIdentityKeyPair();
             const cache = {};
             for (const s of emojis) {
+                var fileKey = s.file_key || null;
+                if (fileKey && identity) {
+                    var decrypted = E2ECrypto.decodeEncryptedFileKey(fileKey, identity.privateKey);
+                    if (decrypted) fileKey = decrypted;
+                }
                 cache[s.sticker_name] = {
                     id: s.id,
                     file_id: s.file_id,
-                    file_key: s.file_key || null,
+                    file_key: fileKey,
                     mime_type: s.mime_type,
                 };
             }
@@ -10419,7 +10435,9 @@ async function processAndUploadSticker() {
             body: JSON.stringify({
                 file_id: file_id,
                 sticker_name: name,
-                file_key: emojiUploadFileKeyB64,
+                // Encrypt the shareable emoji key with the user's identity key so the server
+                // cannot decrypt emoji images; regular stickers keep file_key null (identity-derived).
+                file_key: emojiUploadFileKeyB64 ? E2ECrypto.encodeEncryptedFileKey(emojiUploadFileKeyB64, identity.privateKey) : null,
                 mime_type: mimeType,
             }),
         });
@@ -11961,8 +11979,45 @@ function isLightColor(hex) {
 // Verify that the stored password matches the server's hash.
 // If the password is wrong or missing, prompts the user to re-enter it.
 // Returns the verified password, or null if the user cancels.
+// Get or create a device-specific wrapping key for encrypting the password at rest.
+// This prevents the raw password from appearing in localStorage if the storage is
+// leaked or backed up; the device key is regenerated on every logout/clear.
+function getDeviceWrappingKey() {
+    var key = localStorage.getItem('e2e_device_key');
+    if (!key) {
+        key = E2ECrypto.arrayBufferToBase64(E2ECrypto.randomBytes(32));
+        localStorage.setItem('e2e_device_key', key);
+    }
+    return new Uint8Array(E2ECrypto.base64ToArrayBuffer(key));
+}
+
+function storeEncryptedPassword(password) {
+    var deviceKey = getDeviceWrappingKey();
+    var encrypted = E2ECrypto.encodeEncryptedFileKey(btoa(password), deviceKey);
+    localStorage.setItem('e2e_encrypted_password', encrypted);
+    localStorage.removeItem('e2e_password'); // Remove legacy plaintext
+}
+
+function loadDecryptedPassword() {
+    // Try encrypted password first
+    var encrypted = localStorage.getItem('e2e_encrypted_password');
+    if (encrypted) {
+        var deviceKey = getDeviceWrappingKey();
+        var decryptedB64 = E2ECrypto.decodeEncryptedFileKey(encrypted, deviceKey);
+        if (decryptedB64) {
+            try { return atob(decryptedB64); } catch (_) {}
+        }
+    }
+    // Fall back to legacy plaintext password and auto-migrate to encrypted
+    var legacy = localStorage.getItem('e2e_password');
+    if (legacy && !encrypted) {
+        storeEncryptedPassword(legacy);
+    }
+    return legacy || null;
+}
+
 async function verifyStoredPassword() {
-    var stored = localStorage.getItem('e2e_password');
+    var stored = loadDecryptedPassword();
     if (stored) {
         try {
             var res = await authFetch('/api/reauth', {
@@ -12006,7 +12061,7 @@ async function verifyStoredPassword() {
     // Stored password is missing or wrong — ask the user
     var newPassword = prompt('Your password has changed. Please enter your current password:');
     if (newPassword) {
-        localStorage.setItem('e2e_password', newPassword);
+        storeEncryptedPassword(newPassword);
         // Also update the token via reauth with the new password
         try {
             var pwRes = await authFetch('/api/reauth', {

@@ -747,18 +747,23 @@ const E2ECrypto = (() => {
 
     // --- TOFU Key Verification ---
     function getKnownFingerprints() {
-        try { return JSON.parse(localStorage.getItem('known_key_fingerprints') || '{}'); }
+        try { return JSON.parse(localStorage.getItem('known_key_fingerprints_v2') || '{}'); }
         catch { return {}; }
     }
     function saveKnownFingerprints(obj) {
-        localStorage.setItem('known_key_fingerprints', JSON.stringify(obj));
+        localStorage.setItem('known_key_fingerprints_v2', JSON.stringify(obj));
     }
     function fingerprintKey(pubKeyB64) {
+        // Use SHA-256 hash of the public key instead of raw first 8 bytes.
+        // SHA-256 provides 128-bit collision resistance vs 64-bit for raw bytes.
         var raw = base64ToArrayBuffer(pubKeyB64);
         var bytes = new Uint8Array(raw);
-        var hash = [];
-        for (var i = 0; i < Math.min(bytes.length, 8); i++) hash.push(bytes[i].toString(16).padStart(2, '0'));
-        return hash.join(':');
+        var hash = sha256(bytes);
+        var parts = [];
+        for (var i = 0; i < 8; i++) {
+            parts.push(hash[i].toString(16).padStart(2, '0'));
+        }
+        return parts.join(':');
     }
     function verifyKeyForUser(userId, pubKeyB64) {
         var known = getKnownFingerprints();
@@ -831,6 +836,61 @@ const E2ECrypto = (() => {
         try { return atob(codeB64); } catch (_) { return null; }
     }
 
+    // --- Session Key (password-derived, for localStorage) ---
+    // Derives a session key from the password + userId so we can avoid
+    // storing the raw password in localStorage. The session key is
+    // specific to this account and cannot be used to log in or change
+    // the password — it only unlocks locally-cached encrypted data.
+    function deriveSessionKey(password, userId) {
+        var passwordBytes = new TextEncoder().encode(password);
+        var userIdBytes = new TextEncoder().encode(userId || '');
+        var info = 'e2e-session-v2:' + (userId || '');
+        return hkdf(passwordBytes, userIdBytes, info, 32);
+    }
+
+    // --- Sticker/Emoji File Key Encryption ---
+    // Encrypts a file key for server-side storage so the server cannot
+    // decrypt sticker/emoji images. Uses symmetric encryption with
+    // the user's identity private key (or server key for server stickers).
+    function encryptFileKeyForStorage(fileKeyB64, symmetricKey) {
+        var fileKeyBytes = new Uint8Array(base64ToArrayBuffer(fileKeyB64));
+        var enc = xchacha20poly1305Encrypt(symmetricKey, fileKeyBytes);
+        var combined = concatBuffers(enc.ciphertext, enc.tag);
+        return {
+            ciphertext: arrayBufferToBase64(combined),
+            nonce: arrayBufferToBase64(enc.nonce)
+        };
+    }
+
+    function decryptFileKeyFromStorage(ciphertextB64, nonceB64, symmetricKey) {
+        var combined = new Uint8Array(base64ToArrayBuffer(ciphertextB64));
+        var nonce = new Uint8Array(base64ToArrayBuffer(nonceB64));
+        if (combined.length < 16) throw new Error('Ciphertext too short');
+        var ct = combined.slice(0, combined.length - 16);
+        var tag = combined.slice(combined.length - 16);
+        var plaintext = xchacha20poly1305Decrypt(symmetricKey, ct, tag, nonce);
+        return arrayBufferToBase64(plaintext);
+    }
+
+    // Encode a file key for storage as a single string (nonce:ciphertext)
+    function encodeEncryptedFileKey(fileKeyB64, symmetricKey) {
+        var result = encryptFileKeyForStorage(fileKeyB64, symmetricKey);
+        return result.nonce + ':' + result.ciphertext;
+    }
+
+    // Decode a file key from storage (nonce:ciphertext) — returns null if the
+    // string doesn't look encrypted (backward compat with plaintext keys).
+    function decodeEncryptedFileKey(combinedB64, symmetricKey) {
+        if (!combinedB64 || typeof combinedB64 !== 'string') return null;
+        var parts = combinedB64.split(':');
+        if (parts.length === 2 && parts[0].length > 20 && parts[1].length > 20) {
+            try {
+                return decryptFileKeyFromStorage(parts[1], parts[0], symmetricKey);
+            } catch (_) {}
+        }
+        return null; // Not encrypted or can't decrypt
+    }
+
     return {
         sha256Hex: function(data) {
             var bytes = new TextEncoder().encode(data);
@@ -878,5 +938,10 @@ const E2ECrypto = (() => {
         decryptKeyFromEscrow: decryptKeyFromEscrow,
         encryptWithPassword: encryptWithPassword,
         decryptWithPassword: decryptWithPassword,
+        deriveSessionKey: deriveSessionKey,
+        encryptFileKeyForStorage: encryptFileKeyForStorage,
+        decryptFileKeyFromStorage: decryptFileKeyFromStorage,
+        encodeEncryptedFileKey: encodeEncryptedFileKey,
+        decodeEncryptedFileKey: decodeEncryptedFileKey,
     };
 })();

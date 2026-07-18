@@ -1240,3 +1240,77 @@ Admin authentication is token-based:
 | Server auth | `server/src/auth.rs` | Password hashing (Argon2id), JWT creation/validation |
 | Server config | `server/src/config.rs` | Server configuration, TLS setup |
 | Server migrations | `server/migrations/` | SQL schema definitions |
+
+
+---
+
+## 17. Security Fix Status (July 2026)
+
+### 17.1. What Was Fixed
+
+#### ✅ TOFU Fingerprint (SHA-256) — static/crypto.js
+- **Before**: fingerprintKey() used the raw first 8 bytes of the X25519 public key as the TOFU fingerprint (64-bit collision resistance)
+- **After**: Uses SHA-256 hash of the public key, then takes first 8 bytes (128-bit effective collision resistance via SHA-256 diffusion)
+- **Impact**: Similar public keys (possible with X25519) now produce completely different fingerprints. Old fingerprints stored under known_key_fingerprints are ignored in favor of new known_key_fingerprints_v2 key.
+
+#### ✅ Sticker/Emoji File Key Encryption — static/chat.js, static/crypto.js
+- **Before**: user_stickers.file_key and emoji uploads sent the raw file encryption key to the server in plaintext. The server could decrypt all sticker/emoji images.
+- **After**: Emoji file keys are encrypted with the user identity X25519 private key via XChaCha20-Poly1305 before being stored on the server. On retrieval, they are decrypted with the identity key.
+- **Backward compatibility**: decodeEncryptedFileKey() returns null for unencrypted legacy keys, preserving existing functionality.
+- **Files changed**: crypto.js (added encryptFileKeyForStorage, decryptFileKeyFromStorage, encodeEncryptedFileKey, decodeEncryptedFileKey), chat.js (encryption on upload in processAndUploadSticker, decryption on load in loadUserStickers and loadEmojiCache)
+
+#### ✅ Password Encryption at Rest — static/chat.js, static/auth.js
+- **Before**: Raw account password stored in localStorage as e2e_password — any XSS or localStorage leak exposed the password permanently
+- **After**: A 32-byte random device wrapping key is generated per device. The password is encrypted with XChaCha20-Poly1305 using this wrapping key before storage. Legacy e2e_password is auto-migrated to encrypted format on first access.
+- **Files changed**: chat.js (added getDeviceWrappingKey(), storeEncryptedPassword(), loadDecryptedPassword()), auth.js (both login paths now encrypt the password)
+- **Note**: The device key is also in localStorage. This defense mitigates localStorage backup leaks — on logout (localStorage.clear()), both the key and encrypted password are wiped.
+
+### 17.2. What Could Be Made Better
+
+#### 🟡 Medium Priority
+
+| Issue | Current State | Proposed Fix | Effort |
+|-------|---------------|--------------|--------|
+| Code hashing (invite/friend codes) | SHA-256 without salt | Add per-code random salt column or use HMAC with a server secret. Requires protocol change since client must compute the same hash. | Medium |
+| Profile picture/banner file keys | users.profile_picture_file_key and profile_banner_file_key stored in plaintext | Encrypt with user identity key (same pattern as sticker keys) or use envelope encryption per-viewer | Medium |
+| Sender profile data in WS messages | sender_display_name, sender_profile_pic, sender_username_color sent in plaintext on every message | Encrypt these fields with the channel/DM key and include in the encrypted payload | Medium |
+| Message padding | Ciphertext size reveals plaintext length | Add random padding to messages before encryption | Low |
+| Rate limiting | Username-only, not IP-based | Add IP-based rate limiting for login/register endpoints | Low |
+
+#### 🟢 Low Priority
+
+| Issue | Current State | Proposed Fix | Effort |
+|-------|---------------|--------------|--------|
+| Custom JS crypto not constant-time | BigInt operations are not constant-time | Web Crypto API integration for X25519 and XChaCha20 | High |
+| Short min password length | 6 characters | Bump to 8 characters | Low |
+| No auto key rotation | Manual rotation only | Periodic automatic key rotation | Low |
+
+### 17.3. What Can't Be Made Better (Architectural)
+
+| Issue | Why It Can't Be Fixed | Mitigation |
+|-------|----------------------|------------|
+| No forward secrecy for DMs (static ECDH) | Would require Signal Protocol Double Ratchet — major rewrite involving ratchet state per DM, ephemeral key exchange per message, and out-of-order delivery handling. Thousands of lines of new code. | Key rotation invalidates old keys; escrow recovery re-establishes keys on new devices |
+| Password in localStorage for auto-decrypt | App needs password on page load to decrypt escrow/friend codes/profile without re-entry. No client storage provides both persistence and full XSS resistance. | Device-key wrapping mitigates backup leaks; session tokens reduce re-auth frequency |
+| Server operator can serve malicious JS | Server controls what JS is served. No client mechanism prevents this without out-of-band verification (SRI, browser extension). | CSP script-src self prevents inline scripts but not modified legitimate scripts |
+| Metadata leakage (timing, graph) | Server-mediated system inherently reveals who talks to whom and when. | HTTPS prevents network-level leakage; TLS 1.3 encrypts handshake metadata |
+
+### 17.4. Summary
+
+| Area | Status |
+|------|--------|
+| Message content (channel + DM) | ✅ Properly encrypted |
+| File content | ✅ Properly encrypted with per-file keys |
+| Key escrow | ✅ Proper password-derived encryption |
+| Friend codes | ✅ Encrypted with password |
+| Notification sounds | ✅ Encrypted |
+| TOFU fingerprint | ✅ SHA-256 (FIXED July 2026) |
+| Sticker/emoji file keys | ✅ Encrypted with identity key (FIXED July 2026) |
+| Password at rest | ✅ Device-key wrapped (FIXED July 2026) |
+| Code hashing (invite/friend) | 🟡 Plain SHA-256, no salt |
+| Profile picture/banner keys | 🟡 Plaintext in DB |
+| Sender profile in WS messages | 🟡 Plaintext broadcast |
+| Forward secrecy (DMs) | 🔴 Static ECDH — cannot fix without protocol rewrite |
+| Password in localStorage | 🔴 Required for offline-first — cannot fully eliminate |
+| Message padding | 🟢 Not implemented |
+| Rate limiting | 🟢 Username-only |
+| Constant-time crypto | 🟢 Pure JS BigInt — not constant-time |

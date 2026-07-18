@@ -164,8 +164,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
             localStorage.setItem('token', data.token);
             localStorage.setItem('user', JSON.stringify(data.user));
-            // Store password in localStorage for automatic encryption/decryption
-            try { localStorage.setItem('e2e_password', password); } catch (_) {}
+            // Store password encrypted at rest with a device-specific key
+            try {
+                var devKey = localStorage.getItem('e2e_device_key');
+                if (!devKey) {
+                    devKey = E2ECrypto.arrayBufferToBase64(E2ECrypto.randomBytes(32));
+                    localStorage.setItem('e2e_device_key', devKey);
+                }
+                var dk = new Uint8Array(E2ECrypto.base64ToArrayBuffer(devKey));
+                var encrypted = E2ECrypto.encodeEncryptedFileKey(btoa(password), dk);
+                localStorage.setItem('e2e_encrypted_password', encrypted);
+                localStorage.removeItem('e2e_password');
+            } catch (_) {}
 
             // Try to recover encrypted friend code from server and decrypt with password
             try {
@@ -260,8 +270,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
             localStorage.setItem('token', data.token);
             localStorage.setItem('user', JSON.stringify(data.user));
-            // Store password in localStorage for automatic encryption/decryption
-            try { localStorage.setItem('e2e_password', password); } catch (_) {}
+            // Store password encrypted at rest with a device-specific key
+            try {
+                var devKey = localStorage.getItem('e2e_device_key');
+                if (!devKey) {
+                    devKey = E2ECrypto.arrayBufferToBase64(E2ECrypto.randomBytes(32));
+                    localStorage.setItem('e2e_device_key', devKey);
+                }
+                var dk = new Uint8Array(E2ECrypto.base64ToArrayBuffer(devKey));
+                var encrypted = E2ECrypto.encodeEncryptedFileKey(btoa(password), dk);
+                localStorage.setItem('e2e_encrypted_password', encrypted);
+                localStorage.removeItem('e2e_password');
+            } catch (_) {}
 
             // Upload escrowed key in background (non-blocking)
             try {

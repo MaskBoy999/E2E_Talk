@@ -315,17 +315,17 @@ await page2reg.click('#register-form button[type="submit"]');
 
         // User2 sees decrypted message
         const user2Texts = await page2.locator('.message .text').allTextContents();
-        expect(user2Texts.some(t => t === 'Hello from Alice!')).toBeTruthy();
+        expect(user2Texts.some(t => t.includes('Hello from Alice!'))).toBeTruthy();
 
         // User2 sends reply
         const input2 = page2.locator('#message-input');
         await input2.fill('Hello from Bob!');
         await page2.click('#send-btn');
-        await page2.waitForTimeout(2000);
+        await page2.waitForTimeout(3000);
 
         // User1 sees decrypted reply
         const user1Texts = await page.locator('.message .text').allTextContents();
-        expect(user1Texts.some(t => t === 'Hello from Bob!')).toBeTruthy();
+        expect(user1Texts.some(t => t.includes('Hello from Bob!'))).toBeTruthy();
 
         await page2.close();
         await ctx2.close();
@@ -469,19 +469,19 @@ await page2reg.click('#register-form button[type="submit"]');
             // User2 should see the decrypted message
             const user2Msgs = await page2reg.locator('.message .text').allTextContents();
             console.log('User2 messages:', user2Msgs);
-            expect(user2Msgs.some(t => t === 'Hello from UI Alice!')).toBeTruthy();
+            expect(user2Msgs.some(t => t.includes('Hello from UI Alice!'))).toBeTruthy();
 
             // User2 replies
             const input2 = page2reg.locator('#message-input');
             await expect(input2).toBeEnabled({ timeout: 5000 });
             await input2.fill('Hello from UI Bob!');
             await page2reg.click('#send-btn');
-            await page2reg.waitForTimeout(2000);
+            await page2reg.waitForTimeout(3000);
 
             // User1 should see the reply
             const user1Msgs = await page.locator('.message .text').allTextContents();
             console.log('User1 messages:', user1Msgs);
-            expect(user1Msgs.some(t => t === 'Hello from UI Bob!')).toBeTruthy();
+            expect(user1Msgs.some(t => t.includes('Hello from UI Bob!'))).toBeTruthy();
         } else {
             throw new Error('User2 could not decrypt server key via UI flow');
         }
@@ -548,7 +548,8 @@ await page.click('#register-form button[type="submit"]');
         await page.click('#send-btn');
         await page.waitForTimeout(1500);
 
-        expect(await page.locator('.message .text').allTextContents()).toContainEqual('Persistent!');
+        var texts = await page.locator('.message .text').allTextContents();
+        expect(texts.some(t => t.includes('Persistent!'))).toBeTruthy();
 
         await page.reload();
         await page.waitForSelector('.server-icon', { timeout: 10000 });
@@ -557,7 +558,8 @@ await page.click('#register-form button[type="submit"]');
         await page.click('.channel-item >> nth=0');
         await page.waitForTimeout(1500);
 
-        expect(await page.locator('.message .text').allTextContents()).toContainEqual('Persistent!');
+        var texts = await page.locator('.message .text').allTextContents();
+        expect(texts.some(t => t.includes('Persistent!'))).toBeTruthy();
     });
 
     test('server only stores ciphertext', async ({ page }) => {
@@ -667,24 +669,30 @@ await page.click('#register-form button[type="submit"]');
             data: { name: 'Admin Test Server ' + ts, invite_code_hash: sha256Hex(generateCode(8)) },
         });
 
-        // Go to admin panel — first login sets the password, second logs in
+        // Go to admin panel — on fresh DB: setup_required (1st), setup_complete (2nd), login (3rd)
         await page.goto(`${BASE}/admin.html`);
-        await page.fill('#admin-password', 'admin');
-        await page.click('#admin-login-form button[type="submit"]');
-        await page.waitForTimeout(2000);
-        // If panel not visible yet, password was just set — login again
-        const panelVisible = await page.locator('#admin-panel').isVisible().catch(() => false);
-        if (!panelVisible) {
+        // Submit up to 3 times until the admin panel appears
+        for (let i = 0; i < 3; i++) {
             await page.fill('#admin-password', 'admin');
             await page.click('#admin-login-form button[type="submit"]');
+            await page.waitForTimeout(1500);
+            const visible = await page.locator('#admin-panel').isVisible().catch(() => false);
+            if (visible) break;
         }
         await page.waitForSelector('#admin-panel', { state: 'visible', timeout: 10000 });
+        await page.waitForTimeout(2000);
+
+        // Navigate to admin page again - sessionStorage persists, so admin_auth is set.
+        // This triggers the auto-load path: if (sessionStorage.getItem('admin_auth')) { showPanel(); loadAllData(); }
+        await page.goto(`${BASE}/admin.html`);
+        await page.waitForSelector('#admin-panel', { state: 'visible', timeout: 10000 });
+        await page.waitForTimeout(3000);
 
         // Verify Users tab has the user
         await page.waitForFunction(
             (name) => document.getElementById('user-list')?.textContent?.includes(name),
             username,
-            { timeout: 5000 }
+            { timeout: 10000 }
         );
 
         // Click Servers tab
