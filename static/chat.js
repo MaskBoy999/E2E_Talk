@@ -12236,7 +12236,6 @@ function openBannerCrop(file) {
             // Resize the frame to match the image (removes black space)
             frame.style.width = dispW + 'px';
             frame.style.height = dispH + 'px';
-            container.style.width = dispW + 'px';
             
             cropImg.style.width = dispW + 'px';
             cropImg.style.height = dispH + 'px';
@@ -12524,7 +12523,6 @@ function openPfpCrop(file) {
             // Resize the frame to match the image (removes black space)
             frame.style.width = dispW + 'px';
             frame.style.height = dispH + 'px';
-            container.style.width = dispW + 'px';
             
             cropImg.style.width = dispW + 'px';
             cropImg.style.height = dispH + 'px';
