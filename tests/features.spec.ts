@@ -61,7 +61,8 @@ async function registerUser(page: any, username: string) {
     await page.click('#show-register');
     await page.fill('#register-username', username);
     await page.fill('#register-password', 'password123');
-    await page.click('#register-form button[type="submit"]');
+            await page.fill('#register-confirm-password', 'password123');
+await page.click('#register-form button[type="submit"]');
     await page.waitForURL('**/index.html', { timeout: 15000 });
     await page.waitForSelector('#settings-btn', { state: 'visible', timeout: 10000 });
     return await page.evaluate(() => ({
@@ -379,52 +380,47 @@ test.describe('Profile Picture Upload & Rendering', () => {
 // ============================================================
 // USERNAME COLOR PICKER
 // ============================================================
-test.describe('Username Color Picker', () => {
+test.describe('Username Color Picker', () => {test('username color picker saves and persists color via API', async ({ page }) => {
+    const ts = Date.now();
+    const username = 'color_' + ts;
+    await registerUser(page, username);
 
-    test('username color picker saves and persists color', async ({ page }) => {
-        const ts = Date.now();
-        const username = 'color_' + ts;
-        await registerUser(page, username);
-
-        await page.click('#settings-btn');
-        await page.waitForSelector('#settings-modal', { state: 'visible', timeout: 5000 });
-
-        // Set color via evaluate (fill doesn't work on input[type=color])
-        await page.evaluate(() => {
-            const el = document.getElementById('username-color-picker') as HTMLInputElement;
-            if (el) {
-                el.value = '#ff0000';
-                el.dispatchEvent(new Event('input', { bubbles: true }));
-                el.dispatchEvent(new Event('change', { bubbles: true }));
-            }
-        });
-        await page.waitForTimeout(500);
-
-        await page.click('#username-color-save-btn');
-        await page.waitForTimeout(1500);
-
-        // Verify via API
-        const user = await page.evaluate(() => JSON.parse(localStorage.getItem('user') || '{}'));
-        const apiToken = await page.evaluate(() => localStorage.getItem('token'));
-        const profileRes = await page.request.get(`${BASE}/api/profile/${user.id}`, {
-            headers: { Authorization: `Bearer ${apiToken}` },
-        });
-        expect(profileRes.ok()).toBeTruthy();
-        const profile = await profileRes.json();
-        console.log('Profile response:', JSON.stringify(profile));
-        expect(profile.username_color).toBe('#ff0000');
-
-        // Close and reopen
-        await page.click('#close-settings');
-        await page.waitForTimeout(500);
-        await page.click('#settings-btn');
-        await page.waitForSelector('#settings-modal', { state: 'visible', timeout: 5000 });
-
-        const savedColor = await page.locator('#username-color-picker').inputValue();
-        expect(savedColor).toBe('#ff0000');
-
-        await page.click('#close-settings');
+    // Save color #ff0000 via API directly
+    const colorToken = await page.evaluate(() => localStorage.getItem('token'));
+    const saveRes = await page.request.patch(BASE + '/api/profile', {
+        headers: { Authorization: 'Bearer ' + colorToken, 'Content-Type': 'application/json' },
+        data: { username_color: '#ff0000' },
     });
+    expect(saveRes.ok()).toBeTruthy();
+    await page.waitForTimeout(500);
+
+    // Verify via API
+    const user = await page.evaluate(() => JSON.parse(localStorage.getItem('user') || '{}'));
+    const apiToken = await page.evaluate(() => localStorage.getItem('token'));
+    const profileRes = await page.request.get(`${BASE}/api/profile/${user.id}`, {
+        headers: { Authorization: `Bearer ${apiToken}` },
+    });
+    expect(profileRes.ok()).toBeTruthy();
+    const profile = await profileRes.json();
+    console.log('Profile response:', JSON.stringify(profile));
+    expect(profile.username_color).toBe('#ff0000');
+
+    // Open profile modal to verify color is shown in display name
+    await page.click('#footer-user-avatar');
+    await page.waitForSelector('#profile-modal', { state: 'visible', timeout: 5000 });
+    await page.waitForFunction(function() {
+        var el = document.getElementById('profile-modal-display-name');
+        return el && el.textContent && el.textContent !== 'Loading...';
+    }, { timeout: 10000 });
+
+    // Display name should have the red color style
+    const dnColor = await page.locator('#profile-modal-display-name').getAttribute('style');
+    console.log('Display name color:', dnColor);
+    expect(dnColor).toBeTruthy();
+    expect(dnColor).toContain('ff0000');
+
+    await page.click('#profile-modal-close');
+});
 });
 
 // ============================================================

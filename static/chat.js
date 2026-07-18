@@ -555,11 +555,11 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // Delete account
-    // Clear all client-side data: localStorage, sessionStorage, and cookies
+    // Clear all client-side data (localStorage, sessionStorage, non-HttpOnly cookies).
+    // HttpOnly cookies can only be cleared by the server (see /api/logout GET).
     function clearAllClientData() {
         localStorage.clear();
         try { sessionStorage.clear(); } catch (_) {}
-        // Clear all cookies for this domain (including HttpOnly ones via the server)
         document.cookie.split(';').forEach(function(c) {
             document.cookie = c.replace(/^ +/, '').replace(/=.*/, '=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/');
         });
@@ -579,9 +579,10 @@ document.addEventListener('DOMContentLoaded', () => {
             const res = await authFetch('/api/me', { method: 'DELETE' });
             if (res.ok) {
                 clearAllClientData();
-                await serverLogout();
                 if (ws) ws.close();
-                window.location.href = 'login.html';
+                // The server clears the HttpOnly cookie in the delete_me response,
+                // so we can redirect directly to login without the /api/logout roundtrip.
+                window.location.href = '/login.html';
             } else {
                 const err = await res.json();
                 alert(err.error || 'Failed to delete account');
@@ -591,20 +592,19 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    document.getElementById('logout-btn').addEventListener('click', async () => {
-        await serverLogout();
-        clearAllClientData();
-        if (ws) ws.close();
-        window.location.href = 'login.html';
-    });
+    // Logout is handled in settings (Clear All Data / Sign Out)
 
-    // Clear all data button in settings
+    // Clear all data button in settings — robust logout + wipe sequence
     document.getElementById('clear-all-data-btn').addEventListener('click', async () => {
         if (!confirm('This will clear ALL local data (logins, keys, settings) and sign you out. Continue?')) return;
+        // 1. Close websocket first so no more messages arrive
+        if (ws) { try { ws.close(); } catch (_) {} ws = null; }
+        // 2. Call server logout to clear HttpOnly cookie (while token is still present)
         await serverLogout();
+        // 3. Clear all client-side data
         clearAllClientData();
-        if (ws) ws.close();
-        window.location.href = 'login.html';
+        // 4. Redirect directly to login page since the server already cleared the cookie
+        window.location.href = '/login.html';
     });
 
     // Security tab - session countdown
@@ -688,6 +688,201 @@ document.addEventListener('DOMContentLoaded', () => {
     // Restore notification sound from server (syncs across devices)
     restoreNotificationSoundFromServer();
 
+    // Settings open profile button
+    var settingsOpenProfileBtn = document.getElementById('settings-open-profile-btn');
+    if (settingsOpenProfileBtn) {
+        settingsOpenProfileBtn.addEventListener('click', function() {
+            document.getElementById('settings-modal').style.display = 'none';
+            if (user) openProfileModal(user.id);
+        });
+    }
+    // Settings avatar click -> open profile
+    var settingsAvatar = document.getElementById('settings-profile-avatar');
+    if (settingsAvatar) {
+        settingsAvatar.addEventListener('click', function() {
+            document.getElementById('settings-modal').style.display = 'none';
+            if (user) openProfileModal(user.id);
+        });
+    }
+    
+    // Profile edit modal handlers
+    var profileEditModal = document.getElementById('profile-edit-modal');
+    if (profileEditModal) {
+        document.getElementById('profile-edit-modal-close').addEventListener('click', closeProfileEditModal);
+        profileEditModal.addEventListener('click', function (e) {
+            if (e.target === profileEditModal) closeProfileEditModal();
+        });
+        // Edit save button
+        document.getElementById('profile-edit-save-btn').addEventListener('click', saveProfile);
+        // Banner upload
+        document.getElementById('profile-banner-upload-btn').addEventListener('click', function () {
+            document.getElementById('profile-banner-file-input').click();
+        });
+        document.getElementById('profile-banner-file-input').addEventListener('change', function (e) {
+            var file = e.target.files[0];
+            if (file) openBannerCrop(file);
+            e.target.value = '';
+        });
+        document.getElementById('profile-banner-remove-btn').addEventListener('click', function () {
+            profileBannerFileId = null;
+            profileBannerFileKey = null;
+            document.getElementById('profile-edit-banner-img').style.backgroundImage = '';
+            document.getElementById('profile-banner-remove-btn').style.display = 'none';
+        });
+        // Avatar upload
+        document.getElementById('profile-avatar-upload-btn').addEventListener('click', function () {
+            document.getElementById('profile-avatar-file-input').click();
+        });
+        document.getElementById('profile-avatar-file-input').addEventListener('change', function (e) {
+            var file = e.target.files[0];
+            if (file) openPfpCrop(file);
+            e.target.value = '';
+        });
+        document.getElementById('profile-avatar-remove-btn').addEventListener('click', function () {
+            profilePfpFileId = null;
+            profilePfpFileKey = null;
+            var avatarEl = document.getElementById('profile-edit-avatar');
+            avatarEl.innerHTML = '<div style="font-size:36px;color:#1a1a2e;font-weight:700;">' + escapeHtml((document.getElementById('profile-edit-display-name').value || 'U').charAt(0).toUpperCase()) + '</div>';
+            document.getElementById('profile-avatar-remove-btn').style.display = 'none';
+        });
+        // Banner crop confirm/cancel
+        document.getElementById('profile-banner-crop-cancel').addEventListener('click', cancelBannerCrop);
+        document.getElementById('profile-banner-crop-confirm').addEventListener('click', processBannerCrop);
+        // PFP crop confirm/cancel
+        document.getElementById('profile-pfp-crop-cancel').addEventListener('click', cancelPfpCrop);
+        document.getElementById('profile-pfp-crop-confirm').addEventListener('click', processPfpCrop);
+        // Edit color picker
+        document.getElementById('profile-edit-color').addEventListener('input', function () {
+            var color = this.value;
+            document.getElementById('profile-edit-color-preview').style.color = color;
+            var dnPreview = document.getElementById('profile-edit-display-name-preview');
+            if (dnPreview) dnPreview.style.color = color;
+            renderEditGlowOptions(color);
+        });
+        // Edit bg color picker
+        document.getElementById('profile-edit-bg-color').addEventListener('input', function () {
+            var color = this.value;
+            document.getElementById('profile-edit-bg-preview').style.background = color;
+            var card = document.querySelector('#profile-edit-modal .profile-edit-preview-card');
+            if (card) card.style.background = color;
+        });
+        // Description word count
+        document.getElementById('profile-edit-description').addEventListener('input', function () {
+            updateDescriptionWordCount();
+        });
+        // Live preview inputs
+        var dnInput = document.getElementById('profile-edit-display-name');
+        var dnPreview = document.getElementById('profile-edit-display-name-preview');
+        if (dnInput && dnPreview) {
+            dnInput.addEventListener('input', function() {
+                dnPreview.textContent = this.value || (profileOriginalData && (profileOriginalData.data.display_name || profileOriginalData.data.username || 'Unknown'));
+            });
+        }
+        var nnInput = document.getElementById('profile-edit-nickname');
+        var nnPreview = document.getElementById('profile-edit-nickname-preview');
+        if (nnInput && nnPreview) {
+            nnInput.addEventListener('input', function() {
+                nnPreview.textContent = this.value || '';
+                nnPreview.style.display = this.value ? 'block' : 'none';
+            });
+        }
+        var descInput = document.getElementById('profile-edit-description');
+        var descPreview = document.getElementById('profile-edit-description-preview');
+        if (descInput && descPreview) {
+            descInput.addEventListener('input', function() {
+                if (this.value) {
+                    descPreview.innerHTML = linkifyText(escapeHtml(this.value));
+                    descPreview.style.display = 'block';
+                } else {
+                    descPreview.textContent = '';
+                    descPreview.style.display = 'none';
+                }
+            });
+        }
+        // Escape key to close
+        document.addEventListener('keydown', function (e) {
+            if (e.key === 'Escape' && profileEditModal.style.display !== 'none') {
+                closeProfileEditModal();
+            }
+        });
+    }
+    
+    // Profile view modal handlers
+    var profileModal = document.getElementById('profile-modal');
+    if (profileModal) {
+        // Close button
+        document.getElementById('profile-modal-close').addEventListener('click', closeProfileModal);
+        // Click backdrop to close
+        profileModal.addEventListener('click', function (e) {
+            if (e.target === profileModal) closeProfileModal();
+        });
+        // Footer user avatar click -> open own profile
+        document.getElementById('footer-user-avatar').addEventListener('click', function () {
+            if (user) openProfileModal(user.id);
+        });
+        // Edit profile button — opens the separate edit modal
+        document.getElementById('profile-edit-btn').addEventListener('click', function () {
+            openProfileEditModal();
+        });
+        // Edit cancel button
+        document.getElementById('profile-edit-cancel-btn').addEventListener('click', function () {
+            closeProfileEditModal();
+        });
+
+        
+        // Delegate avatar clicks to open profile for messages and members
+        document.getElementById('message-list').addEventListener('click', function (e) {
+            var avatar = e.target.closest('.message .avatar');
+            if (avatar) {
+                var msgEl = avatar.closest('.message');
+                if (msgEl && msgEl.dataset.senderId) {
+                    openProfileModal(msgEl.dataset.senderId);
+                }
+            }
+        });
+        document.getElementById('member-list').addEventListener('click', function (e) {
+            var avatar = e.target.closest('.member-avatar');
+            if (avatar) {
+                var memberEl = avatar.closest('.member-item');
+                if (memberEl && memberEl.dataset.userId) {
+                    openProfileModal(memberEl.dataset.userId);
+                }
+            }
+        });
+        
+            // Banner crop — confirm on pressing Enter
+        document.addEventListener('keydown', function bannerCropEnter(e) {
+            if (e.key === 'Enter' && bannerCropState && document.getElementById('profile-banner-crop-container').style.display !== 'none') {
+                processBannerCrop();
+            }
+        });
+        // PFP crop — confirm on pressing Enter
+        document.addEventListener('keydown', function pfpCropEnter(e) {
+            if (e.key === 'Enter' && pfpCropState && document.getElementById('profile-pfp-crop-container').style.display !== 'none') {
+                processPfpCrop();
+            }
+        });
+    }
+
+    // Friend code password modal button handlers
+    const fcCancelBtn = document.getElementById('fc-cancel-btn');
+    const fcRecoverBtn = document.getElementById('fc-recover-btn');
+    const fcRegenBtn = document.getElementById('fc-regenerate-btn');
+    if (fcCancelBtn) fcCancelBtn.addEventListener('click', function () {
+        document.getElementById('friend-code-password-modal').style.display = 'none';
+    });
+    if (fcRecoverBtn) fcRecoverBtn.addEventListener('click', handleFriendCodeRecover);
+    if (fcRegenBtn) fcRegenBtn.addEventListener('click', handleFriendCodeRegenerate);
+    // Allow Enter key in password input to trigger recover
+    const fcPasswordInput = document.getElementById('fc-password-input');
+    if (fcPasswordInput) {
+        fcPasswordInput.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                handleFriendCodeRecover();
+            }
+        });
+    }
 
     document.getElementById('send-btn').addEventListener('click', sendMessage);
     document.getElementById('message-input').addEventListener('keydown', (e) => {
@@ -2243,6 +2438,36 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('add-server-btn').addEventListener('click', () => {
         showAddServerMenu();
+    });
+
+    // ===== Click-off (backdrop) handlers for modals =====
+    // Close any .modal when clicking the backdrop (the modal container itself, not .modal-content)
+    function setupModalClickOff(modalId) {
+        var modal = document.getElementById(modalId);
+        if (!modal) return;
+        modal.addEventListener('click', function (e) {
+            if (e.target === modal) modal.style.display = 'none';
+        });
+    }
+    // Apply to all relevant modals
+    ['settings-modal', 'server-choice-modal', 'create-server-modal', 'join-server-modal',
+     'add-friend-modal', 'server-settings-modal', 'friend-requests-modal',
+     'sticker-upload-modal', 'profile-crop-modal', 'upload-modal',
+     'friend-code-password-modal'].forEach(setupModalClickOff);
+    // Global Escape key closes the topmost visible modal
+    document.addEventListener('keydown', function (e) {
+        if (e.key !== 'Escape') return;
+        // Find the first (topmost) visible modal and close it
+        var modals = ['friend-code-password-modal', 'sticker-upload-modal', 'upload-modal',
+                      'settings-modal', 'server-settings-modal', 'friend-requests-modal',
+                      'add-friend-modal', 'join-server-modal', 'create-server-modal', 'server-choice-modal'];
+        for (var i = 0; i < modals.length; i++) {
+            var el = document.getElementById(modals[i]);
+            if (el && el.style.display !== 'none' && el.style.display !== '') {
+                el.style.display = 'none';
+                break;
+            }
+        }
     });
 
     // Server choice modal buttons
@@ -3817,12 +4042,8 @@ function connectWebSocket(t) {
                         loadMembers(currentServerId);
                     }
 
-                    // Refresh current messages to update sender display names
-                    if (currentChannelId && currentServerId) {
-                        loadMessages(currentChannelId);
-                    } else if (currentDmChannelId) {
-                        loadDmMessages(currentDmChannelId);
-                    }
+                    // Update existing message DOM elements instead of reloading all messages
+                    updateExistingMessageStyles(data.user_id);
                 }
                 break;
             case 'mention_notification':
@@ -5252,7 +5473,9 @@ function renderDmSidebar() {
     html += '<button class="key-action-btn" id="toggle-friend-code-btn" title="Show/Hide">&#128065;</button>';
     html += '<button class="key-action-btn" id="copy-friend-code-btn" title="Copy">&#128203;</button>';
     html += '<button class="key-action-btn" id="friend-qr-btn" title="Show QR Code">&#128247;</button>';
+    html += '<button class="key-action-btn" id="recover-friend-code-btn" title="Recover or Regenerate" style="color:#ff9800;">&#128274;</button>';
     html += '</div>';
+    html += '<div id="friend-code-status" class="friend-code-status" style="font-size:11px;color:#888;margin-top:4px;text-align:center;"></div>';
     html += '<div id="friend-qr-container" class="qr-code-container" style="display:none;margin-top:10px;margin-bottom:10px;">';
     html += '<div id="friend-qr-canvas" class="qr-code-canvas"></div>';
     html += '<p class="qr-warning">⚠️ This shows your friend code. Only show to trusted people.</p>';
@@ -6291,8 +6514,19 @@ async function createChannel() {
 let myFriendCode = '';
 
 async function loadMyFriendCode() {
+    var statusEl = document.getElementById('friend-code-status');
     try {
+        // Try localStorage first
         myFriendCode = localStorage.getItem('e2e_friend_code') || '';
+        // Show loading indicator if we need to fetch from server
+        if (!myFriendCode) {
+            if (statusEl) { statusEl.textContent = '⏳ Fetching from server...'; statusEl.style.color = '#888'; }
+        } else {
+            if (statusEl) { statusEl.textContent = ''; statusEl.style.color = '#888'; }
+        }
+        // If missing locally, show unavailable — user can recover via password prompt
+        // (The server no longer stores plaintext friend codes; only encrypted copies
+        // that require the account password to decrypt.)
         const el = document.getElementById('my-friend-code');
         if (el) {
             el.textContent = '••••••••••••••••';
@@ -6307,7 +6541,7 @@ async function loadMyFriendCode() {
             toggleBtn.onclick = () => {
                 const vis = el.dataset.visible === '1';
                 el.dataset.visible = vis ? '0' : '1';
-                el.textContent = vis ? '••••••••••••••••' : (el.dataset.value || '(none - re-register)');
+                el.textContent = vis ? '••••••••••••••••' : (el.dataset.value || '(not available - log in again)');
             };
             copyBtn.onclick = () => {
                 if (!el.dataset.value) return;
@@ -6370,9 +6604,188 @@ async function loadMyFriendCode() {
                     img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svgData)));
                 };
             }
+            // Friend code recovery / regeneration button
+            const recoverBtn = document.getElementById('recover-friend-code-btn');
+            if (recoverBtn) {
+                recoverBtn.onclick = function () {
+                    showFriendCodePasswordModal();
+                };
+            }
         }
     } catch (_) {}
     loadFriendRequestBadge();
+}
+
+// Open the friend code password modal or auto-recover with stored password
+async function showFriendCodePasswordModal() {
+    // Try auto-recovery with stored password (verifies against server)
+    var storedPw = localStorage.getItem('e2e_password');
+    if (storedPw) {
+        var verifiedPw = await verifyStoredPassword();
+        if (verifiedPw) {
+            handleFriendCodeRecover(verifiedPw);
+            return;
+        }
+    }
+    // No valid stored password — show the modal
+    const modal = document.getElementById('friend-code-password-modal');
+    if (!modal) return;
+    modal.style.display = 'flex';
+    const input = document.getElementById('fc-password-input');
+    const errorEl = document.getElementById('fc-password-error');
+    const successEl = document.getElementById('fc-password-success');
+    if (input) { input.value = ''; input.focus(); }
+    if (errorEl) errorEl.style.display = 'none';
+    if (successEl) successEl.style.display = 'none';
+}
+
+async function handleFriendCodeRecover(storedPw) {
+    const input = document.getElementById('fc-password-input');
+    const errorEl = document.getElementById('fc-password-error');
+    const successEl = document.getElementById('fc-password-success');
+    // Use verified password (either passed in or from modal input)
+    var password = storedPw || (input ? input.value.trim() : '') || '';
+    if (!password) {
+        if (errorEl) { errorEl.textContent = 'Please enter your password.'; errorEl.style.display = 'block'; }
+        if (successEl) successEl.style.display = 'none';
+        return;
+    }
+    if (errorEl) errorEl.style.display = 'none';
+    if (successEl) successEl.style.display = 'none';
+    // Show loading state
+    var recoverStatusEl = document.getElementById('friend-code-status');
+    if (recoverStatusEl) { recoverStatusEl.textContent = '⏳ Fetching friend code from server...'; recoverStatusEl.style.color = '#888'; }
+    try {
+        const res = await authFetch('/api/friend-code');
+        if (!res.ok) {
+            const err = await res.json();
+            if (recoverStatusEl) { recoverStatusEl.textContent = '❌ ' + (err.error || 'Failed to fetch'); recoverStatusEl.style.color = '#f44336'; setTimeout(function() { recoverStatusEl.textContent = ''; }, 4000); }
+            if (errorEl) { errorEl.textContent = err.error || 'Failed to fetch friend code from server.'; errorEl.style.display = 'block'; }
+            return;
+        }
+        const data = await res.json();
+        if (recoverStatusEl) { recoverStatusEl.textContent = '⏳ Decrypting...'; }
+        if (!data.encrypted_friend_code || !data.salt || !data.nonce) {
+            if (recoverStatusEl) { recoverStatusEl.textContent = '❌ No encrypted code on server'; recoverStatusEl.style.color = '#ff9800'; setTimeout(function() { recoverStatusEl.textContent = ''; }, 4000); }
+            if (errorEl) { errorEl.textContent = 'No encrypted friend code stored on the server. Use "Generate New" to create one.'; errorEl.style.display = 'block'; }
+            return;
+        }
+        if (typeof E2ECrypto === 'undefined' || !E2ECrypto.decryptWithPassword) {
+            if (recoverStatusEl) { recoverStatusEl.textContent = '❌ Crypto module missing'; recoverStatusEl.style.color = '#f44336'; setTimeout(function() { recoverStatusEl.textContent = ''; }, 4000); }
+            if (errorEl) { errorEl.textContent = 'Crypto module not loaded. Please refresh the page.'; errorEl.style.display = 'block'; }
+            return;
+        }
+        const decrypted = E2ECrypto.decryptWithPassword(data.encrypted_friend_code, password, data.salt, data.nonce);
+        if (!decrypted) {
+            errorEl.textContent = 'Wrong password or corrupted data. Cannot decrypt friend code.';
+            errorEl.style.display = 'block';
+            return;
+        }
+        // Update status indicator
+        if (recoverStatusEl) { recoverStatusEl.textContent = '✅ Recovered from server'; recoverStatusEl.style.color = '#4caf50'; setTimeout(function() { recoverStatusEl.textContent = ''; }, 3000); }
+        
+        // Success — store and update UI
+        myFriendCode = decrypted;
+        localStorage.setItem('e2e_friend_code', myFriendCode);
+        const el = document.getElementById('my-friend-code');
+        if (el) {
+            el.dataset.value = myFriendCode;
+            el.dataset.visible = '0';
+            el.textContent = '••••••••••••••••';
+        }
+        successEl.textContent = 'Friend code recovered successfully! It is now stored locally.';
+        successEl.style.display = 'block';
+        errorEl.style.display = 'none';
+        // Close modal after 2 seconds
+        setTimeout(function () {
+            document.getElementById('friend-code-password-modal').style.display = 'none';
+        }, 2000);
+    } catch (e) {
+        if (recoverStatusEl) { recoverStatusEl.textContent = '❌ Failed to fetch friend code'; recoverStatusEl.style.color = '#f44336'; setTimeout(function() { recoverStatusEl.textContent = ''; }, 4000); }
+        errorEl.textContent = 'Network error. Is the server running?';
+        errorEl.style.display = 'block';
+    }
+}
+
+async function handleFriendCodeRegenerate() {
+    const input = document.getElementById('fc-password-input');
+    const errorEl = document.getElementById('fc-password-error');
+    const successEl = document.getElementById('fc-password-success');
+    // Verify stored password against server before regenerating
+    var password = await verifyStoredPassword();
+    if (!password) {
+        password = input ? input.value.trim() : '';
+    }
+    if (!password) {
+        if (errorEl) { errorEl.textContent = 'Please enter your password to authorize regeneration.'; errorEl.style.display = 'block'; }
+        if (successEl) successEl.style.display = 'none';
+        return;
+    }
+    if (!confirm('Are you sure? Your old friend code will stop working immediately. Anyone who had it will no longer be able to send you friend requests.')) return;
+    errorEl.style.display = 'none';
+    successEl.style.display = 'none';
+    // Show loading state
+    var regenStatusEl = document.getElementById('friend-code-status');
+    if (regenStatusEl) { regenStatusEl.textContent = '⏳ Generating new friend code...'; regenStatusEl.style.color = '#888'; }
+    try {
+        // Generate a new friend code client-side
+        var newCode = generateCode(8);
+        if (regenStatusEl) { regenStatusEl.textContent = '⏳ Encrypting...'; }
+        // Encrypt it with the password (same as key escrow encryption)
+        if (typeof E2ECrypto === 'undefined' || !E2ECrypto.encryptWithPassword) {
+            if (regenStatusEl) { regenStatusEl.textContent = '❌ Crypto module missing'; regenStatusEl.style.color = '#f44336'; setTimeout(function() { regenStatusEl.textContent = ''; }, 4000); }
+            errorEl.textContent = 'Crypto module not loaded. Please refresh the page.';
+            errorEl.style.display = 'block';
+            return;
+        }
+        var encrypted = E2ECrypto.encryptWithPassword(newCode, password);
+        if (!encrypted || !encrypted.encrypted_private_key || !encrypted.salt || !encrypted.nonce) {
+            if (regenStatusEl) { regenStatusEl.textContent = '❌ Encryption failed'; regenStatusEl.style.color = '#f44336'; setTimeout(function() { regenStatusEl.textContent = ''; }, 4000); }
+            errorEl.textContent = 'Encryption failed. Please try again.';
+            errorEl.style.display = 'block';
+            return;
+        }
+        if (regenStatusEl) { regenStatusEl.textContent = '⏳ Uploading to server...'; }
+        // Send to server with password for verification
+        const res = await authFetch('/api/friend-code/regen-with-password', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                password: password,
+                friend_code: newCode,
+                encrypted_friend_code: encrypted.encrypted_private_key,
+                salt: encrypted.salt,
+                nonce: encrypted.nonce
+            })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+            if (regenStatusEl) { regenStatusEl.textContent = '❌ ' + (data.error || 'Server rejected'); regenStatusEl.style.color = '#f44336'; setTimeout(function() { regenStatusEl.textContent = ''; }, 4000); }
+            errorEl.textContent = data.error || 'Failed to regenerate friend code. Wrong password?';
+            errorEl.style.display = 'block';
+            return;
+        }
+        if (regenStatusEl) { regenStatusEl.textContent = '✅ New code generated!'; regenStatusEl.style.color = '#4caf50'; setTimeout(function() { regenStatusEl.textContent = ''; }, 3000); }
+        // Success — store and update UI
+        myFriendCode = newCode;
+        localStorage.setItem('e2e_friend_code', myFriendCode);
+        const el = document.getElementById('my-friend-code');
+        if (el) {
+            el.dataset.value = myFriendCode;
+            el.dataset.visible = '0';
+            el.textContent = '••••••••••••••••';
+        }
+        successEl.textContent = 'New friend code generated and saved!';
+        successEl.style.display = 'block';
+        errorEl.style.display = 'none';
+        // Close modal after 2 seconds
+        setTimeout(function () {
+            document.getElementById('friend-code-password-modal').style.display = 'none';
+        }, 2000);
+    } catch (e) {
+        errorEl.textContent = 'Network error. Is the server running?';
+        errorEl.style.display = 'block';
+    }
 }
 
 async function loadFriendRequestBadge() {
@@ -6569,6 +6982,57 @@ function getDisplayNameTextShadow(hexColor, borderColor) {
     var glowColor = borderColor || getContrastGlowColor(hexColor);
     // Multi-layer shadow for a soft airbrush-like glow
     return '0 0 4px ' + glowColor + ', 0 0 8px ' + glowColor + ', 0 0 16px ' + glowColor;
+}
+
+// Update existing message DOM elements (display-name styles and avatars) when a user's
+// profile changes (color, glow, display name, profile pic), without reloading all messages.
+function updateExistingMessageStyles(userId) {
+    if (!userId) return;
+    var cache = userDisplayNameCache[userId];
+    if (!cache) return;
+    var color = cache.username_color || null;
+    var borderColor = cache.username_border_color || null;
+    var picFileId = cache.profile_picture_file_id || null;
+    var displayName = cache.display_name || null;
+
+    // Update all message headers with this sender_id
+    document.querySelectorAll('.message[data-sender-id="' + userId + '"]').forEach(function (msgEl) {
+        var nameEl = msgEl.querySelector('.display-name');
+        if (nameEl) {
+            if (color) {
+                nameEl.style.color = color;
+                nameEl.style.textShadow = getDisplayNameTextShadow(color, borderColor);
+            }
+            if (displayName) {
+                nameEl.textContent = displayName;
+            }
+        }
+        // Update avatar if profile pic changed
+        var avatarEl = msgEl.querySelector('.avatar');
+        if (avatarEl && picFileId) {
+            var cacheKey = userId + ':' + picFileId;
+            var existingPic = profilePicCache[cacheKey];
+            if (existingPic) {
+                // Replace avatar content with img
+                avatarEl.setAttribute('data-profile-pic', cacheKey);
+                avatarEl.removeAttribute('data-profile-pic-load');
+                avatarEl.innerHTML = '<img class="avatar-img" src="' + existingPic + '" alt="" data-profile-pic="' + cacheKey + '">';
+            } else {
+                // Set up async loading
+                avatarEl.setAttribute('data-profile-pic-load', cacheKey);
+                if (!avatarEl.querySelector('img')) {
+                    avatarEl.innerHTML = (displayName || nameEl?.textContent || '?').charAt(0).toUpperCase();
+                }
+                getProfilePicUrl(picFileId, userId);
+            }
+        } else if (avatarEl && !picFileId) {
+            // Remove pic, show initial only
+            avatarEl.removeAttribute('data-profile-pic');
+            avatarEl.removeAttribute('data-profile-pic-load');
+            var initial = (nameEl ? nameEl.textContent : '?').charAt(0).toUpperCase();
+            avatarEl.innerHTML = initial;
+        }
+    });
 }
 
 // Generate 10 contrasting border/glow color options based on a base color
@@ -9285,8 +9749,21 @@ function renderUploadStickerPanel(container) {
         '<button id="emoji-upload-trigger" style="background:#6a3a8a;color:#fff;border:none;padding:10px 18px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;">😊 Upload Emoji</button>' +
         '</div>' +
         '<p style="color:#666;font-size:11px;margin-top:10px;">Emoji: small inline images • use :emoji_name: in messages to insert</p>' +
-        '<p style="color:#666;font-size:11px;margin-top:4px;">Stickers: cropped/resized to 420×420 • GIFs always uploaded as-is</p>';
+        '<p style="color:#666;font-size:11px;margin-top:4px;">Stickers: cropped/resized to 420×420 • GIFs always uploaded as-is</p>' +
+        '<div style="margin-top:16px;"><button id="sticker-upload-cancel-btn" style="background:rgba(255,255,255,0.1);color:#aaa;border:1px solid #444;padding:8px 20px;border-radius:8px;font-size:13px;cursor:pointer;transition:all 0.15s;">Cancel</button></div>';
     container.appendChild(wrap);
+
+    // Cancel button closes the sticker panel
+    var cancelBtn = wrap.querySelector('#sticker-upload-cancel-btn');
+    if (cancelBtn) {
+        cancelBtn.addEventListener('click', function () {
+            if (typeof closeStickerPanel === 'function') {
+                closeStickerPanel();
+            } else {
+                document.getElementById('sticker-panel').style.display = 'none';
+            }
+        });
+    }
 
     wrap.querySelector('#sticker-upload-trigger').addEventListener('click', () => {
         const modal = document.getElementById('sticker-upload-modal');
@@ -10768,5 +11245,1151 @@ function setupProfileSettings() {
 document.addEventListener('DOMContentLoaded', function () {
     setTimeout(setupProfileSettings, 500);
 });
+
+// ===== Profile Modal =====
+
+let profileModalUserId = null;
+let profileEditMode = false;
+let profileBannerFileId = null;
+let profileBannerFileKey = null;
+let profilePfpFileId = null;
+let profilePfpFileKey = null;
+let bannerCropState = null;
+let pfpCropState = null;
+let profileOriginalData = null;
+
+// Open profile modal for a given user ID
+async function openProfileModal(userId) {
+    profileModalUserId = userId;
+    profileEditMode = false;
+    profileBannerFileId = null;
+    profileBannerFileKey = null;
+    profilePfpFileId = null;
+    profilePfpFileKey = null;
+    
+    var modal = document.getElementById('profile-modal');
+    if (!modal) return;
+    modal.style.display = 'flex';
+    
+    // Show loading state
+    document.getElementById('profile-view').style.display = 'block';
+    document.getElementById('profile-edit').style.display = 'none';
+    document.getElementById('profile-modal-display-name').textContent = 'Loading...';
+    document.getElementById('profile-modal-nickname').textContent = '';
+    document.getElementById('profile-modal-description').textContent = '';
+    document.getElementById('profile-modal-avatar').innerHTML = '<div style="font-size:36px;color:#1a1a2e;font-weight:700;">...</div>';
+    document.getElementById('profile-modal-username-tag').textContent = '';
+    document.getElementById('profile-edit-btn').style.display = 'none';
+    
+    // Fetch profile data
+    try {
+        var res = await authFetch('/api/profile/' + encodeURIComponent(userId));
+        if (!res.ok) {
+            document.getElementById('profile-modal-display-name').textContent = 'User not found';
+            return;
+        }
+        var data = await res.json();
+        
+        // Try to decrypt encrypted profile data if this is our own profile
+        var decrypted = null;
+        if (data.encrypted_profile_data && data.encrypted_profile_salt && data.encrypted_profile_nonce && userId === user.id) {
+            // Verify stored password against server before decrypting
+            var password = await verifyStoredPassword();
+            if (password) {
+                try {
+                    var decryptedStr = E2ECrypto.decryptWithPassword(
+                        data.encrypted_profile_data,
+                        password,
+                        data.encrypted_profile_salt,
+                        data.encrypted_profile_nonce
+                    );
+                    if (decryptedStr) {
+                        decrypted = JSON.parse(decryptedStr);
+                    }
+                } catch (e) {
+                    console.warn('Failed to decrypt profile data', e);
+                }
+            }
+        }
+        
+        profileOriginalData = { data: data, decrypted: decrypted };
+        renderProfileView(data, decrypted, userId);
+    } catch (e) {
+        document.getElementById('profile-modal-display-name').textContent = 'Error loading profile';
+        console.error('Profile fetch error:', e);
+    }
+}
+
+// Render profile view mode
+function renderProfileView(data, decrypted, uid) {
+    var isOwn = uid === user.id;
+    
+    // Determine display name
+    var displayName = (decrypted && decrypted.display_name) || data.display_name || data.username || 'Unknown';
+    var nickname = (decrypted && decrypted.nickname) || '';
+    var description = (decrypted && decrypted.description) || '';
+    
+    // Colors — read from decrypted first (own profile), fall back to unencrypted (other users)
+    var usernameColor = (decrypted && decrypted.username_color) || data.username_color || '#4fc3f7';
+    var borderColor = data.username_border_color || '';
+    
+    // Set display name with color
+    var dnEl = document.getElementById('profile-modal-display-name');
+    dnEl.textContent = displayName;
+    dnEl.style.color = usernameColor;
+    if (borderColor) {
+        dnEl.style.textShadow = '0 0 8px ' + borderColor + ', 0 0 16px ' + borderColor;
+    } else {
+        dnEl.style.textShadow = 'none';
+    }
+    
+    // Set nickname
+    document.getElementById('profile-modal-nickname').textContent = nickname || '';
+    document.getElementById('profile-modal-nickname').style.display = nickname ? 'block' : 'none';
+    
+    // Set description with clickable links
+    var descEl = document.getElementById('profile-modal-description');
+    if (description) {
+        descEl.innerHTML = linkifyText(escapeHtml(description));
+        descEl.style.display = 'block';
+    } else {
+        descEl.textContent = '';
+        descEl.style.display = 'none';
+    }
+    
+    // Set username tag
+    document.getElementById('profile-modal-username-tag').textContent = data.username || '';
+    
+    // Set banner
+    var bannerImg = document.getElementById('profile-banner-img');
+    // If we have a decrypted banner file_key, use it. Otherwise use the existing file_id
+    var bannerFileId = data.profile_banner_file_id;
+    if (bannerFileId) {
+        getDecryptedFileUrl(bannerFileId, null, function(url) {
+            if (url) {
+                bannerImg.style.backgroundImage = 'url(' + url + ')';
+            } else {
+                bannerImg.style.backgroundImage = '';
+            }
+        });
+    } else {
+        bannerImg.style.backgroundImage = '';
+    }
+    
+    // Set avatar
+    var avatarEl = document.getElementById('profile-modal-avatar');
+    var picFileId = data.profile_picture_file_id;
+    if (picFileId) {
+        getDecryptedFileUrl(picFileId, null, function(url) {
+            if (url) {
+                avatarEl.innerHTML = '<img src="' + url + '" alt="Avatar">';
+            } else {
+                avatarEl.innerHTML = '<div style="font-size:36px;color:#1a1a2e;font-weight:700;">' + escapeHtml(displayName.charAt(0).toUpperCase()) + '</div>';
+            }
+        });
+    } else {
+        avatarEl.innerHTML = '<div style="font-size:36px;color:#1a1a2e;font-weight:700;">' + escapeHtml(displayName.charAt(0).toUpperCase()) + '</div>';
+    }
+    
+    // Show edit button only for own profile
+    var editBtn = document.getElementById('profile-edit-btn');
+    if (isOwn) {
+        editBtn.style.display = 'block';
+    } else {
+        editBtn.style.display = 'none';
+    }
+}
+
+// Helper: get decrypted file URL (async callback)
+function getDecryptedFileUrl(fileId, fileKey, callback) {
+    if (!fileId) { callback(null); return; }
+    var cacheKey = 'pfp_' + fileId;
+    var cached = profilePicCache[cacheKey];
+    if (cached) { callback(cached); return; }
+    
+    fetch('/api/files/' + fileId + '/download')
+        .then(function(r) {
+            if (!r.ok) throw new Error('Not found');
+            return r.arrayBuffer();
+        })
+        .then(function(data) {
+            var enc = new Uint8Array(data);
+            // Try to find the key
+            var keyB64 = fileKey || fileKeyCache.get(fileId) || (myProfile && myProfile.profile_picture_file_id === fileId && localStorage.getItem('e2e_file_key_' + fileId));
+            if (keyB64 && enc.length > 40) {
+                var key = E2ECrypto.base64ToArrayBuffer(keyB64);
+                var nonce = enc.slice(0, 24);
+                var tag = enc.slice(-16);
+                var ct = enc.slice(24, -16);
+                try {
+                    var plain = E2ECrypto.xchacha20poly1305Decrypt(key, ct, tag, nonce);
+                    var blob = new Blob([plain], { type: 'image/png' });
+                    var url = URL.createObjectURL(blob);
+                    profilePicCache[cacheKey] = url;
+                    callback(url);
+                } catch (e) {
+                    // Decryption failed - serve raw
+                    callback(URL.createObjectURL(new Blob([data])));
+                }
+            } else {
+                // No key available - serve raw
+                callback(URL.createObjectURL(new Blob([data])));
+            }
+        })
+        .catch(function() { callback(null); });
+}
+
+// Turn plain text URLs into clickable links
+function linkifyText(text) {
+    var urlRegex = /(https?:\/\/[^\s<]+)/g;
+    return text.replace(urlRegex, function(match) {
+        return '<a href="' + match + '" target="_blank" rel="noopener noreferrer">' + match + '</a>';
+    });
+}
+
+function closeProfileModal() {
+    document.getElementById('profile-modal').style.display = 'none';
+    document.getElementById('profile-edit').style.display = 'none';
+    document.getElementById('profile-view').style.display = 'block';
+    
+    // Close edit modal if open
+    if (profileEditModalOpen) closeProfileEditModal();
+    
+    // Clean up any crops
+    if (bannerCropState) cancelBannerCrop();
+    if (pfpCropState) cancelPfpCrop();
+    document.getElementById('profile-banner-crop-container').style.display = 'none';
+    document.getElementById('profile-pfp-crop-container').style.display = 'none';
+    
+    profileModalUserId = null;
+    profileEditMode = false;
+}
+
+var profileEditModalOpen = false;
+
+function openProfileEditModal() {
+    if (!profileOriginalData) return;
+    profileEditModalOpen = true;
+    var modal = document.getElementById('profile-edit-modal');
+    if (!modal) return;
+    modal.style.display = 'flex';
+    renderProfileEdit();
+}
+
+function closeProfileEditModal() {
+    profileEditModalOpen = false;
+    var modal = document.getElementById('profile-edit-modal');
+    if (modal) modal.style.display = 'none';
+    if (bannerCropState) cancelBannerCrop();
+    if (pfpCropState) cancelPfpCrop();
+    document.getElementById('profile-banner-crop-container').style.display = 'none';
+    document.getElementById('profile-pfp-crop-container').style.display = 'none';
+}
+
+// === Handlers wired in DOMContentLoaded ===
+
+// Render profile edit mode (separate modal, side-by-side layout)
+function renderProfileEdit() {
+    if (!profileOriginalData) return;
+    
+    document.getElementById('profile-edit').style.display = 'block';
+    document.getElementById('profile-edit-btn').style.display = 'none';
+    
+    var data = profileOriginalData.data;
+    var decrypted = profileOriginalData.decrypted || {};
+    
+    document.getElementById('profile-edit-display-name').value = decrypted.display_name || data.display_name || '';
+    document.getElementById('profile-edit-nickname').value = decrypted.nickname || '';
+    document.getElementById('profile-edit-description').value = decrypted.description || '';
+    updateDescriptionWordCount();
+    
+    var color = (decrypted && decrypted.username_color) || data.username_color || '#4fc3f7';
+    document.getElementById('profile-edit-color').value = color;
+    document.getElementById('profile-edit-color-preview').style.color = color;
+    
+    var bgColor = (decrypted && decrypted.profile_background_color) || data.profile_background_color || '#16213e';
+    document.getElementById('profile-edit-bg-color').value = bgColor;
+    document.getElementById('profile-edit-bg-preview').style.background = bgColor;
+    
+    // Glow options
+    renderEditGlowOptions(color);
+    
+    // Show/hide remove buttons based on whether images exist
+    if (data.profile_picture_file_id) {
+        document.getElementById('profile-avatar-remove-btn').style.display = '';
+    } else {
+        document.getElementById('profile-avatar-remove-btn').style.display = 'none';
+    }
+    if (data.profile_banner_file_id) {
+        document.getElementById('profile-banner-remove-btn').style.display = '';
+    } else {
+        document.getElementById('profile-banner-remove-btn').style.display = 'none';
+    }
+    // Hide any active crop containers
+    document.getElementById('profile-banner-crop-container').style.display = 'none';
+    document.getElementById('profile-pfp-crop-container').style.display = 'none';
+    
+    // Initialize the live preview
+    updateProfileEditPreview();
+}
+
+function renderEditGlowOptions(baseColor) {
+    var container = document.getElementById('profile-edit-glow-options');
+    if (!container) return;
+    var options = generateBorderGlowOptions(baseColor);
+    if (!options || options.length === 0) {
+        container.innerHTML = '<div style="color:#888;font-size:12px;">No glow options available</div>';
+        return;
+    }
+    var currentBorder = (profileOriginalData && profileOriginalData.data && profileOriginalData.data.username_border_color) || '';
+    var html = '';
+    var baseIsLight = isLightColor(baseColor);
+    var bestGlow = '';
+    var bestContrast = -1;
+    
+    options.forEach(function(o) {
+        var val = o.hex || o.value || '';
+        // Determine contrasting background for color indicator
+        var isLight = isLightColor(val);
+        var indicatorBg = isLight ? '#555' : '#ccc';
+        html += '<button class="glow-btn' + (val === currentBorder ? ' active' : '') + '" data-value="' + escapeAttr(val) + '">' +
+            '<span class="glow-color-circle" style="background:' + val + ';box-shadow:inset 0 0 0 2px ' + indicatorBg + ';"></span>' +
+            escapeHtml(o.name) +
+            '</button>';
+        
+        // Track best contrasting glow (opposite brightness from base color)
+        var glowBrightness = getColorBrightness(val);
+        var baseBrightness = getColorBrightness(baseColor);
+        var contrast = Math.abs(glowBrightness - baseBrightness);
+        if (contrast > bestContrast) {
+            bestContrast = contrast;
+            bestGlow = val;
+        }
+    });
+    container.innerHTML = html;
+    
+    // Auto-select best contrasting glow if no saved glow or base color changed significantly
+    var autoSelectGlow = bestGlow;
+    if (currentBorder) {
+        // Check if current border provides enough contrast
+        var currentContrast = Math.abs(getColorBrightness(currentBorder) - getColorBrightness(baseColor));
+        if (currentContrast < 60) autoSelectGlow = bestGlow; // Too similar, switch
+        else autoSelectGlow = currentBorder;
+    }
+    
+    container.querySelectorAll('.glow-btn').forEach(function(btn) {
+        if (btn.dataset.value === autoSelectGlow) {
+            btn.classList.add('active');
+        }
+        btn.addEventListener('click', function() {
+            container.querySelectorAll('.glow-btn').forEach(function(b) { b.classList.remove('active'); });
+            btn.classList.add('active');
+            // Update live preview glow immediately
+            var val = btn.dataset.value;
+            var editPreview = document.getElementById('profile-edit-display-name-preview');
+            if (editPreview) {
+                if (val) {
+                    editPreview.style.textShadow = '0 0 8px ' + val + ', 0 0 16px ' + val;
+                } else {
+                    editPreview.style.textShadow = 'none';
+                }
+            }
+        });
+    });
+}
+
+function getColorBrightness(hex) {
+    if (!hex || hex === 'transparent' || hex === 'none') return 255;
+    var c = hex.replace('#', '');
+    if (c.length === 3) c = c[0] + c[0] + c[1] + c[1] + c[2] + c[2];
+    var r = parseInt(c.substring(0,2), 16) || 0;
+    var g = parseInt(c.substring(2,4), 16) || 0;
+    var b = parseInt(c.substring(4,6), 16) || 0;
+    return (r * 299 + g * 587 + b * 114) / 1000;
+}
+
+function isLightColor(hex) {
+    return getColorBrightness(hex) > 140;
+}
+
+// Save profile (encrypt and send to server)
+// Verify that the stored password matches the server's hash.
+// If the password is wrong or missing, prompts the user to re-enter it.
+// Returns the verified password, or null if the user cancels.
+async function verifyStoredPassword() {
+    var stored = localStorage.getItem('e2e_password');
+    if (stored) {
+        try {
+            var res = await authFetch('/api/reauth', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ password: stored })
+            });
+            if (res.ok) {
+                // Update the auth token from the reauth response (extends session)
+                try {
+                    var reauthData = await res.json();
+                    if (reauthData && reauthData.token) {
+                        localStorage.setItem('token', reauthData.token);
+                    }
+                } catch (_) {}
+                return stored; // Password is still valid
+            }
+            // reauth might have failed due to an expired token (not wrong password).
+            // Try logging in as a fallback before prompting the user.
+            if (user && user.username) {
+                try {
+                    var loginRes = await fetch('/api/login', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ username: user.username, password: stored })
+                    });
+                    if (loginRes.ok) {
+                        var loginData = await loginRes.json();
+                        if (loginData && loginData.token) {
+                            localStorage.setItem('token', loginData.token);
+                            localStorage.setItem('user', JSON.stringify(loginData.user));
+                        }
+                        return stored; // Password is fine, token was just stale
+                    }
+                } catch (_) {}
+            }
+        } catch (e) {
+            // Network error — fall through to asking user
+        }
+    }
+    // Stored password is missing or wrong — ask the user
+    var newPassword = prompt('Your password has changed. Please enter your current password:');
+    if (newPassword) {
+        localStorage.setItem('e2e_password', newPassword);
+        // Also update the token via reauth with the new password
+        try {
+            var pwRes = await authFetch('/api/reauth', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ password: newPassword })
+            });
+            if (pwRes.ok) {
+                var pwData = await pwRes.json();
+                if (pwData && pwData.token) localStorage.setItem('token', pwData.token);
+            }
+        } catch (_) {}
+        return newPassword;
+    }
+    return null;
+}
+
+async function saveProfile() {
+    var statusEl = document.getElementById('profile-edit-status');
+    if (!statusEl) return;
+    statusEl.style.display = 'block';
+    statusEl.style.color = 'var(--text-muted)';
+    statusEl.textContent = 'Saving...';
+    
+    var displayName = document.getElementById('profile-edit-display-name').value.trim();
+    var nickname = document.getElementById('profile-edit-nickname').value.trim();
+    var description = document.getElementById('profile-edit-description').value.trim();
+    var color = document.getElementById('profile-edit-color').value;
+    
+    var bgColor = document.getElementById('profile-edit-bg-color').value;
+    
+    var glowBtn = document.querySelector('#profile-edit-glow-options .glow-btn.active');
+    var borderColor = glowBtn ? glowBtn.dataset.value : '';
+    
+    // Validate
+    if (displayName.length > 32) { statusEl.textContent = 'Display name too long (max 32 chars)'; statusEl.style.color = 'var(--danger)'; return; }
+    if (nickname.length > 32) { statusEl.textContent = 'Nickname too long (max 32 chars)'; statusEl.style.color = 'var(--danger)'; return; }
+    var wordCount = description ? description.trim().split(/\s+/).length : 0;
+    if (wordCount > 300) { statusEl.textContent = 'Description too long (max 300 words)'; statusEl.style.color = 'var(--danger)'; return; }
+    
+    try {
+        // Build profile data to encrypt
+        var profileData = {
+            display_name: displayName,
+            nickname: nickname,
+            description: description,
+            username_color: color,
+            profile_background_color: bgColor
+        };
+        
+        // Verify stored password against server before encrypting
+        var password = await verifyStoredPassword();
+        if (!password) {
+            statusEl.textContent = 'Password is required to save profile.';
+            statusEl.style.color = 'var(--danger)';
+            return;
+        }
+        
+        var encrypted = E2ECrypto.encryptWithPassword(JSON.stringify(profileData), password);
+        
+        // Build API request
+        var body = {
+            display_name: displayName,
+            username_color: color,
+            encrypted_profile_data: encrypted.encrypted_private_key,
+            encrypted_profile_salt: encrypted.salt,
+            encrypted_profile_nonce: encrypted.nonce
+        };
+        // Only send border color if one is selected (skip empty string to avoid server validation error)
+        body.profile_background_color = bgColor;
+        if (borderColor) {
+            body.username_border_color = borderColor;
+        }
+        
+        // Handle banner and PFP uploads
+        if (profileBannerFileId) {
+            body.profile_banner_file_id = profileBannerFileId;
+        }
+        if (profilePfpFileId) {
+            body.profile_picture_file_id = profilePfpFileId;
+        }
+        
+        var res = await authFetch('/api/profile', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+        
+        if (!res.ok) {
+            var errData = await res.json().catch(function() { return {}; });
+            statusEl.textContent = errData.error || 'Failed to save profile';
+            statusEl.style.color = 'var(--danger)';
+            return;
+        }
+        
+        statusEl.textContent = 'Profile saved!';
+        statusEl.style.color = 'var(--success)';
+        
+        // Reload profile data and explicitly update the sidebar footer
+        await loadMyProfile();
+        // Clear any cached PFP that might be stale
+        var oldPfpId = myProfile && myProfile.profile_picture_file_id;
+        if (oldPfpId && profilePfpFileId && oldPfpId !== profilePfpFileId) {
+            delete profilePicCache[user.id + ':' + oldPfpId];
+        }
+        updateSidebarFooter();
+        
+        // Refresh the view
+        var res2 = await authFetch('/api/profile/' + encodeURIComponent(user.id));
+        if (res2.ok) {
+            var data2 = await res2.json();
+            profileOriginalData = { data: data2, decrypted: profileData };
+            renderProfileView(data2, profileData, user.id);
+        }
+        
+        document.getElementById('profile-edit').style.display = 'none';
+        profileEditMode = false;
+        
+        setTimeout(function() { statusEl.style.display = 'none'; }, 2000);
+    } catch (e) {
+        statusEl.textContent = 'Error saving profile: ' + e.message;
+        statusEl.style.color = 'var(--danger)';
+    }
+}
+
+// ===== Right-panel crop for Banner =====
+function openBannerCrop(file) {
+    if (!file.type.startsWith('image/')) { alert('Please select an image file.'); return; }
+    // Cancel any existing PFP crop first
+    if (pfpCropState) cancelPfpCrop();
+    
+    var container = document.getElementById('profile-banner-crop-container');
+    var cropImg = document.getElementById('profile-banner-crop-img');
+    var box = document.getElementById('profile-banner-crop-box');
+    var handle = document.getElementById('profile-banner-crop-handle');
+    
+    var reader = new FileReader();
+    reader.onload = function(e) {
+        var dataUrl = e.target.result;
+        cropImg.src = dataUrl;
+        container.style.display = 'block';
+        
+        cropImg.onload = function() {
+            var frame = cropImg.parentElement;
+            var frameW = frame.offsetWidth;
+            var frameH = frame.offsetHeight;
+            var imgW = cropImg.naturalWidth;
+            var imgH = cropImg.naturalHeight;
+            
+            // Scale image to COVER the frame (no black space)
+            var scale = Math.max(frameW / imgW, frameH / imgH);
+            var dispW = Math.round(imgW * scale);
+            var dispH = Math.round(imgH * scale);
+            
+            cropImg.style.width = dispW + 'px';
+            cropImg.style.height = dispH + 'px';
+            cropImg.style.display = 'block';
+            
+            // Use frame dimensions as the effective crop area (image covers the frame)
+            var effectiveW = Math.min(dispW, frameW);
+            var effectiveH = Math.min(dispH, frameH);
+            
+            // Center the image initially so all edges of the image can be reached
+            var initOffX = -(dispW - effectiveW) / 2;
+            var initOffY = -(dispH - effectiveH) / 2;
+            cropImg.style.top = initOffY + 'px';
+            cropImg.style.left = initOffX + 'px';
+            
+            // Scale factors: natural pixels per displayed pixel
+            var scaleX = cropImg.naturalWidth / dispW;
+            var scaleY = cropImg.naturalHeight / dispH;
+            
+            // Initial crop centered in the visible area
+            var initW = Math.round(effectiveW * 0.7);
+            var initH = Math.round(initW * 0.45);
+            var initX = Math.round((effectiveW - initW) / 2) - initOffX;
+            var initY = Math.round((effectiveH - initH) / 2) - initOffY;
+            
+            bannerCropState = {
+                file: file, img: cropImg, dataUrl: dataUrl,
+                startX: initX, startY: initY,
+                width: initW, height: initH,
+                imgOffX: initOffX, imgOffY: initOffY,
+                dispW: effectiveW, dispH: effectiveH,
+                fullDispW: dispW, fullDispH: dispH,
+                scaleX: scaleX, scaleY: scaleY,
+                isDragging: false, isResizing: false,
+                dragStartX: 0, dragStartY: 0,
+                startLeft: 0, startTop: 0, startSize: 0
+            };
+            
+            updateBannerCropBox();
+            updateBannerLivePreview();
+            
+            // Pan the image so the crop box is visible within the frame
+            function panImageForCrop() {
+                var s = bannerCropState;
+                if (!s) return;
+                // Keep crop box visible horizontally
+                var cropLeft = s.startX + s.imgOffX;
+                var cropRight = cropLeft + s.width;
+                if (cropLeft < 0) {
+                    s.imgOffX = -s.startX;
+                } else if (cropRight > s.dispW) {
+                    s.imgOffX = s.dispW - s.startX - s.width;
+                }
+                // Keep crop box visible vertically
+                var cropTop = s.startY + s.imgOffY;
+                var cropBottom = cropTop + s.height;
+                if (cropTop < 0) {
+                    s.imgOffY = -s.startY;
+                } else if (cropBottom > s.dispH) {
+                    s.imgOffY = s.dispH - s.startY - s.height;
+                }
+                // Clamp to image bounds (can't move more than the overflow)
+                var maxOffX = 0;
+                var minOffX = -(s.fullDispW - s.dispW);
+                s.imgOffX = Math.max(minOffX, Math.min(maxOffX, s.imgOffX));
+                var maxOffY = 0;
+                var minOffY = -(s.fullDispH - s.dispH);
+                s.imgOffY = Math.max(minOffY, Math.min(maxOffY, s.imgOffY));
+                // Apply to image element
+                s.img.style.left = s.imgOffX + 'px';
+                s.img.style.top = s.imgOffY + 'px';
+            }
+            
+            // Drag
+            function startDrag(ev) {
+                var e = ev.touches ? ev.touches[0] : ev;
+                bannerCropState.isDragging = true;
+                bannerCropState.dragStartX = e.clientX;
+                bannerCropState.dragStartY = e.clientY;
+                bannerCropState.startLeft = bannerCropState.startX;
+                bannerCropState.startTop = bannerCropState.startY;
+                ev.preventDefault();
+            }
+            function onDrag(ev) {
+                if (!bannerCropState.isDragging) return;
+                var e = ev.touches ? ev.touches[0] : ev;
+                var dx = e.clientX - bannerCropState.dragStartX;
+                var dy = e.clientY - bannerCropState.dragStartY;
+                var maxX = bannerCropState.fullDispW - bannerCropState.width;
+                var maxY = bannerCropState.fullDispH - bannerCropState.height;
+                bannerCropState.startX = Math.max(0, Math.min(maxX, bannerCropState.startLeft + dx));
+                bannerCropState.startY = Math.max(0, Math.min(maxY, bannerCropState.startTop + dy));
+                panImageForCrop();
+                updateBannerCropBox();
+                updateBannerLivePreview();
+                ev.preventDefault();
+            }
+            // Resize
+            function startResize(ev) {
+                var e = ev.touches ? ev.touches[0] : ev;
+                bannerCropState.isResizing = true;
+                bannerCropState.dragStartX = e.clientX;
+                bannerCropState.dragStartY = e.clientY;
+                bannerCropState.startSize = bannerCropState.width;
+                bannerCropState.startLeft = bannerCropState.startX;
+                bannerCropState.startTop = bannerCropState.startY;
+                ev.preventDefault();
+                ev.stopPropagation();
+            }
+            function onResize(ev) {
+                if (!bannerCropState.isResizing) return;
+                var e = ev.touches ? ev.touches[0] : ev;
+                var dx = e.clientX - bannerCropState.dragStartX;
+                var maxW = bannerCropState.fullDispW - bannerCropState.startLeft;
+                var maxH = bannerCropState.fullDispH - bannerCropState.startTop;
+                var maxSize = Math.min(maxW, maxH);
+                var newW = Math.max(40, Math.min(maxSize, bannerCropState.startSize + dx));
+                var newH = Math.round(newW * (bannerCropState.height / bannerCropState.width));
+                if (newH > bannerCropState.fullDispH - bannerCropState.startTop) {
+                    newH = bannerCropState.fullDispH - bannerCropState.startTop;
+                    newW = Math.round(newH * (bannerCropState.width / bannerCropState.height));
+                }
+                bannerCropState.width = newW;
+                bannerCropState.height = newH;
+                panImageForCrop();
+                updateBannerCropBox();
+                updateBannerLivePreview();
+                ev.preventDefault();
+            }
+            function endDrag() {
+                bannerCropState.isDragging = false;
+                bannerCropState.isResizing = false;
+            }
+            
+            box.addEventListener('mousedown', startDrag);
+            box.addEventListener('touchstart', startDrag, { passive: false });
+            handle.addEventListener('mousedown', startResize);
+            handle.addEventListener('touchstart', startResize, { passive: false });
+            document.addEventListener('mousemove', onDrag);
+            document.addEventListener('touchmove', onDrag, { passive: false });
+            document.addEventListener('mousemove', onResize);
+            document.addEventListener('touchmove', onResize, { passive: false });
+            document.addEventListener('mouseup', endDrag);
+            document.addEventListener('touchend', endDrag);
+            
+            bannerCropState._cleanup = function() {
+                box.removeEventListener('mousedown', startDrag);
+                box.removeEventListener('touchstart', startDrag);
+                handle.removeEventListener('mousedown', startResize);
+                handle.removeEventListener('touchstart', startResize);
+                document.removeEventListener('mousemove', onDrag);
+                document.removeEventListener('touchmove', onDrag);
+                document.removeEventListener('mousemove', onResize);
+                document.removeEventListener('touchmove', onResize);
+                document.removeEventListener('mouseup', endDrag);
+                document.removeEventListener('touchend', endDrag);
+            };
+        };
+    };
+    reader.readAsDataURL(file);
+}
+
+function updateBannerCropBox() {
+    var s = bannerCropState;
+    if (!s) return;
+    var box = document.getElementById('profile-banner-crop-box');
+    if (box) {
+        box.style.left = s.startX + 'px';
+        box.style.top = s.startY + 'px';
+        box.style.width = s.width + 'px';
+        box.style.height = s.height + 'px';
+    }
+}
+
+function updateBannerLivePreview() {
+    var s = bannerCropState;
+    if (!s) return;
+    var canvas = document.createElement('canvas');
+    // Account for image offset: the crop box is at startX/startY relative to the frame,
+    // but the image is shifted by imgOffX/imgOffY, so the image pixel at the crop is (startX - imgOffX)
+    var natX = Math.round((s.startX - s.imgOffX) * s.scaleX);
+    var natY = Math.round((s.startY - s.imgOffY) * s.scaleY);
+    var natW = Math.round(s.width * s.scaleX);
+    var natH = Math.round(s.height * s.scaleY);
+    canvas.width = natW;
+    canvas.height = natH;
+    var ctx = canvas.getContext('2d');
+    ctx.drawImage(s.img, natX, natY, natW, natH, 0, 0, natW, natH);
+    var dataUrl = canvas.toDataURL('image/png');
+    document.getElementById('profile-banner-img').style.backgroundImage = 'url(' + dataUrl + ')';
+    // Also update edit modal preview if editing
+    var editBanner = document.getElementById('profile-edit-banner-img');
+    if (editBanner) editBanner.style.backgroundImage = 'url(' + dataUrl + ')';
+    canvas.width = 0;
+    canvas.height = 0;
+}
+
+function cancelBannerCrop() {
+    document.getElementById('profile-banner-crop-container').style.display = 'none';
+    if (bannerCropState && bannerCropState._cleanup) {
+        bannerCropState._cleanup();
+    }
+    bannerCropState = null;
+    // Restore original banner in the preview
+    if (profileOriginalData) {
+        var data = profileOriginalData.data;
+        var decrypted = profileOriginalData.decrypted;
+        var bannerImg = document.getElementById('profile-banner-img');
+        if (bannerImg) {
+            var bannerFileId = data.profile_banner_file_id;
+            if (bannerFileId) {
+                getDecryptedFileUrl(bannerFileId, null, function(url) {
+                    bannerImg.style.backgroundImage = url ? 'url(' + url + ')' : '';
+                });
+            } else {
+                bannerImg.style.backgroundImage = '';
+            }
+        }
+    }
+}
+
+async function processBannerCrop() {
+    if (!bannerCropState) return;
+    try {
+        var s = bannerCropState;
+        var canvas = document.createElement('canvas');
+        // Account for image offset
+        var natX = Math.round((s.startX - s.imgOffX) * s.scaleX);
+        var natY = Math.round((s.startY - s.imgOffY) * s.scaleY);
+        var natW = Math.round(s.width * s.scaleX);
+        var natH = Math.round(s.height * s.scaleY);
+        canvas.width = natW;
+        canvas.height = natH;
+        var ctx = canvas.getContext('2d');
+        ctx.drawImage(s.img, natX, natY, natW, natH, 0, 0, natW, natH);
+        
+        var blob = await new Promise(function(resolve) { canvas.toBlob(resolve, 'image/png'); });
+        if (!blob) throw new Error('Canvas to blob failed');
+        
+        var croppedFile = new File([blob], 'banner_crop.png', { type: 'image/png' });
+        var fileId = await uploadBannerImage(croppedFile);
+        if (!fileId) throw new Error('Upload failed');
+        
+        profileBannerFileId = fileId;
+        document.getElementById('profile-banner-crop-container').style.display = 'none';
+        if (bannerCropState && bannerCropState._cleanup) bannerCropState._cleanup();
+        bannerCropState = null;
+        canvas.width = 0;
+        canvas.height = 0;
+    } catch (e) {
+        alert('Banner crop failed: ' + e.message);
+    }
+}
+
+// ===== Right-panel crop for Profile Picture =====
+function openPfpCrop(file) {
+    if (!file.type.startsWith('image/')) { alert('Please select an image file.'); return; }
+    // Cancel any existing banner crop first
+    if (bannerCropState) cancelBannerCrop();
+    
+    var container = document.getElementById('profile-pfp-crop-container');
+    var cropImg = document.getElementById('profile-pfp-crop-img');
+    var box = document.getElementById('profile-pfp-crop-box');
+    var handle = document.getElementById('profile-pfp-crop-handle');
+    
+    var reader = new FileReader();
+    reader.onload = function(e) {
+        var dataUrl = e.target.result;
+        cropImg.src = dataUrl;
+        container.style.display = 'block';
+        
+        cropImg.onload = function() {
+            var frame = cropImg.parentElement;
+            var frameW = frame.offsetWidth;
+            var frameH = frame.offsetHeight;
+            var imgW = cropImg.naturalWidth;
+            var imgH = cropImg.naturalHeight;
+            
+            // Scale image to COVER the frame (no black space)
+            var scale = Math.max(frameW / imgW, frameH / imgH);
+            var dispW = Math.round(imgW * scale);
+            var dispH = Math.round(imgH * scale);
+            
+            cropImg.style.width = dispW + 'px';
+            cropImg.style.height = dispH + 'px';
+            cropImg.style.display = 'block';
+            
+            // Use frame dimensions as the effective crop area
+            var effectiveW = Math.min(dispW, frameW);
+            var effectiveH = Math.min(dispH, frameH);
+            
+            // Center the image initially so all edges can be reached
+            var initOffX = -(dispW - effectiveW) / 2;
+            var initOffY = -(dispH - effectiveH) / 2;
+            cropImg.style.top = initOffY + 'px';
+            cropImg.style.left = initOffX + 'px';
+            
+            // Scale factors
+            var scaleX = cropImg.naturalWidth / dispW;
+            var scaleY = cropImg.naturalHeight / dispH;
+            
+            // Initial crop: centered square within visible area, accounting for image offset
+            var initSize = Math.min(effectiveW, effectiveH) * 0.7;
+            var initX = Math.round((effectiveW - initSize) / 2) - initOffX;
+            var initY = Math.round((effectiveH - initSize) / 2) - initOffY;
+            
+            pfpCropState = {
+                file: file, img: cropImg, dataUrl: dataUrl,
+                startX: initX, startY: initY, size: initSize,
+                imgOffX: initOffX, imgOffY: initOffY,
+                dispW: effectiveW, dispH: effectiveH,
+                fullDispW: dispW, fullDispH: dispH,
+                scaleX: scaleX, scaleY: scaleY,
+                isDragging: false, isResizing: false,
+                dragStartX: 0, dragStartY: 0,
+                startLeft: 0, startTop: 0, startSize: 0
+            };
+            
+            updatePfpCropBox();
+            updatePfpLivePreview();
+            
+            // Pan the image so the crop box is visible within the frame
+            function panPfpImage() {
+                var s = pfpCropState;
+                if (!s) return;
+                // Keep crop box visible horizontally
+                var cropLeft = s.startX + s.imgOffX;
+                var cropRight = cropLeft + s.size;
+                if (cropLeft < 0) {
+                    s.imgOffX = -s.startX;
+                } else if (cropRight > s.dispW) {
+                    s.imgOffX = s.dispW - s.startX - s.size;
+                }
+                // Keep crop box visible vertically
+                var cropTop = s.startY + s.imgOffY;
+                var cropBottom = cropTop + s.size;
+                if (cropTop < 0) {
+                    s.imgOffY = -s.startY;
+                } else if (cropBottom > s.dispH) {
+                    s.imgOffY = s.dispH - s.startY - s.size;
+                }
+                // Clamp to image bounds
+                var maxOffX = 0;
+                var minOffX = -(s.fullDispW - s.dispW);
+                s.imgOffX = Math.max(minOffX, Math.min(maxOffX, s.imgOffX));
+                var maxOffY = 0;
+                var minOffY = -(s.fullDispH - s.dispH);
+                s.imgOffY = Math.max(minOffY, Math.min(maxOffY, s.imgOffY));
+                // Apply to image element
+                s.img.style.left = s.imgOffX + 'px';
+                s.img.style.top = s.imgOffY + 'px';
+            }
+            
+            // Drag
+            function startDrag(ev) {
+                var e = ev.touches ? ev.touches[0] : ev;
+                pfpCropState.isDragging = true;
+                pfpCropState.dragStartX = e.clientX;
+                pfpCropState.dragStartY = e.clientY;
+                pfpCropState.startLeft = pfpCropState.startX;
+                pfpCropState.startTop = pfpCropState.startY;
+                ev.preventDefault();
+            }
+            function onDrag(ev) {
+                if (!pfpCropState.isDragging) return;
+                var e = ev.touches ? ev.touches[0] : ev;
+                var dx = e.clientX - pfpCropState.dragStartX;
+                var dy = e.clientY - pfpCropState.dragStartY;
+                var maxX = pfpCropState.fullDispW - pfpCropState.size;
+                var maxY = pfpCropState.fullDispH - pfpCropState.size;
+                pfpCropState.startX = Math.max(0, Math.min(maxX, pfpCropState.startLeft + dx));
+                pfpCropState.startY = Math.max(0, Math.min(maxY, pfpCropState.startTop + dy));
+                panPfpImage();
+                updatePfpCropBox();
+                updatePfpLivePreview();
+                ev.preventDefault();
+            }
+            // Resize (maintains square aspect)
+            function startResize(ev) {
+                var e = ev.touches ? ev.touches[0] : ev;
+                pfpCropState.isResizing = true;
+                pfpCropState.dragStartX = e.clientX;
+                pfpCropState.dragStartY = e.clientY;
+                pfpCropState.startSize = pfpCropState.size;
+                pfpCropState.startLeft = pfpCropState.startX;
+                pfpCropState.startTop = pfpCropState.startY;
+                ev.preventDefault();
+                ev.stopPropagation();
+            }
+            function onResize(ev) {
+                if (!pfpCropState.isResizing) return;
+                var e = ev.touches ? ev.touches[0] : ev;
+                var dx = e.clientX - pfpCropState.dragStartX;
+                var maxSize = Math.min(pfpCropState.fullDispW - pfpCropState.startLeft, pfpCropState.fullDispH - pfpCropState.startTop);
+                pfpCropState.size = Math.max(20, Math.min(maxSize, pfpCropState.startSize + dx));
+                panPfpImage();
+                updatePfpCropBox();
+                updatePfpLivePreview();
+                ev.preventDefault();
+            }
+            function endDrag() {
+                pfpCropState.isDragging = false;
+                pfpCropState.isResizing = false;
+            }
+            
+            box.addEventListener('mousedown', startDrag);
+            box.addEventListener('touchstart', startDrag, { passive: false });
+            handle.addEventListener('mousedown', startResize);
+            handle.addEventListener('touchstart', startResize, { passive: false });
+            document.addEventListener('mousemove', onDrag);
+            document.addEventListener('touchmove', onDrag, { passive: false });
+            document.addEventListener('mousemove', onResize);
+            document.addEventListener('touchmove', onResize, { passive: false });
+            document.addEventListener('mouseup', endDrag);
+            document.addEventListener('touchend', endDrag);
+            
+            pfpCropState._cleanup = function() {
+                box.removeEventListener('mousedown', startDrag);
+                box.removeEventListener('touchstart', startDrag);
+                handle.removeEventListener('mousedown', startResize);
+                handle.removeEventListener('touchstart', startResize);
+                document.removeEventListener('mousemove', onDrag);
+                document.removeEventListener('touchmove', onDrag);
+                document.removeEventListener('mousemove', onResize);
+                document.removeEventListener('touchmove', onResize);
+                document.removeEventListener('mouseup', endDrag);
+                document.removeEventListener('touchend', endDrag);
+            };
+        };
+    };
+    reader.readAsDataURL(file);
+}
+
+function updatePfpCropBox() {
+    var s = pfpCropState;
+    if (!s) return;
+    var box = document.getElementById('profile-pfp-crop-box');
+    if (box) {
+        box.style.left = s.startX + 'px';
+        box.style.top = s.startY + 'px';
+        box.style.width = s.size + 'px';
+        box.style.height = s.size + 'px';
+    }
+}
+
+function updatePfpLivePreview() {
+    var s = pfpCropState;
+    if (!s) return;
+    var canvas = document.createElement('canvas');
+    var natX = Math.round((s.startX - s.imgOffX) * s.scaleX);
+    var natY = Math.round((s.startY - s.imgOffY) * s.scaleY);
+    var natSize = Math.round(s.size * s.scaleX);
+    canvas.width = natSize;
+    canvas.height = natSize;
+    var ctx = canvas.getContext('2d');
+    ctx.beginPath();
+    ctx.arc(natSize/2, natSize/2, natSize/2, 0, Math.PI * 2);
+    ctx.closePath();
+    ctx.clip();
+    ctx.drawImage(s.img, natX, natY, natSize, natSize, 0, 0, natSize, natSize);
+    var dataUrl = canvas.toDataURL('image/png');
+    var avatarEl = document.getElementById('profile-modal-avatar');
+    avatarEl.innerHTML = '<img src="' + dataUrl + '" alt="Avatar">';
+    // Also update edit modal preview if editing
+    var editAvatar = document.getElementById('profile-edit-avatar');
+    if (editAvatar) editAvatar.innerHTML = '<img src="' + dataUrl + '" alt="Avatar">';
+    canvas.width = 0;
+    canvas.height = 0;
+}
+
+function cancelPfpCrop() {
+    document.getElementById('profile-pfp-crop-container').style.display = 'none';
+    if (pfpCropState && pfpCropState._cleanup) {
+        pfpCropState._cleanup();
+    }
+    pfpCropState = null;
+    // Restore original avatar in both view and edit previews
+    if (profileOriginalData) {
+        var data = profileOriginalData.data;
+        var displayName = (profileOriginalData.decrypted && profileOriginalData.decrypted.display_name) || data.display_name || data.username || 'Unknown';
+        var avatarEl = document.getElementById('profile-modal-avatar');
+        var editAvatarEl = document.getElementById('profile-edit-avatar');
+        var restoreFn = function(url) {
+            var html = url ? '<img src="' + url + '" alt="Avatar">' : '<div style="font-size:36px;color:#1a1a2e;font-weight:700;">' + escapeHtml(displayName.charAt(0).toUpperCase()) + '</div>';
+            if (avatarEl) avatarEl.innerHTML = html;
+            if (editAvatarEl) editAvatarEl.innerHTML = html;
+        };
+        var picFileId = data.profile_picture_file_id;
+        if (picFileId) {
+            getDecryptedFileUrl(picFileId, null, restoreFn);
+        } else {
+            restoreFn(null);
+        }
+    }
+}
+
+async function processPfpCrop() {
+    if (!pfpCropState) return;
+    try {
+        var s = pfpCropState;
+        var canvas = document.createElement('canvas');
+        var natX = Math.round((s.startX - s.imgOffX) * s.scaleX);
+        var natY = Math.round((s.startY - s.imgOffY) * s.scaleY);
+        var natSize = Math.round(s.size * s.scaleX);
+        canvas.width = natSize;
+        canvas.height = natSize;
+        var ctx = canvas.getContext('2d');
+        ctx.drawImage(s.img, natX, natY, natSize, natSize, 0, 0, natSize, natSize);
+        
+        var blob = await new Promise(function(resolve) { canvas.toBlob(resolve, 'image/png'); });
+        if (!blob) throw new Error('Canvas to blob failed');
+        
+        var croppedFile = new File([blob], 'avatar_crop.png', { type: 'image/png' });
+        var fileId = await uploadBannerImage(croppedFile);
+        if (!fileId) throw new Error('Upload failed');
+        
+        profilePfpFileId = fileId;
+        document.getElementById('profile-pfp-crop-container').style.display = 'none';
+        if (pfpCropState && pfpCropState._cleanup) pfpCropState._cleanup();
+        pfpCropState = null;
+        canvas.width = 0;
+        canvas.height = 0;
+        
+        // Show remove button
+        document.getElementById('profile-avatar-remove-btn').style.display = '';
+    } catch (e) {
+        alert('PFP crop failed: ' + e.message);
+    }
+}
+
+// Upload a processed banner image file with encryption and return its file ID
+async function uploadBannerImage(file) {
+    // Use E2E encryption for banner images
+    var fileKey = E2ECrypto.generateFileKey();
+    var encResult = await encryptFileChunk(file, fileKey);
+    
+    var initRes = await authFetch('/api/files/init', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ size: encResult.data.length, mime: file.type || 'image/png' })
+    });
+    if (!initRes.ok) throw new Error('Failed to init upload');
+    var initData = await initRes.json();
+    var fileId = initData.file_id;
+    
+    await authFetch('/api/files/' + fileId + '/chunk/0', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: encResult.data
+    });
+    
+    var completeRes = await authFetch('/api/files/' + fileId + '/complete', { method: 'POST' });
+    if (!completeRes.ok) throw new Error('Failed to complete upload');
+    
+    // Cache the file key
+    fileKeyCache.set(fileId, E2ECrypto.arrayBufferToBase64(fileKey));
+    
+    return fileId;
+}
+
+// Helper: convert File to ArrayBuffer
+function fileToArrayBuffer(file) {
+    return new Promise(function(resolve, reject) {
+        var reader = new FileReader();
+        reader.onload = function(e) { resolve(e.target.result); };
+        reader.onerror = function() { reject(new Error('File read failed')); };
+        reader.readAsArrayBuffer(file);
+    });
+}
+
+// Encrypt a file chunk using E2E file key
+async function encryptFileChunk(file, fileKey) {
+    var data = await fileToArrayBuffer(file);
+    var encrypted = E2ECrypto.encryptFileChunk(new Uint8Array(data), fileKey);
+    return { data: encrypted };
+}
 
 // ===== Favorite GIF on .gif file cards =====

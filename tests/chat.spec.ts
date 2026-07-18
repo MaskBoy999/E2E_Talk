@@ -25,7 +25,8 @@ test.describe('E2E Chat', () => {
         await page.click('#show-register');
         await page.fill('#register-username', username);
         await page.fill('#register-password', 'password123');
-        await page.click('#register-form button[type="submit"]');
+                await page.fill('#register-confirm-password', 'password123');
+await page.click('#register-form button[type="submit"]');
         await page.waitForURL('**/index.html', { timeout: 10000 });
 
         // Intercept any native dialogs - they should NOT appear
@@ -63,7 +64,8 @@ test.describe('E2E Chat', () => {
         await page.click('#show-register');
         await page.fill('#register-username', username);
         await page.fill('#register-password', 'password123');
-        await page.click('#register-form button[type="submit"]');
+                await page.fill('#register-confirm-password', 'password123');
+await page.click('#register-form button[type="submit"]');
         await page.waitForURL('**/index.html', { timeout: 10000 });
 
         await page.click('#add-server-btn');
@@ -87,7 +89,8 @@ test.describe('E2E Chat', () => {
         await page.click('#show-register');
         await page.fill('#register-username', username);
         await page.fill('#register-password', 'password123');
-        await page.click('#register-form button[type="submit"]');
+                await page.fill('#register-confirm-password', 'password123');
+await page.click('#register-form button[type="submit"]');
         await page.waitForURL('**/index.html', { timeout: 10000 });
 
         await page.click('#add-server-btn');
@@ -108,7 +111,8 @@ test.describe('E2E Chat', () => {
         await page.click('#show-register');
         await page.fill('#register-username', username);
         await page.fill('#register-password', 'password123');
-        await page.click('#register-form button[type="submit"]');
+                await page.fill('#register-confirm-password', 'password123');
+await page.click('#register-form button[type="submit"]');
         await page.waitForURL('**/index.html', { timeout: 10000 });
 
         // Open join server modal via the new choice modal
@@ -143,7 +147,8 @@ test.describe('E2E Chat', () => {
         await page.click('#show-register');
         await page.fill('#register-username', username);
         await page.fill('#register-password', 'password123');
-        await page.click('#register-form button[type="submit"]');
+                await page.fill('#register-confirm-password', 'password123');
+await page.click('#register-form button[type="submit"]');
         await page.waitForURL('**/index.html', { timeout: 10000 });
 
         // Navigate to DM view to find Add Friend button
@@ -185,7 +190,8 @@ test.describe('E2E Chat', () => {
         await page.click('#show-register');
         await page.fill('#register-username', user1);
         await page.fill('#register-password', 'password123');
-        await page.click('#register-form button[type="submit"]');
+                await page.fill('#register-confirm-password', 'password123');
+await page.click('#register-form button[type="submit"]');
         await page.waitForURL('**/index.html', { timeout: 10000 });
 
         const body1 = await page.evaluate(() => ({
@@ -202,7 +208,8 @@ test.describe('E2E Chat', () => {
         await page2reg.click('#show-register');
         await page2reg.fill('#register-username', user2);
         await page2reg.fill('#register-password', 'password123');
-        await page2reg.click('#register-form button[type="submit"]');
+        await page2reg.fill('#register-confirm-password', 'password123');
+await page2reg.click('#register-form button[type="submit"]');
         await page2reg.waitForURL('**/index.html', { timeout: 10000 });
 
         const body2 = await page2reg.evaluate(() => ({
@@ -334,7 +341,8 @@ test.describe('E2E Chat', () => {
         await page.click('#show-register');
         await page.fill('#register-username', user1);
         await page.fill('#register-password', 'password123');
-        await page.click('#register-form button[type="submit"]');
+                await page.fill('#register-confirm-password', 'password123');
+await page.click('#register-form button[type="submit"]');
         await page.waitForURL('**/index.html', { timeout: 10000 });
 
         const body1 = await page.evaluate(() => ({
@@ -351,7 +359,8 @@ test.describe('E2E Chat', () => {
         await page2reg.click('#show-register');
         await page2reg.fill('#register-username', user2);
         await page2reg.fill('#register-password', 'password123');
-        await page2reg.click('#register-form button[type="submit"]');
+        await page2reg.fill('#register-confirm-password', 'password123');
+await page2reg.click('#register-form button[type="submit"]');
         await page2reg.waitForURL('**/index.html', { timeout: 10000 });
 
         const body2 = await page2reg.evaluate(() => ({
@@ -489,7 +498,8 @@ test.describe('E2E Chat', () => {
         await page.click('#show-register');
         await page.fill('#register-username', username);
         await page.fill('#register-password', 'password123');
-        await page.click('#register-form button[type="submit"]');
+                await page.fill('#register-confirm-password', 'password123');
+await page.click('#register-form button[type="submit"]');
         await page.waitForURL('**/index.html', { timeout: 10000 });
 
         const body = await page.evaluate(() => ({
@@ -558,7 +568,8 @@ test.describe('E2E Chat', () => {
         await page.click('#show-register');
         await page.fill('#register-username', username);
         await page.fill('#register-password', 'password123');
-        await page.click('#register-form button[type="submit"]');
+                await page.fill('#register-confirm-password', 'password123');
+await page.click('#register-form button[type="submit"]');
         await page.waitForURL('**/index.html', { timeout: 10000 });
 
         const body = await page.evaluate(() => ({
@@ -641,7 +652,8 @@ test.describe('E2E Chat', () => {
         await page.click('#show-register');
         await page.fill('#register-username', username);
         await page.fill('#register-password', 'password123');
-        await page.click('#register-form button[type="submit"]');
+                await page.fill('#register-confirm-password', 'password123');
+await page.click('#register-form button[type="submit"]');
         await page.waitForURL('**/index.html', { timeout: 10000 });
 
         const body = await page.evaluate(() => ({
@@ -732,7 +744,8 @@ test.describe('E2E Chat', () => {
         await page.click('#show-register');
         await page.fill('#register-username', user1);
         await page.fill('#register-password', 'password123');
-        await page.click('#register-form button[type="submit"]');
+                await page.fill('#register-confirm-password', 'password123');
+await page.click('#register-form button[type="submit"]');
         await page.waitForURL('**/index.html', { timeout: 10000 });
         const body1 = await page.evaluate(() => ({
             token: localStorage.getItem('token'),
@@ -747,7 +760,8 @@ test.describe('E2E Chat', () => {
         await page2.click('#show-register');
         await page2.fill('#register-username', user2);
         await page2.fill('#register-password', 'password123');
-        await page2.click('#register-form button[type="submit"]');
+        await page2.fill('#register-confirm-password', 'password123');
+await page2.click('#register-form button[type="submit"]');
         await page2.waitForURL('**/index.html', { timeout: 10000 });
         const body2 = await page2.evaluate(() => ({
             token: localStorage.getItem('token'),
@@ -853,7 +867,8 @@ test.describe('E2E Chat', () => {
         await page.click('#show-register');
         await page.fill('#register-username', user1);
         await page.fill('#register-password', 'password123');
-        await page.click('#register-form button[type="submit"]');
+                await page.fill('#register-confirm-password', 'password123');
+await page.click('#register-form button[type="submit"]');
         await page.waitForURL('**/index.html', { timeout: 10000 });
         const body1 = await page.evaluate(() => ({
             token: localStorage.getItem('token'),
@@ -868,7 +883,8 @@ test.describe('E2E Chat', () => {
         await page2.click('#show-register');
         await page2.fill('#register-username', user2);
         await page2.fill('#register-password', 'password123');
-        await page2.click('#register-form button[type="submit"]');
+        await page2.fill('#register-confirm-password', 'password123');
+await page2.click('#register-form button[type="submit"]');
         await page2.waitForURL('**/index.html', { timeout: 10000 });
         const body2 = await page2.evaluate(() => ({
             token: localStorage.getItem('token'),

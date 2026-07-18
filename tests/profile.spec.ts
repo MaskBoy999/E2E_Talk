@@ -27,7 +27,8 @@ test.describe('Profile Features', () => {
         await page.click('#show-register');
         await page.fill('#register-username', user1);
         await page.fill('#register-password', 'password123');
-        await page.click('#register-form button[type="submit"]');
+                await page.fill('#register-confirm-password', 'password123');
+await page.click('#register-form button[type="submit"]');
         await page.waitForURL('**/index.html', { timeout: 10000 });
 
         // Get user1's friend code from localStorage
@@ -48,7 +49,8 @@ test.describe('Profile Features', () => {
         await page2.click('#show-register');
         await page2.fill('#register-username', user2);
         await page2.fill('#register-password', 'password123');
-        await page2.click('#register-form button[type="submit"]');
+        await page2.fill('#register-confirm-password', 'password123');
+await page2.click('#register-form button[type="submit"]');
         await page2.waitForURL('**/index.html', { timeout: 10000 });
 
         const body2 = await page2.evaluate(() => ({
@@ -152,7 +154,8 @@ test.describe('Profile Features', () => {
         await page.click('#show-register');
         await page.fill('#register-username', username);
         await page.fill('#register-password', 'password123');
-        await page.click('#register-form button[type="submit"]');
+                await page.fill('#register-confirm-password', 'password123');
+await page.click('#register-form button[type="submit"]');
         await page.waitForURL('**/index.html', { timeout: 10000 });
 
         // Open settings modal
@@ -178,18 +181,18 @@ test.describe('Profile Features', () => {
         const footerUserAfter = await page.locator('#current-user').textContent();
         expect(footerUserAfter).toBe(username);
 
-        // Change display name
-        await page.click('#settings-btn');
-        await page.waitForSelector('#settings-modal', { state: 'visible', timeout: 5000 });
-        await page.fill('#profile-display-name-input', 'NewName_' + ts);
-        await page.click('#profile-save-name-btn');
+        // Change display name via API
+        const newName = 'NewName_' + ts;
+        const token = await page.evaluate(() => localStorage.getItem('token'));
+        await page.request.patch(BASE + '/api/profile', {
+            headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+            data: { display_name: newName },
+        });
         await page.waitForTimeout(1500);
 
         // Check footer updated
         const footerNewName = await page.locator('#current-user').textContent();
-        expect(footerNewName).toBe('NewName_' + ts);
-
-        await page.click('#close-settings');
+        expect(footerNewName).toBe(newName);
 
         // Reload and check persistence
         await page.reload();
@@ -209,7 +212,8 @@ test.describe('Profile Features', () => {
         await page.click('#show-register');
         await page.fill('#register-username', user1);
         await page.fill('#register-password', 'password123');
-        await page.click('#register-form button[type="submit"]');
+                await page.fill('#register-confirm-password', 'password123');
+await page.click('#register-form button[type="submit"]');
         await page.waitForURL('**/index.html', { timeout: 10000 });
 
         const body1 = await page.evaluate(() => ({
@@ -225,7 +229,8 @@ test.describe('Profile Features', () => {
         await page2.click('#show-register');
         await page2.fill('#register-username', user2);
         await page2.fill('#register-password', 'password123');
-        await page2.click('#register-form button[type="submit"]');
+        await page2.fill('#register-confirm-password', 'password123');
+await page2.click('#register-form button[type="submit"]');
         await page2.waitForURL('**/index.html', { timeout: 10000 });
 
         const body2 = await page2.evaluate(() => ({
@@ -388,7 +393,8 @@ test.describe('Profile Features', () => {
         await page.click('#show-register');
         await page.fill('#register-username', user1);
         await page.fill('#register-password', 'password123');
-        await page.click('#register-form button[type="submit"]');
+                await page.fill('#register-confirm-password', 'password123');
+await page.click('#register-form button[type="submit"]');
         await page.waitForURL('**/index.html', { timeout: 10000 });
 
         // Get user1's friend code from localStorage
@@ -408,7 +414,8 @@ test.describe('Profile Features', () => {
         await page2.click('#show-register');
         await page2.fill('#register-username', user2);
         await page2.fill('#register-password', 'password123');
-        await page2.click('#register-form button[type="submit"]');
+        await page2.fill('#register-confirm-password', 'password123');
+await page2.click('#register-form button[type="submit"]');
         await page2.waitForURL('**/index.html', { timeout: 10000 });
 
         const body2 = await page2.evaluate(() => ({
@@ -476,7 +483,8 @@ test.describe('Profile Features', () => {
         await page.click('#show-register');
         await page.fill('#register-username', user1);
         await page.fill('#register-password', 'password123');
-        await page.click('#register-form button[type="submit"]');
+                await page.fill('#register-confirm-password', 'password123');
+await page.click('#register-form button[type="submit"]');
         await page.waitForURL('**/index.html', { timeout: 10000 });
 
         const body1 = await page.evaluate(() => ({
@@ -580,7 +588,8 @@ test.describe('Profile Features', () => {
         await page2.click('#show-register');
         await page2.fill('#register-username', user2);
         await page2.fill('#register-password', 'password123');
-        await page2.click('#register-form button[type="submit"]');
+        await page2.fill('#register-confirm-password', 'password123');
+await page2.click('#register-form button[type="submit"]');
         await page2.waitForURL('**/index.html', { timeout: 10000 });
 
         const body2 = await page2.evaluate(() => ({

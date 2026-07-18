@@ -2,8 +2,9 @@
 cd /d "%~dp0server"
 echo ============================================
 echo   WARNING: This will DELETE ALL DATA!
-echo   All users, messages, servers, and the
-echo   admin password will be permanently lost.
+echo   All users, messages, servers, uploaded
+echo   files, and the admin password will be
+echo   permanently lost.
 echo ============================================
 echo.
 set /p confirm="Type 'RESET' to confirm: "
@@ -23,22 +24,26 @@ del /F /Q "e2e_chat.db" 2>nul
 del /F /Q "e2e_chat.db-shm" 2>nul
 del /F /Q "e2e_chat.db-wal" 2>nul
 
-echo Verifying deletion...
-if exist "e2e_chat.db" (
-    echo [!] WARNING: Could not delete e2e_chat.db - file may still be locked.
-    echo     Make sure the server is fully stopped and try again.
-) else if exist "e2e_chat.db-wal" (
-    echo [!] WARNING: e2e_chat.db-wal still exists - deletion incomplete.
+echo Deleting uploaded files...
+if exist "uploads\" (
+    rmdir /S /Q "uploads" 2>nul
+    echo Uploads directory removed.
 ) else (
-    echo All database files successfully deleted.
+    echo No uploads directory found.
 )
+
+echo Verifying deletion...
+if exist "e2e_chat.db" echo [!] WARNING: Could not delete e2e_chat.db - file may still be locked. Make sure the server is fully stopped and try again.
+if exist "e2e_chat.db-wal" echo [!] WARNING: e2e_chat.db-wal still exists - deletion incomplete.
+if exist "uploads\" echo [!] WARNING: Uploads directory still exists.
+if not exist "e2e_chat.db" if not exist "e2e_chat.db-wal" if not exist "uploads\" echo All database files and uploaded content successfully deleted.
 
 echo.
 echo ============================================
 echo   Database has been wiped clean!
-echo   Start the server and visit:
+echo   The application is now in factory-fresh
+echo   state. Start the server and visit:
 echo     http://localhost:3000/admin.html
-echo   The admin password will need to be set
-echo   again on first visit.
+echo   to set up a new admin password.
 echo ============================================
 pause

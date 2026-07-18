@@ -296,7 +296,7 @@ async fn handle_ws_message(
             let msg_sender_username = message.sender_username.clone();
             // Fetch sender's profile data for display name, profile pic, username color, and border color
             let (sender_display_name, sender_profile_pic, sender_color, sender_border_color) = match state.db.get_user_profile(user_id) {
-                Ok((_, _, dn, pp, _fk, uc, bc)) => (dn, pp, uc, bc),
+                Ok((_, _, dn, pp, _fk, uc, bc, _, _, _, _)) => (dn, pp, uc, bc),
                 Err(_) => (None, None, None, None),
             };
             let outgoing = OutgoingMessage {
@@ -466,7 +466,7 @@ async fn handle_ws_message(
             let msg_sender_username = message.sender_username.clone();
             // Fetch sender's profile data for display name, profile pic, username color, and border color
             let (sender_display_name, sender_profile_pic, sender_color, sender_border_color) = match state.db.get_user_profile(user_id) {
-                Ok((_, _, dn, pp, _fk, uc, bc)) => (dn, pp, uc, bc),
+                Ok((_, _, dn, pp, _fk, uc, bc, _, _, _, _)) => (dn, pp, uc, bc),
                 Err(_) => (None, None, None, None),
             };
             let outgoing = OutgoingMessage {
@@ -580,7 +580,7 @@ async fn handle_ws_message(
             };
             // Fetch sender's profile data for display name, profile pic, username color, and border color
             let (sender_display_name, sender_profile_pic, sender_color, sender_border_color) = match state.db.get_user_profile(user_id) {
-                Ok((_, _, dn, pp, _fk, uc, bc)) => (dn, pp, uc, bc),
+                Ok((_, _, dn, pp, _fk, uc, bc, _, _, _, _)) => (dn, pp, uc, bc),
                 Err(_) => (None, None, None, None),
             };
             let outgoing = OutgoingMessage {
@@ -692,7 +692,7 @@ async fn handle_ws_message(
             };
             // Fetch sender's profile data for display name, profile pic, username color, and border color
             let (sender_display_name, sender_profile_pic, sender_color, sender_border_color) = match state.db.get_user_profile(user_id) {
-                Ok((_, _, dn, pp, _fk, uc, bc)) => (dn, pp, uc, bc),
+                Ok((_, _, dn, pp, _fk, uc, bc, _, _, _, _)) => (dn, pp, uc, bc),
                 Err(_) => (None, None, None, None),
             };
             let outgoing = OutgoingMessage {

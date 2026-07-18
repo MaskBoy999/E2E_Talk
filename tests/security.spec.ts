@@ -94,7 +94,8 @@ test.describe('Security', () => {
         await page.click('#show-register');
         await page.fill('#register-username', owner);
         await page.fill('#register-password', 'password123');
-        await page.click('#register-form button[type="submit"]');
+                await page.fill('#register-confirm-password', 'password123');
+await page.click('#register-form button[type="submit"]');
         await page.waitForURL('**/index.html', { timeout: 10000 });
 
         const body = await page.evaluate(() => ({
@@ -110,7 +111,8 @@ test.describe('Security', () => {
         await page2.click('#show-register');
         await page2.fill('#register-username', xssUser);
         await page2.fill('#register-password', 'password123');
-        await page2.click('#register-form button[type="submit"]');
+        await page2.fill('#register-confirm-password', 'password123');
+await page2.click('#register-form button[type="submit"]');
         await page2.waitForURL('**/index.html', { timeout: 10000 });
 
         const body2 = await page2.evaluate(() => ({
@@ -314,7 +316,8 @@ test.describe('Security', () => {
         await page.click('#show-register');
         await page.fill('#register-username', username);
         await page.fill('#register-password', 'password123');
-        await page.click('#register-form button[type="submit"]');
+                await page.fill('#register-confirm-password', 'password123');
+await page.click('#register-form button[type="submit"]');
         await page.waitForURL('**/index.html', { timeout: 10000 });
 
         const body = await page.evaluate(() => ({

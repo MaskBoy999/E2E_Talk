@@ -23,7 +23,8 @@ async function registerAndSetupServer(page: any): Promise<{ token: string; user:
     await page.click('#show-register');
     await page.fill('#register-username', username);
     await page.fill('#register-password', 'password123');
-    await page.click('#register-form button[type="submit"]');
+            await page.fill('#register-confirm-password', 'password123');
+await page.click('#register-form button[type="submit"]');
     await page.waitForURL('**/index.html', { timeout: 10000 });
 
     const body = await page.evaluate(() => ({

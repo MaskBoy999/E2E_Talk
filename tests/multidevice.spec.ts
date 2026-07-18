@@ -10,7 +10,8 @@ test.describe('Multi-Device', () => {
         await page.click('#show-register');
         await page.fill('#register-username', username);
         await page.fill('#register-password', 'password123');
-        await page.click('#register-form button[type="submit"]');
+                await page.fill('#register-confirm-password', 'password123');
+await page.click('#register-form button[type="submit"]');
         await page.waitForURL('**/index.html', { timeout: 10000 });
         await page.waitForSelector('#settings-btn', { state: 'visible', timeout: 10000 });
         return await page.evaluate(() => ({

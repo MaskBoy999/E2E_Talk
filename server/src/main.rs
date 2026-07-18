@@ -1,7 +1,10 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use axum::{
-    http::{HeaderMap, HeaderValue},
+    extract::State,
+    http::{HeaderMap, HeaderValue, StatusCode},
+    response::IntoResponse,
     routing::{get, post, delete, patch},
     Router,
 };
@@ -17,15 +20,43 @@ pub struct AppState {
     pub db: db::Database,
     pub config: config::Config,
     pub ws_manager: ws::WsManager,
+    /// Whether the database has been set up (admin password set OR users exist).
+    /// Starts as false on a fresh DB; set to true once admin password is set
+    /// or the first user registers. Used to redirect visitors to admin setup.
+    pub setup_complete: AtomicBool,
 }
 
-async fn serve_static(uri: axum::http::Uri) -> impl axum::response::IntoResponse {
+async fn serve_static(
+    uri: axum::http::Uri,
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
     let path = format!("../static{}", uri.path());
     let path = if std::path::Path::new(&path).is_dir() {
         format!("{}index.html", path)
     } else {
         path
     };
+
+    // If the database is freshly initialized (no admin password, no users),
+    // redirect the visitor to the admin setup page so the host can configure
+    // the admin password before anyone else uses the app.
+    // Skip the redirect for /admin.html and static assets needed to render
+    // the admin page.
+    if !state.setup_complete.load(Ordering::Relaxed) {
+        let req_path = uri.path();
+        // Allow access to the admin setup page, its assets, and API calls
+        // needed to check/set the admin password.
+        let is_admin_path = req_path.starts_with("/admin")
+            || req_path.starts_with("/api/admin/")
+            || req_path.ends_with(".js")
+            || req_path.ends_with(".css")
+            || req_path == "/favicon.ico";
+        if !is_admin_path {
+            let mut headers = HeaderMap::new();
+            headers.insert("location", HeaderValue::from_str("/admin.html").unwrap());
+            return (StatusCode::FOUND, headers, Vec::new()).into_response();
+        }
+    }
 
     match tokio::fs::read(&path).await {
         Ok(contents) => {
@@ -56,12 +87,12 @@ async fn serve_static(uri: axum::http::Uri) -> impl axum::response::IntoResponse
                 "max-age=31536000; includeSubDomains; preload"
             ));
 
-            (headers, contents)
+            (headers, contents).into_response()
         }
         Err(_) => {
             let mut headers = HeaderMap::new();
             headers.insert("content-type", HeaderValue::from_static("text/plain"));
-            (headers, b"404 Not Found".to_vec())
+            (headers, b"404 Not Found".to_vec()).into_response()
         }
     }
 }
@@ -132,11 +163,39 @@ async fn main() {
     let db = db::Database::new(&config.database_url).expect("Failed to initialize database");
     let ws_manager = ws::WsManager::new();
 
+    let fresh = db.is_fresh_db().unwrap_or(true);
+    tracing::info!("Database setup status: {}", if fresh { "fresh — redirecting to admin setup" } else { "configured" });
     let state = Arc::new(AppState {
+        setup_complete: AtomicBool::new(!fresh),
         db,
         config: config.clone(),
         ws_manager,
     });
+
+    // Run orphan file cleanup on startup, then periodically every hour
+    // Uses spawn_blocking because filesystem operations are synchronous.
+    {
+        let state_for_cleanup = state.clone();
+        tokio::spawn(async move {
+            // Initial cleanup on startup
+            tracing::info!("Running orphan file cleanup...");
+            let s = state_for_cleanup.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                s.db.cleanup_orphan_files("uploads");
+            }).await;
+            tracing::info!("Orphan file cleanup complete.");
+
+            // Schedule periodic cleanup every hour
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600));
+            loop {
+                interval.tick().await;
+                let s = state_for_cleanup.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    s.db.cleanup_orphan_files("uploads");
+                }).await;
+            }
+        });
+    }
 
     let app = Router::new()
         .route("/api/register", post(handlers::register))
@@ -162,7 +221,7 @@ async fn main() {
         .route("/api/identity/upload", post(handlers::upload_identity_key))
         .route("/api/identity/add-key", post(handlers::add_device_key))
         .route("/api/identity/escrow", post(handlers::upload_escrowed_key).get(handlers::get_escrowed_key))
-        .route("/api/logout", post(handlers::logout))
+        .route("/api/logout", post(handlers::logout).get(handlers::logout_get))
         .route("/api/reauth", post(handlers::reauth))
         .route("/api/user/{username}", get(handlers::get_user_id))
         .route("/api/profile/{user_id}", get(handlers::get_profile))
@@ -196,6 +255,10 @@ async fn main() {
 .route("/api/admin/clear", post(handlers::admin_clear_all))
         // Phase 4: Friends + DMs
         .route("/api/me", get(handlers::get_me).delete(handlers::delete_me))
+        .route("/api/friend-code", get(handlers::get_my_friend_code))
+        .route("/api/friend-code/store-encrypted", post(handlers::store_encrypted_friend_code))
+        .route("/api/friend-code/regenerate", post(handlers::server_regenerate_friend_code))
+        .route("/api/friend-code/regen-with-password", post(handlers::regen_friend_code_with_password))
         .route("/api/friends", get(handlers::list_friends))
         .route("/api/notification-sound", post(handlers::upload_notification_sound).get(handlers::get_notification_sound).delete(handlers::delete_notification_sound))
         .route("/api/friends/remove", post(handlers::remove_friend))

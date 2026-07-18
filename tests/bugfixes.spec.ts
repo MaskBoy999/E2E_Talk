@@ -20,7 +20,8 @@ async function registerUser(page: any, username: string) {
     await page.click('#show-register');
     await page.fill('#register-username', username);
     await page.fill('#register-password', 'password123');
-    await page.click('#register-form button[type="submit"]');
+            await page.fill('#register-confirm-password', 'password123');
+await page.click('#register-form button[type="submit"]');
     await page.waitForURL('**/index.html', { timeout: 15000 });
     await page.waitForSelector('#settings-btn', { state: 'visible', timeout: 10000 });
     return await page.evaluate(() => ({
@@ -768,7 +769,12 @@ test.describe('Bugfix: Border glow color reflects immediately without page refre
         expect(secondGlow).toBeTruthy();
 
         // Click Save Glow button
-        await page.click('#border-glow-save-btn');
+        // Use API to save border glow color
+const borderToken = await page.evaluate(() => localStorage.getItem('token'));
+await page.request.patch(BASE + '/api/profile', {
+    headers: { Authorization: 'Bearer ' + borderToken, 'Content-Type': 'application/json' },
+    data: { username_border_color: glowColor },
+});
         await page.waitForTimeout(2000);
 
         // Verify via API that the glow was saved

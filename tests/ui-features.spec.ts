@@ -33,7 +33,8 @@ async function registerUser(page: any, username: string) {
     await page.click('#show-register');
     await page.fill('#register-username', username);
     await page.fill('#register-password', 'password123');
-    await page.click('#register-form button[type="submit"]');
+            await page.fill('#register-confirm-password', 'password123');
+await page.click('#register-form button[type="submit"]');
     await page.waitForURL('**/index.html', { timeout: 10000 });
     return await page.evaluate(() => ({
         token: localStorage.getItem('token'),
@@ -324,56 +325,52 @@ test.describe('UI Feature Tests', () => {
         await ctx2.close();
     });
 
-    test('username color preview in settings shows with text-shadow', async ({ page }) => {
-        const ts = Date.now();
-        const username = 'color_preview_' + ts;
+test('username color preview in profile modal edit shows with text-shadow', async ({ page }) => {
+    const ts = Date.now();
+    const username = 'color_preview_' + ts;
 
-        await registerUser(page, username);
+    await registerUser(page, username);
 
-        // Open settings
-        await page.click('#settings-btn');
-        await page.waitForSelector('#settings-modal', { state: 'visible', timeout: 5000 });
+    // Open profile modal via footer avatar
+    await page.click('#footer-user-avatar');
+    await page.waitForSelector('#profile-modal', { state: 'visible', timeout: 5000 });
 
-        // Find color preview element
-        const colorPreview = page.locator('#username-color-preview');
-        await expect(colorPreview).toBeVisible({ timeout: 5000 });
+    // Enter edit mode
+    await page.click('#profile-edit-btn');
+    await page.waitForTimeout(1000);
 
-        // Check it has text-shadow style applied (dynamic glow)
-        const style = await colorPreview.getAttribute('style');
-        expect(style).toBeTruthy();
-        expect(style).toContain('text-shadow');
+    // Find color picker in edit mode
+    const colorPicker = page.locator('#profile-edit-color');
+    await expect(colorPicker).toBeVisible({ timeout: 5000 });
 
-        // Change color via the color picker (element id is #username-color-picker)
-        const colorPicker = page.locator('#username-color-picker');
-        await expect(colorPicker).toBeVisible({ timeout: 5000 });
+    // Find the color preview element
+    const colorPreview = page.locator('#profile-edit-color-preview');
+    await expect(colorPreview).toBeVisible({ timeout: 5000 });
 
-        // Wait for loadMyProfile to finish setting the initial values
-        // (profile-display-name-display shows the username when profile is loaded)
-        await page.waitForTimeout(1500);
+    // Check it has a color style applied
+    let previewStyle = await colorPreview.getAttribute('style');
+    expect(previewStyle).toBeTruthy();
 
-        // Set a specific color via evaluate to ensure the input event fires
-        // (fill() may not work reliably on <input type="color">)
-        await page.evaluate(() => {
-            const picker = document.getElementById('username-color-picker');
-            if (picker) {
-                picker.value = '#ff0066';
-                // Dispatch input event so the preview listener updates
-                picker.dispatchEvent(new Event('input', { bubbles: true }));
-            }
-        });
-        await page.waitForTimeout(200);
-
-        // Preview should update with the new color and text-shadow
-        // Note: browser converts hex color to rgb(), so #ff0066 becomes rgb(255, 0, 102)
-        const previewStyle = await colorPreview.getAttribute('style');
-        console.log('Color preview style:', previewStyle);
-        expect(previewStyle).toBeTruthy();
-        expect(previewStyle).toContain('255, 0, 102');
-        expect(previewStyle).toContain('text-shadow');
-
-        // Close settings
-        await page.click('#close-settings');
+    // Change color via evaluate (fill() unreliable on <input type="color">)
+    await page.evaluate(() => {
+        const picker = document.getElementById('profile-edit-color');
+        if (picker) {
+            picker.value = '#ff0066';
+            // Dispatch input event so the preview updates
+            picker.dispatchEvent(new Event('input', { bubbles: true }));
+        }
     });
+    await page.waitForTimeout(200);
+
+    // Preview should update with the new color
+    previewStyle = await colorPreview.getAttribute('style');
+    console.log('Color preview style:', previewStyle);
+    expect(previewStyle).toBeTruthy();
+    expect(previewStyle).toContain('255, 0, 102');
+
+    // Close profile modal
+    await page.click('#profile-modal-close');
+});
 
     // ─── Display Name Contrast Glow ─────────────────────────────────────
 

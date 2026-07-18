@@ -98,19 +98,37 @@ pub async fn logout(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    // Validate the token if present (optional, just to make sure it's valid)
+    // Validate the token if present (optional)
     let _ = extract_user(&headers, &state);
 
-    // Clear the HttpOnly cookie by setting Max-Age=0
+    // Clear the HttpOnly cookie by setting Max-Age=0 (both with and without Secure flag for HTTP/HTTPS)
     let mut resp_headers = HeaderMap::new();
     resp_headers.insert(
         "set-cookie",
         HeaderValue::from_str(
-            "token=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0"
+            "token=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"
         ).unwrap(),
     );
 
     (StatusCode::OK, resp_headers, Json(serde_json::json!({"ok": true})))
+}
+
+/// GET /api/logout — clears the HttpOnly cookie and redirects to login.html
+pub async fn logout_get(
+    State(_state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let mut resp_headers = HeaderMap::new();
+    resp_headers.insert(
+        "set-cookie",
+        HeaderValue::from_str(
+            "token=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"
+        ).unwrap(),
+    );
+    resp_headers.insert(
+        "location",
+        HeaderValue::from_str("/login.html").unwrap(),
+    );
+    (StatusCode::FOUND, resp_headers, ())
 }
 
 fn extract_admin_token(headers: &HeaderMap) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
@@ -150,6 +168,9 @@ pub struct RegisterRequest {
     pub password: String,
     pub identity_public_key: Option<String>,
     pub friend_code_hash: Option<String>,
+    pub encrypted_friend_code: Option<String>,
+    pub friend_code_salt: Option<String>,
+    pub friend_code_nonce: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -207,7 +228,7 @@ pub async fn register(
         base64::engine::general_purpose::STANDARD.decode(k).ok()
     });
 
-    let user = match state.db.create_user(&req.username, &password_hash, identity_key_bytes.as_deref(), req.friend_code_hash.as_deref()) {
+    let user = match state.db.create_user(&req.username, &password_hash, identity_key_bytes.as_deref(), req.friend_code_hash.as_deref(), req.encrypted_friend_code.as_deref(), req.friend_code_salt.as_deref(), req.friend_code_nonce.as_deref()) {
         Ok(u) => u,
         Err(e) => {
             return (
@@ -236,9 +257,12 @@ pub async fn register(
 
     // Fetch profile data
     let (display_name, profile_pic) = match state.db.get_user_profile(&user.id) {
-        Ok((_, _, dn, pp, _fk, _uc, _bc)) => (dn, pp),
+        Ok((_, _, dn, pp, _fk, _uc, _bc, _, _, _, _)) => (dn, pp),
         Err(_) => (None, None),
     };
+
+    // First user registration means setup is complete
+    state.setup_complete.store(true, std::sync::atomic::Ordering::Relaxed);
 
     (
         StatusCode::CREATED,
@@ -330,7 +354,7 @@ pub async fn login(
 
     // Fetch profile data
     let (display_name, profile_pic) = match state.db.get_user_profile(&user.id) {
-        Ok((_, _, dn, pp, _fk, _uc, _bc)) => (dn, pp),
+        Ok((_, _, dn, pp, _fk, _uc, _bc, _, _, _, _)) => (dn, pp),
         Err(_) => (None, None),
     };
 
@@ -499,7 +523,7 @@ pub async fn reauth(
 
     // Fetch profile data
     let (display_name, profile_pic) = match state.db.get_user_profile(&user.id) {
-        Ok((_, _, dn, pp, _fk, _uc, _bc)) => (dn, pp),
+        Ok((_, _, dn, pp, _fk, _uc, _bc, _, _, _, _)) => (dn, pp),
         Err(_) => (None, None),
     };
 
@@ -1743,6 +1767,8 @@ pub async fn admin_login(
             )
                 .into_response();
         }
+        // Mark setup as complete — this disables the startup redirect
+        state.setup_complete.store(true, std::sync::atomic::Ordering::Relaxed);
         let admin_token = uuid::Uuid::new_v4().to_string();
         store_admin_token(admin_token.clone());
         return (StatusCode::OK, Json(serde_json::json!({"ok": true, "setup_complete": true, "token": admin_token}))).into_response();
@@ -2326,7 +2352,16 @@ pub async fn admin_clear_all(
     }
 
     match state.db.clear_all() {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Ok(()) => {
+            // Invalidate all in-memory admin tokens so the admin must re-login
+            // after the database is wiped.
+            let mut guard = ADMIN_TOKENS.lock().unwrap();
+            *guard = None;
+            // Reset the setup_complete flag so the next visitor is redirected
+            // to the admin setup page again (factory-fresh state).
+            state.setup_complete.store(false, std::sync::atomic::Ordering::Relaxed);
+            (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
 }
@@ -2750,6 +2785,11 @@ pub struct UpdateProfileRequest {
     pub profile_banner_file_key: Option<String>,
     pub description: Option<String>,
     pub nickname: Option<String>,
+    pub profile_background_color: Option<String>,
+    // Encrypted profile (password-based)
+    pub encrypted_profile_data: Option<String>,
+    pub encrypted_profile_salt: Option<String>,
+    pub encrypted_profile_nonce: Option<String>,
 }
 
 pub async fn get_profile(
@@ -2757,9 +2797,13 @@ pub async fn get_profile(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     match state.db.get_user_profile(&user_id) {
-        Ok((id, _username, display_name, profile_picture_file_id, _file_key, username_color, username_border_color, banner_id, banner_key, description, nickname)) => {
+        Ok((id, username, display_name, profile_picture_file_id, _file_key, username_color, username_border_color, banner_id, banner_key, description, nickname)) => {
+            let encrypted = state.db.get_encrypted_profile(&user_id).ok().flatten();
+            // Fetch background color separately (dynamic column)
+            let bg_color = state.db.get_profile_background_color(&user_id).ok();
             (StatusCode::OK, Json(serde_json::json!({
                 "id": id,
+                "username": username,
                 "display_name": display_name,
                 "profile_picture_file_id": profile_picture_file_id,
                 "profile_picture_file_key": _file_key,
@@ -2769,6 +2813,10 @@ pub async fn get_profile(
                 "profile_banner_file_key": banner_key,
                 "description": description.unwrap_or_default(),
                 "nickname": nickname.unwrap_or_default(),
+                "profile_background_color": bg_color.unwrap_or("#16213e".to_string()),
+                "encrypted_profile_data": encrypted.as_ref().map(|e| e.0.as_str()),
+                "encrypted_profile_salt": encrypted.as_ref().map(|e| e.1.as_str()),
+                "encrypted_profile_nonce": encrypted.as_ref().map(|e| e.2.as_str()),
             }))).into_response()
         }
         Err(e) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": e}))).into_response(),
@@ -2805,7 +2853,7 @@ pub async fn update_profile(
 
     // Before changing profile picture, delete the old one's file from DB and disk
     let delete_current_pic = || -> Result<(), String> {
-        let (_, _, _, old_file_id, _, _, _) = state.db.get_user_profile(&user_id)?;
+        let (_, _, _, old_file_id, _, _, _, _, _, _, _) = state.db.get_user_profile(&user_id)?;
         if let Some(old_id) = old_file_id {
             // Delete from DB (checks ownership)
             if let Ok(old_info) = state.db.delete_file_record(&old_id) {
@@ -2880,9 +2928,25 @@ pub async fn update_profile(
         }
     }
 
+    // Handle profile background color update
+    if let Some(ref bg_color) = req.profile_background_color {
+        let trimmed = bg_color.trim();
+        if !trimmed.starts_with("#") || (trimmed.len() != 7 && trimmed.len() != 4) {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid background color format. Use hex e.g. #16213e"}))).into_response();
+        }
+        if let Err(e) = state.db.update_profile_background_color(&user_id, trimmed) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
+        }
+    }
+
+    // Save encrypted profile data if provided (password-based encryption)
+    if let (Some(data), Some(salt), Some(nonce)) = (&req.encrypted_profile_data, &req.encrypted_profile_salt, &req.encrypted_profile_nonce) {
+        let _ = state.db.save_encrypted_profile(&user_id, data, salt, nonce);
+    }
+
     // Broadcast profile update to the user, friends, and all server members
     if let Ok(profile) = state.db.get_user_profile(&user_id) {
-        let (_id, username, display_name, profile_picture_file_id, _fk, username_color, username_border_color) = profile;
+        let (_id, username, display_name, profile_picture_file_id, _fk, username_color, username_border_color, _, _, _, _) = profile;
         let profile_msg = serde_json::json!({
             "type": "profile_updated",
             "user_id": user_id,
@@ -2954,9 +3018,153 @@ pub async fn delete_me(
         Err(e) => return e.into_response(),
     };
     match state.db.delete_user(&user_id) {
+        Ok(()) => {
+            // Clear the HttpOnly cookie so the user is fully logged out
+            let mut resp_headers = HeaderMap::new();
+            resp_headers.insert(
+                "set-cookie",
+                HeaderValue::from_str(
+                    "token=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"
+                ).unwrap(),
+            );
+            (StatusCode::OK, resp_headers, Json(serde_json::json!({"ok": true}))).into_response()
+        },
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+// --- Friend Code ---
+
+/// GET /api/friend-code — returns the encrypted friend code + salt + nonce for password-based recovery
+pub async fn get_my_friend_code(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    match state.db.get_encrypted_friend_code(&user_id) {
+        Ok((encrypted, salt, nonce)) => (StatusCode::OK, Json(serde_json::json!({
+            "encrypted_friend_code": encrypted,
+            "salt": salt,
+            "nonce": nonce,
+        }))).into_response(),
+        Err(_) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "No encrypted friend code set"}))).into_response(),
+    }
+}
+
+/// POST /api/friend-code/store-encrypted — store encrypted friend code + salt + nonce (no password verification)
+pub async fn store_encrypted_friend_code(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<StoreEncryptedFriendCodeRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    if req.encrypted_friend_code.is_empty() || req.salt.is_empty() || req.nonce.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Missing encrypted friend code data"}))).into_response();
+    }
+
+    let hash = sha256_hex(&req.friend_code.trim().to_uppercase());
+
+    match state.db.update_encrypted_friend_code(&user_id, &hash, &req.encrypted_friend_code, &req.salt, &req.nonce) {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
+}
+
+/// POST /api/friend-code/regenerate — server generates a new code (stores hash only, no encrypted backup)
+pub async fn server_regenerate_friend_code(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    use rand::Rng;
+    const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    let mut rng = rand::thread_rng();
+    let code: String = (0..8)
+        .map(|_| {
+            let idx = rng.gen_range(0..ALPHABET.len());
+            ALPHABET[idx] as char
+        })
+        .collect();
+
+    let hash = sha256_hex(&code);
+    match state.db.update_friend_code_hash(&user_id, &hash) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true, "friend_code": code}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+/// POST /api/friend-code/regen-with-password — verify password, then regen + store encrypted friend code
+pub async fn regen_friend_code_with_password(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RegenWithPasswordRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    // Verify password against stored hash
+    let stored_password_hash = match state.db.get_password_hash_by_id(&user_id) {
+        Ok(h) => h,
+        Err(_) => return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "User not found"}))).into_response(),
+    };
+
+    match auth::verify_password(&req.password, &stored_password_hash) {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Wrong password"}))).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+
+    // Validate the new friend code
+    let code = req.friend_code.trim().to_uppercase();
+    if code.len() != 8 || !code.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid friend code format"}))).into_response();
+    }
+
+    let hash = sha256_hex(&code);
+
+    match state.db.update_encrypted_friend_code(&user_id, &hash, &req.encrypted_friend_code, &req.salt, &req.nonce) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+fn sha256_hex(data: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(data.as_bytes());
+    let result = hasher.finalize();
+    result.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+#[derive(Deserialize)]
+pub struct StoreEncryptedFriendCodeRequest {
+    pub friend_code: String,
+    pub encrypted_friend_code: String,
+    pub salt: String,
+    pub nonce: String,
+}
+
+#[derive(Deserialize)]
+pub struct RegenWithPasswordRequest {
+    pub password: String,
+    pub friend_code: String,
+    pub encrypted_friend_code: String,
+    pub salt: String,
+    pub nonce: String,
 }
 
 // --- Friends ---

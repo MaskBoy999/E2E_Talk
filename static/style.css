@@ -1361,6 +1361,120 @@ body {
     .modal-content {
         max-width: min(400px, 92vw);
     }
+
+    /* Notification toast — give side margins on mobile so it doesn't touch edges */
+    .mention-toast {
+        left: 8px;
+        right: 8px;
+        border-radius: 10px;
+        width: auto;
+    }
+
+    /* Compact chat input buttons on mobile */
+    .chat-input {
+        gap: 4px;
+        padding: 6px 8px;
+        padding-bottom: max(6px, env(safe-area-inset-bottom, 6px));
+    }
+
+    .chat-input textarea {
+        font-size: 16px; /* keep at 16px to prevent iOS zoom */
+        padding: 6px 10px;
+        min-height: 32px;
+        max-height: 100px;
+    }
+
+    .chat-input button {
+        padding: 8px 12px;
+        font-size: 13px;
+        min-height: 36px;
+    }
+
+    .attach-btn {
+        width: 34px;
+        height: 34px;
+        font-size: 20px;
+        flex-shrink: 0;
+    }
+
+    .sticker-btn {
+        font-size: 18px;
+        padding: 4px;
+    }
+
+    /* Slide the attach-popup closer so it doesn't get cut off on the left */
+    .attach-popup {
+        left: 0;
+        transform-origin: bottom left;
+    }
+
+    /* Mentions inbox on mobile — use more horizontal space */
+    .mentions-inbox-content {
+        max-width: 90vw;
+        margin: 0 10px;
+    }
+
+    /* Settings tabs: stack or scroll on narrow screens */
+    .settings-tabs {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .settings-tab {
+        font-size: 13px;
+        padding: 8px 6px;
+        white-space: nowrap;
+    }
+
+    .chat-header h3 {
+        font-size: 14px;
+    }
+
+    .message .text {
+        font-size: 15px;
+    }
+
+    /* Make messages less padded on mobile to maximize space */
+    .message {
+        padding: 4px 8px;
+    }
+
+    /* Notification sound controls: stack on narrow */
+    .notif-sound-controls {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .notif-sound-controls .btn {
+        width: 100%;
+        text-align: center;
+    }
+
+    .notif-volume-slider {
+        width: 100px;
+    }
+
+    .settings-modal-content {
+        max-width: 94vw;
+    }
+
+    .settings-profile {
+        flex-direction: column;
+        align-items: center;
+        text-align: center;
+    }
+
+    .settings-profile-info {
+        text-align: center;
+    }
+
+    .profile-input-row {
+        flex-direction: column;
+    }
+
+    .profile-input-row input {
+        width: 100%;
+    }
 }
 
 /* ===== Very small screens: 380px and below ===== */
@@ -1824,8 +1938,12 @@ body {
 .notif-sound-controls {
     display: flex;
     flex-wrap: wrap;
-    gap: 10px;
+    gap: 8px;
     align-items: center;
+}
+.notif-sound-controls .btn {
+    font-size: 13px;
+    padding: 6px 12px;
 }
 
 .notif-sound-controls .btn {
@@ -1922,7 +2040,7 @@ body {
 }
 
 .settings-modal-content {
-    max-width: 460px;
+    max-width: 520px;
     max-height: 85vh;
     overflow-y: auto;
 }
@@ -2086,6 +2204,14 @@ body {
 .key-action-btn:hover {
     color: var(--accent);
     border-color: var(--accent);
+}
+
+/* Friend code loading/status indicator */
+.friend-code-status {
+    min-height: 16px;
+    line-height: 16px;
+    font-size: 11px;
+    transition: color 0.2s ease;
 }
 
 .settings-danger {
@@ -4294,8 +4420,9 @@ body {
 
 @media (max-width: 480px) {
     .sticker-panel {
+        left: 5px;
         right: 5px;
-        width: calc(100vw - 10px);
+        width: auto;
         height: min(70vh, 400px);
         bottom: 56px;
         border-radius: 8px;
@@ -4553,4 +4680,836 @@ body {
     align-items: center;
     justify-content: center;
     gap: 8px;
+}
+
+/* ===== Ultrawide / Large Screens: 1600px and above ===== */
+@media (min-width: 1600px) {
+    /* Cap the message list width so lines don't become absurdly long */
+    .message-list {
+        max-width: 1000px;
+        margin: 0 auto;
+    }
+
+    /* Slightly larger sidebar for spacious screens */
+    .sidebar {
+        max-width: 340px;
+    }
+
+    /* Keep the server strip at a reasonable max width */
+    .server-strip {
+        width: 72px;
+    }
+
+    /* Admin cards can be wider on large screens */
+    .admin-card {
+        max-width: min(1100px, 80vw);
+    }
+
+    /* Sticker panel: larger on wide screens */
+    .sticker-panel {
+        width: 420px;
+        height: min(70vh, 520px);
+        right: 30px;
+    }
+
+    /* Slightly larger chat text for comfortable reading */
+    .message .text {
+        font-size: 17px;
+        max-width: 85%;
+    }
+
+    /* Wider modal content on large screens */
+    .modal-content {
+        max-width: min(520px, 60vw);
+    }
+
+    .settings-modal-content {
+        max-width: 640px;
+    }
+}
+
+/* ===== Friend Code Password Modal ===== */
+#friend-code-password-modal .modal-content {
+    max-width: 420px;
+}
+#friend-code-password-modal h3 {
+    margin-bottom: 12px;
+    color: var(--accent);
+}
+#friend-code-password-modal p {
+    margin-bottom: 16px;
+    color: var(--text-muted);
+    font-size: 13px;
+    line-height: 1.5;
+}
+#friend-code-password-modal .modal-input {
+    width: 100%;
+    padding: 10px 14px;
+    border: 1px solid #2a2a4a;
+    border-radius: 8px;
+    background: #1a1a2e;
+    color: #e0e0e0;
+    font-size: 16px;
+    box-sizing: border-box;
+    outline: none;
+    transition: border-color 0.15s;
+}
+#friend-code-password-modal .modal-input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(79, 195, 247, 0.15);
+}
+#friend-code-password-modal .modal-actions {
+    gap: 8px;
+    flex-wrap: wrap;
+}
+#fc-recover-btn {
+    background: #ff9800;
+    border-color: #ff9800;
+    color: #fff;
+}
+#fc-recover-btn:hover {
+    background: #f57c00;
+    border-color: #f57c00;
+}
+#fc-regenerate-btn {
+    background: #4caf50;
+    border-color: #4caf50;
+    color: #fff;
+}
+#fc-regenerate-btn:hover {
+    background: #388e3c;
+    border-color: #388e3c;
+}
+#fc-password-error {
+    color: var(--danger);
+    margin-bottom: 12px;
+    font-size: 13px;
+}
+#fc-password-success {
+    color: #4caf50;
+    margin-bottom: 12px;
+    font-size: 13px;
+}
+@media (max-width: 480px) {
+    #friend-code-password-modal .modal-actions {
+        flex-direction: column;
+    }
+    #friend-code-password-modal .modal-actions .btn-cancel,
+    #friend-code-password-modal .modal-actions .btn-invite {
+        width: 100%;
+        text-align: center;
+    }
+}
+
+/* ===== Profile Modal ===== */
+.profile-modal-content {
+    max-width: 440px;
+    padding: 0;
+    overflow: hidden;
+    border-radius: 12px;
+    background: var(--bg-secondary);
+    position: relative;
+    transition: max-width 0.2s ease;
+}
+
+/* Wider modal when editing on desktop */
+.profile-modal-content.profile-modal-editing {
+    max-width: 820px;
+}
+
+#profile-modal-inner {
+    position: relative;
+    transition: all 0.2s ease;
+}
+
+/* Side-by-side layout when editing on desktop */
+#profile-modal-inner.profile-editing {
+    display: flex;
+    flex-direction: row;
+}
+
+#profile-modal-inner.profile-editing #profile-view {
+    flex: 0 0 35%;
+    max-width: 35%;
+    border-right: 1px solid var(--bg-border);
+    overflow-y: auto;
+    max-height: 75vh;
+    position: relative;
+    z-index: 10;
+}
+
+#profile-modal-inner.profile-editing #profile-edit {
+    flex: 0 0 65%;
+    max-width: 65%;
+    border-top: none;
+    border-left: 1px solid var(--bg-border);
+    overflow-y: auto;
+    max-height: 75vh;
+}
+
+.profile-modal-close {
+    position: absolute;
+    top: 10px;
+    right: 14px;
+    background: rgba(0,0,0,0.5);
+    border: none;
+    color: #fff;
+    font-size: 22px;
+    cursor: pointer;
+    z-index: 20;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s;
+}
+
+.profile-modal-close:hover {
+    background: rgba(0,0,0,0.8);
+}
+
+/* Banner */
+.profile-view-card {
+    background: var(--bg-secondary);
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+}
+
+.profile-banner {
+    width: 100%;
+    height: 120px;
+    background: #111127;
+    position: relative;
+    overflow: hidden;
+}
+
+.profile-banner-img {
+    width: 100%;
+    height: 100%;
+    background-size: cover;
+    background-position: center;
+}
+
+/* ===== Profile Edit Panel Crop Styling (right side) ===== */
+.profile-edit-uploads {
+    margin-bottom: 12px;
+    border-bottom: 1px solid var(--bg-border);
+    padding-bottom: 12px;
+}
+
+.profile-edit-upload-row {
+    margin-bottom: 8px;
+}
+
+.profile-edit-upload-row label {
+    display: block;
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+}
+
+.profile-upload-actions {
+    display: flex;
+    gap: 6px;
+}
+
+.profile-upload-actions .btn {
+    padding: 5px 12px;
+    font-size: 12px;
+    border-radius: 6px;
+}
+
+/* Crop container inside edit panel */
+.profile-crop-container {
+    margin-top: 8px;
+    margin-bottom: 8px;
+    border: 1px solid #2a2a4a;
+    border-radius: 8px;
+    overflow: hidden;
+    position: relative;
+    background: #111127;
+}
+
+.profile-crop-frame {
+    position: relative;
+    width: 100%;
+    height: 180px;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #0a0a1a;
+}
+
+.profile-crop-frame img {
+    position: absolute;
+    user-select: none;
+    -webkit-user-drag: none;
+}
+
+.profile-crop-dark-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 2;
+}
+
+.profile-crop-box {
+    position: absolute;
+    border: 2px solid #fff;
+    cursor: move;
+    box-shadow: 0 0 0 9999px rgba(0,0,0,0.55);
+    z-index: 3;
+}
+
+.profile-crop-handle {
+    position: absolute;
+    bottom: -7px;
+    right: -7px;
+    width: 18px;
+    height: 18px;
+    background: #fff;
+    border: 2px solid #4fc3f7;
+    border-radius: 50%;
+    cursor: nwse-resize;
+    z-index: 4;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.4);
+}
+
+.profile-crop-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+    padding: 6px 10px;
+    background: #0a0a1a;
+    border-top: 1px solid #2a2a4a;
+}
+
+.profile-crop-actions .btn-cancel,
+.profile-crop-actions .btn-invite {
+    padding: 4px 12px;
+    font-size: 12px;
+}
+
+/* Mobile: crop in edit panel is standalone (no left preview) */
+@media (max-width: 600px) {
+    .profile-crop-frame {
+        height: 160px;
+    }
+}
+    height: 16px;
+    background: #fff;
+    border: 2px solid var(--accent);
+    border-radius: 3px;
+    cursor: se-resize;
+    z-index: 3;
+}
+
+/* Inline PFP crop (shown within avatar wrap) */
+.profile-avatar-crop-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    z-index: 12;
+    background: rgba(0,0,0,0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    cursor: move;
+}
+
+.avatar-crop-frame {
+    width: 100%;
+    height: 100%;
+    position: relative;
+    border-radius: 50%;
+    overflow: visible;
+    border: 3px solid #fff;
+}
+
+.avatar-crop-handle {
+    position: absolute;
+    bottom: -8px;
+    right: -8px;
+    width: 14px;
+    height: 14px;
+    background: #fff;
+    border: 2px solid var(--accent);
+    border-radius: 3px;
+    cursor: se-resize;
+    z-index: 14;
+}
+
+.profile-banner-edit-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0,0,0,0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    opacity: 0;
+    transition: opacity 0.2s;
+}
+
+.profile-banner:hover .profile-banner-edit-overlay {
+    opacity: 1;
+}
+
+.profile-banner-edit-btn {
+    background: rgba(255,255,255,0.15);
+    border: 1px solid rgba(255,255,255,0.3);
+    color: #fff;
+    padding: 6px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+    transition: background 0.15s;
+}
+
+.profile-banner-edit-btn:hover {
+    background: rgba(255,255,255,0.25);
+}
+
+/* Avatar (overlaps banner) */
+.profile-modal-avatar-wrap {
+    position: relative;
+    width: 100px;
+    height: 100px;
+    margin-top: -50px;
+    margin-left: 20px;
+    z-index: 10;
+}
+
+.profile-modal-avatar {
+    width: 100px;
+    height: 100px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: var(--bg-primary);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 36px;
+    border: 4px solid var(--bg-secondary);
+    overflow: hidden;
+    flex-shrink: 0;
+}
+
+.profile-modal-avatar img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: 50%;
+}
+
+.profile-modal-avatar-edit-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100px;
+    height: 100px;
+    border-radius: 50%;
+    background: rgba(0,0,0,0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    opacity: 0;
+    transition: opacity 0.2s;
+    z-index: 11;
+}
+
+.profile-modal-avatar-wrap:hover .profile-modal-avatar-edit-overlay {
+    opacity: 1;
+}
+
+.profile-avatar-edit-btn {
+    background: rgba(255,255,255,0.2);
+    border: none;
+    color: #fff;
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    cursor: pointer;
+    font-size: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s;
+}
+
+.profile-avatar-edit-btn:hover {
+    background: rgba(255,255,255,0.35);
+}
+
+/* Info section */
+.profile-info-section {
+    padding: 10px 20px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    position: relative;
+}
+
+.profile-display-name {
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--text-primary);
+    line-height: 1.2;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.profile-nickname {
+    font-size: 14px;
+    color: var(--text-muted);
+    line-height: 1.3;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.profile-description {
+    font-size: 14px;
+    color: var(--text-primary);
+    line-height: 1.5;
+    margin-top: 8px;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.profile-description a {
+    color: var(--accent);
+    text-decoration: none;
+}
+
+.profile-description a:hover {
+    text-decoration: underline;
+}
+
+.profile-username-row {
+    margin-top: 8px;
+    display: flex;
+    align-items: center;
+}
+
+.profile-username-tag {
+    font-size: 12px;
+    color: var(--text-faint);
+    background: var(--bg-primary);
+    padding: 3px 8px;
+    border-radius: 4px;
+    font-family: monospace;
+}
+
+.profile-edit-btn {
+    position: absolute;
+    bottom: 14px;
+    right: 16px;
+    background: var(--accent);
+    border: none;
+    color: var(--bg-primary);
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    cursor: pointer;
+    font-size: 15px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s, transform 0.15s;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+}
+
+.profile-edit-btn:hover {
+    background: var(--accent-hover);
+    transform: scale(1.1);
+}
+
+/* Edit mode */
+#profile-edit {
+    border-top: 1px solid var(--bg-border);
+}
+
+.profile-edit-section {
+    padding: 16px 20px;
+}
+
+.profile-edit-section h4 {
+    color: var(--accent);
+    font-size: 15px;
+    margin-bottom: 12px;
+}
+
+.profile-edit-row {
+    margin-bottom: 14px;
+}
+
+.profile-edit-row label {
+    display: block;
+    color: var(--text-muted);
+    font-size: 12px;
+    margin-bottom: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.profile-edit-row input,
+.profile-edit-row textarea {
+    width: 100%;
+    padding: 8px 12px;
+    border: 1px solid var(--bg-border);
+    border-radius: 6px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: 14px;
+    outline: none;
+    font-family: inherit;
+    transition: border-color 0.15s;
+    box-sizing: border-box;
+}
+
+.profile-edit-row input:focus,
+.profile-edit-row textarea:focus {
+    border-color: var(--accent);
+}
+
+.profile-color-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+}
+
+.profile-edit-color-input {
+    flex: 1;
+    min-width: 0;
+    height: 36px;
+    padding: 2px;
+    border: 1px solid var(--bg-border);
+    border-radius: 6px;
+    background: var(--bg-primary);
+    cursor: pointer;
+}
+
+.profile-color-preview {
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+    flex-shrink: 0;
+    min-width: 50px;
+    text-align: center;
+}
+
+.profile-glow-options {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px;
+    margin-top: 4px;
+}
+
+.profile-glow-options .glow-btn {
+    padding: 6px 8px;
+    border-radius: 4px;
+    border: 1px solid var(--bg-border);
+    background: var(--bg-primary);
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 11px;
+    transition: all 0.15s;
+    font-family: inherit;
+    text-align: center;
+}
+
+.profile-glow-options .glow-btn:hover {
+    border-color: var(--accent);
+    color: var(--text-primary);
+    background: rgba(79, 195, 247, 0.05);
+}
+
+.profile-glow-options .glow-btn.active {
+    border-color: var(--accent);
+    background: rgba(79, 195, 247, 0.15);
+    color: var(--accent);
+    font-weight: 600;
+}
+
+.profile-edit-actions {
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+    margin-top: 16px;
+    padding-top: 12px;
+    border-top: 1px solid var(--bg-border);
+}
+
+/* Profile Edit Modal — separate two-panel layout */
+.profile-edit-modal-content {
+    max-width: 900px !important;
+    max-height: 85vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+.profile-edit-layout {
+    display: flex;
+    gap: 20px;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+}
+.profile-edit-preview {
+    flex: 0 0 320px;
+    overflow-y: auto;
+    padding: 12px;
+}
+.profile-edit-preview .profile-view-card {
+    margin: 0;
+    max-width: 100%;
+}
+.profile-edit-settings {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px 16px;
+}
+@media (max-width: 700px) {
+    .profile-edit-layout {
+        flex-direction: column;
+    }
+    .profile-edit-preview {
+        flex: none;
+        max-width: 100%;
+    }
+    .profile-edit-preview .profile-view-card {
+        max-width: 280px;
+        margin: 0 auto;
+    }
+}
+
+/* Glow buttons with color indicator circles */
+.profile-glow-options .glow-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    border-radius: 6px;
+    border: 1px solid #3a3a5a;
+    background: #1a1a2e;
+    color: #e0e0e0 !important;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.profile-glow-options .glow-btn .glow-color-circle {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    border: 1px solid rgba(255,255,255,0.2);
+}
+.profile-glow-options .glow-btn.active {
+    border-color: var(--accent);
+    background: rgba(79,195,247,0.15);
+    box-shadow: 0 0 8px rgba(79,195,247,0.3);
+}
+
+/* Medium/small screens */
+@media (max-width: 768px) {
+    .profile-modal-content {
+        max-width: 96vw;
+        max-height: 90vh;
+        overflow-y: auto;
+    }
+    .profile-modal-content.profile-modal-editing {
+        max-width: 96vw;
+    }
+    #profile-modal-inner.profile-editing {
+        flex-direction: column;
+    }
+    #profile-modal-inner.profile-editing #profile-view {
+        flex: none;
+        max-width: 100%;
+        border-right: none;
+        max-height: none;
+        overflow: visible;
+    }
+    #profile-modal-inner.profile-editing #profile-edit {
+        flex: none;
+        max-width: 100%;
+        border-top: 1px solid var(--bg-border);
+        border-left: none;
+        max-height: none;
+        overflow: visible;
+    }
+    .profile-banner {
+        height: 100px;
+    }
+    .profile-modal-avatar-wrap {
+        width: 80px;
+        height: 80px;
+        margin-top: -40px;
+    }
+    .profile-modal-avatar {
+        width: 80px;
+        height: 80px;
+        font-size: 28px;
+    }
+    .profile-modal-avatar-edit-overlay {
+        width: 80px;
+        height: 80px;
+    }
+    .profile-display-name {
+        font-size: 18px;
+    }
+    .profile-glow-options {
+        grid-template-columns: 1fr 1fr;
+    }
+}
+
+/* Footer user avatar (clickable to open profile) */
+.footer-user-avatar {
+    cursor: pointer;
+}
+
+.footer-user-avatar:hover img,
+.footer-user-avatar:hover div {
+    filter: brightness(1.2);
+}
+
+/* Message avatar (clickable to open profile) */
+.message .avatar {
+    cursor: pointer;
+}
+
+.message .avatar:hover img,
+.message .avatar:hover div {
+    filter: brightness(1.2);
+}
+
+/* Member avatar (clickable to open profile) */
+.member-avatar {
+    cursor: pointer;
+}
+
+.member-avatar:hover img,
+.member-avatar:hover div {
+    filter: brightness(1.2);
 }

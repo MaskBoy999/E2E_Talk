@@ -13,6 +13,7 @@
             <p class="subtitle">LAN chat with friends</p>
 
             <div id="error-message" class="error" style="display: none;"></div>
+            <div id="stale-session-warning" class="error" style="display:none;border-color:#ff9800;color:#ff9800;background:rgba(255,152,0,0.1);"></div>
 
             <!-- Login Form -->
             <form id="login-form">
@@ -34,6 +35,10 @@
                 <div class="auth-input-row">
                     <input type="password" id="register-password" placeholder="Password (min 6 chars)" required minlength="6" autocomplete="new-password" class="auth-code-input">
                     <button type="button" class="toggle-visibility-btn" id="toggle-register-password" title="Show/Hide">&#128065;</button>
+                </div>
+                <div class="auth-input-row">
+                    <input type="password" id="register-confirm-password" placeholder="Confirm password" required autocomplete="off" class="auth-code-input">
+                    <button type="button" class="toggle-visibility-btn" id="toggle-register-confirm-password" title="Show/Hide">&#128065;</button>
                 </div>
                 <button type="submit">Register</button>
                 <p class="toggle">Already have an account? <a href="#" id="show-login">Login</a></p>

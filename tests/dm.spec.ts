@@ -10,7 +10,8 @@ test.describe('Direct Messages', () => {
         await page.click('#show-register');
         await page.fill('#register-username', username);
         await page.fill('#register-password', 'password123');
-        await page.click('#register-form button[type="submit"]');
+                await page.fill('#register-confirm-password', 'password123');
+await page.click('#register-form button[type="submit"]');
         await page.waitForURL('**/index.html', { timeout: 10000 });
         return await page.evaluate(() => ({
             token: localStorage.getItem('token'),
@@ -285,7 +286,8 @@ test.describe('Direct Messages', () => {
         await page.click('#show-register');
         await page.fill('#register-username', user2);
         await page.fill('#register-password', 'password123');
-        await page.click('#register-form button[type="submit"]');
+                await page.fill('#register-confirm-password', 'password123');
+await page.click('#register-form button[type="submit"]');
         await page.waitForURL('**/index.html');
         const key2 = await page.evaluate(() => E2ECrypto.arrayBufferToBase64(E2ECrypto.getIdentityKeyPair().privateKey));
         expect(key2).not.toBe(key1);

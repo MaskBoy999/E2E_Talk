@@ -338,6 +338,19 @@ impl Database {
         // Migration 013: notification sound sync
         let _ = conn.execute_batch(include_str!("../migrations/013_notification_sound.sql"));
 
+        // Migration 021: profile background color
+        let bg_color_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('users') WHERE name = 'profile_background_color'",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if !bg_color_exists {
+            conn.execute("ALTER TABLE users ADD COLUMN profile_background_color TEXT DEFAULT '#16213e'", [])?;
+        }
+
         // Migration 014: profile pictures and display names
         let display_name_exists: bool = conn
             .query_row(
@@ -389,6 +402,40 @@ impl Database {
             conn.execute("ALTER TABLE users ADD COLUMN username_border_color TEXT", [])?;
         }
 
+        // Migration 019: store encrypted friend_code for recovery
+        let encrypted_fc_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('users') WHERE name = 'encrypted_friend_code'",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if !encrypted_fc_exists {
+            // Add encrypted friend code storage columns
+            conn.execute("ALTER TABLE users ADD COLUMN encrypted_friend_code TEXT", [])?;
+            conn.execute("ALTER TABLE users ADD COLUMN friend_code_salt TEXT", [])?;
+            conn.execute("ALTER TABLE users ADD COLUMN friend_code_nonce TEXT", [])?;
+        }
+
+        // Migration 020: encrypted profile fields (password-based)
+        for (col, def) in [
+            ("encrypted_profile_data", "TEXT DEFAULT ''"),
+            ("encrypted_profile_salt", "TEXT DEFAULT ''"),
+            ("encrypted_profile_nonce", "TEXT DEFAULT ''"),
+        ] {
+            let col_exists: bool = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) > 0 FROM pragma_table_info('users') WHERE name = '{}'", col),
+                    [],
+                    |row| row.get::<_, i32>(0),
+                )
+                .map(|c| c > 0)?;
+            if !col_exists {
+                conn.execute(&format!("ALTER TABLE users ADD COLUMN {} {}", col, def), [])?;
+            }
+        }
+
         // Migration 018: profile banner, description, nickname
         for (col, def) in [
             ("profile_banner_file_id", "TEXT REFERENCES files(id) ON DELETE SET NULL"),
@@ -401,7 +448,8 @@ impl Database {
                     &format!("SELECT COUNT(*) > 0 FROM pragma_table_info('users') WHERE name = '{}'", col),
                     [],
                     |row| row.get::<_, i32>(0),
-                )?;
+                )
+                .map(|c| c > 0)?;
             if !col_exists {
                 conn.execute(&format!("ALTER TABLE users ADD COLUMN {} {}", col, def), [])?;
             }
@@ -425,13 +473,13 @@ impl Database {
 
     // --- Users ---
 
-    pub fn create_user(&self, username: &str, password_hash: &str, identity_public_key: Option<&[u8]>, friend_code_hash: Option<&str>) -> Result<User, String> {
+    pub fn create_user(&self, username: &str, password_hash: &str, identity_public_key: Option<&[u8]>, friend_code_hash: Option<&str>, encrypted_friend_code: Option<&str>, friend_code_salt: Option<&str>, friend_code_nonce: Option<&str>) -> Result<User, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let id = Uuid::new_v4().to_string();
 
         conn.execute(
-            "INSERT INTO users (id, username, password_hash, identity_public_key, friend_code_hash) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![id, username, password_hash, identity_public_key, friend_code_hash],
+            "INSERT INTO users (id, username, password_hash, identity_public_key, friend_code_hash, encrypted_friend_code, friend_code_salt, friend_code_nonce) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![id, username, password_hash, identity_public_key, friend_code_hash, encrypted_friend_code, friend_code_salt, friend_code_nonce],
         )
         .map_err(|e| {
             if e.to_string().contains("UNIQUE") {
@@ -603,6 +651,34 @@ impl Database {
         Ok(())
     }
 
+    pub fn save_encrypted_profile(&self, user_id: &str, encrypted_data: &str, salt: &str, nonce: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE users SET encrypted_profile_data = ?1, encrypted_profile_salt = ?2, encrypted_profile_nonce = ?3 WHERE id = ?4",
+            params![encrypted_data, salt, nonce, user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn get_encrypted_profile(&self, user_id: &str) -> Result<Option<(String, String, String)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let result = conn.query_row(
+            "SELECT encrypted_profile_data, encrypted_profile_salt, encrypted_profile_nonce FROM users WHERE id = ?1",
+            params![user_id],
+            |row| Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            )),
+        );
+        match result {
+            Ok((data, salt, nonce)) => Ok(Some((data, salt, nonce))),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
     pub fn update_nickname(&self, user_id: &str, nickname: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
@@ -611,6 +687,27 @@ impl Database {
         )
         .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    pub fn update_profile_background_color(&self, user_id: &str, color: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE users SET profile_background_color = ?1 WHERE id = ?2",
+            params![color, user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn get_profile_background_color(&self, user_id: &str) -> Result<String, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT profile_background_color FROM users WHERE id = ?1",
+            params![user_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .map(|c| c.unwrap_or_else(|| "#16213e".to_string()))
+        .map_err(|_| "User not found".to_string())
     }
 
     pub fn get_password_hash(&self, username: &str) -> Result<String, String> {
@@ -1462,6 +1559,7 @@ impl Database {
 
     // --- Friend Codes ---
 
+    /// Returns the friend_code_hash (used for matching)
     pub fn get_friend_code(&self, user_id: &str) -> Result<String, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let code: Option<String> = conn
@@ -1472,6 +1570,45 @@ impl Database {
             )
             .ok();
         code.ok_or_else(|| "No friend code set".to_string())
+    }
+
+    /// Returns the encrypted friend_code + salt + nonce (for password-based recovery)
+    pub fn get_encrypted_friend_code(&self, user_id: &str) -> Result<(String, String, String), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT encrypted_friend_code, friend_code_salt, friend_code_nonce FROM users WHERE id = ?1",
+            params![user_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .map_err(|_| "No encrypted friend code set".to_string())
+    }
+
+    /// Update/regenerate the friend_code hash AND encrypted backup
+    pub fn update_encrypted_friend_code(&self, user_id: &str, new_code_hash: &str, encrypted_friend_code: &str, salt: &str, nonce: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE users SET friend_code_hash = ?1, encrypted_friend_code = ?2, friend_code_salt = ?3, friend_code_nonce = ?4 WHERE id = ?5",
+            params![new_code_hash, encrypted_friend_code, salt, nonce, user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Update only the friend_code_hash (for server-generated codes without encrypted backup)
+    pub fn update_friend_code_hash(&self, user_id: &str, new_code_hash: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE users SET friend_code_hash = ?1 WHERE id = ?2",
+            params![new_code_hash, user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     pub fn get_user_by_friend_code(&self, code: &str) -> Result<User, String> {
@@ -3260,6 +3397,86 @@ impl Database {
         Ok(rows)
     }
 
+    /// Return all file IDs currently tracked in the database.
+    pub fn list_all_file_ids(&self) -> Result<Vec<String>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT id FROM files")
+            .map_err(|e| e.to_string())?;
+        let ids = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(ids)
+    }
+
+    /// Remove orphaned file directories from disk that have no matching DB record.
+    /// This is a best-effort cleanup — errors are logged but not propagated.
+    /// Check if the database is freshly initialized — no admin password AND no users.
+    /// Used by the server to redirect visitors to the admin setup page.
+    pub fn is_fresh_db(&self) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        // Check if admin password is set
+        let admin_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM admin_config WHERE key = 'password_hash'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if admin_count > 0 {
+            return Ok(false);
+        }
+        // Check if any users exist
+        let user_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM users",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(user_count == 0)
+    }
+
+    pub fn cleanup_orphan_files(&self, upload_dir: &str) {
+        let known_ids = match self.list_all_file_ids() {
+            Ok(ids) => ids.into_iter().collect::<std::collections::HashSet<_>>(),
+            Err(e) => {
+                tracing::warn!("orphan cleanup: failed to list file IDs: {}", e);
+                return;
+            }
+        };
+
+        let dir = std::path::Path::new(upload_dir);
+        if !dir.exists() {
+            return;
+        }
+
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("orphan cleanup: failed to read upload dir: {}", e);
+                return;
+            }
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            if let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) {
+                if !known_ids.contains(dir_name) {
+                    tracing::info!("orphan cleanup: removing orphaned file directory: {}", dir_name);
+                    if let Err(e) = std::fs::remove_dir_all(&path) {
+                        tracing::warn!("orphan cleanup: failed to remove {}: {}", dir_name, e);
+                    }
+                }
+            }
+        }
+    }
+
     pub fn clear_all(&self) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM user_stickers", []).map_err(|e| e.to_string())?;
@@ -3280,6 +3497,7 @@ impl Database {
         conn.execute("DELETE FROM dm_channels", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM friend_requests", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM friendships", []).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM notification_sounds", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM user_public_keys", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM users", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM admin_config", []).map_err(|e| e.to_string())?;

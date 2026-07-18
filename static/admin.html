@@ -44,6 +44,22 @@
         .search-bar input { flex: 1; padding: 8px 12px; border: 1px solid #333; border-radius: 4px; background: #0f0f23; color: #e0e0e0; font-size: 13px; }
         .search-bar input::placeholder { color: #666; }
         .search-bar .record-count { display: flex; align-items: center; color: #888; font-size: 13px; white-space: nowrap; }
+
+        .pagination-container { display: flex; justify-content: center; padding: 10px 0; }
+        .pagination-bar { display: flex; align-items: center; gap: 4px; }
+        .pag-btn { background: #1a1a2e; border: 1px solid #333; color: #aaa; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 13px; transition: all 0.15s; }
+        .pag-btn:hover:not(:disabled) { background: #252540; color: #fff; border-color: #555; }
+        .pag-btn:disabled { opacity: 0.35; cursor: default; }
+        .pag-info { color: #888; font-size: 12px; padding: 0 8px; white-space: nowrap; }
+        .pag-info:hover { color: #aaa; }
+
+        .csv-export-btn { background: #1b5e20; color: #a5d6a7; border: none; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 11px; white-space: nowrap; transition: all 0.15s; }
+        .csv-export-btn:hover { background: #2e7d32; color: #fff; }
+
+        .pag-size-label { color: #888; font-size: 12px; margin-right: 2px; }
+        .pag-size-select { background: #1a1a2e; color: #aaa; border: 1px solid #333; border-radius: 4px; padding: 3px 6px; font-size: 12px; cursor: pointer; outline: none; }
+        .pag-size-select:hover { border-color: #555; color: #fff; }
+        .pag-size-select:focus { border-color: #4fc3f7; }
     </style>
 </head>
 <body>
@@ -53,8 +69,11 @@
             <h1>Admin Panel</h1>
             <p id="admin-login-subtitle" class="subtitle">Enter admin password</p>
             <div id="error-message" class="error" style="display: none;"></div>
-            <form id="admin-login-form">
-                <input type="password" id="admin-password" placeholder="Admin password" required>
+            <form id="admin-login-form" autocomplete="off">
+                <div class="auth-input-row">
+                    <input type="password" id="admin-password" placeholder="Admin password" required autocomplete="off" class="auth-code-input">
+                    <button type="button" class="toggle-visibility-btn" id="toggle-admin-password" title="Show/Hide">&#128065;</button>
+                </div>
                 <button type="submit" id="admin-login-btn">Access Panel</button>
             </form>
             <p class="toggle"><a href="index.html">Back to chat</a></p>
@@ -66,6 +85,7 @@
                 <h1>Admin Panel</h1>
                 <div style="display:flex;gap:8px;align-items:center">
                     <button id="clear-all-btn" class="btn-delete" style="font-size:13px;padding:8px 16px">Clear Everything</button>
+                    <button id="reset-factory-btn" class="btn-delete" style="font-size:13px;padding:8px 16px;background:#7b1fa2;border-color:#9c27b0">Reset to Factory</button>
                     <a href="index.html" class="back-link">Back to chat</a>
                 </div>
             </div>
@@ -98,7 +118,8 @@
             <div class="tab-content active" id="tab-users">
                 <div class="table-header">
                     <div class="search-bar">
-                        <input type="text" id="search-users" placeholder="Search by username or ID..." oninput="filterTab('users')">
+                        <input type="text" id="search-users" placeholder="Search by username or ID..." oninput="searchTab('users')">
+                        <button class="csv-export-btn" data-tab="users">📥 CSV</button>
                         <span class="record-count" id="users-count"></span>
                     </div>
                 </div>
@@ -108,13 +129,15 @@
                         <tbody id="user-list"><tr><td colspan="2" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
+                <div id="users-pagination" class="pagination-container"></div>
             </div>
 
             <!-- Servers Tab -->
             <div class="tab-content" id="tab-servers">
                 <div class="table-header">
                     <div class="search-bar">
-                        <input type="text" id="search-servers" placeholder="Search by name or ID..." oninput="filterTab('servers')">
+                        <input type="text" id="search-servers" placeholder="Search by name or ID..." oninput="searchTab('servers')">
+                        <button class="csv-export-btn" data-tab="servers">📥 CSV</button>
                         <span class="record-count" id="servers-count"></span>
                     </div>
                 </div>
@@ -124,13 +147,15 @@
                         <tbody id="server-list"><tr><td colspan="3" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
+                <div id="servers-pagination" class="pagination-container"></div>
             </div>
 
             <!-- Channels Tab -->
             <div class="tab-content" id="tab-channels">
                 <div class="table-header">
                     <div class="search-bar">
-                        <input type="text" id="search-channels" placeholder="Search by name or server ID..." oninput="filterTab('channels')">
+                        <input type="text" id="search-channels" placeholder="Search by name or server ID..." oninput="searchTab('channels')">
+                        <button class="csv-export-btn" data-tab="channels">📥 CSV</button>
                         <span class="record-count" id="channels-count"></span>
                     </div>
                 </div>
@@ -140,13 +165,15 @@
                         <tbody id="channel-list"><tr><td colspan="4" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
+                <div id="channels-pagination" class="pagination-container"></div>
             </div>
 
             <!-- Messages Tab -->
             <div class="tab-content" id="tab-messages">
                 <div class="table-header">
                     <div class="search-bar">
-                        <input type="text" id="search-messages" placeholder="Search by sender, channel ID, or timestamp..." oninput="filterTab('messages')">
+                        <input type="text" id="search-messages" placeholder="Search by sender, channel ID, or timestamp..." oninput="searchTab('messages')">
+                        <button class="csv-export-btn" data-tab="messages">📥 CSV</button>
                         <span class="record-count" id="messages-count"></span>
                     </div>
                 </div>
@@ -156,13 +183,15 @@
                         <tbody id="message-list"><tr><td colspan="5" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
+                <div id="messages-pagination" class="pagination-container"></div>
             </div>
 
             <!-- Server Keys Tab -->
             <div class="tab-content" id="tab-server-keys">
                 <div class="table-header">
                     <div class="search-bar">
-                        <input type="text" id="search-server-keys" placeholder="Search by server name, user ID, or version..." oninput="filterTab('server-keys')">
+                        <input type="text" id="search-server-keys" placeholder="Search by server name, user ID, or version..." oninput="searchTab('server-keys')">
+                        <button class="csv-export-btn" data-tab="server-keys">📥 CSV</button>
                         <span class="record-count" id="server-keys-count"></span>
                     </div>
                 </div>
@@ -172,13 +201,15 @@
                         <tbody id="server-key-list"><tr><td colspan="6" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
+                <div id="server-keys-pagination" class="pagination-container"></div>
             </div>
 
             <!-- Server Members Tab -->
             <div class="tab-content" id="tab-server-members">
                 <div class="table-header">
                     <div class="search-bar">
-                        <input type="text" id="search-server-members" placeholder="Search by username, user ID, or server name..." oninput="filterTab('server-members')">
+                        <input type="text" id="search-server-members" placeholder="Search by username, user ID, or server name..." oninput="searchTab('server-members')">
+                        <button class="csv-export-btn" data-tab="server-members">📥 CSV</button>
                         <span class="record-count" id="server-members-count"></span>
                     </div>
                 </div>
@@ -188,13 +219,15 @@
                         <tbody id="server-member-list"><tr><td colspan="4" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
+                <div id="server-members-pagination" class="pagination-container"></div>
             </div>
 
             <!-- Prekey Bundles Tab -->
             <div class="tab-content" id="tab-prekey-bundles">
                 <div class="table-header">
                     <div class="search-bar">
-                        <input type="text" id="search-prekey-bundles" placeholder="Search by user ID..." oninput="filterTab('prekey-bundles')">
+                        <input type="text" id="search-prekey-bundles" placeholder="Search by user ID..." oninput="searchTab('prekey-bundles')">
+                        <button class="csv-export-btn" data-tab="prekey-bundles">📥 CSV</button>
                         <span class="record-count" id="prekey-bundles-count"></span>
                     </div>
                 </div>
@@ -204,13 +237,15 @@
                         <tbody id="prekey-bundle-list"><tr><td colspan="6" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
+                <div id="prekey-bundles-pagination" class="pagination-container"></div>
             </div>
 
             <!-- Sessions Tab -->
             <div class="tab-content" id="tab-sessions">
                 <div class="table-header">
                     <div class="search-bar">
-                        <input type="text" id="search-sessions" placeholder="Search by username or user ID..." oninput="filterTab('sessions')">
+                        <input type="text" id="search-sessions" placeholder="Search by username or user ID..." oninput="searchTab('sessions')">
+                        <button class="csv-export-btn" data-tab="sessions">📥 CSV</button>
                         <span class="record-count" id="sessions-count"></span>
                     </div>
                 </div>
@@ -220,13 +255,15 @@
                         <tbody id="session-list"><tr><td colspan="4" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
+                <div id="sessions-pagination" class="pagination-container"></div>
             </div>
 
             <!-- Server Bans Tab -->
             <div class="tab-content" id="tab-server-bans">
                 <div class="table-header">
                     <div class="search-bar">
-                        <input type="text" id="search-server-bans" placeholder="Search by server name, username, or reason..." oninput="filterTab('server-bans')">
+                        <input type="text" id="search-server-bans" placeholder="Search by server name, username, or reason..." oninput="searchTab('server-bans')">
+                        <button class="csv-export-btn" data-tab="server-bans">📥 CSV</button>
                         <span class="record-count" id="server-bans-count"></span>
                     </div>
                 </div>
@@ -236,13 +273,15 @@
                         <tbody id="server-ban-list"><tr><td colspan="4" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
+                <div id="server-bans-pagination" class="pagination-container"></div>
             </div>
 
             <!-- DM Channels Tab -->
             <div class="tab-content" id="tab-dm-channels">
                 <div class="table-header">
                     <div class="search-bar">
-                        <input type="text" id="search-dm-channels" placeholder="Search by channel ID..." oninput="filterTab('dm-channels')">
+                        <input type="text" id="search-dm-channels" placeholder="Search by channel ID..." oninput="searchTab('dm-channels')">
+                        <button class="csv-export-btn" data-tab="dm-channels">📥 CSV</button>
                         <span class="record-count" id="dm-channels-count"></span>
                     </div>
                 </div>
@@ -252,13 +291,15 @@
                         <tbody id="dm-channel-list"><tr><td colspan="2" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
+                <div id="dm-channels-pagination" class="pagination-container"></div>
             </div>
 
             <!-- DM Members Tab -->
             <div class="tab-content" id="tab-dm-members">
                 <div class="table-header">
                     <div class="search-bar">
-                        <input type="text" id="search-dm-members" placeholder="Search by username or DM channel ID..." oninput="filterTab('dm-members')">
+                        <input type="text" id="search-dm-members" placeholder="Search by username or DM channel ID..." oninput="searchTab('dm-members')">
+                        <button class="csv-export-btn" data-tab="dm-members">📥 CSV</button>
                         <span class="record-count" id="dm-members-count"></span>
                     </div>
                 </div>
@@ -268,13 +309,15 @@
                         <tbody id="dm-member-list"><tr><td colspan="4" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
+                <div id="dm-members-pagination" class="pagination-container"></div>
             </div>
 
             <!-- DM Messages Tab -->
             <div class="tab-content" id="tab-dm-messages">
                 <div class="table-header">
                     <div class="search-bar">
-                        <input type="text" id="search-dm-messages" placeholder="Search by sender, DM channel ID, or timestamp..." oninput="filterTab('dm-messages')">
+                        <input type="text" id="search-dm-messages" placeholder="Search by sender, DM channel ID, or timestamp..." oninput="searchTab('dm-messages')">
+                        <button class="csv-export-btn" data-tab="dm-messages">📥 CSV</button>
                         <span class="record-count" id="dm-messages-count"></span>
                     </div>
                 </div>
@@ -284,13 +327,15 @@
                         <tbody id="dm-message-list"><tr><td colspan="5" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
+                <div id="dm-messages-pagination" class="pagination-container"></div>
             </div>
 
             <!-- DM Keys Tab -->
             <div class="tab-content" id="tab-dm-keys">
                 <div class="table-header">
                     <div class="search-bar">
-                        <input type="text" id="search-dm-keys" placeholder="Search by username or DM channel ID..." oninput="filterTab('dm-keys')">
+                        <input type="text" id="search-dm-keys" placeholder="Search by username or DM channel ID..." oninput="searchTab('dm-keys')">
+                        <button class="csv-export-btn" data-tab="dm-keys">📥 CSV</button>
                         <span class="record-count" id="dm-keys-count"></span>
                     </div>
                 </div>
@@ -300,13 +345,15 @@
                         <tbody id="dm-key-list"><tr><td colspan="6" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
+                <div id="dm-keys-pagination" class="pagination-container"></div>
             </div>
 
             <!-- Friend Requests Tab -->
             <div class="tab-content" id="tab-friend-requests">
                 <div class="table-header">
                     <div class="search-bar">
-                        <input type="text" id="search-friend-requests" placeholder="Search by username or status..." oninput="filterTab('friend-requests')">
+                        <input type="text" id="search-friend-requests" placeholder="Search by username or status..." oninput="searchTab('friend-requests')">
+                        <button class="csv-export-btn" data-tab="friend-requests">📥 CSV</button>
                         <span class="record-count" id="friend-requests-count"></span>
                     </div>
                 </div>
@@ -316,13 +363,15 @@
                         <tbody id="friend-request-list"><tr><td colspan="4" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
+                <div id="friend-requests-pagination" class="pagination-container"></div>
             </div>
 
             <!-- Friendships Tab -->
             <div class="tab-content" id="tab-friendships">
                 <div class="table-header">
                     <div class="search-bar">
-                        <input type="text" id="search-friendships" placeholder="Search by username..." oninput="filterTab('friendships')">
+                        <input type="text" id="search-friendships" placeholder="Search by username..." oninput="searchTab('friendships')">
+                        <button class="csv-export-btn" data-tab="friendships">📥 CSV</button>
                         <span class="record-count" id="friendships-count"></span>
                     </div>
                 </div>
@@ -332,13 +381,15 @@
                         <tbody id="friendship-list"><tr><td colspan="3" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
+                <div id="friendships-pagination" class="pagination-container"></div>
             </div>
 
             <!-- User Public Keys Tab -->
             <div class="tab-content" id="tab-user-public-keys">
                 <div class="table-header">
                     <div class="search-bar">
-                        <input type="text" id="search-user-public-keys" placeholder="Search by username, user ID, or device ID..." oninput="filterTab('user-public-keys')">
+                        <input type="text" id="search-user-public-keys" placeholder="Search by username, user ID, or device ID..." oninput="searchTab('user-public-keys')">
+                        <button class="csv-export-btn" data-tab="user-public-keys">📥 CSV</button>
                         <span class="record-count" id="user-public-keys-count"></span>
                     </div>
                 </div>
@@ -348,13 +399,15 @@
                         <tbody id="user-public-key-list"><tr><td colspan="6" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
+                <div id="user-public-keys-pagination" class="pagination-container"></div>
             </div>
 
             <!-- Files Tab -->
             <div class="tab-content" id="tab-files">
                 <div class="table-header">
                     <div class="search-bar">
-                        <input type="text" id="search-files" placeholder="Search by filename, uploader, or MIME type..." oninput="filterTab('files')">
+                        <input type="text" id="search-files" placeholder="Search by filename, uploader, or MIME type..." oninput="searchTab('files')">
+                        <button class="csv-export-btn" data-tab="files">📥 CSV</button>
                         <span class="record-count" id="files-count"></span>
                     </div>
                 </div>
@@ -364,13 +417,15 @@
                         <tbody id="file-list"><tr><td colspan="7" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
+                <div id="files-pagination" class="pagination-container"></div>
             </div>
 
             <!-- User Stickers Tab -->
             <div class="tab-content" id="tab-user-stickers">
                 <div class="table-header">
                     <div class="search-bar">
-                        <input type="text" id="search-user-stickers" placeholder="Search by username, sticker name..." oninput="filterTab('user-stickers')">
+                        <input type="text" id="search-user-stickers" placeholder="Search by username, sticker name..." oninput="searchTab('user-stickers')">
+                        <button class="csv-export-btn" data-tab="user-stickers">📥 CSV</button>
                         <span class="record-count" id="user-stickers-count"></span>
                     </div>
                 </div>
@@ -380,13 +435,15 @@
                         <tbody id="user-sticker-list"><tr><td colspan="5" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
+                <div id="user-stickers-pagination" class="pagination-container"></div>
             </div>
 
             <!-- Server Stickers Tab -->
             <div class="tab-content" id="tab-server-stickers">
                 <div class="table-header">
                     <div class="search-bar">
-                        <input type="text" id="search-server-stickers" placeholder="Search by server name, sticker name..." oninput="filterTab('server-stickers')">
+                        <input type="text" id="search-server-stickers" placeholder="Search by server name, sticker name..." oninput="searchTab('server-stickers')">
+                        <button class="csv-export-btn" data-tab="server-stickers">📥 CSV</button>
                         <span class="record-count" id="server-stickers-count"></span>
                     </div>
                 </div>
@@ -396,13 +453,15 @@
                         <tbody id="server-sticker-list"><tr><td colspan="4" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
+                <div id="server-stickers-pagination" class="pagination-container"></div>
             </div>
 
             <!-- User Key Escrow Tab -->
             <div class="tab-content" id="tab-user-key-escrow">
                 <div class="table-header">
                     <div class="search-bar">
-                        <input type="text" id="search-user-key-escrow" placeholder="Search by username or user ID..." oninput="filterTab('user-key-escrow')">
+                        <input type="text" id="search-user-key-escrow" placeholder="Search by username or user ID..." oninput="searchTab('user-key-escrow')">
+                        <button class="csv-export-btn" data-tab="user-key-escrow">📥 CSV</button>
                         <span class="record-count" id="user-key-escrow-count"></span>
                     </div>
                 </div>
@@ -412,13 +471,15 @@
                         <tbody id="user-key-escrow-list"><tr><td colspan="5" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
+                <div id="user-key-escrow-pagination" class="pagination-container"></div>
             </div>
 
             <!-- Notification Sounds Tab -->
             <div class="tab-content" id="tab-notification-sounds">
                 <div class="table-header">
                     <div class="search-bar">
-                        <input type="text" id="search-notification-sounds" placeholder="Search by username or user ID..." oninput="filterTab('notification-sounds')">
+                        <input type="text" id="search-notification-sounds" placeholder="Search by username or user ID..." oninput="searchTab('notification-sounds')">
+                        <button class="csv-export-btn" data-tab="notification-sounds">📥 CSV</button>
                         <span class="record-count" id="notification-sounds-count"></span>
                     </div>
                 </div>
@@ -428,6 +489,7 @@
                         <tbody id="notification-sound-list"><tr><td colspan="7" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
+                <div id="notification-sounds-pagination" class="pagination-container"></div>
             </div>
         </div>
     </div>

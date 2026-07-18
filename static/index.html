@@ -43,7 +43,6 @@
                 </div>
                 <div class="footer-actions">
                     <button id="settings-btn" class="settings-gear" title="Settings">&#9881;</button>
-                    <button id="logout-btn">Logout</button>
                 </div>
             </div>
         </div>
@@ -282,50 +281,18 @@
             <div class="settings-panel" id="user-settings">
                 <div class="settings-group">
                     <h4>Profile</h4>
-                    <p class="settings-hint">Set a display name and profile picture to protect your login username.</p>
+                    <p class="settings-hint">Your profile is managed through the profile view. Click your avatar in the sidebar to view and edit your profile.</p>
                     
                     <div class="settings-profile">
-                        <div class="settings-profile-avatar" id="settings-profile-avatar"></div>
+                        <div class="settings-profile-avatar" id="settings-profile-avatar" style="cursor:pointer" title="Click to open profile"></div>
                         <div class="settings-profile-info">
                             <div class="profile-username" id="profile-username-display"></div>
                             <div class="profile-display-name" id="profile-display-name-display"></div>
                         </div>
                     </div>
-
-                    <div class="settings-profile-actions" style="margin-bottom:12px;">
-                        <input type="file" id="profile-pic-input" class="profile-hidden-input" accept="image/*">
-                        <button class="btn-profile-action" id="profile-pic-upload-btn">📷 Upload Photo</button>
-                        <button class="btn-profile-action btn-danger" id="profile-pic-remove-btn">Remove Photo</button>
-                    </div>
                     
-                    <div class="profile-input-row">
-                        <input type="text" id="profile-display-name-input" placeholder="Display name (visible to others)" maxlength="50">
-                        <button class="btn-profile-action btn-primary" id="profile-save-name-btn">Save</button>
-                    </div>
-                    
-                    <div class="profile-save-status" id="profile-save-status"></div>
-                </div>
-
-                <div class="settings-group">
-                    <h4>Username Color</h4>
-                    <p class="settings-hint">Choose a color for your username that others will see in chat.</p>
-                    <div class="username-color-row">
-                        <input type="color" id="username-color-picker" class="username-color-input" value="#4fc3f7">
-                        <span class="username-color-preview" id="username-color-preview">Preview</span>
-                        <button class="btn-profile-action btn-primary" id="username-color-save-btn">Save Color</button>
-                    </div>
-
-                </div>
-
-                <div class="settings-group">
-                    <h4>Username Glow / Border</h4>
-                    <p class="settings-hint">Choose a contrasting glow color for your display name. This helps your name stand out against any background.</p>
-                    <div class="border-glow-options" id="border-glow-options">
-                        <div style="color:#888;font-size:13px;padding:8px 0;">Select a username color first to see glow options</div>
-                    </div>
-                    <div class="username-color-row" style="margin-top:8px;">
-                        <span class="username-color-preview" id="border-glow-preview">Glow Preview</span>
-                        <button class="btn-profile-action btn-primary" id="border-glow-save-btn">Save Glow</button>
+                    <div style="margin-top:8px;">
+                        <button class="btn-profile-action" id="settings-open-profile-btn" style="color:var(--accent);border-color:var(--accent);">👤 Open Profile</button>
                     </div>
                 </div>
 
@@ -589,34 +556,183 @@
         </div>
     </div>
 
-    <!-- Profile Picture Crop Modal -->
-    <div class="modal" id="profile-crop-modal" style="display:none">
-        <div class="modal-content sticker-upload-content">
-            <h3 style="margin-bottom:12px;color:var(--accent)">Crop Profile Picture</h3>
-            <div id="profile-crop-container" class="sticker-crop-container">
-                <div class="sticker-crop-frame" id="profile-crop-frame">
-                    <img id="profile-crop-image" style="max-width:100%;max-height:50vh;">
-                    <div class="sticker-crop-overlay" id="profile-crop-overlay">
-                        <div class="sticker-crop-box" id="profile-crop-box">
-                            <div class="sticker-crop-handle" id="profile-crop-handle"></div>
-                        </div>
-                    </div>
-                </div>
-                <div id="profile-crop-info" style="color:#888;font-size:12px;margin-top:6px;">
-                    Drag to select the area to keep. The picture will be resized to 420×420.
-                </div>
+    <!-- Friend Code Password Modal (Recover/Regenerate) -->
+    <div class="modal" id="friend-code-password-modal" style="display:none">
+        <div class="modal-content" style="max-width:420px">
+            <h3 style="margin-bottom:12px;color:var(--accent)">Friend Code Access</h3>
+            <p style="margin-bottom:16px;color:var(--text-muted);font-size:13px">
+                Your friend code is encrypted and only the server cannot decrypt it.
+                Enter your <strong>account password</strong> to access it.
+            </p>
+            <div style="margin-bottom:16px">
+                <label style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">Account Password</label>
+                <input type="password" id="fc-password-input" placeholder="Enter your password" autocomplete="off" class="modal-input" style="width:100%;padding:10px 14px;border:1px solid #2a2a4a;border-radius:8px;background:#1a1a2e;color:#e0e0e0;font-size:16px;box-sizing:border-box;">
             </div>
-            <div id="profile-crop-progress" style="display:none;margin-bottom:12px">
-                <div class="progress-bar-container"><div class="progress-bar-fill" id="profile-crop-progress-fill"></div></div>
-                <div class="progress-text" id="profile-crop-progress-text">0%</div>
-            </div>
-            <div id="profile-crop-error" style="color:var(--danger);margin-bottom:12px;display:none;font-size:13px"></div>
-            <div class="modal-actions">
-                <button class="btn-cancel" id="cancel-profile-crop">Cancel</button>
-                <button class="btn-invite" id="confirm-profile-crop">Crop & Set Picture</button>
+            <div id="fc-password-error" style="color:var(--danger);margin-bottom:12px;display:none;font-size:13px"></div>
+            <div id="fc-password-success" style="color:#4caf50;margin-bottom:12px;display:none;font-size:13px"></div>
+            <div class="modal-actions" style="gap:8px;flex-wrap:wrap">
+                <button class="btn-cancel" id="fc-cancel-btn">Cancel</button>
+                <button class="btn-invite" id="fc-recover-btn" style="background:#ff9800;border-color:#ff9800">&#128274; Recover Code</button>
+                <button class="btn-invite" id="fc-regenerate-btn">&#128260; Generate New</button>
             </div>
         </div>
     </div>
+
+
+
+    <!-- Profile View Modal (shows the profile card) -->
+    <div class="modal" id="profile-modal" style="display:none">
+        <div class="modal-content profile-modal-content">
+            <div id="profile-view">
+                <div class="profile-view-card">
+                    <!-- Banner -->
+                    <div class="profile-banner" id="profile-banner">
+                        <div class="profile-banner-img" id="profile-banner-img"></div>
+                    </div>
+                    <!-- Avatar (overlaps banner) -->
+                    <div class="profile-modal-avatar-wrap" id="profile-modal-avatar-wrap">
+                        <div class="profile-modal-avatar" id="profile-modal-avatar"></div>
+                    </div>
+                    <!-- Info section -->
+                    <div class="profile-info-section">
+                        <div class="profile-display-name" id="profile-modal-display-name"></div>
+                        <div class="profile-nickname" id="profile-modal-nickname"></div>
+                        <div class="profile-description" id="profile-modal-description"></div>
+                        <div class="profile-username-row" id="profile-modal-username-row">
+                            <span class="profile-username-tag" id="profile-modal-username-tag"></span>
+                        </div>
+                        <!-- Edit button (own profile only) — bottom-right, small pencil -->
+                        <button class="profile-edit-btn" id="profile-edit-btn" style="display:none" title="Edit Profile">✏️</button>
+                    </div>
+                </div>
+            </div>
+            <button class="profile-modal-close" id="profile-modal-close">&times;</button>
+        </div>
+    </div>
+
+    <!-- Profile Edit Modal (separate window for editing) -->
+    <div class="modal" id="profile-edit-modal" style="display:none">
+        <div class="modal-content profile-edit-modal-content">
+            <div class="profile-edit-layout">
+                <!-- Left: Live preview -->
+                <div class="profile-edit-preview">
+                    <div class="profile-view-card profile-edit-preview-card">
+                        <!-- Banner preview -->
+                        <div class="profile-banner" id="profile-edit-banner-preview">
+                            <div class="profile-banner-img" id="profile-edit-banner-img"></div>
+                        </div>
+                        <!-- Avatar preview -->
+                        <div class="profile-modal-avatar-wrap" id="profile-edit-avatar-wrap">
+                            <div class="profile-modal-avatar" id="profile-edit-avatar"></div>
+                        </div>
+                        <!-- Info preview -->
+                        <div class="profile-info-section">
+                            <div class="profile-display-name" id="profile-edit-display-name-preview"></div>
+                            <div class="profile-nickname" id="profile-edit-nickname-preview"></div>
+                            <div class="profile-description" id="profile-edit-description-preview"></div>
+                        </div>
+                    </div>
+                </div>
+                <!-- Right: Edit settings -->
+                <div class="profile-edit-settings">
+                    <h3 style="margin-bottom:16px;color:var(--accent);">Edit Profile</h3>
+                    
+                    <!-- Image upload section -->
+                    <div class="profile-edit-uploads">
+                        <div class="profile-edit-upload-row">
+                            <label>Profile Picture</label>
+                            <div class="profile-upload-actions">
+                                <button class="btn btn-primary" id="profile-avatar-upload-btn">📷 Choose</button>
+                                <button class="btn btn-danger" id="profile-avatar-remove-btn" style="display:none">✕</button>
+                            </div>
+                            <input type="file" id="profile-avatar-file-input" accept="image/*" style="display:none">
+                        </div>
+                        <div class="profile-edit-upload-row">
+                            <label>Banner</label>
+                            <div class="profile-upload-actions">
+                                <button class="btn btn-primary" id="profile-banner-upload-btn">📷 Choose</button>
+                                <button class="btn btn-danger" id="profile-banner-remove-btn" style="display:none">✕</button>
+                            </div>
+                            <input type="file" id="profile-banner-file-input" accept="image/*" style="display:none">
+                        </div>
+                    </div>
+
+                    <!-- Crop container for banner -->
+                    <div class="profile-crop-container" id="profile-banner-crop-container" style="display:none">
+                        <div class="profile-crop-frame" id="profile-banner-crop-frame">
+                            <img id="profile-banner-crop-img" style="display:none">
+                            <div class="profile-crop-dark-overlay" id="profile-banner-dark-overlay">
+                                <div class="profile-crop-box" id="profile-banner-crop-box">
+                                    <div class="profile-crop-handle" id="profile-banner-crop-handle"></div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="profile-crop-actions">
+                            <button class="btn-cancel" id="profile-banner-crop-cancel">Cancel</button>
+                            <button class="btn-invite" id="profile-banner-crop-confirm">✓ Apply</button>
+                        </div>
+                    </div>
+                    <!-- Crop container for PFP -->
+                    <div class="profile-crop-container" id="profile-pfp-crop-container" style="display:none">
+                        <div class="profile-crop-frame" id="profile-pfp-crop-frame">
+                            <img id="profile-pfp-crop-img" style="display:none">
+                            <div class="profile-crop-dark-overlay" id="profile-pfp-dark-overlay">
+                                <div class="profile-crop-box" id="profile-pfp-crop-box">
+                                    <div class="profile-crop-handle" id="profile-pfp-crop-handle"></div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="profile-crop-actions">
+                            <button class="btn-cancel" id="profile-pfp-crop-cancel">Cancel</button>
+                            <button class="btn-invite" id="profile-pfp-crop-confirm">✓ Apply</button>
+                        </div>
+                    </div>
+
+                    <div class="profile-edit-row">
+                        <label>Display Name</label>
+                        <input type="text" id="profile-edit-display-name" maxlength="32" placeholder="Display name">
+                    </div>
+                    <div class="profile-edit-row">
+                        <label>Nickname</label>
+                        <input type="text" id="profile-edit-nickname" maxlength="32" placeholder="Nickname">
+                    </div>
+                    <div class="profile-edit-row">
+                        <label>Description</label>
+                        <textarea id="profile-edit-description" placeholder="Tell us about yourself..." rows="3" style="resize:vertical;"></textarea>
+                        <div style="font-size:11px;color:#888;margin-top:4px;"><span id="profile-desc-word-count">0</span>/300 words</div>
+                    </div>
+                    <div class="profile-edit-row">
+                        <label>Profile Background</label>
+                        <div class="profile-color-row">
+                            <input type="color" id="profile-edit-bg-color" value="#16213e" class="profile-edit-color-input">
+                            <span class="profile-color-preview" id="profile-edit-bg-preview" style="width:32px;height:32px;border-radius:6px;background:#16213e;"></span>
+                        </div>
+                    </div>
+                    <div class="profile-edit-row">
+                        <label>Username Color</label>
+                        <div class="profile-color-row">
+                            <input type="color" id="profile-edit-color" value="#4fc3f7" class="profile-edit-color-input">
+                            <span class="profile-color-preview" id="profile-edit-color-preview">Preview</span>
+                        </div>
+                    </div>
+                    <div class="profile-edit-row">
+                        <label>Glow / Border</label>
+                        <div class="profile-glow-options" id="profile-edit-glow-options">
+                            <div style="color:#888;font-size:12px;">Select a color first</div>
+                        </div>
+                    </div>
+                    <div class="profile-edit-actions">
+                        <button class="btn-cancel" id="profile-edit-cancel-btn">Cancel</button>
+                        <button class="btn-invite" id="profile-edit-save-btn">💾 Save Profile</button>
+                    </div>
+                    <div id="profile-edit-status" class="profile-save-status" style="display:none"></div>
+                </div>
+            </div>
+            <button class="profile-modal-close" id="profile-edit-modal-close">&times;</button>
+        </div>
+    </div>
+
+
 
     <script src="crypto.js?v=6"></script>
     <script src="qrcode.js"></script>

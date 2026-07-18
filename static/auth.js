@@ -1,3 +1,8 @@
+function escapeHtml(str) {
+    if (!str) return '';
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     const token = localStorage.getItem('token');
     if (token) {
@@ -21,7 +26,38 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     setupToggleVisibility('toggle-login-password', 'login-password');
     setupToggleVisibility('toggle-register-password', 'register-password');
+    setupToggleVisibility('toggle-register-confirm-password', 'register-confirm-password');
 
+
+    // --- Check for stale HttpOnly cookies from a previous session ---
+    // JS cannot read or clear HttpOnly cookies; we can only detect them.
+    function checkStaleSession() {
+        fetch('/api/me', { credentials: 'include', headers: {} })
+            .then(function(r) {
+                if (!r.ok) return;
+                r.json().then(function(data) {
+                    if (data && data.username) {
+                        var warning = document.getElementById('stale-session-warning');
+                        if (warning) {
+                            warning.style.display = 'block';
+                            warning.innerHTML = '⚠️ Stale session detected for <strong>' + escapeHtml(data.username) +
+                                '</strong>. Click below to clear it before logging in with a different account.' +
+                                '<br><button id="clear-stale-session-btn" class="btn btn-danger" style="margin-top:8px;padding:6px 16px;font-size:13px;">Clear Stale Session</button>';
+                            document.getElementById('clear-stale-session-btn').addEventListener('click', function() {
+                                fetch('/api/logout', { method: 'POST', credentials: 'include' }).catch(function() {});
+                                warning.innerHTML = '✅ Stale session cleared. You can now log in.';
+                                warning.style.background = 'rgba(76,175,80,0.1)';
+                                warning.style.borderColor = '#4caf50';
+                                warning.style.color = '#4caf50';
+                                setTimeout(function() { warning.style.display = 'none'; }, 3000);
+                            });
+                        }
+                    }
+                });
+            })
+            .catch(function() {});
+    }
+    checkStaleSession();
 
     const loginForm = document.getElementById('login-form');
     const registerForm = document.getElementById('register-form');
@@ -69,10 +105,14 @@ document.addEventListener('DOMContentLoaded', () => {
     // Clear All Data button - nuke everything and reload
     document.getElementById('clear-all-data-btn').addEventListener('click', function () {
         if (!confirm('This will clear ALL local data (logins, keys, settings) and reload the page. Continue?')) return;
-        // Call server logout to clear HttpOnly cookie
-        fetch('/api/logout', { method: 'POST' }).catch(function() {});
+        // Attempt server logout to clear HttpOnly cookie (best-effort, send token if present)
+        var t = localStorage.getItem('token');
+        if (t) {
+            fetch('/api/logout', { method: 'POST', headers: { 'Authorization': 'Bearer ' + t } }).catch(function() {});
+        }
         clearAllClientData();
-        window.location.reload();
+        // Redirect directly to login page since we already called serverLogout above.
+        window.location.href = '/login.html';
     });
 
     function setLoading(form, loading) {
@@ -149,6 +189,30 @@ document.addEventListener('DOMContentLoaded', () => {
 
             localStorage.setItem('token', data.token);
             localStorage.setItem('user', JSON.stringify(data.user));
+            // Store password in localStorage for automatic encryption/decryption
+            try { localStorage.setItem('e2e_password', password); } catch (_) {}
+
+            // Try to recover encrypted friend code from server and decrypt with password
+            try {
+                const fcRes = await fetch('/api/friend-code', {
+                    headers: { 'Authorization': 'Bearer ' + data.token }
+                });
+                if (fcRes.ok) {
+                    const fcData = await fcRes.json();
+                    if (fcData.encrypted_friend_code && fcData.salt && fcData.nonce) {
+                        const decryptedFC = E2ECrypto.decryptWithPassword(
+                            fcData.encrypted_friend_code,
+                            password,
+                            fcData.salt,
+                            fcData.nonce
+                        );
+                        if (decryptedFC) {
+                            localStorage.setItem('e2e_friend_code', decryptedFC);
+                        }
+                    }
+                }
+            } catch (_) {}
+
             window.location.href = 'index.html';
         } catch (err) {
             showError('Server is not running');
@@ -162,14 +226,20 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const username = document.getElementById('register-username').value.trim();
         const password = document.getElementById('register-password').value;
+        const confirmPassword = document.getElementById('register-confirm-password').value;
 
-        if (!username || !password) {
+        if (!username || !password || !confirmPassword) {
             showError('Please fill in all fields');
             return;
         }
 
         if (password.length < 6) {
             showError('Password must be at least 6 characters');
+            return;
+        }
+
+        if (password !== confirmPassword) {
+            showError('Passwords do not match');
             return;
         }
 
@@ -180,17 +250,25 @@ document.addEventListener('DOMContentLoaded', () => {
             const keypair = E2ECrypto.x25519GenerateKeyPair();
             const publicKeyB64 = E2ECrypto.arrayBufferToBase64(keypair.publicKey);
 
-            // Generate friend code client-side, send only the hash
+            // Generate friend code client-side, encrypt with password, send encrypted + hash
             const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
             let friendCode = '';
             for (let i = 0; i < 8; i++) friendCode += ALPHABET[Math.floor(Math.random() * ALPHABET.length)];
             const friendCodeHash = E2ECrypto.sha256Hex(friendCode);
+            const encryptedFC = E2ECrypto.encryptWithPassword(friendCode, password);
             localStorage.setItem('e2e_friend_code', friendCode);
 
             const res = await fetch('/api/register', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username, password, identity_public_key: publicKeyB64, friend_code_hash: friendCodeHash })
+                body: JSON.stringify({
+                    username, password,
+                    identity_public_key: publicKeyB64,
+                    friend_code_hash: friendCodeHash,
+                    encrypted_friend_code: encryptedFC.encrypted_private_key,
+                    friend_code_salt: encryptedFC.salt,
+                    friend_code_nonce: encryptedFC.nonce,
+                })
             });
 
             const data = await res.json();
@@ -207,6 +285,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
             localStorage.setItem('token', data.token);
             localStorage.setItem('user', JSON.stringify(data.user));
+            // Store password in localStorage for automatic encryption/decryption
+            try { localStorage.setItem('e2e_password', password); } catch (_) {}
 
             // Upload escrowed key in background (non-blocking)
             try {

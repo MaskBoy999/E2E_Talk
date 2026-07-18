@@ -818,6 +818,19 @@ const E2ECrypto = (() => {
         return arrayBufferToBase64(plaintext);
     }
 
+    // Encrypt/decrypt any plaintext string with a password-derived key
+    // (reuses the same key derivation as key escrow)
+    function encryptWithPassword(plaintext, password) {
+        var codeB64 = btoa(plaintext);
+        return encryptKeyForEscrow(codeB64, password);
+    }
+
+    function decryptWithPassword(encryptedB64, password, saltB64, nonceB64) {
+        var codeB64 = decryptKeyFromEscrow(encryptedB64, password, saltB64, nonceB64);
+        if (!codeB64) return null;
+        try { return atob(codeB64); } catch (_) { return null; }
+    }
+
     return {
         sha256Hex: function(data) {
             var bytes = new TextEncoder().encode(data);
@@ -863,5 +876,7 @@ const E2ECrypto = (() => {
         fingerprintKey: fingerprintKey,
         encryptKeyForEscrow: encryptKeyForEscrow,
         decryptKeyFromEscrow: decryptKeyFromEscrow,
+        encryptWithPassword: encryptWithPassword,
+        decryptWithPassword: decryptWithPassword,
     };
 })();

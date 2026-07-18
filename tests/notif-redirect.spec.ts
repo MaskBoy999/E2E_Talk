@@ -26,7 +26,8 @@ test.describe('Notification Redirect Clear', () => {
         await page.click('#show-register');
         await page.fill('#register-username', user1Name);
         await page.fill('#register-password', 'password123');
-        await page.click('#register-form button[type="submit"]');
+                await page.fill('#register-confirm-password', 'password123');
+await page.click('#register-form button[type="submit"]');
         await page.waitForURL('**/index.html', { timeout: 10000 });
         const body1 = await page.evaluate(() => ({
             token: localStorage.getItem('token'),
@@ -43,7 +44,8 @@ test.describe('Notification Redirect Clear', () => {
         await page2.click('#show-register');
         await page2.fill('#register-username', user2Name);
         await page2.fill('#register-password', 'password123');
-        await page2.click('#register-form button[type="submit"]');
+        await page2.fill('#register-confirm-password', 'password123');
+await page2.click('#register-form button[type="submit"]');
         await page2.waitForURL('**/index.html', { timeout: 10000 });
         const body2 = await page2.evaluate(() => ({
             token: localStorage.getItem('token'),

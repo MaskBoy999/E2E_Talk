@@ -7,6 +7,7 @@ async function registerUser(page: any, username: string, password: string) {
     await page.click('#show-register');
     await page.fill('#register-username', username);
     await page.fill('#register-password', password);
+    await page.fill('#register-confirm-password', password);
     await page.click('#register-form button[type="submit"]');
     await page.waitForURL('**/index.html', { timeout: 10000 });
 }
