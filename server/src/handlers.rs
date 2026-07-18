@@ -2797,24 +2797,40 @@ pub struct UpdateProfileRequest {
 }
 
 pub async fn get_profile(
-    Path(user_id): Path<String>,
+    Path(requested_id): Path<String>,
+    headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    match state.db.get_user_profile(&user_id) {
-        Ok((id, username, display_name, profile_picture_file_id, _file_key, username_color, username_border_color, banner_id, banner_key, description, nickname)) => {
-            let encrypted = state.db.get_encrypted_profile(&user_id).ok().flatten();
+    // Extract the requesting user; require authentication
+    let caller_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    // Determine if the caller is authorized to see file decryption keys:
+    // - Own profile: always authorized
+    // - Friends or share a server: authorized
+    let is_own_profile = caller_id == requested_id;
+    let authorized_for_keys = is_own_profile
+        || state.db.are_friends(&caller_id, &requested_id).unwrap_or(false)
+        || state.db.share_server(&caller_id, &requested_id).unwrap_or(false);
+
+    match state.db.get_user_profile(&requested_id) {
+        Ok((id, username, display_name, profile_picture_file_id, file_key, username_color, username_border_color, banner_id, banner_key, description, nickname)) => {
+            let encrypted = state.db.get_encrypted_profile(&requested_id).ok().flatten();
             // Fetch background color separately (dynamic column)
-            let bg_color = state.db.get_profile_background_color(&user_id).ok();
+            let bg_color = state.db.get_profile_background_color(&requested_id).ok();
             (StatusCode::OK, Json(serde_json::json!({
                 "id": id,
                 "username": username,
                 "display_name": display_name,
                 "profile_picture_file_id": profile_picture_file_id,
-                "profile_picture_file_key": _file_key,
+                // Only return file decryption keys to authorized users (friends / server-mates / self)
+                "profile_picture_file_key": if authorized_for_keys { file_key } else { None },
                 "username_color": username_color.unwrap_or("#4fc3f7".to_string()),
                 "username_border_color": username_border_color,
                 "profile_banner_file_id": banner_id,
-                "profile_banner_file_key": banner_key,
+                "profile_banner_file_key": if authorized_for_keys { banner_key } else { None },
                 "description": description.unwrap_or_default(),
                 "nickname": nickname.unwrap_or_default(),
                 "profile_background_color": bg_color.unwrap_or("#16213e".to_string()),

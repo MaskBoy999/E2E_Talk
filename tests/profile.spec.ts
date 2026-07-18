@@ -698,4 +698,173 @@ await page2.click('#register-form button[type="submit"]');
         await page2.close();
         await ctx2.close();
     });
+
+    test('profile file keys are only returned to friends/server-members, not strangers', async ({ page, context }) => {
+        const ts = Date.now();
+        const userA = 'autha_' + ts;
+        const userB = 'authb_' + ts;
+        const userC = 'authc_' + ts;
+
+        // Register userA
+        await page.goto(`${BASE}/login.html`);
+        await page.click('#show-register');
+        await page.fill('#register-username', userA);
+        await page.fill('#register-password', 'password123');
+        await page.fill('#register-confirm-password', 'password123');
+        await page.click('#register-form button[type="submit"]');
+        await page.waitForURL('**/index.html', { timeout: 10000 });
+
+        const bodyA = await page.evaluate(() => ({
+            token: localStorage.getItem('token'),
+            user: JSON.parse(localStorage.getItem('user') || '{}'),
+            friendCode: localStorage.getItem('e2e_friend_code'),
+        }));
+
+        // Register userB (will become friend)
+        const ctxB = await context.browser()!.newContext();
+        const pageB = await ctxB.newPage();
+        await pageB.goto(`${BASE}/login.html`);
+        await pageB.waitForTimeout(500);
+        await pageB.click('#show-register');
+        await pageB.fill('#register-username', userB);
+        await pageB.fill('#register-password', 'password123');
+        await pageB.fill('#register-confirm-password', 'password123');
+        await pageB.click('#register-form button[type="submit"]');
+        await pageB.waitForURL('**/index.html', { timeout: 10000 });
+
+        const bodyB = await pageB.evaluate(() => ({
+            token: localStorage.getItem('token'),
+            user: JSON.parse(localStorage.getItem('user') || '{}'),
+        }));
+
+        // Register userC (stranger — never friend, no shared server)
+        const ctxC = await context.browser()!.newContext();
+        const pageC = await ctxC.newPage();
+        await pageC.goto(`${BASE}/login.html`);
+        await pageC.waitForTimeout(500);
+        await pageC.click('#show-register');
+        await pageC.fill('#register-username', userC);
+        await pageC.fill('#register-password', 'password123');
+        await pageC.fill('#register-confirm-password', 'password123');
+        await pageC.click('#register-form button[type="submit"]');
+        await pageC.waitForURL('**/index.html', { timeout: 10000 });
+
+        const bodyC = await pageC.evaluate(() => ({
+            token: localStorage.getItem('token'),
+            user: JSON.parse(localStorage.getItem('user') || '{}'),
+        }));
+
+        // Upload a profile picture for userA so there is a file_key
+        const pngBytes = Buffer.from([
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+            0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+            0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
+            0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41,
+            0x54, 0x78, 0x9C, 0x62, 0x60, 0x60, 0x60, 0x00,
+            0x00, 0x00, 0x04, 0x00, 0x01, 0x26, 0x4F, 0x26,
+            0x35, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E,
+            0x44, 0xAE, 0x42, 0x60, 0x82,
+        ]);
+
+        const initRes = await page.request.post(`${BASE}/api/files/init`, {
+            headers: { Authorization: `Bearer ${bodyA.token}`, 'Content-Type': 'application/json' },
+            data: { size: pngBytes.length, mime: 'image/png' },
+        });
+        expect(initRes.ok()).toBeTruthy();
+        const initData = await initRes.json();
+        const fileId = initData.file_id;
+
+        const chunkRes = await page.request.fetch(`${BASE}/api/files/${fileId}/chunk/0`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${bodyA.token}`, 'Content-Type': 'application/octet-stream' },
+            data: pngBytes,
+        });
+        expect(chunkRes.ok()).toBeTruthy();
+
+        await page.request.post(`${BASE}/api/files/${fileId}/complete`, {
+            headers: { Authorization: `Bearer ${bodyA.token}` },
+        });
+
+        // Set profile picture with a mock file_key (simulates what the client does)
+        const mockFileKey = Buffer.from(Array(32).fill(0).map(() => Math.floor(Math.random() * 256))).toString('base64');
+        await page.request.patch(`${BASE}/api/profile`, {
+            headers: { Authorization: `Bearer ${bodyA.token}`, 'Content-Type': 'application/json' },
+            data: {
+                profile_picture_file_id: fileId,
+                profile_picture_file_key: mockFileKey,
+            },
+        });
+
+        // === TEST 1: UserA can see their own file_key (always authorized) ===
+        const ownProfileRes = await page.request.get(`${BASE}/api/profile/${bodyA.user.id}`, {
+            headers: { Authorization: `Bearer ${bodyA.token}` },
+        });
+        expect(ownProfileRes.ok()).toBeTruthy();
+        const ownProfile = await ownProfileRes.json();
+        expect(ownProfile.profile_picture_file_id).toBe(fileId);
+        expect(ownProfile.profile_picture_file_key).toBeTruthy();
+        console.log('Own profile file_key present:', !!ownProfile.profile_picture_file_key);
+        expect(ownProfile.profile_banner_file_id).toBeDefined();
+        expect(ownProfile.profile_banner_file_key).toBeDefined();
+
+        // === TEST 2: UserC (stranger) gets null file keys ===
+        const strangerProfileRes = await pageC.request.get(`${BASE}/api/profile/${bodyA.user.id}`, {
+            headers: { Authorization: `Bearer ${bodyC.token}` },
+        });
+        expect(strangerProfileRes.ok()).toBeTruthy();
+        const strangerProfile = await strangerProfileRes.json();
+        expect(strangerProfile.profile_picture_file_id).toBe(fileId);
+        expect(strangerProfile.profile_picture_file_key).toBeNull();
+        console.log('Stranger profile file_key null:', strangerProfile.profile_picture_file_key === null);
+        expect(strangerProfile.profile_banner_file_key).toBeNull();
+        // Other profile data should still be visible
+        expect(strangerProfile.username).toBeDefined();
+        expect(strangerProfile.display_name).toBeDefined();
+        expect(strangerProfile.username_color).toBeDefined();
+
+        // === TEST 3: After becoming friends, userB can see file keys ===
+        // UserB sends friend request to userA
+        await pageB.request.post(`${BASE}/api/friends/request`, {
+            headers: { Authorization: `Bearer ${bodyB.token}`, 'Content-Type': 'application/json' },
+            data: { friend_code: bodyA.friendCode },
+        });
+
+        // UserA accepts
+        const requestsRes = await page.request.get(`${BASE}/api/friends/requests/incoming`, {
+            headers: { Authorization: `Bearer ${bodyA.token}` },
+        });
+        const requests = await requestsRes.json();
+        expect(requests.length).toBeGreaterThanOrEqual(1);
+        await page.request.post(`${BASE}/api/friends/requests/accept`, {
+            headers: { Authorization: `Bearer ${bodyA.token}`, 'Content-Type': 'application/json' },
+            data: { request_id: requests[0].id },
+        });
+
+        // Now userB fetches userA's profile
+        const friendProfileRes = await pageB.request.get(`${BASE}/api/profile/${bodyA.user.id}`, {
+            headers: { Authorization: `Bearer ${bodyB.token}` },
+        });
+        expect(friendProfileRes.ok()).toBeTruthy();
+        const friendProfile = await friendProfileRes.json();
+        expect(friendProfile.profile_picture_file_id).toBe(fileId);
+        expect(friendProfile.profile_picture_file_key).toBeTruthy();
+        console.log('Friend profile file_key present:', !!friendProfile.profile_picture_file_key);
+        expect(friendProfile.profile_banner_file_key).toBeDefined();
+
+        // === TEST 4: UserC (still stranger) still gets null file keys ===
+        const strangerAgainRes = await pageC.request.get(`${BASE}/api/profile/${bodyA.user.id}`, {
+            headers: { Authorization: `Bearer ${bodyC.token}` },
+        });
+        expect(strangerAgainRes.ok()).toBeTruthy();
+        const strangerAgain = await strangerAgainRes.json();
+        expect(strangerAgain.profile_picture_file_key).toBeNull();
+        expect(strangerAgain.profile_banner_file_key).toBeNull();
+
+        // Cleanup
+        await pageB.close();
+        await ctxB.close();
+        await pageC.close();
+        await ctxC.close();
+    });
 });

@@ -6440,7 +6440,29 @@ async function joinServer() {
 }
 
 async function showInviteModal() {
-    if (!currentServerId || !currentInviteCode) return;
+    if (!currentServerId) return;
+    if (!currentInviteCode && isOwner) {
+        // Silently generate a new invite code if missing from localStorage
+        try {
+            const inviteCode = generateCode(8);
+            const inviteCodeHash = E2ECrypto.sha256Hex(inviteCode);
+            const res = await authFetch(`/api/servers/${currentServerId}/invite`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ invite_code_hash: inviteCodeHash }),
+            });
+            if (res.ok) {
+                currentInviteCode = inviteCode;
+                localStorage.setItem('e2e_invite_' + currentServerId, inviteCode);
+            } else {
+                return; // Failed to create invite, can't open modal
+            }
+        } catch (e) {
+            console.error('Failed to auto-generate invite code:', e);
+            return;
+        }
+    }
+    if (!currentInviteCode) return;
     const display = document.getElementById('invite-code-display');
     display.textContent = '••••••••••••••••';
     display.dataset.value = currentInviteCode;
@@ -11747,7 +11769,7 @@ function renderEditGlowOptions(baseColor) {
         // Determine contrasting background for color indicator
         var isLight = isLightColor(val);
         var indicatorBg = isLight ? '#555' : '#ccc';
-        html += '<button class="glow-btn' + (val === currentBorder ? ' active' : '') + '" data-value="' + escapeAttr(val) + '">' +
+        html += '<button class="glow-btn" data-value="' + escapeAttr(val) + '">' +
             '<span class="glow-color-circle" style="background:' + val + ';box-shadow:inset 0 0 0 2px ' + indicatorBg + ';"></span>' +
             escapeHtml(o.name) +
             '</button>';
@@ -11775,6 +11797,11 @@ function renderEditGlowOptions(baseColor) {
     container.querySelectorAll('.glow-btn').forEach(function(btn) {
         if (btn.dataset.value === autoSelectGlow) {
             btn.classList.add('active');
+            // Also update preview textShadow when auto-selecting (e.g. when color changes)
+            var editPreview = document.getElementById('profile-edit-display-name-preview');
+            if (editPreview && autoSelectGlow) {
+                editPreview.style.textShadow = '0 0 8px ' + autoSelectGlow + ', 0 0 16px ' + autoSelectGlow;
+            }
         }
         btn.addEventListener('click', function() {
             container.querySelectorAll('.glow-btn').forEach(function(b) { b.classList.remove('active'); });
