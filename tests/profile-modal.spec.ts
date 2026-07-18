@@ -247,8 +247,8 @@ test.describe('Profile Modal Features', () => {
         await page.waitForTimeout(500);
 
         // Edit mode should show inputs
-        const editSection = page.locator('#profile-edit');
-        await expect(editSection).toBeVisible();
+        const editModal = page.locator('#profile-edit-modal');
+        await expect(editModal).toBeVisible({ timeout: 5000 });
 
         const displayInput = page.locator('#profile-edit-display-name');
         await expect(displayInput).toBeVisible();
@@ -256,12 +256,12 @@ test.describe('Profile Modal Features', () => {
         // Type a new display name
         await displayInput.fill('My New Name');
 
-        // Cancel and verify view mode returns
+        // Cancel and verify modal closes
         await page.click('#profile-edit-cancel-btn');
         await page.waitForTimeout(500);
 
-        // Edit section should be hidden
-        await expect(editSection).not.toBeVisible();
+        // Edit modal should be hidden
+        await expect(editModal).not.toBeVisible();
 
         // Close
         await page.click('#profile-modal-close');
@@ -458,8 +458,8 @@ test.describe('Profile Modal Features', () => {
         await page.click('#profile-edit-btn');
         await page.waitForTimeout(500);
 
-        // Check edit section is visible
-        await expect(page.locator('#profile-edit')).toBeVisible();
+        // Check edit modal is visible
+        await expect(page.locator('#profile-edit-modal')).toBeVisible({ timeout: 5000 });
 
         // Change the display name
         const displayInput = page.locator('#profile-edit-display-name');

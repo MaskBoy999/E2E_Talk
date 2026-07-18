@@ -726,7 +726,21 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('profile-banner-remove-btn').addEventListener('click', function () {
             profileBannerFileId = null;
             profileBannerFileKey = null;
-            document.getElementById('profile-edit-banner-img').style.backgroundImage = '';
+            // Restore original banner from current profile in edit preview
+            var editBanner = document.getElementById('profile-edit-banner-img');
+            if (editBanner && profileOriginalData) {
+                var origBannerId = profileOriginalData.data.profile_banner_file_id;
+                var origBannerKey = profileOriginalData.data.profile_banner_file_key || null;
+                if (origBannerId) {
+                    getDecryptedFileUrl(origBannerId, origBannerKey, function(url) {
+                        editBanner.style.backgroundImage = url ? 'url(' + url + ')' : '';
+                    });
+                } else {
+                    editBanner.style.backgroundImage = '';
+                }
+            } else if (editBanner) {
+                editBanner.style.backgroundImage = '';
+            }
             document.getElementById('profile-banner-remove-btn').style.display = 'none';
         });
         // Avatar upload
@@ -742,7 +756,25 @@ document.addEventListener('DOMContentLoaded', () => {
             profilePfpFileId = null;
             profilePfpFileKey = null;
             var avatarEl = document.getElementById('profile-edit-avatar');
-            avatarEl.innerHTML = '<div style="font-size:36px;color:#1a1a2e;font-weight:700;">' + escapeHtml((document.getElementById('profile-edit-display-name').value || 'U').charAt(0).toUpperCase()) + '</div>';
+            // Restore original PFP from current profile in edit preview
+            if (profileOriginalData) {
+                var origPicId = profileOriginalData.data.profile_picture_file_id;
+                var origPicKey = profileOriginalData.data.profile_picture_file_key || null;
+                var dn = document.getElementById('profile-edit-display-name').value || 'U';
+                if (origPicId) {
+                    getDecryptedFileUrl(origPicId, origPicKey, function(url) {
+                        if (url) {
+                            avatarEl.innerHTML = '<img src="' + url + '" alt="Avatar">';
+                        } else {
+                            avatarEl.innerHTML = '<div style="font-size:36px;color:#1a1a2e;font-weight:700;">' + escapeHtml(dn.charAt(0).toUpperCase()) + '</div>';
+                        }
+                    });
+                } else {
+                    avatarEl.innerHTML = '<div style="font-size:36px;color:#1a1a2e;font-weight:700;">' + escapeHtml(dn.charAt(0).toUpperCase()) + '</div>';
+                }
+            } else {
+                avatarEl.innerHTML = '<div style="font-size:36px;color:#1a1a2e;font-weight:700;">' + escapeHtml((document.getElementById('profile-edit-display-name').value || 'U').charAt(0).toUpperCase()) + '</div>';
+            }
             document.getElementById('profile-avatar-remove-btn').style.display = 'none';
         });
         // Banner crop confirm/cancel
@@ -816,6 +848,12 @@ document.addEventListener('DOMContentLoaded', () => {
         profileModal.addEventListener('click', function (e) {
             if (e.target === profileModal) closeProfileModal();
         });
+        // Escape key to close profile view modal
+        document.addEventListener('keydown', function (e) {
+            if (e.key === 'Escape' && profileModal.style.display !== 'none' && profileModal.style.display !== '') {
+                closeProfileModal();
+            }
+        });
         // Footer user avatar click -> open own profile
         document.getElementById('footer-user-avatar').addEventListener('click', function () {
             if (user) openProfileModal(user.id);
@@ -872,7 +910,7 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('friend-code-password-modal').style.display = 'none';
     });
     if (fcRecoverBtn) fcRecoverBtn.addEventListener('click', handleFriendCodeRecover);
-    if (fcRegenBtn) fcRegenBtn.addEventListener('click', handleFriendCodeRegenerate);
+    if (fcRegenBtn) fcRegenBtn.addEventListener('click', function () { handleFriendCodeRegenerate(); });
     // Allow Enter key in password input to trigger recover
     const fcPasswordInput = document.getElementById('fc-password-input');
     if (fcPasswordInput) {
@@ -5473,7 +5511,8 @@ function renderDmSidebar() {
     html += '<button class="key-action-btn" id="toggle-friend-code-btn" title="Show/Hide">&#128065;</button>';
     html += '<button class="key-action-btn" id="copy-friend-code-btn" title="Copy">&#128203;</button>';
     html += '<button class="key-action-btn" id="friend-qr-btn" title="Show QR Code">&#128247;</button>';
-    html += '<button class="key-action-btn" id="recover-friend-code-btn" title="Recover or Regenerate" style="color:#ff9800;">&#128274;</button>';
+    html += '<button class="key-action-btn" id="get-friend-code-btn" title="Get friend code from server">&#128274;</button>';
+    html += '<button class="key-action-btn" id="regen-friend-code-btn" title="Generate new friend code" style="color:#ff9800;">&#128260;</button>';
     html += '</div>';
     html += '<div id="friend-code-status" class="friend-code-status" style="font-size:11px;color:#888;margin-top:4px;text-align:center;"></div>';
     html += '<div id="friend-qr-container" class="qr-code-container" style="display:none;margin-top:10px;margin-bottom:10px;">';
@@ -6604,11 +6643,23 @@ async function loadMyFriendCode() {
                     img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svgData)));
                 };
             }
-            // Friend code recovery / regeneration button
-            const recoverBtn = document.getElementById('recover-friend-code-btn');
-            if (recoverBtn) {
-                recoverBtn.onclick = function () {
-                    showFriendCodePasswordModal();
+            // Get friend code from server button (recover)
+            const getBtn = document.getElementById('get-friend-code-btn');
+            if (getBtn) {
+                getBtn.onclick = async function () {
+                    var pw = await verifyStoredPassword();
+                    if (!pw) return;
+                    handleFriendCodeRecover(pw);
+                };
+            }
+            // Regenerate friend code button
+            const regenBtn = document.getElementById('regen-friend-code-btn');
+            if (regenBtn) {
+                regenBtn.onclick = async function () {
+                    var pw = await verifyStoredPassword();
+                    if (!pw) return;
+                    if (!confirm('Generate a new friend code? Your old one will stop working immediately.')) return;
+                    handleFriendCodeRegenerate(pw);
                 };
             }
         }
@@ -6677,8 +6728,8 @@ async function handleFriendCodeRecover(storedPw) {
         }
         const decrypted = E2ECrypto.decryptWithPassword(data.encrypted_friend_code, password, data.salt, data.nonce);
         if (!decrypted) {
-            errorEl.textContent = 'Wrong password or corrupted data. Cannot decrypt friend code.';
-            errorEl.style.display = 'block';
+            if (errorEl) { errorEl.textContent = 'Wrong password or corrupted data. Cannot decrypt friend code.'; errorEl.style.display = 'block'; }
+            if (!errorEl) { alert('Wrong password or corrupted data. Cannot decrypt friend code.'); }
             return;
         }
         // Update status indicator
@@ -6693,26 +6744,30 @@ async function handleFriendCodeRecover(storedPw) {
             el.dataset.visible = '0';
             el.textContent = '••••••••••••••••';
         }
-        successEl.textContent = 'Friend code recovered successfully! It is now stored locally.';
-        successEl.style.display = 'block';
-        errorEl.style.display = 'none';
-        // Close modal after 2 seconds
-        setTimeout(function () {
-            document.getElementById('friend-code-password-modal').style.display = 'none';
-        }, 2000);
+        if (successEl) { successEl.textContent = 'Friend code recovered successfully! It is now stored locally.'; successEl.style.display = 'block'; }
+        if (errorEl) errorEl.style.display = 'none';
+        // Close modal if visible
+        var fcModal = document.getElementById('friend-code-password-modal');
+        if (fcModal && fcModal.style.display !== 'none') {
+            setTimeout(function () { fcModal.style.display = 'none'; }, 2000);
+        }
     } catch (e) {
         if (recoverStatusEl) { recoverStatusEl.textContent = '❌ Failed to fetch friend code'; recoverStatusEl.style.color = '#f44336'; setTimeout(function() { recoverStatusEl.textContent = ''; }, 4000); }
-        errorEl.textContent = 'Network error. Is the server running?';
-        errorEl.style.display = 'block';
+        if (errorEl) { errorEl.textContent = 'Network error. Is the server running?'; errorEl.style.display = 'block'; }
+        if (!errorEl) { alert('Network error. Is the server running?'); }
     }
 }
 
-async function handleFriendCodeRegenerate() {
+async function handleFriendCodeRegenerate(preverifiedPw) {
     const input = document.getElementById('fc-password-input');
     const errorEl = document.getElementById('fc-password-error');
     const successEl = document.getElementById('fc-password-success');
-    // Verify stored password against server before regenerating
-    var password = await verifyStoredPassword();
+    var regenStatusEl = document.getElementById('friend-code-status');
+    // Use pre-verified password if provided, otherwise verify now
+    var password = preverifiedPw || '';
+    if (!password) {
+        password = await verifyStoredPassword();
+    }
     if (!password) {
         password = input ? input.value.trim() : '';
     }
@@ -6721,11 +6776,11 @@ async function handleFriendCodeRegenerate() {
         if (successEl) successEl.style.display = 'none';
         return;
     }
+    if (regenStatusEl) regenStatusEl.textContent = '';
     if (!confirm('Are you sure? Your old friend code will stop working immediately. Anyone who had it will no longer be able to send you friend requests.')) return;
-    errorEl.style.display = 'none';
-    successEl.style.display = 'none';
+    if (errorEl) errorEl.style.display = 'none';
+    if (successEl) successEl.style.display = 'none';
     // Show loading state
-    var regenStatusEl = document.getElementById('friend-code-status');
     if (regenStatusEl) { regenStatusEl.textContent = '⏳ Generating new friend code...'; regenStatusEl.style.color = '#888'; }
     try {
         // Generate a new friend code client-side
@@ -6734,15 +6789,15 @@ async function handleFriendCodeRegenerate() {
         // Encrypt it with the password (same as key escrow encryption)
         if (typeof E2ECrypto === 'undefined' || !E2ECrypto.encryptWithPassword) {
             if (regenStatusEl) { regenStatusEl.textContent = '❌ Crypto module missing'; regenStatusEl.style.color = '#f44336'; setTimeout(function() { regenStatusEl.textContent = ''; }, 4000); }
-            errorEl.textContent = 'Crypto module not loaded. Please refresh the page.';
-            errorEl.style.display = 'block';
+            if (errorEl) { errorEl.textContent = 'Crypto module not loaded. Please refresh the page.'; errorEl.style.display = 'block'; }
+            if (!errorEl) { alert('Crypto module not loaded. Please refresh the page.'); }
             return;
         }
         var encrypted = E2ECrypto.encryptWithPassword(newCode, password);
         if (!encrypted || !encrypted.encrypted_private_key || !encrypted.salt || !encrypted.nonce) {
             if (regenStatusEl) { regenStatusEl.textContent = '❌ Encryption failed'; regenStatusEl.style.color = '#f44336'; setTimeout(function() { regenStatusEl.textContent = ''; }, 4000); }
-            errorEl.textContent = 'Encryption failed. Please try again.';
-            errorEl.style.display = 'block';
+            if (errorEl) { errorEl.textContent = 'Encryption failed. Please try again.'; errorEl.style.display = 'block'; }
+            if (!errorEl) { alert('Encryption failed. Please try again.'); }
             return;
         }
         if (regenStatusEl) { regenStatusEl.textContent = '⏳ Uploading to server...'; }
@@ -6761,8 +6816,8 @@ async function handleFriendCodeRegenerate() {
         const data = await res.json();
         if (!res.ok) {
             if (regenStatusEl) { regenStatusEl.textContent = '❌ ' + (data.error || 'Server rejected'); regenStatusEl.style.color = '#f44336'; setTimeout(function() { regenStatusEl.textContent = ''; }, 4000); }
-            errorEl.textContent = data.error || 'Failed to regenerate friend code. Wrong password?';
-            errorEl.style.display = 'block';
+            if (errorEl) { errorEl.textContent = data.error || 'Failed to regenerate friend code. Wrong password?'; errorEl.style.display = 'block'; }
+            if (!errorEl) { alert(data.error || 'Failed to regenerate friend code.'); }
             return;
         }
         if (regenStatusEl) { regenStatusEl.textContent = '✅ New code generated!'; regenStatusEl.style.color = '#4caf50'; setTimeout(function() { regenStatusEl.textContent = ''; }, 3000); }
@@ -6775,16 +6830,16 @@ async function handleFriendCodeRegenerate() {
             el.dataset.visible = '0';
             el.textContent = '••••••••••••••••';
         }
-        successEl.textContent = 'New friend code generated and saved!';
-        successEl.style.display = 'block';
-        errorEl.style.display = 'none';
-        // Close modal after 2 seconds
-        setTimeout(function () {
-            document.getElementById('friend-code-password-modal').style.display = 'none';
-        }, 2000);
+        if (successEl) { successEl.textContent = 'New friend code generated and saved!'; successEl.style.display = 'block'; }
+        if (errorEl) errorEl.style.display = 'none';
+        // Close modal if visible
+        var fcModal = document.getElementById('friend-code-password-modal');
+        if (fcModal && fcModal.style.display !== 'none') {
+            setTimeout(function () { fcModal.style.display = 'none'; }, 2000);
+        }
     } catch (e) {
-        errorEl.textContent = 'Network error. Is the server running?';
-        errorEl.style.display = 'block';
+        if (errorEl) { errorEl.textContent = 'Network error. Is the server running?'; errorEl.style.display = 'block'; }
+        if (!errorEl) { alert('Network error. Is the server running?'); }
     }
 }
 
@@ -11273,7 +11328,6 @@ async function openProfileModal(userId) {
     
     // Show loading state
     document.getElementById('profile-view').style.display = 'block';
-    document.getElementById('profile-edit').style.display = 'none';
     document.getElementById('profile-modal-display-name').textContent = 'Loading...';
     document.getElementById('profile-modal-nickname').textContent = '';
     document.getElementById('profile-modal-description').textContent = '';
@@ -11326,12 +11380,19 @@ function renderProfileView(data, decrypted, uid) {
     
     // Determine display name
     var displayName = (decrypted && decrypted.display_name) || data.display_name || data.username || 'Unknown';
-    var nickname = (decrypted && decrypted.nickname) || '';
-    var description = (decrypted && decrypted.description) || '';
+    var nickname = (decrypted && decrypted.nickname) || data.nickname || '';
+    var description = (decrypted && decrypted.description) || data.description || '';
     
     // Colors — read from decrypted first (own profile), fall back to unencrypted (other users)
     var usernameColor = (decrypted && decrypted.username_color) || data.username_color || '#4fc3f7';
     var borderColor = data.username_border_color || '';
+    var bgColor = (decrypted && decrypted.profile_background_color) || data.profile_background_color || '';
+    
+    // Apply background color to profile card (colors the gap between banner and avatar)
+    var cardEl = document.querySelector('#profile-view .profile-view-card') || document.querySelector('#profile-modal .profile-view-card');
+    if (cardEl) {
+        cardEl.style.background = bgColor || '';
+    }
     
     // Set display name with color
     var dnEl = document.getElementById('profile-modal-display-name');
@@ -11362,10 +11423,10 @@ function renderProfileView(data, decrypted, uid) {
     
     // Set banner
     var bannerImg = document.getElementById('profile-banner-img');
-    // If we have a decrypted banner file_key, use it. Otherwise use the existing file_id
     var bannerFileId = data.profile_banner_file_id;
+    var bannerFileKey = data.profile_banner_file_key || null;
     if (bannerFileId) {
-        getDecryptedFileUrl(bannerFileId, null, function(url) {
+        getDecryptedFileUrl(bannerFileId, bannerFileKey, function(url) {
             if (url) {
                 bannerImg.style.backgroundImage = 'url(' + url + ')';
             } else {
@@ -11379,8 +11440,9 @@ function renderProfileView(data, decrypted, uid) {
     // Set avatar
     var avatarEl = document.getElementById('profile-modal-avatar');
     var picFileId = data.profile_picture_file_id;
+    var picFileKey = data.profile_picture_file_key || null;
     if (picFileId) {
-        getDecryptedFileUrl(picFileId, null, function(url) {
+        getDecryptedFileUrl(picFileId, picFileKey, function(url) {
             if (url) {
                 avatarEl.innerHTML = '<img src="' + url + '" alt="Avatar">';
             } else {
@@ -11407,34 +11469,29 @@ function getDecryptedFileUrl(fileId, fileKey, callback) {
     var cached = profilePicCache[cacheKey];
     if (cached) { callback(cached); return; }
     
-    fetch('/api/files/' + fileId + '/download')
+    authFetch('/api/files/' + fileId + '/download')
         .then(function(r) {
             if (!r.ok) throw new Error('Not found');
             return r.arrayBuffer();
         })
-        .then(function(data) {
+        .then(async function(data) {
             var enc = new Uint8Array(data);
-            // Try to find the key
             var keyB64 = fileKey || fileKeyCache.get(fileId) || (myProfile && myProfile.profile_picture_file_id === fileId && localStorage.getItem('e2e_file_key_' + fileId));
             if (keyB64 && enc.length > 40) {
-                var key = E2ECrypto.base64ToArrayBuffer(keyB64);
-                var nonce = enc.slice(0, 24);
-                var tag = enc.slice(-16);
-                var ct = enc.slice(24, -16);
                 try {
-                    var plain = E2ECrypto.xchacha20poly1305Decrypt(key, ct, tag, nonce);
-                    var blob = new Blob([plain], { type: 'image/png' });
-                    var url = URL.createObjectURL(blob);
-                    profilePicCache[cacheKey] = url;
-                    callback(url);
-                } catch (e) {
-                    // Decryption failed - serve raw
-                    callback(URL.createObjectURL(new Blob([data])));
-                }
-            } else {
-                // No key available - serve raw
-                callback(URL.createObjectURL(new Blob([data])));
+                    var key = new Uint8Array(E2ECrypto.base64ToArrayBuffer(keyB64));
+                    var decrypted = await decryptProfilePicData(key, enc);
+                    if (decrypted) {
+                        var blob = new Blob([decrypted], { type: 'image/png' });
+                        var url = URL.createObjectURL(blob);
+                        profilePicCache[cacheKey] = url;
+                        callback(url);
+                        return;
+                    }
+                } catch (e) {}
             }
+            // No key or decryption failed - serve raw
+            callback(URL.createObjectURL(new Blob([data])));
         })
         .catch(function() { callback(null); });
 }
@@ -11449,7 +11506,6 @@ function linkifyText(text) {
 
 function closeProfileModal() {
     document.getElementById('profile-modal').style.display = 'none';
-    document.getElementById('profile-edit').style.display = 'none';
     document.getElementById('profile-view').style.display = 'block';
     
     // Close edit modal if open
@@ -11492,8 +11548,8 @@ function closeProfileEditModal() {
 function renderProfileEdit() {
     if (!profileOriginalData) return;
     
-    document.getElementById('profile-edit').style.display = 'block';
-    document.getElementById('profile-edit-btn').style.display = 'none';
+    var editBtn = document.getElementById('profile-edit-btn');
+    if (editBtn) editBtn.style.display = 'none';
     
     var data = profileOriginalData.data;
     var decrypted = profileOriginalData.decrypted || {};
@@ -11531,6 +11587,115 @@ function renderProfileEdit() {
     
     // Initialize the live preview
     updateProfileEditPreview();
+}
+
+function updateDescriptionWordCount() {
+    var descInput = document.getElementById('profile-edit-description');
+    var counter = document.getElementById('profile-desc-word-count');
+    if (!descInput || !counter) return;
+    var words = descInput.value.trim() ? descInput.value.trim().split(/\s+/).length : 0;
+    counter.textContent = words + '/300 words';
+    counter.style.color = words > 300 ? 'var(--danger)' : 'var(--text-muted)';
+}
+
+function updateProfileEditPreview() {
+    if (!profileOriginalData) return;
+    var data = profileOriginalData.data;
+    var decrypted = profileOriginalData.decrypted || {};
+    
+    // Update display name preview
+    var dnPreview = document.getElementById('profile-edit-display-name-preview');
+    if (dnPreview) {
+        var dn = document.getElementById('profile-edit-display-name').value || '';
+        dnPreview.textContent = dn || data.display_name || data.username || 'Unknown';
+        dnPreview.style.color = (decrypted && decrypted.username_color) || data.username_color || '#4fc3f7';
+    }
+    
+    // Update nickname preview
+    var nnPreview = document.getElementById('profile-edit-nickname-preview');
+    if (nnPreview) {
+        var nn = document.getElementById('profile-edit-nickname').value || '';
+        nnPreview.textContent = nn;
+        nnPreview.style.display = nn ? 'block' : 'none';
+    }
+    
+    // Update description preview
+    var descPreview = document.getElementById('profile-edit-description-preview');
+    if (descPreview) {
+        var desc = document.getElementById('profile-edit-description').value || '';
+        if (desc) {
+            descPreview.innerHTML = linkifyText(escapeHtml(desc));
+            descPreview.style.display = 'block';
+        } else {
+            descPreview.textContent = '';
+            descPreview.style.display = 'none';
+        }
+    }
+    
+    // Update background color preview
+    var bgColor = document.getElementById('profile-edit-bg-color').value || '';
+    var card = document.querySelector('#profile-edit-modal .profile-edit-preview-card');
+    if (card) card.style.background = bgColor || '';
+    
+    // Update banner preview from current profile
+    var bannerImg = document.getElementById('profile-edit-banner-img');
+    if (bannerImg) {
+        var bannerFileId = data.profile_banner_file_id;
+        var bannerFileKey = data.profile_banner_file_key || null;
+        if (bannerFileId) {
+            getDecryptedFileUrl(bannerFileId, bannerFileKey, function(url) {
+                bannerImg.style.backgroundImage = url ? 'url(' + url + ')' : '';
+            });
+        } else {
+            bannerImg.style.backgroundImage = '';
+        }
+    }
+    
+    // Update avatar preview from current profile
+    var avatarEl = document.getElementById('profile-edit-avatar');
+    if (avatarEl) {
+        var picFileId = data.profile_picture_file_id;
+        var picFileKey = data.profile_picture_file_key || null;
+        var dn = document.getElementById('profile-edit-display-name').value || data.display_name || data.username || 'U';
+        if (picFileId) {
+            getDecryptedFileUrl(picFileId, picFileKey, function(url) {
+                if (url) {
+                    avatarEl.innerHTML = '<img src="' + url + '" alt="Avatar">';
+                } else {
+                    avatarEl.innerHTML = '<div style="font-size:36px;color:#1a1a2e;font-weight:700;">' + escapeHtml(dn.charAt(0).toUpperCase()) + '</div>';
+                }
+            });
+        } else {
+            avatarEl.innerHTML = '<div style="font-size:36px;color:#1a1a2e;font-weight:700;">' + escapeHtml(dn.charAt(0).toUpperCase()) + '</div>';
+        }
+    }
+    
+    // Also update the view modal banner/avatar with correct file keys
+    var viewBannerImg = document.getElementById('profile-banner-img');
+    if (viewBannerImg) {
+        var vbFileId = data.profile_banner_file_id;
+        var vbFileKey = data.profile_banner_file_key || null;
+        if (vbFileId) {
+            getDecryptedFileUrl(vbFileId, vbFileKey, function(url) {
+                viewBannerImg.style.backgroundImage = url ? 'url(' + url + ')' : '';
+            });
+        }
+    }
+    var viewAvatarEl = document.getElementById('profile-modal-avatar');
+    if (viewAvatarEl) {
+        var vpFileId = data.profile_picture_file_id;
+        var vpFileKey = data.profile_picture_file_key || null;
+        var dn2 = (decrypted && decrypted.display_name) || data.display_name || data.username || 'U';
+        if (vpFileId) {
+            getDecryptedFileUrl(vpFileId, vpFileKey, function(url) {
+                if (url) {
+                    viewAvatarEl.innerHTML = '<img src="' + url + '" alt="Avatar">';
+                } else {
+                    viewAvatarEl.innerHTML = '<div style="font-size:36px;color:#1a1a2e;font-weight:700;">' + escapeHtml(dn2.charAt(0).toUpperCase()) + '</div>';
+                }
+            });
+        }
+    }
 }
 
 function renderEditGlowOptions(baseColor) {
@@ -11725,6 +11890,8 @@ async function saveProfile() {
         // Build API request
         var body = {
             display_name: displayName,
+            nickname: nickname,
+            description: description,
             username_color: color,
             encrypted_profile_data: encrypted.encrypted_private_key,
             encrypted_profile_salt: encrypted.salt,
@@ -11739,9 +11906,11 @@ async function saveProfile() {
         // Handle banner and PFP uploads
         if (profileBannerFileId) {
             body.profile_banner_file_id = profileBannerFileId;
+            body.profile_banner_file_key = profileBannerFileKey || null;
         }
         if (profilePfpFileId) {
             body.profile_picture_file_id = profilePfpFileId;
+            body.profile_picture_file_key = profilePfpFileKey || null;
         }
         
         var res = await authFetch('/api/profile', {
@@ -11777,7 +11946,7 @@ async function saveProfile() {
             renderProfileView(data2, profileData, user.id);
         }
         
-        document.getElementById('profile-edit').style.display = 'none';
+        document.getElementById('profile-edit-modal').style.display = 'none';
         profileEditMode = false;
         
         setTimeout(function() { statusEl.style.display = 'none'; }, 2000);
@@ -11803,26 +11972,32 @@ function openBannerCrop(file) {
         var dataUrl = e.target.result;
         cropImg.src = dataUrl;
         container.style.display = 'block';
+        container.style.width = '';
         
         cropImg.onload = function() {
             var frame = cropImg.parentElement;
-            var frameW = frame.offsetWidth;
-            var frameH = frame.offsetHeight;
             var imgW = cropImg.naturalWidth;
             var imgH = cropImg.naturalHeight;
             
-            // Scale image to COVER the frame (no black space)
-            var scale = Math.max(frameW / imgW, frameH / imgH);
+            // Scale image to FIT (show all corners) — compute display size first
+            var maxFrameW = frame.offsetWidth;
+            var maxFrameH = frame.offsetHeight;
+            var scale = Math.min(maxFrameW / imgW, maxFrameH / imgH);
             var dispW = Math.round(imgW * scale);
             var dispH = Math.round(imgH * scale);
+            
+            // Resize the frame to match the image (removes black space)
+            frame.style.width = dispW + 'px';
+            frame.style.height = dispH + 'px';
+            container.style.width = dispW + 'px';
             
             cropImg.style.width = dispW + 'px';
             cropImg.style.height = dispH + 'px';
             cropImg.style.display = 'block';
             
-            // Use frame dimensions as the effective crop area (image covers the frame)
-            var effectiveW = Math.min(dispW, frameW);
-            var effectiveH = Math.min(dispH, frameH);
+            // Use image dimensions as the crop area (no overflow, no black space)
+            var effectiveW = dispW;
+            var effectiveH = dispH;
             
             // Center the image initially so all edges of the image can be reached
             var initOffX = -(dispW - effectiveW) / 2;
@@ -11903,8 +12078,8 @@ function openBannerCrop(file) {
                 var e = ev.touches ? ev.touches[0] : ev;
                 var dx = e.clientX - bannerCropState.dragStartX;
                 var dy = e.clientY - bannerCropState.dragStartY;
-                var maxX = bannerCropState.fullDispW - bannerCropState.width;
-                var maxY = bannerCropState.fullDispH - bannerCropState.height;
+                var maxX = bannerCropState.dispW - bannerCropState.width;
+                var maxY = bannerCropState.dispH - bannerCropState.height;
                 bannerCropState.startX = Math.max(0, Math.min(maxX, bannerCropState.startLeft + dx));
                 bannerCropState.startY = Math.max(0, Math.min(maxY, bannerCropState.startTop + dy));
                 panImageForCrop();
@@ -11928,13 +12103,13 @@ function openBannerCrop(file) {
                 if (!bannerCropState.isResizing) return;
                 var e = ev.touches ? ev.touches[0] : ev;
                 var dx = e.clientX - bannerCropState.dragStartX;
-                var maxW = bannerCropState.fullDispW - bannerCropState.startLeft;
-                var maxH = bannerCropState.fullDispH - bannerCropState.startTop;
+                var maxW = bannerCropState.dispW - bannerCropState.startLeft;
+                var maxH = bannerCropState.dispH - bannerCropState.startTop;
                 var maxSize = Math.min(maxW, maxH);
                 var newW = Math.max(40, Math.min(maxSize, bannerCropState.startSize + dx));
                 var newH = Math.round(newW * (bannerCropState.height / bannerCropState.width));
-                if (newH > bannerCropState.fullDispH - bannerCropState.startTop) {
-                    newH = bannerCropState.fullDispH - bannerCropState.startTop;
+                if (newH > bannerCropState.dispH - bannerCropState.startTop) {
+                    newH = bannerCropState.dispH - bannerCropState.startTop;
                     newW = Math.round(newH * (bannerCropState.width / bannerCropState.height));
                 }
                 bannerCropState.width = newW;
@@ -12018,20 +12193,22 @@ function cancelBannerCrop() {
         bannerCropState._cleanup();
     }
     bannerCropState = null;
-    // Restore original banner in the preview
+    // Restore original banner in both view and edit previews
     if (profileOriginalData) {
         var data = profileOriginalData.data;
-        var decrypted = profileOriginalData.decrypted;
         var bannerImg = document.getElementById('profile-banner-img');
-        if (bannerImg) {
-            var bannerFileId = data.profile_banner_file_id;
-            if (bannerFileId) {
-                getDecryptedFileUrl(bannerFileId, null, function(url) {
-                    bannerImg.style.backgroundImage = url ? 'url(' + url + ')' : '';
-                });
-            } else {
-                bannerImg.style.backgroundImage = '';
-            }
+        var editBannerImg = document.getElementById('profile-edit-banner-img');
+        var restoreFn = function(url) {
+            var bgVal = url ? 'url(' + url + ')' : '';
+            if (bannerImg) bannerImg.style.backgroundImage = bgVal;
+            if (editBannerImg) editBannerImg.style.backgroundImage = bgVal;
+        };
+        var bannerFileId = data.profile_banner_file_id;
+        var bannerFileKey = data.profile_banner_file_key || null;
+        if (bannerFileId) {
+            getDecryptedFileUrl(bannerFileId, bannerFileKey, restoreFn);
+        } else {
+            restoreFn(null);
         }
     }
 }
@@ -12055,10 +12232,11 @@ async function processBannerCrop() {
         if (!blob) throw new Error('Canvas to blob failed');
         
         var croppedFile = new File([blob], 'banner_crop.png', { type: 'image/png' });
-        var fileId = await uploadBannerImage(croppedFile);
-        if (!fileId) throw new Error('Upload failed');
+        var uploadResult = await uploadBannerImage(croppedFile);
+        if (!uploadResult) throw new Error('Upload failed');
         
-        profileBannerFileId = fileId;
+        profileBannerFileId = uploadResult.fileId;
+        profileBannerFileKey = uploadResult.fileKey;
         document.getElementById('profile-banner-crop-container').style.display = 'none';
         if (bannerCropState && bannerCropState._cleanup) bannerCropState._cleanup();
         bannerCropState = null;
@@ -12085,26 +12263,32 @@ function openPfpCrop(file) {
         var dataUrl = e.target.result;
         cropImg.src = dataUrl;
         container.style.display = 'block';
+        container.style.width = '';
         
         cropImg.onload = function() {
             var frame = cropImg.parentElement;
-            var frameW = frame.offsetWidth;
-            var frameH = frame.offsetHeight;
             var imgW = cropImg.naturalWidth;
             var imgH = cropImg.naturalHeight;
             
-            // Scale image to COVER the frame (no black space)
-            var scale = Math.max(frameW / imgW, frameH / imgH);
+            // Scale image to FIT (show all corners) — compute display size first
+            var maxFrameW = frame.offsetWidth;
+            var maxFrameH = frame.offsetHeight;
+            var scale = Math.min(maxFrameW / imgW, maxFrameH / imgH);
             var dispW = Math.round(imgW * scale);
             var dispH = Math.round(imgH * scale);
+            
+            // Resize the frame to match the image (removes black space)
+            frame.style.width = dispW + 'px';
+            frame.style.height = dispH + 'px';
+            container.style.width = dispW + 'px';
             
             cropImg.style.width = dispW + 'px';
             cropImg.style.height = dispH + 'px';
             cropImg.style.display = 'block';
             
-            // Use frame dimensions as the effective crop area
-            var effectiveW = Math.min(dispW, frameW);
-            var effectiveH = Math.min(dispH, frameH);
+            // Use image dimensions as the crop area (no overflow, no black space)
+            var effectiveW = dispW;
+            var effectiveH = dispH;
             
             // Center the image initially so all edges can be reached
             var initOffX = -(dispW - effectiveW) / 2;
@@ -12183,8 +12367,8 @@ function openPfpCrop(file) {
                 var e = ev.touches ? ev.touches[0] : ev;
                 var dx = e.clientX - pfpCropState.dragStartX;
                 var dy = e.clientY - pfpCropState.dragStartY;
-                var maxX = pfpCropState.fullDispW - pfpCropState.size;
-                var maxY = pfpCropState.fullDispH - pfpCropState.size;
+                var maxX = pfpCropState.dispW - pfpCropState.size;
+                var maxY = pfpCropState.dispH - pfpCropState.size;
                 pfpCropState.startX = Math.max(0, Math.min(maxX, pfpCropState.startLeft + dx));
                 pfpCropState.startY = Math.max(0, Math.min(maxY, pfpCropState.startTop + dy));
                 panPfpImage();
@@ -12208,7 +12392,7 @@ function openPfpCrop(file) {
                 if (!pfpCropState.isResizing) return;
                 var e = ev.touches ? ev.touches[0] : ev;
                 var dx = e.clientX - pfpCropState.dragStartX;
-                var maxSize = Math.min(pfpCropState.fullDispW - pfpCropState.startLeft, pfpCropState.fullDispH - pfpCropState.startTop);
+                var maxSize = Math.min(pfpCropState.dispW - pfpCropState.startLeft, pfpCropState.dispH - pfpCropState.startTop);
                 pfpCropState.size = Math.max(20, Math.min(maxSize, pfpCropState.startSize + dx));
                 panPfpImage();
                 updatePfpCropBox();
@@ -12303,8 +12487,9 @@ function cancelPfpCrop() {
             if (editAvatarEl) editAvatarEl.innerHTML = html;
         };
         var picFileId = data.profile_picture_file_id;
+        var picFileKey = data.profile_picture_file_key || null;
         if (picFileId) {
-            getDecryptedFileUrl(picFileId, null, restoreFn);
+            getDecryptedFileUrl(picFileId, picFileKey, restoreFn);
         } else {
             restoreFn(null);
         }
@@ -12328,10 +12513,11 @@ async function processPfpCrop() {
         if (!blob) throw new Error('Canvas to blob failed');
         
         var croppedFile = new File([blob], 'avatar_crop.png', { type: 'image/png' });
-        var fileId = await uploadBannerImage(croppedFile);
-        if (!fileId) throw new Error('Upload failed');
+        var uploadResult = await uploadBannerImage(croppedFile);
+        if (!uploadResult) throw new Error('Upload failed');
         
-        profilePfpFileId = fileId;
+        profilePfpFileId = uploadResult.fileId;
+        profilePfpFileKey = uploadResult.fileKey;
         document.getElementById('profile-pfp-crop-container').style.display = 'none';
         if (pfpCropState && pfpCropState._cleanup) pfpCropState._cleanup();
         pfpCropState = null;
@@ -12345,51 +12531,42 @@ async function processPfpCrop() {
     }
 }
 
-// Upload a processed banner image file with encryption and return its file ID
+// Upload a processed image file with encryption, return { fileId, fileKey }
 async function uploadBannerImage(file) {
-    // Use E2E encryption for banner images
     var fileKey = E2ECrypto.generateFileKey();
-    var encResult = await encryptFileChunk(file, fileKey);
-    
+    var fileKeyB64 = E2ECrypto.arrayBufferToBase64(fileKey);
+
     var initRes = await authFetch('/api/files/init', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ size: encResult.data.length, mime: file.type || 'image/png' })
+        body: JSON.stringify({ size: file.size, mime: file.type || 'image/png' })
     });
     if (!initRes.ok) throw new Error('Failed to init upload');
     var initData = await initRes.json();
     var fileId = initData.file_id;
-    
-    await authFetch('/api/files/' + fileId + '/chunk/0', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/octet-stream' },
-        body: encResult.data
-    });
-    
+
+    var CHUNK_SIZE = 64 * 1024;
+    var totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+
+    for (var i = 0; i < totalChunks; i++) {
+        var start = i * CHUNK_SIZE;
+        var end = Math.min(start + CHUNK_SIZE, file.size);
+        var chunkData = new Uint8Array(await file.slice(start, end).arrayBuffer());
+        var encryptedChunk = E2ECrypto.encryptFileChunk(fileKey, chunkData);
+        var chunkRes = await authFetch('/api/files/' + fileId + '/chunk/' + i, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/octet-stream' },
+            body: encryptedChunk
+        });
+        if (!chunkRes.ok) throw new Error('Failed to upload chunk ' + (i + 1));
+    }
+
     var completeRes = await authFetch('/api/files/' + fileId + '/complete', { method: 'POST' });
     if (!completeRes.ok) throw new Error('Failed to complete upload');
-    
-    // Cache the file key
-    fileKeyCache.set(fileId, E2ECrypto.arrayBufferToBase64(fileKey));
-    
-    return fileId;
-}
 
-// Helper: convert File to ArrayBuffer
-function fileToArrayBuffer(file) {
-    return new Promise(function(resolve, reject) {
-        var reader = new FileReader();
-        reader.onload = function(e) { resolve(e.target.result); };
-        reader.onerror = function() { reject(new Error('File read failed')); };
-        reader.readAsArrayBuffer(file);
-    });
-}
+    fileKeyCache.set(fileId, fileKeyB64);
 
-// Encrypt a file chunk using E2E file key
-async function encryptFileChunk(file, fileKey) {
-    var data = await fileToArrayBuffer(file);
-    var encrypted = E2ECrypto.encryptFileChunk(new Uint8Array(data), fileKey);
-    return { data: encrypted };
+    return { fileId: fileId, fileKey: fileKeyB64 };
 }
 
 // ===== Favorite GIF on .gif file cards =====

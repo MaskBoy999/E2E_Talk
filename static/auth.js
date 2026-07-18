@@ -29,35 +29,22 @@ document.addEventListener('DOMContentLoaded', () => {
     setupToggleVisibility('toggle-register-confirm-password', 'register-confirm-password');
 
 
-    // --- Check for stale HttpOnly cookies from a previous session ---
-    // JS cannot read or clear HttpOnly cookies; we can only detect them.
-    function checkStaleSession() {
+    // --- Auto-clear stale HttpOnly cookies from a previous session ---
+    // JS cannot read or clear HttpOnly cookies, so we ask the server to clear them.
+    function autoClearStaleSession() {
         fetch('/api/me', { credentials: 'include', headers: {} })
             .then(function(r) {
                 if (!r.ok) return;
                 r.json().then(function(data) {
                     if (data && data.username) {
-                        var warning = document.getElementById('stale-session-warning');
-                        if (warning) {
-                            warning.style.display = 'block';
-                            warning.innerHTML = '⚠️ Stale session detected for <strong>' + escapeHtml(data.username) +
-                                '</strong>. Click below to clear it before logging in with a different account.' +
-                                '<br><button id="clear-stale-session-btn" class="btn btn-danger" style="margin-top:8px;padding:6px 16px;font-size:13px;">Clear Stale Session</button>';
-                            document.getElementById('clear-stale-session-btn').addEventListener('click', function() {
-                                fetch('/api/logout', { method: 'POST', credentials: 'include' }).catch(function() {});
-                                warning.innerHTML = '✅ Stale session cleared. You can now log in.';
-                                warning.style.background = 'rgba(76,175,80,0.1)';
-                                warning.style.borderColor = '#4caf50';
-                                warning.style.color = '#4caf50';
-                                setTimeout(function() { warning.style.display = 'none'; }, 3000);
-                            });
-                        }
+                        // Stale session detected — clear it automatically
+                        fetch('/api/logout', { method: 'POST', credentials: 'include' }).catch(function() {});
                     }
                 });
             })
             .catch(function() {});
     }
-    checkStaleSession();
+    autoClearStaleSession();
 
     const loginForm = document.getElementById('login-form');
     const registerForm = document.getElementById('register-form');
@@ -92,28 +79,6 @@ document.addEventListener('DOMContentLoaded', () => {
         errorDiv.textContent = msg;
         errorDiv.style.display = 'block';
     }
-
-    // Clear all client-side data: localStorage, sessionStorage, and cookies
-    function clearAllClientData() {
-        localStorage.clear();
-        try { sessionStorage.clear(); } catch (_) {}
-        document.cookie.split(';').forEach(function(c) {
-            document.cookie = c.replace(/^ +/, '').replace(/=.*/, '=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/');
-        });
-    }
-
-    // Clear All Data button - nuke everything and reload
-    document.getElementById('clear-all-data-btn').addEventListener('click', function () {
-        if (!confirm('This will clear ALL local data (logins, keys, settings) and reload the page. Continue?')) return;
-        // Attempt server logout to clear HttpOnly cookie (best-effort, send token if present)
-        var t = localStorage.getItem('token');
-        if (t) {
-            fetch('/api/logout', { method: 'POST', headers: { 'Authorization': 'Bearer ' + t } }).catch(function() {});
-        }
-        clearAllClientData();
-        // Redirect directly to login page since we already called serverLogout above.
-        window.location.href = '/login.html';
-    });
 
     function setLoading(form, loading) {
         const btn = form.querySelector('button[type="submit"]');

@@ -101,29 +101,33 @@ pub async fn logout(
     // Validate the token if present (optional)
     let _ = extract_user(&headers, &state);
 
-    // Clear the HttpOnly cookie by setting Max-Age=0 (both with and without Secure flag for HTTP/HTTPS)
+    // Clear all known cookies by overwriting with blank expired values
     let mut resp_headers = HeaderMap::new();
-    resp_headers.insert(
-        "set-cookie",
-        HeaderValue::from_str(
-            "token=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"
-        ).unwrap(),
-    );
+    for cookie_name in &["token", "session", "connect.sid", "xsrf-token"] {
+        resp_headers.append(
+            "set-cookie",
+            HeaderValue::from_str(
+                &format!("{}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0", cookie_name)
+            ).unwrap(),
+        );
+    }
 
     (StatusCode::OK, resp_headers, Json(serde_json::json!({"ok": true})))
 }
 
-/// GET /api/logout — clears the HttpOnly cookie and redirects to login.html
+/// GET /api/logout — clears all cookies and redirects to login.html
 pub async fn logout_get(
     State(_state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     let mut resp_headers = HeaderMap::new();
-    resp_headers.insert(
-        "set-cookie",
-        HeaderValue::from_str(
-            "token=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"
-        ).unwrap(),
-    );
+    for cookie_name in &["token", "session", "connect.sid", "xsrf-token"] {
+        resp_headers.append(
+            "set-cookie",
+            HeaderValue::from_str(
+                &format!("{}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0", cookie_name)
+            ).unwrap(),
+        );
+    }
     resp_headers.insert(
         "location",
         HeaderValue::from_str("/login.html").unwrap(),
@@ -2939,6 +2943,42 @@ pub async fn update_profile(
         }
     }
 
+    // Handle description update
+    if let Some(ref description) = req.description {
+        if let Err(e) = state.db.update_description(&user_id, description) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
+        }
+    }
+
+    // Handle nickname update
+    if let Some(ref nickname) = req.nickname {
+        if let Err(e) = state.db.update_nickname(&user_id, nickname) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
+        }
+    }
+
+    // Handle profile banner
+    if let Some(ref banner_file_id) = req.profile_banner_file_id {
+        // Verify the file exists and is complete
+        let file_info = match state.db.get_file_info(banner_file_id) {
+            Ok(f) => f,
+            Err(_) => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Banner file not found"}))).into_response(),
+        };
+        if !file_info.upload_complete {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Banner upload not complete"}))).into_response();
+        }
+        if !file_info.mime_type.starts_with("image/") {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Only image files allowed for banner"}))).into_response();
+        }
+        if file_info.uploader_id != user_id {
+            return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Not your file"}))).into_response();
+        }
+        let banner_key = req.profile_banner_file_key.as_deref();
+        if let Err(e) = state.db.update_profile_banner(&user_id, Some(banner_file_id), banner_key) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
+        }
+    }
+
     // Save encrypted profile data if provided (password-based encryption)
     if let (Some(data), Some(salt), Some(nonce)) = (&req.encrypted_profile_data, &req.encrypted_profile_salt, &req.encrypted_profile_nonce) {
         let _ = state.db.save_encrypted_profile(&user_id, data, salt, nonce);
@@ -2946,13 +2986,16 @@ pub async fn update_profile(
 
     // Broadcast profile update to the user, friends, and all server members
     if let Ok(profile) = state.db.get_user_profile(&user_id) {
-        let (_id, username, display_name, profile_picture_file_id, _fk, username_color, username_border_color, _, _, _, _) = profile;
+        let (_id, username, display_name, profile_picture_file_id, _fk, username_color, username_border_color, banner_id, _, description, nickname) = profile;
         let profile_msg = serde_json::json!({
             "type": "profile_updated",
             "user_id": user_id,
             "username": username,
             "display_name": display_name,
             "profile_picture_file_id": profile_picture_file_id,
+            "profile_banner_file_id": banner_id,
+            "description": description,
+            "nickname": nickname,
             "username_color": username_color.unwrap_or("#4fc3f7".to_string()),
             "username_border_color": username_border_color,
         });
@@ -3019,14 +3062,16 @@ pub async fn delete_me(
     };
     match state.db.delete_user(&user_id) {
         Ok(()) => {
-            // Clear the HttpOnly cookie so the user is fully logged out
+            // Clear all cookies so the user is fully logged out
             let mut resp_headers = HeaderMap::new();
-            resp_headers.insert(
-                "set-cookie",
-                HeaderValue::from_str(
-                    "token=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"
-                ).unwrap(),
-            );
+            for cookie_name in &["token", "session", "connect.sid", "xsrf-token"] {
+                resp_headers.append(
+                    "set-cookie",
+                    HeaderValue::from_str(
+                        &format!("{}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0", cookie_name)
+                    ).unwrap(),
+                );
+            }
             (StatusCode::OK, resp_headers, Json(serde_json::json!({"ok": true}))).into_response()
         },
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
