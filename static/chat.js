@@ -4154,8 +4154,17 @@ function connectWebSocket(t) {
                     await loadDmConversations();
                     renderDmSidebar();
                 }
-                // currentDmOtherUser is an object { id, username, ... }, compare by .id
+                // If currently viewing the DM with the unfriended user, clear the view
                 if (data.by_user_id && currentDmOtherUser && data.by_user_id === currentDmOtherUser.id) {
+                    currentDmChannelId = null;
+                    currentDmOtherUser = null;
+                    document.getElementById('channel-name').textContent = 'Select a conversation';
+                    document.getElementById('message-input').disabled = true;
+                    document.getElementById('send-btn').disabled = true;
+                    document.getElementById('message-list').innerHTML = '<div class="welcome">Select a conversation to start chatting</div>';
+                }
+                // Also check by dmChannelId: if the current DM channel no longer exists
+                if (viewMode === 'dms' && currentDmChannelId && !dmConversations.find(function(c) { return c.dm_channel_id === currentDmChannelId; })) {
                     currentDmChannelId = null;
                     currentDmOtherUser = null;
                     document.getElementById('channel-name').textContent = 'Select a conversation';
