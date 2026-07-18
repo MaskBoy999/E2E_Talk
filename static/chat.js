@@ -1467,6 +1467,14 @@ document.addEventListener('DOMContentLoaded', () => {
             clearInterval(_cameraCaptureCountdownTimer);
             _cameraCaptureCountdownTimer = null;
         }
+        if (_cameraFlashTimer) {
+            clearTimeout(_cameraFlashTimer);
+            _cameraFlashTimer = null;
+        }
+        if (_cameraCapturePreTimer) {
+            clearTimeout(_cameraCapturePreTimer);
+            _cameraCapturePreTimer = null;
+        }
         if (_cameraCaptureCountdownEl) _cameraCaptureCountdownEl.style.display = 'none';
         if (_cameraCaptureFlashEl) _cameraCaptureFlashEl.style.display = 'none';
         if (_cameraCaptureStream) {
@@ -1507,18 +1515,23 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (e) { /* shutter sound not critical */ }
     }
 
+    var _cameraCapturePreTimer = null; // setTimeout ID for the pre-capture flash hold
+    
     function captureCameraPhoto() {
         if (!_cameraCaptureVideo || !_cameraCaptureVideo.videoWidth) return;
         playShutterSound();
-        // Flash effect: Flash BEFORE capturing the image so it's visible on screen
-        // before the frame is grabbed. We use requestAnimationFrame to let the
-        // browser paint the flash overlay before we draw to the canvas.
-        if (_cameraCaptureFlashOn && _cameraCaptureFlashEl) {
-            _cameraCaptureFlashEl.style.display = '';
+        _cameraCapturePreTimer = null;
+        
+        // If back camera with flash, ensure the hardware torch is actively lit
+        if (_cameraCaptureFlashOn && _cameraCaptureFacing === 'environment' && _cameraCaptureStream) {
+            var track = _cameraCaptureStream.getVideoTracks()[0];
+            if (track && track.getCapabilities && track.getCapabilities().torch) {
+                track.applyConstraints({ advanced: [{ torch: true }] }).catch(function(){});
+            }
         }
-        // Use requestAnimationFrame to let the browser composite the flash overlay
-        // before we capture the frame. If rAF isn't available, capture immediately.
-        var doCapture = function () {
+        
+        // Shared capture: draws video frame to canvas and creates the preview blob
+        function doCapture() {
             if (!_cameraCaptureCanvas) {
                 _cameraCaptureCanvas = document.createElement('canvas');
                 _cameraCaptureCtx = _cameraCaptureCanvas.getContext('2d');
@@ -1535,37 +1548,54 @@ document.addEventListener('DOMContentLoaded', () => {
             if (_cameraCaptureMirror) {
                 _cameraCaptureCtx.setTransform(1, 0, 0, 1, 0, 0);
             }
-            // Keep flash on for 800ms total from when it was first shown
-            // so it covers the entire capture moment and fades smoothly
-            if (_cameraCaptureFlashOn && _cameraCaptureFlashEl) {
-                // Cancel any existing flash timer
-                if (_cameraFlashTimer) {
-                    clearTimeout(_cameraFlashTimer);
-                }
-                _cameraFlashTimer = setTimeout(function () {
-                    if (_cameraCaptureFlashEl) _cameraCaptureFlashEl.style.display = 'none';
-                    _cameraFlashTimer = null;
-                }, 800);
-            }
             _cameraCaptureCanvas.toBlob(function (blob) {
-                // Keep flash on a bit longer during the preview transition
-                if (_cameraCaptureFlashOn && _cameraCaptureFlashEl) {
-                    // Flash already has a timer running, let it finish naturally
-                }
                 var url = URL.createObjectURL(blob);
                 _cameraPhotoPreviewData = { blob: blob, url: url };
                 var previewImg = document.getElementById('camera-photo-preview-img');
                 if (previewImg) previewImg.src = url;
                 _cameraCaptureModal.style.display = 'none';
-                closeCameraCaptureStream();
+                
+                // If flash is on: keep the camera stream (and torch) alive during
+                // the post-capture flash hold so the subject stays lit. The stream
+                // and overlay are cleaned up after a 1s delay.
+                if (_cameraCaptureFlashOn && _cameraCaptureFlashEl) {
+                    if (_cameraFlashTimer) {
+                        clearTimeout(_cameraFlashTimer);
+                    }
+                    _cameraFlashTimer = setTimeout(function () {
+                        closeCameraCaptureStream();
+                        if (_cameraCaptureFlashEl) _cameraCaptureFlashEl.style.display = 'none';
+                        _cameraFlashTimer = null;
+                    }, 1000);
+                } else {
+                    // No flash: tear down immediately
+                    closeCameraCaptureStream();
+                    if (_cameraCaptureFlashEl) _cameraCaptureFlashEl.style.display = 'none';
+                }
+                
                 _cameraPhotoPreviewEl.style.display = 'flex';
             }, 'image/png');
-        };
-        // Use requestAnimationFrame to ensure the flash is painted before capture
-        if (typeof requestAnimationFrame !== 'undefined') {
-            requestAnimationFrame(doCapture);
+        }
+        
+        if (_cameraCaptureFlashOn && _cameraCaptureFlashEl) {
+            // Flash on: show overlay, wait 1s for torch/exposure to settle, capture,
+            // then keep flash and stream alive for 1s more after capture
+            _cameraCaptureFlashEl.style.display = '';
+            _cameraCapturePreTimer = setTimeout(function () {
+                _cameraCapturePreTimer = null;
+                if (typeof requestAnimationFrame !== 'undefined') {
+                    requestAnimationFrame(doCapture);
+                } else {
+                    doCapture();
+                }
+            }, 1000);
         } else {
-            doCapture();
+            // Flash off: capture immediately
+            if (typeof requestAnimationFrame !== 'undefined') {
+                requestAnimationFrame(doCapture);
+            } else {
+                doCapture();
+            }
         }
     }
     
@@ -11385,7 +11415,7 @@ function renderProfileView(data, decrypted, uid) {
     
     // Colors — read from decrypted first (own profile), fall back to unencrypted (other users)
     var usernameColor = (decrypted && decrypted.username_color) || data.username_color || '#4fc3f7';
-    var borderColor = data.username_border_color || '';
+    var borderColor = (decrypted && decrypted.username_border_color) || data.username_border_color || '';
     var bgColor = (decrypted && decrypted.profile_background_color) || data.profile_background_color || '';
     
     // Apply background color to profile card (colors the gap between banner and avatar)
@@ -11874,6 +11904,7 @@ async function saveProfile() {
             nickname: nickname,
             description: description,
             username_color: color,
+            username_border_color: borderColor,
             profile_background_color: bgColor
         };
         

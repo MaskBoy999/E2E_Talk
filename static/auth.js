@@ -31,6 +31,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // --- Auto-clear stale HttpOnly cookies from a previous session ---
     // JS cannot read or clear HttpOnly cookies, so we ask the server to clear them.
+    // Also clear any client-side non-HttpOnly cookies by overwriting with expired dates.
+    function clearClientCookies() {
+        document.cookie.split(';').forEach(function(c) {
+            document.cookie = c.replace(/^ +/, '').replace(/=.*/, '=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/');
+        });
+    }
+
     function autoClearStaleSession() {
         fetch('/api/me', { credentials: 'include', headers: {} })
             .then(function(r) {
@@ -38,6 +45,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 r.json().then(function(data) {
                     if (data && data.username) {
                         // Stale session detected — clear it automatically
+                        // First clear client-side cookies by overwriting with expired dates
+                        clearClientCookies();
+                        // Then ask the server to clear the HttpOnly cookie
                         fetch('/api/logout', { method: 'POST', credentials: 'include' }).catch(function() {});
                     }
                 });
