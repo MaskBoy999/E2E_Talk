@@ -4686,12 +4686,6 @@ body {
 
 /* ===== Ultrawide / Large Screens: 1600px and above ===== */
 @media (min-width: 1600px) {
-    /* Cap the message list width so lines don't become absurdly long */
-    .message-list {
-        max-width: 1000px;
-        margin: 0 auto;
-    }
-
     /* Slightly larger sidebar for spacious screens */
     .sidebar {
         max-width: 340px;
