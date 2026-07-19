@@ -3892,7 +3892,8 @@ function connectWebSocket(t) {
     ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
 
     ws.onopen = () => {
-        ws.send(JSON.stringify({ type: 'auth', token: t }));
+        var devId = localStorage.getItem('e2e_device_key');
+        ws.send(JSON.stringify({ type: 'auth', token: t, device_id: devId || undefined }));
     };
 
     ws.onmessage = async (event) => {

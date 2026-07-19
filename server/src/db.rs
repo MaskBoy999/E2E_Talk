@@ -338,6 +338,9 @@ impl Database {
         // Migration 013: notification sound sync
         let _ = conn.execute_batch(include_str!("../migrations/013_notification_sound.sql"));
 
+        // Migration 018: user_devices, device_id on keys, encrypted sticker keys
+        let _ = conn.execute_batch(include_str!("../migrations/018_user_devices.sql"));
+
         // Migration 021: profile background color
         let bg_color_exists: bool = conn
             .query_row(
@@ -1456,26 +1459,110 @@ impl Database {
         Ok(())
     }
 
-    // --- Multi-device public keys ---
+    // --- User Devices (multi-device support) ---
 
-    pub fn add_user_public_key(&self, user_id: &str, public_key: &[u8]) -> Result<(), String> {
+    pub fn register_device(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        device_name: &str,
+        identity_key: &[u8],
+        signed_prekey: Option<&[u8]>,
+        signed_prekey_signature: Option<&[u8]>,
+        one_time_prekey: Option<&[u8]>,
+        one_time_prekey_id: Option<i32>,
+    ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let id = Uuid::new_v4().to_string();
         conn.execute(
-            "INSERT INTO user_public_keys (id, user_id, public_key) VALUES (?1, ?2, ?3)",
-            params![id, user_id, public_key],
+            "INSERT OR REPLACE INTO user_devices (device_id, user_id, device_name, identity_key, signed_prekey, signed_prekey_signature, one_time_prekey, one_time_prekey_id, last_active_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, CURRENT_TIMESTAMP)",
+            params![device_id, user_id, device_name, identity_key, signed_prekey, signed_prekey_signature, one_time_prekey, one_time_prekey_id],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
     }
 
-    pub fn get_all_user_public_keys(&self, user_id: &str) -> Result<Vec<Vec<u8>>, String> {
+    pub fn get_user_devices(&self, user_id: &str) -> Result<Vec<(String, String, Vec<u8>, Option<Vec<u8>>, Option<String>)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT public_key FROM user_public_keys WHERE user_id = ?1")
+            .prepare("SELECT device_id, COALESCE(device_name, ''), identity_key, signed_prekey, last_active_at FROM user_devices WHERE user_id = ?1 ORDER BY created_at")
+            .map_err(|e| e.to_string())?;
+        let devices = stmt
+            .query_map(params![user_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, Option<Vec<u8>>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(devices)
+    }
+
+    pub fn get_device_identity_key(&self, user_id: &str, device_id: &str) -> Result<Vec<u8>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT identity_key FROM user_devices WHERE user_id = ?1 AND device_id = ?2",
+            params![user_id, device_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| "Device not found".to_string())
+    }
+
+    pub fn remove_device(&self, user_id: &str, device_id: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let rows = conn.execute(
+            "DELETE FROM user_devices WHERE user_id = ?1 AND device_id = ?2",
+            params![user_id, device_id],
+        )
+        .map_err(|e| e.to_string())?;
+        if rows == 0 {
+            return Ok(false);
+        }
+        // Clean up server_keys and dm_keys for this device
+        conn.execute(
+            "DELETE FROM server_keys WHERE user_id = ?1 AND device_id = ?2",
+            params![user_id, device_id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM dm_keys WHERE user_id = ?1 AND device_id = ?2",
+            params![user_id, device_id],
+        )
+        .map_err(|e| e.to_string())?;
+        // Clean up per-device escrow
+        conn.execute(
+            "DELETE FROM user_device_escrow WHERE user_id = ?1 AND device_id = ?2",
+            params![user_id, device_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(true)
+    }
+
+    pub fn update_device_last_active(&self, user_id: &str, device_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE user_devices SET last_active_at = CURRENT_TIMESTAMP WHERE user_id = ?1 AND device_id = ?2",
+            params![user_id, device_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    // Legacy: get all identity keys across all devices for a user
+    pub fn get_all_user_identity_keys(&self, user_id: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT device_id, identity_key FROM user_devices WHERE user_id = ?1")
             .map_err(|e| e.to_string())?;
         let keys = stmt
-            .query_map(params![user_id], |row| row.get(0))
+            .query_map(params![user_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })
             .map_err(|e| e.to_string())?
             .filter_map(|r| r.ok())
             .collect();
@@ -1483,6 +1570,38 @@ impl Database {
     }
 
     // --- Key Escrow ---
+
+    // --- Per-Device Key Escrow ---
+
+    pub fn save_device_escrowed_key(&self, user_id: &str, device_id: &str, encrypted_key: &[u8], salt: &[u8], nonce: &[u8]) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO user_device_escrow (user_id, device_id, encrypted_private_key, salt, nonce, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, CURRENT_TIMESTAMP)
+             ON CONFLICT(user_id, device_id) DO UPDATE SET
+                encrypted_private_key = excluded.encrypted_private_key,
+                salt = excluded.salt,
+                nonce = excluded.nonce,
+                updated_at = CURRENT_TIMESTAMP",
+            params![user_id, device_id, encrypted_key, salt, nonce],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn get_device_escrowed_key(&self, user_id: &str, device_id: &str) -> Result<Option<(Vec<u8>, Vec<u8>, Vec<u8>)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let result = conn.query_row(
+            "SELECT encrypted_private_key, salt, nonce FROM user_device_escrow WHERE user_id = ?1 AND device_id = ?2",
+            params![user_id, device_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        );
+        match result {
+            Ok(row) => Ok(Some(row)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
 
     pub fn save_escrowed_key(&self, user_id: &str, encrypted_key: &[u8], salt: &[u8], nonce: &[u8]) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
@@ -2067,12 +2186,13 @@ impl Database {
         encrypted_key: &[u8],
         sender_public_key: &[u8],
         nonce: &[u8],
+        device_id: Option<&str>,
     ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
-            "INSERT OR REPLACE INTO dm_keys (dm_channel_id, user_id, encrypted_key, sender_public_key, nonce)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![dm_channel_id, user_id, encrypted_key, sender_public_key, nonce],
+            "INSERT INTO dm_keys (dm_channel_id, user_id, encrypted_key, sender_public_key, nonce, device_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![dm_channel_id, user_id, encrypted_key, sender_public_key, nonce, device_id.unwrap_or("")],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -2356,12 +2476,14 @@ impl Database {
         uploaded_by: &str,
         sticker_name: &str,
         file_key: &str,
+        encrypted_file_key: Option<&[u8]>,
+        file_key_nonce: Option<&[u8]>,
     ) -> Result<String, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let id = Uuid::new_v4().to_string();
         conn.execute(
-            "INSERT INTO server_stickers (id, server_id, file_id, uploaded_by, sticker_name, file_key) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![id, server_id, file_id, uploaded_by, sticker_name, file_key],
+            "INSERT INTO server_stickers (id, server_id, file_id, uploaded_by, sticker_name, file_key, encrypted_file_key, file_key_nonce) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![id, server_id, file_id, uploaded_by, sticker_name, file_key, encrypted_file_key, file_key_nonce],
         )
         .map_err(|e| e.to_string())?;
         Ok(id)
@@ -2377,11 +2499,11 @@ impl Database {
         Ok(())
     }
 
-    pub fn list_server_stickers(&self, server_id: &str) -> Result<Vec<(String, String, String, String, String, Option<String>)>, String> {
+    pub fn list_server_stickers(&self, server_id: &str) -> Result<Vec<(String, String, String, String, String, Option<String>, Option<Vec<u8>>, Option<Vec<u8>>)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT s.id, s.file_id, s.sticker_name, f.mime_type, COALESCE(u.username, '?'), s.file_key
+                "SELECT s.id, s.file_id, s.sticker_name, f.mime_type, COALESCE(u.username, '?'), s.file_key, s.encrypted_file_key, s.file_key_nonce
                  FROM server_stickers s
                  INNER JOIN files f ON s.file_id = f.id
                  LEFT JOIN users u ON s.uploaded_by = u.id
@@ -2398,6 +2520,8 @@ impl Database {
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
                     row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<Vec<u8>>>(6)?,
+                    row.get::<_, Option<Vec<u8>>>(7)?,
                 ))
             })
             .map_err(|e| e.to_string())?
@@ -2415,13 +2539,14 @@ impl Database {
         sticker_name: &str,
         file_key: &str,
         mime_type: &str,
+        encrypted_file_key: Option<&[u8]>,
+        file_key_nonce: Option<&[u8]>,
     ) -> Result<String, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let id = Uuid::new_v4().to_string();
-        // file_key can be empty — the key is derived from the user's identity key on the client
         conn.execute(
-            "INSERT INTO user_stickers (id, user_id, file_id, sticker_name, file_key, mime_type) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![id, user_id, file_id, sticker_name, file_key, mime_type],
+            "INSERT INTO user_stickers (id, user_id, file_id, sticker_name, file_key, mime_type, encrypted_file_key, file_key_nonce) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![id, user_id, file_id, sticker_name, file_key, mime_type, encrypted_file_key, file_key_nonce],
         )
         .map_err(|e| e.to_string())?;
         Ok(id)
@@ -2437,11 +2562,11 @@ impl Database {
         Ok(())
     }
 
-    pub fn list_user_stickers(&self, user_id: &str) -> Result<Vec<(String, String, String, String, String)>, String> {
+    pub fn list_user_stickers(&self, user_id: &str) -> Result<Vec<(String, String, String, String, String, Option<Vec<u8>>, Option<Vec<u8>>)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT s.id, s.file_id, s.sticker_name, f.mime_type, s.file_key
+                "SELECT s.id, s.file_id, s.sticker_name, f.mime_type, s.file_key, s.encrypted_file_key, s.file_key_nonce
                  FROM user_stickers s
                  INNER JOIN files f ON s.file_id = f.id
                  WHERE s.user_id = ?1
@@ -2456,6 +2581,8 @@ impl Database {
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
+                    row.get::<_, Option<Vec<u8>>>(5)?,
+                    row.get::<_, Option<Vec<u8>>>(6)?,
                 ))
             })
             .map_err(|e| e.to_string())?
@@ -2526,12 +2653,13 @@ impl Database {
         encrypted_key: &[u8],
         sender_public_key: &[u8],
         nonce: &[u8],
+        device_id: Option<&str>,
     ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
-            "INSERT OR REPLACE INTO server_keys (server_id, user_id, encrypted_key, sender_public_key, nonce, version)
-             VALUES (?1, ?2, ?3, ?4, ?5, 1)",
-            params![server_id, user_id, encrypted_key, sender_public_key, nonce],
+            "INSERT INTO server_keys (server_id, user_id, encrypted_key, sender_public_key, nonce, version, device_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6)",
+            params![server_id, user_id, encrypted_key, sender_public_key, nonce, device_id.unwrap_or("")],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -3017,14 +3145,14 @@ impl Database {
         Ok(rows)
     }
 
-    pub fn list_all_user_public_keys_admin(
+    pub fn list_all_user_devices_admin(
         &self,
-    ) -> Result<Vec<(String, String, String, Vec<u8>, Vec<u8>, Option<Vec<u8>>, Option<i32>)>, String> {
+    ) -> Result<Vec<(String, String, String, String, Vec<u8>, Option<Vec<u8>>, Option<String>)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT upk.user_id, COALESCE(u.username, '?'), upk.device_id, upk.identity_key, upk.signed_prekey, upk.one_time_prekey, upk.one_time_prekey_id
-                 FROM user_public_keys upk LEFT JOIN users u ON upk.user_id = u.id ORDER BY upk.id",
+                "SELECT ud.user_id, COALESCE(u.username, '?'), ud.device_id, COALESCE(ud.device_name, ''), ud.identity_key, ud.signed_prekey, ud.last_active_at
+                 FROM user_devices ud LEFT JOIN users u ON ud.user_id = u.id ORDER BY ud.user_id, ud.device_id",
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
@@ -3033,10 +3161,10 @@ impl Database {
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, String>(3)?,
                     row.get::<_, Vec<u8>>(4)?,
                     row.get::<_, Option<Vec<u8>>>(5)?,
-                    row.get::<_, Option<i32>>(6)?,
+                    row.get::<_, Option<String>>(6)?,
                 ))
             })
             .map_err(|e| e.to_string())?
@@ -3337,11 +3465,11 @@ impl Database {
 
     // --- Admin: missing tables ---
 
-    pub fn list_all_user_stickers_admin(&self) -> Result<Vec<(String, String, String, String, String, String, String)>, String> {
+    pub fn list_all_user_stickers_admin(&self) -> Result<Vec<(String, String, String, String, String, String, String, Option<Vec<u8>>, Option<Vec<u8>>)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT us.id, us.user_id, COALESCE(u.username, '?'), us.file_id, us.sticker_name, us.file_key, COALESCE(us.mime_type, '')
+                "SELECT us.id, us.user_id, COALESCE(u.username, '?'), us.file_id, us.sticker_name, us.file_key, COALESCE(us.mime_type, ''), us.encrypted_file_key, us.file_key_nonce
                  FROM user_stickers us LEFT JOIN users u ON us.user_id = u.id ORDER BY us.created_at DESC",
             )
             .map_err(|e| e.to_string())?;
@@ -3355,6 +3483,8 @@ impl Database {
                     row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
                     row.get::<_, String>(6)?,
+                    row.get::<_, Option<Vec<u8>>>(7)?,
+                    row.get::<_, Option<Vec<u8>>>(8)?,
                 ))
             })
             .map_err(|e| e.to_string())?
@@ -3363,11 +3493,11 @@ impl Database {
         Ok(rows)
     }
 
-    pub fn list_all_server_stickers_admin(&self) -> Result<Vec<(String, String, String, String, String, String, String)>, String> {
+    pub fn list_all_server_stickers_admin(&self) -> Result<Vec<(String, String, String, String, String, String, String, Option<Vec<u8>>, Option<Vec<u8>>)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT ss.id, ss.server_id, COALESCE(s.name, '?'), ss.file_id, ss.uploaded_by, ss.sticker_name, COALESCE(ss.file_key, '')
+                "SELECT ss.id, ss.server_id, COALESCE(s.name, '?'), ss.file_id, ss.uploaded_by, ss.sticker_name, COALESCE(ss.file_key, ''), ss.encrypted_file_key, ss.file_key_nonce
                  FROM server_stickers ss LEFT JOIN servers s ON ss.server_id = s.id ORDER BY ss.created_at DESC",
             )
             .map_err(|e| e.to_string())?;
@@ -3381,6 +3511,8 @@ impl Database {
                     row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
                     row.get::<_, String>(6)?,
+                    row.get::<_, Option<Vec<u8>>>(7)?,
+                    row.get::<_, Option<Vec<u8>>>(8)?,
                 ))
             })
             .map_err(|e| e.to_string())?
@@ -3541,7 +3673,8 @@ impl Database {
         conn.execute("DELETE FROM friend_requests", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM friendships", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM notification_sounds", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM user_public_keys", []).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM user_device_escrow", []).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM user_devices", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM users", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM admin_config", []).map_err(|e| e.to_string())?;
         Ok(())

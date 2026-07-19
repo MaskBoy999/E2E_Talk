@@ -19,7 +19,7 @@ use crate::AppState;
 static CONN_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 pub struct WsManager {
-    connections: tokio::sync::RwLock<std::collections::HashMap<u64, (String, mpsc::UnboundedSender<String>)>>,
+    connections: tokio::sync::RwLock<std::collections::HashMap<u64, (String, Option<String>, mpsc::UnboundedSender<String>)>>,
 }
 
 impl WsManager {
@@ -29,9 +29,14 @@ impl WsManager {
         }
     }
 
-    pub async fn add_connection(&self, user_id: String, sender: mpsc::UnboundedSender<String>) -> u64 {
+    pub async fn add_connection(&self, user_id: String, device_id: Option<String>, sender: mpsc::UnboundedSender<String>) -> u64 {
+        // Remove any existing connection for this device
+        if let Some(ref dev_id) = device_id {
+            let mut conns = self.connections.write().await;
+            conns.retain(|_, (uid, did, _)| uid != &user_id || did.as_ref() != Some(dev_id));
+        }
         let id = CONN_COUNTER.fetch_add(1, Ordering::Relaxed);
-        self.connections.write().await.insert(id, (user_id, sender));
+        self.connections.write().await.insert(id, (user_id, device_id, sender));
         id
     }
 
@@ -39,9 +44,18 @@ impl WsManager {
         self.connections.write().await.remove(&conn_id);
     }
 
+    pub async fn broadcast_to_device(&self, user_id: &str, device_id: &str, message: &str) {
+        let conns = self.connections.read().await;
+        for (uid, did, sender) in conns.values() {
+            if uid == user_id && did.as_deref() == Some(device_id) {
+                let _ = sender.send(message.to_string());
+            }
+        }
+    }
+
     pub async fn broadcast_to_users(&self, user_ids: &[String], message: &str) {
         let conns = self.connections.read().await;
-        for (uid, sender) in conns.values() {
+        for (uid, _did, sender) in conns.values() {
             if user_ids.contains(uid) {
                 let _ = sender.send(message.to_string());
             }
@@ -50,7 +64,7 @@ impl WsManager {
 
     pub async fn broadcast_to_server(&self, _server_id: &str, message: &str) {
         let conns = self.connections.read().await;
-        for (_conn_id, sender) in conns.values() {
+        for (_conn_id, _did, sender) in conns.values() {
             let _ = sender.send(message.to_string());
         }
     }
@@ -61,6 +75,8 @@ struct WsAuthMessage {
     #[serde(rename = "type")]
     msg_type: String,
     token: String,
+    #[serde(default)]
+    device_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -118,13 +134,13 @@ pub async fn ws_handler(
 async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     let (mut sender, mut receiver) = socket.split();
 
-    let user_id = loop {
+    let (user_id, device_id) = loop {
         match receiver.next().await {
             Some(Ok(Message::Text(text))) => {
                 match serde_json::from_str::<WsAuthMessage>(text.as_str()) {
                     Ok(auth_msg) if auth_msg.msg_type == "auth" => {
                         match auth::validate_token(&auth_msg.token, &state.config.jwt_secret) {
-                            Ok(claims) => break claims.sub,
+                            Ok(claims) => break (claims.sub, auth_msg.device_id),
                             Err(_) => {
                                 let err = OutgoingMessage {
                                     msg_type: "auth_error".to_string(),
@@ -201,7 +217,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
 
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 
-    let conn_id = state.ws_manager.add_connection(user_id.clone(), tx).await;
+    let conn_id = state.ws_manager.add_connection(user_id.clone(), device_id, tx).await;
 
     let mut send_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {

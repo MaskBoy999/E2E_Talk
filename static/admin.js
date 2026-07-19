@@ -56,7 +56,7 @@ const csvColumns = {
     'dm-keys': { headers: ['DM Channel ID', 'User ID', 'Username', 'Encrypted Key', 'Sender Public Key', 'Nonce'], map: (r) => [r.dm_channel_id, r.user_id, r.username, r.encrypted_key, r.sender_public_key, r.nonce] },
     'friend-requests': { headers: ['From', 'From User ID', 'To', 'To User ID', 'Status', 'Created At'], map: (r) => [r.from_username, r.from_user_id, r.to_username, r.to_user_id, r.status, r.created_at] },
     'friendships': { headers: ['User 1', 'User 1 ID', 'User 2', 'User 2 ID', 'Created At'], map: (r) => [r.username_1, r.user_id_1, r.username_2, r.user_id_2, r.created_at] },
-    'user-public-keys': { headers: ['Username', 'User ID', 'Device ID', 'Identity Key', 'Signed Prekey', 'OT Prekey', 'OT ID'], map: (r) => [r.username, r.user_id, r.device_id, r.identity_key, r.signed_prekey, r.one_time_prekey || '', r.one_time_prekey_id != null ? String(r.one_time_prekey_id) : ''] },
+    'user-public-keys': { headers: ['Username', 'User ID', 'Device ID', 'Device Name', 'Identity Key', 'Signed Prekey', 'Last Active'], map: (r) => [r.username, r.user_id, r.device_id, r.device_name || '', r.identity_key, r.signed_prekey || '', r.last_active_at || ''] },
     'files': { headers: ['Filename', 'Uploader', 'Uploader ID', 'MIME Type', 'File Size (bytes)', 'Server ID', 'Channel ID', 'Created At'], map: (r) => [r.original_name, r.uploader_username, r.uploader_id || '', r.mime_type, String(r.file_size), r.server_id || '', r.channel_id || '', r.created_at] },
     'user-stickers': { headers: ['Username', 'Sticker Name', 'File ID', 'File Key', 'MIME Type'], map: (r) => [r.username, r.sticker_name || '(unnamed)', r.file_id, r.file_key || '', r.mime_type || ''] },
     'server-stickers': { headers: ['Server', 'Sticker Name', 'Uploaded By', 'File ID'], map: (r) => [r.server_name, r.sticker_name || '(unnamed)', r.uploaded_by || '', r.file_id] },
@@ -303,7 +303,7 @@ function filterTab(tab) {
         case 'dm-keys': filtered = rawData.dmKeys.filter(k => !q || k.username.toLowerCase().includes(q) || k.user_id.toLowerCase().includes(q) || k.dm_channel_id.toLowerCase().includes(q)); tabFilteredCache['dm-keys'] = filtered; renderDmKeys(filtered); break;
         case 'friend-requests': filtered = rawData.friendRequests.filter(r => !q || r.from_username.toLowerCase().includes(q) || r.to_username.toLowerCase().includes(q) || r.status.toLowerCase().includes(q)); tabFilteredCache['friend-requests'] = filtered; renderFriendRequests(filtered); break;
         case 'friendships': filtered = rawData.friendships.filter(f => !q || f.username_1.toLowerCase().includes(q) || f.username_2.toLowerCase().includes(q)); tabFilteredCache['friendships'] = filtered; renderFriendships(filtered); break;
-        case 'user-public-keys': filtered = rawData.userPublicKeys.filter(k => !q || k.username.toLowerCase().includes(q) || k.user_id.toLowerCase().includes(q) || k.device_id.toLowerCase().includes(q)); tabFilteredCache['user-public-keys'] = filtered; renderUserPublicKeys(filtered); break;
+        case 'user-public-keys': filtered = rawData.userPublicKeys.filter(k => !q || k.username.toLowerCase().includes(q) || k.user_id.toLowerCase().includes(q) || k.device_id.toLowerCase().includes(q) || (k.device_name || '').toLowerCase().includes(q)); tabFilteredCache['user-public-keys'] = filtered; renderUserPublicKeys(filtered); break;
         case 'files': filtered = rawData.files.filter(f => !q || f.original_name.toLowerCase().includes(q) || f.uploader_username.toLowerCase().includes(q) || f.mime_type.toLowerCase().includes(q)); tabFilteredCache['files'] = filtered; renderFiles(filtered); break;
         case 'user-stickers': filtered = rawData.userStickers.filter(s => !q || s.username.toLowerCase().includes(q) || (s.sticker_name || '').toLowerCase().includes(q)); tabFilteredCache['user-stickers'] = filtered; renderUserStickers(filtered); break;
         case 'server-stickers': filtered = rawData.serverStickers.filter(s => !q || s.server_name.toLowerCase().includes(q) || (s.sticker_name || '').toLowerCase().includes(q)); tabFilteredCache['server-stickers'] = filtered; renderServerStickers(filtered); break;
@@ -766,16 +766,16 @@ function renderUserPublicKeys(rows) {
     tabTotals['user-public-keys'] = rows.length;
     const p = paginate(rows, 'user-public-keys');
     updateCount('user-public-keys-count', p.total);
-    renderTable('user-public-key-list', 6,
+    renderTable('user-public-key-list', 7,
         p.items.map(r =>
             '<td>' + escapeHtml(r.username) + ' <span class="id-cell">(' + escapeHtml(truncate(r.user_id, 8)) + ')</span></td>' +
-            '<td>' + escapeHtml(r.device_id) + '</td>' +
+            '<td class="id-cell" title="' + escapeHtml(r.device_id) + '">' + escapeHtml(truncate(r.device_id, 12)) + '</td>' +
+            '<td>' + escapeHtml(r.device_name || '') + '</td>' +
             '<td class="blob-cell">' + escapeHtml(truncate(r.identity_key, 30)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(r.signed_prekey, 30)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(r.one_time_prekey || '', 30)) + '</td>' +
-            '<td>' + (r.one_time_prekey_id || '') + '</td>'
+            '<td class="blob-cell">' + escapeHtml(truncate(r.signed_prekey || '', 30)) + '</td>' +
+            '<td class="ts-cell">' + escapeHtml(r.last_active_at || '') + '</td>'
         ),
-        'No user public keys'
+        'No user devices'
     );
     renderPaginationControls('user-public-keys');
 }

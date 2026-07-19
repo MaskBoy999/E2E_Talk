@@ -221,6 +221,10 @@ async fn main() {
         .route("/api/identity/upload", post(handlers::upload_identity_key))
         .route("/api/identity/add-key", post(handlers::add_device_key))
         .route("/api/identity/escrow", post(handlers::upload_escrowed_key).get(handlers::get_escrowed_key))
+        // Device management routes
+        .route("/api/devices", get(handlers::list_devices).post(handlers::register_device))
+        .route("/api/devices/{device_id}", delete(handlers::remove_device))
+        .route("/api/devices/escrow", post(handlers::upload_device_escrowed_key).get(handlers::get_device_escrowed_key))
         .route("/api/logout", post(handlers::logout).get(handlers::logout_get))
         .route("/api/reauth", post(handlers::reauth))
         .route("/api/user/{username}", get(handlers::get_user_id))

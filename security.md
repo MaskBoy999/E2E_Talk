@@ -398,7 +398,8 @@ Every single field in every API request, WebSocket message, and database table. 
 | `friendships` (`user_id_a, user_id_b`) | Access control | Server must know who is friends |
 | `friend_requests` (`from_user_id, to_user_id, status`) | Friend system | Server must manage requests |
 | `server_bans` (`server_id, user_id`) | Ban enforcement | Server must block banned users |
-| `user_public_keys` (`user_id, public_key`) | Multi-device key storage | Public keys |
+| `user_devices` (`device_id, user_id`, keys) | Multi-device storage | Per-device identity keys, signed prekeys, device names |
+| `user_device_escrow` (`user_id, device_id`) | Per-device key escrow | Encrypted private keys, per-device revocation |
 | `notification_sounds` | Encrypted audio data | Content encrypted, routing fields plaintext |
 
 ### 4.2. API Endpoints — What Returns in Plaintext
@@ -570,7 +571,13 @@ Step 5: Send
    - Exchanging ephemeral public keys with each message
    - Handling out-of-order message delivery (difficult over WebSocket)
 
-✅ **Multi-device support**: Both parties can have multiple public keys. The `dm_keys` table stores envelope-encrypted copies for each device. Since all devices share the same primary identity key (via escrow), any device can decrypt.
+✅ **Multi-device support**: Both parties can have multiple devices, each with their own identity key, signed prekey, and one-time prekeys. The `user_devices` table (`018_user_devices.sql`) replaces the old flat `user_public_keys` table. Devices have names (`device_name`) and last-active timestamps. The `dm_keys` and `server_keys` tables now have an optional `device_id` column for device-level key tracking.
+
+✅ **Per-device key escrow**: Each device can independently escrow its identity private key via the `user_device_escrow` table (unique on `(user_id, device_id)`). Revoking a device only removes that device's escrow — other devices are unaffected. This replaces the single shared escrow model where all devices shared one key.
+
+✅ **Device management API**: Full CRUD via `POST /api/devices`, `GET /api/devices`, `DELETE /api/devices/{device_id}`. Device registration includes optional prekey bundle for future X3DH support.
+
+✅ **WebSocket device tracking**: The WebSocket auth message now includes an optional `device_id` field. The `WsManager` tracks which device each connection belongs to. Duplicate connections for the same device are automatically evicted. A `broadcast_to_device()` method enables device-specific messaging.
 
 ❗ **Prekey bundles exist but are never used**: The `prekey_bundles` table and `upload_key_bundle` WebSocket handler exist, but X3DH is not implemented. DM key agreement requires both parties to be online and have exchanged identity keys.
 
@@ -936,8 +943,9 @@ Secret source: JWT_SECRET env var OR auto-generated on first run (persisted to .
 | `users` | `username_color` | LOW | Cosmetic preference |
 | `users` | `username_border_color` | LOW | Cosmetic preference |
 | `users` | `profile_background_color` | LOW | Cosmetic preference |
-| `server_stickers` | `file_key` | **HIGH** | Server can decrypt sticker images |
-| `user_stickers` | `file_key` | **HIGH** | Server can decrypt sticker images |
+| `server_stickers` | `file_key` | **HIGH** | Server can decrypt sticker images — `encrypted_file_key` column added in migration 018 (schema ready, not yet used by handlers) |
+| `user_stickers` | `file_key` | **HIGH** | Server can decrypt sticker images — `encrypted_file_key` column added in migration 018 (schema ready) |
+| `profiles` (users) | `profile_picture_file_key`, `profile_banner_file_key` | **CRITICAL** | Column `encrypted_file_key` added in migration 018 on `profiles` table (schema ready, not yet used) |
 
 ---
 
@@ -1118,8 +1126,8 @@ This is the **single highest-priority client-side fix**.
 | # | Issue | Severity | Effort | Impact |
 |---|-------|----------|--------|--------|
 | 1 | Password in localStorage (`e2e_password`) | 🔴 CRITICAL | Small | Prevents full account compromise from XSS |
-| 2 | Profile picture/banner file keys in plaintext (`profile_picture_file_key`, `profile_banner_file_key`) | 🔴 CRITICAL | Medium | Server can decrypt profile images |
-| 3 | Sticker file keys in plaintext (`server_stickers.file_key`, `user_stickers.file_key`) | 🔴 CRITICAL | Medium | Server can decrypt sticker images |
+| 2 | Profile picture/banner file keys in plaintext (`profile_picture_file_key`, `profile_banner_file_key`) | 🔴 CRITICAL | Medium | Server can decrypt profile images — `encrypted_file_key` column added in migration 018 (schema ready) |
+| 3 | Sticker file keys in plaintext (`server_stickers.file_key`, `user_stickers.file_key`) | 🔴 CRITICAL | Medium | Server can decrypt sticker images — `encrypted_file_key` column added in migration 018 (schema ready) |
 | 4 | Profile data (display_name, description, etc.) in plaintext | 🟠 HIGH | Large | Server can read all profile text content |
 | 5 | No forward secrecy for DMs (static ECDH) | 🟠 HIGH | Very large | Compromised key reveals all past DMs |
 | 6 | Sender display name/profile pic in every message broadcast | 🟡 MEDIUM | Large | Profile data attached to every message |
@@ -1129,6 +1137,8 @@ This is the **single highest-priority client-side fix**.
 | 10 | Username-based rate limiting only (not IP-based) | 🟢 LOW | Small | Brute-force protection gap |
 | 11 | No automatic server key rotation | 🟢 LOW | Medium | Manual rotation sufficient |
 | 12 | No message padding (ciphertext size reveals plaintext size) | 🟢 LOW | Medium | Metadata leakage only |
+| 13 | Single shared identity key per user (no per-device revocation) | 🟠 HIGH | Large | Compromised device = revoked all devices (FIXED: per-device keys + escrow) |
+| 14 | No WebSocket device tracking | 🟢 LOW | Small | Multiple connections indistinguishable (FIXED: device_id in WS auth) |
 
 ### 15.2. Implementation Guidance for Fixes
 
@@ -1174,6 +1184,59 @@ const profile = JSON.parse(decrypted);
 
 **Fix 5: Double Ratchet** — Too large to describe here. See the Signal Protocol specification.
 
+**Fix 13: Per-device identity keys** (FIXED — migration 018 + Rust handlers)
+```sql
+-- New table: user_devices (replaces user_public_keys)
+CREATE TABLE IF NOT EXISTS user_devices (
+    device_id TEXT NOT NULL,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    device_name TEXT NOT NULL DEFAULT '',
+    identity_key BLOB NOT NULL,
+    signed_prekey BLOB,
+    signed_prekey_signature BLOB,
+    one_time_prekey BLOB,
+    one_time_prekey_id INTEGER,
+    last_active_at DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (device_id, user_id)
+);
+
+-- Per-device key escrow
+CREATE TABLE IF NOT EXISTS user_device_escrow (
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    device_id TEXT NOT NULL,
+    encrypted_private_key BLOB NOT NULL,
+    salt BLOB NOT NULL,
+    nonce BLOB NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, device_id)
+);
+
+-- device_id on server_keys and dm_keys (nullable for backward compat)
+ALTER TABLE server_keys ADD COLUMN device_id TEXT;
+ALTER TABLE dm_keys ADD COLUMN device_id TEXT;
+
+-- encrypted_file_key columns for stickers and profiles
+ALTER TABLE server_stickers ADD COLUMN encrypted_file_key TEXT;
+ALTER TABLE user_stickers ADD COLUMN encrypted_file_key TEXT;
+ALTER TABLE users ADD COLUMN profile_picture_encrypted_key TEXT;
+ALTER TABLE users ADD COLUMN profile_banner_encrypted_key TEXT;
+```
+
+API endpoints added:
+- `POST /api/devices` — Register a new device (with optional prekey bundle)
+- `GET /api/devices` — List all devices for the authenticated user
+- `DELETE /api/devices/{device_id}` — Remove a device (cascades to keys + escrow)
+- `POST /api/devices/escrow` — Upload per-device escrowed private key
+- `GET /api/devices/escrow` — Download per-device escrowed private key
+
+WebSocket changes:
+- Auth message now accepts `device_id` field
+- `WsManager.add_connection()` stores `(user_id, device_id, sender)` tuples
+- Duplicate device connections are evicted automatically
+- `broadcast_to_device()` enables device-specific messaging
+
 ---
 
 ## Appendix A: TLS Certificate Generation
@@ -1203,6 +1266,19 @@ Admin authentication is token-based:
 - 24-hour TTL
 - Single admin account (no multi-admin)
 
+### 15.3. Changes Made in July 2026
+
+| # | Change | Files Modified | Impact |
+|---|-------|---------------|--------|
+| 1 | **Per-device identity keys** — Replaced flat `user_public_keys` table with `user_devices` (device names, prekeys, last-active) | `018_user_devices.sql`, `db.rs`, `handlers.rs` | Foundation for proper multi-device with revocable devices |
+| 2 | **Per-device key escrow** — `user_device_escrow` table with `UNIQUE(user_id, device_id)`. Revoking one device doesn't affect others. | `018_user_devices.sql`, `db.rs`, `handlers.rs` | Compromised device can be revoked independently |
+| 3 | **Device management API** — Full CRUD: register, list, remove devices. Registration includes optional prekey bundle for future X3DH support. | `main.rs`, `handlers.rs` | Users can manage devices without DB access |
+| 4 | **WebSocket device tracking** — Auth message includes `device_id`. `WsManager` tracks (user_id, device_id) per connection. Duplicate connections replaced. | `ws.rs` | Auditability; device-specific broadcasts |
+| 5 | **`encrypted_file_key` columns** — Added to `server_stickers`, `user_stickers`, and `users` (profile pictures/banners). Schema ready — handlers can be updated to use them. | `018_user_devices.sql` | Sticker + profile key encryption enabled at schema level |
+| 6 | **`device_id` on server_keys/dm_keys** — Optional column for future device-level key cleanup. | `018_user_devices.sql` | When a device is removed, its keys can be cleaned up |
+| 7 | **Admin panel updated** — 'Pub Keys' tab now shows device data (Device Name, Last Active) instead of old public key format. | `admin.js`, `admin.html` | Admins can see device info |
+| 8 | **WebSocket auth includes device_id** — Client passes `device_id` from localStorage on WebSocket connect. | `chat.js` | Device tracking on every connection |
+
 ## Appendix C: Migration History
 
 | Migration | Purpose | Cryptographic Relevance |
@@ -1224,6 +1300,7 @@ Admin authentication is token-based:
 | 015 | Username color | Added username_color column |
 | 016 | Privacy | Added encrypted_profile_data column |
 | 017 | Username border color | Added username_border_color column |
+| **018** | **Multi-device v2** | **Replaced `user_public_keys` with `user_devices` table, added per-device escrow (`user_device_escrow`), device_id columns on `server_keys`/`dm_keys`, encrypted_file_key columns on stickers and profiles** |
 
 ---
 
@@ -1306,6 +1383,9 @@ Admin authentication is token-based:
 | TOFU fingerprint | ✅ SHA-256 (FIXED July 2026) |
 | Sticker/emoji file keys | ✅ Encrypted with identity key (FIXED July 2026) |
 | Password at rest | ✅ Device-key wrapped (FIXED July 2026) |
+| Multi-device (per-device identities) | ✅ `user_devices` table + API (FIXED July 2026) |
+| Per-device key escrow | ✅ `user_device_escrow` table (FIXED July 2026) |
+| WebSocket device tracking | ✅ `device_id` in auth + connection manager (FIXED July 2026) |
 | Code hashing (invite/friend) | 🟡 Plain SHA-256, no salt |
 | Profile picture/banner keys | 🟡 Plaintext in DB |
 | Sender profile in WS messages | 🟡 Plaintext broadcast |

@@ -243,9 +243,10 @@ pub async fn register(
         }
     };
 
-    // Also store in user_public_keys for multi-device support
+    // Register initial device with the identity key
     if let Some(ref key_bytes) = identity_key_bytes {
-        let _ = state.db.add_user_public_key(&user.id, key_bytes);
+        let device_id = uuid::Uuid::new_v4().to_string();
+        let _ = state.db.register_device(&user.id, &device_id, "primary", key_bytes, None, None, None, None);
     }
 
     let token = match auth::create_token(&user.id, &user.username, &state.config.jwt_secret) {
@@ -549,6 +550,7 @@ pub struct UploadEscrowRequest {
     pub encrypted_private_key: String,
     pub salt: String,
     pub nonce: String,
+    pub device_id: Option<String>,
 }
 
 pub async fn upload_escrowed_key(
@@ -1465,10 +1467,10 @@ pub async fn get_identity_key(
         all_keys.push(base64::engine::general_purpose::STANDARD.encode(&key));
     }
 
-    // Additional keys from user_public_keys table
-    if let Ok(extra_keys) = state.db.get_all_user_public_keys(&user_id) {
-        for k in extra_keys {
-            all_keys.push(base64::engine::general_purpose::STANDARD.encode(&k));
+    // Additional keys from user_devices table
+    if let Ok(extra_keys) = state.db.get_all_user_identity_keys(&user_id) {
+        for (_device_id, key_bytes) in extra_keys {
+            all_keys.push(base64::engine::general_purpose::STANDARD.encode(&key_bytes));
         }
     }
 
@@ -1526,8 +1528,9 @@ pub async fn upload_identity_key(
             .into_response();
     }
 
-    // Also add to multi-device keys table
-    let _ = state.db.add_user_public_key(&user_id, &key_bytes);
+    // Also register as device
+    let device_id = uuid::Uuid::new_v4().to_string();
+    let _ = state.db.register_device(&user_id, &device_id, "primary", &key_bytes, None, None, None, None);
 
     (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
 }
@@ -1567,21 +1570,199 @@ pub async fn add_device_key(
     }
 
     // Check for duplicate
-    if let Ok(existing) = state.db.get_all_user_public_keys(&user_id) {
-        for k in &existing {
+    if let Ok(existing) = state.db.get_all_user_identity_keys(&user_id) {
+        for (_did, k) in &existing {
             if k == &key_bytes {
                 return (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response();
             }
         }
     }
 
-    match state.db.add_user_public_key(&user_id, &key_bytes) {
+    let device_id = uuid::Uuid::new_v4().to_string();
+    match state.db.register_device(&user_id, &device_id, "additional", &key_bytes, None, None, None, None) {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e})),
         )
             .into_response(),
+    }
+}
+
+// --- Device Management ---
+
+#[derive(Deserialize)]
+pub struct RegisterDeviceRequest {
+    pub device_id: String,
+    pub device_name: Option<String>,
+    pub identity_key: String,
+    pub signed_prekey: Option<String>,
+    pub signed_prekey_signature: Option<String>,
+    pub one_time_prekey: Option<String>,
+    pub one_time_prekey_id: Option<i32>,
+}
+
+pub async fn register_device(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RegisterDeviceRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    let key_bytes = match base64::engine::general_purpose::STANDARD.decode(&req.identity_key) {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid identity_key"}))).into_response(),
+    };
+
+    let spk = req.signed_prekey.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+    let spk_sig = req.signed_prekey_signature.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+    let otpk = req.one_time_prekey.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+
+    match state.db.register_device(
+        &user_id,
+        &req.device_id,
+        req.device_name.as_deref().unwrap_or("Unnamed device"),
+        &key_bytes,
+        spk.as_deref(),
+        spk_sig.as_deref(),
+        otpk.as_deref(),
+        req.one_time_prekey_id,
+    ) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true, "device_id": req.device_id}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn list_devices(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    match state.db.get_user_devices(&user_id) {
+        Ok(devices) => {
+            let result: Vec<serde_json::Value> = devices.iter().map(|(did, dname, ik, spk, last_active)| {
+                serde_json::json!({
+                    "device_id": did,
+                    "device_name": dname,
+                    "identity_key": base64::engine::general_purpose::STANDARD.encode(ik),
+                    "signed_prekey": spk.as_ref().map(|k| base64::engine::general_purpose::STANDARD.encode(k)),
+                    "last_active_at": last_active,
+                })
+            }).collect();
+            (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn remove_device(
+    Path(device_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    match state.db.remove_device(&user_id, &device_id) {
+        Ok(true) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Device not found"}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+// --- Per-Device Key Escrow ---
+
+pub async fn upload_device_escrowed_key(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UploadEscrowRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    // Get device_id from request body or first device
+    let device_id = req.device_id.clone().unwrap_or_default();
+    if device_id.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "device_id required"}))).into_response();
+    }
+
+    let encrypted_key = match base64::engine::general_purpose::STANDARD.decode(&req.encrypted_private_key) {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid encrypted_private_key"}))).into_response(),
+    };
+    let salt = match base64::engine::general_purpose::STANDARD.decode(&req.salt) {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid salt"}))).into_response(),
+    };
+    let nonce = match base64::engine::general_purpose::STANDARD.decode(&req.nonce) {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid nonce"}))).into_response(),
+    };
+
+    match state.db.save_device_escrowed_key(&user_id, &device_id, &encrypted_key, &salt, &nonce) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn get_device_escrowed_key(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    // Get device_id from query parameter or header
+    let device_id = headers.get("x-device-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if device_id.is_empty() {
+        // Fall back to user-level key escrow
+        return match state.db.get_escrowed_key(&user_id) {
+            Ok(Some((encrypted_key, salt, nonce))) => {
+                (StatusCode::OK, Json(serde_json::json!({
+                    "encrypted_private_key": base64::engine::general_purpose::STANDARD.encode(&encrypted_key),
+                    "salt": base64::engine::general_purpose::STANDARD.encode(&salt),
+                    "nonce": base64::engine::general_purpose::STANDARD.encode(&nonce),
+                }))).into_response()
+            }
+            Ok(None) => {
+                (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "No escrowed key found"}))).into_response()
+            }
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response(),
+        };
+    }
+
+    match state.db.get_device_escrowed_key(&user_id, device_id) {
+        Ok(Some((encrypted_key, salt, nonce))) => {
+            (StatusCode::OK, Json(serde_json::json!({
+                "encrypted_private_key": base64::engine::general_purpose::STANDARD.encode(&encrypted_key),
+                "salt": base64::engine::general_purpose::STANDARD.encode(&salt),
+                "nonce": base64::engine::general_purpose::STANDARD.encode(&nonce),
+                "device_id": device_id,
+            }))).into_response()
+        }
+        Ok(None) => {
+            (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "No escrowed key found for device"}))).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
 }
 
@@ -1637,7 +1818,7 @@ pub async fn upload_server_key(
         Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid nonce"}))).into_response(),
     };
 
-    match state.db.save_server_key(&server_id, &req.user_id, &encrypted_key, &sender_pub, &nonce) {
+    match state.db.save_server_key(&server_id, &req.user_id, &encrypted_key, &sender_pub, &nonce, None) {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
@@ -1732,7 +1913,7 @@ pub async fn rotate_server_keys(
             Ok(b) => b,
             Err(_) => continue,
         };
-        let _ = state.db.save_server_key(&server_id, &entry.user_id, &encrypted_key, &sender_pub, &nonce);
+        let _ = state.db.save_server_key(&server_id, &entry.user_id, &encrypted_key, &sender_pub, &nonce, None);
     }
 
     // Broadcast key rotation to all server members
@@ -2197,17 +2378,16 @@ pub async fn admin_list_user_public_keys(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
-    let rows = match state.db.list_all_user_public_keys_admin() {
+    let rows = match state.db.list_all_user_devices_admin() {
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     };
-    let result: Vec<serde_json::Value> = rows.iter().map(|(uid, uname, did, ik, spk, otpk, otpk_id)| {
+    let result: Vec<serde_json::Value> = rows.iter().map(|(uid, uname, did, dname, ik, spk, last_active)| {
         serde_json::json!({
-            "user_id": uid, "username": uname, "device_id": did,
+            "user_id": uid, "username": uname, "device_id": did, "device_name": dname,
             "identity_key": base64::engine::general_purpose::STANDARD.encode(ik),
-            "signed_prekey": base64::engine::general_purpose::STANDARD.encode(spk),
-            "one_time_prekey": otpk.as_ref().map(|k| base64::engine::general_purpose::STANDARD.encode(k)),
-            "one_time_prekey_id": otpk_id,
+            "signed_prekey": spk.as_ref().map(|k| base64::engine::general_purpose::STANDARD.encode(k)),
+            "last_active_at": last_active,
         })
     }).collect();
     (StatusCode::OK, Json(serde_json::json!(result))).into_response()
@@ -2286,7 +2466,7 @@ pub async fn admin_list_user_stickers(
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     };
-    let result: Vec<serde_json::Value> = rows.iter().map(|(id, uid, uname, fid, sname, fkey, mime)| {
+    let result: Vec<serde_json::Value> = rows.iter().map(|(id, uid, uname, fid, sname, fkey, mime, _ekey, _eknonce)| {
         serde_json::json!({
             "id": id, "user_id": uid, "username": uname,
             "file_id": fid, "sticker_name": sname,
@@ -2306,7 +2486,7 @@ pub async fn admin_list_server_stickers(
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     };
-    let result: Vec<serde_json::Value> = rows.iter().map(|(id, sid, sname, fid, uby, stname, fkey)| {
+    let result: Vec<serde_json::Value> = rows.iter().map(|(id, sid, sname, fid, uby, stname, fkey, _ekey, _eknonce)| {
         serde_json::json!({
             "id": id, "server_id": sid, "server_name": sname,
             "file_id": fid, "uploaded_by": uby, "sticker_name": stname,
@@ -2639,7 +2819,7 @@ pub async fn list_server_stickers(
         Ok(stickers) => {
             let result: Vec<serde_json::Value> = stickers
                 .iter()
-                .map(|(id, file_id, name, mime, uploaded_by, file_key)| {
+                .map(|(id, file_id, name, mime, uploaded_by, file_key, _ekey, _eknonce)| {
                     serde_json::json!({
                         "id": id,
                         "file_id": file_id,
@@ -2678,7 +2858,7 @@ pub async fn add_server_sticker(
         }
         Err(_) => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "File not found"}))).into_response(),
     }
-    match state.db.add_server_sticker(&server_id, &body.file_id, &user_id, &body.sticker_name, body.file_key.as_deref().unwrap_or("")) {
+    match state.db.add_server_sticker(&server_id, &body.file_id, &user_id, &body.sticker_name, body.file_key.as_deref().unwrap_or(""), None, None) {
         Ok(id) => (StatusCode::OK, Json(serde_json::json!({"id": id}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
@@ -2726,7 +2906,7 @@ pub async fn list_user_stickers(
         Ok(stickers) => {
             let result: Vec<serde_json::Value> = stickers
                 .iter()
-                .map(|(id, file_id, name, mime, file_key)| {
+                .map(|(id, file_id, name, mime, file_key, _ekey, _eknonce)| {
                     serde_json::json!({
                         "id": id,
                         "file_id": file_id,
@@ -2760,7 +2940,7 @@ pub async fn add_user_sticker(
         }
         Err(_) => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "File not found"}))).into_response(),
     }
-    match state.db.add_user_sticker(&user_id, &body.file_id, &body.sticker_name, body.file_key.as_deref().unwrap_or(""), &body.mime_type) {
+    match state.db.add_user_sticker(&user_id, &body.file_id, &body.sticker_name, body.file_key.as_deref().unwrap_or(""), &body.mime_type, None, None) {
         Ok(id) => (StatusCode::OK, Json(serde_json::json!({"id": id}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
@@ -3708,7 +3888,7 @@ pub async fn upload_dm_key(
         Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid nonce"}))).into_response(),
     };
 
-    match state.db.save_dm_key(&dm_channel_id, &req.user_id, &encrypted_key, &sender_pub, &nonce) {
+    match state.db.save_dm_key(&dm_channel_id, &req.user_id, &encrypted_key, &sender_pub, &nonce, None) {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
