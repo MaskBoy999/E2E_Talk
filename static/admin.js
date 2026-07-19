@@ -2,7 +2,8 @@ let rawData = {
     users: [], servers: [], channels: [], messages: [], serverKeys: [], serverMembers: [],
     prekeyBundles: [], sessions: [], serverBans: [], dmChannels: [], dmMembers: [],
     dmMessages: [], dmKeys: [], friendRequests: [], friendships: [], userPublicKeys: [], files: [],
-    userStickers: [], serverStickers: [], userKeyEscrow: [], notificationSounds: []
+    userStickers: [], serverStickers: [], userKeyEscrow: [], notificationSounds: [],
+    adminConfig: [], userDeviceEscrow: []
 };
 
 const PAGE_SIZES = [25, 50, 100];
@@ -41,27 +42,29 @@ let tabTotals = {};
 let tabFilteredCache = {};
 
 const csvColumns = {
-    'users': { headers: ['Username', 'User ID'], map: (r) => [r.username, r.id] },
-    'servers': { headers: ['Name', 'Server ID', 'Owner ID'], map: (r) => [r.name, r.id, r.owner_id] },
-    'channels': { headers: ['Name', 'Channel ID', 'Server ID', 'Type'], map: (r) => [r.name, r.id, r.server_id, r.type] },
-    'messages': { headers: ['Sender', 'Sender ID', 'Channel ID', 'Encrypted Content', 'Nonce', 'Timestamp'], map: (r) => [r.sender_username || r.sender_id, r.sender_id || '', r.channel_id, r.encrypted_content, r.nonce, r.timestamp] },
-    'server-keys': { headers: ['Server', 'Server ID', 'User ID', 'Encrypted Key', 'Sender Public Key', 'Nonce', 'Version'], map: (r) => [r.server_name, r.server_id || '', r.user_id, r.encrypted_key, r.sender_public_key, r.nonce, String(r.version)] },
-    'server-members': { headers: ['Username', 'User ID', 'Server', 'Server ID'], map: (r) => [r.username, r.user_id, r.server_name, r.server_id] },
-    'prekey-bundles': { headers: ['User ID', 'Identity Key', 'Signed Prekey', 'Signature', 'OT Prekey', 'OT ID'], map: (r) => [r.user_id, r.identity_key_public, r.signed_prekey_public, r.signed_prekey_signature, r.one_time_prekey_public || '', r.one_time_prekey_id != null ? String(r.one_time_prekey_id) : ''] },
-    'sessions': { headers: ['Our User', 'Our User ID', 'Their User', 'Their User ID', 'Session Data', 'Ratchet Counter'], map: (r) => [r.our_username, r.our_user_id, r.their_username, r.their_user_id, r.session_data, String(r.ratchet_counter)] },
+    'users': { headers: ['Username', 'User ID', 'Created', 'Display Name', 'Identity Pub Key', 'PFP File ID', 'PFP File Key', 'Username Color', 'Border Color', 'Banner File ID', 'Banner File Key', 'Description', 'Nickname', 'BG Color', 'Friend Req Disabled', 'Profile Data', 'FC Hash'], map: (r) => [r.username, r.id, r.created_at || '', r.display_name || '', r.identity_public_key || '', r.profile_picture_file_id || '', r.profile_picture_file_key || '', r.username_color || '', r.username_border_color || '', r.profile_banner_file_id || '', r.profile_banner_file_key || '', r.description || '', r.nickname || '', r.profile_background_color || '', String(r.friend_requests_disabled != null ? r.friend_requests_disabled : ''), r.encrypted_profile_data || '', r.friend_code_hash || ''] },
+    'servers': { headers: ['Name', 'Server ID', 'Owner ID', 'Created', 'Invite Code Hash', 'Joins Disabled'], map: (r) => [r.name, r.id, r.owner_id, r.created_at || '', r.invite_code_hash || '', r.joins_disabled ? 'Yes' : 'No'] },
+    'channels': { headers: ['Name', 'Channel ID', 'Server ID', 'Type', 'Position', 'Created'], map: (r) => [r.name, r.id, r.server_id, r.type, String(r.position != null ? r.position : ''), r.created_at || ''] },
+    'messages': { headers: ['Sender', 'Sender ID', 'Channel ID', 'Encrypted Content', 'Nonce', 'Timestamp', 'Message ID', 'Edited At', 'Msg Nonce', 'Msg Sig', 'Profile Key', 'Profile Key Nonce', 'Banner Key', 'Banner Key Nonce'], map: (r) => [r.sender_username || r.sender_id, r.sender_id || '', r.channel_id, r.encrypted_content, r.nonce, r.timestamp, r.id || '', r.edited_at || '', r.message_nonce || '', r.message_signature || '', r.encrypted_profile_key || '', r.profile_key_nonce || '', r.encrypted_banner_key || '', r.banner_key_nonce || ''] },
+    'server-keys': { headers: ['Server', 'Server ID', 'User ID', 'Encrypted Key', 'Sender Public Key', 'Nonce', 'Version', 'Device ID', 'Created'], map: (r) => [r.server_name, r.server_id || '', r.user_id, r.encrypted_key, r.sender_public_key, r.nonce, String(r.version), r.device_id || '', r.created_at || ''] },
+    'server-members': { headers: ['Username', 'User ID', 'Server', 'Server ID', 'Role', 'Joined At'], map: (r) => [r.username, r.user_id, r.server_name, r.server_id, r.role || '', r.joined_at || ''] },
+    'prekey-bundles': { headers: ['User ID', 'Identity Key', 'Signed Prekey', 'Signature', 'OT Prekey', 'OT ID', 'Created'], map: (r) => [r.user_id, r.identity_key_public, r.signed_prekey_public, r.signed_prekey_signature, r.one_time_prekey_public || '', r.one_time_prekey_id != null ? String(r.one_time_prekey_id) : '', r.created_at || ''] },
+    'sessions': { headers: ['Our User', 'Our User ID', 'Their User', 'Their User ID', 'Session Data', 'Ratchet #', 'Created'], map: (r) => [r.our_username, r.our_user_id, r.their_username, r.their_user_id, r.session_data, String(r.ratchet_counter), r.created_at || ''] },
     'server-bans': { headers: ['Server', 'Server ID', 'Username', 'User ID', 'Reason', 'Created At'], map: (r) => [r.server_name, r.server_id || '', r.username, r.user_id || '', r.reason || '', r.created_at] },
     'dm-channels': { headers: ['Channel ID', 'Created At'], map: (r) => [r.id, r.created_at] },
     'dm-members': { headers: ['DM Channel ID', 'User ID', 'Username', 'Created At'], map: (r) => [r.dm_channel_id, r.user_id, r.username, r.created_at] },
-    'dm-messages': { headers: ['Sender', 'Sender ID', 'DM Channel ID', 'Encrypted Content', 'Nonce', 'Timestamp'], map: (r) => [r.sender_username || r.sender_id, r.sender_id || '', r.dm_channel_id, r.encrypted_content, r.nonce, r.timestamp] },
-    'dm-keys': { headers: ['DM Channel ID', 'User ID', 'Username', 'Encrypted Key', 'Sender Public Key', 'Nonce'], map: (r) => [r.dm_channel_id, r.user_id, r.username, r.encrypted_key, r.sender_public_key, r.nonce] },
-    'friend-requests': { headers: ['From', 'From User ID', 'To', 'To User ID', 'Status', 'Created At'], map: (r) => [r.from_username, r.from_user_id, r.to_username, r.to_user_id, r.status, r.created_at] },
+    'dm-messages': { headers: ['Sender', 'Sender ID', 'DM Channel ID', 'Encrypted Content', 'Nonce', 'Timestamp', 'Message ID', 'Edited At', 'Msg Nonce', 'Msg Sig', 'Profile Key', 'Profile Key Nonce', 'Banner Key', 'Banner Key Nonce'], map: (r) => [r.sender_username || r.sender_id, r.sender_id || '', r.dm_channel_id, r.encrypted_content, r.nonce, r.timestamp, r.id || '', r.edited_at || '', r.message_nonce || '', r.message_signature || '', r.encrypted_profile_key || '', r.profile_key_nonce || '', r.encrypted_banner_key || '', r.banner_key_nonce || ''] },
+    'dm-keys': { headers: ['DM Channel ID', 'User ID', 'Username', 'Encrypted Key', 'Sender Pub Key', 'Nonce', 'Device ID', 'Created'], map: (r) => [r.dm_channel_id, r.user_id, r.username, r.encrypted_key, r.sender_public_key, r.nonce, r.device_id || '', r.created_at || ''] },
+    'friend-requests': { headers: ['From', 'From User ID', 'To', 'To User ID', 'Status', 'Created At', 'Responded At'], map: (r) => [r.from_username, r.from_user_id, r.to_username, r.to_user_id, r.status, r.created_at, r.responded_at || ''] },
     'friendships': { headers: ['User 1', 'User 1 ID', 'User 2', 'User 2 ID', 'Created At'], map: (r) => [r.username_1, r.user_id_1, r.username_2, r.user_id_2, r.created_at] },
-    'user-public-keys': { headers: ['Username', 'User ID', 'Device ID', 'Device Name', 'Identity Key', 'Signed Prekey', 'Last Active'], map: (r) => [r.username, r.user_id, r.device_id, r.device_name || '', r.identity_key, r.signed_prekey || '', r.last_active_at || ''] },
-    'files': { headers: ['Filename', 'Uploader', 'Uploader ID', 'MIME Type', 'File Size (bytes)', 'Server ID', 'Channel ID', 'Created At'], map: (r) => [r.original_name, r.uploader_username, r.uploader_id || '', r.mime_type, String(r.file_size), r.server_id || '', r.channel_id || '', r.created_at] },
-    'user-stickers': { headers: ['Username', 'Sticker Name', 'File ID', 'File Key', 'MIME Type'], map: (r) => [r.username, r.sticker_name || '(unnamed)', r.file_id, r.file_key || '', r.mime_type || ''] },
-    'server-stickers': { headers: ['Server', 'Sticker Name', 'Uploaded By', 'File ID'], map: (r) => [r.server_name, r.sticker_name || '(unnamed)', r.uploaded_by || '', r.file_id] },
-    'user-key-escrow': { headers: ['Username', 'User ID', 'Created', 'Updated', 'Has Key'], map: (r) => [r.username, r.user_id, r.created_at || '', r.updated_at || '', r.has_key ? 'Yes' : 'No'] },
-    'notification-sounds': { headers: ['Username', 'User ID', 'File Name', 'Encrypted Sound', 'Nonce', 'Sender Public Key', 'Created'], map: (r) => [r.username, r.user_id, r.file_name || '', r.encrypted_sound, r.nonce, r.sender_public_key, r.created_at || ''] },
+    'user-public-keys': { headers: ['Username', 'User ID', 'Device ID', 'Device Name', 'Identity Key', 'Signed Prekey', 'Signed Prekey Sig', 'Last Active', 'Created'], map: (r) => [r.username, r.user_id, r.device_id, r.device_name || '', r.identity_key, r.signed_prekey || '', r.signed_prekey_signature || '', r.last_active_at || '', r.created_at || ''] },
+    'files': { headers: ['Filename', 'Uploader', 'Uploader ID', 'MIME Type', 'Size', 'Server ID', 'Channel ID', 'Chunks', 'Complete', 'Created'], map: (r) => [r.original_name, r.uploader_username, r.uploader_id || '', r.mime_type, String(r.file_size), r.server_id || '', r.channel_id || '', String(r.chunk_count != null ? r.chunk_count : ''), r.upload_complete ? 'Yes' : 'No', r.created_at] },
+    'user-stickers': { headers: ['Username', 'Sticker Name', 'File ID', 'File Key', 'MIME', 'Created', 'Enc File Key', 'File Key Nonce'], map: (r) => [r.username, r.sticker_name || '(unnamed)', r.file_id, r.file_key || '', r.mime_type || '', r.created_at || '', r.encrypted_file_key || '', r.file_key_nonce || ''] },
+    'server-stickers': { headers: ['Server', 'Sticker Name', 'Uploaded By', 'File ID', 'Created', 'Enc File Key', 'File Key Nonce'], map: (r) => [r.server_name, r.sticker_name || '(unnamed)', r.uploaded_by || '', r.file_id, r.created_at || '', r.encrypted_file_key || '', r.file_key_nonce || ''] },
+    'user-key-escrow': { headers: ['Username', 'User ID', 'Created', 'Updated', 'Has Key', 'Encrypted Private Key', 'Salt', 'Nonce'], map: (r) => [r.username, r.user_id, r.created_at || '', r.updated_at || '', r.has_key ? 'Yes' : 'No', r.encrypted_private_key || '', r.salt || '', r.nonce || ''] },
+    'notification-sounds': { headers: ['Username', 'User ID', 'File Name', 'Encrypted Sound', 'Nonce', 'Sender Public Key', 'Created', 'Updated'], map: (r) => [r.username, r.user_id, r.file_name || '', r.encrypted_sound, r.nonce, r.sender_public_key, r.created_at || '', r.updated_at || ''] },
+    'admin-config': { headers: ['Key', 'Value'], map: (r) => [r.key, r.value] },
+    'user-device-escrow': { headers: ['Username', 'User ID', 'Device ID', 'Encrypted Private Key', 'Salt', 'Nonce', 'Created', 'Updated'], map: (r) => [r.username, r.user_id, r.device_id || '', r.encrypted_private_key || '', r.salt || '', r.nonce || '', r.created_at || '', r.updated_at || ''] },
 };
 
 function csvEscape(val) {
@@ -309,6 +312,8 @@ function filterTab(tab) {
         case 'server-stickers': filtered = rawData.serverStickers.filter(s => !q || s.server_name.toLowerCase().includes(q) || (s.sticker_name || '').toLowerCase().includes(q)); tabFilteredCache['server-stickers'] = filtered; renderServerStickers(filtered); break;
         case 'user-key-escrow': filtered = rawData.userKeyEscrow.filter(e => !q || e.username.toLowerCase().includes(q) || e.user_id.toLowerCase().includes(q)); tabFilteredCache['user-key-escrow'] = filtered; renderUserKeyEscrow(filtered); break;
         case 'notification-sounds': filtered = rawData.notificationSounds.filter(n => !q || n.username.toLowerCase().includes(q) || n.user_id.toLowerCase().includes(q)); tabFilteredCache['notification-sounds'] = filtered; renderNotificationSounds(filtered); break;
+        case 'admin-config': filtered = rawData.adminConfig.filter(c => !q || c.key.toLowerCase().includes(q) || c.value.toLowerCase().includes(q)); tabFilteredCache['admin-config'] = filtered; renderAdminConfig(filtered); break;
+        case 'user-device-escrow': filtered = rawData.userDeviceEscrow.filter(e => !q || e.username.toLowerCase().includes(q) || e.user_id.toLowerCase().includes(q) || e.device_id.toLowerCase().includes(q)); tabFilteredCache['user-device-escrow'] = filtered; renderUserDeviceEscrow(filtered); break;
     }
 }
 
@@ -335,6 +340,8 @@ async function loadAllData() {
         loadServerStickers(),
         loadUserKeyEscrow(),
         loadNotificationSounds(),
+        loadAdminConfig(),
+        loadUserDeviceEscrow(),
     ]);
 }
 
@@ -354,10 +361,25 @@ function renderUsers(users) {
     tabTotals['users'] = users.length;
     const p = paginate(users, 'users');
     updateCount('users-count', p.total);
-    renderTable('user-list', 2,
+    renderTable('user-list', 17,
         p.items.map(u =>
             '<td>' + escapeHtml(u.username) + '</td>' +
-            '<td class="id-cell" title="' + escapeHtml(u.id) + '">' + escapeHtml(truncate(u.id, 12)) + '</td>'
+            '<td class="id-cell" title="' + escapeHtml(u.id) + '">' + escapeHtml(truncate(u.id, 12)) + '</td>' +
+            '<td class="ts-cell">' + escapeHtml(u.created_at || '') + '</td>' +
+            '<td>' + escapeHtml(u.display_name || '') + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(u.identity_public_key || '', 20)) + '</td>' +
+            '<td class="id-cell">' + escapeHtml(truncate(u.profile_picture_file_id || '', 12)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(u.profile_picture_file_key || '', 20)) + '</td>' +
+            '<td>' + escapeHtml(u.username_color || '') + '</td>' +
+            '<td>' + escapeHtml(u.username_border_color || '') + '</td>' +
+            '<td class="id-cell">' + escapeHtml(truncate(u.profile_banner_file_id || '', 12)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(u.profile_banner_file_key || '', 20)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(u.description || '', 40)) + '</td>' +
+            '<td>' + escapeHtml(u.nickname || '') + '</td>' +
+            '<td>' + escapeHtml(u.profile_background_color || '') + '</td>' +
+            '<td>' + (u.friend_requests_disabled ? 'Yes' : 'No') + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(u.encrypted_profile_data || '', 30)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(u.friend_code_hash || '', 20)) + '</td>'
         ),
         'No users'
     );
@@ -380,11 +402,14 @@ function renderServers(servers) {
     tabTotals['servers'] = servers.length;
     const p = paginate(servers, 'servers');
     updateCount('servers-count', p.total);
-    renderTable('server-list', 3,
+    renderTable('server-list', 6,
         p.items.map(s =>
             '<td>' + escapeHtml(s.name) + '</td>' +
             '<td class="id-cell" title="' + escapeHtml(s.id) + '">' + escapeHtml(truncate(s.id, 12)) + '</td>' +
-            '<td class="id-cell" title="' + escapeHtml(s.owner_id) + '">' + escapeHtml(truncate(s.owner_id, 12)) + '</td>'
+            '<td class="id-cell" title="' + escapeHtml(s.owner_id) + '">' + escapeHtml(truncate(s.owner_id, 12)) + '</td>' +
+            '<td class="ts-cell">' + escapeHtml(s.created_at || '') + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(s.invite_code_hash || '', 20)) + '</td>' +
+            '<td>' + (s.joins_disabled ? 'Yes' : 'No') + '</td>'
         ),
         'No servers'
     );
@@ -407,12 +432,14 @@ function renderChannels(channels) {
     tabTotals['channels'] = channels.length;
     const p = paginate(channels, 'channels');
     updateCount('channels-count', p.total);
-    renderTable('channel-list', 4,
+    renderTable('channel-list', 6,
         p.items.map(c =>
             '<td>' + escapeHtml(c.name) + '</td>' +
             '<td class="id-cell" title="' + escapeHtml(c.id) + '">' + escapeHtml(truncate(c.id, 12)) + '</td>' +
             '<td class="id-cell" title="' + escapeHtml(c.server_id) + '">' + escapeHtml(truncate(c.server_id, 12)) + '</td>' +
-            '<td>' + escapeHtml(c.type) + '</td>'
+            '<td>' + escapeHtml(c.type) + '</td>' +
+            '<td>' + (c.position != null ? c.position : '') + '</td>' +
+            '<td class="ts-cell">' + escapeHtml(c.created_at || '') + '</td>'
         ),
         'No channels'
     );
@@ -435,13 +462,21 @@ function renderMessages(messages) {
     tabTotals['messages'] = messages.length;
     const p = paginate(messages, 'messages');
     updateCount('messages-count', p.total, ' records');
-    renderTable('message-list', 5,
+    renderTable('message-list', 13,
         p.items.map(m =>
             '<td>' + escapeHtml(m.sender_username || m.sender_id) + '</td>' +
             '<td class="id-cell" title="' + escapeHtml(m.channel_id) + '">' + escapeHtml(truncate(m.channel_id, 12)) + '</td>' +
             '<td class="blob-cell" title="Click to expand">' + escapeHtml(truncate(m.encrypted_content, 60)) + '</td>' +
             '<td class="blob-cell">' + escapeHtml(truncate(m.nonce, 30)) + '</td>' +
-            '<td class="ts-cell">' + escapeHtml(m.timestamp) + '</td>'
+            '<td class="ts-cell">' + escapeHtml(m.timestamp) + '</td>' +
+            '<td class="id-cell">' + escapeHtml(truncate(m.id || '', 12)) + '</td>' +
+            '<td class="ts-cell">' + escapeHtml(m.edited_at || '') + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(m.message_nonce || '', 20)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(m.message_signature || '', 20)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(m.encrypted_profile_key || '', 20)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(m.profile_key_nonce || '', 20)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(m.encrypted_banner_key || '', 20)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(m.banner_key_nonce || '', 20)) + '</td>'
         ),
         'No messages'
     );
@@ -464,14 +499,16 @@ function renderServerKeys(keys) {
     tabTotals['server-keys'] = keys.length;
     const p = paginate(keys, 'server-keys');
     updateCount('server-keys-count', p.total);
-    renderTable('server-key-list', 6,
+    renderTable('server-key-list', 8,
         p.items.map(k =>
             '<td>' + escapeHtml(k.server_name) + '</td>' +
             '<td class="id-cell" title="' + escapeHtml(k.user_id) + '">' + escapeHtml(truncate(k.user_id, 12)) + '</td>' +
             '<td class="blob-cell" title="Click to expand">' + escapeHtml(truncate(k.encrypted_key, 40)) + '</td>' +
             '<td class="blob-cell" title="Click to expand">' + escapeHtml(truncate(k.sender_public_key, 40)) + '</td>' +
             '<td class="blob-cell">' + escapeHtml(truncate(k.nonce, 30)) + '</td>' +
-            '<td>' + k.version + '</td>'
+            '<td>' + k.version + '</td>' +
+            '<td class="id-cell">' + escapeHtml(truncate(k.device_id || '', 12)) + '</td>' +
+            '<td class="ts-cell">' + escapeHtml(k.created_at || '') + '</td>'
         ),
         'No server keys'
     );
@@ -494,12 +531,14 @@ function renderServerMembers(members) {
     tabTotals['server-members'] = members.length;
     const p = paginate(members, 'server-members');
     updateCount('server-members-count', p.total);
-    renderTable('server-member-list', 4,
+    renderTable('server-member-list', 6,
         p.items.map(m =>
             '<td>' + escapeHtml(m.username) + '</td>' +
             '<td class="id-cell" title="' + escapeHtml(m.user_id) + '">' + escapeHtml(truncate(m.user_id, 12)) + '</td>' +
             '<td>' + escapeHtml(m.server_name) + '</td>' +
-            '<td class="id-cell" title="' + escapeHtml(m.server_id) + '">' + escapeHtml(truncate(m.server_id, 12)) + '</td>'
+            '<td class="id-cell" title="' + escapeHtml(m.server_id) + '">' + escapeHtml(truncate(m.server_id, 12)) + '</td>' +
+            '<td>' + escapeHtml(m.role || 'member') + '</td>' +
+            '<td class="ts-cell">' + escapeHtml(m.joined_at || '') + '</td>'
         ),
         'No members'
     );
@@ -521,14 +560,15 @@ function renderPrekeyBundles(rows) {
     tabTotals['prekey-bundles'] = rows.length;
     const p = paginate(rows, 'prekey-bundles');
     updateCount('prekey-bundles-count', p.total);
-    renderTable('prekey-bundle-list', 6,
+    renderTable('prekey-bundle-list', 7,
         p.items.map(r =>
             '<td class="id-cell" title="' + escapeHtml(r.user_id) + '">' + escapeHtml(truncate(r.user_id, 12)) + '</td>' +
             '<td class="blob-cell">' + escapeHtml(truncate(r.identity_key_public, 30)) + '</td>' +
             '<td class="blob-cell">' + escapeHtml(truncate(r.signed_prekey_public, 30)) + '</td>' +
             '<td class="blob-cell">' + escapeHtml(truncate(r.signed_prekey_signature, 30)) + '</td>' +
             '<td class="blob-cell">' + escapeHtml(truncate(r.one_time_prekey_public || '', 30)) + '</td>' +
-            '<td>' + (r.one_time_prekey_id || '') + '</td>'
+            '<td>' + (r.one_time_prekey_id || '') + '</td>' +
+            '<td class="ts-cell">' + escapeHtml(r.created_at || '') + '</td>'
         ),
         'No prekey bundles'
     );
@@ -550,12 +590,13 @@ function renderSessions(rows) {
     tabTotals['sessions'] = rows.length;
     const p = paginate(rows, 'sessions');
     updateCount('sessions-count', p.total);
-    renderTable('session-list', 4,
+    renderTable('session-list', 5,
         p.items.map(r =>
             '<td>' + escapeHtml(r.our_username) + ' <span class="id-cell" title="' + escapeHtml(r.our_user_id) + '">(' + escapeHtml(truncate(r.our_user_id, 8)) + ')</span></td>' +
             '<td>' + escapeHtml(r.their_username) + ' <span class="id-cell" title="' + escapeHtml(r.their_user_id) + '">(' + escapeHtml(truncate(r.their_user_id, 8)) + ')</span></td>' +
             '<td class="blob-cell">' + escapeHtml(truncate(r.session_data, 40)) + '</td>' +
-            '<td>' + r.ratchet_counter + '</td>'
+            '<td>' + r.ratchet_counter + '</td>' +
+            '<td class="ts-cell">' + escapeHtml(r.created_at || '') + '</td>'
         ),
         'No sessions'
     );
@@ -577,10 +618,12 @@ function renderServerBans(rows) {
     tabTotals['server-bans'] = rows.length;
     const p = paginate(rows, 'server-bans');
     updateCount('server-bans-count', p.total);
-    renderTable('server-ban-list', 4,
+    renderTable('server-ban-list', 6,
         p.items.map(r =>
             '<td>' + escapeHtml(r.server_name) + '</td>' +
+            '<td class="id-cell" title="' + escapeHtml(r.server_id) + '">' + escapeHtml(truncate(r.server_id, 12)) + '</td>' +
             '<td>' + escapeHtml(r.username) + '</td>' +
+            '<td class="id-cell" title="' + escapeHtml(r.user_id) + '">' + escapeHtml(truncate(r.user_id || '', 12)) + '</td>' +
             '<td>' + escapeHtml(r.reason || '') + '</td>' +
             '<td class="ts-cell">' + escapeHtml(r.created_at) + '</td>'
         ),
@@ -656,13 +699,21 @@ function renderDmMessages(rows) {
     tabTotals['dm-messages'] = rows.length;
     const p = paginate(rows, 'dm-messages');
     updateCount('dm-messages-count', p.total, ' records');
-    renderTable('dm-message-list', 5,
+    renderTable('dm-message-list', 13,
         p.items.map(m =>
             '<td>' + escapeHtml(m.sender_username || m.sender_id) + '</td>' +
             '<td class="id-cell" title="' + escapeHtml(m.dm_channel_id) + '">' + escapeHtml(truncate(m.dm_channel_id, 12)) + '</td>' +
             '<td class="blob-cell" title="Click to expand">' + escapeHtml(truncate(m.encrypted_content, 50)) + '</td>' +
             '<td class="blob-cell">' + escapeHtml(truncate(m.nonce, 30)) + '</td>' +
-            '<td class="ts-cell">' + escapeHtml(m.timestamp) + '</td>'
+            '<td class="ts-cell">' + escapeHtml(m.timestamp) + '</td>' +
+            '<td class="id-cell">' + escapeHtml(truncate(m.id || '', 12)) + '</td>' +
+            '<td class="ts-cell">' + escapeHtml(m.edited_at || '') + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(m.message_nonce || '', 20)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(m.message_signature || '', 20)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(m.encrypted_profile_key || '', 20)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(m.profile_key_nonce || '', 20)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(m.encrypted_banner_key || '', 20)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(m.banner_key_nonce || '', 20)) + '</td>'
         ),
         'No DM messages'
     );
@@ -684,14 +735,16 @@ function renderDmKeys(rows) {
     tabTotals['dm-keys'] = rows.length;
     const p = paginate(rows, 'dm-keys');
     updateCount('dm-keys-count', p.total);
-    renderTable('dm-key-list', 6,
+    renderTable('dm-key-list', 8,
         p.items.map(r =>
             '<td class="id-cell" title="' + escapeHtml(r.dm_channel_id) + '">' + escapeHtml(truncate(r.dm_channel_id, 12)) + '</td>' +
             '<td class="id-cell" title="' + escapeHtml(r.user_id) + '">' + escapeHtml(truncate(r.user_id, 12)) + '</td>' +
             '<td>' + escapeHtml(r.username) + '</td>' +
             '<td class="blob-cell">' + escapeHtml(truncate(r.encrypted_key, 40)) + '</td>' +
             '<td class="blob-cell">' + escapeHtml(truncate(r.sender_public_key, 40)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(r.nonce, 30)) + '</td>'
+            '<td class="blob-cell">' + escapeHtml(truncate(r.nonce, 30)) + '</td>' +
+            '<td class="id-cell">' + escapeHtml(truncate(r.device_id || '', 12)) + '</td>' +
+            '<td class="ts-cell">' + escapeHtml(r.created_at || '') + '</td>'
         ),
         'No DM keys'
     );
@@ -713,12 +766,13 @@ function renderFriendRequests(rows) {
     tabTotals['friend-requests'] = rows.length;
     const p = paginate(rows, 'friend-requests');
     updateCount('friend-requests-count', p.total);
-    renderTable('friend-request-list', 4,
+    renderTable('friend-request-list', 5,
         p.items.map(r =>
             '<td>' + escapeHtml(r.from_username) + ' <span class="id-cell">(' + escapeHtml(truncate(r.from_user_id, 8)) + ')</span></td>' +
             '<td>' + escapeHtml(r.to_username) + ' <span class="id-cell">(' + escapeHtml(truncate(r.to_user_id, 8)) + ')</span></td>' +
             '<td>' + escapeHtml(r.status) + '</td>' +
-            '<td class="ts-cell">' + escapeHtml(r.created_at) + '</td>'
+            '<td class="ts-cell">' + escapeHtml(r.created_at) + '</td>' +
+            '<td class="ts-cell">' + escapeHtml(r.responded_at || '') + '</td>'
         ),
         'No friend requests'
     );
@@ -766,14 +820,16 @@ function renderUserPublicKeys(rows) {
     tabTotals['user-public-keys'] = rows.length;
     const p = paginate(rows, 'user-public-keys');
     updateCount('user-public-keys-count', p.total);
-    renderTable('user-public-key-list', 7,
+    renderTable('user-public-key-list', 9,
         p.items.map(r =>
             '<td>' + escapeHtml(r.username) + ' <span class="id-cell">(' + escapeHtml(truncate(r.user_id, 8)) + ')</span></td>' +
             '<td class="id-cell" title="' + escapeHtml(r.device_id) + '">' + escapeHtml(truncate(r.device_id, 12)) + '</td>' +
             '<td>' + escapeHtml(r.device_name || '') + '</td>' +
             '<td class="blob-cell">' + escapeHtml(truncate(r.identity_key, 30)) + '</td>' +
             '<td class="blob-cell">' + escapeHtml(truncate(r.signed_prekey || '', 30)) + '</td>' +
-            '<td class="ts-cell">' + escapeHtml(r.last_active_at || '') + '</td>'
+            '<td class="blob-cell">' + escapeHtml(truncate(r.signed_prekey_signature || '', 30)) + '</td>' +
+            '<td class="ts-cell">' + escapeHtml(r.last_active_at || '') + '</td>' +
+            '<td class="ts-cell">' + escapeHtml(r.created_at || '') + '</td>'
         ),
         'No user devices'
     );
@@ -795,16 +851,19 @@ function renderFiles(rows) {
     tabTotals['files'] = rows.length;
     const p = paginate(rows, 'files');
     updateCount('files-count', p.total);
-    renderTable('file-list', 7,
+    renderTable('file-list', 10,
         p.items.map(r => {
             const size = r.file_size > 1048576 ? (r.file_size / 1048576).toFixed(1) + ' MB' :
                          r.file_size > 1024 ? (r.file_size / 1024).toFixed(1) + ' KB' : r.file_size + ' B';
             return '<td>' + escapeHtml(r.original_name) + '</td>' +
             '<td>' + escapeHtml(r.uploader_username) + '</td>' +
+            '<td class="id-cell">' + escapeHtml(truncate(r.uploader_id || '', 12)) + '</td>' +
             '<td>' + escapeHtml(r.mime_type) + '</td>' +
             '<td>' + size + '</td>' +
             '<td class="id-cell">' + escapeHtml(truncate(r.server_id || '-', 10)) + '</td>' +
             '<td class="id-cell">' + escapeHtml(truncate(r.channel_id || '-', 10)) + '</td>' +
+            '<td>' + (r.chunk_count != null ? r.chunk_count : '') + '</td>' +
+            '<td>' + (r.upload_complete ? 'Yes' : 'No') + '</td>' +
             '<td class="ts-cell">' + escapeHtml(r.created_at) + '</td>';
         }),
         'No files'
@@ -827,13 +886,16 @@ function renderUserStickers(rows) {
     tabTotals['user-stickers'] = rows.length;
     const p = paginate(rows, 'user-stickers');
     updateCount('user-stickers-count', p.total);
-    renderTable('user-sticker-list', 5,
+    renderTable('user-sticker-list', 8,
         p.items.map(r =>
             '<td>' + escapeHtml(r.username) + '</td>' +
             '<td>' + escapeHtml(r.sticker_name || '(unnamed)') + '</td>' +
             '<td class="id-cell">' + escapeHtml(truncate(r.file_id, 12)) + '</td>' +
             '<td class="blob-cell">' + escapeHtml(truncate(r.file_key || '', 30)) + '</td>' +
-            '<td>' + escapeHtml(r.mime_type || '') + '</td>'
+            '<td>' + escapeHtml(r.mime_type || '') + '</td>' +
+            '<td class="ts-cell">' + escapeHtml(r.created_at || '') + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.encrypted_file_key || '', 30)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.file_key_nonce || '', 30)) + '</td>'
         ),
         'No user stickers'
     );
@@ -855,12 +917,15 @@ function renderServerStickers(rows) {
     tabTotals['server-stickers'] = rows.length;
     const p = paginate(rows, 'server-stickers');
     updateCount('server-stickers-count', p.total);
-    renderTable('server-sticker-list', 4,
+    renderTable('server-sticker-list', 7,
         p.items.map(r =>
             '<td>' + escapeHtml(r.server_name) + '</td>' +
             '<td>' + escapeHtml(r.sticker_name || '(unnamed)') + '</td>' +
             '<td>' + escapeHtml(r.uploaded_by || '') + '</td>' +
-            '<td class="id-cell">' + escapeHtml(truncate(r.file_id, 12)) + '</td>'
+            '<td class="id-cell">' + escapeHtml(truncate(r.file_id, 12)) + '</td>' +
+            '<td class="ts-cell">' + escapeHtml(r.created_at || '') + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.encrypted_file_key || '', 30)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.file_key_nonce || '', 30)) + '</td>'
         ),
         'No server stickers'
     );
@@ -882,13 +947,16 @@ function renderUserKeyEscrow(rows) {
     tabTotals['user-key-escrow'] = rows.length;
     const p = paginate(rows, 'user-key-escrow');
     updateCount('user-key-escrow-count', p.total);
-    renderTable('user-key-escrow-list', 5,
+    renderTable('user-key-escrow-list', 8,
         p.items.map(r =>
             '<td>' + escapeHtml(r.username) + '</td>' +
             '<td class="id-cell">' + escapeHtml(truncate(r.user_id, 12)) + '</td>' +
             '<td class="ts-cell">' + escapeHtml(r.created_at || '') + '</td>' +
             '<td class="ts-cell">' + escapeHtml(r.updated_at || '') + '</td>' +
-            '<td>' + (r.has_key ? 'Yes' : 'No') + '</td>'
+            '<td>' + (r.has_key ? 'Yes' : 'No') + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.encrypted_private_key || '', 30)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.salt || '', 30)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.nonce || '', 30)) + '</td>'
         ),
         'No key escrow records'
     );
@@ -910,7 +978,7 @@ function renderNotificationSounds(rows) {
     tabTotals['notification-sounds'] = rows.length;
     const p = paginate(rows, 'notification-sounds');
     updateCount('notification-sounds-count', p.total);
-    renderTable('notification-sound-list', 7,
+    renderTable('notification-sound-list', 8,
         p.items.map(r =>
             '<td>' + escapeHtml(r.username) + '</td>' +
             '<td class="id-cell">' + escapeHtml(truncate(r.user_id, 12)) + '</td>' +
@@ -918,11 +986,68 @@ function renderNotificationSounds(rows) {
             '<td class="blob-cell">' + escapeHtml(truncate(r.encrypted_sound, 40)) + '</td>' +
             '<td class="blob-cell">' + escapeHtml(truncate(r.nonce, 30)) + '</td>' +
             '<td class="blob-cell">' + escapeHtml(truncate(r.sender_public_key, 30)) + '</td>' +
-            '<td class="ts-cell">' + escapeHtml(r.created_at || '') + '</td>'
+            '<td class="ts-cell">' + escapeHtml(r.created_at || '') + '</td>' +
+            '<td class="ts-cell">' + escapeHtml(r.updated_at || '') + '</td>'
         ),
         'No notification sounds'
     );
     renderPaginationControls('notification-sounds');
+}
+
+// --- Admin Config ---
+async function loadAdminConfig() {
+    try {
+        const rows = await apiFetch('/api/admin/admin-config');
+        rawData.adminConfig = Array.isArray(rows) ? rows : [];
+        renderAdminConfig(rawData.adminConfig);
+    } catch (err) {
+        rawData.adminConfig = [];
+        renderAdminConfig([]);
+    }
+}
+function renderAdminConfig(rows) {
+    tabTotals['admin-config'] = rows.length;
+    const p = paginate(rows, 'admin-config');
+    updateCount('admin-config-count', p.total);
+    renderTable('admin-config-list', 2,
+        p.items.map(r =>
+            '<td>' + escapeHtml(r.key) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.value, 60)) + '</td>'
+        ),
+        'No config entries'
+    );
+    renderPaginationControls('admin-config');
+}
+
+// --- User Device Escrow ---
+async function loadUserDeviceEscrow() {
+    try {
+        const rows = await apiFetch('/api/admin/user-device-escrow');
+        rawData.userDeviceEscrow = Array.isArray(rows) ? rows : [];
+        renderUserDeviceEscrow(rawData.userDeviceEscrow);
+    } catch (err) {
+        rawData.userDeviceEscrow = [];
+        renderUserDeviceEscrow([]);
+    }
+}
+function renderUserDeviceEscrow(rows) {
+    tabTotals['user-device-escrow'] = rows.length;
+    const p = paginate(rows, 'user-device-escrow');
+    updateCount('user-device-escrow-count', p.total);
+    renderTable('user-device-escrow-list', 8,
+        p.items.map(r =>
+            '<td>' + escapeHtml(r.username) + '</td>' +
+            '<td class="id-cell">' + escapeHtml(truncate(r.user_id, 12)) + '</td>' +
+            '<td class="id-cell">' + escapeHtml(truncate(r.device_id || '', 12)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.encrypted_private_key || '', 30)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.salt || '', 30)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.nonce || '', 30)) + '</td>' +
+            '<td class="ts-cell">' + escapeHtml(r.created_at || '') + '</td>' +
+            '<td class="ts-cell">' + escapeHtml(r.updated_at || '') + '</td>'
+        ),
+        'No device escrow records'
+    );
+    renderPaginationControls('user-device-escrow');
 }
 
 async function clearAll() {

@@ -2033,10 +2033,30 @@ pub async fn admin_list_users(
 
     let user_infos: Vec<serde_json::Value> = users
         .iter()
-        .map(|u| {
+        .map(|(id, username, _pw_hash, created_at, display_name, identity_public_key, profile_picture_file_id, profile_picture_file_key, username_color, username_border_color, friend_requests_disabled, encrypted_friend_code, friend_code_salt, friend_code_nonce, encrypted_profile_data, encrypted_profile_salt, encrypted_profile_nonce, profile_banner_file_id, profile_banner_file_key, description, nickname, profile_background_color, friend_code_hash)| {
             serde_json::json!({
-                "id": u.id,
-                "username": u.username,
+                "id": id,
+                "username": username,
+                "created_at": created_at,
+                "display_name": display_name,
+                "identity_public_key": if identity_public_key.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(identity_public_key.clone()) },
+                "profile_picture_file_id": profile_picture_file_id,
+                "profile_picture_file_key": profile_picture_file_key,
+                "username_color": username_color,
+                "username_border_color": username_border_color,
+                "friend_requests_disabled": *friend_requests_disabled != 0,
+                "encrypted_friend_code": encrypted_friend_code,
+                "friend_code_salt": friend_code_salt,
+                "friend_code_nonce": friend_code_nonce,
+                "encrypted_profile_data": encrypted_profile_data,
+                "encrypted_profile_salt": encrypted_profile_salt,
+                "encrypted_profile_nonce": encrypted_profile_nonce,
+                "profile_banner_file_id": profile_banner_file_id,
+                "profile_banner_file_key": profile_banner_file_key,
+                "description": description,
+                "nickname": nickname,
+                "profile_background_color": profile_background_color,
+                "friend_code_hash": friend_code_hash,
             })
         })
         .collect();
@@ -2093,6 +2113,9 @@ pub async fn admin_list_servers(
                 "id": s.id,
                 "name": s.name,
                 "owner_id": s.owner_id,
+                "invite_code_hash": s.invite_code_hash,
+                "joins_disabled": s.joins_disabled,
+                "created_at": s.created_at,
             })
         })
         .collect();
@@ -2121,6 +2144,8 @@ pub async fn admin_list_channels(
                 "server_id": c.server_id,
                 "name": c.name,
                 "type": c.channel_type,
+                "position": c.position,
+                "created_at": c.created_at,
             })
         })
         .collect();
@@ -2152,6 +2177,13 @@ pub async fn admin_list_messages(
                 "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
                 "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
                 "timestamp": m.timestamp,
+                "edited_at": m.edited_at,
+                "message_nonce": m.message_nonce,
+                "message_signature": m.message_signature,
+                "encrypted_profile_key": m.encrypted_profile_key,
+                "profile_key_nonce": m.profile_key_nonce,
+                "encrypted_banner_key": m.encrypted_banner_key,
+                "banner_key_nonce": m.banner_key_nonce,
             })
         })
         .collect();
@@ -2174,7 +2206,7 @@ pub async fn admin_list_server_keys(
     };
     let result: Vec<serde_json::Value> = keys
         .iter()
-        .map(|(sid, sname, uid, ek, spk, nonce, ver)| {
+        .map(|(sid, sname, uid, ek, spk, nonce, ver, did, ts)| {
             serde_json::json!({
                 "server_id": sid,
                 "server_name": sname,
@@ -2183,6 +2215,8 @@ pub async fn admin_list_server_keys(
                 "sender_public_key": base64::engine::general_purpose::STANDARD.encode(spk),
                 "nonce": base64::engine::general_purpose::STANDARD.encode(nonce),
                 "version": ver,
+                "device_id": did,
+                "created_at": ts,
             })
         })
         .collect();
@@ -2205,12 +2239,14 @@ pub async fn admin_list_server_members(
     };
     let result: Vec<serde_json::Value> = members
         .iter()
-        .map(|(uid, uname, sid, sname)| {
+        .map(|(uid, uname, sid, sname, role, joined_at)| {
             serde_json::json!({
                 "user_id": uid,
                 "username": uname,
                 "server_id": sid,
                 "server_name": sname,
+                "role": role,
+                "joined_at": joined_at,
             })
         })
         .collect();
@@ -2335,12 +2371,14 @@ pub async fn admin_list_dm_keys(
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     };
-    let result: Vec<serde_json::Value> = rows.iter().map(|(dm_id, uid, uname, ek, spk, nonce)| {
+    let result: Vec<serde_json::Value> = rows.iter().map(|(dm_id, uid, uname, ek, spk, nonce, device_id, created_at)| {
         serde_json::json!({
             "dm_channel_id": dm_id, "user_id": uid, "username": uname,
             "encrypted_key": base64::engine::general_purpose::STANDARD.encode(ek),
             "sender_public_key": base64::engine::general_purpose::STANDARD.encode(spk),
             "nonce": base64::engine::general_purpose::STANDARD.encode(nonce),
+            "device_id": device_id,
+            "created_at": created_at,
         })
     }).collect();
     (StatusCode::OK, Json(serde_json::json!(result))).into_response()
@@ -2355,10 +2393,11 @@ pub async fn admin_list_friend_requests(
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     };
-    let result: Vec<serde_json::Value> = rows.iter().map(|(id, fid, fname, tid, tname, status, ts)| {
+    let result: Vec<serde_json::Value> = rows.iter().map(|(id, fid, fname, tid, tname, status, ts, responded_at)| {
         serde_json::json!({
             "id": id, "from_user_id": fid, "from_username": fname,
             "to_user_id": tid, "to_username": tname, "status": status, "created_at": ts,
+            "responded_at": responded_at,
         })
     }).collect();
     (StatusCode::OK, Json(serde_json::json!(result))).into_response()
@@ -2391,12 +2430,14 @@ pub async fn admin_list_user_public_keys(
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     };
-    let result: Vec<serde_json::Value> = rows.iter().map(|(uid, uname, did, dname, ik, spk, last_active)| {
+    let result: Vec<serde_json::Value> = rows.iter().map(|(uid, uname, did, dname, ik, spk, last_active, spk_sig, created_at)| {
         serde_json::json!({
             "user_id": uid, "username": uname, "device_id": did, "device_name": dname,
             "identity_key": base64::engine::general_purpose::STANDARD.encode(ik),
             "signed_prekey": spk.as_ref().map(|k| base64::engine::general_purpose::STANDARD.encode(k)),
+            "signed_prekey_signature": if spk_sig.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(spk_sig.clone()) },
             "last_active_at": last_active,
+            "created_at": created_at,
         })
     }).collect();
     (StatusCode::OK, Json(serde_json::json!(result))).into_response()
@@ -2411,11 +2452,12 @@ pub async fn admin_list_files(
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     };
-    let result: Vec<serde_json::Value> = rows.iter().map(|(id, uid, uname, name, mime, size, sid, cid, ts)| {
+    let result: Vec<serde_json::Value> = rows.iter().map(|(id, uid, uname, name, mime, size, sid, cid, ts, chunk_count, upload_complete)| {
         serde_json::json!({
             "id": id, "uploader_id": uid, "uploader_username": uname,
             "original_name": name, "mime_type": mime, "file_size": size,
             "server_id": sid, "channel_id": cid, "created_at": ts,
+            "chunk_count": chunk_count, "upload_complete": *upload_complete != 0,
         })
     }).collect();
     (StatusCode::OK, Json(serde_json::json!(result))).into_response()
@@ -2475,12 +2517,15 @@ pub async fn admin_list_user_stickers(
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     };
-    let result: Vec<serde_json::Value> = rows.iter().map(|(id, uid, uname, fid, sname, fkey, mime, _ekey, _eknonce)| {
+    let result: Vec<serde_json::Value> = rows.iter().map(|(id, uid, uname, fid, sname, fkey, mime, ekey, eknonce, created_at)| {
         serde_json::json!({
             "id": id, "user_id": uid, "username": uname,
             "file_id": fid, "sticker_name": sname,
             "file_key": if fkey.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(fkey.clone()) },
             "mime_type": mime,
+            "created_at": created_at,
+            "encrypted_file_key": ekey.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
+            "file_key_nonce": eknonce.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
         })
     }).collect();
     (StatusCode::OK, Json(serde_json::json!(result))).into_response()
@@ -2495,11 +2540,14 @@ pub async fn admin_list_server_stickers(
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     };
-    let result: Vec<serde_json::Value> = rows.iter().map(|(id, sid, sname, fid, uby, stname, fkey, _ekey, _eknonce)| {
+    let result: Vec<serde_json::Value> = rows.iter().map(|(id, sid, sname, fid, uby, stname, fkey, ekey, eknonce, created_at)| {
         serde_json::json!({
             "id": id, "server_id": sid, "server_name": sname,
             "file_id": fid, "uploaded_by": uby, "sticker_name": stname,
             "file_key": if fkey.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(fkey.clone()) },
+            "created_at": created_at,
+            "encrypted_file_key": ekey.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
+            "file_key_nonce": eknonce.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
         })
     }).collect();
     (StatusCode::OK, Json(serde_json::json!(result))).into_response()
@@ -2514,11 +2562,14 @@ pub async fn admin_list_user_key_escrow(
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     };
-    let result: Vec<serde_json::Value> = rows.iter().map(|(uid, uname, created, updated, has_key)| {
+    let result: Vec<serde_json::Value> = rows.iter().map(|(uid, uname, created, updated, encrypted_key, salt, nonce)| {
         serde_json::json!({
             "user_id": uid, "username": uname,
             "created_at": created, "updated_at": updated,
-            "has_key": *has_key != 0,
+            "has_key": !encrypted_key.is_empty(),
+            "encrypted_private_key": if encrypted_key.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(encrypted_key)) },
+            "salt": if salt.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(salt)) },
+            "nonce": if nonce.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(nonce)) },
         })
     }).collect();
     (StatusCode::OK, Json(serde_json::json!(result))).into_response()
@@ -2533,13 +2584,52 @@ pub async fn admin_list_notification_sounds(
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     };
-    let result: Vec<serde_json::Value> = rows.iter().map(|(uid, uname, fname, enc, nonce, spk, created)| {
+    let result: Vec<serde_json::Value> = rows.iter().map(|(uid, uname, fname, enc, nonce, spk, created, updated)| {
         serde_json::json!({
             "user_id": uid, "username": uname, "file_name": fname,
             "encrypted_sound": base64::engine::general_purpose::STANDARD.encode(enc),
             "nonce": base64::engine::general_purpose::STANDARD.encode(nonce),
             "sender_public_key": base64::engine::general_purpose::STANDARD.encode(spk),
             "created_at": created,
+            "updated_at": updated,
+        })
+    }).collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
+pub async fn admin_list_admin_config(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
+    let rows = match state.db.list_all_config_admin() {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let result: Vec<serde_json::Value> = rows.iter().map(|(key, value)| {
+        serde_json::json!({
+            "key": key, "value": value,
+        })
+    }).collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
+pub async fn admin_list_user_device_escrow(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
+    let rows = match state.db.list_all_user_device_escrow_admin() {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let result: Vec<serde_json::Value> = rows.iter().map(|(uid, uname, did, ek, salt, nonce, created, updated)| {
+        serde_json::json!({
+            "user_id": uid, "username": uname, "device_id": did,
+            "encrypted_private_key": base64::engine::general_purpose::STANDARD.encode(ek),
+            "salt": base64::engine::general_purpose::STANDARD.encode(salt),
+            "nonce": base64::engine::general_purpose::STANDARD.encode(nonce),
+            "created_at": created, "updated_at": updated,
         })
     }).collect();
     (StatusCode::OK, Json(serde_json::json!(result))).into_response()

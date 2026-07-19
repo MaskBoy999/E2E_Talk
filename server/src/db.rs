@@ -27,6 +27,7 @@ pub struct Server {
     pub owner_id: String,
     pub invite_code_hash: String,
     pub joins_disabled: bool,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone)]
@@ -35,6 +36,8 @@ pub struct Channel {
     pub server_id: String,
     pub name: String,
     pub channel_type: String,
+    pub position: i32,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone)]
@@ -803,6 +806,7 @@ impl Database {
             owner_id: owner_id.to_string(),
             invite_code_hash: invite_code_hash.to_string(),
             joins_disabled: false,
+            created_at: String::new(),
         })
     }
 
@@ -825,6 +829,7 @@ impl Database {
                     owner_id: row.get(2)?,
                     invite_code_hash: row.get(3)?,
                     joins_disabled: row.get::<_, i64>(4)? != 0,
+                    created_at: String::new(),
                 })
             })
             .map_err(|e| e.to_string())?
@@ -880,6 +885,7 @@ impl Database {
                         owner_id: row.get(2)?,
                         invite_code_hash: row.get(3)?,
                         joins_disabled: row.get::<_, i64>(4)? != 0,
+                        created_at: String::new(),
                     })
                 },
             )
@@ -1167,7 +1173,7 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, server_id, name, type FROM channels
+                "SELECT id, server_id, name, type, COALESCE(position, 0), COALESCE(created_at, '') FROM channels
                  WHERE server_id = ?1 ORDER BY position",
             )
             .map_err(|e| e.to_string())?;
@@ -1178,6 +1184,8 @@ impl Database {
                     server_id: row.get(1)?,
                     name: row.get(2)?,
                     channel_type: row.get(3)?,
+                    position: row.get::<_, i32>(4)?,
+                    created_at: row.get::<_, String>(5)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -1209,6 +1217,8 @@ impl Database {
             server_id: server_id.to_string(),
             name: name.to_string(),
             channel_type: "text".to_string(),
+            position: 0,
+            created_at: String::new(),
         })
     }
 
@@ -2886,17 +2896,69 @@ impl Database {
         Ok(count > 0)
     }
 
-    pub fn list_all_users(&self) -> Result<Vec<User>, String> {
+    pub fn list_all_users(
+        &self,
+    ) -> Result<
+        Vec<(
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            i32,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+        )>,
+        String,
+    > {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT id, username FROM users ORDER BY created_at")
+            .prepare(
+                "SELECT id, username, password_hash, created_at, COALESCE(display_name, ''), COALESCE(identity_public_key, ''), COALESCE(profile_picture_file_id, ''), COALESCE(profile_picture_file_key, ''), COALESCE(username_color, '#4fc3f7'), COALESCE(username_border_color, ''), COALESCE(friend_requests_disabled, 0), COALESCE(encrypted_friend_code, ''), COALESCE(friend_code_salt, ''), COALESCE(friend_code_nonce, ''), COALESCE(encrypted_profile_data, ''), COALESCE(encrypted_profile_salt, ''), COALESCE(encrypted_profile_nonce, ''), COALESCE(profile_banner_file_id, ''), COALESCE(profile_banner_file_key, ''), COALESCE(description, ''), COALESCE(nickname, ''), COALESCE(profile_background_color, '#16213e'), COALESCE(friend_code_hash, '') FROM users ORDER BY created_at",
+            )
             .map_err(|e| e.to_string())?;
         let users = stmt
             .query_map([], |row| {
-                Ok(User {
-                    id: row.get(0)?,
-                    username: row.get(1)?,
-                })
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, i32>(10)?,
+                    row.get::<_, String>(11)?,
+                    row.get::<_, String>(12)?,
+                    row.get::<_, String>(13)?,
+                    row.get::<_, String>(14)?,
+                    row.get::<_, String>(15)?,
+                    row.get::<_, String>(16)?,
+                    row.get::<_, String>(17)?,
+                    row.get::<_, String>(18)?,
+                    row.get::<_, String>(19)?,
+                    row.get::<_, String>(20)?,
+                    row.get::<_, String>(21)?,
+                    row.get::<_, String>(22)?,
+                ))
             })
             .map_err(|e| e.to_string())?
             .filter_map(|r| r.ok())
@@ -2907,7 +2969,7 @@ impl Database {
     pub fn list_all_servers_admin(&self) -> Result<Vec<Server>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT id, name, owner_id, COALESCE(invite_code_hash, ''), COALESCE(joins_disabled, 0) FROM servers ORDER BY created_at")
+            .prepare("SELECT id, name, owner_id, COALESCE(invite_code_hash, ''), COALESCE(joins_disabled, 0), COALESCE(created_at, '') FROM servers ORDER BY created_at")
             .map_err(|e| e.to_string())?;
         let servers = stmt
             .query_map([], |row| {
@@ -2917,6 +2979,7 @@ impl Database {
                     owner_id: row.get(2)?,
                     invite_code_hash: row.get(3)?,
                     joins_disabled: row.get::<_, i64>(4)? != 0,
+                    created_at: row.get(5)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -2928,7 +2991,7 @@ impl Database {
     pub fn list_all_channels_admin(&self) -> Result<Vec<Channel>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT id, server_id, name, type FROM channels ORDER BY created_at")
+            .prepare("SELECT id, server_id, name, type, COALESCE(position, 0), COALESCE(created_at, '') FROM channels ORDER BY created_at")
             .map_err(|e| e.to_string())?;
         let channels = stmt
             .query_map([], |row| {
@@ -2937,6 +3000,8 @@ impl Database {
                     server_id: row.get(1)?,
                     name: row.get(2)?,
                     channel_type: row.get(3)?,
+                    position: row.get::<_, i32>(4)?,
+                    created_at: row.get(5)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -2949,7 +3014,7 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT m.id, m.channel_id, m.sender_id, COALESCE(u.username, '?'), u.display_name, u.profile_picture_file_id, u.username_color, m.encrypted_content, m.nonce, m.timestamp, m.message_nonce, m.edited_at
+                "SELECT m.id, m.channel_id, m.sender_id, COALESCE(u.username, '?'), u.display_name, u.profile_picture_file_id, u.username_color, m.encrypted_content, m.nonce, m.timestamp, COALESCE(m.message_nonce, ''), COALESCE(m.edited_at, ''), COALESCE(m.message_signature, ''), COALESCE(m.encrypted_profile_key, ''), COALESCE(m.profile_key_nonce, ''), COALESCE(m.encrypted_banner_key, ''), COALESCE(m.banner_key_nonce, '')
                  FROM messages m LEFT JOIN users u ON m.sender_id = u.id ORDER BY m.timestamp DESC LIMIT 500",
             )
             .map_err(|e| e.to_string())?;
@@ -2983,11 +3048,11 @@ impl Database {
 
     pub fn list_all_server_keys_admin(
         &self,
-    ) -> Result<Vec<(String, String, String, Vec<u8>, Vec<u8>, Vec<u8>, i32)>, String> {
+    ) -> Result<Vec<(String, String, String, Vec<u8>, Vec<u8>, Vec<u8>, i32, String, String)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT sk.server_id, COALESCE(s.name, '?'), sk.user_id, sk.encrypted_key, sk.sender_public_key, sk.nonce, sk.version
+                "SELECT sk.server_id, COALESCE(s.name, '?'), sk.user_id, sk.encrypted_key, sk.sender_public_key, sk.nonce, sk.version, COALESCE(sk.device_id, ''), sk.created_at
                  FROM server_keys sk LEFT JOIN servers s ON sk.server_id = s.id ORDER BY sk.created_at",
             )
             .map_err(|e| e.to_string())?;
@@ -3001,6 +3066,8 @@ impl Database {
                     row.get::<_, Vec<u8>>(4)?,
                     row.get::<_, Vec<u8>>(5)?,
                     row.get::<_, i32>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
                 ))
             })
             .map_err(|e| e.to_string())?
@@ -3011,11 +3078,11 @@ impl Database {
 
     pub fn list_all_server_members_admin(
         &self,
-    ) -> Result<Vec<(String, String, String, String)>, String> {
+    ) -> Result<Vec<(String, String, String, String, String, String)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT sm.user_id, COALESCE(u.username, '?'), sm.server_id, COALESCE(s.name, '?')
+                "SELECT sm.user_id, COALESCE(u.username, '?'), sm.server_id, COALESCE(s.name, '?'), COALESCE(sm.role, 'member'), COALESCE(sm.joined_at, '')
                  FROM server_members sm
                  LEFT JOIN users u ON sm.user_id = u.id
                  LEFT JOIN servers s ON sm.server_id = s.id
@@ -3029,6 +3096,8 @@ impl Database {
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
                 ))
             })
             .map_err(|e| e.to_string())?
@@ -3195,11 +3264,11 @@ impl Database {
 
     pub fn list_all_dm_keys_admin(
         &self,
-    ) -> Result<Vec<(String, String, String, Vec<u8>, Vec<u8>, Vec<u8>)>, String> {
+    ) -> Result<Vec<(String, String, String, Vec<u8>, Vec<u8>, Vec<u8>, String, String)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT dk.dm_channel_id, dk.user_id, COALESCE(u.username, '?'), dk.encrypted_key, dk.sender_public_key, dk.nonce
+                "SELECT dk.dm_channel_id, dk.user_id, COALESCE(u.username, '?'), dk.encrypted_key, dk.sender_public_key, dk.nonce, COALESCE(dk.device_id, ''), dk.created_at
                  FROM dm_keys dk LEFT JOIN users u ON dk.user_id = u.id ORDER BY dk.id",
             )
             .map_err(|e| e.to_string())?;
@@ -3212,6 +3281,8 @@ impl Database {
                     row.get::<_, Vec<u8>>(3)?,
                     row.get::<_, Vec<u8>>(4)?,
                     row.get::<_, Vec<u8>>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
                 ))
             })
             .map_err(|e| e.to_string())?
@@ -3222,11 +3293,11 @@ impl Database {
 
     pub fn list_all_friend_requests_admin(
         &self,
-    ) -> Result<Vec<(String, String, String, String, String, String, String)>, String> {
+    ) -> Result<Vec<(String, String, String, String, String, String, String, String)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT fr.id, fr.from_user_id, COALESCE(u1.username, '?'), fr.to_user_id, COALESCE(u2.username, '?'), fr.status, fr.created_at
+                "SELECT fr.id, fr.from_user_id, COALESCE(u1.username, '?'), fr.to_user_id, COALESCE(u2.username, '?'), fr.status, fr.created_at, COALESCE(fr.responded_at, '')
                  FROM friend_requests fr
                  LEFT JOIN users u1 ON fr.from_user_id = u1.id
                  LEFT JOIN users u2 ON fr.to_user_id = u2.id
@@ -3243,6 +3314,7 @@ impl Database {
                     row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
                     row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
                 ))
             })
             .map_err(|e| e.to_string())?
@@ -3282,11 +3354,11 @@ impl Database {
 
     pub fn list_all_user_devices_admin(
         &self,
-    ) -> Result<Vec<(String, String, String, String, Vec<u8>, Option<Vec<u8>>, Option<String>)>, String> {
+    ) -> Result<Vec<(String, String, String, String, Vec<u8>, Option<Vec<u8>>, Option<String>, String, String)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT ud.user_id, COALESCE(u.username, '?'), ud.device_id, COALESCE(ud.device_name, ''), ud.identity_key, ud.signed_prekey, ud.last_active_at
+                "SELECT ud.user_id, COALESCE(u.username, '?'), ud.device_id, COALESCE(ud.device_name, ''), ud.identity_key, ud.signed_prekey, ud.last_active_at, COALESCE(ud.signed_prekey_signature, ''), ud.created_at
                  FROM user_devices ud LEFT JOIN users u ON ud.user_id = u.id ORDER BY ud.user_id, ud.device_id",
             )
             .map_err(|e| e.to_string())?;
@@ -3300,6 +3372,8 @@ impl Database {
                     row.get::<_, Vec<u8>>(4)?,
                     row.get::<_, Option<Vec<u8>>>(5)?,
                     row.get::<_, Option<String>>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
                 ))
             })
             .map_err(|e| e.to_string())?
@@ -3310,11 +3384,11 @@ impl Database {
 
     pub fn list_all_files_admin(
         &self,
-    ) -> Result<Vec<(String, String, String, String, String, i64, String, String, String)>, String> {
+    ) -> Result<Vec<(String, String, String, String, String, i64, String, String, String, i64, i32)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT f.id, f.uploader_id, COALESCE(u.username, '?'), f.original_name, COALESCE(f.mime_type, ''), f.file_size, COALESCE(f.server_id, ''), COALESCE(f.channel_id, ''), f.created_at
+                "SELECT f.id, f.uploader_id, COALESCE(u.username, '?'), f.original_name, COALESCE(f.mime_type, ''), f.file_size, COALESCE(f.server_id, ''), COALESCE(f.channel_id, ''), f.created_at, COALESCE(f.chunk_count, 0), COALESCE(f.upload_complete, 0)
                  FROM files f LEFT JOIN users u ON f.uploader_id = u.id ORDER BY f.created_at",
             )
             .map_err(|e| e.to_string())?;
@@ -3330,6 +3404,8 @@ impl Database {
                     row.get::<_, String>(6)?,
                     row.get::<_, String>(7)?,
                     row.get::<_, String>(8)?,
+                    row.get::<_, i64>(9)?,
+                    row.get::<_, i32>(10)?,
                 ))
             })
             .map_err(|e| e.to_string())?
@@ -3600,11 +3676,11 @@ impl Database {
 
     // --- Admin: missing tables ---
 
-    pub fn list_all_user_stickers_admin(&self) -> Result<Vec<(String, String, String, String, String, String, String, Option<Vec<u8>>, Option<Vec<u8>>)>, String> {
+    pub fn list_all_user_stickers_admin(&self) -> Result<Vec<(String, String, String, String, String, String, String, Option<Vec<u8>>, Option<Vec<u8>>, String)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT us.id, us.user_id, COALESCE(u.username, '?'), us.file_id, us.sticker_name, us.file_key, COALESCE(us.mime_type, ''), us.encrypted_file_key, us.file_key_nonce
+                "SELECT us.id, us.user_id, COALESCE(u.username, '?'), us.file_id, us.sticker_name, us.file_key, COALESCE(us.mime_type, ''), us.encrypted_file_key, us.file_key_nonce, COALESCE(us.created_at, '')
                  FROM user_stickers us LEFT JOIN users u ON us.user_id = u.id ORDER BY us.created_at DESC",
             )
             .map_err(|e| e.to_string())?;
@@ -3620,6 +3696,7 @@ impl Database {
                     row.get::<_, String>(6)?,
                     row.get::<_, Option<Vec<u8>>>(7)?,
                     row.get::<_, Option<Vec<u8>>>(8)?,
+                    row.get::<_, String>(9)?,
                 ))
             })
             .map_err(|e| e.to_string())?
@@ -3628,11 +3705,11 @@ impl Database {
         Ok(rows)
     }
 
-    pub fn list_all_server_stickers_admin(&self) -> Result<Vec<(String, String, String, String, String, String, String, Option<Vec<u8>>, Option<Vec<u8>>)>, String> {
+    pub fn list_all_server_stickers_admin(&self) -> Result<Vec<(String, String, String, String, String, String, String, Option<Vec<u8>>, Option<Vec<u8>>, String)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT ss.id, ss.server_id, COALESCE(s.name, '?'), ss.file_id, ss.uploaded_by, ss.sticker_name, COALESCE(ss.file_key, ''), ss.encrypted_file_key, ss.file_key_nonce
+                "SELECT ss.id, ss.server_id, COALESCE(s.name, '?'), ss.file_id, ss.uploaded_by, ss.sticker_name, COALESCE(ss.file_key, ''), ss.encrypted_file_key, ss.file_key_nonce, COALESCE(ss.created_at, '')
                  FROM server_stickers ss LEFT JOIN servers s ON ss.server_id = s.id ORDER BY ss.created_at DESC",
             )
             .map_err(|e| e.to_string())?;
@@ -3648,6 +3725,7 @@ impl Database {
                     row.get::<_, String>(6)?,
                     row.get::<_, Option<Vec<u8>>>(7)?,
                     row.get::<_, Option<Vec<u8>>>(8)?,
+                    row.get::<_, String>(9)?,
                 ))
             })
             .map_err(|e| e.to_string())?
@@ -3656,12 +3734,12 @@ impl Database {
         Ok(rows)
     }
 
-    pub fn list_all_user_key_escrow_admin(&self) -> Result<Vec<(String, String, String, String, i32)>, String> {
+    pub fn list_all_user_key_escrow_admin(&self) -> Result<Vec<(String, String, String, String, Vec<u8>, Vec<u8>, Vec<u8>)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
                 "SELECT eke.user_id, COALESCE(u.username, '?'), eke.created_at, eke.updated_at,
-                 CASE WHEN eke.encrypted_private_key IS NOT NULL THEN 1 ELSE 0 END
+                 COALESCE(eke.encrypted_private_key, X''), COALESCE(eke.salt, X''), COALESCE(eke.nonce, X'')
                  FROM user_key_escrow eke LEFT JOIN users u ON eke.user_id = u.id ORDER BY eke.created_at",
             )
             .map_err(|e| e.to_string())?;
@@ -3672,7 +3750,9 @@ impl Database {
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
-                    row.get::<_, i32>(4)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                    row.get::<_, Vec<u8>>(5)?,
+                    row.get::<_, Vec<u8>>(6)?,
                 ))
             })
             .map_err(|e| e.to_string())?
@@ -3681,11 +3761,11 @@ impl Database {
         Ok(rows)
     }
 
-    pub fn list_all_notification_sounds_admin(&self) -> Result<Vec<(String, String, String, Vec<u8>, Vec<u8>, Vec<u8>, String)>, String> {
+    pub fn list_all_notification_sounds_admin(&self) -> Result<Vec<(String, String, String, Vec<u8>, Vec<u8>, Vec<u8>, String, String)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT ns.user_id, COALESCE(u.username, '?'), ns.file_name, ns.encrypted_sound, ns.nonce, ns.sender_public_key, ns.created_at
+                "SELECT ns.user_id, COALESCE(u.username, '?'), ns.file_name, ns.encrypted_sound, ns.nonce, ns.sender_public_key, ns.created_at, COALESCE(ns.updated_at, '')
                  FROM notification_sounds ns LEFT JOIN users u ON ns.user_id = u.id ORDER BY ns.created_at",
             )
             .map_err(|e| e.to_string())?;
@@ -3699,12 +3779,43 @@ impl Database {
                     row.get::<_, Vec<u8>>(4)?,
                     row.get::<_, Vec<u8>>(5)?,
                     row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
                 ))
             })
             .map_err(|e| e.to_string())?
             .filter_map(|r| r.ok())
             .collect();
         Ok(rows)
+    }
+
+    pub fn list_all_config_admin(&self) -> Result<Vec<(String, String)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare("SELECT key, value FROM admin_config ORDER BY key").map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }).map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    }
+
+    pub fn list_all_user_device_escrow_admin(&self) -> Result<Vec<(String, String, String, Vec<u8>, Vec<u8>, Vec<u8>, String, String)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT ude.user_id, COALESCE(u.username, '?'), ude.device_id, ude.encrypted_private_key, ude.salt, ude.nonce, ude.created_at, ude.updated_at \
+             FROM user_device_escrow ude LEFT JOIN users u ON ude.user_id = u.id ORDER BY ude.created_at"
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+                row.get::<_, Vec<u8>>(4)?,
+                row.get::<_, Vec<u8>>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+            ))
+        }).map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
     }
 
     /// Return all file IDs currently tracked in the database.

@@ -112,6 +112,8 @@
                 <button class="tab-btn" data-tab="server-stickers">Srv Stickers</button>
                 <button class="tab-btn" data-tab="user-key-escrow">Key Escrow</button>
                 <button class="tab-btn" data-tab="notification-sounds">Notif Sounds</button>
+                <button class="tab-btn" data-tab="admin-config">Config</button>
+                <button class="tab-btn" data-tab="user-device-escrow">Device Escrow</button>
             </div>
 
             <!-- Users Tab -->
@@ -125,8 +127,8 @@
                 </div>
                 <div class="table-scroll">
                     <table class="data-table">
-                        <thead><tr><th>Username</th><th>User ID</th></tr></thead>
-                        <tbody id="user-list"><tr><td colspan="2" class="empty-state">Loading...</td></tr></tbody>
+                        <thead><tr><th>Username</th><th>User ID</th><th>Created</th><th>Display Name</th><th>Identity Pub Key</th><th>PFP File ID</th><th>PFP File Key</th><th>Username Color</th><th>Border Color</th><th>Banner File ID</th><th>Banner File Key</th><th>Description</th><th>Nickname</th><th>BG Color</th><th>Friend Req Disabled</th><th>Profile Data</th><th>FC Hash</th></tr></thead>
+                        <tbody id="user-list"><tr><td colspan="17" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
                 <div id="users-pagination" class="pagination-container"></div>
@@ -143,8 +145,8 @@
                 </div>
                 <div class="table-scroll">
                     <table class="data-table">
-                        <thead><tr><th>Name</th><th>Server ID</th><th>Owner ID</th></tr></thead>
-                        <tbody id="server-list"><tr><td colspan="3" class="empty-state">Loading...</td></tr></tbody>
+                        <thead><tr><th>Name</th><th>Server ID</th><th>Owner ID</th><th>Created</th><th>Invite Code Hash</th><th>Joins Disabled</th></tr></thead>
+                        <tbody id="server-list"><tr><td colspan="6" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
                 <div id="servers-pagination" class="pagination-container"></div>
@@ -161,8 +163,8 @@
                 </div>
                 <div class="table-scroll">
                     <table class="data-table">
-                        <thead><tr><th>Name</th><th>Channel ID</th><th>Server ID</th><th>Type</th></tr></thead>
-                        <tbody id="channel-list"><tr><td colspan="4" class="empty-state">Loading...</td></tr></tbody>
+                        <thead><tr><th>Name</th><th>Channel ID</th><th>Server ID</th><th>Type</th><th>Position</th><th>Created</th></tr></thead>
+                        <tbody id="channel-list"><tr><td colspan="6" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
                 <div id="channels-pagination" class="pagination-container"></div>
@@ -179,8 +181,8 @@
                 </div>
                 <div class="table-scroll">
                     <table class="data-table">
-                        <thead><tr><th>Sender</th><th>Channel ID</th><th>Encrypted Content (base64)</th><th>Nonce</th><th>Timestamp</th></tr></thead>
-                        <tbody id="message-list"><tr><td colspan="5" class="empty-state">Loading...</td></tr></tbody>
+                        <thead><tr><th>Sender</th><th>Channel ID</th><th>Encrypted Content (base64)</th><th>Nonce</th><th>Timestamp</th><th>Message ID</th><th>Edited At</th><th>Msg Nonce</th><th>Msg Sig</th><th>Profile Key</th><th>Profile Key Nonce</th><th>Banner Key</th><th>Banner Key Nonce</th></tr></thead>
+                        <tbody id="message-list"><tr><td colspan="13" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
                 <div id="messages-pagination" class="pagination-container"></div>
@@ -197,8 +199,8 @@
                 </div>
                 <div class="table-scroll">
                     <table class="data-table">
-                        <thead><tr><th>Server</th><th>User ID</th><th>Encrypted Key</th><th>Sender Public Key</th><th>Nonce</th><th>v</th></tr></thead>
-                        <tbody id="server-key-list"><tr><td colspan="6" class="empty-state">Loading...</td></tr></tbody>
+                        <thead><tr><th>Server</th><th>User ID</th><th>Encrypted Key</th><th>Sender Public Key</th><th>Nonce</th><th>v</th><th>Device ID</th><th>Created</th></tr></thead>
+                        <tbody id="server-key-list"><tr><td colspan="8" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
                 <div id="server-keys-pagination" class="pagination-container"></div>
@@ -215,8 +217,8 @@
                 </div>
                 <div class="table-scroll">
                     <table class="data-table">
-                        <thead><tr><th>Username</th><th>User ID</th><th>Server</th><th>Server ID</th></tr></thead>
-                        <tbody id="server-member-list"><tr><td colspan="4" class="empty-state">Loading...</td></tr></tbody>
+                        <thead><tr><th>Username</th><th>User ID</th><th>Server</th><th>Server ID</th><th>Role</th><th>Joined At</th></tr></thead>
+                        <tbody id="server-member-list"><tr><td colspan="6" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
                 <div id="server-members-pagination" class="pagination-container"></div>
@@ -233,8 +235,8 @@
                 </div>
                 <div class="table-scroll">
                     <table class="data-table">
-                        <thead><tr><th>User ID</th><th>Identity Key</th><th>Signed Prekey</th><th>Sig</th><th>OT Prekey</th><th>OT ID</th></tr></thead>
-                        <tbody id="prekey-bundle-list"><tr><td colspan="6" class="empty-state">Loading...</td></tr></tbody>
+                        <thead><tr><th>User ID</th><th>Identity Key</th><th>Signed Prekey</th><th>Sig</th><th>OT Prekey</th><th>OT ID</th><th>Created</th></tr></thead>
+                        <tbody id="prekey-bundle-list"><tr><td colspan="7" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
                 <div id="prekey-bundles-pagination" class="pagination-container"></div>
@@ -251,8 +253,8 @@
                 </div>
                 <div class="table-scroll">
                     <table class="data-table">
-                        <thead><tr><th>Our User</th><th>Their User</th><th>Session Data</th><th>Ratchet #</th></tr></thead>
-                        <tbody id="session-list"><tr><td colspan="4" class="empty-state">Loading...</td></tr></tbody>
+                        <thead><tr><th>Our User</th><th>Their User</th><th>Session Data</th><th>Ratchet #</th><th>Created</th></tr></thead>
+                        <tbody id="session-list"><tr><td colspan="5" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
                 <div id="sessions-pagination" class="pagination-container"></div>
@@ -323,8 +325,8 @@
                 </div>
                 <div class="table-scroll">
                     <table class="data-table">
-                        <thead><tr><th>Sender</th><th>DM Channel ID</th><th>Encrypted Content</th><th>Nonce</th><th>Timestamp</th></tr></thead>
-                        <tbody id="dm-message-list"><tr><td colspan="5" class="empty-state">Loading...</td></tr></tbody>
+                        <thead><tr><th>Sender</th><th>DM Channel ID</th><th>Encrypted Content</th><th>Nonce</th><th>Timestamp</th><th>Message ID</th><th>Edited At</th><th>Msg Nonce</th><th>Msg Sig</th><th>Profile Key</th><th>Profile Key Nonce</th><th>Banner Key</th><th>Banner Key Nonce</th></tr></thead>
+                        <tbody id="dm-message-list"><tr><td colspan="13" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
                 <div id="dm-messages-pagination" class="pagination-container"></div>
@@ -341,8 +343,8 @@
                 </div>
                 <div class="table-scroll">
                     <table class="data-table">
-                        <thead><tr><th>DM Channel ID</th><th>User ID</th><th>Username</th><th>Encrypted Key</th><th>Sender Pub Key</th><th>Nonce</th></tr></thead>
-                        <tbody id="dm-key-list"><tr><td colspan="6" class="empty-state">Loading...</td></tr></tbody>
+                        <thead><tr><th>DM Channel ID</th><th>User ID</th><th>Username</th><th>Encrypted Key</th><th>Sender Pub Key</th><th>Nonce</th><th>Device ID</th><th>Created</th></tr></thead>
+                        <tbody id="dm-key-list"><tr><td colspan="8" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
                 <div id="dm-keys-pagination" class="pagination-container"></div>
@@ -359,8 +361,8 @@
                 </div>
                 <div class="table-scroll">
                     <table class="data-table">
-                        <thead><tr><th>From</th><th>To</th><th>Status</th><th>Created At</th></tr></thead>
-                        <tbody id="friend-request-list"><tr><td colspan="4" class="empty-state">Loading...</td></tr></tbody>
+                        <thead><tr><th>From</th><th>To</th><th>Status</th><th>Created At</th><th>Responded At</th></tr></thead>
+                        <tbody id="friend-request-list"><tr><td colspan="5" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
                 <div id="friend-requests-pagination" class="pagination-container"></div>
@@ -395,8 +397,8 @@
                 </div>
                 <div class="table-scroll">
                     <table class="data-table">
-                        <thead><tr><th>Username</th><th>Device ID</th><th>Device Name</th><th>Identity Key</th><th>Signed Prekey</th><th>Last Active</th></tr></thead>
-                        <tbody id="user-public-key-list"><tr><td colspan="6" class="empty-state">Loading...</td></tr></tbody>
+                        <thead><tr><th>Username</th><th>Device ID</th><th>Device Name</th><th>Identity Key</th><th>Signed Prekey</th><th>Signed Prekey Sig</th><th>Last Active</th><th>Created</th></tr></thead>
+                        <tbody id="user-public-key-list"><tr><td colspan="8" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
                 <div id="user-public-keys-pagination" class="pagination-container"></div>
@@ -413,8 +415,8 @@
                 </div>
                 <div class="table-scroll">
                     <table class="data-table">
-                        <thead><tr><th>Filename</th><th>Uploader</th><th>MIME</th><th>Size</th><th>Server</th><th>Channel</th><th>Created At</th></tr></thead>
-                        <tbody id="file-list"><tr><td colspan="7" class="empty-state">Loading...</td></tr></tbody>
+                        <thead><tr><th>Filename</th><th>Uploader</th><th>MIME</th><th>Size</th><th>Server</th><th>Channel</th><th>Chunks</th><th>Complete</th><th>Created At</th></tr></thead>
+                        <tbody id="file-list"><tr><td colspan="9" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
                 <div id="files-pagination" class="pagination-container"></div>
@@ -431,8 +433,8 @@
                 </div>
                 <div class="table-scroll">
                     <table class="data-table">
-                        <thead><tr><th>Username</th><th>Sticker Name</th><th>File ID</th><th>File Key</th><th>MIME</th></tr></thead>
-                        <tbody id="user-sticker-list"><tr><td colspan="5" class="empty-state">Loading...</td></tr></tbody>
+                        <thead><tr><th>Username</th><th>Sticker Name</th><th>File ID</th><th>File Key</th><th>MIME</th><th>Created</th><th>Enc File Key</th><th>File Key Nonce</th></tr></thead>
+                        <tbody id="user-sticker-list"><tr><td colspan="8" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
                 <div id="user-stickers-pagination" class="pagination-container"></div>
@@ -449,8 +451,8 @@
                 </div>
                 <div class="table-scroll">
                     <table class="data-table">
-                        <thead><tr><th>Server</th><th>Sticker Name</th><th>Uploaded By</th><th>File ID</th></tr></thead>
-                        <tbody id="server-sticker-list"><tr><td colspan="4" class="empty-state">Loading...</td></tr></tbody>
+                        <thead><tr><th>Server</th><th>Sticker Name</th><th>Uploaded By</th><th>File ID</th><th>Created</th><th>Enc File Key</th><th>File Key Nonce</th></tr></thead>
+                        <tbody id="server-sticker-list"><tr><td colspan="7" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
                 <div id="server-stickers-pagination" class="pagination-container"></div>
@@ -467,8 +469,8 @@
                 </div>
                 <div class="table-scroll">
                     <table class="data-table">
-                        <thead><tr><th>Username</th><th>User ID</th><th>Created</th><th>Updated</th><th>Has Key</th></tr></thead>
-                        <tbody id="user-key-escrow-list"><tr><td colspan="5" class="empty-state">Loading...</td></tr></tbody>
+                        <thead><tr><th>Username</th><th>User ID</th><th>Created</th><th>Updated</th><th>Has Key</th><th>Encrypted Private Key</th><th>Salt</th><th>Nonce</th></tr></thead>
+                        <tbody id="user-key-escrow-list"><tr><td colspan="8" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
                 <div id="user-key-escrow-pagination" class="pagination-container"></div>
@@ -485,11 +487,47 @@
                 </div>
                 <div class="table-scroll">
                     <table class="data-table">
-                        <thead><tr><th>Username</th><th>User ID</th><th>File Name</th><th>Encrypted Sound</th><th>Nonce</th><th>Sender Pub Key</th><th>Created</th></tr></thead>
-                        <tbody id="notification-sound-list"><tr><td colspan="7" class="empty-state">Loading...</td></tr></tbody>
+                        <thead><tr><th>Username</th><th>User ID</th><th>File Name</th><th>Encrypted Sound</th><th>Nonce</th><th>Sender Pub Key</th><th>Created</th><th>Updated</th></tr></thead>
+                        <tbody id="notification-sound-list"><tr><td colspan="8" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
                 <div id="notification-sounds-pagination" class="pagination-container"></div>
+            </div>
+
+            <!-- Admin Config Tab -->
+            <div class="tab-content" id="tab-admin-config">
+                <div class="table-header">
+                    <div class="search-bar">
+                        <input type="text" id="search-admin-config" placeholder="Search by key or value..." oninput="searchTab('admin-config')">
+                        <button class="csv-export-btn" data-tab="admin-config">📥 CSV</button>
+                        <span class="record-count" id="admin-config-count"></span>
+                    </div>
+                </div>
+                <div class="table-scroll">
+                    <table class="data-table">
+                        <thead><tr><th>Key</th><th>Value</th></tr></thead>
+                        <tbody id="admin-config-list"><tr><td colspan="2" class="empty-state">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+                <div id="admin-config-pagination" class="pagination-container"></div>
+            </div>
+
+            <!-- User Device Escrow Tab -->
+            <div class="tab-content" id="tab-user-device-escrow">
+                <div class="table-header">
+                    <div class="search-bar">
+                        <input type="text" id="search-user-device-escrow" placeholder="Search by username or device ID..." oninput="searchTab('user-device-escrow')">
+                        <button class="csv-export-btn" data-tab="user-device-escrow">📥 CSV</button>
+                        <span class="record-count" id="user-device-escrow-count"></span>
+                    </div>
+                </div>
+                <div class="table-scroll">
+                    <table class="data-table">
+                        <thead><tr><th>Username</th><th>User ID</th><th>Device ID</th><th>Encrypted Private Key</th><th>Salt</th><th>Nonce</th><th>Created</th><th>Updated</th></tr></thead>
+                        <tbody id="user-device-escrow-list"><tr><td colspan="8" class="empty-state">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+                <div id="user-device-escrow-pagination" class="pagination-container"></div>
             </div>
         </div>
     </div>

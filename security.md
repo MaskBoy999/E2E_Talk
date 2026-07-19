@@ -1553,3 +1553,151 @@ Every `message_new`, `dm_new`, `message_edited`, and `dm_edited` broadcast inclu
 | Message padding | 🟢 Not implemented |
 | Rate limiting | 🟢 Username-only |
 | Constant-time crypto | 🟢 Pure JS BigInt — not constant-time |
+
+## 19. Encryption Status Summary: What Can, Can't, and Is Improved (July 2026)
+
+This section provides a single, consolidated reference for the current state of every encryption concern in the system — what has been fixed, what could be improved with further work, and what cannot be changed due to fundamental design constraints.
+
+---
+
+### 19.1. What Is Already Improved (Fixed July 2026)
+
+| Issue | Previous State | Current State |
+|-------|---------------|---------------|
+| **Profile picture file keys** | Stored in plaintext `profile_picture_file_key` column | ✅ **Identity-key encrypted** via `encodeEncryptedFileKey()` — server cannot decrypt. Keys are wrapped with the user's X25519 identity private key using XChaCha20-Poly1305 symmetric encryption (the private key bytes are used directly as a 256-bit ChaCha20 key). |
+| **Profile banner file keys** | Same as PFP | ✅ **Identity-key encrypted** — same scheme as profile picture keys. |
+| **Profile picture/banner key sharing** | Server broadcast the raw file key to all friends/server-mates | ✅ **Re-encrypted per DM conversation** — the raw file key is decrypted with the owner's identity key, then re-encrypted with the DM's ECDH shared secret via `encryptDm()` and sent as an encrypted `profile_key_sync` WS message. Recipients decrypt with their identity key and cache the result in `profileKeyCache`. |
+| **Profile data (display_name, description, nickname, colors)** | All stored in plaintext columns, leaked to server and broadcast in WS messages | ✅ **Identity-key encrypted** into a single JSON blob stored in `encrypted_profile_data`. Decrypted client-side using `decodeEncryptedFileKey()` with the user's identity private key. The server stores only ciphertext — it CANNOT read `display_name`, `description`, `nickname`, `username_color`, `username_border_color`, or `profile_background_color`. |
+| **TOFU key fingerprints** | Raw first 8 bytes of public key (64-bit collision resistance) | ✅ **SHA-256 hash** — provides 128-bit collision resistance. The `fingerprintKey()` function now uses the full SHA-256 output instead of raw key bytes. |
+| **Identity key isolation** | Single browser-wide identity key (one account per browser) | ✅ **Per-account keys** — identity keys are stored as `e2e_identity_private_{userId}` / `e2e_identity_public_{userId}`, preventing one account from overwriting another's keys. Legacy key migration via `claimLegacyIdentityKey()`. |
+| **Multi-device support** | Single device, no device registration | ✅ **Full device management** — `user_devices` table with per-device identity keys, signed prekeys, device names, and last-active timestamps. Devices registered via `POST /api/devices`. DM and server keys include optional `device_id` column. |
+| **Per-device key escrow** | Single shared escrow for all devices | ✅ **Per-device escrow** — `user_device_escrow` table keyed on `(user_id, device_id)`. Revoking one device doesn't affect others. |
+| **WebSocket device tracking** | No device awareness | ✅ **Device ID in auth** — WebSocket auth includes optional `device_id`. Duplicate connections per device are auto-evicted. `broadcast_to_device()` enables device-specific messaging. |
+| **Message signing (message_signature)** | Not implemented — column existed but never populated | ✅ **HMAC message authentication** — `signMessage()` and `verifyMessage()` using HMAC-SHA256 with the message encryption key. An HMAC-based approach avoids public-key overhead while still binding each message to the conversation's shared key. Signatures are transmitted via WebSocket and REST endpoints. |
+| **Server channel key ratchet primitive** | No forward-secrecy mechanism available | ✅ **`ratchetKey()` primitive** — derives a new key from the old one via HKDF with random salt, providing the foundation for forward secrecy when wired to the send path. |
+| **DM key rotation primitive** | Static ECDH — no rotation possible | ✅ **`rotateDmKey()` primitive** — computes a new shared secret from current identity keys using HKDF, enabling DM key rotation when wired to the UI. |
+| **Sticker/emoji file key encryption schema** | `file_key` stored in plaintext in `server_stickers` and `user_stickers` tables | ✅ **Schema ready** — `encrypted_file_key` column (BLOB) added in migration 018 on both sticker tables. Uses `encryptFileKeyForStorage()` with the user's identity private key. Client-side sticker preview (`loadStickerPreview()`) already attempts to decrypt via `decodeEncryptedFileKey()` with fallback to plaintext keys for backward compatibility. **Note**: The server handler and admin panel still read/write the old `file_key` column — sticker file keys are encrypted at the client level during save and decrypted during load, but the server handler for sticker upload (`add_server_sticker`, `add_user_sticker`) stores the key as passed by the client (which is now encrypted). |
+
+---
+
+### 19.2. Profile Encryption Architecture (Detail)
+
+Profile data is encrypted using a **symmetric key-wrapping scheme** where the user's X25519 identity private key serves as the encryption key:
+
+```
+OWNER'S BROWSER                                SERVER
+─────────────────                               ──────
+
+identity.privateKey (32 bytes, localStorage)    identity_public_key (stored in users table)
+                                                ⚠ CANNOT derive private key from this
+                                                
+┌─ pack profile fields into JSON:
+│   { display_name, nickname, description,
+│     username_color, username_border_color,
+│     profile_background_color }
+│     → JSON.stringify → UTF-8 bytes
+│     → base64 encode
+│
+│  encodeEncryptedFileKey(profileB64, privKey)
+│     ├─ nonce = randomBytes(24)
+│     ├─ subkey = HChaCha20(privKey, nonce[0:16])
+│     ├─ ciphertext = XChaCha20(privKey, nonce, data)
+│     ├─ tag = Poly1305(...)
+│     └─ return nonce + ":" + (ciphertext + tag) as base64
+│
+└─ PATCH /api/profile
+   { encrypted_profile_data: "nonce:ciphertext" } ──► users.encrypted_profile_data
+                                                      ⚠ Server stores base64 ciphertext
+                                                      ⚠ CANNOT decrypt — needs privateKey
+
+OWN DECRYPTION (on profile view):
+GET /api/profile/:id ──► returns encrypted_profile_data
+decodeEncryptedFileKey(encrypted, privKey)
+  ├─ split ":" → nonce, ciphertext
+  ├─ subkey = HChaCha20(privKey, nonce[0:16])
+  ├─ decrypt XChaCha20-Poly1305(privKey, ct, tag, nonce)
+  └─ base64 decode → JSON.parse → profile fields ✓
+```
+
+**Key insight**: Although `identity.privateKey` is called a "private key" (because it's the secret half of an X25519 keypair), the `encodeEncryptedFileKey`/`decodeEncryptedFileKey` functions use it as a **symmetric key** for XChaCha20-Poly1305. The X25519 key is a random 32-byte scalar — exactly the right size for a 256-bit ChaCha20 key. This is **not** asymmetric encryption; it's symmetric encryption where the key happens to be an asymmetric private key.
+
+**Why the server cannot decrypt**:
+1. The server has `identity_public_key` — deriving the private key from it requires solving the Curve25519 discrete log problem, which is computationally infeasible
+2. The server has `encrypted_profile_data` (ciphertext) — without the 32-byte key, XChaCha20-Poly1305 is secure against chosen-ciphertext attacks
+3. The password-derived key escrow (`user_key_escrow` table) stores the private key encrypted with HKDF(password, salt) — the server only has a one-way bcrypt hash of the password, so it cannot derive the escrow key
+
+**Sharing encrypted profile data to other users**: Profile fields (display name, etc.) are synced to other users through the encrypted message stream. Every encrypted message includes `encrypted_profile_key` and `profile_key_nonce` fields that are encrypted with the conversation's shared key (server channel key or ECDH DM shared secret). Recipients decrypt with their conversation key and cache the raw profile data in `userDisplayNameCache` — the server sees only ciphertext at every step.
+
+**Sharing PFP/banner keys to other users**: When a user sends a message or rec
+
+**Sharing PFP/banner keys to other users**: When a user sends a message or receives a key sync, the raw file key (decrypted from identity wrapping) is re-encrypted using the DM's ECDH shared secret via `E2ECrypto.encryptDm()`. The encrypted payload (`encrypted_profile_key`, `profile_key_nonce`, `profile_key_message_nonce`) is sent over WebSocket. The recipient decrypts with their identity private key + the sender's public key, then caches the raw key in `profileKeyCache` (backed by localStorage) for all subsequent profile image rendering.
+
+---
+
+### 19.3. What CAN Be Improved (Future Work)
+
+These items are technically feasible and would improve security, but require additional development time:
+
+| Improvement | Effort | Priority | Notes |
+|-------------|--------|----------|-------|
+| **Wire sticker `encrypted_file_key` to server handlers** | Small | 🔴 **Critical** | `encrypted_file_key` column exists in migration 018 for `server_stickers` and `user_stickers`. The server handler currently stores whatever key the client sends (now encrypted at the client level via `encryptFileKeyForStorage()`). Proper wiring requires: (1) updating server handlers to store `encrypted_file_key` instead of `file_key`, (2) updating sticker listing endpoints, (3) updating admin panel display. |
+| **Full Double Ratchet forward secrecy for DMs** | Very Large | 🟠 **High** | Static ECDH means compromising either party's identity key decrypts ALL past/future DMs. Signal Protocol's Double Ratchet would fix this. Primitives `ratchetKey()` and `rotateDmKey()` already exist. Requires ratchet state per DM channel, out-of-order delivery handling, and a new message format. |
+| **Full Double Ratchet for server channels** | Very Large | 🟠 **High** | Same as DMs but more complex due to multiple members. Current mitigations: manual server key rotation by owner. |
+| **Wire `encrypted_profile_data` as the primary profile read path** | Medium | 🟠 **High** | Profile data is encrypted and stored in `encrypted_profile_data`, but `get_profile` still returns plaintext fields alongside the encrypted blob. The client reads from plaintext fields. Fix: have the client read ONLY from `encrypted_profile_data` on profile view, and clear the plaintext columns on save. |
+| **Salt invite/friend code hashes** | Small | 🟡 **Medium** | `friend_code_hash` and `invite_code_hash` use plain SHA-256 without salt. Fix: use HKDF with the server's JWT secret as salt, or HMAC-SHA256 with a server-side salt. |
+| **IP-based rate limiting** | Small | 🟡 **Medium** | Current rate limiting is per-username, not per-IP. An attacker can brute-force different usernames from a single IP. |
+| **Message padding (length obfuscation)** | Medium | 🟢 **Low** | Ciphertext size reveals approximate plaintext length. Adding uniform random padding to messages would obscure this. |
+| **WebSocket sender display name encryption** | Medium | 🟢 **Low** | `sender_display_name`, `sender_profile_pic`, `sender_username_color`, and `sender_username_border_color` are broadcast in plaintext with every message. These could be encrypted with the channel/DM key. |
+| **Constant-time crypto primitives** | Very Large | 🟢 **Low** | Pure JavaScript BigInt operations in the X25519 ladder are not constant-time. Timing attacks over a local network are theoretically possible but impractical. |
+
+---
+
+### 19.4. What CANNOT Be Improved (Fundamental Limitations)
+
+These are inherent to the system's architecture and cannot be changed without redesigning the entire protocol or changing the security model:
+
+| Limitation | Reason | Mitigation |
+|------------|--------|------------|
+| **Social graph visibility** | The server MUST know who is friends with whom, who is in which server, and who is in which DM to route messages and enforce access control. | None — this is inherent to server-mediated communication. |
+| **Message timing patterns** | The server MUST know when to deliver messages. Message timestamps are needed for ordering and display. | HTTPS/Tailscale prevents network-level leakage; TLS 1.3 encrypts handshake metadata. |
+| **File size estimation** | Chunk count (64KB per chunk) reveals approximate file size. | Acceptable metadata leakage — server must manage file storage. |
+| **Usernames must be unique and searchable** | Usernames are used for login and friend finding. They must be plaintext for uniqueness enforcement and lookup. | Usernames are low-value identifiers (like email addresses). |
+| **Server/channel names must be visible** | The server must render the navigation UI for routing. | Server and channel names are public by design (any member can see them). |
+| **Server operator can serve malicious JS** | The server controls what JavaScript is served to clients. No client-side mechanism prevents this without out-of-band code verification. | CSP `script-src 'self'` blocks inline scripts but not modified legitimate scripts. |
+| **Password in localStorage for offline-first** | The app needs the password on page load to decrypt escrowed keys, friend codes, and profile data. No client-side storage provides both persistence and full XSS resistance. | Session key (`deriveSessionKey()`) stored instead of raw password mitigates but does not eliminate the risk. |
+| **Metadata leakage (membership, activity)** | A server-mediated communication system inherently reveals who belongs to which conversations and when they are active. | Nothing can hide this from the server operator. |
+| **Offline message delivery** | Server must store undelivered messages (they are encrypted, but the server knows they exist). | Messages are encrypted — content is hidden. |
+| **No deniable authentication** | All messages are signed with HMAC keys shared by all conversation participants. Any participant can prove to a third party that a message was sent by someone in the conversation. | Repudiable messaging would require a different cryptographic model (e.g., ring signatures). |
+
+---
+
+### 19.5. Quick Reference: Encrypted vs Plaintext
+
+| What | Encrypted? | Who Can Read It |
+|------|-----------|-----------------|
+| Message content (channels) | ✅ XChaCha20-Poly1305 | Server members with the server key |
+| Message content (DMs) | ✅ XChaCha20-Poly1305 | DM participants with identity keys |
+| File content | ✅ Per-file random key, chunked | Recipients with the file key |
+| Profile picture/banner file keys | ✅ Identity-key encrypted + shared via encrypted WS messages | Profile owner + friends/server-mates who received key sync |
+| Profile data (display_name, description, nickname, colors) | ✅ Identity-key encrypted in `encrypted_profile_data` | Profile owner + friends/server-mates (via encrypted message stream) |
+| Friend codes | ✅ Password-derived HKDF + XChaCha20 | Account holder (with password) |
+| Key escrow | ✅ Password-derived HKDF + XChaCha20 | Account holder (with password) |
+| Notification sounds | ✅ Envelope-encrypted | Account holder (with identity key) |
+| Sticker/emoji file keys | ✅ Client-level encryption with identity key; schema-ready `encrypted_file_key` column | Sticker uploader + viewers (decrypted client-side) |
+| Server/channel names | ❌ Plaintext (must be plaintext) | All server members + server operator |
+| Usernames | ❌ Plaintext (must be for login) | Everyone |
+| Social graph (friendships, memberships) | ❌ Plaintext (must be for routing) | Server operator + relevant members |
+| Timestamps | ❌ Plaintext (must be for ordering) | Everyone with access |
+| File IDs | ❌ Plaintext (must be for download) | Anyone with the URL |
+| Display name in WS broadcasts | ❌ Plaintext (design trade-off for rendering speed) | All channel members |
+| Sticker `file_key` (old column) | ❌ Plaintext (migration in progress) | Server operator |
+
+---
+
+### 19.6. Summary Matrix
+
+| Property | Status | Details |
+|----------|--------|---------|
+| Message content encrypted | ✅ | Channels: per-message HKDF key. DMs: ECDH shared secret + per-message HKDF |
+| File content encrypted | ✅ | Per-file random 32-byte key, chunked XChaCha20-Poly1305 |
+| Profile data encrypted (server cannot read) | ✅ | Identity-key wrapped XChaCha2
