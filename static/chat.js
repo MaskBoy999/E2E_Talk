@@ -314,6 +314,7 @@ document.addEventListener('DOMContentLoaded', () => {
         settingsModal.style.display = 'flex';
         loadMyProfile();
         loadDmConversations();
+        loadFriendRequestsDisabledSetting();
     });
     document.getElementById('close-settings').addEventListener('click', () => { settingsModal.style.display = 'none'; });
 
@@ -334,6 +335,12 @@ document.addEventListener('DOMContentLoaded', () => {
         autoLoadCheckbox.addEventListener('change', () => {
             localStorage.setItem('autoLoadPreviews', autoLoadCheckbox.checked);
         });
+    }
+
+    // Friend requests disabled setting
+    const disableFrToggle = document.getElementById('disable-friend-requests-toggle');
+    if (disableFrToggle) {
+        disableFrToggle.addEventListener('change', friendRequestsDisabledToggleChanged);
     }
 
     // Notification sound upload
@@ -7005,6 +7012,38 @@ async function handleFriendCodeRegenerate(preverifiedPw) {
     } catch (e) {
         if (errorEl) { errorEl.textContent = 'Network error. Is the server running?'; errorEl.style.display = 'block'; }
         if (!errorEl) { alert('Network error. Is the server running?'); }
+    }
+}
+
+async function loadFriendRequestsDisabledSetting() {
+    const toggle = document.getElementById('disable-friend-requests-toggle');
+    if (!toggle) return;
+    try {
+        const res = await authFetch('/api/friends/requests/disabled');
+        if (res.ok) {
+            const data = await res.json();
+            toggle.checked = data.friend_requests_disabled;
+        }
+    } catch (_) {}
+}
+
+async function friendRequestsDisabledToggleChanged() {
+    const toggle = document.getElementById('disable-friend-requests-toggle');
+    if (!toggle) return;
+    try {
+        const res = await authFetch('/api/friends/requests/disabled', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ disabled: toggle.checked }),
+        });
+        if (!res.ok) {
+            const err = await res.json();
+            alert(err.error || 'Failed to update friend request setting');
+            toggle.checked = !toggle.checked;
+        }
+    } catch (_) {
+        alert('Failed to connect to server');
+        toggle.checked = !toggle.checked;
     }
 }
 

@@ -3462,6 +3462,58 @@ pub struct RegenWithPasswordRequest {
 // --- Friends ---
 
 #[derive(Deserialize)]
+pub struct FriendRequestsDisabledRequest {
+    pub disabled: bool,
+}
+
+pub async fn get_friend_requests_disabled(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    match state.db.get_friend_requests_disabled(&user_id) {
+        Ok(disabled) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"friend_requests_disabled": disabled})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn set_friend_requests_disabled(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<FriendRequestsDisabledRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    match state.db.set_friend_requests_disabled(&user_id, req.disabled) {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"ok": true, "friend_requests_disabled": req.disabled})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
 pub struct SendFriendRequest {
     pub friend_code: String,
 }

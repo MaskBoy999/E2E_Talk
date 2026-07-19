@@ -267,6 +267,7 @@ async fn main() {
         .route("/api/notification-sound", post(handlers::upload_notification_sound).get(handlers::get_notification_sound).delete(handlers::delete_notification_sound))
         .route("/api/friends/remove", post(handlers::remove_friend))
         .route("/api/friends/request", post(handlers::send_friend_request))
+        .route("/api/friends/requests/disabled", get(handlers::get_friend_requests_disabled).post(handlers::set_friend_requests_disabled))
         .route("/api/friends/requests/incoming", get(handlers::list_incoming_friend_requests))
         .route("/api/friends/requests/outgoing", get(handlers::list_outgoing_friend_requests))
         .route("/api/friends/requests/accept", post(handlers::accept_friend_request))

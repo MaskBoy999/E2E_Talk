@@ -296,10 +296,19 @@
                     </div>
                 </div>
 
-                <div class="settings-group settings-danger">
-                    <h4>Danger Zone</h4>
-                    <p class="settings-hint">Permanently delete your account and all associated data. This cannot be undone.</p>
-                    <button class="btn-delete-account" id="delete-account-btn">Delete Account</button>
+                <div class="settings-group" style="padding-bottom:12px;border-bottom:1px solid var(--bg-border)">
+                    <h4>Privacy</h4>
+                    <label class="settings-toggle" style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-top:8px">
+                        <input type="checkbox" id="disable-friend-requests-toggle">
+                        <span class="toggle-slider"></span>
+                        <span class="toggle-label" style="font-size:13px;color:var(--text-primary)">Block incoming friend requests</span>
+                    </label>
+                    <p class="settings-hint">When enabled, other users cannot send you friend requests.</p>
+                </div>
+                <div class="settings-group">
+                    <h4>Clear All Local Data</h4>
+                    <p class="settings-hint">Clears all stored logins, keys, settings, cookies, and cached data. Use this if you encounter login or account issues such as constraint errors when creating a new account after logging out.</p>
+                    <button class="btn-delete-account" id="clear-all-data-btn">🗑️ Clear All Data &amp; Sign Out</button>
                 </div>
             </div>
 
@@ -377,10 +386,10 @@
                         <p id="reauth-error" class="error-text" style="display:none;margin-top:8px;"></p>
                     </div>
                 </div>
-                <div class="settings-group" style="margin-top:16px;border-top:1px solid var(--bg-border);padding-top:16px">
-                    <h4>Clear All Local Data</h4>
-                    <p class="settings-hint">Clears all stored logins, keys, settings, cookies, and cached data. Use this if you encounter login or account issues such as constraint errors when creating a new account after logging out.</p>
-                    <button class="btn-delete-account" id="clear-all-data-btn">🗑️ Clear All Data &amp; Sign Out</button>
+                <div class="settings-group settings-danger">
+                    <h4>Danger Zone</h4>
+                    <p class="settings-hint">Permanently delete your account and all associated data. This cannot be undone.</p>
+                    <button class="btn-delete-account" id="delete-account-btn">Delete Account</button>
                 </div>
             </div>
 

@@ -341,6 +341,19 @@ impl Database {
         // Migration 018: user_devices, device_id on keys, encrypted sticker keys
         let _ = conn.execute_batch(include_str!("../migrations/018_user_devices.sql"));
 
+        // Migration 019: friend_requests_disabled
+        let fr_disabled_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('users') WHERE name = 'friend_requests_disabled'",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if !fr_disabled_exists {
+            conn.execute("ALTER TABLE users ADD COLUMN friend_requests_disabled INTEGER NOT NULL DEFAULT 0", [])?;
+        }
+
         // Migration 021: profile background color
         let bg_color_exists: bool = conn
             .query_row(
@@ -1748,6 +1761,28 @@ impl Database {
 
     // --- Friendships ---
 
+    pub fn get_friend_requests_disabled(&self, user_id: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let disabled: i64 = conn
+            .query_row(
+                "SELECT COALESCE(friend_requests_disabled, 0) FROM users WHERE id = ?1",
+                params![user_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| "User not found".to_string())?;
+        Ok(disabled != 0)
+    }
+
+    pub fn set_friend_requests_disabled(&self, user_id: &str, disabled: bool) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE users SET friend_requests_disabled = ?1 WHERE id = ?2",
+            params![disabled as i64, user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     /// Returns true if a friendship row exists between the two users.
     pub fn are_friends(&self, user_a: &str, user_b: &str) -> Result<bool, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
@@ -1844,6 +1879,18 @@ impl Database {
 
         if target.id == from_user_id {
             return Err("You can't add yourself as a friend".to_string());
+        }
+
+        // Check if recipient has disabled friend requests
+        let recipient_disabled: i64 = conn
+            .query_row(
+                "SELECT COALESCE(friend_requests_disabled, 0) FROM users WHERE id = ?1",
+                params![target.id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        if recipient_disabled != 0 {
+            return Err("This user is not accepting friend requests".to_string());
         }
 
         if Self::are_friends_c(&conn, from_user_id, &target.id).map_err(|e| e.to_string())? {
