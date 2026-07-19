@@ -910,6 +910,24 @@ body {
     background: rgba(249,168,37,0.08) !important;
 }
 
+/* Unverified message (signature check failed or missing) */
+.message.unverified::after {
+    content: '⚠️';
+    position: absolute;
+    top: -6px;
+    right: -6px;
+    font-size: 14px;
+    line-height: 1;
+    pointer-events: none;
+    z-index: 5;
+    filter: drop-shadow(0 1px 2px rgba(0,0,0,0.5));
+}
+.message.unverified {
+    position: relative;
+    border-left-color: #ff9800 !important;
+    background: rgba(255,152,0,0.06) !important;
+}
+
 .mention {
     color: #4fc3f7;
     background: rgba(79,195,247,0.12);

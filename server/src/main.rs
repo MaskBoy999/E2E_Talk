@@ -8,7 +8,7 @@ use axum::{
     routing::{get, post, delete, patch},
     Router,
 };
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 mod auth;
 mod config;
@@ -156,6 +156,7 @@ fn generate_self_signed_cert(cert_dir: &str) -> Result<(String, String), Box<dyn
 #[tokio::main]
 async fn main() {
     tracing_subscriber::registry()
+        .with(EnvFilter::new("info"))
         .with(tracing_subscriber::fmt::layer())
         .init();
 

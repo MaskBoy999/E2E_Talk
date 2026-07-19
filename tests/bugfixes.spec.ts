@@ -287,8 +287,10 @@ test.describe('Bugfix: profile_updated handler does not crash when myProfile is 
         const dnStyle = await page2.locator('.message .display-name').first().getAttribute('style');
         console.log('Display name style after update:', dnStyle);
         expect(dnStyle).toBeTruthy();
-        // Should have the new color (browser keeps hex: #ff0066)
-        expect(dnStyle).toContain('#ff0066');
+        // Should have the new color (browser may return hex #ff0066 or rgb(255,0,102))
+        var containsHex = dnStyle.indexOf('#ff0066') !== -1;
+        var containsRgb = dnStyle.indexOf('255, 0, 102') !== -1 || dnStyle.indexOf('255,0,102') !== -1;
+        expect(containsHex || containsRgb).toBe(true);
 
         // The text-shadow should include the new border glow
         expect(dnStyle).toContain('text-shadow');
@@ -654,40 +656,43 @@ test.describe('Bugfix: Border glow color reflects immediately without page refre
             user: JSON.parse(localStorage.getItem('user') || '{}'),
         }));
 
+        // Store password for auto-verification so profile edit works
+        await page.evaluate(() => localStorage.setItem('e2e_password', 'password123'));
+
         // Save a border glow via API
         await page.request.patch(`${BASE}/api/profile`, {
             headers: { Authorization: `Bearer ${body.token}`, 'Content-Type': 'application/json' },
             data: { username_border_color: 'rgba(0,0,0,0.85)' },
         });
 
-        // Reload and open settings
+        // Reload and open own profile
         await page.goto(`${BASE}/index.html`);
         await page.waitForTimeout(2000);
-        await page.click('#settings-btn');
-        await page.waitForSelector('#settings-modal', { state: 'visible', timeout: 5000 });
+        await page.click('#footer-user-avatar');
+        await page.waitForSelector('#profile-modal', { state: 'visible', timeout: 5000 });
+        await page.waitForFunction(() => {
+            const el = document.getElementById('profile-modal-display-name');
+            return el && el.textContent && el.textContent !== 'Loading...' && el.textContent !== '';
+        }, { timeout: 15000 });
+
+        // Open profile edit
+        await page.click('#profile-edit-btn');
+        await page.waitForSelector('#profile-edit-modal', { state: 'visible', timeout: 5000 });
         await page.waitForTimeout(2000);
 
-        // Check that the saved glow is selected in the glow options
+        // Check that the saved glow is selected in the profile edit glow options
         const selectedGlow = await page.evaluate(() => {
-            const container = document.getElementById('border-glow-options');
+            const container = document.getElementById('profile-edit-glow-options');
             if (!container) return null;
-            const selectedBtn = container.querySelector('.glow-option-btn.selected');
-            if (!selectedBtn) return null;
-            return selectedBtn.getAttribute('data-glow');
+            const activeBtn = container.querySelector('.glow-btn.active');
+            if (!activeBtn) return null;
+            return activeBtn.getAttribute('data-value');
         });
-        console.log('Selected glow in settings:', selectedGlow);
+        console.log('Selected glow in profile edit:', selectedGlow);
         expect(selectedGlow).toBe('rgba(0,0,0,0.85)');
 
-        // Check preview shows the saved glow
-        const previewGlow = await page.evaluate(() => {
-            const preview = document.getElementById('border-glow-preview');
-            if (!preview) return null;
-            return preview.dataset.selectedGlow || null;
-        });
-        console.log('Preview selected glow:', previewGlow);
-        expect(previewGlow).toBe('rgba(0,0,0,0.85)');
-
-        await page.click('#close-settings');
+        await page.click('#profile-edit-cancel-btn');
+        await page.waitForTimeout(500);
     });
 
     test('username border glow colors save and persist correctly via API', async ({ page }) => {
@@ -729,7 +734,7 @@ test.describe('Bugfix: Border glow color reflects immediately without page refre
         expect(profileData.username_border_color).toBe(testGlow);
     });
 
-    test('saving border glow via settings button stores the correct value', async ({ page }) => {
+    test('saving border glow via profile edit stores the correct value', async ({ page }) => {
         const ts = Date.now();
         const username = 'glowbtn_' + ts;
 
@@ -740,42 +745,46 @@ test.describe('Bugfix: Border glow color reflects immediately without page refre
             user: JSON.parse(localStorage.getItem('user') || '{}'),
         }));
 
-        // Open settings
-        await page.click('#settings-btn');
-        await page.waitForSelector('#settings-modal', { state: 'visible', timeout: 5000 });
+        // Store password for auto-verification so profile edit works
+        await page.evaluate(() => localStorage.setItem('e2e_password', 'password123'));
+
+        // Open profile modal then edit
+        await page.click('#footer-user-avatar');
+        await page.waitForSelector('#profile-modal', { state: 'visible', timeout: 5000 });
+        await page.waitForFunction(() => {
+            const el = document.getElementById('profile-modal-display-name');
+            return el && el.textContent && el.textContent !== 'Loading...' && el.textContent !== '';
+        }, { timeout: 15000 });
+        await page.click('#profile-edit-btn');
+        await page.waitForSelector('#profile-edit-modal', { state: 'visible', timeout: 5000 });
         await page.waitForTimeout(2000);
 
-        // Check glow options exist
+        // Check glow options exist in profile edit
         const glowOptions = await page.evaluate(() => {
-            const container = document.getElementById('border-glow-options');
+            const container = document.getElementById('profile-edit-glow-options');
             if (!container) return { exists: false };
-            const btns = container.querySelectorAll('.glow-option-btn');
-            return { exists: true, count: btns.length, firstGlow: btns[0]?.getAttribute('data-glow') || null };
+            const btns = container.querySelectorAll('.glow-btn');
+            return { exists: true, count: btns.length, firstGlow: btns[0]?.getAttribute('data-value') || null };
         });
         console.log('Glow options:', JSON.stringify(glowOptions));
         expect(glowOptions.exists).toBeTruthy();
-        expect(glowOptions.count).toBeGreaterThanOrEqual(8); // should have 10 options
+        expect(glowOptions.count).toBeGreaterThanOrEqual(8);
 
-        // Click the second glow option (should be different from first)
+        // Click the second glow option
         const secondGlow = await page.evaluate(() => {
-            const container = document.getElementById('border-glow-options');
+            const container = document.getElementById('profile-edit-glow-options');
             if (!container) return null;
-            const btns = container.querySelectorAll('.glow-option-btn');
+            const btns = container.querySelectorAll('.glow-btn');
             if (btns.length < 2) return null;
             btns[1].click();
-            return btns[1].getAttribute('data-glow');
+            return btns[1].getAttribute('data-value');
         });
         console.log('Clicked second glow:', secondGlow);
         expect(secondGlow).toBeTruthy();
 
-        // Click Save Glow button
-        // Use API to save border glow color
-const borderToken = await page.evaluate(() => localStorage.getItem('token'));
-await page.request.patch(BASE + '/api/profile', {
-    headers: { Authorization: 'Bearer ' + borderToken, 'Content-Type': 'application/json' },
-    data: { username_border_color: glowColor },
-});
-        await page.waitForTimeout(2000);
+        // Save profile
+        await page.click('#profile-edit-save-btn');
+        await page.waitForTimeout(3000);
 
         // Verify via API that the glow was saved
         const profileRes = await page.request.get(`${BASE}/api/profile/${body.user.id}`, {
@@ -784,8 +793,6 @@ await page.request.patch(BASE + '/api/profile', {
         const profile = await profileRes.json();
         console.log('Profile after saving via button:', JSON.stringify(profile));
         expect(profile.username_border_color).toBe(secondGlow);
-
-        await page.click('#close-settings');
     });
 });
 

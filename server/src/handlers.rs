@@ -1343,7 +1343,12 @@ pub async fn list_messages(
                 "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
                 "timestamp": m.timestamp,
                 "message_nonce": m.message_nonce,
-                "edited_at": m.edited_at
+                "edited_at": m.edited_at,
+                "message_signature": m.message_signature,
+                "encrypted_profile_key": m.encrypted_profile_key,
+                "profile_key_nonce": m.profile_key_nonce,
+                "encrypted_banner_key": m.encrypted_banner_key,
+                "banner_key_nonce": m.banner_key_nonce
             })
         })
         .collect();
@@ -1405,7 +1410,11 @@ pub async fn list_messages_around(
                 "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
                 "timestamp": m.timestamp,
                 "message_nonce": m.message_nonce,
-                "edited_at": m.edited_at
+                "edited_at": m.edited_at,
+                "encrypted_profile_key": m.encrypted_profile_key,
+                "profile_key_nonce": m.profile_key_nonce,
+                "encrypted_banner_key": m.encrypted_banner_key,
+                "banner_key_nonce": m.banner_key_nonce
             })
         })
         .collect();
@@ -3188,25 +3197,31 @@ pub async fn update_profile(
         }
     }
 
-    // Save encrypted profile data if provided (password-based encryption)
-    if let (Some(data), Some(salt), Some(nonce)) = (&req.encrypted_profile_data, &req.encrypted_profile_salt, &req.encrypted_profile_nonce) {
+    // Save encrypted profile data if provided (supports both password-based and identity-key encryption)
+    if let Some(data) = &req.encrypted_profile_data {
+        let salt = req.encrypted_profile_salt.as_deref().unwrap_or("");
+        let nonce = req.encrypted_profile_nonce.as_deref().unwrap_or("");
         let _ = state.db.save_encrypted_profile(&user_id, data, salt, nonce);
     }
 
     // Broadcast profile update to the user, friends, and all server members
     if let Ok(profile) = state.db.get_user_profile(&user_id) {
-        let (_id, username, display_name, profile_picture_file_id, _fk, username_color, username_border_color, banner_id, _, description, nickname) = profile;
+        let (_id, username, display_name, profile_picture_file_id, profile_picture_file_key, username_color, username_border_color, banner_id, banner_file_key, description, nickname) = profile;
+        let encrypted = state.db.get_encrypted_profile(&user_id).ok().flatten();
         let profile_msg = serde_json::json!({
             "type": "profile_updated",
             "user_id": user_id,
             "username": username,
             "display_name": display_name,
             "profile_picture_file_id": profile_picture_file_id,
+            "profile_picture_file_key": profile_picture_file_key,
             "profile_banner_file_id": banner_id,
+            "profile_banner_file_key": banner_file_key,
             "description": description,
             "nickname": nickname,
             "username_color": username_color.unwrap_or("#4fc3f7".to_string()),
             "username_border_color": username_border_color,
+            "encrypted_profile_data": encrypted.as_ref().map(|e| e.0.as_str()),
         });
 
         let mut recipients: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -3587,14 +3602,14 @@ pub async fn accept_friend_request(
             // Auto-create a DM channel between the two new friends
             let _ = state.db.find_or_create_dm_channel(&from_id, &user_id);
 
-            // Notify the original sender that they are now friends.
+            // Notify both users that they are now friends.
             let notify = serde_json::json!({
                 "type": "friend_request_accepted",
                 "by_user_id": user_id,
             });
             let _ = state
                 .ws_manager
-                .broadcast_to_users(&[from_id], &notify.to_string())
+                .broadcast_to_users(&[from_id, user_id], &notify.to_string())
                 .await;
             (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
         }
@@ -3878,6 +3893,11 @@ pub async fn list_dm_messages(
                         "timestamp": m.timestamp,
                         "message_nonce": m.message_nonce,
                         "edited_at": m.edited_at,
+                        "message_signature": m.message_signature,
+                        "encrypted_profile_key": m.encrypted_profile_key,
+                        "profile_key_nonce": m.profile_key_nonce,
+                        "encrypted_banner_key": m.encrypted_banner_key,
+                        "banner_key_nonce": m.banner_key_nonce,
                     })
                 })
                 .collect();

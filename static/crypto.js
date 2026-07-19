@@ -891,6 +891,59 @@ const E2ECrypto = (() => {
         return null; // Not encrypted or can't decrypt
     }
 
+    // --- HMAC hex output (for friend codes and invite codes) ---
+    // Uses the identity private key as HMAC key if available, otherwise falls back to a session key.
+    function hmacHex(keyBytesOrB64, dataString) {
+        var keyBytes;
+        if (typeof keyBytesOrB64 === 'string' && keyBytesOrB64.length > 32) {
+            keyBytes = new Uint8Array(base64ToArrayBuffer(keyBytesOrB64));
+        } else if (keyBytesOrB64 instanceof Uint8Array) {
+            keyBytes = keyBytesOrB64;
+        } else {
+            keyBytes = new TextEncoder().encode(keyBytesOrB64);
+        }
+        var dataBytes = new TextEncoder().encode(dataString);
+        var hash = hmacSHA256(keyBytes, dataBytes);
+        var hex = '';
+        for (var i = 0; i < hash.length; i++) hex += hash[i].toString(16).padStart(2, '0');
+        return hex;
+    }
+
+    // Sign a message payload using the message encryption key (channel key or DM shared secret).
+    // All participants in the conversation share this key, so all can verify.
+    // Returns base64-encoded HMAC-SHA256 signature.
+    function signMessage(encryptionKey, messagePayloadJson) {
+        var dataBytes = new TextEncoder().encode(messagePayloadJson);
+        var sig = hmacSHA256(encryptionKey, dataBytes);
+        return arrayBufferToBase64(sig);
+    }
+
+    // Verify a message signature against the expected encryption key.
+    function verifyMessage(encryptionKey, messagePayloadJson, signatureB64) {
+        var dataBytes = new TextEncoder().encode(messagePayloadJson);
+        var expectedSig = hmacSHA256(encryptionKey, dataBytes);
+        var actualSig = new Uint8Array(base64ToArrayBuffer(signatureB64));
+        return equalBytes(expectedSig, actualSig);
+    }
+
+    // Server channel key auto-ratchet: derive a new key from the old one for forward secrecy.
+    function ratchetKey(currentKey) {
+        var salt = randomBytes(16);
+        var info = 'e2e-ratchet-v1';
+        return {
+            key: hkdf(currentKey, salt, info, 32),
+            salt: arrayBufferToBase64(salt)
+        };
+    }
+
+    // DM key rotation: derive a new shared secret from the current identity keys.
+    function rotateDmKey(myPrivateKey, theirNewPublicKeyB64, dmChannelId) {
+        var theirPub = new Uint8Array(base64ToArrayBuffer(theirNewPublicKeyB64));
+        var shared = x25519SharedSecret(myPrivateKey, theirPub);
+        var info = 'e2e-dm-rotate-v1:' + dmChannelId;
+        return hkdf(shared, shared, info, 32);
+    }
+
     return {
         sha256Hex: function(data) {
             var bytes = new TextEncoder().encode(data);
@@ -899,6 +952,11 @@ const E2ECrypto = (() => {
             for (var i = 0; i < hash.length; i++) hex += hash[i].toString(16).padStart(2, '0');
             return hex;
         },
+        hmacHex: hmacHex,
+        signMessage: signMessage,
+        verifyMessage: verifyMessage,
+        ratchetKey: ratchetKey,
+        rotateDmKey: rotateDmKey,
         arrayBufferToBase64: arrayBufferToBase64,
         base64ToArrayBuffer: base64ToArrayBuffer,
         randomBytes: randomBytes,

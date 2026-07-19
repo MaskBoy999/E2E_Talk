@@ -122,6 +122,16 @@ struct OutgoingChatMessage {
     message_nonce: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     edited_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message_signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    encrypted_profile_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile_key_nonce: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    encrypted_banner_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    banner_key_nonce: Option<String>,
 }
 
 pub async fn ws_handler(
@@ -290,6 +300,8 @@ async fn handle_ws_message(
                 return;
             }
 
+            let message_signature = parsed.get("message_signature").and_then(|c| c.as_str()).map(|s| s.to_string());
+
             let encrypted_content = match base64::engine::general_purpose::STANDARD.decode(encrypted_content_b64) {
                 Ok(b) => b,
                 Err(_) => return,
@@ -299,7 +311,12 @@ async fn handle_ws_message(
                 Err(_) => return,
             };
 
-            let message = match state.db.save_encrypted_message(channel_id, user_id, &encrypted_content, &nonce, message_nonce.as_deref()) {
+            let encrypted_profile_key = parsed.get("encrypted_profile_key").and_then(|c| c.as_str()).map(|s| s.to_string());
+            let profile_key_nonce = parsed.get("profile_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
+            let encrypted_banner_key = parsed.get("encrypted_banner_key").and_then(|c| c.as_str()).map(|s| s.to_string());
+            let banner_key_nonce = parsed.get("banner_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
+
+            let message = match state.db.save_encrypted_message(channel_id, user_id, &encrypted_content, &nonce, message_nonce.as_deref(), message_signature.as_deref(), encrypted_profile_key.as_deref(), profile_key_nonce.as_deref(), encrypted_banner_key.as_deref(), banner_key_nonce.as_deref()) {
                 Ok(m) => m,
                 Err(e) => {
                     tracing::error!("Failed to save message: {}", e);
@@ -335,6 +352,11 @@ async fn handle_ws_message(
                     timestamp: message.timestamp,
                     message_nonce: message.message_nonce,
                     edited_at: None,
+                    message_signature: message.message_signature,
+                    encrypted_profile_key: encrypted_profile_key.clone(),
+                    profile_key_nonce: profile_key_nonce.clone(),
+                    encrypted_banner_key: encrypted_banner_key.clone(),
+                    banner_key_nonce: banner_key_nonce.clone(),
                 }),
                 user_id: None,
                 username: None,
@@ -441,6 +463,50 @@ async fn handle_ws_message(
                 }
             }
         }
+        "profile_key_sync" => {
+            let dm_channel_id = match parsed.get("dm_channel_id").and_then(|c| c.as_str()) {
+                Some(c) => c,
+                None => return,
+            };
+
+            // Must be a member of this DM channel.
+            if !state.db.is_dm_member(dm_channel_id, user_id).unwrap_or(false) {
+                return;
+            }
+
+            let encrypted_profile_key = parsed.get("encrypted_profile_key").and_then(|c| c.as_str()).map(|s| s.to_string());
+            let profile_key_nonce = parsed.get("profile_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
+            let profile_key_message_nonce = parsed.get("profile_key_message_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
+            let profile_picture_file_id = parsed.get("profile_picture_file_id").and_then(|c| c.as_str()).map(|s| s.to_string());
+            let encrypted_banner_key = parsed.get("encrypted_banner_key").and_then(|c| c.as_str()).map(|s| s.to_string());
+            let banner_key_nonce = parsed.get("banner_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
+            let banner_key_message_nonce = parsed.get("banner_key_message_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
+            let profile_banner_file_id = parsed.get("profile_banner_file_id").and_then(|c| c.as_str()).map(|s| s.to_string());
+
+            let sync_msg = serde_json::json!({
+                "type": "profile_key_sync",
+                "user_id": user_id,
+                "dm_channel_id": dm_channel_id,
+                "profile_picture_file_id": profile_picture_file_id,
+                "encrypted_profile_key": encrypted_profile_key,
+                "profile_key_nonce": profile_key_nonce,
+                "profile_key_message_nonce": profile_key_message_nonce,
+                "profile_banner_file_id": profile_banner_file_id,
+                "encrypted_banner_key": encrypted_banner_key,
+                "banner_key_nonce": banner_key_nonce,
+                "banner_key_message_nonce": banner_key_message_nonce,
+            });
+
+            // Broadcast to both DM members
+            match state.db.get_dm_members(dm_channel_id) {
+                Ok(members) => {
+                    state.ws_manager.broadcast_to_users(&members, &sync_msg.to_string()).await;
+                }
+                Err(e) => {
+                    tracing::error!("Failed to get DM members: {}", e);
+                }
+            }
+        }
         "dm_send" => {
             let dm_channel_id = match parsed.get("dm_channel_id").and_then(|c| c.as_str()) {
                 Some(c) => c,
@@ -461,6 +527,8 @@ async fn handle_ws_message(
                 return;
             }
 
+            let message_signature = parsed.get("message_signature").and_then(|c| c.as_str()).map(|s| s.to_string());
+
             let encrypted_content = match base64::engine::general_purpose::STANDARD.decode(encrypted_content_b64) {
                 Ok(b) => b,
                 Err(_) => return,
@@ -470,7 +538,12 @@ async fn handle_ws_message(
                 Err(_) => return,
             };
 
-            let message = match state.db.save_dm_message(dm_channel_id, user_id, &encrypted_content, &nonce, message_nonce.as_deref()) {
+            let encrypted_profile_key = parsed.get("encrypted_profile_key").and_then(|c| c.as_str()).map(|s| s.to_string());
+            let profile_key_nonce = parsed.get("profile_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
+            let encrypted_banner_key = parsed.get("encrypted_banner_key").and_then(|c| c.as_str()).map(|s| s.to_string());
+            let banner_key_nonce = parsed.get("banner_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
+
+            let message = match state.db.save_dm_message(dm_channel_id, user_id, &encrypted_content, &nonce, message_nonce.as_deref(), message_signature.as_deref(), encrypted_profile_key.as_deref(), profile_key_nonce.as_deref(), encrypted_banner_key.as_deref(), banner_key_nonce.as_deref()) {
                 Ok(m) => m,
                 Err(e) => {
                     tracing::error!("Failed to save DM message: {}", e);
@@ -505,6 +578,11 @@ async fn handle_ws_message(
                     timestamp: message.timestamp,
                     message_nonce: message.message_nonce,
                     edited_at: None,
+                    message_signature: message.message_signature,
+                    encrypted_profile_key: encrypted_profile_key.clone(),
+                    profile_key_nonce: profile_key_nonce.clone(),
+                    encrypted_banner_key: encrypted_banner_key.clone(),
+                    banner_key_nonce: banner_key_nonce.clone(),
                 }),
                 user_id: None,
                 username: None,
@@ -572,6 +650,7 @@ async fn handle_ws_message(
                 None => return,
             };
             let message_nonce = parsed.get("message_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
+            let message_signature = parsed.get("message_signature").and_then(|c| c.as_str()).map(|s| s.to_string());
 
             let encrypted_content = match base64::engine::general_purpose::STANDARD.decode(encrypted_content_b64) {
                 Ok(b) => b,
@@ -582,7 +661,12 @@ async fn handle_ws_message(
                 Err(_) => return,
             };
 
-            let message = match state.db.edit_encrypted_message(message_id, user_id, &encrypted_content, &nonce, message_nonce.as_deref()) {
+            let encrypted_profile_key = parsed.get("encrypted_profile_key").and_then(|c| c.as_str()).map(|s| s.to_string());
+            let profile_key_nonce = parsed.get("profile_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
+            let encrypted_banner_key = parsed.get("encrypted_banner_key").and_then(|c| c.as_str()).map(|s| s.to_string());
+            let banner_key_nonce = parsed.get("banner_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
+
+            let message = match state.db.edit_encrypted_message(message_id, user_id, &encrypted_content, &nonce, message_nonce.as_deref(), message_signature.as_deref(), encrypted_profile_key.as_deref(), profile_key_nonce.as_deref(), encrypted_banner_key.as_deref(), banner_key_nonce.as_deref()) {
                 Ok(m) => m,
                 Err(e) => {
                     tracing::error!("Failed to edit message: {}", e);
@@ -619,6 +703,11 @@ async fn handle_ws_message(
                     timestamp: message.timestamp,
                     message_nonce: message.message_nonce,
                     edited_at: message.edited_at,
+                    message_signature: message.message_signature,
+                    encrypted_profile_key: encrypted_profile_key.clone(),
+                    profile_key_nonce: profile_key_nonce.clone(),
+                    encrypted_banner_key: encrypted_banner_key.clone(),
+                    banner_key_nonce: banner_key_nonce.clone(),
                 }),
                 user_id: None,
                 username: None,
@@ -689,6 +778,7 @@ async fn handle_ws_message(
                 None => return,
             };
             let message_nonce = parsed.get("message_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
+            let message_signature = parsed.get("message_signature").and_then(|c| c.as_str()).map(|s| s.to_string());
 
             let encrypted_content = match base64::engine::general_purpose::STANDARD.decode(encrypted_content_b64) {
                 Ok(b) => b,
@@ -699,7 +789,12 @@ async fn handle_ws_message(
                 Err(_) => return,
             };
 
-            let message = match state.db.edit_dm_message(message_id, user_id, &encrypted_content, &nonce, message_nonce.as_deref()) {
+            let encrypted_profile_key = parsed.get("encrypted_profile_key").and_then(|c| c.as_str()).map(|s| s.to_string());
+            let profile_key_nonce = parsed.get("profile_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
+            let encrypted_banner_key = parsed.get("encrypted_banner_key").and_then(|c| c.as_str()).map(|s| s.to_string());
+            let banner_key_nonce = parsed.get("banner_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
+
+            let message = match state.db.edit_dm_message(message_id, user_id, &encrypted_content, &nonce, message_nonce.as_deref(), message_signature.as_deref(), encrypted_profile_key.as_deref(), profile_key_nonce.as_deref(), encrypted_banner_key.as_deref(), banner_key_nonce.as_deref()) {
                 Ok(m) => m,
                 Err(e) => {
                     tracing::error!("Failed to edit DM message: {}", e);
@@ -731,6 +826,11 @@ async fn handle_ws_message(
                     timestamp: message.timestamp,
                     message_nonce: message.message_nonce,
                     edited_at: message.edited_at,
+                    message_signature: message.message_signature,
+                    encrypted_profile_key: encrypted_profile_key.clone(),
+                    profile_key_nonce: profile_key_nonce.clone(),
+                    encrypted_banner_key: encrypted_banner_key.clone(),
+                    banner_key_nonce: banner_key_nonce.clone(),
                 }),
                 user_id: None,
                 username: None,
