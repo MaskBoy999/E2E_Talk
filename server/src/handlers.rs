@@ -934,7 +934,17 @@ pub async fn join_server(
             .into_response();
     }
 
-    let server = match state.db.join_server_by_invite(req.code.trim(), &user_id) {
+    // Try HMAC hash first, fall back to legacy SHA-256 for backward compat
+    let code = req.code.trim();
+    let hmac_hash = hmac_sha256_hex(state.config.hmac_key.as_bytes(), code);
+    let server = match state.db.join_server_by_invite(&hmac_hash, &user_id) {
+        Ok(s) => Ok(s),
+        Err(_) => {
+            // Fall back to legacy SHA-256 hash for old invite codes
+            state.db.join_server_by_invite(&sha256_hex(code), &user_id)
+        }
+    };
+    let server = match server {
         Ok(s) => s,
         Err(e) => {
             return (
@@ -2900,6 +2910,8 @@ pub struct AddStickerRequest {
     pub file_id: String,
     pub sticker_name: String,
     pub file_key: Option<String>,
+    pub encrypted_file_key: Option<String>,
+    pub file_key_nonce: Option<String>,
 }
 
 pub async fn list_server_stickers(
@@ -2918,7 +2930,7 @@ pub async fn list_server_stickers(
         Ok(stickers) => {
             let result: Vec<serde_json::Value> = stickers
                 .iter()
-                .map(|(id, file_id, name, mime, uploaded_by, file_key, _ekey, _eknonce)| {
+                .map(|(id, file_id, name, mime, uploaded_by, file_key, ekey, eknounce)| {
                     serde_json::json!({
                         "id": id,
                         "file_id": file_id,
@@ -2926,6 +2938,8 @@ pub async fn list_server_stickers(
                         "mime_type": mime,
                         "uploaded_by": uploaded_by,
                         "file_key": file_key,
+                        "encrypted_file_key": ekey.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
+                        "file_key_nonce": eknounce.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
                     })
                 })
                 .collect();
@@ -2957,7 +2971,11 @@ pub async fn add_server_sticker(
         }
         Err(_) => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "File not found"}))).into_response(),
     }
-    match state.db.add_server_sticker(&server_id, &body.file_id, &user_id, &body.sticker_name, body.file_key.as_deref().unwrap_or(""), None, None) {
+    // Decode encrypted_file_key and file_key_nonce if provided
+    let encrypted_key_bytes = body.encrypted_file_key.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+    let key_nonce_bytes = body.file_key_nonce.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+
+    match state.db.add_server_sticker(&server_id, &body.file_id, &user_id, &body.sticker_name, body.file_key.as_deref().unwrap_or(""), encrypted_key_bytes.as_deref(), key_nonce_bytes.as_deref()) {
         Ok(id) => (StatusCode::OK, Json(serde_json::json!({"id": id}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
@@ -2991,6 +3009,8 @@ pub struct AddUserStickerRequest {
     pub sticker_name: String,
     pub file_key: Option<String>,
     pub mime_type: String,
+    pub encrypted_file_key: Option<String>,
+    pub file_key_nonce: Option<String>,
 }
 
 pub async fn list_user_stickers(
@@ -3005,13 +3025,15 @@ pub async fn list_user_stickers(
         Ok(stickers) => {
             let result: Vec<serde_json::Value> = stickers
                 .iter()
-                .map(|(id, file_id, name, mime, file_key, _ekey, _eknonce)| {
+                .map(|(id, file_id, name, mime, file_key, ekey, eknounce)| {
                     serde_json::json!({
                         "id": id,
                         "file_id": file_id,
                         "sticker_name": name,
                         "mime_type": mime,
                         "file_key": file_key,
+                        "encrypted_file_key": ekey.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
+                        "file_key_nonce": eknounce.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
                     })
                 })
                 .collect();
@@ -3039,7 +3061,11 @@ pub async fn add_user_sticker(
         }
         Err(_) => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "File not found"}))).into_response(),
     }
-    match state.db.add_user_sticker(&user_id, &body.file_id, &body.sticker_name, body.file_key.as_deref().unwrap_or(""), &body.mime_type, None, None) {
+    // Decode encrypted_file_key and file_key_nonce if provided
+    let encrypted_key_bytes = body.encrypted_file_key.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+    let key_nonce_bytes = body.file_key_nonce.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+
+    match state.db.add_user_sticker(&user_id, &body.file_id, &body.sticker_name, body.file_key.as_deref().unwrap_or(""), &body.mime_type, encrypted_key_bytes.as_deref(), key_nonce_bytes.as_deref()) {
         Ok(id) => (StatusCode::OK, Json(serde_json::json!({"id": id}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
@@ -3433,6 +3459,19 @@ pub async fn delete_me(
 // --- Friend Code ---
 
 /// GET /api/friend-code — returns the encrypted friend code + salt + nonce for password-based recovery
+pub async fn get_hmac_key(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let _user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    (StatusCode::OK, Json(serde_json::json!({
+        "hmac_key": state.config.hmac_key,
+    }))).into_response()
+}
+
 pub async fn get_my_friend_code(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
@@ -3467,7 +3506,7 @@ pub async fn store_encrypted_friend_code(
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Missing encrypted friend code data"}))).into_response();
     }
 
-    let hash = sha256_hex(&req.friend_code.trim().to_uppercase());
+    let hash = hmac_sha256_hex(state.config.hmac_key.as_bytes(), &req.friend_code.trim().to_uppercase());
 
     match state.db.update_encrypted_friend_code(&user_id, &hash, &req.encrypted_friend_code, &req.salt, &req.nonce) {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
@@ -3495,7 +3534,7 @@ pub async fn server_regenerate_friend_code(
         })
         .collect();
 
-    let hash = sha256_hex(&code);
+    let hash = hmac_sha256_hex(state.config.hmac_key.as_bytes(), &code);
     match state.db.update_friend_code_hash(&user_id, &hash) {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true, "friend_code": code}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
@@ -3531,12 +3570,43 @@ pub async fn regen_friend_code_with_password(
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid friend code format"}))).into_response();
     }
 
-    let hash = sha256_hex(&code);
+    let hash = hmac_sha256_hex(state.config.hmac_key.as_bytes(), &code);
 
     match state.db.update_encrypted_friend_code(&user_id, &hash, &req.encrypted_friend_code, &req.salt, &req.nonce) {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
+}
+
+fn hmac_sha256_hex(key: &[u8], data: &str) -> String {
+    use sha2::{Digest, Sha256};
+    const BLOCK_SIZE: usize = 64;
+    let mut k = vec![0u8; BLOCK_SIZE];
+    if key.len() > BLOCK_SIZE {
+        let hash = Sha256::digest(key);
+        k[..hash.len()].copy_from_slice(&hash);
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = vec![0u8; BLOCK_SIZE];
+    let mut opad = vec![0u8; BLOCK_SIZE];
+    for i in 0..BLOCK_SIZE {
+        ipad[i] = k[i] ^ 0x36;
+        opad[i] = k[i] ^ 0x5c;
+    }
+    let inner_hash = {
+        let mut hasher = Sha256::new();
+        hasher.update(&ipad);
+        hasher.update(data.as_bytes());
+        hasher.finalize()
+    };
+    let result = {
+        let mut hasher = Sha256::new();
+        hasher.update(&opad);
+        hasher.update(&inner_hash);
+        hasher.finalize()
+    };
+    result.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 fn sha256_hex(data: &str) -> String {
@@ -3642,7 +3712,16 @@ pub async fn send_friend_request(
             .into_response();
     }
 
-    match state.db.create_friend_request(&user_id, &code) {
+    // Compute HMAC hash; fall back to legacy SHA-256 if HMAC lookup fails
+    let hmac_code_hash = hmac_sha256_hex(state.config.hmac_key.as_bytes(), &code);
+    let friend_request_result = match state.db.create_friend_request(&user_id, &hmac_code_hash) {
+        Ok(target) => Ok(target),
+        Err(_) => {
+            // Fall back to legacy SHA-256 hash for old friend codes
+            state.db.create_friend_request(&user_id, &sha256_hex(&code))
+        }
+    };
+    match friend_request_result {
         Ok(target) => {
             // Notify the recipient in real time (best-effort). Include sender username.
             let sender_username = state.db.get_user_by_id(&user_id).ok().map(|u| u.username).unwrap_or_default();

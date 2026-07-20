@@ -315,6 +315,60 @@ async function broadcastProfileKeySyncToAllDms() {
     }
 }
 
+// Broadcast our PFP and banner keys to all members of a server
+// so they can see our profile picture and banner without us sending a message first
+async function broadcastProfileKeySyncToServer(serverId) {
+    if (!myProfile || !myProfile.profile_picture_file_id || !myProfile.profile_picture_file_key) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!serverId) return;
+    var identity = E2ECrypto.getIdentityKeyPair();
+    if (!identity) return;
+    
+    // Get the server key to re-encrypt our PFP/banner keys with
+    var serverKey = E2ECrypto.getServerKey(serverId);
+    if (!serverKey) return;
+    
+    try {
+        // Decrypt own PFP key from identity-key encrypted format
+        var rawPicKey = myProfile.profile_picture_file_key;
+        if (rawPicKey && rawPicKey.indexOf(':') > 0) {
+            var dk = E2ECrypto.decodeEncryptedFileKey(rawPicKey, identity.privateKey);
+            if (dk) rawPicKey = dk;
+        }
+        
+        // Use the server's metadata key for encryption (server-wide, not channel-specific)
+        var metadataKey = E2ECrypto.deriveMetadataKey ? E2ECrypto.deriveMetadataKey(serverKey) : serverKey;
+        var encPicKey = E2ECrypto.encryptWithKey(rawPicKey, metadataKey);
+        
+        var payload = {
+            type: 'profile_key_server_sync',
+            server_id: serverId,
+            profile_picture_file_id: myProfile.profile_picture_file_id,
+            encrypted_profile_key: encPicKey.ciphertext,
+            profile_key_nonce: encPicKey.nonce,
+        };
+        
+        // Also share banner key if available
+        if (myProfile.profile_banner_file_id && myProfile.profile_banner_file_key) {
+            var rawBannerKey = myProfile.profile_banner_file_key;
+            if (rawBannerKey && rawBannerKey.indexOf(':') > 0) {
+                var dkB = E2ECrypto.decodeEncryptedFileKey(rawBannerKey, identity.privateKey);
+                if (dkB) rawBannerKey = dkB;
+            }
+            var encBannerKey = E2ECrypto.encryptWithKey(rawBannerKey, metadataKey);
+            if (encBannerKey) {
+                payload.profile_banner_file_id = myProfile.profile_banner_file_id;
+                payload.encrypted_banner_key = encBannerKey.ciphertext;
+                payload.banner_key_nonce = encBannerKey.nonce;
+            }
+        }
+        
+        ws.send(JSON.stringify(payload));
+    } catch (e) {
+        console.warn('Failed to send profile key server sync:', e);
+    }
+}
+
 // Local file key cache (file_id → base64 file_key) for sticker previews
 const fileKeyCache = {
     _prefix: 'fkc_',
@@ -4220,6 +4274,11 @@ function connectWebSocket(t) {
                     if (data.server_id === currentServerId) {
                         await loadMembers(data.server_id);
                     }
+                    // Broadcast our PFP/banner keys if we're viewing this server
+                    // so the new member can see our profile immediately
+                    if (data.server_id === currentServerId) {
+                        broadcastProfileKeySyncToServer(data.server_id);
+                    }
                 }
                 break;
             case 'member_kicked':
@@ -4501,6 +4560,35 @@ function connectWebSocket(t) {
                                     openProfileModal(profileModalUserId);
                                 }
                             }
+                        }
+                    }
+                }
+                break;
+            case 'profile_key_server_sync':
+                if (data.user_id && data.server_id && data.encrypted_profile_key && data.profile_key_nonce && data.profile_picture_file_id) {
+                    if (user && data.user_id !== user.id) {
+                        try {
+                            // Decrypt the PFP key with the server's metadata key
+                            var serverKeyForSync = E2ECrypto.getServerKey(data.server_id);
+                            if (serverKeyForSync) {
+                                var metadataKey = E2ECrypto.deriveMetadataKey ? E2ECrypto.deriveMetadataKey(serverKeyForSync) : serverKeyForSync;
+                                var decryptedPicKey = E2ECrypto.decryptWithKey(data.encrypted_profile_key, data.profile_key_nonce, metadataKey);
+                                if (decryptedPicKey) {
+                                    profileKeyCache[data.user_id + ':' + data.profile_picture_file_id] = decryptedPicKey;
+                                    scheduleProfileKeySave();
+                                }
+                                // Also decrypt banner key if available
+                                if (data.encrypted_banner_key && data.banner_key_nonce && data.profile_banner_file_id) {
+                                    var decryptedBannerKey = E2ECrypto.decryptWithKey(data.encrypted_banner_key, data.banner_key_nonce, metadataKey);
+                                    if (decryptedBannerKey) {
+                                        profileKeyCache[data.user_id + ':' + data.profile_banner_file_id] = decryptedBannerKey;
+                                        profileKeyCache[data.user_id + ':banner'] = decryptedBannerKey;
+                                        scheduleProfileKeySave();
+                                    }
+                                }
+                            }
+                        } catch (e) {
+                            console.warn('Failed to decrypt server profile key sync:', e);
                         }
                     }
                 }
@@ -4844,6 +4932,9 @@ async function selectServer(serverId) {
     renderServerList();
     await loadChannels(serverId);
     await loadMembers(serverId);
+    
+    // If we have profile keys, broadcast them to all server members so they can see our PFP/banner immediately
+    broadcastProfileKeySyncToServer(serverId);
 
     if (window.innerWidth <= 768 && window._openSidebar) {
         window._openSidebar();
@@ -7112,7 +7203,7 @@ async function createServer() {
 
     try {
         // Generate invite code client-side, send only the hash
-        const inviteCode = generateCode(8);        const inviteCodeHash = E2ECrypto.sha256Hex(inviteCode);
+        const inviteCode = generateCode(8);        var hmacKey = localStorage.getItem('e2e_hmac_key');        const inviteCodeHash = hmacKey ? E2ECrypto.hmacHex(hmacKey, inviteCode) : E2ECrypto.sha256Hex(inviteCode);
         const res = await authFetch('/api/servers', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -7194,7 +7285,7 @@ async function showInviteModal() {
         // Silently generate a new invite code if missing from localStorage
         try {
             const inviteCode = generateCode(8);
-            const inviteCodeHash = E2ECrypto.sha256Hex(inviteCode);
+            var hmacKey = localStorage.getItem('e2e_hmac_key');            const inviteCodeHash = hmacKey ? E2ECrypto.hmacHex(hmacKey, inviteCode) : E2ECrypto.sha256Hex(inviteCode);
             const res = await authFetch(`/api/servers/${currentServerId}/invite`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -7299,7 +7390,7 @@ async function regenerateInvite() {
 
     try {
         const inviteCode = generateCode(8);
-        const inviteCodeHash = E2ECrypto.sha256Hex(inviteCode);
+        var hmacKey = localStorage.getItem('e2e_hmac_key');        const inviteCodeHash = hmacKey ? E2ECrypto.hmacHex(hmacKey, inviteCode) : E2ECrypto.sha256Hex(inviteCode);
 
         const res = await authFetch(`/api/servers/${currentServerId}/invite`, {
             method: 'POST',
@@ -10138,7 +10229,14 @@ async function loadUserStickers() {
             const identity = E2ECrypto.getIdentityKeyPair();
             if (identity) {
                 for (const s of userStickersCache) {
-                    if (s.file_key) {
+                    // Prefer encrypted_file_key + file_key_nonce (separate columns) over plaintext file_key.
+                    // The server stores nonce and ciphertext in two separate BLOB columns, so we must
+                    // combine them back into nonce:ciphertext format for decodeEncryptedFileKey.
+                    if (s.encrypted_file_key && s.file_key_nonce) {
+                        var combined = s.file_key_nonce + ':' + s.encrypted_file_key;
+                        var decrypted = E2ECrypto.decodeEncryptedFileKey(combined, identity.privateKey);
+                        if (decrypted) s.file_key = decrypted;
+                    } else if (s.file_key) {
                         var decrypted = E2ECrypto.decodeEncryptedFileKey(s.file_key, identity.privateKey);
                         if (decrypted) s.file_key = decrypted;
                     }
@@ -10163,9 +10261,16 @@ async function loadEmojiCache() {
             const identity = E2ECrypto.getIdentityKeyPair();
             const cache = {};
             for (const s of emojis) {
-                var fileKey = s.file_key || null;
-                if (fileKey && identity) {
-                    var decrypted = E2ECrypto.decodeEncryptedFileKey(fileKey, identity.privateKey);
+                // Prefer encrypted_file_key + file_key_nonce (separate columns) over plaintext file_key.
+                // The server stores nonce and ciphertext in two separate BLOB columns, so we must
+                // combine them back into nonce:ciphertext format for decodeEncryptedFileKey.
+                var fileKey = null;
+                if (s.encrypted_file_key && s.file_key_nonce && identity) {
+                    var combined = s.file_key_nonce + ':' + s.encrypted_file_key;
+                    var decrypted = E2ECrypto.decodeEncryptedFileKey(combined, identity.privateKey);
+                    if (decrypted) fileKey = decrypted;
+                } else if (s.file_key && identity) {
+                    var decrypted = E2ECrypto.decodeEncryptedFileKey(s.file_key, identity.privateKey);
                     if (decrypted) fileKey = decrypted;
                 }
                 cache[s.sticker_name] = {
@@ -11111,6 +11216,11 @@ async function processAndUploadSticker() {
                 // cannot decrypt emoji images; regular stickers keep file_key null (identity-derived).
                 file_key: emojiUploadFileKeyB64 ? E2ECrypto.encodeEncryptedFileKey(emojiUploadFileKeyB64, identity.privateKey) : null,
                 mime_type: mimeType,
+                // Also populate the encrypted_file_key + file_key_nonce columns so the server
+                // can only store ciphertext. The client already supports decrypting these
+                // via decodeEncryptedFileKey in loadUserStickers() and loadEmojiCache().
+                encrypted_file_key: emojiUploadFileKeyB64 ? E2ECrypto.arrayBufferToBase64(E2ECrypto.base64ToArrayBuffer(E2ECrypto.encodeEncryptedFileKey(emojiUploadFileKeyB64, identity.privateKey).split(':')[1])) : null,
+                file_key_nonce: emojiUploadFileKeyB64 ? E2ECrypto.encodeEncryptedFileKey(emojiUploadFileKeyB64, identity.privateKey).split(':')[0] : null,
             }),
         });
         if (!stickerRes.ok) {

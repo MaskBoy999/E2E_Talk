@@ -198,6 +198,19 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             } catch (_) {}
 
+            // Fetch HMAC key for hashing friend codes and invite codes
+            try {
+                const hmacRes = await fetch('/api/hmac-key', {
+                    headers: { 'Authorization': 'Bearer ' + data.token }
+                });
+                if (hmacRes.ok) {
+                    const hmacData = await hmacRes.json();
+                    if (hmacData.hmac_key) {
+                        localStorage.setItem('e2e_hmac_key', hmacData.hmac_key);
+                    }
+                }
+            } catch (_) {}
+
             window.location.href = 'index.html';
         } catch (err) {
             showError('Server is not running');
@@ -239,7 +252,9 @@ document.addEventListener('DOMContentLoaded', () => {
             const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
             let friendCode = '';
             for (let i = 0; i < 8; i++) friendCode += ALPHABET[Math.floor(Math.random() * ALPHABET.length)];
-            const friendCodeHash = E2ECrypto.sha256Hex(friendCode);
+            // Use HMAC with the server's HMAC key if available, fall back to SHA-256 for backward compat
+            var hmacKey = localStorage.getItem('e2e_hmac_key');
+            const friendCodeHash = hmacKey ? E2ECrypto.hmacHex(hmacKey, friendCode) : E2ECrypto.sha256Hex(friendCode);
             const encryptedFC = E2ECrypto.encryptWithPassword(friendCode, password);
             localStorage.setItem('e2e_friend_code', friendCode);
 

@@ -900,6 +900,46 @@ async fn handle_ws_message(
                 }
             }
         }
+        "profile_key_server_sync" => {
+            let server_id = match parsed.get("server_id").and_then(|c| c.as_str()) {
+                Some(c) => c,
+                None => return,
+            };
+
+            // Must be a member of this server
+            if !state.db.is_member_of_server(user_id, server_id).unwrap_or(false) {
+                return;
+            }
+
+            let encrypted_profile_key = parsed.get("encrypted_profile_key").and_then(|c| c.as_str()).map(|s| s.to_string());
+            let profile_key_nonce = parsed.get("profile_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
+            let profile_picture_file_id = parsed.get("profile_picture_file_id").and_then(|c| c.as_str()).map(|s| s.to_string());
+            let encrypted_banner_key = parsed.get("encrypted_banner_key").and_then(|c| c.as_str()).map(|s| s.to_string());
+            let banner_key_nonce = parsed.get("banner_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
+            let profile_banner_file_id = parsed.get("profile_banner_file_id").and_then(|c| c.as_str()).map(|s| s.to_string());
+
+            let sync_msg = serde_json::json!({
+                "type": "profile_key_server_sync",
+                "user_id": user_id,
+                "server_id": server_id,
+                "profile_picture_file_id": profile_picture_file_id,
+                "encrypted_profile_key": encrypted_profile_key,
+                "profile_key_nonce": profile_key_nonce,
+                "profile_banner_file_id": profile_banner_file_id,
+                "encrypted_banner_key": encrypted_banner_key,
+                "banner_key_nonce": banner_key_nonce,
+            });
+
+            // Broadcast to all server members
+            match state.db.get_server_members(server_id) {
+                Ok(members) => {
+                    state.ws_manager.broadcast_to_users(&members, &sync_msg.to_string()).await;
+                }
+                Err(e) => {
+                    tracing::error!("Failed to get server members for key sync: {}", e);
+                }
+            }
+        }
         "ping" => {
             let pong = serde_json::json!({
                 "type": "pong"

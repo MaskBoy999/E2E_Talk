@@ -262,6 +262,7 @@ async fn main() {
         .route("/api/admin/clear", post(handlers::admin_clear_all))
         // Phase 4: Friends + DMs
         .route("/api/me", get(handlers::get_me).delete(handlers::delete_me))
+        .route("/api/hmac-key", get(handlers::get_hmac_key))
         .route("/api/friend-code", get(handlers::get_my_friend_code))
         .route("/api/friend-code/store-encrypted", post(handlers::store_encrypted_friend_code))
         .route("/api/friend-code/regenerate", post(handlers::server_regenerate_friend_code))

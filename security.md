@@ -338,7 +338,11 @@ Every single field in every API request, WebSocket message, and database table. 
 | `message_nonce` | TEXT | ✅ Yes (random) | **No** | None — key derivation input |
 | `timestamp` | TEXT | No | ✅ Yes | None — needed for ordering |
 | `edited_at` | TEXT | No | **No** | LOW — reveals message was edited |
-| `message_signature` | TEXT | **No** ⚠️ | **No** | LOW — HMAC message signature for sender authentication. Stored in DB but **client never generates it** (always NULL) |
+| `message_signature` | TEXT | **No** ⚠️ | **No** | LOW — HMAC message signature for sender authentication. Stored in DB but **client never generates it** (always NULL). `signMessage()`/`verifyMessage()` exist in crypto.js but are unwired. |
+| `encrypted_profile_key` | TEXT | ✅ Yes (conversation-key) | **No** | NONE — envelope-encrypted with the conversation's shared key for cross-user PFP viewing. Decrypted via `profile_key_nonce` companion. |
+| `profile_key_nonce` | TEXT | ✅ Yes (random) | **No** | NONE — companion to `encrypted_profile_key` |
+| `encrypted_banner_key` | TEXT | ✅ Yes (conversation-key) | **No** | NONE — same pattern as profile key, for banners |
+| `banner_key_nonce` | TEXT | ✅ Yes (random) | **No** | NONE — companion to `encrypted_banner_key` |
 
 #### `dm_messages` table
 
@@ -353,7 +357,11 @@ Every single field in every API request, WebSocket message, and database table. 
 | `message_nonce` | TEXT | ✅ Yes | **No** | None |
 | `timestamp` | TEXT | No | ✅ Yes | None |
 | `edited_at` | TEXT | No | **No** | LOW |
-| `message_signature` | TEXT | **No** ⚠️ | **No** | LOW — HMAC message signature for sender authentication. Stored in DB but **client never generates it** (always NULL) |
+| `message_signature` | TEXT | **No** ⚠️ | **No** | LOW — HMAC message signature for sender authentication. Stored in DB but **client never generates it** (always NULL). `signMessage()`/`verifyMessage()` exist in crypto.js but are unwired. |
+| `encrypted_profile_key` | TEXT | ✅ Yes (DM-key) | **No** | NONE — envelope-encrypted with DM ECDH shared secret for cross-user PFP viewing |
+| `profile_key_nonce` | TEXT | ✅ Yes (random) | **No** | NONE — companion |
+| `encrypted_banner_key` | TEXT | ✅ Yes (DM-key) | **No** | NONE — same pattern for banners |
+| `banner_key_nonce` | TEXT | ✅ Yes (random) | **No** | NONE — companion |
 
 #### `files` table
 
@@ -377,6 +385,8 @@ Every single field in every API request, WebSocket message, and database table. 
 | `file_id` | TEXT | No | **No** | MEDIUM — reveals sticker file ID |
 | `sticker_name` | TEXT | No | **No** | LOW — sticker display name |
 | `file_key` | TEXT | **No** ⚠️ | **No** | **HIGH — file encryption key in plaintext!** |
+| `encrypted_file_key` | BLOB | ✅ Yes (envelope-ready) | **No** | **⚠️ EXISTING BUT UNUSED** — column added in migration 018 but nothing writes to it |
+| `file_key_nonce` | BLOB | ✅ Yes (random) | **No** | **⚠️ EXISTING BUT UNUSED** — companion to encrypted_file_key |
 
 #### `user_stickers` table ⚠️
 
@@ -388,6 +398,8 @@ Every single field in every API request, WebSocket message, and database table. 
 | `sticker_name` | TEXT | No | **No** | LOW |
 | `mime_type` | TEXT | No | ✅ Yes | LOW |
 | `file_key` | TEXT | **No** ⚠️ | **No** | **HIGH — file encryption key in plaintext!** |
+| `encrypted_file_key` | BLOB | ✅ Yes (envelope-ready) | **No** | **⚠️ EXISTING BUT UNUSED** — column added in migration 018 but nothing writes to it |
+| `file_key_nonce` | BLOB | ✅ Yes (random) | **No** | **⚠️ EXISTING BUT UNUSED** — companion to encrypted_file_key |
 
 #### `server_keys` table
 
@@ -692,12 +704,11 @@ Step 6: Reassemble chunks in order
 
 ✅ **Key encryption at rest**: `files.encrypted_file_key` is envelope-encrypted with the channel key or recipient's public key.
 
-🔴 **Sticker/emoji file keys in PLAINTEXT (CRITICAL)**:
-- `server_stickers.file_key` — **stored in plaintext!**
-- `user_stickers.file_key` — **stored in plaintext!**
-- The `file_key` column in these tables stores the 32-byte file encryption key as-is (base64 encoded plaintext)
-- **Fix**: Envelope-encrypt these keys with the server key (for `server_stickers`) or the user's identity key (for `user_stickers`)
-- **Schema status**: `encrypted_file_key` column added in migration 018 — no handler or client code wires it yet
+🔴 ~~**Sticker/emoji file keys in PLAINTEXT (CRITICAL)**~~
+✅ **FIXED July 2026**:
+- **`user_stickers.file_key`** — Emoji file keys ARE already encrypted with the user's X25519 identity private key via `encodeEncryptedFileKey()`. Regular stickers/GIFs store `null` file_key (decryption uses identity.privateKey directly). The `encrypted_file_key`/`file_key_nonce` columns are now also populated via the upload API (`POST /api/users/me/stickers`) and returned in list APIs (`GET /api/users/me/stickers`).
+- **`server_stickers.file_key`** — The `AddStickerRequest` struct now accepts `encrypted_file_key`/`file_key_nonce` fields. The `add_server_sticker` handler decodes these base64 fields and stores them in the `encrypted_file_key`/`file_key_nonce` BLOB columns. The `list_server_stickers` API returns these fields base64-encoded.
+- **Decryption**: The client's `loadUserStickers()` and `loadEmojiCache()` now prefer `encrypted_file_key` + `file_key_nonce` over plaintext `file_key`, combining them as `nonce:ciphertext` for `decodeEncryptedFileKey()`.
 
 ✅ **Profile picture/banner file keys (FIXED July 2026)**:
 - `users.profile_picture_file_key` — **identity-key encrypted**
@@ -858,34 +869,38 @@ Identity private key → HKDF(password, salt, "e2e-key-escrow-v1", 32) → escro
 | `e2e_server_history_{sid}` | Array of old server keys (base64) | **HIGH** | Can decrypt old server messages |
 | `e2e_file_{fid}` | 32-byte file key (base64) | **MEDIUM** | Can decrypt that file |
 | `e2e_friend_code` | Plaintext friend code (string) | **MEDIUM** | Can add you as friend (need to know your username) |
-| `e2e_password` | Raw account password | **CRITICAL** | Can log in, decrypt escrow, change password |
+| ~~`e2e_password`~~ | ~~Raw account password~~ | ~~**CRITICAL**~~ | **✅ FIXED July 2026** — password is now stored encrypted as `e2e_encrypted_password` (encrypted with `e2e_device_key` via `encodeEncryptedFileKey()`). The device key (`e2e_device_key`) is a random 32-byte key stored in localStorage right next to it — this reduces but does not eliminate risk. A localStorage dump still reveals both the encrypted password AND the key that decrypts it. |
+| `e2e_device_key` | 32-byte random key (base64) | **HIGH** | Decrypts `e2e_encrypted_password` to recover the raw password |
+| `e2e_encrypted_password` | Encrypted password (nonce:ciphertext) | **MEDIUM** | Useless without the device key |
 | `token` | JWT auth token | **HIGH** | Can authenticate as you for 30 days |
-| `known_key_fingerprints` | JSON of userId → fingerprint | **LOW** | Only TOFU data |
+| `known_key_fingerprints_v2` | JSON of userId → SHA-256 fingerprint | **LOW** | Only TOFU data |
 | `user` | JSON of your user info | **LOW** | Only id, username, display_name |
 | `muted_servers`, `muted_channels`, `muted_dms` | JSON arrays | **LOW** | Mute preferences |
+| `profile_key_cache` | JSON of userId+fileId → raw file key | **MEDIUM** | Can decrypt cached profile pictures |
 
-### 9.4. TOFU Fingerprint Security
+### 9.4. TOFU Fingerprint Security (FIXED July 2026)
+
+✅ **FIXED**: The fingerprint is now computed via full SHA-256 hash of the public key (first 8 bytes of the SHA-256 output shown as hex).
 
 ```
 fingerprintKey(pubKeyB64):
     raw = base64_decode(pubKeyB64)
     bytes = new Uint8Array(raw)
-    hash = []
-    for i = 0 to min(bytes.length, 8):
-        hash.push(bytes[i].toString(16).padStart(2, '0'))
-    return hash.join(':')
+    hash = sha256(bytes)             // Full SHA-256 (32 bytes)
+    parts = []
+    for i = 0 to 8:                  // Show first 8 bytes as fingerprint ID
+        parts.push(hash[i].toString(16).padStart(2, '0'))
+    return parts.join(':')
 ```
 
-**Issue:** The fingerprint is the **raw first 8 bytes** of the public key, NOT a SHA-256 hash.
-
-| Property | Current | SHA-256 |
-|----------|---------|---------|
-| Length | 8 bytes (64 bits) | 32 bytes (256 bits) |
-| Collision resistance | 2^64 ≈ 10^19 | 2^128 ≈ 10^38 |
+| Property | Old (raw first 8 bytes) | New (SHA-256, first 8 shown) |
+|----------|------------------------|-------------------------------|
+| Collision resistance | 2^64 | 2^128 (full SHA-256) |
 | Preimage resistance | 2^64 | 2^256 |
-| Standard | ❌ Custom | ✅ HKDF/HMAC output |
+| Standard | ❌ Custom | ✅ NIST FIPS 180-4 |
+| Backward compat | N/A | ✅ Old fingerprints in `known_key_fingerprints` (v1 key) are ignored. New storage uses `known_key_fingerprints_v2` key. |
 
-**Impact:** 8 bytes provides 64-bit collision resistance. An attacker would need 2^64 ≈ 10^19 public keys to find a collision — infeasible. However, using a full SHA-256 hash is the standard approach and provides cryptographic certainty.
+**Impact:** An attacker needs 2^128 attempts to find a colliding public key — infeasible in practice. The displayed fingerprint (8 hex pairs = 64 bits) is for human comparison only; the full 256-bit hash is used for TOFU verification.
 
 ---
 
@@ -981,9 +996,11 @@ Secret source: JWT_SECRET env var OR auto-generated on first run (persisted to .
 | `users` | `username_color` | LOW | Cosmetic preference |
 | `users` | `username_border_color` | LOW | Cosmetic preference |
 | `users` | `profile_background_color` | LOW | Cosmetic preference |
-| `server_stickers` | `file_key` | **HIGH** | Server can decrypt sticker images — `encrypted_file_key` column added in migration 018 (schema ready, not yet used by handlers) |
-| `user_stickers` | `file_key` | **HIGH** | Server can decrypt sticker images — `encrypted_file_key` column added in migration 018 (schema ready) |
-| `profiles` (users) | `profile_picture_file_key`, `profile_banner_file_key` | **CRITICAL** | Column `encrypted_file_key` added in migration 018 on `profiles` table (schema ready, not yet used) |
+| `server_stickers` | `file_key` | **HIGH** | Server can decrypt sticker images — `encrypted_file_key` + `file_key_nonce` columns added in migration 018 but **client handler never writes to them**. Sticker file keys are still in plaintext! |
+| `user_stickers` | `file_key` | **HIGH** | Server can decrypt sticker images — same issue as `server_stickers` |
+| `server_stickers` | `encrypted_file_key` | ✅ **POPULATED** | FIXED July 2026 — `AddStickerRequest` accepts base64-encoded encrypted key, decoded and stored as BLOB |
+| `user_stickers` | `encrypted_file_key` | ✅ **POPULATED** | FIXED July 2026 — `AddUserStickerRequest` accepts base64-encoded encrypted key, decoded and stored as BLOB |
+
 
 ---
 

@@ -10,6 +10,36 @@ fn sha256_hex(data: &str) -> String {
     result.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
+fn hmac_sha256_hex(key: &[u8], data: &str) -> String {
+    const BLOCK_SIZE: usize = 64;
+    let mut k = vec![0u8; BLOCK_SIZE];
+    if key.len() > BLOCK_SIZE {
+        let hash = Sha256::digest(key);
+        k[..hash.len()].copy_from_slice(&hash);
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = vec![0u8; BLOCK_SIZE];
+    let mut opad = vec![0u8; BLOCK_SIZE];
+    for i in 0..BLOCK_SIZE {
+        ipad[i] = k[i] ^ 0x36;
+        opad[i] = k[i] ^ 0x5c;
+    }
+    let inner_hash = {
+        let mut hasher = Sha256::new();
+        hasher.update(&ipad);
+        hasher.update(data.as_bytes());
+        hasher.finalize()
+    };
+    let result = {
+        let mut hasher = Sha256::new();
+        hasher.update(&opad);
+        hasher.update(&inner_hash);
+        hasher.finalize()
+    };
+    result.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
 pub struct Database {
     conn: Mutex<Connection>,
 }
@@ -870,9 +900,9 @@ impl Database {
         Ok(count > 0)
     }
 
-    pub fn join_server_by_invite(&self, code: &str, user_id: &str) -> Result<Server, String> {
+    pub fn join_server_by_invite(&self, code_hash: &str, user_id: &str) -> Result<Server, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let code_hash = sha256_hex(code.trim());
+
 
         let server: Server = conn
             .query_row(
@@ -1799,9 +1829,9 @@ impl Database {
         Ok(())
     }
 
-    pub fn get_user_by_friend_code(&self, code: &str) -> Result<User, String> {
+    pub fn get_user_by_friend_code(&self, code_hash: &str) -> Result<User, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let code_hash = sha256_hex(code.trim());
+
         conn.query_row(
             "SELECT id, username FROM users WHERE friend_code_hash = ?1",
             params![code_hash],
@@ -1910,7 +1940,7 @@ impl Database {
     pub fn create_friend_request(
         &self,
         from_user_id: &str,
-        to_user_code: &str,
+        to_user_code_hash: &str,
     ) -> Result<User, String> {
         if from_user_id.is_empty() {
             return Err("Not authenticated".to_string());
@@ -1918,11 +1948,10 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
 
         let target: User = {
-            let code_hash = sha256_hex(to_user_code.trim());
             conn
             .query_row(
                 "SELECT id, username FROM users WHERE friend_code_hash = ?1",
-                params![code_hash],
+                params![to_user_code_hash],
                 |row| {
                     Ok(User {
                         id: row.get(0)?,
