@@ -3322,8 +3322,10 @@ pub async fn update_profile(
 
     // Broadcast profile update to the user, friends, and all server members
     if let Ok(profile) = state.db.get_user_profile(&user_id) {
-        let (_id, username, display_name, profile_picture_file_id, profile_picture_file_key, username_color, username_border_color, banner_id, banner_file_key, description, nickname) = profile;
+        let (_id, username, display_name, profile_picture_file_id, profile_picture_file_key, username_color, 
+username_border_color, banner_id, banner_file_key, description, nickname) = profile;
         let encrypted = state.db.get_encrypted_profile(&user_id).ok().flatten();
+        let profile_updated_at = state.db.get_profile_updated_at(&user_id).ok();
         let profile_msg = serde_json::json!({
             "type": "profile_updated",
             "user_id": user_id,
@@ -3338,6 +3340,7 @@ pub async fn update_profile(
             "username_color": username_color.unwrap_or("#4fc3f7".to_string()),
             "username_border_color": username_border_color,
             "encrypted_profile_data": encrypted.as_ref().map(|e| e.0.as_str()),
+            "profile_updated_at": profile_updated_at,
         });
 
         let mut recipients: std::collections::HashSet<String> = std::collections::HashSet::new();

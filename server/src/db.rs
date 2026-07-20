@@ -530,6 +530,26 @@ impl Database {
             }
         }
 
+        // profile_updated_at: timestamp of last profile change (for cache invalidation)
+        {
+            let col_exists: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM pragma_table_info('users') WHERE name = 'profile_updated_at'",
+                    [],
+                    |row| row.get::<_, i32>(0),
+                )
+                .map(|c| c > 0)
+                .unwrap_or(false);
+            if !col_exists {
+                conn.execute("ALTER TABLE users ADD COLUMN profile_updated_at TEXT DEFAULT ''", [])?;
+                // Backfill existing users with current timestamp
+                conn.execute(
+                    "UPDATE users SET profile_updated_at = datetime('now') WHERE profile_updated_at = '' OR profile_updated_at IS NULL",
+                    [],
+                )?;
+            }
+        }
+
         Ok(())
     }
 
@@ -673,6 +693,12 @@ impl Database {
             params![display_name, user_id],
         )
         .map_err(|e| e.to_string())?;
+        // Update timestamp
+        conn.execute(
+            "UPDATE users SET profile_updated_at = datetime('now') WHERE id = ?1",
+            params![user_id],
+        )
+        .map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -681,6 +707,11 @@ impl Database {
         conn.execute(
             "UPDATE users SET username_color = ?1 WHERE id = ?2",
             params![color, user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE users SET profile_updated_at = datetime('now') WHERE id = ?1",
+            params![user_id],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -693,6 +724,11 @@ impl Database {
             params![border_color, user_id],
         )
         .map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE users SET profile_updated_at = datetime('now') WHERE id = ?1",
+            params![user_id],
+        )
+        .map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -701,6 +737,11 @@ impl Database {
         conn.execute(
             "UPDATE users SET profile_picture_file_id = ?1, profile_picture_file_key = ?2 WHERE id = ?3",
             params![file_id, file_key, user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE users SET profile_updated_at = datetime('now') WHERE id = ?1",
+            params![user_id],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -713,6 +754,11 @@ impl Database {
             params![file_id, file_key, user_id],
         )
         .map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE users SET profile_updated_at = datetime('now') WHERE id = ?1",
+            params![user_id],
+        )
+        .map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -723,6 +769,11 @@ impl Database {
             params![description, user_id],
         )
         .map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE users SET profile_updated_at = datetime('now') WHERE id = ?1",
+            params![user_id],
+        )
+        .map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -731,6 +782,11 @@ impl Database {
         conn.execute(
             "UPDATE users SET encrypted_profile_data = ?1, encrypted_profile_salt = ?2, encrypted_profile_nonce = ?3 WHERE id = ?4",
             params![encrypted_data, salt, nonce, user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE users SET profile_updated_at = datetime('now') WHERE id = ?1",
+            params![user_id],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -761,6 +817,11 @@ impl Database {
             params![nickname, user_id],
         )
         .map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE users SET profile_updated_at = datetime('now') WHERE id = ?1",
+            params![user_id],
+        )
+        .map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -771,7 +832,23 @@ impl Database {
             params![color, user_id],
         )
         .map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE users SET profile_updated_at = datetime('now') WHERE id = ?1",
+            params![user_id],
+        )
+        .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    pub fn get_profile_updated_at(&self, user_id: &str) -> Result<String, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT profile_updated_at FROM users WHERE id = ?1",
+            params![user_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .map(|t| t.unwrap_or_default())
+        .map_err(|_| "User not found".to_string())
     }
 
     pub fn get_profile_background_color(&self, user_id: &str) -> Result<String, String> {

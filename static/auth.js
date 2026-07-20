@@ -177,6 +177,36 @@ document.addEventListener('DOMContentLoaded', () => {
                 localStorage.removeItem('e2e_password');
             } catch (_) {}
 
+            // If still no identity key (escrow recovery failed or no escrow exists),
+            // generate a fresh key pair and upload it so this device can function.
+            if (!identityKeyPair) {
+                try {
+                    const newKp = E2ECrypto.x25519GenerateKeyPair();
+                    const pubB64 = E2ECrypto.arrayBufferToBase64(newKp.publicKey);
+                    await fetch('/api/identity/upload', {
+                        method: 'POST',
+                        headers: {
+                            'Authorization': 'Bearer ' + data.token,
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({ identity_public_key: pubB64 })
+                    });
+                    // Also upload new escrow so other devices can recover this key
+                    const privB64 = E2ECrypto.arrayBufferToBase64(newKp.privateKey);
+                    const escrow = E2ECrypto.encryptKeyForEscrow(privB64, password);
+                    await fetch('/api/identity/escrow', {
+                        method: 'POST',
+                        headers: {
+                            'Authorization': 'Bearer ' + data.token,
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify(escrow)
+                    });
+                    identityKeyPair = newKp;
+                    E2ECrypto.saveIdentityKeyPair(identityKeyPair, data.user.id);
+                } catch (_) {}
+            }
+
             // Try to recover encrypted friend code from server and decrypt with password
             try {
                 const fcRes = await fetch('/api/friend-code', {
@@ -298,11 +328,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 localStorage.removeItem('e2e_password');
             } catch (_) {}
 
-            // Upload escrowed key in background (non-blocking)
+            // Upload escrowed key so other devices can recover the same identity key
             try {
                 const privB64 = E2ECrypto.arrayBufferToBase64(keypair.privateKey);
                 const escrow = E2ECrypto.encryptKeyForEscrow(privB64, password);
-                fetch('/api/identity/escrow', {
+                await fetch('/api/identity/escrow', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',

@@ -206,6 +206,10 @@ let userDisplayNameCache = {}; // user_id -> { display_name, profile_picture_fil
 // Key format: userId + ':' + fileId -> raw base64 file key
 var profileKeyCache = {};
 
+// Tracks profile_updated_at per user so we can detect stale cached data.
+// user_id -> ISO timestamp string (or empty string if unknown)
+var profileUpdatedAt = {};
+
 // Load profileKeyCache from localStorage on startup
 function loadProfileKeyCache() {
     try {
@@ -4559,11 +4563,22 @@ function connectWebSocket(t) {
                                 if (profileModal && profileModal.style.display !== 'none') {
                                     openProfileModal(profileModalUserId);
                                 }
-                            }
-                        }
-                    }
-                }
-                break;
+                            }                          }
+                      }
+                      
+                      // Auto-respond with our keys so the sender's other devices get them too.
+                      // Throttled per DM channel (30s) to prevent echo loops.
+                      if (!window._profileKeyResponseThrottle) window._profileKeyResponseThrottle = {};
+                      var throttleKey = data.dm_channel_id;
+                      var now = Date.now();
+                      if (!window._profileKeyResponseThrottle[throttleKey] || now - window._profileKeyResponseThrottle[throttleKey] > 30000) {
+                          window._profileKeyResponseThrottle[throttleKey] = now;
+                          if (convSync) {
+                              sendProfileKeySync(data.dm_channel_id, convSync);
+                          }
+                      }
+                  }
+                  break;
             case 'profile_key_server_sync':
                 if (data.user_id && data.server_id && data.encrypted_profile_key && data.profile_key_nonce && data.profile_picture_file_id) {
                     if (user && data.user_id !== user.id) {
@@ -4588,13 +4603,18 @@ function connectWebSocket(t) {
                                 }
                             }
                         } catch (e) {
-                            console.warn('Failed to decrypt server profile key sync:', e);
-                        }
-                    }
-                }
-                break;
+                            console.warn('Failed to decrypt server profile key sync:', e);                          }
+                      }
+                      
+
+                  }
+                  break;
             case 'profile_updated':
                 if (data.user_id) {
+                    // Store profile_updated_at for cache invalidation
+                    if (data.profile_updated_at) {
+                        profileUpdatedAt[data.user_id] = data.profile_updated_at;
+                    }
                     // Update our own profile in cache and localStorage
                     if (data.user_id === user.id) {
                         // Decrypt encrypted profile data with identity key (server cannot read it)
@@ -4703,11 +4723,12 @@ function connectWebSocket(t) {
                             if (!isUserMuted(data.sender_id)) {
                                 showMentionToast(data.sender_username, data.server_id, data.channel_id, data.message_id);
                                 flashServerIcon(data.server_id);
-                            }
-                        }
-                    }
-                }
-                break;
+                            }                          }
+                      }
+                      
+
+                  }
+                  break;
             case 'reply_notification':
                 if (data.sender_username) {
                     if (!isMuted(data.server_id, data.channel_id) && !isUserMuted(data.sender_id)) {
