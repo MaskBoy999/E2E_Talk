@@ -77,6 +77,10 @@ struct WsAuthMessage {
     token: String,
     #[serde(default)]
     device_id: Option<String>,
+    /// Client-provided ISO 8601 timestamp of when the user last had the page open.
+    /// Used to count missed messages since they were last online.
+    #[serde(default)]
+    last_seen_timestamp: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -144,13 +148,13 @@ pub async fn ws_handler(
 async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     let (mut sender, mut receiver) = socket.split();
 
-    let (user_id, device_id) = loop {
+    let (user_id, device_id, last_seen_timestamp) = loop {
         match receiver.next().await {
             Some(Ok(Message::Text(text))) => {
                 match serde_json::from_str::<WsAuthMessage>(text.as_str()) {
                     Ok(auth_msg) if auth_msg.msg_type == "auth" => {
                         match auth::validate_token(&auth_msg.token, &state.config.jwt_secret) {
-                            Ok(claims) => break (claims.sub, auth_msg.device_id),
+                            Ok(claims) => break (claims.sub, auth_msg.device_id, auth_msg.last_seen_timestamp),
                             Err(_) => {
                                 let err = OutgoingMessage {
                                     msg_type: "auth_error".to_string(),
@@ -224,6 +228,20 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     let _ = sender
         .send(Message::Text(serde_json::to_string(&auth_ok).unwrap().into()))
         .await;
+
+    // Check for missed messages since the client's last_seen_timestamp (saved on beforeunload)
+    if let Some(since) = &last_seen_timestamp {
+        let new_dms = state.db.count_new_dm_messages(&user_id, since).unwrap_or(0);
+        let new_server_msgs = state.db.count_new_server_messages(&user_id, since).unwrap_or(0);
+        if new_dms > 0 || new_server_msgs > 0 {
+            let missed = serde_json::json!({
+                "type": "missed_summary",
+                "new_dms": new_dms,
+                "new_server_messages": new_server_msgs,
+            });
+            let _ = sender.send(Message::Text(missed.to_string().into())).await;
+        }
+    }
 
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 

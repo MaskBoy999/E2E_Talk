@@ -808,6 +808,21 @@ document.addEventListener('DOMContentLoaded', () => {
     // Restore notification sound from server (syncs across devices)
     restoreNotificationSoundFromServer();
 
+    // Default to DM view instead of auto-selecting first server
+    setTimeout(function () {
+        enterDmView();
+    }, 400);
+
+    // Save unread state + last seen timestamp when page is closing or hidden,
+    // so missed notifications are restored on next load.
+    function saveBeforeClose() {
+        saveMentionState();
+        localStorage.setItem('e2e_last_seen', new Date().toISOString());
+    }
+    window.addEventListener('beforeunload', saveBeforeClose);
+    // pagehide is more reliable on mobile browsers where beforeunload may not fire
+    window.addEventListener('pagehide', saveBeforeClose);
+
     // Settings open profile button
     var settingsOpenProfileBtn = document.getElementById('settings-open-profile-btn');
     if (settingsOpenProfileBtn) {
@@ -3251,6 +3266,67 @@ function showBrowserNotification(title, body, onClick) {
     }
 }
 
+// Show a banner when the user reconnects and has missed messages while offline
+function showMissedActivityNotification(newDms, newServerMsgs) {
+    // Build a short message
+    var parts = [];
+    if (newDms > 0) parts.push(newDms + ' new DM' + (newDms !== 1 ? 's' : ''));
+    if (newServerMsgs > 0) parts.push(newServerMsgs + ' new message' + (newServerMsgs !== 1 ? 's' : '') + ' in servers');
+    if (parts.length === 0) return;
+    var msg = 'While you were away: ' + parts.join(' and ') + '.';
+    
+    // Show the toast
+    var toast = document.getElementById('mention-toast');
+    if (toast) {
+        toast.textContent = '📬 ' + msg;
+        toast.style.display = 'block';
+        toast.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+        toast.onclick = function () {
+            toast.style.display = 'none';
+            toast.onclick = null;
+            // Clear missed-summary badge keys since user is acknowledging them
+            delete unreadDms['__missed__'];
+            delete unreadMentionsByServer['__missed__'];
+            updateMentionsBadge();
+            updateDmStripBadge();
+            saveMentionState();
+            // Open appropriate view: DMs if there are new DMs, mentions inbox otherwise
+            if (newDms > 0) {
+                enterDmView();
+            } else {
+                openMentionsInbox();
+            }
+        };
+        setTimeout(function () {
+            if (toast.style.display !== 'none') {
+                toast.style.display = 'none';
+                toast.onclick = null;
+            }
+        }, 10000);
+    }
+    
+    // Flash the DM strip button if there are new DMs
+    if (newDms > 0) {
+        var dmBtn = document.getElementById('dm-strip-btn');
+        if (dmBtn) {
+            dmBtn.classList.add('flash');
+            setTimeout(function () { if (dmBtn) dmBtn.classList.remove('flash'); }, 1500);
+        }
+    }
+    
+    // Flash the mentions strip button if there are new server messages
+    if (newServerMsgs > 0) {
+        var mentionBtn = document.getElementById('mentions-strip-btn');
+        if (mentionBtn) {
+            mentionBtn.classList.add('flash');
+            setTimeout(function () { if (mentionBtn) mentionBtn.classList.remove('flash'); }, 1500);
+        }
+    }
+
+    // Send browser notification
+    showBrowserNotification('Missed Activity', msg);
+}
+
 // --- Unread mention tracking + badge rendering ---
 
 function trackUnreadMention(serverId, channelId, dmChannelId, messageId, senderUsername, channelName, serverName, notifType, senderId, senderProfilePic) {
@@ -3440,7 +3516,13 @@ function restoreMentionState() {
         }
         var d = localStorage.getItem('mention_unread_dms');
         if (d) {
-            unreadDms = JSON.parse(d);
+            var parsedDms = JSON.parse(d);
+            unreadDms = {};
+            for (var k in parsedDms) {
+                if (parsedDms.hasOwnProperty(k) && k !== '__missed__') {
+                    unreadDms[k] = parsedDms[k];
+                }
+            }
         }
         var mi = localStorage.getItem('mention_items');
         if (mi) {
@@ -3485,6 +3567,12 @@ function openMentionsInbox() {
     if (panel) panel.style.display = 'flex';
     var btn = document.getElementById('mentions-strip-btn');
     if (btn) btn.classList.add('active');
+    // Clear missed-summary badge keys when user opens the inbox to read them
+    delete unreadMentionsByServer['__missed__'];
+    delete unreadDms['__missed__'];
+    updateMentionsBadge();
+    updateDmStripBadge();
+    saveMentionState();
     renderMentionsInbox();
 }
 
@@ -4013,7 +4101,8 @@ function connectWebSocket(t) {
 
     ws.onopen = () => {
         var devId = localStorage.getItem('e2e_device_key');
-        ws.send(JSON.stringify({ type: 'auth', token: t, device_id: devId || undefined }));
+        var lastSeen = localStorage.getItem('e2e_last_seen') || undefined;
+        ws.send(JSON.stringify({ type: 'auth', token: t, device_id: devId || undefined, last_seen_timestamp: lastSeen }));
     };
 
     ws.onmessage = async (event) => {
@@ -4259,6 +4348,54 @@ function connectWebSocket(t) {
             case 'channel_deleted':
                 if (data.server_id && data.server_id === currentServerId) {
                     await loadChannels(data.server_id);
+                }
+                break;
+            case 'missed_summary':
+                if ((data.new_dms || 0) > 0 || (data.new_server_messages || 0) > 0) {
+                    var dmCount = data.new_dms || 0;
+                    var msgCount = data.new_server_messages || 0;
+                    // Remove any previously-added missed-summary entries to avoid accumulation across reloads
+                    mentionItems = mentionItems.filter(function (it) {
+                        return it.id.indexOf('missed-dm-') !== 0 && it.id.indexOf('missed-msg-') !== 0;
+                    });
+                    // Add a single summary entry for missed DMs
+                    if (dmCount > 0) {
+                        mentionItems.unshift({
+                            id: 'missed-dm-summary-' + Date.now(),
+                            type: 'dm',
+                            senderUsername: dmCount + ' new DM' + (dmCount !== 1 ? 's' : ''),
+                            dmChannelId: null,
+                            messageId: null,
+                            time: Date.now()
+                        });
+                    }
+                    // Add a single summary entry for missed server messages
+                    if (msgCount > 0) {
+                        mentionItems.unshift({
+                            id: 'missed-msg-summary-' + Date.now(),
+                            type: 'reply',
+                            senderUsername: msgCount + ' new message' + (msgCount !== 1 ? 's' : '') + ' in servers',
+                            serverId: null,
+                            channelId: null,
+                            messageId: null,
+                            time: Date.now()
+                        });
+                    }
+                    // Light up strip button badges with FRESH counts (overwrite, don't accumulate)
+                    if (dmCount > 0) {
+                        unreadDms['__missed__'] = dmCount;
+                    }
+                    if (msgCount > 0) {
+                        unreadMentionsByServer['__missed__'] = msgCount;
+                    }
+                    // Keep within limit
+                    if (mentionItems.length > 200) {
+                        mentionItems = mentionItems.slice(0, 200);
+                    }
+                    saveMentionState();
+                    updateMentionsBadge();
+                    updateDmStripBadge();
+                    showMissedActivityNotification(data.new_dms || 0, data.new_server_messages || 0);
                 }
                 break;
             case 'pong':
@@ -6009,6 +6146,12 @@ function enterDmView() {
     viewMode = 'dms';
     currentChannelId = null;
     currentServerId = null;
+    // Clear missed-summary badge keys — user is now viewing DMs, so they've "read" them
+    delete unreadDms['__missed__'];
+    delete unreadMentionsByServer['__missed__'];
+    updateMentionsBadge();
+    updateDmStripBadge();
+    saveMentionState();
     document.getElementById('dm-strip-btn').classList.add('active');
     document.querySelectorAll('.server-icon:not(.add-server):not(.dm-strip-btn)').forEach(el => el.classList.remove('active'));
     document.querySelectorAll('.dm-item').forEach(el => el.classList.remove('active'));
@@ -12764,9 +12907,20 @@ async function saveProfile() {
         var profileDataB64 = E2ECrypto.arrayBufferToBase64(new TextEncoder().encode(profileDataJson));
         var encryptedProfileData = E2ECrypto.encodeEncryptedFileKey(profileDataB64, identityForKeys.privateKey);
         
-        // Build API request — no plaintext profile fields, only encrypted data + file keys
+        // Build API request — send both encrypted data AND plaintext fields.
+        // The encrypted blob lets the owner re-decrypt on other devices.
+        // The plaintext fields let other users see the profile (they cannot
+        // decrypt the identity-key-encrypted blob). This mirrors how PFP/banner
+        // send both the identity-key-encrypted file key AND share it through
+        // DM-encrypted profile_key_sync messages.
         var body = {
-            encrypted_profile_data: encryptedProfileData
+            encrypted_profile_data: encryptedProfileData,
+            display_name: displayName,
+            nickname: nickname,
+            description: description,
+            username_color: color,
+            username_border_color: borderColor,
+            profile_background_color: bgColor
         };
         
         // Handle banner and PFP uploads — encrypt file keys with identity key so

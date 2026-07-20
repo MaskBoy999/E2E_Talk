@@ -2280,6 +2280,36 @@ impl Database {
         Ok(count > 0)
     }
 
+    /// Count new DM messages (from other users) for a user since a given timestamp.
+    pub fn count_new_dm_messages(&self, user_id: &str, since_rfc3339: &str) -> Result<i64, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM dm_messages dm
+             JOIN dm_members dmem ON dm.dm_channel_id = dmem.dm_channel_id
+             WHERE dmem.user_id = ?1
+               AND dm.sender_id != ?1
+               AND dm.timestamp > ?2",
+            params![user_id, since_rfc3339],
+            |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        Ok(count)
+    }
+
+    /// Count new server messages (in channels of servers the user belongs to) since a timestamp.
+    pub fn count_new_server_messages(&self, user_id: &str, since_rfc3339: &str) -> Result<i64, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM messages m
+             JOIN channels ch ON m.channel_id = ch.id
+             JOIN server_members sm ON ch.server_id = sm.server_id AND sm.user_id = ?1
+             WHERE m.sender_id != ?1
+               AND m.timestamp > ?2",
+            params![user_id, since_rfc3339],
+            |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        Ok(count)
+    }
+
     // --- DM Keys (envelope-encrypted per member, same pattern as server_keys) ---
 
     pub fn save_dm_key(
