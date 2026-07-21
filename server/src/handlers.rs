@@ -640,6 +640,8 @@ pub async fn get_escrowed_key(
 pub struct CreateServerRequest {
     pub name: String,
     pub invite_code_hash: String,
+    pub encrypted_name: Option<String>,
+    pub name_nonce: Option<String>,
 }
 
 pub async fn create_server(
@@ -660,7 +662,10 @@ pub async fn create_server(
             .into_response();
     }
 
-    let server = match state.db.create_server(req.name.trim(), &user_id, &req.invite_code_hash) {
+    let encrypted_name_bytes = req.encrypted_name.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+    let name_nonce_bytes = req.name_nonce.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+
+    let server = match state.db.create_server(req.name.trim(), &user_id, &req.invite_code_hash, encrypted_name_bytes.as_deref(), name_nonce_bytes.as_deref()) {
         Ok(s) => s,
         Err(e) => {
             return (
@@ -676,6 +681,8 @@ pub async fn create_server(
         Json(serde_json::json!({
             "id": server.id,
             "name": server.name,
+            "encrypted_name": server.encrypted_name.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+            "name_nonce": server.name_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
         })),
     )
         .into_response()
@@ -708,6 +715,8 @@ pub async fn list_servers(
             serde_json::json!({
                 "id": s.id,
                 "name": s.name,
+                "encrypted_name": s.encrypted_name.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+                "name_nonce": s.name_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                 "is_owner": is_owner,
                 "joins_disabled": s.joins_disabled,
             })
@@ -754,6 +763,8 @@ pub async fn list_channels(
             serde_json::json!({
                 "id": c.id,
                 "name": c.name,
+                "encrypted_name": c.encrypted_name.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+                "name_nonce": c.name_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
             })
         })
         .collect();
@@ -764,6 +775,8 @@ pub async fn list_channels(
 #[derive(Deserialize)]
 pub struct CreateChannelRequest {
     pub name: String,
+    pub encrypted_name: Option<String>,
+    pub name_nonce: Option<String>,
 }
 
 pub async fn create_channel(
@@ -793,7 +806,10 @@ pub async fn create_channel(
             .into_response();
     }
 
-    let channel = match state.db.create_channel(&server_id, req.name.trim()) {
+    let encrypted_name_bytes = req.encrypted_name.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+    let name_nonce_bytes = req.name_nonce.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+
+    let channel = match state.db.create_channel(&server_id, req.name.trim(), encrypted_name_bytes.as_deref(), name_nonce_bytes.as_deref()) {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -818,6 +834,8 @@ pub async fn create_channel(
         Json(serde_json::json!({
             "id": channel.id,
             "name": channel.name,
+            "encrypted_name": channel.encrypted_name.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+            "name_nonce": channel.name_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
         })),
     )
         .into_response()
@@ -1358,7 +1376,12 @@ pub async fn list_messages(
                 "encrypted_profile_key": m.encrypted_profile_key,
                 "profile_key_nonce": m.profile_key_nonce,
                 "encrypted_banner_key": m.encrypted_banner_key,
-                "banner_key_nonce": m.banner_key_nonce
+                "banner_key_nonce": m.banner_key_nonce,
+                "key_version": m.key_version,
+                "encrypted_profile_snapshot": m.encrypted_profile_snapshot.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+                "profile_snapshot_nonce": m.profile_snapshot_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+                "encrypted_file_key": m.encrypted_file_key.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+                "file_key_nonce": m.file_key_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
             })
         })
         .collect();
@@ -1424,7 +1447,12 @@ pub async fn list_messages_around(
                 "encrypted_profile_key": m.encrypted_profile_key,
                 "profile_key_nonce": m.profile_key_nonce,
                 "encrypted_banner_key": m.encrypted_banner_key,
-                "banner_key_nonce": m.banner_key_nonce
+                "banner_key_nonce": m.banner_key_nonce,
+                "key_version": m.key_version,
+                "encrypted_profile_snapshot": m.encrypted_profile_snapshot.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+                "profile_snapshot_nonce": m.profile_snapshot_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+                "encrypted_file_key": m.encrypted_file_key.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+                "file_key_nonce": m.file_key_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
             })
         })
         .collect();

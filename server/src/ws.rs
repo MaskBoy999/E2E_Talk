@@ -136,6 +136,17 @@ struct OutgoingChatMessage {
     encrypted_banner_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     banner_key_nonce: Option<String>,
+    // Streamlined E2E fields
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key_version: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    encrypted_profile_snapshot: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile_snapshot_nonce: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    encrypted_file_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_key_nonce: Option<String>,
 }
 
 pub async fn ws_handler(
@@ -334,7 +345,7 @@ async fn handle_ws_message(
             let encrypted_banner_key = parsed.get("encrypted_banner_key").and_then(|c| c.as_str()).map(|s| s.to_string());
             let banner_key_nonce = parsed.get("banner_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
 
-            let message = match state.db.save_encrypted_message(channel_id, user_id, &encrypted_content, &nonce, message_nonce.as_deref(), message_signature.as_deref(), encrypted_profile_key.as_deref(), profile_key_nonce.as_deref(), encrypted_banner_key.as_deref(), banner_key_nonce.as_deref()) {
+            let message = match state.db.save_encrypted_message(channel_id, user_id, &encrypted_content, &nonce, message_nonce.as_deref(), message_signature.as_deref(), encrypted_profile_key.as_deref(), profile_key_nonce.as_deref(), encrypted_banner_key.as_deref(), banner_key_nonce.as_deref(), None, None, None, None) {
                 Ok(m) => m,
                 Err(e) => {
                     tracing::error!("Failed to save message: {}", e);
@@ -375,6 +386,11 @@ async fn handle_ws_message(
                     profile_key_nonce: profile_key_nonce.clone(),
                     encrypted_banner_key: encrypted_banner_key.clone(),
                     banner_key_nonce: banner_key_nonce.clone(),
+                    key_version: None,
+                    encrypted_profile_snapshot: None,
+                    profile_snapshot_nonce: None,
+                    encrypted_file_key: None,
+                    file_key_nonce: None,
                 }),
                 user_id: None,
                 username: None,
@@ -561,7 +577,7 @@ async fn handle_ws_message(
             let encrypted_banner_key = parsed.get("encrypted_banner_key").and_then(|c| c.as_str()).map(|s| s.to_string());
             let banner_key_nonce = parsed.get("banner_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
 
-            let message = match state.db.save_dm_message(dm_channel_id, user_id, &encrypted_content, &nonce, message_nonce.as_deref(), message_signature.as_deref(), encrypted_profile_key.as_deref(), profile_key_nonce.as_deref(), encrypted_banner_key.as_deref(), banner_key_nonce.as_deref()) {
+            let message = match state.db.save_dm_message(dm_channel_id, user_id, &encrypted_content, &nonce, message_nonce.as_deref(), message_signature.as_deref(), encrypted_profile_key.as_deref(), profile_key_nonce.as_deref(), encrypted_banner_key.as_deref(), banner_key_nonce.as_deref(), None, None, None, None) {
                 Ok(m) => m,
                 Err(e) => {
                     tracing::error!("Failed to save DM message: {}", e);
@@ -601,6 +617,11 @@ async fn handle_ws_message(
                     profile_key_nonce: profile_key_nonce.clone(),
                     encrypted_banner_key: encrypted_banner_key.clone(),
                     banner_key_nonce: banner_key_nonce.clone(),
+                    key_version: None,
+                    encrypted_profile_snapshot: None,
+                    profile_snapshot_nonce: None,
+                    encrypted_file_key: None,
+                    file_key_nonce: None,
                 }),
                 user_id: None,
                 username: None,
@@ -726,6 +747,11 @@ async fn handle_ws_message(
                     profile_key_nonce: profile_key_nonce.clone(),
                     encrypted_banner_key: encrypted_banner_key.clone(),
                     banner_key_nonce: banner_key_nonce.clone(),
+                    key_version: None,
+                    encrypted_profile_snapshot: None,
+                    profile_snapshot_nonce: None,
+                    encrypted_file_key: None,
+                    file_key_nonce: None,
                 }),
                 user_id: None,
                 username: None,
@@ -849,6 +875,11 @@ async fn handle_ws_message(
                     profile_key_nonce: profile_key_nonce.clone(),
                     encrypted_banner_key: encrypted_banner_key.clone(),
                     banner_key_nonce: banner_key_nonce.clone(),
+                    key_version: None,
+                    encrypted_profile_snapshot: None,
+                    profile_snapshot_nonce: None,
+                    encrypted_file_key: None,
+                    file_key_nonce: None,
                 }),
                 user_id: None,
                 username: None,

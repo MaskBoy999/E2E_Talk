@@ -54,6 +54,8 @@ pub struct User {
 pub struct Server {
     pub id: String,
     pub name: String,
+    pub encrypted_name: Option<Vec<u8>>,
+    pub name_nonce: Option<Vec<u8>>,
     pub owner_id: String,
     pub invite_code_hash: String,
     pub joins_disabled: bool,
@@ -65,6 +67,8 @@ pub struct Channel {
     pub id: String,
     pub server_id: String,
     pub name: String,
+    pub encrypted_name: Option<Vec<u8>>,
+    pub name_nonce: Option<Vec<u8>>,
     pub channel_type: String,
     pub position: i32,
     pub created_at: String,
@@ -89,6 +93,12 @@ pub struct Message {
     pub profile_key_nonce: Option<String>,
     pub encrypted_banner_key: Option<String>,
     pub banner_key_nonce: Option<String>,
+    // Streamlined E2E fields (migration 022)
+    pub key_version: Option<i32>,
+    pub encrypted_profile_snapshot: Option<Vec<u8>>,
+    pub profile_snapshot_nonce: Option<Vec<u8>>,
+    pub encrypted_file_key: Option<Vec<u8>>,
+    pub file_key_nonce: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone)]
@@ -110,6 +120,12 @@ pub struct DmMessage {
     pub profile_key_nonce: Option<String>,
     pub encrypted_banner_key: Option<String>,
     pub banner_key_nonce: Option<String>,
+    // Streamlined E2E fields (migration 022)
+    pub key_version: Option<i32>,
+    pub encrypted_profile_snapshot: Option<Vec<u8>>,
+    pub profile_snapshot_nonce: Option<Vec<u8>>,
+    pub encrypted_file_key: Option<Vec<u8>>,
+    pub file_key_nonce: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone)]
@@ -550,6 +566,10 @@ impl Database {
             }
         }
 
+        // Migration 022: Streamlined E2E (MUST run LAST — drops obsolete tables/columns,
+        // adds encrypted_name, encrypted_profile_snapshot, voice sessions, user_media)
+        let _ = conn.execute_batch(include_str!("../migrations/022_streamlined_e2e.sql"));
+
         Ok(())
     }
 
@@ -884,14 +904,14 @@ impl Database {
 
     // --- Servers ---
 
-    pub fn create_server(&self, name: &str, owner_id: &str, invite_code_hash: &str) -> Result<Server, String> {
+    pub fn create_server(&self, name: &str, owner_id: &str, invite_code_hash: &str, encrypted_name: Option<&[u8]>, name_nonce: Option<&[u8]>) -> Result<Server, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let server_id = Uuid::new_v4().to_string();
         let general_id = Uuid::new_v4().to_string();
 
         conn.execute(
-            "INSERT INTO servers (id, name, owner_id, invite_code_hash) VALUES (?1, ?2, ?3, ?4)",
-            params![server_id, name, owner_id, invite_code_hash],
+            "INSERT INTO servers (id, name, owner_id, invite_code_hash, encrypted_name, name_nonce) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![server_id, name, owner_id, invite_code_hash, encrypted_name, name_nonce],
         )
         .map_err(|e| e.to_string())?;
 
@@ -910,6 +930,8 @@ impl Database {
         Ok(Server {
             id: server_id,
             name: name.to_string(),
+            encrypted_name: encrypted_name.map(|v| v.to_vec()),
+            name_nonce: name_nonce.map(|v| v.to_vec()),
             owner_id: owner_id.to_string(),
             invite_code_hash: invite_code_hash.to_string(),
             joins_disabled: false,
@@ -921,7 +943,7 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT s.id, s.name, s.owner_id, COALESCE(s.invite_code_hash, ''), COALESCE(s.joins_disabled, 0)
+                "SELECT s.id, s.name, s.encrypted_name, s.name_nonce, s.owner_id, COALESCE(s.invite_code_hash, ''), COALESCE(s.joins_disabled, 0)
                  FROM servers s
                  INNER JOIN server_members sm ON s.id = sm.server_id
                  WHERE sm.user_id = ?1
@@ -933,9 +955,11 @@ impl Database {
                 Ok(Server {
                     id: row.get(0)?,
                     name: row.get(1)?,
-                    owner_id: row.get(2)?,
-                    invite_code_hash: row.get(3)?,
-                    joins_disabled: row.get::<_, i64>(4)? != 0,
+                    encrypted_name: row.get(2)?,
+                    name_nonce: row.get(3)?,
+                    owner_id: row.get(4)?,
+                    invite_code_hash: row.get(5)?,
+                    joins_disabled: row.get::<_, i64>(6)? != 0,
                     created_at: String::new(),
                 })
             })
@@ -983,15 +1007,17 @@ impl Database {
 
         let server: Server = conn
             .query_row(
-                "SELECT id, name, owner_id, COALESCE(invite_code_hash, ''), COALESCE(joins_disabled, 0) FROM servers WHERE invite_code_hash = ?1",
+                "SELECT id, name, encrypted_name, name_nonce, owner_id, COALESCE(invite_code_hash, ''), COALESCE(joins_disabled, 0) FROM servers WHERE invite_code_hash = ?1",
                 params![code_hash],
                 |row| {
                     Ok(Server {
                         id: row.get(0)?,
                         name: row.get(1)?,
-                        owner_id: row.get(2)?,
-                        invite_code_hash: row.get(3)?,
-                        joins_disabled: row.get::<_, i64>(4)? != 0,
+                        encrypted_name: row.get(2)?,
+                        name_nonce: row.get(3)?,
+                        owner_id: row.get(4)?,
+                        invite_code_hash: row.get(5)?,
+                        joins_disabled: row.get::<_, i64>(6)? != 0,
                         created_at: String::new(),
                     })
                 },
@@ -1280,7 +1306,7 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, server_id, name, type, COALESCE(position, 0), COALESCE(created_at, '') FROM channels
+                "SELECT id, server_id, name, encrypted_name, name_nonce, type, COALESCE(position, 0), COALESCE(created_at, '') FROM channels
                  WHERE server_id = ?1 ORDER BY position",
             )
             .map_err(|e| e.to_string())?;
@@ -1290,9 +1316,11 @@ impl Database {
                     id: row.get(0)?,
                     server_id: row.get(1)?,
                     name: row.get(2)?,
-                    channel_type: row.get(3)?,
-                    position: row.get::<_, i32>(4)?,
-                    created_at: row.get::<_, String>(5)?,
+                    encrypted_name: row.get(3)?,
+                    name_nonce: row.get(4)?,
+                    channel_type: row.get(5)?,
+                    position: row.get::<_, i32>(6)?,
+                    created_at: row.get::<_, String>(7)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -1301,7 +1329,7 @@ impl Database {
         Ok(channels)
     }
 
-    pub fn create_channel(&self, server_id: &str, name: &str) -> Result<Channel, String> {
+    pub fn create_channel(&self, server_id: &str, name: &str, encrypted_name: Option<&[u8]>, name_nonce: Option<&[u8]>) -> Result<Channel, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let id = Uuid::new_v4().to_string();
 
@@ -1314,8 +1342,8 @@ impl Database {
             .map_err(|e| e.to_string())?;
 
         conn.execute(
-            "INSERT INTO channels (id, server_id, name, type, position) VALUES (?1, ?2, ?3, 'text', ?4)",
-            params![id, server_id, name, max_pos + 1],
+            "INSERT INTO channels (id, server_id, name, encrypted_name, name_nonce, type, position) VALUES (?1, ?2, ?3, ?4, ?5, 'text', ?6)",
+            params![id, server_id, name, encrypted_name, name_nonce, max_pos + 1],
         )
         .map_err(|e| e.to_string())?;
 
@@ -1323,6 +1351,8 @@ impl Database {
             id,
             server_id: server_id.to_string(),
             name: name.to_string(),
+            encrypted_name: encrypted_name.map(|v| v.to_vec()),
+            name_nonce: name_nonce.map(|v| v.to_vec()),
             channel_type: "text".to_string(),
             position: 0,
             created_at: String::new(),
@@ -1333,14 +1363,18 @@ impl Database {
 
     pub fn list_messages(&self, channel_id: &str, limit: i64) -> Result<Vec<Message>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        // Return the `limit` most recent messages in ASCENDING order (oldest -> newest).
-        // The subquery picks the newest `limit` rows; the outer query re-sorts them oldest
-        // first so the client can render top-to-bottom chronologically.
         let mut stmt = conn
             .prepare(
-                "SELECT m.id, m.channel_id, m.sender_id, u.username, u.display_name, u.profile_picture_file_id, u.username_color, m.encrypted_content, m.nonce, m.timestamp, m.message_nonce, m.edited_at, m.message_signature, m.encrypted_profile_key, m.profile_key_nonce, m.encrypted_banner_key, m.banner_key_nonce
+                "SELECT m.id, m.channel_id, m.sender_id, u.username, u.display_name, u.profile_picture_file_id, u.username_color,
+                        m.encrypted_content, m.nonce, m.timestamp,
+                        m.message_nonce, m.edited_at, m.message_signature,
+                        m.encrypted_profile_key, m.profile_key_nonce, m.encrypted_banner_key, m.banner_key_nonce,
+                        m.key_version, m.encrypted_profile_snapshot, m.profile_snapshot_nonce, m.encrypted_file_key, m.file_key_nonce
                  FROM (
-                     SELECT id, channel_id, sender_id, encrypted_content, nonce, timestamp, message_nonce, edited_at, message_signature, encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce
+                     SELECT id, channel_id, sender_id, encrypted_content, nonce, timestamp,
+                            message_nonce, edited_at, message_signature,
+                            encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce,
+                            key_version, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce
                      FROM messages
                      WHERE channel_id = ?1
                      ORDER BY timestamp DESC
@@ -1357,9 +1391,9 @@ impl Database {
                     channel_id: row.get(1)?,
                     sender_id: row.get(2)?,
                     sender_username: row.get(3)?,
-                sender_display_name: row.get(4)?,
-                sender_profile_pic: row.get(5)?,
-                sender_username_color: row.get(6)?,
+                    sender_display_name: row.get(4)?,
+                    sender_profile_pic: row.get(5)?,
+                    sender_username_color: row.get(6)?,
                     encrypted_content: row.get(7)?,
                     nonce: row.get(8)?,
                     timestamp: row.get(9)?,
@@ -1370,6 +1404,11 @@ impl Database {
                     profile_key_nonce: row.get(14)?,
                     encrypted_banner_key: row.get(15)?,
                     banner_key_nonce: row.get(16)?,
+                    key_version: row.get(17)?,
+                    encrypted_profile_snapshot: row.get(18)?,
+                    profile_snapshot_nonce: row.get(19)?,
+                    encrypted_file_key: row.get(20)?,
+                    file_key_nonce: row.get(21)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -1385,17 +1424,25 @@ impl Database {
         let half = limit / 2;
         let mut stmt = conn
             .prepare(
-                "SELECT m.id, m.channel_id, m.sender_id, u.username, u.display_name, u.profile_picture_file_id, u.username_color, m.encrypted_content, m.nonce, m.timestamp, m.message_nonce, m.edited_at, m.message_signature, m.encrypted_profile_key, m.profile_key_nonce, m.encrypted_banner_key, m.banner_key_nonce
+                "SELECT m.id, m.channel_id, m.sender_id, u.username, u.display_name, u.profile_picture_file_id, u.username_color,
+                        m.encrypted_content, m.nonce, m.timestamp,
+                        m.message_nonce, m.edited_at, m.message_signature,
+                        m.encrypted_profile_key, m.profile_key_nonce, m.encrypted_banner_key, m.banner_key_nonce,
+                        m.key_version, m.encrypted_profile_snapshot, m.profile_snapshot_nonce, m.encrypted_file_key, m.file_key_nonce
                  FROM (
-                     -- Get half_limit messages before-and-including the target
-                     SELECT id, channel_id, sender_id, encrypted_content, nonce, timestamp, message_nonce, edited_at, message_signature, encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce
+                     SELECT id, channel_id, sender_id, encrypted_content, nonce, timestamp,
+                            message_nonce, edited_at, message_signature,
+                            encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce,
+                            key_version, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce
                      FROM messages
                      WHERE channel_id = ?1 AND timestamp <= (SELECT COALESCE(timestamp, '') FROM messages WHERE id = ?2)
                      ORDER BY timestamp DESC
                      LIMIT ?3
                      UNION ALL
-                     -- Get half_limit messages after the target
-                     SELECT id, channel_id, sender_id, encrypted_content, nonce, timestamp, message_nonce, edited_at, message_signature, encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce
+                     SELECT id, channel_id, sender_id, encrypted_content, nonce, timestamp,
+                            message_nonce, edited_at, message_signature,
+                            encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce,
+                            key_version, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce
                      FROM messages
                      WHERE channel_id = ?1 AND timestamp > (SELECT COALESCE(timestamp, '') FROM messages WHERE id = ?2)
                      ORDER BY timestamp ASC
@@ -1412,9 +1459,9 @@ impl Database {
                     channel_id: row.get(1)?,
                     sender_id: row.get(2)?,
                     sender_username: row.get(3)?,
-                sender_display_name: row.get(4)?,
-                sender_profile_pic: row.get(5)?,
-                sender_username_color: row.get(6)?,
+                    sender_display_name: row.get(4)?,
+                    sender_profile_pic: row.get(5)?,
+                    sender_username_color: row.get(6)?,
                     encrypted_content: row.get(7)?,
                     nonce: row.get(8)?,
                     timestamp: row.get(9)?,
@@ -1425,6 +1472,11 @@ impl Database {
                     profile_key_nonce: row.get(14)?,
                     encrypted_banner_key: row.get(15)?,
                     banner_key_nonce: row.get(16)?,
+                    key_version: row.get(17)?,
+                    encrypted_profile_snapshot: row.get(18)?,
+                    profile_snapshot_nonce: row.get(19)?,
+                    encrypted_file_key: row.get(20)?,
+                    file_key_nonce: row.get(21)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -1445,6 +1497,11 @@ impl Database {
         profile_key_nonce: Option<&str>,
         encrypted_banner_key: Option<&str>,
         banner_key_nonce: Option<&str>,
+        // Streamlined E2E fields
+        encrypted_profile_snapshot: Option<&[u8]>,
+        profile_snapshot_nonce: Option<&[u8]>,
+        encrypted_file_key: Option<&[u8]>,
+        file_key_nonce: Option<&[u8]>,
     ) -> Result<Message, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let id = Uuid::new_v4().to_string();
@@ -1458,8 +1515,8 @@ impl Database {
             .map_err(|_| "Sender not found".to_string())?;
 
         conn.execute(
-            "INSERT INTO messages (id, channel_id, sender_id, encrypted_content, nonce, message_nonce, message_signature, encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![id, channel_id, sender_id, encrypted_content, nonce, message_nonce, message_signature, encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce],
+            "INSERT INTO messages (id, channel_id, sender_id, encrypted_content, nonce, message_nonce, message_signature, encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            params![id, channel_id, sender_id, encrypted_content, nonce, message_nonce, message_signature, encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce],
         )
         .map_err(|e| e.to_string())?;
 
@@ -1481,6 +1538,11 @@ impl Database {
             profile_key_nonce: profile_key_nonce.map(|s| s.to_string()),
             encrypted_banner_key: encrypted_banner_key.map(|s| s.to_string()),
             banner_key_nonce: banner_key_nonce.map(|s| s.to_string()),
+            key_version: Some(1),
+            encrypted_profile_snapshot: encrypted_profile_snapshot.map(|v| v.to_vec()),
+            profile_snapshot_nonce: profile_snapshot_nonce.map(|v| v.to_vec()),
+            encrypted_file_key: encrypted_file_key.map(|v| v.to_vec()),
+            file_key_nonce: file_key_nonce.map(|v| v.to_vec()),
         })
     }
 
@@ -2491,6 +2553,11 @@ impl Database {
                 profile_key_nonce: row.get(14)?,
                 encrypted_banner_key: row.get(15)?,
                 banner_key_nonce: row.get(16)?,
+                key_version: Some(1),
+                encrypted_profile_snapshot: None,
+                profile_snapshot_nonce: None,
+                encrypted_file_key: None,
+                file_key_nonce: None,
             })
         }).map_err(|e| e.to_string())?;
         let mut out = Vec::new();
@@ -2512,6 +2579,11 @@ impl Database {
         profile_key_nonce: Option<&str>,
         encrypted_banner_key: Option<&str>,
         banner_key_nonce: Option<&str>,
+        // Streamlined E2E fields
+        encrypted_profile_snapshot: Option<&[u8]>,
+        profile_snapshot_nonce: Option<&[u8]>,
+        encrypted_file_key: Option<&[u8]>,
+        file_key_nonce: Option<&[u8]>,
     ) -> Result<DmMessage, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let id = Uuid::new_v4().to_string();
@@ -2521,9 +2593,10 @@ impl Database {
                 params![sender_id],
                 |row| row.get(0),
             )
-            .map_err(|_| "Sender not found".to_string())?;        conn.execute(
-            "INSERT INTO dm_messages (id, dm_channel_id, sender_id, encrypted_content, nonce, message_nonce, message_signature, encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![id, dm_channel_id, sender_id, encrypted_content, nonce, message_nonce, message_signature, encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce],
+            .map_err(|_| "Sender not found".to_string())?;
+        conn.execute(
+            "INSERT INTO dm_messages (id, dm_channel_id, sender_id, encrypted_content, nonce, message_nonce, message_signature, encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            params![id, dm_channel_id, sender_id, encrypted_content, nonce, message_nonce, message_signature, encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce],
         )
         .map_err(|e| e.to_string())?;
 
@@ -2545,6 +2618,11 @@ impl Database {
             profile_key_nonce: profile_key_nonce.map(|s| s.to_string()),
             encrypted_banner_key: encrypted_banner_key.map(|s| s.to_string()),
             banner_key_nonce: banner_key_nonce.map(|s| s.to_string()),
+            key_version: None,
+            encrypted_profile_snapshot: encrypted_profile_snapshot.map(|v| v.to_vec()),
+            profile_snapshot_nonce: profile_snapshot_nonce.map(|v| v.to_vec()),
+            encrypted_file_key: encrypted_file_key.map(|v| v.to_vec()),
+            file_key_nonce: file_key_nonce.map(|v| v.to_vec()),
         })
     }
 
@@ -2588,8 +2666,7 @@ impl Database {
             .map_err(|e| e.to_string())?;
         let msg = conn
             .query_row(
-                "SELECT m.id, m.channel_id, m.sender_id, m.encrypted_content, m.nonce, m.timestamp, m.message_nonce, m.edited_at, m.message_signature, m.encrypted_profile_key, m.profile_key_nonce, m.encrypted_banner_key, m.banner_key_nonce
-                 FROM messages m WHERE m.id = ?1",
+                "SELECT m.id, m.channel_id, m.sender_id, m.encrypted_content, m.nonce, m.timestamp, m.message_nonce, m.edited_at, m.message_signature, m.encrypted_profile_key, m.profile_key_nonce, m.encrypted_banner_key, m.banner_key_nonce                         FROM messages m WHERE m.id = ?1",
                 params![message_id],
                 |row| {
                     Ok(Message {
@@ -2610,6 +2687,11 @@ impl Database {
                         profile_key_nonce: row.get(10)?,
                         encrypted_banner_key: row.get(11)?,
                         banner_key_nonce: row.get(12)?,
+                        key_version: None,
+                        encrypted_profile_snapshot: None,
+                        profile_snapshot_nonce: None,
+                        encrypted_file_key: None,
+                        file_key_nonce: None,
                     })
                 },
             )
@@ -2672,8 +2754,7 @@ impl Database {
             .map_err(|e| e.to_string())?;
         let msg = conn
             .query_row(
-                "SELECT m.id, m.dm_channel_id, m.sender_id, m.encrypted_content, m.nonce, m.timestamp, m.message_nonce, m.edited_at, m.message_signature, m.encrypted_profile_key, m.profile_key_nonce, m.encrypted_banner_key, m.banner_key_nonce
-                 FROM dm_messages m WHERE m.id = ?1",
+                "SELECT m.id, m.dm_channel_id, m.sender_id, m.encrypted_content, m.nonce, m.timestamp, m.message_nonce, m.edited_at, m.message_signature, m.encrypted_profile_key, m.profile_key_nonce, m.encrypted_banner_key, m.banner_key_nonce                         FROM dm_messages m WHERE m.id = ?1",
                 params![message_id],
                 |row| {
                     Ok(DmMessage {
@@ -2694,6 +2775,11 @@ impl Database {
                         profile_key_nonce: row.get(10)?,
                         encrypted_banner_key: row.get(11)?,
                         banner_key_nonce: row.get(12)?,
+                        key_version: None,
+                        encrypted_profile_snapshot: None,
+                        profile_snapshot_nonce: None,
+                        encrypted_file_key: None,
+                        file_key_nonce: None,
                     })
                 },
             )
@@ -2884,11 +2970,16 @@ impl Database {
                     timestamp: row.get(9)?,
                     message_nonce: row.get(10)?,
                     edited_at: row.get(11)?,
-                    message_signature: row.get(12)?,
-                    encrypted_profile_key: row.get(13)?,
-                    profile_key_nonce: row.get(14)?,
-                    encrypted_banner_key: row.get(15)?,
-                    banner_key_nonce: row.get(16)?,
+                    message_signature: None,
+                    encrypted_profile_key: None,
+                    profile_key_nonce: None,
+                    encrypted_banner_key: None,
+                    banner_key_nonce: None,
+                    key_version: None,
+                    encrypted_profile_snapshot: None,
+                    profile_snapshot_nonce: None,
+                    encrypted_file_key: None,
+                    file_key_nonce: None,
                 })
             },
         );
@@ -3112,6 +3203,8 @@ impl Database {
                 Ok(Server {
                     id: row.get(0)?,
                     name: row.get(1)?,
+                    encrypted_name: None,
+                    name_nonce: None,
                     owner_id: row.get(2)?,
                     invite_code_hash: row.get(3)?,
                     joins_disabled: row.get::<_, i64>(4)? != 0,
@@ -3135,6 +3228,8 @@ impl Database {
                     id: row.get(0)?,
                     server_id: row.get(1)?,
                     name: row.get(2)?,
+                    encrypted_name: None,
+                    name_nonce: None,
                     channel_type: row.get(3)?,
                     position: row.get::<_, i32>(4)?,
                     created_at: row.get(5)?,
@@ -3174,6 +3269,11 @@ impl Database {
                     profile_key_nonce: row.get(14)?,
                     encrypted_banner_key: row.get(15)?,
                     banner_key_nonce: row.get(16)?,
+                    key_version: None,
+                    encrypted_profile_snapshot: None,
+                    profile_snapshot_nonce: None,
+                    encrypted_file_key: None,
+                    file_key_nonce: None,
                 })
             })
             .map_err(|e| e.to_string())?

@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Crypto Test</title>
+    <style>
+        body { font-family: monospace; background: #111; color: #e0e0e0; padding: 20px; }
+        h1 { color: #4fc3f7; }
+        .result { margin: 8px 0; padding: 8px 12px; border-radius: 6px; }
+        .pass { background: #1b5e20; color: #a5d6a7; }
+        .fail { background: #b71c1c; color: #ef9a9a; }
+        .info { color: #888; font-size: 13px; }
+        .summary { font-size: 18px; margin-top: 20px; padding: 12px; border-radius: 8px; }
+        .summary.all-pass { background: #1b5e20; color: #a5d6a7; }
+        .summary.has-fail { background: #b71c1c; color: #ef9a9a; }
+        .sodium-status { margin-bottom: 16px; }
+        .progress { color: #ff9800; }
+    </style>
+</head>
+<body>
+    <h1>🔐 Crypto Test Suite</h1>
+    <div id="sodium-status" class="sodium-status info">⏳ Initializing libsodium...</div>
+    <div id="results"></div>
+    <div id="summary" class="summary"></div>
+
+    <script src="libsodium-sumo.js"></script>
+    <script src="libsodium-wrappers.js"></script>
+    <script src="crypto.js?v=8"></script>
+    <script src="test-crypto-runner.js"></script>
+</body>
+</html>
