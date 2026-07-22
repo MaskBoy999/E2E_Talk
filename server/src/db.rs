@@ -2016,7 +2016,7 @@ impl Database {
             return Err(rusqlite::Error::InvalidQuery);
         }
         conn.execute(
-            "UPDATE friend_requests SET status = 'accepted', responded_at = CURRENT_TIMESTAMP WHERE id = ?1",
+            "DELETE FROM friend_requests WHERE id = ?1",
             params![request_id],
         )?;
         Self::add_friendship_c(conn, &from_id, &to_id)?;
@@ -2052,7 +2052,7 @@ impl Database {
     ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let count = conn.execute(
-            "UPDATE friend_requests SET status = 'declined', responded_at = CURRENT_TIMESTAMP
+            "DELETE FROM friend_requests
              WHERE id = ?1 AND to_user_id = ?2 AND status = 'pending'",
             params![request_id, declining_user_id],
         ).map_err(|e| e.to_string())?;
@@ -3738,6 +3738,123 @@ impl Database {
         }).map_err(|e| e.to_string())?;
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
     }
+    pub fn list_all_prekey_bundles_admin(&self) -> Result<Vec<(String, String, String, String, Option<String>, Option<i32>, String)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT p.user_id, p.identity_key_public, p.signed_prekey_public, p.signed_prekey_signature, p.one_time_prekey_public, p.one_time_prekey_id, COALESCE(p.created_at, '')
+             FROM prekey_bundles p
+             ORDER BY p.created_at"
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<i32>>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        }).map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    }
+
+    pub fn list_all_sessions_admin(&self) -> Result<Vec<(String, String, String, String, String, i32, String)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT COALESCE(u1.username, s.our_user_id), s.our_user_id, COALESCE(u2.username, s.their_user_id), s.their_user_id,
+                    s.session_data, COALESCE(s.ratchet_counter, 0), COALESCE(s.created_at, '')
+             FROM sessions s
+             LEFT JOIN users u1 ON s.our_user_id = u1.id
+             LEFT JOIN users u2 ON s.their_user_id = u2.id
+             ORDER BY s.created_at"
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i32>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        }).map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    }
+
+    pub fn list_all_user_devices_admin(&self) -> Result<Vec<(String, String, String, String, String, Option<String>, Option<String>, Option<String>, String)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT COALESCE(u.username, d.user_id), d.user_id, d.device_id, COALESCE(d.device_name, ''),
+                    d.identity_key, d.signed_prekey, d.signed_prekey_signature, d.last_active_at, COALESCE(d.created_at, '')
+             FROM user_devices d
+             LEFT JOIN users u ON d.user_id = u.id
+             ORDER BY d.created_at"
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, String>(8)?,
+            ))
+        }).map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    }
+
+    pub fn list_all_user_key_escrow_admin(&self) -> Result<Vec<(String, String, String, String, String, String, String)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT COALESCE(u.username, e.user_id), e.user_id, COALESCE(e.encrypted_private_key, ''), COALESCE(e.salt, ''),
+                    COALESCE(e.nonce, ''), COALESCE(e.created_at, ''), COALESCE(e.updated_at, '')
+             FROM user_key_escrow e
+             LEFT JOIN users u ON e.user_id = u.id
+             ORDER BY e.created_at"
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        }).map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    }
+
+    pub fn list_all_user_device_escrow_admin(&self) -> Result<Vec<(String, String, String, String, String, String, String, String)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT COALESCE(u.username, e.user_id), e.user_id, COALESCE(e.device_id, ''), COALESCE(e.encrypted_private_key, ''),
+                    COALESCE(e.salt, ''), COALESCE(e.nonce, ''), COALESCE(e.created_at, ''), COALESCE(e.updated_at, '')
+             FROM user_device_escrow e
+             LEFT JOIN users u ON e.user_id = u.id
+             ORDER BY e.created_at"
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+            ))
+        }).map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    }
+
 
 
     /// Return all file IDs currently tracked in the database.
@@ -3820,20 +3937,47 @@ impl Database {
         }
     }
 
-    pub fn clear_all(&self) -> Result<(), String> {
+    pub fn clear_all(&self, upload_dir: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        // Delete uploaded files directory first
+        if let Ok(entries) = std::fs::read_dir(upload_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let _ = std::fs::remove_dir_all(&path);
+                } else {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        }
+        // Wipe all tables in dependency-safe order
+        conn.execute("DELETE FROM voice_participants", []).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM voice_sessions", []).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM user_media", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM files", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM messages", []).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM dm_messages", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM server_keys", []).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM server_keys_new", []).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM dm_keys", []).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM dm_keys_new", []).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM prekey_bundles", []).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM sessions", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM server_bans", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM server_members", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM channels", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM servers", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM dm_messages", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM dm_members", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM dm_channels", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM friend_requests", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM friendships", []).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM user_stickers", []).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM server_stickers", []).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM user_key_escrow", []).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM user_device_escrow", []).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM user_devices", []).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM user_public_keys", []).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM notification_sounds", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM users", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM admin_config", []).map_err(|e| e.to_string())?;
         Ok(())

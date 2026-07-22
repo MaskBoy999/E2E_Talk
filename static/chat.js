@@ -4237,7 +4237,7 @@ function connectWebSocket(t) {
                 }
                 break;
             case 'message_edited':
-                if (data.channel_id === currentChannelId && data.message) {
+                if (data.message) {
                     await handleEditedMessage(data.message, 'channel');
                 }
                 break;
@@ -4247,7 +4247,7 @@ function connectWebSocket(t) {
                 }
                 break;
             case 'dm_edited':
-                if (data.dm_channel_id === currentDmChannelId && data.message) {
+                if (data.message) {
                     await handleEditedMessage(data.message, 'dm');
                 }
                 break;
@@ -5325,7 +5325,8 @@ async function appendMessage(msg) {
                         }
                     }
                 } catch (_) {}
-                contentHtml += '<div class="forward-preview"><div class="text"><span class="time-hover">' + time + '</span>' + renderEmojiText(previewText, previewEmojis) + editedHtml + '</div></div>';
+                // Forward preview should not show (edited) - it's a new message
+                contentHtml += '<div class="forward-preview"><div class="text"><span class="time-hover">' + time + '</span>' + renderEmojiText(previewText, previewEmojis) + '</div></div>';
             } catch (_) {
                 contentHtml += '<div class="forward-preview forward-unavailable">Preview unavailable</div>';
             }
@@ -6111,20 +6112,20 @@ async function handleEditedMessage(msg, mode) {
                 textEl.innerHTML = timeHtml + renderEmojiText(renderText, extraEmojis);
                 // Ensure the text element is visible (it might have been hidden during editing)
                 textEl.style.display = '';
+                // Add (edited) label only when decryption succeeds
+                const contentEl = existing.querySelector('.content');
+                if (contentEl) {
+                    let existingLabel = contentEl.querySelector('.edited-label');
+                    if (existingLabel) {
+                        if (!existingLabel.textContent) {
+                            existingLabel.textContent = '(edited)';
+                        }
+                    } else {
+                        contentEl.insertAdjacentHTML('beforeend', '<span class="edited-label">(edited)</span>');
+                    }
+                }
             }
         } catch (_) {}
-    }
-
-    const contentEl = existing.querySelector('.content');
-    if (contentEl) {
-        let existingLabel = contentEl.querySelector('.edited-label');
-        if (existingLabel) {
-            if (!existingLabel.textContent) {
-                existingLabel.textContent = '(edited)';
-            }
-        } else {
-            contentEl.insertAdjacentHTML('beforeend', '<span class="edited-label">(edited)</span>');
-        }
     }
 }
 

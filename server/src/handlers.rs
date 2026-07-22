@@ -2309,6 +2309,106 @@ pub async fn admin_list_admin_config(
     (StatusCode::OK, Json(serde_json::json!(result))).into_response()
 }
 
+pub async fn admin_list_prekey_bundles(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
+    let rows = match state.db.list_all_prekey_bundles_admin() {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let result: Vec<serde_json::Value> = rows.iter().map(|(user_id, identity_key_public, signed_prekey_public, signed_prekey_signature, one_time_prekey_public, one_time_prekey_id, created_at)| {
+        serde_json::json!({
+            "user_id": user_id, "identity_key_public": identity_key_public,
+            "signed_prekey_public": signed_prekey_public, "signed_prekey_signature": signed_prekey_signature,
+            "one_time_prekey_public": one_time_prekey_public, "one_time_prekey_id": one_time_prekey_id,
+            "created_at": created_at,
+        })
+    }).collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
+pub async fn admin_list_sessions(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
+    let rows = match state.db.list_all_sessions_admin() {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let result: Vec<serde_json::Value> = rows.iter().map(|(our_username, our_user_id, their_username, their_user_id, session_data, ratchet_counter, created_at)| {
+        serde_json::json!({
+            "our_username": our_username, "our_user_id": our_user_id,
+            "their_username": their_username, "their_user_id": their_user_id,
+            "session_data": session_data, "ratchet_counter": ratchet_counter,
+            "created_at": created_at,
+        })
+    }).collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
+pub async fn admin_list_user_public_keys(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
+    let rows = match state.db.list_all_user_devices_admin() {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let result: Vec<serde_json::Value> = rows.iter().map(|(username, user_id, device_id, device_name, identity_key, signed_prekey, signed_prekey_signature, last_active_at, created_at)| {
+        serde_json::json!({
+            "username": username, "user_id": user_id,
+            "device_id": device_id, "device_name": device_name,
+            "identity_key": identity_key, "signed_prekey": signed_prekey,
+            "signed_prekey_signature": signed_prekey_signature,
+            "last_active_at": last_active_at, "created_at": created_at,
+        })
+    }).collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
+pub async fn admin_list_user_key_escrow(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
+    let rows = match state.db.list_all_user_key_escrow_admin() {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let result: Vec<serde_json::Value> = rows.iter().map(|(username, user_id, encrypted_private_key, salt, nonce, created_at, updated_at)| {
+        serde_json::json!({
+            "username": username, "user_id": user_id,
+            "encrypted_private_key": encrypted_private_key, "salt": salt, "nonce": nonce,
+            "created_at": created_at, "updated_at": updated_at,
+            "has_key": !encrypted_private_key.is_empty(),
+        })
+    }).collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
+pub async fn admin_list_user_device_escrow(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
+    let rows = match state.db.list_all_user_device_escrow_admin() {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let result: Vec<serde_json::Value> = rows.iter().map(|(username, user_id, device_id, encrypted_private_key, salt, nonce, created_at, updated_at)| {
+        serde_json::json!({
+            "username": username, "user_id": user_id, "device_id": device_id,
+            "encrypted_private_key": encrypted_private_key, "salt": salt, "nonce": nonce,
+            "created_at": created_at, "updated_at": updated_at,
+        })
+    }).collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
 
 pub async fn admin_clear_all(
     headers: HeaderMap,
@@ -2318,7 +2418,7 @@ pub async fn admin_clear_all(
         return e.into_response();
     }
 
-    match state.db.clear_all() {
+    match state.db.clear_all("uploads") {
         Ok(()) => {
             // Invalidate all in-memory admin tokens so the admin must re-login
             // after the database is wiped.

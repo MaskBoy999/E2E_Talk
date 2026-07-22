@@ -247,6 +247,11 @@ async fn main() {
 .route("/api/admin/server-stickers", get(handlers::admin_list_server_stickers))
         .route("/api/admin/notification-sounds", get(handlers::admin_list_notification_sounds))
         .route("/api/admin/admin-config", get(handlers::admin_list_admin_config))
+        .route("/api/admin/prekey-bundles", get(handlers::admin_list_prekey_bundles))
+        .route("/api/admin/sessions", get(handlers::admin_list_sessions))
+        .route("/api/admin/user-public-keys", get(handlers::admin_list_user_public_keys))
+        .route("/api/admin/user-key-escrow", get(handlers::admin_list_user_key_escrow))
+        .route("/api/admin/user-device-escrow", get(handlers::admin_list_user_device_escrow))
         .route("/api/admin/clear", post(handlers::admin_clear_all))
         // Phase 4: Friends + DMs
         .route("/api/me", get(handlers::get_me).delete(handlers::delete_me))
