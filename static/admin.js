@@ -42,7 +42,7 @@ let tabTotals = {};
 let tabFilteredCache = {};
 
 const csvColumns = {
-    'users': { headers: ['Username', 'User ID', 'Created', 'Display Name', 'Identity Pub Key', 'PFP File ID', 'PFP File Key', 'Username Color', 'Border Color', 'Banner File ID', 'Banner File Key', 'Description', 'Nickname', 'BG Color', 'Friend Req Disabled', 'Profile Data', 'FC Hash'], map: (r) => [r.username, r.id, r.created_at || '', r.display_name || '', r.identity_public_key || '', r.profile_picture_file_id || '', r.profile_picture_file_key || '', r.username_color || '', r.username_border_color || '', r.profile_banner_file_id || '', r.profile_banner_file_key || '', r.description || '', r.nickname || '', r.profile_background_color || '', String(r.friend_requests_disabled != null ? r.friend_requests_disabled : ''), r.encrypted_profile_data || '', r.friend_code_hash || ''] },
+    'users': { headers: ['Username', 'User ID', 'Created', 'Display Name', 'Identity Pub Key', 'PFP File ID', 'PFP File Key', 'Username Color', 'Border Color', 'Banner File ID', 'Banner File Key', 'BG Color', 'Friend Req Disabled', 'Profile Data', 'FC Hash'], map: (r) => [r.username, r.id, r.created_at || '', r.display_name || '', r.identity_public_key || '', r.profile_picture_file_id || '', r.profile_picture_file_key || '', r.username_color || '', r.username_border_color || '', r.profile_banner_file_id || '', r.profile_banner_file_key || '', r.profile_background_color || '', String(r.friend_requests_disabled != null ? r.friend_requests_disabled : ''), r.encrypted_profile_data || '', r.friend_code_hash || ''] },
     'servers': { headers: ['Name', 'Server ID', 'Owner ID', 'Created', 'Invite Code Hash', 'Joins Disabled'], map: (r) => [r.name, r.id, r.owner_id, r.created_at || '', r.invite_code_hash || '', r.joins_disabled ? 'Yes' : 'No'] },
     'channels': { headers: ['Name', 'Channel ID', 'Server ID', 'Type', 'Position', 'Created'], map: (r) => [r.name, r.id, r.server_id, r.type, String(r.position != null ? r.position : ''), r.created_at || ''] },
     'messages': { headers: ['Sender', 'Sender ID', 'Channel ID', 'Encrypted Content', 'Nonce', 'Timestamp', 'Message ID', 'Edited At', 'Msg Nonce', 'Msg Sig', 'Profile Key', 'Profile Key Nonce', 'Banner Key', 'Banner Key Nonce'], map: (r) => [r.sender_username || r.sender_id, r.sender_id || '', r.channel_id, r.encrypted_content, r.nonce, r.timestamp, r.id || '', r.edited_at || '', r.message_nonce || '', r.message_signature || '', r.encrypted_profile_key || '', r.profile_key_nonce || '', r.encrypted_banner_key || '', r.banner_key_nonce || ''] },
@@ -374,8 +374,7 @@ function renderUsers(users) {
             '<td>' + escapeHtml(u.username_border_color || '') + '</td>' +
             '<td class="id-cell">' + escapeHtml(truncate(u.profile_banner_file_id || '', 12)) + '</td>' +
             '<td class="blob-cell">' + escapeHtml(truncate(u.profile_banner_file_key || '', 20)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(u.description || '', 40)) + '</td>' +
-            '<td>' + escapeHtml(u.nickname || '') + '</td>' +
+            // description and nickname removed — use encrypted_profile_data instead
             '<td>' + escapeHtml(u.profile_background_color || '') + '</td>' +
             '<td>' + (u.friend_requests_disabled ? 'Yes' : 'No') + '</td>' +
             '<td class="blob-cell">' + escapeHtml(truncate(u.encrypted_profile_data || '', 30)) + '</td>' +

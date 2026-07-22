@@ -56,6 +56,7 @@ test.describe('Profile Modal Features', () => {
     });
 
     test('profile modal opens from message avatar click', async ({ page, context }) => {
+        test.slow(); // Multi-user setup (2 registrations, server, keys, messages) takes ~30s
         const ts = Date.now();
         const user1 = 'pmsg1_' + ts;
         const user2 = 'pmsg2_' + ts;

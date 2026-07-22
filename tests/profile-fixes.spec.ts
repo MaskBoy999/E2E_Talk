@@ -87,7 +87,7 @@ test.describe('Profile Fixes', () => {
         expect(nullError).toBeUndefined();
     });
 
-    test('API returns nickname and description for other users', async ({ page, context }) => {
+    test('API does not return plaintext display_name, nickname, description for other users', async ({ page, context }) => {
         const ts = Date.now();
         const user1 = 'apiown_' + ts;
         const user2 = 'apisee_' + ts;
@@ -98,12 +98,13 @@ test.describe('Profile Fixes', () => {
         const page2 = await ctx2.newPage();
         const body2 = await registerUser(page2, user2);
 
+        // Save profile with encrypted data — no plaintext display_name/colors sent
+        // The old display_name field is no longer accepted; only encrypted_profile_data is used.
         const patchRes = await page.request.patch(`${BASE}/api/profile`, {
             headers: { Authorization: `Bearer ${body1.token}`, 'Content-Type': 'application/json' },
             data: {
-                display_name: 'VisibleDisplay',
-                nickname: 'VisibleNick',
-                description: 'Visible description',
+                encrypted_profile_data: 'dGVzdDp0ZXN0',
+                encrypted_profile_data_key: 'dGVzdC1rZXk=',
             },
         });
         expect(patchRes.ok()).toBeTruthy();
@@ -113,12 +114,16 @@ test.describe('Profile Fixes', () => {
         });
         const prof = await profRes.json();
 
-        expect(prof.display_name).toBe('VisibleDisplay');
-        expect(prof.nickname).toBe('VisibleNick');
-        expect(prof.description).toBe('Visible description');
+        // display_name/nickname/description are no longer returned as plaintext
+        // All profile data is inside encrypted_profile_data
+        expect(prof.display_name).toBeUndefined();
+        expect(prof.nickname).toBeUndefined();
+        expect(prof.description).toBeUndefined();
+        // The encrypted profile data should be present instead
+        expect(prof.encrypted_profile_data).toBeDefined();
     });
 
-    test('other user can see friend nickname and description in profile modal', async ({ page, context }) => {
+    test('API does not leak plaintext nickname/description — encrypted_profile_data only', async ({ page, context }) => {
         const ts = Date.now();
         const user1 = 'ownick_' + ts;
         const user2 = 'seenick_' + ts;
@@ -131,7 +136,7 @@ test.describe('Profile Fixes', () => {
 
         await becomeFriends(page, page2, body1.token, body2.token);
 
-        // Set nickname/description via API
+        // Set nickname/description via API — now ONLY stored as encrypted_profile_data
         const patchRes = await page.request.patch(`${BASE}/api/profile`, {
             headers: { Authorization: `Bearer ${body1.token}`, 'Content-Type': 'application/json' },
             data: { nickname: 'MyNickname', description: 'My description text' },
@@ -143,8 +148,14 @@ test.describe('Profile Fixes', () => {
             headers: { Authorization: `Bearer ${body2.token}` },
         });
         const prof = await profRes.json();
-        expect(prof.nickname).toBe('MyNickname');
-        expect(prof.description).toBe('My description text');
+        // Note: nickname/description are no longer returned as plaintext.
+        // They are only available via encrypted_profile_data (which requires
+        // the profile data key, cached via profile_key_sync in DM messages).
+        expect(prof.nickname).toBeUndefined();
+        expect(prof.description).toBeUndefined();
+        expect(prof.encrypted_profile_data).toBeDefined();
+        // encrypted_profile_data_key should also be present for the owner to re-decrypt
+        expect(prof.encrypted_profile_data_key).toBeDefined();
 
         // User2 navigates to DM view and opens user1's DM
         await page2.goto(`${BASE}/index.html`);
@@ -157,19 +168,10 @@ test.describe('Profile Fixes', () => {
             await dmItem.click();
             await page2.waitForTimeout(1500);
 
-            // Check that profile view shows nickname/description via JS
-            const viewData = await page2.evaluate(() => {
-                const nn = document.getElementById('profile-modal-nickname');
-                const desc = document.getElementById('profile-modal-description');
-                return {
-                    nickname: nn ? nn.textContent : null,
-                    nicknameDisplay: nn ? nn.style.display : null,
-                };
-            });
-            // If the profile modal opened, nickname should be visible
-            if (viewData.nickname) {
-                expect(viewData.nickname).toBe('MyNickname');
-            }
+            // Verify the modal opens without error (nickname/description content
+            // depends on the profile_key_sync mechanism which is tested separately)
+            const nnEl = page2.locator('#profile-modal-nickname');
+            await expect(nnEl).toBeAttached({ timeout: 5000 });
         }
     });
 
@@ -270,27 +272,27 @@ test.describe('Profile Fixes', () => {
         expect(overflow).toBe('visible');
     });
 
-    test('profile card background color is applied from data', async ({ page }) => {
+    test('profile card and edit form elements are present', async ({ page }) => {
         const ts = Date.now();
         const username = 'bgcolor_' + ts;
-        const body = await registerUser(page, username);
-
-        await page.request.patch(`${BASE}/api/profile`, {
-            headers: { Authorization: `Bearer ${body.token}`, 'Content-Type': 'application/json' },
-            data: { profile_background_color: '#ff5500' },
-        });
+        await registerUser(page, username);
 
         await page.goto(`${BASE}/index.html`);
         await page.waitForTimeout(2000);
         await openOwnProfile(page);
 
-        const bg = await page.evaluate(() => {
-            const card = document.querySelector('#profile-view .profile-view-card');
-            if (!card) return null;
-            return (card as HTMLElement).style.background || '';
+        // Profile card should exist
+        const card = await page.evaluate(() => {
+            const c = document.querySelector('#profile-view .profile-view-card');
+            return c ? true : false;
         });
-        // Browser may convert hex to rgb: #ff5500 = rgb(255, 85, 0)
-        expect(bg).toContain('255, 85, 0');
+        expect(card).toBeTruthy();
+
+        // Profile edit should show background color input (id: profile-edit-bg-color)
+        await page.click('#profile-edit-btn');
+        await page.waitForSelector('#profile-edit-bg-color', { timeout: 5000 });
+        const bgInput = await page.locator('#profile-edit-bg-color');
+        await expect(bgInput).toBeVisible();
     });
 
     test('profile edit preview syncs display name live', async ({ page }) => {

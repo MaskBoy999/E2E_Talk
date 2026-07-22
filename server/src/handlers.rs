@@ -281,7 +281,7 @@ pub async fn register(
 
     // Fetch profile data
     let (display_name, profile_pic) = match state.db.get_user_profile(&user.id) {
-        Ok((_, _, dn, pp, _fk, _uc, _bc, _, _, _, _)) => (dn, pp),
+        Ok((_, _, dn, pp, _fk, _uc, _bc, _, _)) => (dn, pp),
         Err(_) => (None, None),
     };
 
@@ -378,7 +378,7 @@ pub async fn login(
 
     // Fetch profile data
     let (display_name, profile_pic) = match state.db.get_user_profile(&user.id) {
-        Ok((_, _, dn, pp, _fk, _uc, _bc, _, _, _, _)) => (dn, pp),
+        Ok((_, _, dn, pp, _fk, _uc, _bc, _, _)) => (dn, pp),
         Err(_) => (None, None),
     };
 
@@ -547,7 +547,7 @@ pub async fn reauth(
 
     // Fetch profile data
     let (display_name, profile_pic) = match state.db.get_user_profile(&user.id) {
-        Ok((_, _, dn, pp, _fk, _uc, _bc, _, _, _, _)) => (dn, pp),
+        Ok((_, _, dn, pp, _fk, _uc, _bc, _, _)) => (dn, pp),
         Err(_) => (None, None),
     };
 
@@ -1811,7 +1811,7 @@ pub async fn admin_list_users(
 
     let user_infos: Vec<serde_json::Value> = users
         .iter()
-        .map(|(id, username, _pw_hash, created_at, display_name, identity_public_key, profile_picture_file_id, profile_picture_file_key, username_color, username_border_color, friend_requests_disabled, encrypted_friend_code, friend_code_salt, friend_code_nonce, encrypted_profile_data, encrypted_profile_salt, encrypted_profile_nonce, profile_banner_file_id, profile_banner_file_key, description, nickname, profile_background_color, friend_code_hash)| {
+        .map(|(id, username, _pw_hash, created_at, display_name, identity_public_key, profile_picture_file_id, profile_picture_file_key, username_color, username_border_color, friend_requests_disabled, encrypted_friend_code, friend_code_salt, friend_code_nonce, encrypted_profile_data, encrypted_profile_salt, encrypted_profile_nonce, profile_banner_file_id, profile_banner_file_key, _description, _nickname, profile_background_color, friend_code_hash)| {
             serde_json::json!({
                 "id": id,
                 "username": username,
@@ -1831,8 +1831,7 @@ pub async fn admin_list_users(
                 "encrypted_profile_nonce": encrypted_profile_nonce,
                 "profile_banner_file_id": profile_banner_file_id,
                 "profile_banner_file_key": profile_banner_file_key,
-                "description": description,
-                "nickname": nickname,
+                // description/nickname removed — use encrypted_profile_data
                 "profile_background_color": profile_background_color,
                 "friend_code_hash": friend_code_hash,
             })
@@ -2857,22 +2856,18 @@ pub async fn remove_user_sticker(
 
 #[derive(Deserialize)]
 pub struct UpdateProfileRequest {
-    pub display_name: Option<String>,  // None = no change, Some("") = clear, Some("value") = set
     pub remove_picture: Option<bool>,  // true = remove profile picture
     pub profile_picture_file_id: Option<String>,  // Some("file_id") = set picture
     pub profile_picture_file_key: Option<String>,  // file encryption key (base64)
-    pub username_color: Option<String>,  // hex color for username
-    pub username_border_color: Option<String>,  // hex color for display name glow/border
     // Profile v2 fields
     pub profile_banner_file_id: Option<String>,
     pub profile_banner_file_key: Option<String>,
-    pub description: Option<String>,
-    pub nickname: Option<String>,
-    pub profile_background_color: Option<String>,
-    // Encrypted profile (password-based)
+    // Encrypted profile — all profile fields (display_name, colors, description, etc.)
+    // are inside this encrypted blob. No plaintext profile data accepted.
     pub encrypted_profile_data: Option<String>,
     pub encrypted_profile_salt: Option<String>,
     pub encrypted_profile_nonce: Option<String>,
+    pub encrypted_profile_data_key: Option<String>,
 }
 
 pub async fn get_profile(
@@ -2895,27 +2890,24 @@ pub async fn get_profile(
         || state.db.share_server(&caller_id, &requested_id).unwrap_or(false);
 
     match state.db.get_user_profile(&requested_id) {
-        Ok((id, username, display_name, profile_picture_file_id, file_key, username_color, username_border_color, banner_id, banner_key, description, nickname)) => {
+        Ok((id, username, _display_name, profile_picture_file_id, file_key, _username_color, _username_border_color, banner_id, banner_key)) => {
             let encrypted = state.db.get_encrypted_profile(&requested_id).ok().flatten();
-            // Fetch background color separately (dynamic column)
-            let bg_color = state.db.get_profile_background_color(&requested_id).ok();
             (StatusCode::OK, Json(serde_json::json!({
                 "id": id,
                 "username": username,
-                "display_name": display_name,
+                // display_name, username_color, username_border_color, profile_background_color
+                // are no longer returned as plaintext — all profile data is inside encrypted_profile_data.
                 "profile_picture_file_id": profile_picture_file_id,
                 // Only return file decryption keys to authorized users (friends / server-mates / self)
                 "profile_picture_file_key": if authorized_for_keys { file_key } else { None },
-                "username_color": username_color.unwrap_or("#4fc3f7".to_string()),
-                "username_border_color": username_border_color,
                 "profile_banner_file_id": banner_id,
                 "profile_banner_file_key": if authorized_for_keys { banner_key } else { None },
-                "description": description.unwrap_or_default(),
-                "nickname": nickname.unwrap_or_default(),
-                "profile_background_color": bg_color.unwrap_or("#16213e".to_string()),
+                // description, nickname, display_name, and colors removed from plaintext API.
+                // All profile data is inside encrypted_profile_data.
                 "encrypted_profile_data": encrypted.as_ref().map(|e| e.0.as_str()),
                 "encrypted_profile_salt": encrypted.as_ref().map(|e| e.1.as_str()),
                 "encrypted_profile_nonce": encrypted.as_ref().map(|e| e.2.as_str()),
+                "encrypted_profile_data_key": encrypted.as_ref().and_then(|e| if e.3.is_empty() { None } else { Some(e.3.as_str()) }),
             }))).into_response()
         }
         Err(e) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": e}))).into_response(),
@@ -2932,27 +2924,13 @@ pub async fn update_profile(
         Err(e) => return e.into_response(),
     };
 
-    // Update display name if provided
-    if let Some(ref display_name) = req.display_name {
-        let trimmed = display_name.trim();
-        if trimmed.len() > 50 {
-            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Display name too long (max 50 chars)"}))).into_response();
-        }
-        // Empty string means clear the display name
-        if trimmed.is_empty() {
-            if let Err(e) = state.db.update_display_name(&user_id, "") {
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
-            }
-        } else {
-            if let Err(e) = state.db.update_display_name(&user_id, trimmed) {
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
-            }
-        }
-    }
+    // Display name, username_color, username_border_color, profile_background_color
+    // are NO LONGER accepted as plaintext fields. All profile data (including these)
+    // must be sent inside encrypted_profile_data and encrypted with the profile data key.
 
     // Before changing profile picture, delete the old one's file from DB and disk
     let delete_current_pic = || -> Result<(), String> {
-        let (_, _, _, old_file_id, _, _, _, _, _, _, _) = state.db.get_user_profile(&user_id)?;
+        let (_, _, _, old_file_id, _, _, _, _, _) = state.db.get_user_profile(&user_id)?;
         if let Some(old_id) = old_file_id {
             // Delete from DB (checks ownership)
             if let Ok(old_info) = state.db.delete_file_record(&old_id) {
@@ -3003,58 +2981,9 @@ pub async fn update_profile(
         }
     }
 
-    // Handle username border color update
-    if let Some(ref border_color) = req.username_border_color {
-        let trimmed = border_color.trim();
-        let is_valid_hex = trimmed.starts_with("#") && (trimmed.len() == 7 || trimmed.len() == 4);
-        let is_valid_rgba = trimmed.starts_with("rgba(") && trimmed.ends_with(")");
-        if !is_valid_hex && !is_valid_rgba {
-            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid border color format. Use hex e.g. #000000 or rgba e.g. rgba(0,0,0,0.8)"}))).into_response();
-        }
-        if let Err(e) = state.db.update_username_border_color(&user_id, trimmed) {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
-        }
-    }
-
-    // Handle username color update
-    if let Some(ref color) = req.username_color {
-        let trimmed = color.trim();
-        if !trimmed.starts_with("#") || (trimmed.len() != 7 && trimmed.len() != 4) {
-            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid color format. Use hex e.g. #4fc3f7"}))).into_response();
-        }
-        if let Err(e) = state.db.update_username_color(&user_id, trimmed) {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
-        }
-    }
-
-    // Handle profile background color update
-    if let Some(ref bg_color) = req.profile_background_color {
-        let trimmed = bg_color.trim();
-        if !trimmed.starts_with("#") || (trimmed.len() != 7 && trimmed.len() != 4) {
-            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid background color format. Use hex e.g. #16213e"}))).into_response();
-        }
-        if let Err(e) = state.db.update_profile_background_color(&user_id, trimmed) {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
-        }
-    }
-
-    // Handle description update with 300-word hard cap
-    if let Some(ref description) = req.description {
-        let word_count = description.trim().split_whitespace().count();
-        if word_count > 300 {
-            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Description too long (max 300 words)"}))).into_response();
-        }
-        if let Err(e) = state.db.update_description(&user_id, description) {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
-        }
-    }
-
-    // Handle nickname update
-    if let Some(ref nickname) = req.nickname {
-        if let Err(e) = state.db.update_nickname(&user_id, nickname) {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
-        }
-    }
+    // Description, nickname, display_name, username_color, username_border_color,
+    // and profile_background_color are NO LONGER accepted as plaintext fields.
+    // All profile data must be inside encrypted_profile_data.
 
     // Handle profile banner
     if let Some(ref banner_file_id) = req.profile_banner_file_id {
@@ -3078,33 +3007,32 @@ pub async fn update_profile(
         }
     }
 
-    // Save encrypted profile data if provided (supports both password-based and identity-key encryption)
+    // Save encrypted profile data + key if provided
     if let Some(data) = &req.encrypted_profile_data {
         let salt = req.encrypted_profile_salt.as_deref().unwrap_or("");
         let nonce = req.encrypted_profile_nonce.as_deref().unwrap_or("");
-        let _ = state.db.save_encrypted_profile(&user_id, data, salt, nonce);
+        let data_key = req.encrypted_profile_data_key.as_deref();
+        let _ = state.db.save_encrypted_profile(&user_id, data, salt, nonce, data_key);
     }
 
     // Broadcast profile update to the user, friends, and all server members
     if let Ok(profile) = state.db.get_user_profile(&user_id) {
-        let (_id, username, display_name, profile_picture_file_id, profile_picture_file_key, username_color, 
-username_border_color, banner_id, banner_file_key, description, nickname) = profile;
+        let (_id, username, _display_name, profile_picture_file_id, profile_picture_file_key, _username_color, 
+_username_border_color, banner_id, banner_file_key) = profile;
         let encrypted = state.db.get_encrypted_profile(&user_id).ok().flatten();
         let profile_updated_at = state.db.get_profile_updated_at(&user_id).ok();
         let profile_msg = serde_json::json!({
             "type": "profile_updated",
             "user_id": user_id,
             "username": username,
-            "display_name": display_name,
-            "profile_picture_file_id": profile_picture_file_id,
-            "profile_picture_file_key": profile_picture_file_key,
-            "profile_banner_file_id": banner_id,
-            "profile_banner_file_key": banner_file_key,
-            "description": description,
-            "nickname": nickname,
-            "username_color": username_color.unwrap_or("#4fc3f7".to_string()),
-            "username_border_color": username_border_color,
-            "encrypted_profile_data": encrypted.as_ref().map(|e| e.0.as_str()),
+    // display_name, username_color, username_border_color are
+    // no longer sent as plaintext — they're inside encrypted_profile_data.
+    "profile_picture_file_id": profile_picture_file_id,
+    "profile_picture_file_key": profile_picture_file_key,
+    "profile_banner_file_id": banner_id,
+    "profile_banner_file_key": banner_file_key,
+    "encrypted_profile_data": encrypted.as_ref().map(|e| e.0.as_str()),
+    "encrypted_profile_data_key": encrypted.as_ref().and_then(|e| if e.3.is_empty() { None } else { Some(e.3.as_str()) }),
             "profile_updated_at": profile_updated_at,
         });
 
@@ -3137,6 +3065,86 @@ username_border_color, banner_id, banner_file_key, description, nickname) = prof
 }
 
 // --- Current user / friend code ---
+
+// --- Conversation Profile Data (per-conversation encrypted profile) ---
+
+#[derive(Deserialize)]
+pub struct UpsertConversationProfileRequest {
+    pub conversation_type: String,  // "dm" or "channel"
+    pub conversation_id: String,
+    pub encrypted_profile_data: String,
+    pub nonce: String,
+}
+
+pub async fn upsert_conversation_profile(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UpsertConversationProfileRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    // Verify the caller is a member of the conversation
+    let is_member = match req.conversation_type.as_str() {
+        "dm" => state.db.is_member_of_dm(&user_id, &req.conversation_id).unwrap_or(false),
+        "channel" => {
+            let server_id = state.db.get_server_id_for_channel(&req.conversation_id).ok();
+            match server_id {
+                Some(sid) => state.db.is_member_of_server(&user_id, &sid).unwrap_or(false),
+                None => false,
+            }
+        }
+        _ => false,
+    };
+
+    if !is_member {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Not a member of this conversation"}))).into_response();
+    }
+
+    match state.db.upsert_conversation_profile(&user_id, &req.conversation_type, &req.conversation_id, &req.encrypted_profile_data, &req.nonce) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn get_conversation_profile(
+    Path((target_user_id, conv_type, conv_id)): Path<(String, String, String)>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    // Verify the caller is a member of the conversation
+    let is_member = match conv_type.as_str() {
+        "dm" => state.db.is_member_of_dm(&user_id, &conv_id).unwrap_or(false),
+        "channel" => {
+            let server_id = state.db.get_server_id_for_channel(&conv_id).ok();
+            match server_id {
+                Some(sid) => state.db.is_member_of_server(&user_id, &sid).unwrap_or(false),
+                None => false,
+            }
+        }
+        _ => false,
+    };
+
+    if !is_member {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Not a member of this conversation"}))).into_response();
+    }
+
+    match state.db.get_conversation_profile(&target_user_id, &conv_type, &conv_id) {
+        Ok(Some((data, nonce))) => (StatusCode::OK, Json(serde_json::json!({
+            "encrypted_profile_data": data,
+            "nonce": nonce,
+        }))).into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "No profile data for this conversation"}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
 
 pub async fn get_me(
     headers: HeaderMap,

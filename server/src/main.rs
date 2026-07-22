@@ -5,7 +5,7 @@ use axum::{
     extract::State,
     http::{HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
-    routing::{get, post, delete, patch},
+    routing::{get, post, put, delete, patch},
     Router,
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -224,6 +224,8 @@ async fn main() {
         .route("/api/user/{username}", get(handlers::get_user_id))
         .route("/api/profile/{user_id}", get(handlers::get_profile))
         .route("/api/profile", patch(handlers::update_profile))
+        .route("/api/profile/conversation", put(handlers::upsert_conversation_profile))
+        .route("/api/profile/{target_user_id}/conversation/{conv_type}/{conv_id}", get(handlers::get_conversation_profile))
         .route("/api/admin/login", post(handlers::admin_login))
         .route("/api/admin/users", get(handlers::admin_list_users))
         .route("/api/admin/users/{user_id}", delete(handlers::admin_delete_user))

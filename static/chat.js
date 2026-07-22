@@ -248,8 +248,8 @@ loadProfileKeyCache();
 
 // Proactively send profile key to a DM conversation so the other user can see our PFP/banner immediately
 async function sendProfileKeySync(dmChannelId, conv) {
-    if (!myProfile || !myProfile.profile_picture_file_id || !myProfile.profile_picture_file_key) return;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!myProfile && !profileKeyCache[user.id + ':profile_data_key']) return;
     var identity = E2ECrypto.getIdentityKeyPair();
     if (!identity) return;
     // Get the other user's public key for DM encryption
@@ -272,21 +272,24 @@ async function sendProfileKeySync(dmChannelId, conv) {
     }
     if (!otherPubKey) return;
     try {
-        // Decrypt own PFP key from identity-key encrypted format
-        var rawPicKey = myProfile.profile_picture_file_key;
-        if (rawPicKey && rawPicKey.indexOf(':') > 0) {
-            var dk = E2ECrypto.decodeEncryptedFileKey(rawPicKey, identity.privateKey);
-            if (dk) rawPicKey = dk;
-        }
-        var encPicKey = E2ECrypto.encryptDm(rawPicKey, dmChannelId, identity.privateKey, otherPubKey);
         var payload = {
             type: 'profile_key_sync',
             dm_channel_id: dmChannelId,
-            profile_picture_file_id: myProfile.profile_picture_file_id,
-            encrypted_profile_key: encPicKey.ciphertext,
-            profile_key_nonce: encPicKey.nonce,
-            profile_key_message_nonce: encPicKey.messageNonce
         };
+        
+        // Share PFP key if available
+        if (myProfile && myProfile.profile_picture_file_id && myProfile.profile_picture_file_key) {
+            var rawPicKey = myProfile.profile_picture_file_key;
+            if (rawPicKey && rawPicKey.indexOf(':') > 0) {
+                var dk = E2ECrypto.decodeEncryptedFileKey(rawPicKey, identity.privateKey);
+                if (dk) rawPicKey = dk;
+            }
+            var encPicKey = E2ECrypto.encryptDm(rawPicKey, dmChannelId, identity.privateKey, otherPubKey);
+            payload.profile_picture_file_id = myProfile.profile_picture_file_id;
+            payload.encrypted_profile_key = encPicKey.ciphertext;
+            payload.profile_key_nonce = encPicKey.nonce;
+            payload.profile_key_message_nonce = encPicKey.messageNonce;
+        }
         // Also share banner key if available
         if (myProfile.profile_banner_file_id && myProfile.profile_banner_file_key) {
             var rawBannerKey = myProfile.profile_banner_file_key;
@@ -302,6 +305,15 @@ async function sendProfileKeySync(dmChannelId, conv) {
                 payload.banner_key_message_nonce = encBannerKey.messageNonce;
             }
         }
+        
+        // Share profile data key if cached (so recipient can decrypt description/nickname)
+        var pdKeyB64 = profileKeyCache[user.id + ':profile_data_key'];
+        if (pdKeyB64) {
+            var encPdKey = E2ECrypto.encryptDm(pdKeyB64, dmChannelId, identity.privateKey, otherPubKey);
+            payload.encrypted_profile_data_key = encPdKey.ciphertext;
+            payload.profile_data_key_nonce = encPdKey.nonce;
+        }
+        
         ws.send(JSON.stringify(payload));
     } catch (e) {
         console.warn('Failed to send profile key sync:', e);
@@ -364,6 +376,14 @@ async function broadcastProfileKeySyncToServer(serverId) {
                 payload.encrypted_banner_key = encBannerKey.ciphertext;
                 payload.banner_key_nonce = encBannerKey.nonce;
             }
+        }
+        
+        // Share profile data key if cached (so server members can decrypt description/nickname)
+        var pdKeyB64 = profileKeyCache[user.id + ':profile_data_key'];
+        if (pdKeyB64) {
+            var encPdKey = E2ECrypto.aeadEncrypt(pdKeyB64, serverKey);
+            payload.encrypted_profile_data_key = encPdKey.ciphertext;
+            payload.profile_data_key_nonce = encPdKey.nonce;
         }
         
         ws.send(JSON.stringify(payload));
@@ -4485,6 +4505,8 @@ function connectWebSocket(t) {
                         sendProfileKeySync(newConv.dm_channel_id, newConv);
                     }
                 }
+                // Upload per-conversation profile data for all conversations (including the new one)
+                try { await uploadCurrentProfileToConversations(); } catch (_) {}
                 break;
             case 'friend_removed':
                 // Filter out the DM conversation with the unfriended user
@@ -4556,6 +4578,18 @@ function connectWebSocket(t) {
                                     console.warn('Failed to decrypt banner key sync:', e);
                                 }
                             }
+                            // Decrypt and cache profile data key so we can decrypt description/nickname
+                            if (data.encrypted_profile_data_key && data.profile_data_key_nonce) {
+                                try {
+                                    var decPdKey = E2ECrypto.decryptDm(data.encrypted_profile_data_key, data.profile_data_key_nonce, data.dm_channel_id, kpSync.privateKey, otherPubKeySync);
+                                    if (decPdKey) {
+                                        profileKeyCache[data.user_id + ':profile_data_key'] = decPdKey;
+                                        scheduleProfileKeySave();
+                                    }
+                                } catch (e) {
+                                    console.warn('Failed to decrypt profile data key sync:', e);
+                                }
+                            }
                             // Re-render profile modal if open for this user
                             if (profileModalUserId === data.user_id) {
                                 var profileModal = document.getElementById('profile-modal');
@@ -4599,6 +4633,14 @@ function connectWebSocket(t) {
                                         scheduleProfileKeySave();
                                     }
                                 }
+                                // Decrypt and cache profile data key
+                                if (data.encrypted_profile_data_key && data.profile_data_key_nonce) {
+                                    var decPdKey = new TextDecoder().decode(E2ECrypto.aeadDecrypt(data.encrypted_profile_data_key, serverKeyForSync, data.profile_data_key_nonce));
+                                    if (decPdKey) {
+                                        profileKeyCache[data.user_id + ':profile_data_key'] = decPdKey;
+                                        scheduleProfileKeySave();
+                                    }
+                                }
                             }
                         } catch (e) {
                             console.warn('Failed to decrypt server profile key sync:', e);                          }
@@ -4613,29 +4655,62 @@ function connectWebSocket(t) {
                     if (data.profile_updated_at) {
                         profileUpdatedAt[data.user_id] = data.profile_updated_at;
                     }
-                    // Update our own profile in cache and localStorage
-                    if (data.user_id === user.id) {
-                        // Decrypt encrypted profile data with identity key (server cannot read it)
-                        var profileIdent = E2ECrypto.getIdentityKeyPair();
-                        var decryptedProfileUpdate = null;
-                        if (data.encrypted_profile_data && profileIdent) {
+                    
+                    // Try to decrypt the profile data — for the owner (identity key) or for others (cached key)
+                    var profileIdentForDec = E2ECrypto.getIdentityKeyPair();
+                    var decryptedProfileUpdate = null;
+                    
+                    // For own profile: decrypt encrypted_profile_data_key with identity key to get profile data key,
+                    // then decrypt encrypted_profile_data with the profile data key
+                    if (data.user_id === user.id && data.encrypted_profile_data && data.encrypted_profile_data_key && profileIdentForDec) {
+                        try {
+                            var decKeyB64 = E2ECrypto.decodeEncryptedFileKey(data.encrypted_profile_data_key, profileIdentForDec.privateKey);
+                            if (decKeyB64) {
+                                var profileDataKey = E2ECrypto.base64ToArrayBuffer(decKeyB64);
+                                var parts = data.encrypted_profile_data.split(':');
+                                if (parts.length === 2) {
+                                    decryptedProfileUpdate = E2ECrypto.decryptProfileData(parts[1], parts[0], new Uint8Array(profileDataKey));
+                                    // Cache the key for sharing
+                                    if (decryptedProfileUpdate) {
+                                        profileKeyCache[user.id + ':profile_data_key'] = decKeyB64;
+                                        scheduleProfileKeySave();
+                                    }
+                                }
+                            }
+                        } catch (e) {
+                            console.warn('Failed to decrypt own profile update with key:', e);
+                        }
+                    }
+                    
+                    // For other users: try cached profile data key
+                    if (data.user_id !== user.id && data.encrypted_profile_data) {
+                        var cachedKeyB64 = profileKeyCache[data.user_id + ':profile_data_key'];
+                        if (cachedKeyB64) {
                             try {
-                                var decB64 = E2ECrypto.decodeEncryptedFileKey(data.encrypted_profile_data, profileIdent.privateKey);
-                                if (decB64) {
-                                    var decStr = new TextDecoder().decode(E2ECrypto.base64ToArrayBuffer(decB64));
-                                    decryptedProfileUpdate = JSON.parse(decStr);
+                                var cachedKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(cachedKeyB64));
+                                var parts = data.encrypted_profile_data.split(':');
+                                if (parts.length === 2) {
+                                    decryptedProfileUpdate = E2ECrypto.decryptProfileData(parts[1], parts[0], cachedKey);
                                 }
                             } catch (e) {
-                                console.warn('Failed to decrypt own profile update:', e);
+                                console.warn('Failed to decrypt other user profile update:', e);
                             }
                         }
+                    }
+                    
+                    // Update our own profile in cache and localStorage
+                    if (data.user_id === user.id) {
                         if (decryptedProfileUpdate) {
                             user.display_name = decryptedProfileUpdate.display_name || user.display_name;
                             user.username_color = decryptedProfileUpdate.username_color || user.username_color;
+                            if (decryptedProfileUpdate.description !== undefined) user.description = decryptedProfileUpdate.description;
+                            if (decryptedProfileUpdate.nickname !== undefined) user.nickname = decryptedProfileUpdate.nickname;
                             if (myProfile) {
                                 myProfile.display_name = decryptedProfileUpdate.display_name;
                                 myProfile.username_color = decryptedProfileUpdate.username_color;
                                 myProfile.username_border_color = decryptedProfileUpdate.username_border_color;
+                                if (decryptedProfileUpdate.nickname !== undefined) myProfile.nickname = decryptedProfileUpdate.nickname;
+                                if (decryptedProfileUpdate.description !== undefined) myProfile.description = decryptedProfileUpdate.description;
                             }
                         }
                         user.profile_picture_file_id = data.profile_picture_file_id || user.profile_picture_file_id;
@@ -4648,12 +4723,15 @@ function connectWebSocket(t) {
                         updateSidebarFooter();
                     }
 
-                    // Update display name cache for all users
+                    // Update display name cache from decrypted profile data
+                    // (display_name, username_color, border_color are no longer sent as plaintext)
                     if (!userDisplayNameCache[data.user_id]) userDisplayNameCache[data.user_id] = {};
                     if (data.profile_picture_file_id !== undefined) userDisplayNameCache[data.user_id].profile_picture_file_id = data.profile_picture_file_id;
-                    if (data.display_name !== undefined) userDisplayNameCache[data.user_id].display_name = data.display_name;
-                    if (data.username_color !== undefined) userDisplayNameCache[data.user_id].username_color = data.username_color;
-                    if (data.username_border_color !== undefined) userDisplayNameCache[data.user_id].username_border_color = data.username_border_color;
+                    if (decryptedProfileUpdate) {
+                        if (decryptedProfileUpdate.display_name !== undefined) userDisplayNameCache[data.user_id].display_name = decryptedProfileUpdate.display_name;
+                        if (decryptedProfileUpdate.username_color !== undefined) userDisplayNameCache[data.user_id].username_color = decryptedProfileUpdate.username_color;
+                        if (decryptedProfileUpdate.username_border_color !== undefined) userDisplayNameCache[data.user_id].username_border_color = decryptedProfileUpdate.username_border_color;
+                    }
 
                     // Invalidate profile pic cache and profile key cache for this user
                     for (var pk in profilePicCache) {
@@ -6058,75 +6136,156 @@ async function handleEditedMessage(msg, mode) {
     const existing = list.querySelector('[data-message-id="' + msg.id + '"]');
     if (!existing) return;
 
-    const textEl = existing.querySelector('.text');
-    if (textEl && msg.encrypted_content && msg.nonce) {
-        try {
-            let decrypted;
-            if (mode === 'dm' && currentDmChannelId && currentDmOtherUser) {
-                const kp = E2ECrypto.getIdentityKeyPair();
-                if (!kp) return;
-                let otherPubKey;
-                try {
-                    const res = await authFetch('/api/identity/' + currentDmOtherUser.id);
-                    const data = await res.json();
-                    otherPubKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(data.identity_public_key));
-                } catch (e) {
-                    return;
+    if (!msg.encrypted_content || !msg.nonce) return;
+
+    try {
+        let decrypted = null;
+        
+        // Try DM decryption: use msg.dm_channel_id or currentDmChannelId,
+        // and fetch the sender's identity key (not currentDmOtherUser)
+        if (mode === 'dm') {
+            var dmChannelId = msg.dm_channel_id || currentDmChannelId;
+            if (dmChannelId) {
+                var kp = E2ECrypto.getIdentityKeyPair();
+                if (kp) {
+                    try {
+                        var senderPubRes = await authFetch('/api/identity/' + msg.sender_id);
+                        if (senderPubRes.ok) {
+                            var senderPubData = await senderPubRes.json();
+                            var senderPubKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(senderPubData.identity_public_key));
+                            decrypted = E2ECrypto.decryptDm(msg.encrypted_content, msg.nonce, dmChannelId, kp.privateKey, senderPubKey, msg.message_nonce);
+                        }
+                    } catch (_e) {}
                 }
-                decrypted = E2ECrypto.decryptDm(msg.encrypted_content, msg.nonce, currentDmChannelId, kp.privateKey, otherPubKey, msg.message_nonce);
-
-            } else if (currentChannelId && currentServerId) {
-                var editDecryptKey = E2ECrypto.getServerKey(currentServerId);
-                decrypted = editDecryptKey ? E2ECrypto.decryptMessage(msg.encrypted_content, msg.nonce, editDecryptKey) : null;
-
             }
-            if (decrypted) {
-                // Ensure the global emoji cache is loaded so renderEmojiText can find custom emojis
-                if (!emojiCache) {
-                    await loadEmojiCache();
+        }
+        
+        // Try channel decryption: use the server key from currentServerId
+        if (!decrypted && currentServerId) {
+            try {
+                var editDecryptKey = E2ECrypto.getServerKey(currentServerId);
+                if (editDecryptKey) {
+                    decrypted = E2ECrypto.decryptMessage(msg.encrypted_content, msg.nonce, editDecryptKey);
                 }
-                // Parse JSON payload to extract emoji refs (same as appendMessage/appendDmMessage)
-                let renderText = decrypted;
-                let extraEmojis = null;
-                try {
-                    const parsed = JSON.parse(decrypted);
-                    if (parsed && parsed.text !== undefined) {
-                        renderText = parsed.text || '';
-                        if (Array.isArray(parsed.emojis) && parsed.emojis.length > 0) {
-                            extraEmojis = {};
-                            for (const ref of parsed.emojis) {
-                                if (ref.name && ref.file_id && ref.file_key) {
-                                    extraEmojis[ref.name] = {
-                                        file_id: ref.file_id,
-                                        file_key: ref.file_key,
-                                        mime_type: ref.mime_type || 'image/png',
-                                    };
-                                }
-                            }
-                        }
-                    }
-                } catch (_) {}
-                // Preserve the time-hover span and render emoji text properly
-                const timeEl = textEl.querySelector('.time-hover');
-                const timeHtml = timeEl ? timeEl.outerHTML : '';
-                textEl.innerHTML = timeHtml + renderEmojiText(renderText, extraEmojis);
-                // Ensure the text element is visible (it might have been hidden during editing)
-                textEl.style.display = '';
-                // Add (edited) label only when decryption succeeds
-                const contentEl = existing.querySelector('.content');
-                if (contentEl) {
-                    let existingLabel = contentEl.querySelector('.edited-label');
-                    if (existingLabel) {
-                        if (!existingLabel.textContent) {
-                            existingLabel.textContent = '(edited)';
-                        }
-                    } else {
-                        contentEl.insertAdjacentHTML('beforeend', '<span class="edited-label">(edited)</span>');
+            } catch (_e) {}
+        }
+
+        if (!decrypted) return;
+
+        // Ensure the global emoji cache is loaded
+        if (!emojiCache) {
+            await loadEmojiCache();
+        }
+
+        // Parse JSON payload to extract text, emoji refs, GIF and sticker data
+        let renderText = decrypted;
+        let extraEmojis = null;
+        let editGifData = null;
+        let editStickerData = null;
+        try {
+            const parsed = JSON.parse(decrypted);
+            if (parsed && parsed.text !== undefined) {
+                renderText = parsed.text || '';
+            }
+            if (parsed && Array.isArray(parsed.emojis) && parsed.emojis.length > 0) {
+                extraEmojis = {};
+                for (const ref of parsed.emojis) {
+                    if (ref.name && ref.file_id && ref.file_key) {
+                        extraEmojis[ref.name] = {
+                            file_id: ref.file_id,
+                            file_key: ref.file_key,
+                            mime_type: ref.mime_type || 'image/png',
+                        };
                     }
                 }
+            }
+            // Preserve GIF and sticker data from the edit payload
+            if (parsed && parsed.type === 'gif') {
+                editGifData = parsed;
+            } else if (parsed && parsed.type === 'sticker') {
+                editStickerData = parsed;
             }
         } catch (_) {}
-    }
+
+        // Preserve the time-hover span and render emoji text
+        const timeEl = existing.querySelector('.text .time-hover') || existing.querySelector('.time-hover');
+        const timeHtml = timeEl ? timeEl.outerHTML : '';
+
+        // Update or create the text element
+        let textEl = existing.querySelector('.text');
+        if (textEl) {
+            textEl.innerHTML = timeHtml + renderEmojiText(renderText, extraEmojis);
+            textEl.style.display = '';
+        } else if (renderText) {
+            // If no text element exists but the edit added text, create one                    contentEl = existing.querySelector('.content');
+                    if (contentEl) {
+                        // Find where to insert: before the sticker/gif/file container
+                        var firstMedia = contentEl.querySelector('.gif-message, .sticker-message, .file-preview, .file-card');
+                        var newTextDiv = document.createElement('div');
+                        newTextDiv.className = 'text';
+                        newTextDiv.innerHTML = timeHtml + renderEmojiText(renderText, extraEmojis);
+                        if (firstMedia) {
+                            contentEl.insertBefore(newTextDiv, firstMedia);
+                        } else {
+                            contentEl.insertAdjacentElement('afterbegin', newTextDiv);
+                        }
+                        textEl = newTextDiv;
+                    }
+                }
+
+        // Update GIF container if the edit payload has GIF data
+        var contentEl = contentEl || existing.querySelector('.content');
+        if (editGifData && editGifData.url) {
+            var gifEl = existing.querySelector('.gif-message');
+            if (gifEl) {
+                var img = gifEl.querySelector('img');
+                if (img) {
+                    img.src = editGifData.url;
+                    img.alt = editGifData.alt || 'GIF';
+                }
+            } else if (contentEl) {
+                // Create GIF container if it doesn't exist
+                var newGifDiv = document.createElement('div');
+                newGifDiv.className = 'gif-message';
+                newGifDiv.innerHTML = '<img src="' + escapeHtml(editGifData.url) + '" alt="' + escapeHtml(editGifData.alt || 'GIF') + '" loading="lazy" style="max-width:300px;max-height:300px;border-radius:8px;cursor:pointer">';
+                contentEl.appendChild(newGifDiv);
+            }
+        }
+
+        // Update sticker container if the edit payload has sticker data
+        if (editStickerData && editStickerData.file_id) {
+            var stickerEl = existing.querySelector('.sticker-message');
+            if (stickerEl) {
+                stickerEl.setAttribute('data-file-id', editStickerData.file_id);
+                stickerEl.setAttribute('data-file-key', editStickerData.file_key || '');
+                stickerEl.setAttribute('data-mime-type', editStickerData.mime_type || 'image/png');
+                // Reload sticker preview
+                stickerEl.innerHTML = '';
+                loadStickerPreview(stickerEl, editStickerData);
+            } else if (contentEl) {
+                // Create sticker container if it doesn't exist
+                var newStickerDiv = document.createElement('div');
+                newStickerDiv.className = 'sticker-message';
+                newStickerDiv.setAttribute('data-file-id', editStickerData.file_id);
+                newStickerDiv.setAttribute('data-file-key', editStickerData.file_key || '');
+                newStickerDiv.setAttribute('data-mime-type', editStickerData.mime_type || 'image/png');
+                contentEl.appendChild(newStickerDiv);
+                loadStickerPreview(newStickerDiv, editStickerData);
+            }
+        }
+
+        // Add (edited) label
+        if (contentEl) {
+            let existingLabel = contentEl.querySelector('.edited-label');
+            if (existingLabel) {
+                if (!existingLabel.textContent) {
+                    existingLabel.textContent = '(edited)';
+                }
+            } else {
+                contentEl.insertAdjacentHTML('beforeend', '<span class="edited-label">(edited)</span>');
+            }
+        }
+    } catch (_) {}
 }
 
 function handleDeletedMessage(messageId) {
@@ -7679,6 +7838,9 @@ async function joinServer() {
                 if (ok) break;
                 await new Promise(r => setTimeout(r, 1000));
             }
+
+            // Upload per-conversation profile data for the new server
+            try { await uploadCurrentProfileToConversations(); } catch (_) {}
 
             selectServer(serverData.id);
         } else {
@@ -12153,6 +12315,88 @@ function updateSidebarFooter() {
 }
 
 // Load own profile from server
+// Upload per-conversation encrypted profile data so any user with access
+// to a DM or server channel can decrypt the user's current profile.
+// Stores the ACTUAL profile data (description, nickname, colors) re-encrypted
+// with each conversation's key so a single fetch + decrypt gives everything.
+async function uploadConversationProfiles(identity, profileDataJson) {
+    if (!dmConversations || !servers) return;
+    
+    // For each DM conversation: encrypt profile data JSON directly with DM key, upload
+    for (var i = 0; i < dmConversations.length; i++) {
+        var conv = dmConversations[i];
+        if (!conv || !conv.dm_channel_id) continue;
+        try {
+            var otherPubKey = null;
+            if (conv.other_public_key) {
+                otherPubKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(conv.other_public_key));
+            }
+            if (!otherPubKey) {
+                var idRes = await authFetch('/api/identity/' + conv.other_user_id);
+                if (idRes.ok) {
+                    var idData = await idRes.json();
+                    otherPubKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(idData.identity_public_key));
+                }
+            }
+            if (!otherPubKey || !identity) continue;
+            var dmKey = E2ECrypto.getDmKey(conv.dm_channel_id, identity.privateKey, otherPubKey);
+            // Encrypt the profile data JSON directly with the DM key (single-step decryption)
+            var encDm = E2ECrypto.aeadEncrypt(profileDataJson, dmKey);
+            await authFetch('/api/profile/conversation', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    conversation_type: 'dm',
+                    conversation_id: conv.dm_channel_id,
+                    encrypted_profile_data: encDm.ciphertext,
+                    nonce: encDm.nonce,
+                }),
+            });
+        } catch (e) {
+            console.warn('Failed to upload DM profile for', conv.dm_channel_id, e);
+        }
+    }
+    
+    // For each server: encrypt profile data JSON directly with server key, upload
+    for (var s = 0; s < servers.length; s++) {
+        var serverId = servers[s].id;
+        var serverKey = E2ECrypto.getServerKey(serverId);
+        if (!serverKey) continue;
+        try {
+            var encSrv = E2ECrypto.aeadEncrypt(profileDataJson, serverKey);
+            await authFetch('/api/profile/conversation', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    conversation_type: 'channel',
+                    conversation_id: serverId,
+                    encrypted_profile_data: encSrv.ciphertext,
+                    nonce: encSrv.nonce,
+                }),
+            });
+        } catch (e) {
+            console.warn('Failed to upload server profile for', serverId, e);
+        }
+    }
+}
+
+// Helper: build profile data JSON from current myProfile and upload to all conversations
+async function uploadCurrentProfileToConversations() {
+    if (!myProfile) return;
+    var ident = E2ECrypto.getIdentityKeyPair();
+    if (!ident) return;
+    var profileData = {
+        display_name: myProfile.display_name || (user && user.display_name) || (user && user.username) || '',
+        nickname: myProfile.nickname || '',
+        description: myProfile.description || '',
+        username_color: myProfile.username_color || '#4fc3f7',
+        username_border_color: myProfile.username_border_color || '',
+        profile_background_color: myProfile.profile_background_color || '',
+    };
+    var profileDataJson = JSON.stringify(profileData);
+    await uploadConversationProfiles(ident, profileDataJson);
+}
+
 async function loadMyProfile() {
     if (!user || !user.id) return;
     try {
@@ -12160,21 +12404,46 @@ async function loadMyProfile() {
         if (!res.ok) return;
         var data = await res.json();
         
-        // Decrypt encrypted profile data with identity key
+        // Decrypt encrypted profile data with identity key encrypted_profile_data_key
         if (data.encrypted_profile_data) {
             var ident = E2ECrypto.getIdentityKeyPair();
             if (ident) {
                 try {
-                    var decB64 = E2ECrypto.decodeEncryptedFileKey(data.encrypted_profile_data, ident.privateKey);
-                    if (decB64) {
-                        var decStr = new TextDecoder().decode(E2ECrypto.base64ToArrayBuffer(decB64));
-                        var decrypted = JSON.parse(decStr);
-                        if (decrypted.display_name) data.display_name = decrypted.display_name;
-                        if (decrypted.nickname) data.nickname = decrypted.nickname;
-                        if (decrypted.description) data.description = decrypted.description;
-                        if (decrypted.username_color) data.username_color = decrypted.username_color;
-                        if (decrypted.username_border_color) data.username_border_color = decrypted.username_border_color;
-                        if (decrypted.profile_background_color) data.profile_background_color = decrypted.profile_background_color;
+                    // First try the new approach: decrypt the profile data key with identity key,
+                    // then decrypt the profile data with the key
+                    if (data.encrypted_profile_data_key) {
+                        var decKeyB64 = E2ECrypto.decodeEncryptedFileKey(data.encrypted_profile_data_key, ident.privateKey);
+                        if (decKeyB64) {
+                            var profileDataKeyLV = E2ECrypto.base64ToArrayBuffer(decKeyB64);
+                            var parts = data.encrypted_profile_data.split(':');
+                            if (parts.length === 2) {
+                                var decrypted = E2ECrypto.decryptProfileData(parts[1], parts[0], new Uint8Array(profileDataKeyLV));
+                                if (decrypted) {
+                                    if (decrypted.display_name) data.display_name = decrypted.display_name;
+                                    if (decrypted.nickname) data.nickname = decrypted.nickname;
+                                    if (decrypted.description) data.description = decrypted.description;
+                                    if (decrypted.username_color) data.username_color = decrypted.username_color;
+                                    if (decrypted.username_border_color) data.username_border_color = decrypted.username_border_color;
+                                    if (decrypted.profile_background_color) data.profile_background_color = decrypted.profile_background_color;
+                                    // Cache the key for sharing
+                                    profileKeyCache[user.id + ':profile_data_key'] = decKeyB64;
+                                    scheduleProfileKeySave();
+                                }
+                            }
+                        }
+                    } else {
+                        // Fallback: old approach — decrypt directly with identity key
+                        var decB64 = E2ECrypto.decodeEncryptedFileKey(data.encrypted_profile_data, ident.privateKey);
+                        if (decB64) {
+                            var decStr = new TextDecoder().decode(E2ECrypto.base64ToArrayBuffer(decB64));
+                            var decrypted = JSON.parse(decStr);
+                            if (decrypted.display_name) data.display_name = decrypted.display_name;
+                            if (decrypted.nickname) data.nickname = decrypted.nickname;
+                            if (decrypted.description) data.description = decrypted.description;
+                            if (decrypted.username_color) data.username_color = decrypted.username_color;
+                            if (decrypted.username_border_color) data.username_border_color = decrypted.username_border_color;
+                            if (decrypted.profile_background_color) data.profile_background_color = decrypted.profile_background_color;
+                        }
                     }
                 } catch (e) {
                     console.warn('Failed to decrypt own profile:', e);
@@ -12868,19 +13137,139 @@ async function openProfileModal(userId) {
         }
         var data = await res.json();
         
-        // Try to decrypt encrypted profile data if this is our own profile
+        // Try to decrypt encrypted profile data
         var decrypted = null;
-        if (data.encrypted_profile_data && userId === user.id) {
-            var identityForDecrypt = E2ECrypto.getIdentityKeyPair();
-            if (identityForDecrypt) {
+        if (data.encrypted_profile_data) {
+            var profileDataKeyB64 = null;
+            var identityForDecrypt = null;
+            
+            if (userId === user.id) {
+                // Own profile — decrypt encrypted_profile_data_key with identity key
+                identityForDecrypt = E2ECrypto.getIdentityKeyPair();
+                if (identityForDecrypt && data.encrypted_profile_data_key) {
+                    try {
+                        profileDataKeyB64 = E2ECrypto.decodeEncryptedFileKey(data.encrypted_profile_data_key, identityForDecrypt.privateKey);
+                    } catch (e) {}
+                }
+                if (!profileDataKeyB64) {
+                    // Fallback: old approach — decrypt directly with identity key
+                    try {
+                        var decryptedB64 = E2ECrypto.decodeEncryptedFileKey(data.encrypted_profile_data, identityForDecrypt.privateKey);
+                        if (decryptedB64) {
+                            var decryptedStr = new TextDecoder().decode(E2ECrypto.base64ToArrayBuffer(decryptedB64));
+                            decrypted = JSON.parse(decryptedStr);
+                        }
+                    } catch (e) {
+                        console.warn('Failed to decrypt profile data (old approach)', e);
+                    }
+                }
+            } else {
+                // Other user's profile — try per-conversation profile data first
+                // This is the most reliable approach since the data is stored in the DB
+                // encrypted with the conversation key.
                 try {
-                    var decryptedB64 = E2ECrypto.decodeEncryptedFileKey(data.encrypted_profile_data, identityForDecrypt.privateKey);
-                    if (decryptedB64) {
-                        var decryptedStr = new TextDecoder().decode(E2ECrypto.base64ToArrayBuffer(decryptedB64));
-                        decrypted = JSON.parse(decryptedStr);
+                    var convKey = null;
+                    
+                    // Try DM conversation first
+                    var dmConv = dmConversations.find(function(c) { return c.other_user_id === userId; });
+                    if (dmConv && dmConv.dm_channel_id) {
+                        var identDm = E2ECrypto.getIdentityKeyPair();
+                        if (identDm) {
+                            var otherPubKey = null;
+                            if (dmConv.other_public_key) {
+                                otherPubKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(dmConv.other_public_key));
+                            } else {
+                                try {
+                                    var _idRes = await fetch('/api/identity/' + encodeURIComponent(userId), {
+                                        headers: { 'Authorization': 'Bearer ' + token() },
+                                    });
+                                    if (_idRes.ok) {
+                                        var _idData = await _idRes.json();
+                                        otherPubKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(_idData.identity_public_key));
+                                    }
+                                } catch (_) {}
+                            }
+                            if (otherPubKey) {
+                                convKey = E2ECrypto.getDmKey(dmConv.dm_channel_id, identDm.privateKey, otherPubKey);
+                            }
+                        }
+                    }
+                    
+                    if (!decrypted && dmConv && dmConv.dm_channel_id && convKey) {
+                        try {
+                            convId = dmConv.dm_channel_id;
+                            convType = 'dm';
+                            var convRes = await fetch('/api/profile/' + encodeURIComponent(userId) + '/conversation/' + convType + '/' + encodeURIComponent(convId), {
+                                headers: { 'Authorization': 'Bearer ' + token() },
+                            });
+                            if (convRes.ok) {
+                                var convData = await convRes.json();
+                                if (convData.encrypted_profile_data && convData.nonce) {
+                                    var decRaw = E2ECrypto.aeadDecrypt(convData.encrypted_profile_data, convKey, convData.nonce);
+                                    if (decRaw) {
+                                        var decStr = new TextDecoder().decode(decRaw);
+                                        try {
+                                            decrypted = JSON.parse(decStr);
+                                        } catch (e) {
+                                            console.warn('Failed to parse DM conversation profile JSON:', e);
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (e) {
+                            console.warn('Failed to fetch DM conversation profile:', e);
+                        }
+                    }
+                    
+                    // If no DM result, try each server until one succeeds
+                    if (!decrypted && servers.length > 0) {
+                        var identitySrv = E2ECrypto.getIdentityKeyPair();
+                        for (var si = 0; si < servers.length && !decrypted; si++) {
+                            var svKey = E2ECrypto.getServerKey(servers[si].id);
+                            if (!svKey) continue;
+                            try {
+                                var srvRes = await fetch('/api/profile/' + encodeURIComponent(userId) + '/conversation/channel/' + encodeURIComponent(servers[si].id), {
+                                    headers: { 'Authorization': 'Bearer ' + token() },
+                                });
+                                if (srvRes.ok) {
+                                    var srvData = await srvRes.json();
+                                    if (srvData.encrypted_profile_data && srvData.nonce) {
+                                        var srvRaw = E2ECrypto.aeadDecrypt(srvData.encrypted_profile_data, svKey, srvData.nonce);
+                                        if (srvRaw) {
+                                            var srvStr = new TextDecoder().decode(srvRaw);
+                                            try {
+                                                decrypted = JSON.parse(srvStr);
+                                            } catch (e) {
+                                                console.warn('Failed to parse server conversation profile JSON:', e);
+                                            }
+                                        }
+                                    }
+                                }
+                            } catch (e) {
+                                console.warn('Failed to fetch server conversation profile:', e);
+                            }
+                        }
                     }
                 } catch (e) {
-                    console.warn('Failed to decrypt profile data', e);
+                    console.warn('Failed to fetch per-conversation profile:', e);
+                }
+                
+                // Fallback: try cached profile data key from real-time sync
+                if (!decrypted) {
+                    profileDataKeyB64 = profileKeyCache[userId + ':profile_data_key'];
+                }
+            }
+            
+            // Decrypt with profile data key (fallback path)
+            if (!decrypted && profileDataKeyB64) {
+                try {
+                    var profileKeyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(profileDataKeyB64));
+                    var parts = data.encrypted_profile_data.split(':');
+                    if (parts.length === 2) {
+                        decrypted = E2ECrypto.decryptProfileData(parts[1], parts[0], profileKeyBytes);
+                    }
+                } catch (e) {
+                    console.warn('Failed to decrypt profile data with key:', e);
                 }
             }
         }
@@ -13508,31 +13897,34 @@ async function saveProfile() {
             profile_background_color: bgColor
         };
         
-        // Encrypt ALL profile fields with identity private key so server cannot read any profile data
+        // Generate a dedicated profile data key — this can be shared with friends
+        // via DM-encrypted profile_key_sync messages so they can decrypt the
+        // encrypted_profile_data blob and see description/nickname.
         var identityForKeys = E2ECrypto.getIdentityKeyPair();
         if (!identityForKeys) {
             statusEl.textContent = 'Identity key not found. Please log in again.';
             statusEl.style.color = 'var(--danger)';
             return;
         }
+        var profileDataKey = E2ECrypto.generateProfileDataKey();
         var profileDataJson = JSON.stringify(profileData);
-        var profileDataB64 = E2ECrypto.arrayBufferToBase64(new TextEncoder().encode(profileDataJson));
-        var encryptedProfileData = E2ECrypto.encodeEncryptedFileKey(profileDataB64, identityForKeys.privateKey);
         
-        // Build API request — send both encrypted data AND plaintext fields.
-        // The encrypted blob lets the owner re-decrypt on other devices.
-        // The plaintext fields let other users see the profile (they cannot
-        // decrypt the identity-key-encrypted blob). This mirrors how PFP/banner
-        // send both the identity-key-encrypted file key AND share it through
-        // DM-encrypted profile_key_sync messages.
+        // Encrypt profile data with the dedicated key (this is what friends will decrypt)
+        var encrypted = E2ECrypto.encryptProfileData(profileDataJson, profileDataKey);
+        
+        // Encrypt the profile data key with identity key for own retrieval on other devices
+        // (only the owner has the private key to decrypt this)
+        var profileDataKeyB64 = E2ECrypto.arrayBufferToBase64(profileDataKey);
+        var encryptedProfileDataKey = E2ECrypto.encodeEncryptedFileKey(profileDataKeyB64, identityForKeys.privateKey);
+        
+        // Build the encrypted_profile_data as nonce:ciphertext (same format as encodeEncryptedFileKey so existing code works)
+        var encryptedProfileData = encrypted.nonce + ':' + encrypted.ciphertext;
+        
+        // Build API request — send ONLY encrypted data + encrypted key.
+        // No plaintext profile fields are sent to the server.
         var body = {
             encrypted_profile_data: encryptedProfileData,
-            display_name: displayName,
-            nickname: nickname,
-            description: description,
-            username_color: color,
-            username_border_color: borderColor,
-            profile_background_color: bgColor
+            encrypted_profile_data_key: encryptedProfileDataKey
         };
         
         // Handle banner and PFP uploads — encrypt file keys with identity key so
@@ -13562,6 +13954,13 @@ async function saveProfile() {
         
         statusEl.textContent = 'Profile saved!';
         statusEl.style.color = 'var(--success)';
+        
+        // Upload per-conversation encrypted profile data so other users can decrypt
+        try {
+            await uploadConversationProfiles(identityForKeys, profileDataJson);
+        } catch (e) {
+            console.warn('Failed to upload conversation profiles:', e);
+        }
         
         // Reload profile data and explicitly update the sidebar footer
         await loadMyProfile();

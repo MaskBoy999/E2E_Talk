@@ -561,6 +561,20 @@ impl Database {
         // user_key_escrow) and migrate escrow to users table columns
         let _ = conn.execute_batch(include_str!("../migrations/023_streamlined_cleanup.sql"));
 
+        // Migration P1.5: conversation_profile_data — per-conversation encrypted profile data
+        // so any user with access to a DM/channel can decrypt the user's current profile.
+        let _ = conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS conversation_profile_data (
+                user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                conversation_type TEXT NOT NULL,
+                conversation_id TEXT NOT NULL,
+                encrypted_profile_data TEXT NOT NULL,
+                nonce TEXT NOT NULL,
+                updated_at TEXT DEFAULT '',
+                PRIMARY KEY (user_id, conversation_type, conversation_id)
+            );"
+        );
+
         // Re-create tables that are still used by the codebase but were dropped by migration 022/023
         // notification_sounds: used for cross-device notification sound sync
         let _ = conn.execute_batch(
@@ -673,7 +687,7 @@ impl Database {
         .map_err(|_| "User not found".to_string())
     }
 
-    pub fn get_user_profile(&self, id: &str) -> Result<(String, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>), String> {
+    pub fn get_user_profile(&self, id: &str) -> Result<(String, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
 
         // Build column list dynamically — check which columns exist
@@ -694,29 +708,28 @@ impl Database {
         let has_border = *present.get("username_border_color").unwrap_or(&false);
         let has_banner = *present.get("profile_banner_file_id").unwrap_or(&false);
         let has_banner_key = *present.get("profile_banner_file_key").unwrap_or(&false);
-        let has_desc = *present.get("description").unwrap_or(&false);
-        let has_nick = *present.get("nickname").unwrap_or(&false);
+        // description/nickname removed — use encrypted_profile_data instead
         let has_color = *present.get("username_color").unwrap_or(&false);
 
-        let sql = if has_border && has_banner && has_banner_key && has_desc && has_nick {
+        let sql = if has_border && has_banner && has_banner_key {
             format!(
                 "SELECT id, username, display_name, profile_picture_file_id, profile_picture_file_key,
                         username_color, username_border_color,
-                        profile_banner_file_id, profile_banner_file_key, description, nickname
+                        profile_banner_file_id, profile_banner_file_key
                  FROM users WHERE id = ?1"
             )
         } else if has_color && has_border {
             format!(
                 "SELECT id, username, display_name, profile_picture_file_id, profile_picture_file_key,
                         username_color, username_border_color,
-                        NULL as banner_id, NULL as banner_key, '' as descr, '' as nick
+                        NULL as banner_id, NULL as banner_key
                  FROM users WHERE id = ?1"
             )
         } else {
             format!(
                 "SELECT id, username, display_name, profile_picture_file_id, profile_picture_file_key,
                         NULL as color, NULL as border,
-                        NULL as banner_id, NULL as banner_key, '' as descr, '' as nick
+                        NULL as banner_id, NULL as banner_key
                  FROM users WHERE id = ?1"
             )
         };
@@ -732,57 +745,9 @@ impl Database {
                 row.get::<_, Option<String>>(6)?,
                 row.get::<_, Option<String>>(7)?,
                 row.get::<_, Option<String>>(8)?,
-                row.get::<_, Option<String>>(9)?,
-                row.get::<_, Option<String>>(10)?,
             ))
         })
         .map_err(|_| "User not found".to_string())
-    }
-
-    pub fn update_display_name(&self, user_id: &str, display_name: &str) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "UPDATE users SET display_name = ?1 WHERE id = ?2",
-            params![display_name, user_id],
-        )
-        .map_err(|e| e.to_string())?;
-        // Update timestamp
-        conn.execute(
-            "UPDATE users SET profile_updated_at = datetime('now') WHERE id = ?1",
-            params![user_id],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
-    pub fn update_username_color(&self, user_id: &str, color: &str) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "UPDATE users SET username_color = ?1 WHERE id = ?2",
-            params![color, user_id],
-        )
-        .map_err(|e| e.to_string())?;
-        conn.execute(
-            "UPDATE users SET profile_updated_at = datetime('now') WHERE id = ?1",
-            params![user_id],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
-    pub fn update_username_border_color(&self, user_id: &str, border_color: &str) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "UPDATE users SET username_border_color = ?1 WHERE id = ?2",
-            params![border_color, user_id],
-        )
-        .map_err(|e| e.to_string())?;
-        conn.execute(
-            "UPDATE users SET profile_updated_at = datetime('now') WHERE id = ?1",
-            params![user_id],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(())
     }
 
     pub fn update_profile_picture(&self, user_id: &str, file_id: Option<&str>, file_key: Option<&str>) -> Result<(), String> {
@@ -815,61 +780,26 @@ impl Database {
         Ok(())
     }
 
-    pub fn update_description(&self, user_id: &str, description: &str) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "UPDATE users SET description = ?1 WHERE id = ?2",
-            params![description, user_id],
-        )
-        .map_err(|e| e.to_string())?;
-        conn.execute(
-            "UPDATE users SET profile_updated_at = datetime('now') WHERE id = ?1",
-            params![user_id],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(())
-    }
+    // description/nickname no longer stored as plaintext — use encrypted_profile_data
 
-    pub fn save_encrypted_profile(&self, user_id: &str, encrypted_data: &str, salt: &str, nonce: &str) -> Result<(), String> {
+    pub fn save_encrypted_profile(&self, user_id: &str, encrypted_data: &str, salt: &str, nonce: &str, encrypted_data_key: Option<&str>) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "UPDATE users SET encrypted_profile_data = ?1, encrypted_profile_salt = ?2, encrypted_profile_nonce = ?3 WHERE id = ?4",
-            params![encrypted_data, salt, nonce, user_id],
-        )
-        .map_err(|e| e.to_string())?;
-        conn.execute(
-            "UPDATE users SET profile_updated_at = datetime('now') WHERE id = ?1",
-            params![user_id],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
-    pub fn get_encrypted_profile(&self, user_id: &str) -> Result<Option<(String, String, String)>, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let result = conn.query_row(
-            "SELECT encrypted_profile_data, encrypted_profile_salt, encrypted_profile_nonce FROM users WHERE id = ?1",
-            params![user_id],
-            |row| Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            )),
-        );
-        match result {
-            Ok((data, salt, nonce)) => Ok(Some((data, salt, nonce))),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e.to_string()),
+        match encrypted_data_key {
+            Some(key) => {
+                conn.execute(
+                    "UPDATE users SET encrypted_profile_data = ?1, encrypted_profile_salt = ?2, encrypted_profile_nonce = ?3, encrypted_profile_data_key = ?4 WHERE id = ?5",
+                    params![encrypted_data, salt, nonce, key, user_id],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            None => {
+                conn.execute(
+                    "UPDATE users SET encrypted_profile_data = ?1, encrypted_profile_salt = ?2, encrypted_profile_nonce = ?3 WHERE id = ?4",
+                    params![encrypted_data, salt, nonce, user_id],
+                )
+                .map_err(|e| e.to_string())?;
+            }
         }
-    }
-
-    pub fn update_nickname(&self, user_id: &str, nickname: &str) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "UPDATE users SET nickname = ?1 WHERE id = ?2",
-            params![nickname, user_id],
-        )
-        .map_err(|e| e.to_string())?;
         conn.execute(
             "UPDATE users SET profile_updated_at = datetime('now') WHERE id = ?1",
             params![user_id],
@@ -878,19 +808,50 @@ impl Database {
         Ok(())
     }
 
-    pub fn update_profile_background_color(&self, user_id: &str, color: &str) -> Result<(), String> {
+    pub fn get_encrypted_profile(&self, user_id: &str) -> Result<Option<(String, String, String, String)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "UPDATE users SET profile_background_color = ?1 WHERE id = ?2",
-            params![color, user_id],
-        )
-        .map_err(|e| e.to_string())?;
-        conn.execute(
-            "UPDATE users SET profile_updated_at = datetime('now') WHERE id = ?1",
-            params![user_id],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(())
+        // Check if encrypted_profile_data_key column exists
+        let key_col_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('users') WHERE name = 'encrypted_profile_data_key'",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        
+        if key_col_exists {
+            let result = conn.query_row(
+                "SELECT encrypted_profile_data, encrypted_profile_salt, encrypted_profile_nonce, encrypted_profile_data_key FROM users WHERE id = ?1",
+                params![user_id],
+                |row| Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                )),
+            );
+            match result {
+                Ok((data, salt, nonce, key)) => Ok(Some((data, salt, nonce, key))),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(e.to_string()),
+            }
+        } else {
+            let result = conn.query_row(
+                "SELECT encrypted_profile_data, encrypted_profile_salt, encrypted_profile_nonce FROM users WHERE id = ?1",
+                params![user_id],
+                |row| Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                )),
+            );
+            match result {
+                Ok((data, salt, nonce)) => Ok(Some((data, salt, nonce, String::new()))),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(e.to_string()),
+            }
+        }
     }
 
     pub fn get_profile_updated_at(&self, user_id: &str) -> Result<String, String> {
@@ -913,6 +874,31 @@ impl Database {
         )
         .map(|c| c.unwrap_or_else(|| "#16213e".to_string()))
         .map_err(|_| "User not found".to_string())
+    }
+
+    pub fn upsert_conversation_profile(&self, user_id: &str, conv_type: &str, conv_id: &str, encrypted_data: &str, nonce: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT OR REPLACE INTO conversation_profile_data (user_id, conversation_type, conversation_id, encrypted_profile_data, nonce, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))",
+            params![user_id, conv_type, conv_id, encrypted_data, nonce],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn get_conversation_profile(&self, user_id: &str, conv_type: &str, conv_id: &str) -> Result<Option<(String, String)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let result = conn.query_row(
+            "SELECT encrypted_profile_data, nonce FROM conversation_profile_data WHERE user_id = ?1 AND conversation_type = ?2 AND conversation_id = ?3",
+            params![user_id, conv_type, conv_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        );
+        match result {
+            Ok(val) => Ok(Some(val)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
     }
 
     pub fn get_password_hash(&self, username: &str) -> Result<String, String> {
@@ -1842,6 +1828,18 @@ impl Database {
             .query_row(
                 "SELECT COUNT(*) FROM friendships WHERE user_id_a = ?1 AND user_id_b = ?2",
                 params![a, b],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(count > 0)
+    }
+
+    pub fn is_member_of_dm(&self, user_id: &str, dm_channel_id: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dm_channels WHERE id = ?1 AND (user_a = ?2 OR user_b = ?2)",
+                params![dm_channel_id, user_id],
                 |row| row.get(0),
             )
             .map_err(|e| e.to_string())?;

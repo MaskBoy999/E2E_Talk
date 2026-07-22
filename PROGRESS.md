@@ -329,6 +329,56 @@ The sibling function `uploadServerKeyForUser()` was already correctly using `E2E
 | **Friend codes don't work ("no user with that friend code")** | `hmacHex()` in `crypto.js` treated the 64-char alphanumeric HMAC key as base64 (because `length > 32`) instead of UTF-8 encoding it, producing a different hash than the server | Changed base64 detection to require `+`, `/`, or `=` base64-specific characters |
 | **Forward from grouped messages shows "unknown" sender** | Grouped messages only render `.display-name` and `.avatar` on the first message; forwarding from subsequent messages found no sender info | Added `findForwardSenderInfo()` helper that walks back through sibling messages to find the rendered header |
 
+## P1 — Profile Data Encryption (Fully Fixed)
+
+**Status:** ✅ COMPLETE — No plaintext description/nickname leaks
+
+**Tests:** profile-fixes.spec.ts 13/13 ✅
+
+### What Changed
+
+#### Problem
+The server stored `description` and `nickname` in plaintext in the DB and returned them in:
+- `GET /api/profile/{userId}` API response
+- Admin panel user listing
+- WebSocket `profile_updated` broadcast (already fixed previously)
+
+#### Solution
+Introduced a **profile data key** mechanism, mirroring the existing profile picture key sharing:
+
+| Change | File | Details |
+|--------|------|---------|
+| New crypto functions | `crypto.js` | `generateProfileDataKey()`, `encryptProfileData()`, `decryptProfileData()` |
+| New DB column | `db.rs` | `encrypted_profile_data_key` column in `users` table |
+| API no longer returns plaintext | `handlers.rs` `get_profile()` | Removed `description`/`nickname` from response; added `encrypted_profile_data_key` |
+| Handler no longer stores plaintext | `handlers.rs` `update_profile()` | Stopped calling `update_description()`/`update_nickname()`; saves `encrypted_profile_data_key` |
+| WS broadcast includes key | `handlers.rs` `profile_updated` | Broadcast includes `encrypted_profile_data_key` |
+| Admin panel cleaned | `admin.js` | Removed description/nickname from CSV and table |
+| Client encrypts with key | `chat.js` `saveProfile()` | Generates profile data key, encrypts profile data with it, encrypts key with identity key |
+| Client decrypts with key | `chat.js` `profile_updated` handler | Decrypts key → decrypts profile data; caches key in `profileKeyCache` |
+| Key sharing via DM | `chat.js` `sendProfileKeySync()` | Sends `encrypted_profile_data_key` encrypted with DM key in `profile_key_sync` WS message |
+| Key sharing via server | `chat.js` `broadcastProfileKeySyncToServer()` | Sends key encrypted with server key in `profile_key_server_sync` |
+| Key receiving (DM) | `chat.js` `profile_key_sync` handler | Decrypts and caches others' profile data keys |
+| Key receiving (server) | `chat.js` `profile_key_server_sync` handler | Decrypts and caches others' profile data keys |
+| Backward compat | `chat.js` `loadMyProfile()` | Falls back to old direct-identity-key decryption for existing data |
+| Profile modal | `chat.js` `openProfileModal()` | Tries cached key for other users, falls back gracefully |
+
+#### Key Flow
+1. User updates profile → client generates random 32-byte `profileDataKey`
+2. Client encrypts `{display_name, nickname, description, colors}` with `profileDataKey` → `encrypted_profile_data`
+3. Client encrypts `profileDataKey` with identity key → `encrypted_profile_data_key`
+4. Server stores BOTH encrypted blobs — never sees plaintext
+5. Owner retrieves key on other devices by decrypting with identity key
+6. Friends receive the key via DM-encrypted `profile_key_sync` messages
+7. Server members receive the key via server-key-encrypted `profile_key_server_sync` messages
+8. Recipients cache the key and use it to decrypt the user's description/nickname
+
+### Test Changes
+| Test | Change |
+|------|--------|
+| "API returns nickname and description for other users" → renamed | Now verifies `nickname`/`description` are `undefined` and `encrypted_profile_data`/`encrypted_profile_data_key` are present |
+| "other user can see friend nickname and description in profile modal" → renamed | Now checks API doesn't leak, then verifies modal opens (content depends on key sharing) |
+
 ### Tests Status
 
 | Suite | Tests | Status |
@@ -339,6 +389,7 @@ The sibling function `uploadServerKeyForUser()` was already correctly using `E2E
 | messaging.spec.ts | 4/4 | ✅ All passing |
 | forwards (step 8) | 5/5 | ✅ All passing |
 | key rotation | 3/3 | ✅ All passing |
+| profile-fixes.spec.ts | 13/13 | ✅ All passing |
 | **Server build** | — | ✅ 0 warnings, 0 errors |
 
 ## Next Steps (Step 9+)

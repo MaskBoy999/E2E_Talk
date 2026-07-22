@@ -233,6 +233,26 @@ var E2ECrypto = (() => {
         } catch (_) { return null; }
     }
 
+    // ---- Profile Data Key (for sharing encrypted profile data) ----
+    function generateProfileDataKey() {
+        return randomBytes(32);
+    }
+
+    function encryptProfileData(jsonString, key) {
+        const pt = new TextEncoder().encode(jsonString);
+        const enc = _aeadEncryptRaw(pt, key, null, null);
+        return { ciphertext: arrayBufferToBase64(enc.ciphertext), nonce: arrayBufferToBase64(enc.nonce) };
+    }
+
+    function decryptProfileData(ciphertextB64, nonceB64, key) {
+        const ct = new Uint8Array(base64ToArrayBuffer(ciphertextB64));
+        const n = new Uint8Array(base64ToArrayBuffer(nonceB64));
+        const k = key instanceof Uint8Array ? key : new Uint8Array(key);
+        const pt = _aeadDecryptRaw(ct, k, null, n);
+        if (!pt) return null;
+        return JSON.parse(new TextDecoder().decode(pt));
+    }
+
     // ---- HMAC hex (for invite/friend codes) ----
     function hmacHex(keyBytesOrB64, dataString) {
         let keyBytes;
@@ -442,5 +462,10 @@ var E2ECrypto = (() => {
         // File Key Storage
         encodeEncryptedFileKey: encodeEncryptedFileKey,
         decodeEncryptedFileKey: decodeEncryptedFileKey,
+
+        // Profile Data Key
+        generateProfileDataKey: generateProfileDataKey,
+        encryptProfileData: encryptProfileData,
+        decryptProfileData: decryptProfileData,
     };
 })();
