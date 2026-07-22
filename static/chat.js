@@ -5281,8 +5281,10 @@ async function appendMessage(msg) {
 
     let contentHtml = '';
     if (replyTo) {
-        contentHtml += '<div class="reply-quote" data-reply-to="' + escapeHtml(replyTo.message_id || '') + '">' +
-            '<span class="reply-author">@' + escapeHtml(replyTo.author || 'unknown') + '</span> ' +
+        contentHtml += '<div class="reply-quote" data-reply-to="' + escapeHtml(replyTo.message_id || '') + '">' +                '<span class="reply-author"' +
+                    (replyTo.sender_color ? ' style="color:' + replyTo.sender_color + ';text-shadow:' + getDisplayNameTextShadow(replyTo.sender_color, replyTo.sender_border_color) + '"' : '') + '>' +
+                    (replyTo.sender_profile_pic ? '<img class="reply-author-pic" src="' + escapeAttr(replyTo.sender_profile_pic) + '" alt="" style="width:16px;height:16px;border-radius:50%;vertical-align:middle;margin-right:4px">' : '') +
+                    '@' + escapeHtml(replyTo.author || 'unknown') + '</span> ' +
             '<span class="reply-preview">' + (replyTo.preview ? renderEmojiText(replyTo.preview) : '') + '</span>' +
             '</div>';
     }
@@ -5388,16 +5390,19 @@ async function appendMessage(msg) {
     // Load media preview if applicable (respect auto-load setting)
     const autoLoad = localStorage.getItem('autoLoadPreviews') !== 'false';
     if (filesData) {
-        div.querySelectorAll('.file-preview').forEach((container, idx) => {
-            if (filesData[idx] && filesData[idx].file_key) {
+        div.querySelectorAll('.file-preview').forEach((container) => {
+            // Match file by data-file-id attribute to handle cases where some files lack a preview container
+            var fileId = container.getAttribute('data-file-id');
+            var fileData = fileId ? filesData.find(function(f) { return f.file_id === fileId; }) : null;
+            if (fileData && fileData.file_key) {
                 if (autoLoad) {
-                    loadMediaPreview(container, filesData[idx]);
+                    loadMediaPreview(container, fileData);
                 } else {
                     // Show manual load button
-                    container.innerHTML = '<button class="load-preview-btn" data-file-idx="' + idx + '">Load preview</button>';
+                    container.innerHTML = '<button class="load-preview-btn">Load preview</button>';
                     container.querySelector('.load-preview-btn').addEventListener('click', () => {
                         container.innerHTML = '';
-                        loadMediaPreview(container, filesData[idx]);
+                        loadMediaPreview(container, fileData);
                     });
                 }
             }
@@ -5554,6 +5559,9 @@ async function loadStickerPreview(container, stickerData) {
         container.setAttribute('data-file-id', stickerData.file_id || '');
         container.setAttribute('data-file-key', stickerData.file_key || '');
         container.setAttribute('data-mime-type', stickerData.mime_type || 'image/png');
+        if (fileKeyBytes) {
+            container.setAttribute('data-raw-file-key', E2ECrypto.arrayBufferToBase64(fileKeyBytes.buffer));
+        }
         container.appendChild(img);
         // Add download button
         const dlBtn = document.createElement('button');
@@ -5738,11 +5746,66 @@ function waitForElement(selector, timeout) {
 }
 
 function handleReply(messageId, msgDiv) {
-    const username = msgDiv.querySelector('.username')?.textContent || 'unknown';
+    // Try to get display name from the current .display-name element (modern)
+    // or fall back to .username (legacy)
+    const displayNameEl = msgDiv.querySelector('.display-name');
+    const usernameEl = msgDiv.querySelector('.username');
+    const username = (displayNameEl ? displayNameEl.textContent : (usernameEl ? usernameEl.textContent : null)) || 'unknown';
     const textEl = msgDiv.querySelector('.text');
-    const preview = textEl ? extractRawMessageText(textEl).substring(0, 80) : '';
+    let preview = textEl ? extractRawMessageText(textEl).substring(0, 80) : '';
+    // For file messages, use the filename as preview
+    if (!preview) {
+        const fileNameEl = msgDiv.querySelector('.file-name');
+        if (fileNameEl) {
+            preview = fileNameEl.textContent ? fileNameEl.textContent.trim().substring(0, 80) : '';
+        }
+    }
+    // For sticker messages, use 'Sticker' as preview
+    if (!preview) {
+        const stickerEl = msgDiv.querySelector('.sticker-message');
+        if (stickerEl) {
+            preview = 'Sticker';
+        }
+    }
+    // For GIF messages, use 'GIF' as preview
+    if (!preview) {
+        const gifEl = msgDiv.querySelector('.gif-message');
+        if (gifEl) {
+            preview = 'GIF';
+        }
+    }
     const senderId = msgDiv.getAttribute('data-sender-id') || '';
-    pendingReply = { message_id: messageId, author: username, preview: preview, sender_id: senderId };
+    // Extract sender color and border color from inline style on .display-name
+    var senderColor = '';
+    var senderBorderColor = '';
+    if (displayNameEl) {
+        var style = displayNameEl.getAttribute('style') || '';
+        var colorMatch = style.match(/color:\s*([^;]+)/);
+        if (colorMatch) senderColor = colorMatch[1].trim();
+        var shadowMatch = style.match(/text-shadow:\s*([^;]+)/);
+        if (shadowMatch) senderBorderColor = shadowMatch[1].trim();
+    }
+    // Extract sender profile pic from avatar element (only valid URLs, not raw file IDs)
+    var senderProfilePic = '';
+    var avatarEl = msgDiv.querySelector('.avatar');
+    if (avatarEl) {
+        var avatarImg = avatarEl.querySelector('.avatar-img');
+        if (avatarImg) {
+            var src = avatarImg.getAttribute('src') || '';
+            if (src && (src.startsWith('blob:') || src.startsWith('http://') || src.startsWith('https://') || src.startsWith('data:'))) {
+                senderProfilePic = src;
+            }
+        }
+    }
+    pendingReply = {
+        message_id: messageId,
+        author: username,
+        preview: preview,
+        sender_id: senderId,
+        sender_color: senderColor,
+        sender_border_color: senderBorderColor,
+        sender_profile_pic: senderProfilePic
+    };
     const replyBar = document.getElementById('reply-bar');
     if (replyBar) {
         replyBar.innerHTML = 'Replying to <strong>@' + escapeHtml(username) + '</strong>: ' + escapeHtml(preview) + ' <button id="cancel-reply" style="margin-left:8px;background:none;border:none;color:#aaa;cursor:pointer">&#x2715;</button>';
@@ -5953,8 +6016,17 @@ function handleEdit(messageId, msgDiv) {
         }
         textarea.remove();
         btnRow.remove();
-        // Restore the old text display so it's visible while waiting for server confirmation
-        if (oldText) oldText.style.display = '';
+        // Immediately update the local text with new content so the editor sees the change
+        if (oldText) {
+            var timeSpan = oldText.querySelector('.time-hover');
+            var timeHtml = timeSpan ? timeSpan.outerHTML : '';
+            oldText.innerHTML = timeHtml + renderEmojiText(newText);
+            oldText.style.display = '';
+        }
+        // Add (edited) label locally
+        if (contentEl && !contentEl.querySelector('.edited-label')) {
+            contentEl.insertAdjacentHTML('beforeend', '<span class="edited-label">(edited)</span>');
+        }
         if (oldReply) oldReply.style.display = '';
         if (oldForward) oldForward.style.display = '';
         if (actionsEl) actionsEl.style.display = '';
@@ -6156,9 +6228,11 @@ async function executeDmForwardToChannel(targetServerId, targetChannelId) {
     if (stickerMsgEl) {
         const img = stickerMsgEl.querySelector('img');
         if (img) {
+            // Prefer raw decrypted key for forwarding
+            var rawKey = stickerMsgEl.getAttribute('data-raw-file-key') || stickerMsgEl.getAttribute('data-file-key') || '';
             stickerData = {
                 file_id: stickerMsgEl.getAttribute('data-file-id') || '',
-                file_key: stickerMsgEl.getAttribute('data-file-key') || '',
+                file_key: rawKey,
                 mime_type: stickerMsgEl.getAttribute('data-mime-type') || 'image/png',
             };
         }
@@ -6168,7 +6242,7 @@ async function executeDmForwardToChannel(targetServerId, targetChannelId) {
         fileData = {
             file_id: fileCardEl.getAttribute('data-file-id') || '',
             file_key: fileCardEl.getAttribute('data-file-key') || '',
-            file_name: fileCardEl.getAttribute('data-file-name') || 'File',
+            filename: fileCardEl.getAttribute('data-file-name') || 'File',
             file_size: fileCardEl.getAttribute('data-file-size') || '0',
             mime_type: fileCardEl.getAttribute('data-file-mime') || 'application/octet-stream',
         };
@@ -6300,10 +6374,11 @@ async function executeForward(targetServerId, targetServerName, targetChannelId,
         const img = stickerMsgEl.querySelector('img');
         if (img) {
             // Sticker images have blob URLs as src, but we store the original sticker data
-            // in a data attribute for forward purposes
+            // in a data attribute for forward purposes. Prefer the raw decrypted key.
+            var rawKey = stickerMsgEl.getAttribute('data-raw-file-key') || stickerMsgEl.getAttribute('data-file-key') || '';
             stickerData = {
                 file_id: stickerMsgEl.getAttribute('data-file-id') || '',
-                file_key: stickerMsgEl.getAttribute('data-file-key') || '',
+                file_key: rawKey,
                 mime_type: stickerMsgEl.getAttribute('data-mime-type') || 'image/png',
             };
         }
@@ -6313,7 +6388,7 @@ async function executeForward(targetServerId, targetServerName, targetChannelId,
         fileData = {
             file_id: fileCardEl.getAttribute('data-file-id') || '',
             file_key: fileCardEl.getAttribute('data-file-key') || '',
-            file_name: fileCardEl.getAttribute('data-file-name') || 'File',
+            filename: fileCardEl.getAttribute('data-file-name') || 'File',
             file_size: fileCardEl.getAttribute('data-file-size') || '0',
             mime_type: fileCardEl.getAttribute('data-file-mime') || 'application/octet-stream',
         };
@@ -6889,8 +6964,10 @@ function appendDmMessage(msg, kp, otherPublicKey) {
 
     let contentHtml = '';
     if (replyTo) {
-        contentHtml += '<div class="reply-quote" data-reply-to="' + escapeHtml(replyTo.message_id || '') + '">' +
-            '<span class="reply-author">@' + escapeHtml(replyTo.author || 'unknown') + '</span> ' +
+        contentHtml += '<div class="reply-quote" data-reply-to="' + escapeHtml(replyTo.message_id || '') + '">' +                '<span class="reply-author"' +
+                    (replyTo.sender_color ? ' style="color:' + replyTo.sender_color + ';text-shadow:' + getDisplayNameTextShadow(replyTo.sender_color, replyTo.sender_border_color) + '"' : '') + '>' +
+                    (replyTo.sender_profile_pic ? '<img class="reply-author-pic" src="' + escapeAttr(replyTo.sender_profile_pic) + '" alt="" style="width:16px;height:16px;border-radius:50%;vertical-align:middle;margin-right:4px">' : '') +
+                    '@' + escapeHtml(replyTo.author || 'unknown') + '</span> ' +
             '<span class="reply-preview">' + (replyTo.preview ? renderEmojiText(replyTo.preview) : '') + '</span>' +
             '</div>';
     }
@@ -7059,19 +7136,22 @@ function appendDmMessage(msg, kp, otherPublicKey) {
             }
         }
     } else if (filesData) {
-        div.querySelectorAll('.file-preview').forEach((container, idx) => {
-            if (filesData[idx] && filesData[idx].file_key) {
-                if (autoLoad) {
-                    loadMediaPreview(container, filesData[idx]);
-                } else {
-                    container.innerHTML = '<button class="load-preview-btn" data-file-idx="' + idx + '">Load preview</button>';
-                    container.querySelector('.load-preview-btn').addEventListener('click', () => {
-                        container.innerHTML = '';
-                        loadMediaPreview(container, filesData[idx]);
-                    });
-                }
-            }
-        });
+div.querySelectorAll('.file-preview').forEach((container) => {
+    // Match file by data-file-id attribute instead of index for reliability
+    var fileId = container.getAttribute('data-file-id');
+    var fileData = fileId ? filesData.find(function(f) { return f.file_id === fileId; }) : null;
+    if (fileData && fileData.file_key) {
+        if (autoLoad) {
+            loadMediaPreview(container, fileData);
+        } else {
+            container.innerHTML = '<button class="load-preview-btn">Load preview</button>';
+            container.querySelector('.load-preview-btn').addEventListener('click', () => {
+                container.innerHTML = '';
+                loadMediaPreview(container, fileData);
+            });
+        }
+    }
+});
     } else if (fileData && fileData.file_key) {
         const container = div.querySelector('.file-preview');
         if (container) {
@@ -11787,9 +11867,11 @@ async function executeDmForward(targetUserId, targetUsername, dmChannelId) {
     if (stickerMsgEl) {
         const img = stickerMsgEl.querySelector('img');
         if (img) {
+            // Prefer raw decrypted key for forwarding
+            var rawKey = stickerMsgEl.getAttribute('data-raw-file-key') || stickerMsgEl.getAttribute('data-file-key') || '';
             stickerData = {
                 file_id: stickerMsgEl.getAttribute('data-file-id') || '',
-                file_key: stickerMsgEl.getAttribute('data-file-key') || '',
+                file_key: rawKey,
                 mime_type: stickerMsgEl.getAttribute('data-mime-type') || 'image/png',
             };
         }
@@ -11799,7 +11881,7 @@ async function executeDmForward(targetUserId, targetUsername, dmChannelId) {
         fileData = {
             file_id: fileCardEl.getAttribute('data-file-id') || '',
             file_key: fileCardEl.getAttribute('data-file-key') || '',
-            file_name: fileCardEl.getAttribute('data-file-name') || 'File',
+            filename: fileCardEl.getAttribute('data-file-name') || 'File',
             file_size: fileCardEl.getAttribute('data-file-size') || '0',
             mime_type: fileCardEl.getAttribute('data-file-mime') || 'application/octet-stream',
         };
