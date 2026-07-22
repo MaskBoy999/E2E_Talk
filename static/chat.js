@@ -340,9 +340,8 @@ async function broadcastProfileKeySyncToServer(serverId) {
             if (dk) rawPicKey = dk;
         }
         
-        // Use the server's metadata key for encryption (server-wide, not channel-specific)
-        var metadataKey = E2ECrypto.deriveMetadataKey ? E2ECrypto.deriveMetadataKey(serverKey) : serverKey;
-        var encPicKey = E2ECrypto.encryptWithKey(rawPicKey, metadataKey);
+        // Encrypt the PFP key with the server key for broadcast
+        var encPicKey = E2ECrypto.aeadEncrypt(rawPicKey, serverKey);
         
         var payload = {
             type: 'profile_key_server_sync',
@@ -359,7 +358,7 @@ async function broadcastProfileKeySyncToServer(serverId) {
                 var dkB = E2ECrypto.decodeEncryptedFileKey(rawBannerKey, identity.privateKey);
                 if (dkB) rawBannerKey = dkB;
             }
-            var encBannerKey = E2ECrypto.encryptWithKey(rawBannerKey, metadataKey);
+            var encBannerKey = E2ECrypto.aeadEncrypt(rawBannerKey, serverKey);
             if (encBannerKey) {
                 payload.profile_banner_file_id = myProfile.profile_banner_file_id;
                 payload.encrypted_banner_key = encBannerKey.ciphertext;
@@ -3488,7 +3487,7 @@ async function syncNotificationSoundToServer(file) {
             body: JSON.stringify({
                 encrypted_sound: encrypted.ciphertext,
                 nonce: encrypted.nonce,
-                sender_public_key: encrypted.ephemeralPublicKey,
+                sender_public_key: E2ECrypto.arrayBufferToBase64(identity.publicKey),
                 file_name: file.name || 'notification.mp3',
             }),
         });
@@ -4586,15 +4585,14 @@ function connectWebSocket(t) {
                             // Decrypt the PFP key with the server's metadata key
                             var serverKeyForSync = E2ECrypto.getServerKey(data.server_id);
                             if (serverKeyForSync) {
-                                var metadataKey = E2ECrypto.deriveMetadataKey ? E2ECrypto.deriveMetadataKey(serverKeyForSync) : serverKeyForSync;
-                                var decryptedPicKey = E2ECrypto.decryptWithKey(data.encrypted_profile_key, data.profile_key_nonce, metadataKey);
+                                var decryptedPicKey = new TextDecoder().decode(E2ECrypto.aeadDecrypt(data.encrypted_profile_key, serverKeyForSync, data.profile_key_nonce));
                                 if (decryptedPicKey) {
                                     profileKeyCache[data.user_id + ':' + data.profile_picture_file_id] = decryptedPicKey;
                                     scheduleProfileKeySave();
                                 }
                                 // Also decrypt banner key if available
                                 if (data.encrypted_banner_key && data.banner_key_nonce && data.profile_banner_file_id) {
-                                    var decryptedBannerKey = E2ECrypto.decryptWithKey(data.encrypted_banner_key, data.banner_key_nonce, metadataKey);
+                                    var decryptedBannerKey = new TextDecoder().decode(E2ECrypto.aeadDecrypt(data.encrypted_banner_key, serverKeyForSync, data.banner_key_nonce));
                                     if (decryptedBannerKey) {
                                         profileKeyCache[data.user_id + ':' + data.profile_banner_file_id] = decryptedBannerKey;
                                         profileKeyCache[data.user_id + ':banner'] = decryptedBannerKey;
@@ -4653,6 +4651,9 @@ function connectWebSocket(t) {
                     // Update display name cache for all users
                     if (!userDisplayNameCache[data.user_id]) userDisplayNameCache[data.user_id] = {};
                     if (data.profile_picture_file_id !== undefined) userDisplayNameCache[data.user_id].profile_picture_file_id = data.profile_picture_file_id;
+                    if (data.display_name !== undefined) userDisplayNameCache[data.user_id].display_name = data.display_name;
+                    if (data.username_color !== undefined) userDisplayNameCache[data.user_id].username_color = data.username_color;
+                    if (data.username_border_color !== undefined) userDisplayNameCache[data.user_id].username_border_color = data.username_border_color;
 
                     // Invalidate profile pic cache and profile key cache for this user
                     for (var pk in profilePicCache) {
@@ -4804,15 +4805,15 @@ async function rotateServerKey(serverId) {
             if (!recipientRes.ok) continue;
             const recipientData = await recipientRes.json();
             if (!recipientData.identity_public_key) continue;
-            const recipientPub = new Uint8Array(E2ECrypto.base64ToArrayBuffer(recipientData.identity_public_key));
-            const encrypted = E2ECrypto.envelopeEncrypt(newKey, recipientPub, identity.privateKey);
+            const recipientPub = new Uint8Array(E2ECrypto.base64ToArrayBuffer(recipientData.identity_public_key));            const encrypted = E2ECrypto.envelopeEncrypt(newKey, recipientPub, identity.privateKey);
+
             await authFetch(`/api/servers/${serverId}/keys`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     user_id: member.id,
                     encrypted_key: encrypted.ciphertext,
-                    sender_public_key: encrypted.ephemeralPublicKey,
+                    sender_public_key: E2ECrypto.arrayBufferToBase64(identity.publicKey),
                     nonce: encrypted.nonce,
                 }),
             });
@@ -5097,6 +5098,15 @@ async function loadMessages(channelId, aroundMessageId) {
     const list = document.getElementById('message-list');
     list.innerHTML = '<div class="welcome">Loading messages...</div>';
 
+    // CRITICAL: Ensure the channel key is available before fetching messages
+    if (currentServerId && !E2ECrypto.getServerKey(currentServerId)) {
+        var fetched = await fetchAndDecryptServerKey(currentServerId);
+        if (!fetched) {
+            list.innerHTML = '<div class="welcome" style="color:#f44336">Cannot load messages: encryption key unavailable</div>';
+            return;
+        }
+    }
+
     try {
         let url = `/api/channels/${channelId}/messages`;
         if (aroundMessageId) {
@@ -5139,6 +5149,32 @@ async function appendMessage(msg) {
     lastMessageInfo = { senderId: msg.sender_id, channelId: currentChannelId, time: msgTime };
     if (isGrouped) div.classList.add('grouped');
 
+    // Decrypt encrypted_profile_snapshot BEFORE extracting display name/colors/PFP
+    // so the snapshot values override the API response values
+    if (msg.encrypted_profile_snapshot && msg.profile_snapshot_nonce && msg.sender_id && currentServerId) {
+        try {
+            var snapKey = E2ECrypto.getServerKey(currentServerId);
+            if (snapKey) {
+                var snapDec = E2ECrypto.decryptMessage(msg.encrypted_profile_snapshot, msg.profile_snapshot_nonce, snapKey);
+                if (snapDec) {
+                    var snap = JSON.parse(snapDec);
+                    if (snap.display_name) msg.sender_display_name = snap.display_name;
+                    if (snap.username_color) msg.sender_username_color = snap.username_color;
+                    if (snap.username_border_color) msg.sender_username_border_color = snap.username_border_color;
+                    if (snap.profile_picture_file_id) {
+                        msg.sender_profile_pic = snap.profile_picture_file_id;
+                        if (snap.profile_picture_file_key) {
+                            profileKeyCache[msg.sender_id + ':' + snap.profile_picture_file_id] = snap.profile_picture_file_key;
+                            scheduleProfileKeySave();
+                        }
+                    }
+                }
+            }
+        } catch (_e) {
+            console.warn('Failed to decrypt profile snapshot:', _e);
+        }
+    }
+
     const displayName = msg.sender_display_name || msg.sender_username || '?';
     const initial = displayName.charAt(0).toUpperCase();
     var senderPicUrl = msg.sender_profile_pic ? getProfilePicUrl(msg.sender_profile_pic, msg.sender_id) : null;
@@ -5170,24 +5206,14 @@ async function appendMessage(msg) {
     let extraEmojis = null; // emoji refs embedded in message payload by sender
     if (msg.encrypted_content && msg.nonce && currentChannelId && currentServerId) {
         try {
-            textContent = E2ECrypto.decrypt(msg.encrypted_content, msg.nonce, currentChannelId, currentServerId, msg.message_nonce);
+            var decryptKey = E2ECrypto.getServerKey(currentServerId);
+            textContent = decryptKey ? E2ECrypto.decryptMessage(msg.encrypted_content, msg.nonce, decryptKey) : null;
             // Verify message signature if present
-            if (msg.message_signature) {
-                try {
-                    var verifyKey = E2ECrypto.getServerKey(currentServerId);
-                    if (verifyKey) {
-                        if (!E2ECrypto.verifyMessage(verifyKey, textContent, msg.message_signature)) {
-                            div.classList.add('unverified');
-                        }
-                    }
-                } catch (_e) {
-                    console.warn('Signature verification error:', _e);
-                }
-            }
+
             // Decrypt and cache sender's profile picture key from message
-            if (msg.encrypted_profile_key && msg.profile_key_nonce && msg.sender_profile_pic && msg.sender_id) {
+            if (msg.encrypted_profile_key && msg.profile_key_nonce && msg.sender_profile_pic && msg.sender_id && decryptKey) {
                 try {
-                    var decryptedPicKey = E2ECrypto.decrypt(msg.encrypted_profile_key, msg.profile_key_nonce, currentChannelId, currentServerId, null);
+                    var decryptedPicKey = E2ECrypto.decryptMessage(msg.encrypted_profile_key, msg.profile_key_nonce, decryptKey);
                     if (decryptedPicKey) {
                         profileKeyCache[msg.sender_id + ':' + msg.sender_profile_pic] = decryptedPicKey;
                         scheduleProfileKeySave();
@@ -5197,9 +5223,9 @@ async function appendMessage(msg) {
                 }
             }
             // Decrypt and cache sender's banner key from message
-            if (msg.encrypted_banner_key && msg.banner_key_nonce && msg.sender_id) {
+            if (msg.encrypted_banner_key && msg.banner_key_nonce && msg.sender_id && decryptKey) {
                 try {
-                    var decryptedBannerKey = E2ECrypto.decrypt(msg.encrypted_banner_key, msg.banner_key_nonce, currentChannelId, currentServerId, null);
+                    var decryptedBannerKey = E2ECrypto.decryptMessage(msg.encrypted_banner_key, msg.banner_key_nonce, decryptKey);
                     if (decryptedBannerKey) {
                         // Cache banner key with ':banner' suffix since the banner file_id
                         // is not included in the WS message (it's fetched from the profile API)
@@ -5210,6 +5236,7 @@ async function appendMessage(msg) {
                     console.warn('Failed to decrypt banner key from message:', _e);
                 }
             }
+
             try {
                 const parsed = JSON.parse(textContent);
                 if (parsed && parsed.type === 'files' && Array.isArray(parsed.files)) {
@@ -5262,17 +5289,25 @@ async function appendMessage(msg) {
     const editedHtml = msg.edited_at ? '<span class="edited-label">(edited)</span>' : '';
     if (forwardData) {
         div.classList.add('forwarded');
-        var fwdFileId = forwardData.sender_profile_pic_file_id || forwardData.sender_profile_pic || '';
-        var fwdUserId = forwardData.sender_id || forwardData.source_server_id || '';
-        var fwdSenderPicUrl = fwdFileId && fwdUserId ? getProfilePicUrl(fwdFileId, fwdUserId) : null;
-        var fwdPicHtml = fwdSenderPicUrl ? '<img class="forward-sender-pic" src="' + fwdSenderPicUrl + '" alt="">' : '<span class="forward-sender-initial">' + (forwardData.sender_username ? forwardData.sender_username.charAt(0).toUpperCase() : '?') + '</span>';
-        contentHtml += '<div class="forward-label" data-source-server-id="' + escapeAttr(forwardData.source_server_id || '') + '" data-source-channel-id="' + escapeAttr(forwardData.source_channel_id || '') + '" data-source-message-id="' + escapeAttr(forwardData.source_message_id || '') + '">' +
-            '<div class="forward-sender-info">' + fwdPicHtml + '<span class="forward-sender-name"' + (forwardData.sender_color ? ' style="color:' + forwardData.sender_color + (forwardData.sender_border_color ? ';text-shadow:' + forwardData.sender_border_color : ';text-shadow:' + getDisplayNameTextShadow(forwardData.sender_color)) + '"' : '') + '>' + escapeHtml(forwardData.sender_username || 'unknown') + '</span></div>' +
-            '<div class="forward-source-label"><span class="forward-channel-badge">#' + escapeHtml(forwardData.source_channel_name || 'unknown') + '</span> <span class="forward-server-badge">' + escapeHtml(forwardData.source_server_name || 'unknown') + '</span></div></div>';
+        if (forwardData.source_is_dm) {
+            // DM-sourced forward: no sender info, just show "Forwarded" label
+            contentHtml += '<div class="forward-label" data-source-is-dm="true">' +
+                '<div class="forward-source-label" style="font-style:italic;color:var(--text-muted)">Forwarded</div></div>';
+        } else {
+            // Server-sourced forward: show original sender info with source link
+            var fwdFileId = forwardData.sender_profile_pic_file_id || forwardData.sender_profile_pic || '';
+            var fwdUserId = forwardData.sender_id || forwardData.source_server_id || '';
+            var fwdSenderPicUrl = fwdFileId && fwdUserId ? getProfilePicUrl(fwdFileId, fwdUserId) : null;
+            var fwdPicHtml = fwdSenderPicUrl ? '<img class="forward-sender-pic" src="' + fwdSenderPicUrl + '" alt="">' : '<span class="forward-sender-initial">' + (forwardData.sender_username ? forwardData.sender_username.charAt(0).toUpperCase() : '?') + '</span>';
+            contentHtml += '<div class="forward-label" data-source-server-id="' + escapeAttr(forwardData.source_server_id || '') + '" data-source-channel-id="' + escapeAttr(forwardData.source_channel_id || '') + '" data-source-message-id="' + escapeAttr(forwardData.source_message_id || '') + '">' +
+                '<div class="forward-sender-info">' + fwdPicHtml + '<span class="forward-sender-name"' + (forwardData.sender_color ? ' style="color:' + forwardData.sender_color + (forwardData.sender_border_color ? ';text-shadow:' + forwardData.sender_border_color : ';text-shadow:' + getDisplayNameTextShadow(forwardData.sender_color)) + '"' : '') + '>' + escapeHtml(forwardData.sender_username || 'unknown') + '</span></div>' +
+                '<div class="forward-source-label"><span class="forward-channel-badge">#' + escapeHtml(forwardData.source_channel_name || 'unknown') + '</span> <span class="forward-server-badge">' + escapeHtml(forwardData.source_server_name || 'unknown') + '</span></div></div>';
+        }
         // Forward text preview
         if (forwardData.preview_content && forwardData.preview_nonce) {
             try {
-                let previewText = E2ECrypto.decrypt(forwardData.preview_content, forwardData.preview_nonce, forwardData.source_channel_id, forwardData.source_server_id, forwardData.preview_message_nonce);
+                var srcKey = forwardData.source_server_id ? E2ECrypto.getServerKey(forwardData.source_server_id) : null;
+                let previewText = srcKey ? E2ECrypto.decryptMessage(forwardData.preview_content, forwardData.preview_nonce, srcKey) : null;
                 let previewEmojis = null;
                 try {
                     const parsed = JSON.parse(previewText);
@@ -5448,24 +5483,57 @@ async function appendMessage(msg) {
 
 async function loadStickerPreview(container, stickerData) {
     try {
-        // New stickers: encrypted file_key or identity-derived. Old stickers: stored plaintext file_key.
+        // New stickers: file_key is channel-encrypted (with nonce) for server messages,
+        // raw base64 for DM messages (already DM-encrypted), or identity-encrypted
+        // (nonce:ciphertext format), or fallback raw key.
+        // Old stickers: no file_key at all (identity-derived).
         let fileKeyBytes;
         if (stickerData.file_key) {
-            // Try decrypted file key format (nonce:ciphertext), fall back to raw key
-            const identity = E2ECrypto.getIdentityKeyPair();
-            if (identity) {
-                var decrypted = E2ECrypto.decodeEncryptedFileKey(stickerData.file_key, identity.privateKey);
-                if (decrypted) {
-                    fileKeyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(decrypted));
+            // Try channel key decryption (server messages: ciphertext + nonce)
+            if (stickerData.file_key_nonce && currentServerId) {
+                var decryptKey = E2ECrypto.getServerKey(currentServerId);
+                if (decryptKey) {
+                    try {
+                        var rawDecrypted = E2ECrypto.aeadDecrypt(stickerData.file_key, decryptKey, stickerData.file_key_nonce);
+                        if (rawDecrypted && rawDecrypted.length > 0) {
+                            // The decrypted result is the base64 string of the raw file key as UTF-8 bytes.
+                            // Convert it back to binary: decode UTF-8 → base64 string → Uint8Array.
+                            var decryptedKeyB64 = new TextDecoder().decode(rawDecrypted);
+                            fileKeyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(decryptedKeyB64));
+                        }
+                    } catch (_) {}
                 }
             }
+            // Fallback: try identity-encrypted format (nonce:ciphertext) for own stickers
             if (!fileKeyBytes) {
-                fileKeyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(stickerData.file_key));
+                const identity = E2ECrypto.getIdentityKeyPair();
+                if (identity) {
+                    try {
+                        var decrypted = E2ECrypto.decodeEncryptedFileKey(stickerData.file_key, identity.privateKey);
+                        if (decrypted) {
+                            fileKeyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(decrypted));
+                        }
+                    } catch (_) {}
+                }
             }
-        } else {
+            // Last fallback: treat as raw key bytes (works for DM messages where the
+            // entire payload is DM-encrypted, and for forwarded stickers)
+            if (!fileKeyBytes) {
+                try {
+                    fileKeyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(stickerData.file_key));
+                } catch (_) {
+                    fileKeyBytes = null;
+                }
+            }
+        }
+        // If no key found, try identity private key as last resort for own old stickers
+        if (!fileKeyBytes) {
             const identity = E2ECrypto.getIdentityKeyPair();
-            if (!identity) throw new Error('No identity key');
-            fileKeyBytes = identity.privateKey;
+            if (identity) {
+                fileKeyBytes = identity.privateKey;
+            } else {
+                throw new Error('No identity key and no file key');
+            }
         }
 
         const blob = await downloadAndDecryptStickerData(stickerData.file_id, fileKeyBytes, stickerData.mime_type || 'image/png');
@@ -5510,6 +5578,8 @@ let pendingForward = null;
 function setupMessageActions() {
     const list = document.getElementById('message-list');
     function handleForwardLabelClick(forwardLabel) {
+        const isDmSource = forwardLabel.dataset.sourceIsDm;
+        if (isDmSource === 'true') return; // DM-sourced forward has no source link
         const serverId = forwardLabel.dataset.sourceServerId;
         const channelId = forwardLabel.dataset.sourceChannelId;
         const messageId = forwardLabel.dataset.sourceMessageId;
@@ -5552,6 +5622,10 @@ function setupMessageActions() {
             handleForward(messageId, msgDiv);
         } else if (action === 'forward-dm') {
             handleForwardToDm(messageId, msgDiv);
+        } else if (action === 'dm-forward') {
+            handleDmForwardToChannel(messageId, msgDiv);
+        } else if (action === 'dm-forward-dm') {
+            handleDmForwardToDm(messageId, msgDiv);
         } else if (action === 'edit') {
             handleEdit(messageId, msgDiv);
         } else if (action === 'delete') {
@@ -5691,6 +5765,16 @@ function handleForwardToDm(messageId, msgDiv) {
     showDmForwardModal();
 }
 
+function handleDmForwardToChannel(messageId, msgDiv) {
+    pendingForward = { messageId, msgDiv, fromDm: true };
+    showForwardAllModal();
+}
+
+function handleDmForwardToDm(messageId, msgDiv) {
+    pendingForward = { messageId, msgDiv, toDm: true, fromDm: true };
+    showDmForwardModal();
+}
+
 function handleEdit(messageId, msgDiv) {
     const textEl = msgDiv.querySelector('.text');
     if (!textEl) return;
@@ -5818,16 +5902,6 @@ function handleEdit(messageId, msgDiv) {
                 if (emojiRefs.length > 0) payload.emojis = emojiRefs;
                 plaintext = JSON.stringify(payload);
                 const encrypted = E2ECrypto.encryptDm(plaintext, currentDmChannelId, kp.privateKey, otherPubKey);
-                // Sign the DM edit with ECDH shared secret
-                var dmEditSig = null;
-                try {
-                    var dmEditSecret = E2ECrypto.x25519SharedSecret(kp.privateKey, otherPubKey);
-                    if (dmEditSecret) {
-                        dmEditSig = E2ECrypto.signMessage(dmEditSecret, plaintext);
-                    }
-                } catch (e) {
-                    console.warn('DM edit signing failed:', e);
-                }
                 var dmEditPayload = {
                     type: 'dm_edit',
                     message_id: messageId,
@@ -5835,7 +5909,6 @@ function handleEdit(messageId, msgDiv) {
                     nonce: encrypted.nonce,
                     message_nonce: encrypted.messageNonce || null,
                 };
-                if (dmEditSig) dmEditPayload.message_signature = dmEditSig;
                 ws.send(JSON.stringify(dmEditPayload));
             } catch (e) {
                 console.error('DM edit encrypt failed:', e);
@@ -5864,17 +5937,8 @@ function handleEdit(messageId, msgDiv) {
                 if (pendingReply) payload.reply_to = pendingReply;
                 if (emojiRefs.length > 0) payload.emojis = emojiRefs;
                 plaintext = JSON.stringify(payload);
-                const encrypted = E2ECrypto.encrypt(plaintext, currentChannelId, currentServerId);
-                // Sign the channel edit with server key
-                var channelEditSig = null;
-                try {
-                    var channelEditKey = E2ECrypto.getServerKey(currentServerId);
-                    if (channelEditKey) {
-                        channelEditSig = E2ECrypto.signMessage(channelEditKey, plaintext);
-                    }
-                } catch (e) {
-                    console.warn('Channel edit signing failed:', e);
-                }
+                var editChannelKey = E2ECrypto.getServerKey(currentServerId);
+                const encrypted = editChannelKey ? E2ECrypto.encryptMessage(plaintext, editChannelKey) : null;
                 var channelEditPayload = {
                     type: 'message_edit',
                     message_id: messageId,
@@ -5882,7 +5946,6 @@ function handleEdit(messageId, msgDiv) {
                     nonce: encrypted.nonce,
                     message_nonce: encrypted.messageNonce || null,
                 };
-                if (channelEditSig) channelEditPayload.message_signature = channelEditSig;
                 ws.send(JSON.stringify(channelEditPayload));
             } catch (e) {
                 console.error('Edit encrypt failed:', e);
@@ -5938,26 +6001,11 @@ async function handleEditedMessage(msg, mode) {
                     return;
                 }
                 decrypted = E2ECrypto.decryptDm(msg.encrypted_content, msg.nonce, currentDmChannelId, kp.privateKey, otherPubKey, msg.message_nonce);
-                // Verify DM edit signature
-                if (msg.message_signature && decrypted) {
-                    try {
-                        var dmEditVerify = E2ECrypto.x25519SharedSecret(kp.privateKey, otherPubKey);
-                        if (dmEditVerify && !E2ECrypto.verifyMessage(dmEditVerify, decrypted, msg.message_signature)) {
-                            existing.classList.add('unverified');
-                        }
-                    } catch (_e) { console.warn('DM edit signature verify error:', _e); }
-                }
+
             } else if (currentChannelId && currentServerId) {
-                decrypted = E2ECrypto.decrypt(msg.encrypted_content, msg.nonce, currentChannelId, currentServerId, msg.message_nonce);
-                // Verify channel edit signature
-                if (msg.message_signature && decrypted) {
-                    try {
-                        var channelEditVerify = E2ECrypto.getServerKey(currentServerId);
-                        if (channelEditVerify && !E2ECrypto.verifyMessage(channelEditVerify, decrypted, msg.message_signature)) {
-                            existing.classList.add('unverified');
-                        }
-                    } catch (_e) { console.warn('Channel edit signature verify error:', _e); }
-                }
+                var editDecryptKey = E2ECrypto.getServerKey(currentServerId);
+                decrypted = editDecryptKey ? E2ECrypto.decryptMessage(msg.encrypted_content, msg.nonce, editDecryptKey) : null;
+
             }
             if (decrypted) {
                 // Ensure the global emoji cache is loaded so renderEmojiText can find custom emojis
@@ -6022,15 +6070,24 @@ function showForwardModal() {
     }
 }
 
+// Show forward modal with ALL servers/channels (for DM-sourced forwards)
+function showForwardAllModal() {
+    const modal = document.getElementById('forward-modal');
+    if (modal) {
+        modal.style.display = 'flex';
+        loadAllForwardChannels();
+    }
+}
+
 async function loadForwardChannels() {
     const list = document.getElementById('forward-channel-list');
     if (!list) return;
     list.innerHTML = '<div style="color:#888">Loading...</div>';
     try {
-        // Only show channels from the same server as the forwarded message
         const sourceServerId = pendingForward?.sourceServerId || currentServerId;
         if (!sourceServerId) {
-            list.innerHTML = '<div style="color:#888">No source server</div>';
+            // Try showing all servers/channels instead
+            loadAllForwardChannels();
             return;
         }
         const chRes = await authFetch('/api/servers/' + sourceServerId + '/channels');
@@ -6045,6 +6102,113 @@ async function loadForwardChannels() {
         list.innerHTML = html || '<div style="color:#888">No channels found</div>';
     } catch (e) {
         list.innerHTML = '<div style="color:#888">Failed to load</div>';
+    }
+}
+
+async function loadAllForwardChannels() {
+    const list = document.getElementById('forward-channel-list');
+    if (!list) return;
+    list.innerHTML = '<div style="color:#888">Loading all servers...</div>';
+    try {
+        if (!servers || servers.length === 0) {
+            list.innerHTML = '<div style="color:#888">No servers available</div>';
+            return;
+        }
+        let html = '';
+        for (const server of servers) {
+            const chRes = await authFetch('/api/servers/' + server.id + '/channels');
+            if (!chRes.ok) continue;
+            const channels = await chRes.json();
+            html += '<div class="forward-server"><div class="forward-server-name">' + escapeHtml(server.name) + '</div>';
+            for (const ch of channels) {
+                html += '<div class="forward-channel-item" data-server-id="' + server.id + '" data-server-name="' + escapeHtml(server.name) + '" data-channel-id="' + ch.id + '" data-channel-name="' + escapeHtml(ch.name) + '">' + escapeHtml(ch.name) + '</div>';
+            }
+            html += '</div>';
+        }
+        list.innerHTML = html || '<div style="color:#888">No channels found</div>';
+    } catch (e) {
+        list.innerHTML = '<div style="color:#888">Failed to load servers</div>';
+    }
+}
+
+// Execute forward from a DM to a server channel (no sender info)
+async function executeDmForwardToChannel(targetServerId, targetChannelId) {
+    if (!pendingForward || !ws || ws.readyState !== WebSocket.OPEN) return;
+    const msgDiv = pendingForward.msgDiv;
+    const messageId = pendingForward.messageId;
+
+    // Get the original DM message content (already decrypted in DOM)
+    const textEl = msgDiv.querySelector('.text');
+    const originalText = textEl ? extractRawMessageText(textEl) : '';
+
+    // Extract media data from DOM
+    let gifData = null;
+    let stickerData = null;
+    let fileData = null;
+    const gifMsgEl = msgDiv.querySelector('.gif-message');
+    if (gifMsgEl) {
+        const img = gifMsgEl.querySelector('img');
+        if (img) {
+            gifData = { url: img.getAttribute('src') || '', alt: img.getAttribute('alt') || 'GIF' };
+        }
+    }
+    const stickerMsgEl = msgDiv.querySelector('.sticker-message');
+    if (stickerMsgEl) {
+        const img = stickerMsgEl.querySelector('img');
+        if (img) {
+            stickerData = {
+                file_id: stickerMsgEl.getAttribute('data-file-id') || '',
+                file_key: stickerMsgEl.getAttribute('data-file-key') || '',
+                mime_type: stickerMsgEl.getAttribute('data-mime-type') || 'image/png',
+            };
+        }
+    }
+    const fileCardEl = msgDiv.querySelector('.file-card');
+    if (fileCardEl) {
+        fileData = {
+            file_id: fileCardEl.getAttribute('data-file-id') || '',
+            file_key: fileCardEl.getAttribute('data-file-key') || '',
+            file_name: fileCardEl.getAttribute('data-file-name') || 'File',
+            file_size: fileCardEl.getAttribute('data-file-size') || '0',
+            mime_type: fileCardEl.getAttribute('data-file-mime') || 'application/octet-stream',
+        };
+    }
+
+    try {
+        let previewEncrypted = null;
+        if (originalText) {
+            var targetKey = E2ECrypto.getServerKey(targetServerId);
+            previewEncrypted = targetKey ? E2ECrypto.encryptMessage(JSON.stringify({ type: 'text', text: originalText }), targetKey) : null;
+        }
+
+        const forwardPayload = {
+            type: 'forward',
+            source_is_dm: true,
+            source_message_id: messageId,
+            timestamp: msgDiv.querySelector('.time')?.textContent || '',
+        };
+        if (previewEncrypted) {
+            forwardPayload.preview_content = previewEncrypted.ciphertext;
+            forwardPayload.preview_nonce = previewEncrypted.nonce;
+            forwardPayload.preview_message_nonce = previewEncrypted.messageNonce || null;
+        }
+        if (gifData) forwardPayload.gif = gifData;
+        if (stickerData) forwardPayload.sticker = stickerData;
+        if (fileData) forwardPayload.file = fileData;
+
+        var targetKey2 = E2ECrypto.getServerKey(targetServerId);
+        const encrypted = targetKey2 ? E2ECrypto.encryptMessage(JSON.stringify(forwardPayload), targetKey2) : null;
+        if (encrypted) {
+            ws.send(JSON.stringify({
+                type: 'message_send',
+                channel_id: targetChannelId,
+                encrypted_content: encrypted.ciphertext,
+                nonce: encrypted.nonce,
+                message_nonce: encrypted.messageNonce || null,
+            }));
+        }
+    } catch (e) {
+        console.error('DM forward to channel failed:', e);
     }
 }
 
@@ -6066,11 +6230,39 @@ function setupForwardModal() {
             const targetServerName = item.getAttribute('data-server-name');
             const targetChannelId = item.getAttribute('data-channel-id');
             const targetChannelName = item.getAttribute('data-channel-name');
-            executeForward(targetServerId, targetServerName, targetChannelId, targetChannelName);
+            if (pendingForward && pendingForward.fromDm) {
+                executeDmForwardToChannel(targetServerId, targetChannelId);
+            } else {
+                executeForward(targetServerId, targetServerName, targetChannelId, targetChannelName);
+            }
             modal.style.display = 'none';
             pendingForward = null;
         });
     }
+}
+
+// Walk backwards through message siblings to find sender info for grouped messages
+// where the header (display-name, avatar) is only rendered on the first message.
+function findForwardSenderInfo(msgDiv) {
+    let result = { senderUsername: 'unknown', senderId: '', senderPicFileId: '', senderColor: '', senderBorderColor: '' };
+    let current = msgDiv;
+    while (current && current.classList.contains('message')) {
+        const nameEl = current.querySelector('.display-name');
+        const avatarImg = current.querySelector('.avatar img.avatar-img');
+        const avatarEl = current.querySelector('.avatar');
+        if (nameEl && nameEl.textContent) {
+            result.senderUsername = nameEl.textContent;
+            result.senderColor = nameEl.style.color || '';
+            result.senderBorderColor = nameEl.style.textShadow || '';
+            var picAttr = avatarImg?.getAttribute('data-profile-pic') || avatarEl?.getAttribute('data-profile-pic-load') || '';
+            result.senderPicFileId = picAttr ? picAttr.split(':')[1] || '' : '';
+            break;
+        }
+        current = current.previousElementSibling;
+        if (!current || !current.classList.contains('message') || current.getAttribute('data-sender-id') !== msgDiv.getAttribute('data-sender-id')) break;
+    }
+    result.senderId = msgDiv.getAttribute('data-sender-id') || '';
+    return result;
 }
 
 async function executeForward(targetServerId, targetServerName, targetChannelId, targetChannelName) {
@@ -6078,11 +6270,13 @@ async function executeForward(targetServerId, targetServerName, targetChannelId,
     const msgDiv = pendingForward.msgDiv;
     const messageId = pendingForward.messageId;
 
-    const senderUsername = msgDiv.querySelector('.display-name')?.textContent || msgDiv.querySelector('.username')?.textContent || 'unknown';
-    const senderId = msgDiv.getAttribute('data-sender-id') || '';
-    var avatarPicAttr = (msgDiv.querySelector('.avatar img.avatar-img')?.getAttribute('data-profile-pic')) || (msgDiv.querySelector('.avatar')?.getAttribute('data-profile-pic-load')) || '';
-    var senderPicFileId = avatarPicAttr ? avatarPicAttr.split(':')[1] || '' : '';
-    const senderColor = msgDiv.querySelector('.display-name')?.style?.color || '';
+    // For grouped messages, the header (display-name, avatar) may not be in the DOM.
+    // Walk backwards through siblings to find the sender info.
+    var senderInfo = findForwardSenderInfo(msgDiv);
+    const senderUsername = senderInfo.senderUsername;
+    const senderId = senderInfo.senderId;
+    var senderPicFileId = senderInfo.senderPicFileId;
+    const senderColor = senderInfo.senderColor;
     const textEl = msgDiv.querySelector('.text');
     const originalText = textEl ? extractRawMessageText(textEl) : '';
 
@@ -6131,7 +6325,8 @@ async function executeForward(targetServerId, targetServerName, targetChannelId,
         let previewEncrypted = null;
         if (previewText || previewEmojiRefs.length > 0) {
             const previewPlaintext = JSON.stringify({ type: 'text', text: previewText || '', emojis: previewEmojiRefs });
-            previewEncrypted = E2ECrypto.encrypt(previewPlaintext, targetChannelId, targetServerId);
+            var targetKey = E2ECrypto.getServerKey(targetServerId);
+            previewEncrypted = targetKey ? E2ECrypto.encryptMessage(previewPlaintext, targetKey) : null;
         }
         const sourceChannelId = currentChannelId;
 
@@ -6146,7 +6341,7 @@ async function executeForward(targetServerId, targetServerName, targetChannelId,
             sender_id: senderId,
             sender_profile_pic_file_id: senderPicFileId,
             sender_color: senderColor,
-            sender_border_color: msgDiv.querySelector('.display-name')?.style?.textShadow || '',
+            sender_border_color: senderInfo.senderBorderColor || '',
             timestamp: msgDiv.querySelector('.time')?.textContent || '',
         };
         if (previewEncrypted) {
@@ -6159,14 +6354,17 @@ async function executeForward(targetServerId, targetServerName, targetChannelId,
         if (stickerData) forwardPayload.sticker = stickerData;
         if (fileData) forwardPayload.file = fileData;
 
-        const encrypted = E2ECrypto.encrypt(JSON.stringify(forwardPayload), targetChannelId, targetServerId);
-        ws.send(JSON.stringify({
-            type: 'message_send',
-            channel_id: targetChannelId,
-            encrypted_content: encrypted.ciphertext,
-            nonce: encrypted.nonce,
-            message_nonce: encrypted.messageNonce || null,
-        }));
+        var targetKey2 = E2ECrypto.getServerKey(targetServerId);
+        const encrypted = targetKey2 ? E2ECrypto.encryptMessage(JSON.stringify(forwardPayload), targetKey2) : null;
+        if (encrypted) {
+            ws.send(JSON.stringify({
+                type: 'message_send',
+                channel_id: targetChannelId,
+                encrypted_content: encrypted.ciphertext,
+                nonce: encrypted.nonce,
+                message_nonce: encrypted.messageNonce || null,
+            }));
+        }
     } catch (e) {
         console.error('Forward failed:', e);
     }
@@ -6198,22 +6396,14 @@ async function sendMessage() {
     }
 
     var encrypted;
+    var encKey;
     try {
-        encrypted = E2ECrypto.encrypt(plaintext, currentChannelId, currentServerId);
+        encKey = E2ECrypto.getServerKey(currentServerId);
+        if (!encKey) throw new Error('No channel key');
+        encrypted = E2ECrypto.encryptMessage(plaintext, encKey);
     } catch (e) {
         console.error('Encryption failed:', e);
         return;
-    }
-
-    // Sign the message with the server key for sender authentication
-    var serverKey = E2ECrypto.getServerKey(currentServerId);
-    var signature = null;
-    if (serverKey) {
-        try {
-            signature = E2ECrypto.signMessage(serverKey, plaintext);
-        } catch (e) {
-            console.warn('Message signing failed, proceeding without signature:', e);
-        }
     }
 
     var msgPayload = {
@@ -6223,9 +6413,45 @@ async function sendMessage() {
         nonce: encrypted.nonce,
         message_nonce: encrypted.messageNonce || null,
     };
-    if (signature) msgPayload.message_signature = signature;
     if (mentionIds.length > 0) msgPayload.mentions = mentionIds;
     if (pendingReply && pendingReply.sender_id) msgPayload.reply_to_user_id = pendingReply.sender_id;
+
+    // Include encrypted profile snapshot (sender's display name, colors, PFP file_id/file_key)
+    // so recipients can display the sender's correct profile even without cached data.
+    // This is critical for forwarded messages and offline recipients.
+    if (myProfile && currentServerId) {
+        try {
+            if (encKey && myProfile) {
+                var snapshot = {
+                    display_name: myProfile.display_name || user.display_name || user.username,
+                    username_color: myProfile.username_color || user.username_color || null,
+                    username_border_color: myProfile.username_border_color || null,
+                    profile_picture_file_id: myProfile.profile_picture_file_id || null,
+                    profile_picture_file_key: null
+                };
+                // Decrypt PFP key for inclusion in snapshot
+                if (myProfile.profile_picture_file_id && myProfile.profile_picture_file_key) {
+                    var identity = E2ECrypto.getIdentityKeyPair();
+                    if (identity) {
+                        var rawPicKey = myProfile.profile_picture_file_key;
+                        if (rawPicKey.indexOf(':') > 0) {
+                            var dk = E2ECrypto.decodeEncryptedFileKey(rawPicKey, identity.privateKey);
+                            if (dk) rawPicKey = dk;
+                        }
+                        snapshot.profile_picture_file_key = rawPicKey;
+                    }
+                }
+                var snapshotJson = JSON.stringify(snapshot);
+                var encSnapshot = E2ECrypto.encryptMessage(snapshotJson, encKey);
+                if (encSnapshot) {
+                    msgPayload.encrypted_profile_snapshot = encSnapshot.ciphertext;
+                    msgPayload.profile_snapshot_nonce = encSnapshot.nonce;
+                }
+            }
+        } catch (e) {
+            console.warn('Failed to encrypt profile snapshot:', e);
+        }
+    }
 
     // Include sender's profile picture key and banner key encrypted with the server key
     // so recipients can decrypt and view the sender's profile picture and banner.
@@ -6238,11 +6464,9 @@ async function sendMessage() {
                     var dk = E2ECrypto.decodeEncryptedFileKey(rawPicKey, identity.privateKey);
                     if (dk) rawPicKey = dk;
                 }
-                // Use deriveChannelKey WITHOUT msgNonce so decrypt(null) matches
-                var serverKey = E2ECrypto.getServerKey(currentServerId);
-                if (serverKey) {
-                    var channelKey = E2ECrypto.deriveChannelKey(serverKey, currentChannelId, null);
-                    var encPicKey = E2ECrypto.encryptWithKey(rawPicKey, channelKey);
+                var channelKey = E2ECrypto.getServerKey(currentServerId);
+                if (channelKey) {
+                    var encPicKey = E2ECrypto.encryptMessage(rawPicKey, channelKey);
                     if (encPicKey) {
                         msgPayload.encrypted_profile_key = encPicKey.ciphertext;
                         msgPayload.profile_key_nonce = encPicKey.nonce;
@@ -6266,8 +6490,8 @@ async function sendMessage() {
                 // Use deriveChannelKey WITHOUT msgNonce so decrypt(null) matches
                 var serverKey2 = E2ECrypto.getServerKey(currentServerId);
                 if (serverKey2) {
-                    var channelKey2 = E2ECrypto.deriveChannelKey(serverKey2, currentChannelId, null);
-                    var encBannerKey = E2ECrypto.encryptWithKey(rawBannerKey, channelKey2);
+                    var channelKey2 = E2ECrypto.getServerKey(currentServerId);
+                    var encBannerKey = E2ECrypto.encryptMessage(rawBannerKey, channelKey2);
                     if (encBannerKey) {
                         msgPayload.encrypted_banner_key = encBannerKey.ciphertext;
                         msgPayload.banner_key_nonce = encBannerKey.nonce;
@@ -6509,20 +6733,6 @@ async function loadDmMessages(dmChannelId, otherUserId) {
                 const otherUserData = await otherUserRes.json();
                 if (otherUserData.identity_public_key) {
                     otherPublicKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(otherUserData.identity_public_key));
-
-                    // TOFU key verification
-                    const verification = E2ECrypto.verifyKeyForUser(otherUserId, otherUserData.identity_public_key);
-                    if (verification.trusted) {
-                        tofuTrusted = true;
-                    } else {
-                        const banner = document.createElement('div');
-                        banner.className = 'message system';
-                        banner.style.cssText = 'background:#ff9800;color:#fff;padding:10px;border-radius:6px;margin:10px 0;text-align:center';
-                        banner.innerHTML = '⚠ <b>Key Changed!</b> The identity key for this user has changed since you last communicated. ' +
-                            '<button onclick="if(confirm(\'Trust the new key?\')){E2ECrypto.trustCurrentKey(\'' + otherUserId + '\',\'' + otherUserData.identity_public_key + '\');this.parentElement.remove();}" ' +
-                            'style="margin-left:8px;background:#fff;color:#e65100;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-weight:bold">Trust New Key</button>';
-                        list.appendChild(banner);
-                    }
                 }
             }
         } catch (_) {
@@ -6556,6 +6766,30 @@ function appendDmMessage(msg, kp, otherPublicKey) {
     lastDmMessageInfo = { senderId: msg.sender_id, dmChannelId: currentDmChannelId, time: msgTime };
     if (isGrouped) div.classList.add('grouped');
 
+    // Decrypt encrypted_profile_snapshot BEFORE extracting display name/colors/PFP
+    // so the snapshot values override the API response values
+    if (msg.encrypted_profile_snapshot && msg.profile_snapshot_nonce && msg.sender_id && kp && otherPublicKey) {
+        try {
+            var snapDmId = msg.dm_channel_id || currentDmChannelId;
+            var snapDec = E2ECrypto.decryptDm(msg.encrypted_profile_snapshot, msg.profile_snapshot_nonce, snapDmId, kp.privateKey, otherPublicKey, null);
+            if (snapDec) {
+                var snap = JSON.parse(snapDec);
+                if (snap.display_name) msg.sender_display_name = snap.display_name;
+                if (snap.username_color) msg.sender_username_color = snap.username_color;
+                if (snap.username_border_color) msg.sender_username_border_color = snap.username_border_color;
+                if (snap.profile_picture_file_id) {
+                    msg.sender_profile_pic = snap.profile_picture_file_id;
+                    if (snap.profile_picture_file_key) {
+                        profileKeyCache[msg.sender_id + ':' + snap.profile_picture_file_id] = snap.profile_picture_file_key;
+                        scheduleProfileKeySave();
+                    }
+                }
+            }
+        } catch (_e) {
+            console.warn('Failed to decrypt DM profile snapshot:', _e);
+        }
+    }
+
     const displayName = msg.sender_display_name || msg.sender_username || '?';
     const initial = displayName.charAt(0).toUpperCase();
     var senderPicUrl = msg.sender_profile_pic ? getProfilePicUrl(msg.sender_profile_pic, msg.sender_id) : null;
@@ -6583,19 +6817,7 @@ function appendDmMessage(msg, kp, otherPublicKey) {
         try {
             const dmId = msg.dm_channel_id || currentDmChannelId;
             textContent = E2ECrypto.decryptDm(msg.encrypted_content, msg.nonce, dmId, kp.privateKey, otherPublicKey, msg.message_nonce);
-            // Verify DM message signature if present
-            if (msg.message_signature) {
-                try {
-                    var dmVerifySecret = E2ECrypto.x25519SharedSecret(kp.privateKey, otherPublicKey);
-                    if (dmVerifySecret) {
-                        if (!E2ECrypto.verifyMessage(dmVerifySecret, textContent, msg.message_signature)) {
-                            div.classList.add('unverified');
-                        }
-                    }
-                } catch (_e) {
-                    console.warn('DM signature verification error:', _e);
-                }
-            }
+
             // Decrypt and cache sender's profile picture key from DM message
             if (msg.encrypted_profile_key && msg.profile_key_nonce && msg.sender_profile_pic && msg.sender_id && kp && otherPublicKey) {
                 try {
@@ -6622,6 +6844,7 @@ function appendDmMessage(msg, kp, otherPublicKey) {
                     console.warn('Failed to decrypt banner key from DM:', _e);
                 }
             }
+
             // Check if it's a structured message
             try {
                 const parsed = JSON.parse(textContent);
@@ -6673,13 +6896,20 @@ function appendDmMessage(msg, kp, otherPublicKey) {
     }
     if (forwardData) {
         div.classList.add('forwarded');
-        var fwdFileId = forwardData.sender_profile_pic_file_id || forwardData.sender_profile_pic || '';
-        var fwdUserId = forwardData.sender_id || forwardData.source_server_id || '';
-        var fwdSenderPicUrl = fwdFileId && fwdUserId ? getProfilePicUrl(fwdFileId, fwdUserId) : null;
-        var fwdPicHtml = fwdSenderPicUrl ? '<img class="forward-sender-pic" src="' + fwdSenderPicUrl + '" alt="">' : '<span class="forward-sender-initial">' + (forwardData.sender_username ? forwardData.sender_username.charAt(0).toUpperCase() : '?') + '</span>';
-        contentHtml += '<div class="forward-label" data-source-server-id="' + escapeAttr(forwardData.source_server_id || '') + '" data-source-channel-id="' + escapeAttr(forwardData.source_channel_id || '') + '" data-source-message-id="' + escapeAttr(forwardData.source_message_id || '') + '">' +
-            '<div class="forward-sender-info">' + fwdPicHtml + '<span class="forward-sender-name"' + (forwardData.sender_color ? ' style="color:' + forwardData.sender_color + (forwardData.sender_border_color ? ';text-shadow:' + forwardData.sender_border_color : ';text-shadow:' + getDisplayNameTextShadow(forwardData.sender_color)) + '"' : '') + '>' + escapeHtml(forwardData.sender_username || 'unknown') + '</span></div>' +
-            '<div class="forward-source-label"><span class="forward-channel-badge">#' + escapeHtml(forwardData.source_channel_name || 'unknown') + '</span> <span class="forward-server-badge">' + escapeHtml(forwardData.source_server_name || 'unknown') + '</span></div></div>';
+        if (forwardData.source_is_dm) {
+            // DM-sourced forward: no sender info, just show "Forwarded" label
+            contentHtml += '<div class="forward-label" data-source-is-dm="true">' +
+                '<div class="forward-source-label" style="font-style:italic;color:var(--text-muted)">Forwarded</div></div>';
+        } else {
+            // Server-sourced forward: show original sender info with source link
+            var fwdFileId = forwardData.sender_profile_pic_file_id || forwardData.sender_profile_pic || '';
+            var fwdUserId = forwardData.sender_id || forwardData.source_server_id || '';
+            var fwdSenderPicUrl = fwdFileId && fwdUserId ? getProfilePicUrl(fwdFileId, fwdUserId) : null;
+            var fwdPicHtml = fwdSenderPicUrl ? '<img class="forward-sender-pic" src="' + fwdSenderPicUrl + '" alt="">' : '<span class="forward-sender-initial">' + (forwardData.sender_username ? forwardData.sender_username.charAt(0).toUpperCase() : '?') + '</span>';
+            contentHtml += '<div class="forward-label" data-source-server-id="' + escapeAttr(forwardData.source_server_id || '') + '" data-source-channel-id="' + escapeAttr(forwardData.source_channel_id || '') + '" data-source-message-id="' + escapeAttr(forwardData.source_message_id || '') + '">' +
+                '<div class="forward-sender-info">' + fwdPicHtml + '<span class="forward-sender-name"' + (forwardData.sender_color ? ' style="color:' + forwardData.sender_color + (forwardData.sender_border_color ? ';text-shadow:' + forwardData.sender_border_color : ';text-shadow:' + getDisplayNameTextShadow(forwardData.sender_color)) + '"' : '') + '>' + escapeHtml(forwardData.sender_username || 'unknown') + '</span></div>' +
+                '<div class="forward-source-label"><span class="forward-channel-badge">#' + escapeHtml(forwardData.source_channel_name || 'unknown') + '</span> <span class="forward-server-badge">' + escapeHtml(forwardData.source_server_name || 'unknown') + '</span></div></div>';
+        }
         // Forward text preview (decrypt with DM keys)
         if (forwardData.preview_content && forwardData.preview_nonce && kp && otherPublicKey) {
             try {
@@ -6736,7 +6966,10 @@ function appendDmMessage(msg, kp, otherPublicKey) {
 
     const actionsHtml = '<div class="message-actions">' +
         '<button class="msg-action-btn" data-action="reply" title="Reply">&#x21A9;</button>' +
+        '<button class="msg-action-btn" data-action="dm-forward" title="Forward to channel">&#x21AA;</button>' +
+        '<button class="msg-action-btn" data-action="dm-forward-dm" title="Forward to DM">&#x1F4AC;</button>' +
         (isOwn ? '<button class="msg-action-btn" data-action="edit" title="Edit">&#x270E;</button>' : '') +
+        (isOwn ? '<button class="msg-action-btn" data-action="delete" title="Delete">&#x2715;</button>' : '') +
         '</div>';
 
     const editedHtml = msg.edited_at ? '<span class="edited-label">(edited)</span>' : '';
@@ -6897,17 +7130,6 @@ async function sendDmMessage() {
         return;
     }
 
-    // Sign the DM message with ECDH shared secret for sender authentication
-    var dmSignature = null;
-    try {
-        var dmSharedSecret = E2ECrypto.x25519SharedSecret(kp.privateKey, otherPublicKey);
-        if (dmSharedSecret) {
-            dmSignature = E2ECrypto.signMessage(dmSharedSecret, plaintext);
-        }
-    } catch (e) {
-        console.warn('DM signing failed, proceeding without signature:', e);
-    }
-
     var msgPayload = {
         type: 'dm_send',
         dm_channel_id: currentDmChannelId,
@@ -6915,9 +7137,42 @@ async function sendDmMessage() {
         nonce: encrypted.nonce,
         message_nonce: encrypted.messageNonce || null,
     };
-    if (dmSignature) msgPayload.message_signature = dmSignature;
     if (mentionIds.length > 0) msgPayload.mentions = mentionIds;
     if (pendingReply && pendingReply.sender_id) msgPayload.reply_to_user_id = pendingReply.sender_id;
+
+    // Include encrypted profile snapshot (sender's display name, colors, PFP file_id/file_key)
+    // so the DM recipient can display the sender's correct profile even without cached data.
+    if (myProfile && kp && otherPublicKey) {
+        try {
+            var snapshot = {
+                display_name: myProfile.display_name || user.display_name || user.username,
+                username_color: myProfile.username_color || user.username_color || null,
+                username_border_color: myProfile.username_border_color || null,
+                profile_picture_file_id: myProfile.profile_picture_file_id || null,
+                profile_picture_file_key: null
+            };
+            // Decrypt PFP key for inclusion in snapshot
+            if (myProfile.profile_picture_file_id && myProfile.profile_picture_file_key) {
+                var identity = E2ECrypto.getIdentityKeyPair();
+                if (identity) {
+                    var rawPicKey = myProfile.profile_picture_file_key;
+                    if (rawPicKey.indexOf(':') > 0) {
+                        var dk = E2ECrypto.decodeEncryptedFileKey(rawPicKey, identity.privateKey);
+                        if (dk) rawPicKey = dk;
+                    }
+                    snapshot.profile_picture_file_key = rawPicKey;
+                }
+            }
+            var snapshotJson = JSON.stringify(snapshot);
+            var encSnapshot = E2ECrypto.encryptDm(snapshotJson, currentDmChannelId, kp.privateKey, otherPublicKey);
+            if (encSnapshot) {
+                msgPayload.encrypted_profile_snapshot = encSnapshot.ciphertext;
+                msgPayload.profile_snapshot_nonce = encSnapshot.nonce;
+            }
+        } catch (e) {
+            console.warn('Failed to encrypt DM profile snapshot:', e);
+        }
+    }
 
     // Include sender's profile picture key and banner key encrypted with the DM shared secret
     // so the DM recipient can decrypt and view the sender's profile picture and banner.
@@ -9148,8 +9403,11 @@ async function startFileUpload() {
             const encrypted = E2ECrypto.encryptDm(messagePayload, currentDmChannelId, kp.privateKey, otherPublicKey);
             ws.send(JSON.stringify({ type: 'dm_send', dm_channel_id: currentDmChannelId, encrypted_content: encrypted.ciphertext, nonce: encrypted.nonce, message_nonce: encrypted.messageNonce || null }));
         } else {
-            const encrypted = E2ECrypto.encrypt(messagePayload, currentChannelId, currentServerId);
-            ws.send(JSON.stringify({ type: 'message_send', channel_id: currentChannelId, encrypted_content: encrypted.ciphertext, nonce: encrypted.nonce, message_nonce: encrypted.messageNonce || null }));
+            var fileMsgKey = E2ECrypto.getServerKey(currentServerId);
+            const encrypted = fileMsgKey ? E2ECrypto.encryptMessage(messagePayload, fileMsgKey) : null;
+            if (encrypted) {
+                ws.send(JSON.stringify({ type: 'message_send', channel_id: currentChannelId, encrypted_content: encrypted.ciphertext, nonce: encrypted.nonce, message_nonce: encrypted.messageNonce || null }));
+            }
         }
 
         closeUploadModal();
@@ -10608,7 +10866,10 @@ function renderStickerItems(grid, stickers) {
         (async () => {
             const identity = E2ECrypto.getIdentityKeyPair();
             if (!identity) return;
-            const stickerKey = identity.privateKey;
+            // sticker.file_key is already decrypted by loadUserStickers()
+            const stickerKey = sticker.file_key
+                ? new Uint8Array(E2ECrypto.base64ToArrayBuffer(sticker.file_key))
+                : identity.privateKey;
             try {
                 const blob = await downloadAndDecryptStickerData(sticker.file_id, stickerKey, sticker.mime_type || 'image/png');
                 img.src = URL.createObjectURL(blob);
@@ -10666,7 +10927,10 @@ function renderGifPanel(container) {
             (async () => {
                 const identity = E2ECrypto.getIdentityKeyPair();
                 if (!identity) return;
-                const stickerKey = identity.privateKey;
+                // sticker.file_key is already decrypted by loadUserStickers()
+                const stickerKey = sticker.file_key
+                    ? new Uint8Array(E2ECrypto.base64ToArrayBuffer(sticker.file_key))
+                    : identity.privateKey;
                 try {
                     const blob = await downloadAndDecryptStickerData(sticker.file_id, stickerKey, sticker.mime_type || 'image/gif');
                     img.src = URL.createObjectURL(blob);
@@ -10739,23 +11003,27 @@ async function sendStickerMessage(sticker) {
 
     try {
         let filePayload;
+        // Decrypt the stored file_key using identity key, then re-encrypt with channel/DM key
+        // so the recipient can decrypt it. This ensures file keys are never in plaintext
+        // and work for both sender and recipient.
+        const identity = E2ECrypto.getIdentityKeyPair();
+        if (!identity) { console.error('sendStickerMessage: no identity key'); hideStickerProgress(); setStickerSendingCooldown(false); return; }
+
+        let rawFileKeyB64 = null;
         if (sticker.file_key) {
-            // Optimized: reuse existing file — no need to download/re-encrypt/re-upload
-            showStickerProgress('Sending...', 50);
-            const payload = {
-                type: 'sticker',
-                file_id: sticker.file_id,
-                sticker_name: sticker.sticker_name,
-                mime_type: sticker.mime_type || 'image/png',
-                file_key: sticker.file_key,
-            };
-            if (pendingText) payload.text = pendingText;
-            filePayload = JSON.stringify(payload);
-        } else {
-            // Fallback for old stickers without file_key: download, decrypt, re-encrypt, re-upload
+            try {
+                rawFileKeyB64 = E2ECrypto.decodeEncryptedFileKey(sticker.file_key, identity.privateKey);
+            } catch (_) {}
+            // If the key is already decrypted (raw base64 from loadUserStickers),
+            // decodeEncryptedFileKey returns null because there's no colon separator.
+            if (!rawFileKeyB64) {
+                rawFileKeyB64 = sticker.file_key;
+            }
+        }
+
+        if (!rawFileKeyB64) {
+            // Fallback for old stickers without encrypted file_key: download, decrypt, re-encrypt, re-upload
             showStickerProgress('Decrypting...', 5);
-            const identity = E2ECrypto.getIdentityKeyPair();
-            if (!identity) { console.error('sendStickerMessage: no identity key'); hideStickerProgress(); setStickerSendingCooldown(false); return; }
             const stickerKey = identity.privateKey;
             const stickerMime = sticker.mime_type || 'image/png';
             const decryptedBlob = await downloadAndDecryptStickerData(sticker.file_id, stickerKey, stickerMime);
@@ -10764,6 +11032,7 @@ async function sendStickerMessage(sticker) {
             showStickerProgress('Re-encrypting...', 15);
             const freshKey = E2ECrypto.generateFileKey();
             const freshKeyB64 = E2ECrypto.arrayBufferToBase64(freshKey);
+            rawFileKeyB64 = freshKeyB64;
             const mime = sticker.mime_type || 'image/png';
 
             showStickerProgress('Uploading...', 20);
@@ -10795,16 +11064,43 @@ async function sendStickerMessage(sticker) {
             const completeRes = await authFetch('/api/files/' + newFileId + '/complete', { method: 'POST' });
             if (!completeRes.ok) { console.error('sendStickerMessage: complete failed', await completeRes.text()); hideStickerProgress(); setStickerSendingCooldown(false); return; }
 
-            const fallbackPayload = {
-                type: 'sticker',
-                file_id: newFileId,
-                sticker_name: sticker.sticker_name,
-                mime_type: mime,
-                file_key: freshKeyB64,
-            };
-            if (pendingText) fallbackPayload.text = pendingText;
-            filePayload = JSON.stringify(fallbackPayload);
+            sticker.file_id = newFileId;
+            sticker.mime_type = mime;
         }
+
+        // Re-encrypt the raw file key with the channel key for the recipient.
+        // For DMs, the entire message payload is already DM-encrypted, so we can
+        // include the raw key directly (it's never in plaintext on the server).
+        showStickerProgress('Sending...', 50);
+        const payload = {
+            type: 'sticker',
+            file_id: sticker.file_id,
+            sticker_name: sticker.sticker_name,
+            mime_type: sticker.mime_type || 'image/png',
+        };
+        if (pendingText) payload.text = pendingText;
+
+        if (currentServerId) {
+            // Server channel: encrypt file key with the server key so recipients can decrypt
+            try {
+                var channelKey = E2ECrypto.getServerKey(currentServerId);
+                if (channelKey) {
+                    const encKey = E2ECrypto.aeadEncrypt(rawFileKeyB64, channelKey);
+                    payload.file_key = encKey.ciphertext;
+                    payload.file_key_nonce = encKey.nonce;
+                } else {
+                    payload.file_key = rawFileKeyB64;
+                }
+            } catch (e) {
+                console.error('Failed to encrypt sticker file key for server:', e);
+                payload.file_key = rawFileKeyB64;
+            }
+        } else {
+            // DM: the entire message payload is DM-encrypted, raw key is safe here
+            payload.file_key = rawFileKeyB64;
+        }
+
+        filePayload = JSON.stringify(payload);
 
         // Clear input after sending combined message
         if (pendingText && stickerInput) {
@@ -10833,18 +11129,21 @@ async function sendStickerMessage(sticker) {
             await new Promise(r => setTimeout(r, 600));
         } else if (currentChannelId && currentServerId) {
             if (!E2ECrypto.getServerKey(currentServerId)) { hideStickerProgress(); setStickerSendingCooldown(false); return; }
-            const encrypted = E2ECrypto.encrypt(filePayload, currentChannelId, currentServerId);
-            ws.send(JSON.stringify({
-                type: 'message_send',
-                channel_id: currentChannelId,
-                encrypted_content: encrypted.ciphertext,
-                nonce: encrypted.nonce,
-                message_nonce: encrypted.messageNonce || null,
-            }));
-            // Brief success glow then cleanup
-            const fill = document.getElementById('sticker-send-fill');
-            if (fill) { fill.classList.add('success'); fill.style.width = '100%'; }
-            await new Promise(r => setTimeout(r, 600));
+            var stickerKey = E2ECrypto.getServerKey(currentServerId);
+            const encrypted = stickerKey ? E2ECrypto.encryptMessage(filePayload, stickerKey) : null;
+            if (encrypted) {
+                ws.send(JSON.stringify({
+                    type: 'message_send',
+                    channel_id: currentChannelId,
+                    encrypted_content: encrypted.ciphertext,
+                    nonce: encrypted.nonce,
+                    message_nonce: encrypted.messageNonce || null,
+                }));
+                // Brief success glow then cleanup
+                const fill = document.getElementById('sticker-send-fill');
+                if (fill) { fill.classList.add('success'); fill.style.width = '100%'; }
+                await new Promise(r => setTimeout(r, 600));
+            }
         }
     } catch (e) {
         console.error('Failed to send sticker:', e);
@@ -11206,10 +11505,10 @@ async function processAndUploadSticker() {
         const originalFile = stickerCropState.file;
 
         let blob, mimeType;
-        // Emojis get a random shareable key so other users can decrypt them via
-        // the file_key embedded in messages; stickers/GIFs still use identity.
-        let emojiUploadFileKey = null;
-        let emojiUploadFileKeyB64 = null;
+        // All sticker types get a random shareable key so other users can decrypt
+        // them via the file_key re-encrypted with channel/DM key in messages.
+        let shareableFileKey = E2ECrypto.generateFileKey();
+        let shareableFileKeyB64 = E2ECrypto.arrayBufferToBase64(shareableFileKey);
 
         // Create a canvas and crop/resize the image
         const canvas = document.createElement('canvas');
@@ -11235,10 +11534,7 @@ async function processAndUploadSticker() {
             blob = await new Promise(resolve => canvas.toBlob(resolve, outputMime));
             if (!blob) throw new Error('Failed to process emoji');
             mimeType = 'image/emoji';
-            // Emojis use a random shareable key (not the identity key) so that
-            // the file_key embedded in messages lets other users decrypt them.
-            emojiUploadFileKey = E2ECrypto.generateFileKey();
-            emojiUploadFileKeyB64 = E2ECrypto.arrayBufferToBase64(emojiUploadFileKey);
+            // Emojis use the same random shareable key pattern
         } else if (stickerUploadMode === 'gif') {
             // GIFs are always uploaded as-is to preserve animation, no cropping
             blob = originalFile;
@@ -11271,11 +11567,11 @@ async function processAndUploadSticker() {
         if (progressText) progressText.textContent = 'Uploading...';
         if (progressFill) progressFill.style.width = '15%';
 
-        // Use the random shareable key for emojis (set above), or the identity
-        // private key for stickers/GIFs (synced across devices).
+        // All sticker types use a random shareable key so that the file_key
+        // re-encrypted with the channel/DM key in messages can be decrypted by recipients.
         const identity = E2ECrypto.getIdentityKeyPair();
         if (!identity) throw new Error('No identity key - cannot encrypt sticker');
-        const fileKey = emojiUploadFileKey || identity.privateKey;
+        const fileKey = shareableFileKey;
 
         // Init file upload
         const initRes = await authFetch('/api/files/init', {
@@ -11309,25 +11605,25 @@ async function processAndUploadSticker() {
         const completeRes = await authFetch('/api/files/' + file_id + '/complete', { method: 'POST' });
         if (!completeRes.ok) throw new Error('Failed to finalize upload');
 
-        // Register as user sticker. Emojis store their random shareable key so
-        // it can travel with messages; stickers/GIFs keep file_key null (identity-derived).
+        // Register as user sticker. All types store their random shareable key
+        // encrypted with the identity key, so the key can be re-encrypted with
+        // the channel/DM key when sent in messages.
         if (progressText) progressText.textContent = 'Registering sticker...';
         if (progressFill) progressFill.style.width = '95%';
+        const encryptedFileKeyCombined = E2ECrypto.encodeEncryptedFileKey(shareableFileKeyB64, identity.privateKey);
+        const encryptedFileKeyParts = encryptedFileKeyCombined.split(':');
         const stickerRes = await authFetch('/api/users/me/stickers', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 file_id: file_id,
                 sticker_name: name,
-                // Encrypt the shareable emoji key with the user's identity key so the server
-                // cannot decrypt emoji images; regular stickers keep file_key null (identity-derived).
-                file_key: emojiUploadFileKeyB64 ? E2ECrypto.encodeEncryptedFileKey(emojiUploadFileKeyB64, identity.privateKey) : null,
+                // Encrypt the shareable key with the user's identity key so the server
+                // cannot decrypt sticker/emoji/GIF images.
+                file_key: encryptedFileKeyCombined,
                 mime_type: mimeType,
-                // Also populate the encrypted_file_key + file_key_nonce columns so the server
-                // can only store ciphertext. The client already supports decrypting these
-                // via decodeEncryptedFileKey in loadUserStickers() and loadEmojiCache().
-                encrypted_file_key: emojiUploadFileKeyB64 ? E2ECrypto.arrayBufferToBase64(E2ECrypto.base64ToArrayBuffer(E2ECrypto.encodeEncryptedFileKey(emojiUploadFileKeyB64, identity.privateKey).split(':')[1])) : null,
-                file_key_nonce: emojiUploadFileKeyB64 ? E2ECrypto.encodeEncryptedFileKey(emojiUploadFileKeyB64, identity.privateKey).split(':')[0] : null,
+                encrypted_file_key: encryptedFileKeyParts[1] || null,
+                file_key_nonce: encryptedFileKeyParts[0] || null,
             }),
         });
         if (!stickerRes.ok) {
@@ -11441,6 +11737,7 @@ async function executeDmForward(targetUserId, targetUsername, dmChannelId) {
     if (!pendingForward || !ws || ws.readyState !== WebSocket.OPEN) return;
     const msgDiv = pendingForward.msgDiv;
     const messageId = pendingForward.messageId;
+    const fromDm = pendingForward.fromDm || false;
 
     // Get our identity key pair for DM encryption
     const kp = E2ECrypto.getIdentityKeyPair();
@@ -11467,11 +11764,6 @@ async function executeDmForward(targetUserId, targetUsername, dmChannelId) {
         return;
     }
 
-    const senderUsername = msgDiv.querySelector('.display-name')?.textContent || msgDiv.querySelector('.username')?.textContent || 'unknown';
-    const senderId = msgDiv.getAttribute('data-sender-id') || '';
-    var avatarPicAttr = (msgDiv.querySelector('.avatar img.avatar-img')?.getAttribute('data-profile-pic')) || (msgDiv.querySelector('.avatar')?.getAttribute('data-profile-pic-load')) || '';
-    var senderPicFileId = avatarPicAttr ? avatarPicAttr.split(':')[1] || '' : '';
-    const senderColor = msgDiv.querySelector('.display-name')?.style?.color || '';
     const textEl = msgDiv.querySelector('.text');
     const originalText = textEl ? extractRawMessageText(textEl) : '';
 
@@ -11522,20 +11814,35 @@ async function executeDmForward(targetUserId, targetUsername, dmChannelId) {
             previewEncrypted = E2ECrypto.encryptDm(previewPlaintext, dmChannelId, kp.privateKey, otherPublicKey);
         }
 
-        // Build the forward payload (same structure as channel forwards, with encrypted preview)
+        // Build the forward payload
         const forwardPayload = {
             type: 'forward',
-            source_server_id: currentServerId,
-            source_channel_id: currentChannelId,
+            source_is_dm: fromDm,
             source_message_id: messageId,
-            source_server_name: document.getElementById('server-name')?.textContent || 'Server',
-            source_channel_name: document.getElementById('channel-name')?.textContent || 'channel',
-            sender_username: senderUsername,
-            sender_id: senderId,
-            sender_profile_pic_file_id: senderPicFileId,
-            sender_color: senderColor,
-            sender_border_color: msgDiv.querySelector('.display-name')?.style?.textShadow || '',
+            timestamp: msgDiv.querySelector('.time')?.textContent || '',
         };
+
+        if (!fromDm) {
+            // Server-source forward: include sender info
+            // For grouped messages, the header (display-name, avatar) may not be in the DOM.
+            // Walk backwards through siblings to find the sender info.
+            var senderInfo = findForwardSenderInfo(msgDiv);
+            const senderUsername = senderInfo.senderUsername;
+            const senderId = senderInfo.senderId;
+            var senderPicFileId = senderInfo.senderPicFileId;
+            const senderColor = senderInfo.senderColor;
+
+            forwardPayload.source_server_id = currentServerId;
+            forwardPayload.source_channel_id = currentChannelId;
+            forwardPayload.source_server_name = document.getElementById('server-name')?.textContent || 'Server';
+            forwardPayload.source_channel_name = document.getElementById('channel-name')?.textContent || 'channel';
+            forwardPayload.sender_username = senderUsername;
+            forwardPayload.sender_id = senderId;
+            forwardPayload.sender_profile_pic_file_id = senderPicFileId;
+            forwardPayload.sender_color = senderColor;
+            forwardPayload.sender_border_color = senderInfo.senderBorderColor || '';
+        }
+
         if (previewEncrypted) {
             forwardPayload.preview_content = previewEncrypted.ciphertext;
             forwardPayload.preview_nonce = previewEncrypted.nonce;
@@ -11703,6 +12010,11 @@ function getProfilePicUrl(fileId, userId) {
         // Update loaded avatars: img elements with data-profile-pic
         document.querySelectorAll('[data-profile-pic="' + cacheKey + '"]').forEach(function (el) {
             el.src = url;
+        });
+        // Update fallback avatars that were rendered with data-profile-pic-load (initial only)
+        document.querySelectorAll('[data-profile-pic-load="' + cacheKey + '"]').forEach(function (el) {
+            el.innerHTML = '<img class="avatar-img" src="' + url + '" alt="" data-profile-pic="' + cacheKey + '">';
+            el.removeAttribute('data-profile-pic-load');
         });
         // Update placeholder avatars: divs with data-profile-pic-load
         document.querySelectorAll('[data-profile-pic-load="' + cacheKey + '"]').forEach(function (el) {

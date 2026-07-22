@@ -116,9 +116,9 @@ test.describe('Friend Code Features', () => {
         const qrBtn = page.locator('#friend-qr-btn');
         await expect(qrBtn).toBeVisible();
 
-        // Check the recover button exists
-        const recoverBtn = page.locator('#recover-friend-code-btn');
-        await expect(recoverBtn).toBeVisible();
+        // Check the get/recover button exists
+        const getBtn = page.locator('#get-friend-code-btn');
+        await expect(getBtn).toBeVisible();
     });
 
     test('recover friend code modal opens from DM sidebar button', async ({ page }) => {
@@ -144,9 +144,9 @@ test.describe('Friend Code Features', () => {
         await page.click('#dm-strip-btn');
         await page.waitForTimeout(2000);
 
-        // Click the recover button
-        const recoverBtn = page.locator('#recover-friend-code-btn');
-        await recoverBtn.click();
+        // Click the get/recover button
+        const getBtn = page.locator('#get-friend-code-btn');
+        await getBtn.click();
         await page.waitForTimeout(1000);
 
         // The friend code password modal should be visible (if auto-recovery didn't kick in)

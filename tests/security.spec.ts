@@ -130,7 +130,7 @@ await page2.click('#register-form button[type="submit"]');
 
         // Upload server key for owner
         await page.evaluate(async ({ serverId, userId }) => {
-            const serverKey = E2ECrypto.generateServerKey();
+            const serverKey = E2ECrypto.generateSymmetricKey();
             E2ECrypto.saveServerKey(serverId, serverKey);
             const identity = E2ECrypto.getIdentityKeyPair();
             const encrypted = E2ECrypto.envelopeEncryptRaw(serverKey, identity.publicKey);
@@ -338,7 +338,7 @@ await page.click('#register-form button[type="submit"]');
         const channelId = channels[0].id;
 
         await page.evaluate(async ({ serverId, userId }) => {
-            const serverKey = E2ECrypto.generateServerKey();
+            const serverKey = E2ECrypto.generateSymmetricKey();
             E2ECrypto.saveServerKey(serverId, serverKey);
             const identity = E2ECrypto.getIdentityKeyPair();
             const encrypted = E2ECrypto.envelopeEncryptRaw(serverKey, identity.publicKey);

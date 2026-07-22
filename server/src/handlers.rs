@@ -1399,12 +1399,12 @@ pub async fn list_messages(
                 "sender_display_name": m.sender_display_name,
                 "sender_profile_pic": m.sender_profile_pic,
                 "sender_username_color": m.sender_username_color,
+                "sender_username_border_color": m.sender_username_border_color,
                 "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
                 "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
                 "timestamp": m.timestamp,
                 "message_nonce": m.message_nonce,
                 "edited_at": m.edited_at,
-                "message_signature": m.message_signature,
                 "encrypted_profile_key": m.encrypted_profile_key,
                 "profile_key_nonce": m.profile_key_nonce,
                 "encrypted_banner_key": m.encrypted_banner_key,
@@ -1471,6 +1471,7 @@ pub async fn list_messages_around(
                 "sender_display_name": m.sender_display_name,
                 "sender_profile_pic": m.sender_profile_pic,
                 "sender_username_color": m.sender_username_color,
+                "sender_username_border_color": m.sender_username_border_color,
                 "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
                 "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
                 "timestamp": m.timestamp,
@@ -1956,7 +1957,6 @@ pub async fn admin_list_messages(
                 "timestamp": m.timestamp,
                 "edited_at": m.edited_at,
                 "message_nonce": m.message_nonce,
-                "message_signature": m.message_signature,
                 "encrypted_profile_key": m.encrypted_profile_key,
                 "profile_key_nonce": m.profile_key_nonce,
                 "encrypted_banner_key": m.encrypted_banner_key,
@@ -2088,7 +2088,7 @@ pub async fn admin_list_dm_messages(
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     };
-    let result: Vec<serde_json::Value> = rows.iter().map(|(id, dm_id, sid, sname, enc, nonce, ts)| {
+    let result: Vec<serde_json::Value> = rows.iter().map(|(id, dm_id, sid, sname, enc, nonce, ts, _kv, _snap, _snap_nonce, _file_key, _file_key_nonce)| {
         serde_json::json!({
             "id": id, "dm_channel_id": dm_id, "sender_id": sid, "sender_username": sname,
             "encrypted_content": base64::engine::general_purpose::STANDARD.encode(enc),
@@ -3247,13 +3247,17 @@ pub async fn regen_friend_code_with_password(
 fn hmac_sha256_hex(key: &[u8], data: &str) -> String {
     use sha2::{Digest, Sha256};
     const BLOCK_SIZE: usize = 64;
-    let mut k = vec![0u8; BLOCK_SIZE];
-    if key.len() > BLOCK_SIZE {
+    // Normalize key to 32 bytes: if key is not exactly 32 bytes, hash it.
+    // This matches the client behavior in crypto.js where libsodium's one-shot
+    // crypto_auth_hmacsha256 requires a 32-byte key.
+    let normalized_key = if key.len() != 32 {
         let hash = Sha256::digest(key);
-        k[..hash.len()].copy_from_slice(&hash);
+        hash.to_vec()
     } else {
-        k[..key.len()].copy_from_slice(key);
-    }
+        key.to_vec()
+    };
+    let mut k = vec![0u8; BLOCK_SIZE];
+    k[..normalized_key.len()].copy_from_slice(&normalized_key);
     let mut ipad = vec![0u8; BLOCK_SIZE];
     let mut opad = vec![0u8; BLOCK_SIZE];
     for i in 0..BLOCK_SIZE {
@@ -3723,12 +3727,13 @@ pub async fn list_dm_messages(
                         "sender_display_name": m.sender_display_name,
                         "sender_profile_pic": m.sender_profile_pic,
                         "sender_username_color": m.sender_username_color,
+                "sender_username_border_color": m.sender_username_border_color,
                         "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
                         "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
                         "timestamp": m.timestamp,
                         "message_nonce": m.message_nonce,
                         "edited_at": m.edited_at,
-                        "message_signature": m.message_signature,
+
                         "encrypted_profile_key": m.encrypted_profile_key,
                         "profile_key_nonce": m.profile_key_nonce,
                         "encrypted_banner_key": m.encrypted_banner_key,

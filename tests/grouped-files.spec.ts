@@ -42,7 +42,7 @@ await page.click('#register-form button[type="submit"]');
 
     // Generate and upload server key
     await page.evaluate(async ({ serverId, userId }) => {
-        const serverKey = E2ECrypto.generateServerKey();
+        const serverKey = E2ECrypto.generateSymmetricKey();
         E2ECrypto.saveServerKey(serverId, serverKey);
         const identity = E2ECrypto.getIdentityKeyPair();
         const encrypted = E2ECrypto.envelopeEncryptRaw(serverKey, identity.publicKey);
@@ -180,7 +180,7 @@ test.describe('Grouped File Uploads', () => {
                 file_size: 100,
                 file_key: 'dGVzdA=='
             });
-            const encrypted = E2ECrypto.encrypt(payload, channelId, serverId);
+            const encrypted = E2ECrypto.encryptMessage(payload, E2ECrypto.getServerKey(serverId));
             ws.send(JSON.stringify({
                 type: 'message_send',
                 channel_id: channelId,
@@ -212,7 +212,7 @@ test.describe('Grouped File Uploads', () => {
                     { type: 'file', file_id: 'gf-002', filename: 'img2.png', mime_type: 'image/png', file_size: 2000, file_key: 'dGVzdDI=' },
                 ]
             });
-            const encrypted = E2ECrypto.encrypt(payload, channelId, serverId);
+            const encrypted = E2ECrypto.encryptMessage(payload, E2ECrypto.getServerKey(serverId));
             ws.send(JSON.stringify({
                 type: 'message_send',
                 channel_id: channelId,
@@ -266,7 +266,7 @@ test.describe('Grouped File Uploads', () => {
                     { type: 'file', file_id: 'gf-nav-3', filename: 'file3.txt', mime_type: 'text/plain', file_size: 300, file_key: 'dGVzdDM=' },
                 ]
             });
-            const encrypted = E2ECrypto.encrypt(payload, channelId, serverId);
+            const encrypted = E2ECrypto.encryptMessage(payload, E2ECrypto.getServerKey(serverId));
             ws.send(JSON.stringify({
                 type: 'message_send',
                 channel_id: channelId,
@@ -317,7 +317,7 @@ test.describe('Grouped File Uploads', () => {
                     { type: 'file', file_id: 'gf-strip-3', filename: 'doc3.pdf', mime_type: 'application/pdf', file_size: 700, file_key: 'dGVzdDM=' },
                 ]
             });
-            const encrypted = E2ECrypto.encrypt(payload, channelId, serverId);
+            const encrypted = E2ECrypto.encryptMessage(payload, E2ECrypto.getServerKey(serverId));
             ws.send(JSON.stringify({
                 type: 'message_send',
                 channel_id: channelId,
@@ -367,7 +367,7 @@ test.describe('Grouped File Uploads', () => {
                 file_size: 5000,
                 file_key: 'dGVzdGF1ZGlv'
             });
-            const encrypted = E2ECrypto.encrypt(payload, channelId, serverId);
+            const encrypted = E2ECrypto.encryptMessage(payload, E2ECrypto.getServerKey(serverId));
             ws.send(JSON.stringify({
                 type: 'message_send',
                 channel_id: channelId,

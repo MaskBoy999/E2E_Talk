@@ -58,6 +58,7 @@ var E2ECrypto = (() => {
     // If the key is shorter or longer, hash it down to 32 bytes first.
     function hmacSHA256(keyBytes, msgBytes) {
         let k = new Uint8Array(keyBytes);
+        // Normalize key to 32 bytes (libsodium's one-shot API requires exactly 32 bytes)
         if (k.length !== 32) {
             k = sha256(k);
         }
@@ -235,8 +236,8 @@ var E2ECrypto = (() => {
     // ---- HMAC hex (for invite/friend codes) ----
     function hmacHex(keyBytesOrB64, dataString) {
         let keyBytes;
-        if (typeof keyBytesOrB64 === 'string' && keyBytesOrB64.length > 32) {
-            // Base64-encoded key (e.g., from server HMAC endpoint)
+        if (typeof keyBytesOrB64 === 'string' && keyBytesOrB64.length > 32 && /[+\/=]/.test(keyBytesOrB64)) {
+            // Base64-encoded key (contains base64-specific chars)
             keyBytes = new Uint8Array(base64ToArrayBuffer(keyBytesOrB64));
         } else if (keyBytesOrB64 instanceof Uint8Array) {
             keyBytes = keyBytesOrB64;
@@ -361,68 +362,6 @@ var E2ECrypto = (() => {
         return null;
     }
 
-    // ---- DEPRECATED: OLD per-server-key HKDF chain functions ----
-    function generateServerKey() { return randomBytes(32); }
-    function deriveChannelKey(serverKey, channelId, messageNonce) {
-        const info = 'e2e-channel-v1:' + channelId + (messageNonce ? ':' + messageNonce : '');
-        return hkdf(serverKey, serverKey, info, 32);
-    }
-    function deriveMetadataKey(serverKey) { return hkdf(serverKey, serverKey, 'e2e-metadata-v1', 32); }
-    function encryptWithKey(plaintext, key) {
-        const ptBytes = typeof plaintext === 'string' ? new TextEncoder().encode(plaintext) : plaintext;
-        const enc = _aeadEncryptRaw(ptBytes, key, null, null);
-        return { ciphertext: arrayBufferToBase64(enc.ciphertext), nonce: arrayBufferToBase64(enc.nonce) };
-    }
-    function encryptWithKeyAndNonce(plaintext, key, msgNonce) { return encryptWithKey(plaintext, key); }
-    function decryptWithKey(ciphertextB64, nonceB64, key) {
-        const combined = new Uint8Array(base64ToArrayBuffer(ciphertextB64));
-        const n = new Uint8Array(base64ToArrayBuffer(nonceB64));
-        const k = key instanceof Uint8Array ? key : new Uint8Array(key);
-        return new TextDecoder().decode(_aeadDecryptRaw(combined, k, null, n));
-    }
-    function encrypt(plaintext, channelId, serverId) {
-        const serverKey = getServerKey(serverId);
-        if (!serverKey) throw new Error('No server key - cannot encrypt');
-        const key = deriveChannelKey(serverKey, channelId, null);
-        return encryptWithKey(plaintext, key);
-    }
-    function decrypt(ciphertextB64, nonceB64, channelId, serverId, messageNonce) {
-        const allKeys = getAllServerKeys(serverId);
-        if (allKeys.length === 0) throw new Error('No server keys - cannot decrypt');
-        for (let i = 0; i < allKeys.length; i++) {
-            try {
-                const key = deriveChannelKey(allKeys[i], channelId, messageNonce);
-                return decryptWithKey(ciphertextB64, nonceB64, key);
-            } catch (_) {}
-        }
-        throw new Error('Decryption failed with all keys');
-    }
-    function encryptMetadata(plaintext, serverId) {
-        const serverKey = getServerKey(serverId);
-        if (!serverKey) throw new Error('No server key - cannot encrypt metadata');
-        return encryptWithKey(plaintext, deriveMetadataKey(serverKey));
-    }
-    function decryptMetadata(ciphertextB64, nonceB64, serverId) {
-        const allKeys = getAllServerKeys(serverId);
-        if (allKeys.length === 0) throw new Error('No server keys - cannot decrypt metadata');
-        for (let i = 0; i < allKeys.length; i++) {
-            try { return decryptWithKey(ciphertextB64, nonceB64, deriveMetadataKey(allKeys[i])); }
-            catch (_) {}
-        }
-        throw new Error('Metadata decryption failed with all keys');
-    }
-    function claimLegacyIdentityKey(accountId, expectedPublicKeyB64) {
-        if (getIdentityKeyPair(accountId)) return true;
-        const priv = localStorage.getItem('e2e_identity_private');
-        const pub = localStorage.getItem('e2e_identity_public');
-        if (!priv || !pub || pub !== expectedPublicKeyB64) return false;
-        localStorage.setItem('e2e_identity_private_' + accountId, priv);
-        localStorage.setItem('e2e_identity_public_' + accountId, pub);
-        localStorage.removeItem('e2e_identity_private');
-        localStorage.removeItem('e2e_identity_public');
-        return true;
-    }
-
     // ---- Key Escrow ----
     function deriveEscrowKey(password, salt) {
         const pwdBytes = new TextEncoder().encode(password);
@@ -459,6 +398,8 @@ var E2ECrypto = (() => {
         aeadDecrypt: aeadDecrypt,
         envelopeEncrypt: envelopeEncrypt,
         envelopeDecrypt: envelopeDecrypt,
+        envelopeEncryptRaw: envelopeEncryptRaw,
+        envelopeDecryptRaw: envelopeDecryptRaw,
         encryptMediaFrame: encryptMediaFrame,
         decryptMediaFrame: decryptMediaFrame,
         encryptWithPassword: encryptWithPassword,
@@ -499,19 +440,7 @@ var E2ECrypto = (() => {
         decryptFileChunk: decryptFileChunk,
 
         // File Key Storage
-        encryptFileKeyForStorage: encryptFileKeyForStorage,
-        decryptFileKeyFromStorage: decryptFileKeyFromStorage,
         encodeEncryptedFileKey: encodeEncryptedFileKey,
         decodeEncryptedFileKey: decodeEncryptedFileKey,
-
-        // HKDF-chain functions (still used for profile key management)
-        deriveChannelKey: deriveChannelKey,
-        deriveMetadataKey: deriveMetadataKey,
-        encryptWithKey: encryptWithKey,
-        decryptWithKey: decryptWithKey,
-        encrypt: encrypt,
-        decrypt: decrypt,
-        encryptMetadata: encryptMetadata,
-        decryptMetadata: decryptMetadata,
     };
 })();

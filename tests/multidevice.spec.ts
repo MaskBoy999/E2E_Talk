@@ -76,7 +76,7 @@ await page.click('#register-form button[type="submit"]');
 
         // Generate + save + upload server key (like chat.js createServer)
         const keySetup = await page1.evaluate(async ({ serverId, token }: { serverId: string; token: string }) => {
-            const serverKey = E2ECrypto.generateServerKey();
+            const serverKey = E2ECrypto.generateSymmetricKey();
             E2ECrypto.saveServerKey(serverId, serverKey);
             const identity = E2ECrypto.getIdentityKeyPair();
             const user = JSON.parse(localStorage.getItem('user') || '{}');
@@ -112,7 +112,7 @@ await page.click('#register-form button[type="submit"]');
         expect(wsReady).toBeTruthy();
 
         const encResult = await page1.evaluate(({ plaintext, channelId, serverId }) => {
-            return E2ECrypto.encrypt(plaintext, channelId, serverId);
+            return E2ECrypto.encryptMessage(plaintext, E2ECrypto.getServerKey(serverId));
         }, { plaintext: 'Hello from device 1!', channelId, serverId });
 
         await page1.evaluate(({ channelId, encResult }) => {
@@ -249,7 +249,7 @@ await page.click('#register-form button[type="submit"]');
             const messages = await res.json();
             if (!messages.length) return 'no_messages';
             const msg = messages[messages.length - 1];
-            return E2ECrypto.decrypt(msg.encrypted_content, msg.nonce, channelId, serverId, msg.message_nonce);
+            return E2ECrypto.decryptMessage(msg.encrypted_content, msg.nonce, E2ECrypto.getServerKey(serverId));
         }, { channelId, serverId, token: token2 });
         expect(decrypted).toBe('Hello from device 1!');
 
@@ -401,7 +401,7 @@ await page.click('#register-form button[type="submit"]');
 
         // Device 1: generate + save + upload server key
         await page1.evaluate(async ({ serverId, token }: { serverId: string; token: string }) => {
-            const serverKey = E2ECrypto.generateServerKey();
+            const serverKey = E2ECrypto.generateSymmetricKey();
             E2ECrypto.saveServerKey(serverId, serverKey);
             const identity = E2ECrypto.getIdentityKeyPair();
             const user = JSON.parse(localStorage.getItem('user') || '{}');
@@ -458,7 +458,7 @@ await page.click('#register-form button[type="submit"]');
         expect(wsReady).toBeTruthy();
 
         const enc2 = await page2.evaluate(({ plaintext, channelId, serverId }) => {
-            return E2ECrypto.encrypt(plaintext, channelId, serverId);
+            return E2ECrypto.encryptMessage(plaintext, E2ECrypto.getServerKey(serverId));
         }, { plaintext: 'Hello from device 2!', channelId, serverId });
 
         await page2.evaluate(({ channelId, enc2 }) => {
@@ -480,7 +480,7 @@ await page.click('#register-form button[type="submit"]');
             const messages = await res.json();
             if (!messages.length) return 'no_messages';
             const msg = messages[messages.length - 1];
-            return E2ECrypto.decrypt(msg.encrypted_content, msg.nonce, channelId, serverId, msg.message_nonce);
+            return E2ECrypto.decryptMessage(msg.encrypted_content, msg.nonce, E2ECrypto.getServerKey(serverId));
         }, { channelId, serverId, token: token1 });
         expect(decrypted).toBe('Hello from device 2!');
 

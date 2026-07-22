@@ -1,0 +1,10 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.41s
+     Running `target\debug\e2e-chat.exe`
+
+thread 'tokio-rt-worker' (28524) panicked at src\main.rs:331:80:
+called `Result::unwrap()` on an `Err` value: Os { code: 10048, kind: AddrInUse, message: "Only one usage of each socket address (protocol/network address/port) is normally permitted." }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'main' (27188) panicked at src\main.rs:339:18:
+called `Result::unwrap()` on an `Err` value: Os { code: 10048, kind: AddrInUse, message: "Only one usage of each socket address (protocol/network address/port) is normally permitted." }
+error: process didn't exit successfully: `target\debug\e2e-chat.exe` (exit code: 101)

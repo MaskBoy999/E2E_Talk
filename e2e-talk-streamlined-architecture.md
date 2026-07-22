@@ -526,7 +526,7 @@ test('profiles auto-update and display names appear', async ({ browser }) => {
 2. When clicked, prompt user to select a target channel/DM.
 3. Client decrypts the original message using the source `channelKey`/`dmKey`.
 4. Client re-encrypts the content (and any `fileKey`) using the target `channelKey`/`dmKey`.
-5. Client sends as a new standard message to the target.
+5. Client sends as a new standard message to the target that also has a link to the message in the channel it was sent if it was sent from a server, also rendering the pfp and display name and color and glow on the forwarded message, however when forwarding from a dm anywhere the pfp and display name wont be rendered
 
 **Test (`tests/08-forwarding.spec.js`):**
 ```js

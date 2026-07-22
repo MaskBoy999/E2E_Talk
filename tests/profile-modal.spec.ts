@@ -103,7 +103,7 @@ test.describe('Profile Modal Features', () => {
 
         // Upload server key for user1
         await page.evaluate(async ({ serverId, userId }) => {
-            const serverKey = E2ECrypto.generateServerKey();
+            const serverKey = E2ECrypto.generateSymmetricKey();
             E2ECrypto.saveServerKey(serverId, serverKey);
             const identity = E2ECrypto.getIdentityKeyPair();
             const encrypted = E2ECrypto.envelopeEncryptRaw(serverKey, identity.publicKey);

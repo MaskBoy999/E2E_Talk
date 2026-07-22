@@ -1,11 +1,10 @@
-[2m2026-07-21T23:30:51.511993Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Database setup status: configured
-[2m2026-07-21T23:30:51.512346Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Running orphan file cleanup...
-[2m2026-07-21T23:30:51.516882Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Auto-generated self-signed TLS certificates in certs
-[2m2026-07-21T23:30:51.516966Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m For trusted HTTPS, install mkcert and run:
-[2m2026-07-21T23:30:51.516997Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m   mkcert -install
-[2m2026-07-21T23:30:51.517029Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m   mkcert localhost 127.0.0.1 ::1
-[2m2026-07-21T23:30:51.517079Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Then set TLS_CERT_PATH and TLS_KEY_PATH env vars
-[2m2026-07-21T23:30:51.518804Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Server starting on 0.0.0.0:3000
-[2m2026-07-21T23:30:51.518788Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Orphan file cleanup complete.
-[2m2026-07-21T23:30:51.518890Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m HTTPS available on https://localhost:3443
-[2m2026-07-21T23:30:51.518951Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m HTTP available on http://localhost:3000
+[2m2026-07-22T14:04:42.021063Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Database setup status: configured
+[2m2026-07-22T14:04:42.021577Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Running orphan file cleanup...
+[2m2026-07-22T14:04:42.024182Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Auto-generated self-signed TLS certificates in certs
+[2m2026-07-22T14:04:42.024232Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m For trusted HTTPS, install mkcert and run:
+[2m2026-07-22T14:04:42.024254Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m   mkcert -install
+[2m2026-07-22T14:04:42.024270Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m   mkcert localhost 127.0.0.1 ::1
+[2m2026-07-22T14:04:42.024284Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Then set TLS_CERT_PATH and TLS_KEY_PATH env vars
+[2m2026-07-22T14:04:42.026067Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Server starting on 0.0.0.0:3000
+[2m2026-07-22T14:04:42.026118Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m HTTPS available on https://localhost:3443
+[2m2026-07-22T14:04:42.026141Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m HTTP available on http://localhost:3000

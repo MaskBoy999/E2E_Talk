@@ -234,7 +234,7 @@ await page2reg.click('#register-form button[type="submit"]');
 
         // Generate server key and upload encrypted key for user1
         await page.evaluate(async ({ serverId, userId }) => {
-            const serverKey = E2ECrypto.generateServerKey();
+            const serverKey = E2ECrypto.generateSymmetricKey();
             E2ECrypto.saveServerKey(serverId, serverKey);
             const identity = E2ECrypto.getIdentityKeyPair();
             const encrypted = E2ECrypto.envelopeEncryptRaw(serverKey, identity.publicKey);
@@ -516,7 +516,7 @@ await page.click('#register-form button[type="submit"]');
 
         // Generate server key
         await page.evaluate(async ({ serverId, userId }) => {
-            const serverKey = E2ECrypto.generateServerKey();
+            const serverKey = E2ECrypto.generateSymmetricKey();
             E2ECrypto.saveServerKey(serverId, serverKey);
             const identity = E2ECrypto.getIdentityKeyPair();
             const encrypted = E2ECrypto.envelopeEncryptRaw(serverKey, identity.publicKey);
@@ -595,7 +595,7 @@ await page.click('#register-form button[type="submit"]');
 
         // Generate server key
         await page.evaluate(async ({ serverId, userId }) => {
-            const serverKey = E2ECrypto.generateServerKey();
+            const serverKey = E2ECrypto.generateSymmetricKey();
             E2ECrypto.saveServerKey(serverId, serverKey);
             const identity = E2ECrypto.getIdentityKeyPair();
             const encrypted = E2ECrypto.envelopeEncryptRaw(serverKey, identity.publicKey);
@@ -786,7 +786,7 @@ await page2.click('#register-form button[type="submit"]');
 
         // Generate and upload server key for user1
         await page.evaluate(async ({ serverId, userId }) => {
-            const serverKey = E2ECrypto.generateServerKey();
+            const serverKey = E2ECrypto.generateSymmetricKey();
             E2ECrypto.saveServerKey(serverId, serverKey);
             const identity = E2ECrypto.getIdentityKeyPair();
             const encrypted = E2ECrypto.envelopeEncryptRaw(serverKey, identity.publicKey);
@@ -907,7 +907,7 @@ await page2.click('#register-form button[type="submit"]');
         });
         const server = await srv.json();
         await page.evaluate(async ({ serverId, userId }) => {
-            const serverKey = E2ECrypto.generateServerKey();
+            const serverKey = E2ECrypto.generateSymmetricKey();
             E2ECrypto.saveServerKey(serverId, serverKey);
             const identity = E2ECrypto.getIdentityKeyPair();
             const encrypted = E2ECrypto.envelopeEncryptRaw(serverKey, identity.publicKey);

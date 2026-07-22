@@ -244,7 +244,7 @@ test.describe('UI Feature Tests', () => {
         const server = await srv.json();
 
         await page.evaluate(async ({ serverId, userId }) => {
-            const serverKey = E2ECrypto.generateServerKey();
+            const serverKey = E2ECrypto.generateSymmetricKey();
             E2ECrypto.saveServerKey(serverId, serverKey);
             const identity = E2ECrypto.getIdentityKeyPair();
             const encrypted = E2ECrypto.envelopeEncryptRaw(serverKey, identity.publicKey);
@@ -469,7 +469,7 @@ test('username color preview in profile modal edit shows with text-shadow', asyn
         const server = await srv.json();
 
         await page.evaluate(async ({ serverId, userId }) => {
-            const serverKey = E2ECrypto.generateServerKey();
+            const serverKey = E2ECrypto.generateSymmetricKey();
             E2ECrypto.saveServerKey(serverId, serverKey);
             const identity = E2ECrypto.getIdentityKeyPair();
             const encrypted = E2ECrypto.envelopeEncryptRaw(serverKey, identity.publicKey);
@@ -558,7 +558,7 @@ test('username color preview in profile modal edit shows with text-shadow', asyn
         const server = await srv.json();
 
         await page.evaluate(async ({ serverId, userId }) => {
-            const serverKey = E2ECrypto.generateServerKey();
+            const serverKey = E2ECrypto.generateSymmetricKey();
             E2ECrypto.saveServerKey(serverId, serverKey);
             const identity = E2ECrypto.getIdentityKeyPair();
             const encrypted = E2ECrypto.envelopeEncryptRaw(serverKey, identity.publicKey);
@@ -740,7 +740,7 @@ test('username color preview in profile modal edit shows with text-shadow', asyn
         const server = await srv.json();
 
         await page.evaluate(async ({ serverId, userId }) => {
-            const serverKey = E2ECrypto.generateServerKey();
+            const serverKey = E2ECrypto.generateSymmetricKey();
             E2ECrypto.saveServerKey(serverId, serverKey);
             const identity = E2ECrypto.getIdentityKeyPair();
             const encrypted = E2ECrypto.envelopeEncryptRaw(serverKey, identity.publicKey);
@@ -923,7 +923,7 @@ test('username color preview in profile modal edit shows with text-shadow', asyn
         const server = await srv.json();
 
         await page.evaluate(async ({ serverId, userId }) => {
-            const serverKey = E2ECrypto.generateServerKey();
+            const serverKey = E2ECrypto.generateSymmetricKey();
             E2ECrypto.saveServerKey(serverId, serverKey);
             const identity = E2ECrypto.getIdentityKeyPair();
             const encrypted = E2ECrypto.envelopeEncryptRaw(serverKey, identity.publicKey);
