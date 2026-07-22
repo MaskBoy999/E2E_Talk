@@ -125,16 +125,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
-            // Safely claim a key from the pre-account-scoped storage used by
-            // older versions, but only if its public half matches this account.
-            try {
-                const keyRes = await fetch('/api/identity/' + data.user.id);
-                if (keyRes.ok) {
-                    const keyData = await keyRes.json();
-                    E2ECrypto.claimLegacyIdentityKey(data.user.id, keyData.identity_public_key);
-                }
-            } catch (_) {}
-
             // If no local identity key exists, try to recover from escrow
             let identityKeyPair = E2ECrypto.getIdentityKeyPair(data.user.id);
             if (!identityKeyPair) {
@@ -144,22 +134,12 @@ document.addEventListener('DOMContentLoaded', () => {
                     });
                     if (escrowRes.ok) {
                         const escrowData = await escrowRes.json();
-                        // Try Argon2id decryptWithPassword first (new format),
-                        // fall back to HKDF-based decryptKeyFromEscrow (legacy)
                         let privateKeyB64 = E2ECrypto.decryptWithPassword(
                             escrowData.encrypted_private_key,
                             password,
                             escrowData.salt,
                             escrowData.nonce
                         );
-                        if (!privateKeyB64) {
-                            privateKeyB64 = E2ECrypto.decryptKeyFromEscrow(
-                                escrowData.encrypted_private_key,
-                                password,
-                                escrowData.salt,
-                                escrowData.nonce
-                            );
-                        }
                         if (privateKeyB64) {
                             const privBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(privateKeyB64));
                             const pubBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(
@@ -186,36 +166,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 localStorage.setItem('e2e_encrypted_password', encrypted);
                 localStorage.removeItem('e2e_password');
             } catch (_) {}
-
-            // If still no identity key (escrow recovery failed or no escrow exists),
-            // generate a fresh key pair and upload it so this device can function.
-            if (!identityKeyPair) {
-                try {
-                    const newKp = E2ECrypto.x25519GenerateKeyPair();
-                    const pubB64 = E2ECrypto.arrayBufferToBase64(newKp.publicKey);
-                    await fetch('/api/identity/upload', {
-                        method: 'POST',
-                        headers: {
-                            'Authorization': 'Bearer ' + data.token,
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify({ identity_public_key: pubB64 })
-                    });
-                    // Also upload new escrow so other devices can recover this key
-                    const privB64 = E2ECrypto.arrayBufferToBase64(newKp.privateKey);
-                    const escrow = E2ECrypto.encryptKeyForEscrow(privB64, password);
-                    await fetch('/api/identity/escrow', {
-                        method: 'POST',
-                        headers: {
-                            'Authorization': 'Bearer ' + data.token,
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify(escrow)
-                    });
-                    identityKeyPair = newKp;
-                    E2ECrypto.saveIdentityKeyPair(identityKeyPair, data.user.id);
-                } catch (_) {}
-            }
 
             // Try to recover encrypted friend code from server and decrypt with password
             try {
@@ -306,8 +256,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
             let friendCode = '';
             for (let i = 0; i < 8; i++) friendCode += ALPHABET[Math.floor(Math.random() * ALPHABET.length)];
-            // Always use HMAC-SHA256 with server's key (no fallback to plain SHA-256)
-            const friendCodeHash = hmacKey ? E2ECrypto.hmacHex(hmacKey, friendCode) : E2ECrypto.sha256Hex(friendCode);
+            const friendCodeHash = E2ECrypto.hmacHex(hmacKey, friendCode);
             const encryptedFC = E2ECrypto.encryptWithPassword(friendCode, password);
             localStorage.setItem('e2e_friend_code', friendCode);
 

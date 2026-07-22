@@ -248,9 +248,9 @@ pub async fn register(
     };
 
     // Register initial device with the identity key
-    if let Some(ref key_bytes) = identity_key_bytes {
-        let device_id = uuid::Uuid::new_v4().to_string();
-        let _ = state.db.register_device(&user.id, &device_id, "primary", key_bytes, None, None, None, None);
+    if identity_key_bytes.is_some() {
+        // Identity key was provided during registration
+        // (device registration not needed in streamlined flow)
     }
 
     // Store escrowed identity key if provided
@@ -565,6 +565,7 @@ pub async fn reauth(
 // --- Key Escrow ---
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 pub struct UploadEscrowRequest {
     pub encrypted_private_key: String,
     pub salt: String,
@@ -572,6 +573,7 @@ pub struct UploadEscrowRequest {
     pub device_id: Option<String>,
 }
 
+#[allow(dead_code)]
 pub async fn upload_escrowed_key(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
@@ -625,6 +627,7 @@ pub async fn upload_escrowed_key(
     }
 }
 
+#[allow(dead_code)]
 pub async fn get_escrowed_key(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
@@ -1491,28 +1494,6 @@ pub async fn list_messages_around(
 
 // --- Keys ---
 
-pub async fn get_key_bundle(
-    Path(user_id): Path<String>,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    match state.db.get_prekey_bundle(&user_id) {
-        Ok(bundle) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "user_id": bundle.user_id,
-                "identity_key_public": base64::engine::general_purpose::STANDARD.encode(&bundle.identity_key_public),
-                "signed_prekey_public": base64::engine::general_purpose::STANDARD.encode(&bundle.signed_prekey_public),
-                "signed_prekey_signature": base64::engine::general_purpose::STANDARD.encode(&bundle.signed_prekey_signature),
-                "one_time_prekey_public": bundle.one_time_prekey_public.as_ref().map(|k| base64::engine::general_purpose::STANDARD.encode(k)),
-                "one_time_prekey_id": bundle.one_time_prekey_id,
-            })),
-        ),
-        Err(e) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": e})),
-        ),
-    }
-}
 
 pub async fn get_user_id(
     Path(username): Path<String>,
@@ -1567,280 +1548,9 @@ pub async fn get_identity_key(
         })),
     )
         .into_response()
-}
+}// --- Per-Device Key Escrow ---
 
-#[derive(Deserialize)]
-pub struct UploadIdentityKeyRequest {
-    pub identity_public_key: String,
-}
 
-pub async fn upload_identity_key(
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<UploadIdentityKeyRequest>,
-) -> impl IntoResponse {
-    let user_id = match extract_user(&headers, &state) {
-        Ok(id) => id,
-        Err(e) => return e.into_response(),
-    };
-
-    let key_bytes = match base64::engine::general_purpose::STANDARD.decode(&req.identity_public_key) {
-        Ok(b) => b,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid identity_public_key"})),
-            )
-                .into_response();
-        }
-    };
-
-    // Update primary key
-    if let Err(e) = state.db.update_identity_public_key(&user_id, &key_bytes) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
-        )
-            .into_response();
-    }
-
-    // Also register as device
-    let device_id = uuid::Uuid::new_v4().to_string();
-    let _ = state.db.register_device(&user_id, &device_id, "primary", &key_bytes, None, None, None, None);
-
-    (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
-}
-
-#[derive(Deserialize)]
-pub struct AddDeviceKeyRequest {
-    pub identity_public_key: String,
-}
-
-pub async fn add_device_key(
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<AddDeviceKeyRequest>,
-) -> impl IntoResponse {
-    let user_id = match extract_user(&headers, &state) {
-        Ok(id) => id,
-        Err(e) => return e.into_response(),
-    };
-
-    let key_bytes = match base64::engine::general_purpose::STANDARD.decode(&req.identity_public_key) {
-        Ok(b) => b,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid identity_public_key"})),
-            )
-                .into_response();
-        }
-    };
-
-    if key_bytes.len() != 32 {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Key must be 32 bytes"})),
-        )
-            .into_response();
-    }
-
-    // Check for duplicate
-    if let Ok(existing) = state.db.get_all_user_identity_keys(&user_id) {
-        for (_did, k) in &existing {
-            if k == &key_bytes {
-                return (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response();
-            }
-        }
-    }
-
-    let device_id = uuid::Uuid::new_v4().to_string();
-    match state.db.register_device(&user_id, &device_id, "additional", &key_bytes, None, None, None, None) {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
-        )
-            .into_response(),
-    }
-}
-
-// --- Device Management ---
-
-#[derive(Deserialize)]
-pub struct RegisterDeviceRequest {
-    pub device_id: String,
-    pub device_name: Option<String>,
-    pub identity_key: String,
-    pub signed_prekey: Option<String>,
-    pub signed_prekey_signature: Option<String>,
-    pub one_time_prekey: Option<String>,
-    pub one_time_prekey_id: Option<i32>,
-}
-
-pub async fn register_device(
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<RegisterDeviceRequest>,
-) -> impl IntoResponse {
-    let user_id = match extract_user(&headers, &state) {
-        Ok(id) => id,
-        Err(e) => return e.into_response(),
-    };
-
-    let key_bytes = match base64::engine::general_purpose::STANDARD.decode(&req.identity_key) {
-        Ok(b) => b,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid identity_key"}))).into_response(),
-    };
-
-    let spk = req.signed_prekey.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
-    let spk_sig = req.signed_prekey_signature.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
-    let otpk = req.one_time_prekey.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
-
-    match state.db.register_device(
-        &user_id,
-        &req.device_id,
-        req.device_name.as_deref().unwrap_or("Unnamed device"),
-        &key_bytes,
-        spk.as_deref(),
-        spk_sig.as_deref(),
-        otpk.as_deref(),
-        req.one_time_prekey_id,
-    ) {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true, "device_id": req.device_id}))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-    }
-}
-
-pub async fn list_devices(
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    let user_id = match extract_user(&headers, &state) {
-        Ok(id) => id,
-        Err(e) => return e.into_response(),
-    };
-
-    match state.db.get_user_devices(&user_id) {
-        Ok(devices) => {
-            let result: Vec<serde_json::Value> = devices.iter().map(|(did, dname, ik, spk, last_active)| {
-                serde_json::json!({
-                    "device_id": did,
-                    "device_name": dname,
-                    "identity_key": base64::engine::general_purpose::STANDARD.encode(ik),
-                    "signed_prekey": spk.as_ref().map(|k| base64::engine::general_purpose::STANDARD.encode(k)),
-                    "last_active_at": last_active,
-                })
-            }).collect();
-            (StatusCode::OK, Json(serde_json::json!(result))).into_response()
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-    }
-}
-
-pub async fn remove_device(
-    Path(device_id): Path<String>,
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    let user_id = match extract_user(&headers, &state) {
-        Ok(id) => id,
-        Err(e) => return e.into_response(),
-    };
-
-    match state.db.remove_device(&user_id, &device_id) {
-        Ok(true) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
-        Ok(false) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Device not found"}))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-    }
-}
-
-// --- Per-Device Key Escrow ---
-
-pub async fn upload_device_escrowed_key(
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<UploadEscrowRequest>,
-) -> impl IntoResponse {
-    let user_id = match extract_user(&headers, &state) {
-        Ok(id) => id,
-        Err(e) => return e.into_response(),
-    };
-
-    // Get device_id from request body or first device
-    let device_id = req.device_id.clone().unwrap_or_default();
-    if device_id.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "device_id required"}))).into_response();
-    }
-
-    let encrypted_key = match base64::engine::general_purpose::STANDARD.decode(&req.encrypted_private_key) {
-        Ok(b) => b,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid encrypted_private_key"}))).into_response(),
-    };
-    let salt = match base64::engine::general_purpose::STANDARD.decode(&req.salt) {
-        Ok(b) => b,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid salt"}))).into_response(),
-    };
-    let nonce = match base64::engine::general_purpose::STANDARD.decode(&req.nonce) {
-        Ok(b) => b,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid nonce"}))).into_response(),
-    };
-
-    match state.db.save_device_escrowed_key(&user_id, &device_id, &encrypted_key, &salt, &nonce) {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-    }
-}
-
-pub async fn get_device_escrowed_key(
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    let user_id = match extract_user(&headers, &state) {
-        Ok(id) => id,
-        Err(e) => return e.into_response(),
-    };
-
-    // Get device_id from query parameter or header
-    let device_id = headers.get("x-device-id")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    if device_id.is_empty() {
-        // Fall back to user-level key escrow
-        return match state.db.get_escrowed_key(&user_id) {
-            Ok(Some((encrypted_key, salt, nonce))) => {
-                (StatusCode::OK, Json(serde_json::json!({
-                    "encrypted_private_key": base64::engine::general_purpose::STANDARD.encode(&encrypted_key),
-                    "salt": base64::engine::general_purpose::STANDARD.encode(&salt),
-                    "nonce": base64::engine::general_purpose::STANDARD.encode(&nonce),
-                }))).into_response()
-            }
-            Ok(None) => {
-                (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "No escrowed key found"}))).into_response()
-            }
-            Err(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e})),
-            )
-                .into_response(),
-        };
-    }
-
-    match state.db.get_device_escrowed_key(&user_id, device_id) {
-        Ok(Some((encrypted_key, salt, nonce))) => {
-            (StatusCode::OK, Json(serde_json::json!({
-                "encrypted_private_key": base64::engine::general_purpose::STANDARD.encode(&encrypted_key),
-                "salt": base64::engine::general_purpose::STANDARD.encode(&salt),
-                "nonce": base64::engine::general_purpose::STANDARD.encode(&nonce),
-                "device_id": device_id,
-            }))).into_response()
-        }
-        Ok(None) => {
-            (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "No escrowed key found for device"}))).into_response()
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-    }
-}
 
 #[derive(Deserialize)]
 pub struct UploadServerKeyRequest {
@@ -2320,47 +2030,7 @@ pub async fn admin_list_server_members(
     (StatusCode::OK, Json(serde_json::json!(result))).into_response()
 }
 
-pub async fn admin_list_prekey_bundles(
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
-    let rows = match state.db.list_all_prekey_bundles_admin() {
-        Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-    };
-    let result: Vec<serde_json::Value> = rows.iter().map(|(uid, ik, spk, sig, otpk, otpk_id)| {
-        serde_json::json!({
-            "user_id": uid,
-            "identity_key_public": base64::engine::general_purpose::STANDARD.encode(ik),
-            "signed_prekey_public": base64::engine::general_purpose::STANDARD.encode(spk),
-            "signed_prekey_signature": base64::engine::general_purpose::STANDARD.encode(sig),
-            "one_time_prekey_public": otpk.as_ref().map(|k| base64::engine::general_purpose::STANDARD.encode(k)),
-            "one_time_prekey_id": otpk_id,
-        })
-    }).collect();
-    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
-}
 
-pub async fn admin_list_sessions(
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
-    let rows = match state.db.list_all_sessions_admin() {
-        Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-    };
-    let result: Vec<serde_json::Value> = rows.iter().map(|(our_id, our_name, their_id, their_name, data, rc)| {
-        serde_json::json!({
-            "our_user_id": our_id, "our_username": our_name,
-            "their_user_id": their_id, "their_username": their_name,
-            "session_data": base64::engine::general_purpose::STANDARD.encode(data),
-            "ratchet_counter": rc,
-        })
-    }).collect();
-    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
-}
 
 pub async fn admin_list_server_bans(
     headers: HeaderMap,
@@ -2488,27 +2158,6 @@ pub async fn admin_list_friendships(
     (StatusCode::OK, Json(serde_json::json!(result))).into_response()
 }
 
-pub async fn admin_list_user_public_keys(
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
-    let rows = match state.db.list_all_user_devices_admin() {
-        Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-    };
-    let result: Vec<serde_json::Value> = rows.iter().map(|(uid, uname, did, dname, ik, spk, last_active, spk_sig, created_at)| {
-        serde_json::json!({
-            "user_id": uid, "username": uname, "device_id": did, "device_name": dname,
-            "identity_key": base64::engine::general_purpose::STANDARD.encode(ik),
-            "signed_prekey": spk.as_ref().map(|k| base64::engine::general_purpose::STANDARD.encode(k)),
-            "signed_prekey_signature": if spk_sig.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(spk_sig.clone()) },
-            "last_active_at": last_active,
-            "created_at": created_at,
-        })
-    }).collect();
-    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
-}
 
 pub async fn admin_list_files(
     headers: HeaderMap,
@@ -2620,27 +2269,6 @@ pub async fn admin_list_server_stickers(
     (StatusCode::OK, Json(serde_json::json!(result))).into_response()
 }
 
-pub async fn admin_list_user_key_escrow(
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
-    let rows = match state.db.list_all_user_key_escrow_admin() {
-        Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-    };
-    let result: Vec<serde_json::Value> = rows.iter().map(|(uid, uname, created, updated, encrypted_key, salt, nonce)| {
-        serde_json::json!({
-            "user_id": uid, "username": uname,
-            "created_at": created, "updated_at": updated,
-            "has_key": !encrypted_key.is_empty(),
-            "encrypted_private_key": if encrypted_key.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(encrypted_key)) },
-            "salt": if salt.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(salt)) },
-            "nonce": if nonce.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(nonce)) },
-        })
-    }).collect();
-    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
-}
 
 pub async fn admin_list_notification_sounds(
     headers: HeaderMap,
@@ -2681,26 +2309,6 @@ pub async fn admin_list_admin_config(
     (StatusCode::OK, Json(serde_json::json!(result))).into_response()
 }
 
-pub async fn admin_list_user_device_escrow(
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
-    let rows = match state.db.list_all_user_device_escrow_admin() {
-        Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-    };
-    let result: Vec<serde_json::Value> = rows.iter().map(|(uid, uname, did, ek, salt, nonce, created, updated)| {
-        serde_json::json!({
-            "user_id": uid, "username": uname, "device_id": did,
-            "encrypted_private_key": base64::engine::general_purpose::STANDARD.encode(ek),
-            "salt": base64::engine::general_purpose::STANDARD.encode(salt),
-            "nonce": base64::engine::general_purpose::STANDARD.encode(nonce),
-            "created_at": created, "updated_at": updated,
-        })
-    }).collect();
-    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
-}
 
 pub async fn admin_clear_all(
     headers: HeaderMap,

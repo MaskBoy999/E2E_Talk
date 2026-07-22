@@ -3481,7 +3481,7 @@ async function syncNotificationSoundToServer(file) {
             if (statusEl) { statusEl.textContent = 'Encryption keys not ready, sound not synced to server'; statusEl.style.color = '#f44336'; }
             return;
         }
-        var encrypted = E2ECrypto.envelopeEncryptRaw(soundBytes, identity.publicKey);
+        var encrypted = E2ECrypto.envelopeEncrypt(soundBytes, identity.publicKey, identity.privateKey);
         var uploadRes = await authFetch('/api/notification-sound', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -3509,11 +3509,11 @@ async function restoreNotificationSoundFromServer() {
         if (!data.encrypted_sound || !data.nonce || !data.sender_public_key) return;
         var identity = E2ECrypto.getIdentityKeyPair();
         if (!identity) return;
-        var decryptedBytes = E2ECrypto.envelopeDecryptRaw(
+        var decryptedBytes = E2ECrypto.envelopeDecrypt(
             data.encrypted_sound,
-            data.nonce,
-            data.sender_public_key,
-            identity.privateKey
+            identity.privateKey,
+            new Uint8Array(E2ECrypto.base64ToArrayBuffer(data.sender_public_key)),
+            data.nonce
         );
         if (!decryptedBytes || decryptedBytes.length === 0) return;
         var blob = new Blob([decryptedBytes]);
@@ -4773,19 +4773,7 @@ async function fetchAndDecryptServerKey(serverId) {
                 E2ECrypto.saveServerKey(serverId, serverKey);
                 return true;
             } catch (e) {
-                try {
-                    // Fall back to ephemeral envelopeDecryptRaw (legacy format)
-                    const serverKey = E2ECrypto.envelopeDecryptRaw(
-                        entry.encrypted_key,
-                        entry.nonce,
-                        entry.sender_public_key,
-                        identity.privateKey
-                    );
-                    E2ECrypto.saveServerKey(serverId, serverKey);
-                    return true;
-                } catch (e2) {
-                    continue;
-                }
+                continue;
             }
         }
         return false;
@@ -4800,7 +4788,7 @@ async function rotateServerKey(serverId) {
     if (!identity) return false;
 
     // Generate a new server key
-    const newKey = E2ECrypto.generateServerKey();
+    const newKey = E2ECrypto.generateSymmetricKey();
     E2ECrypto.saveServerKey(serverId, newKey);
 
     // Get all members of the server
@@ -4817,7 +4805,7 @@ async function rotateServerKey(serverId) {
             const recipientData = await recipientRes.json();
             if (!recipientData.identity_public_key) continue;
             const recipientPub = new Uint8Array(E2ECrypto.base64ToArrayBuffer(recipientData.identity_public_key));
-            const encrypted = E2ECrypto.envelopeEncryptRaw(newKey, recipientPub);
+            const encrypted = E2ECrypto.envelopeEncrypt(newKey, recipientPub, identity.privateKey);
             await authFetch(`/api/servers/${serverId}/keys`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -7279,7 +7267,7 @@ async function createServer() {
         // Generate invite code client-side, send only the hash
         const inviteCode = generateCode(8);
         var hmacKey = localStorage.getItem('e2e_hmac_key');
-        const inviteCodeHash = hmacKey ? E2ECrypto.hmacHex(hmacKey, inviteCode) : E2ECrypto.sha256Hex(inviteCode);
+        const inviteCodeHash = E2ECrypto.hmacHex(hmacKey, inviteCode);
 
         const res = await authFetch('/api/servers', {
             method: 'POST',
@@ -7336,7 +7324,7 @@ async function joinServer() {
     try {
         // Hash the code client-side before sending (HMAC-SHA256 with server's HMAC key)
         var hmacKey = localStorage.getItem('e2e_hmac_key');
-        var codeHash = hmacKey ? E2ECrypto.hmacHex(hmacKey, code) : E2ECrypto.sha256Hex(code);
+        var codeHash = E2ECrypto.hmacHex(hmacKey, code);
 
         const res = await authFetch('/api/invites/join', {
             method: 'POST',
@@ -7392,7 +7380,7 @@ async function showInviteModal() {
         // Silently generate a new invite code if missing from localStorage
         try {
             const inviteCode = generateCode(8);
-            var hmacKey = localStorage.getItem('e2e_hmac_key');            const inviteCodeHash = hmacKey ? E2ECrypto.hmacHex(hmacKey, inviteCode) : E2ECrypto.sha256Hex(inviteCode);
+            var hmacKey = localStorage.getItem('e2e_hmac_key');            const inviteCodeHash = E2ECrypto.hmacHex(hmacKey, inviteCode);
             const res = await authFetch(`/api/servers/${currentServerId}/invite`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -7497,7 +7485,7 @@ async function regenerateInvite() {
 
     try {
         const inviteCode = generateCode(8);
-        var hmacKey = localStorage.getItem('e2e_hmac_key');        const inviteCodeHash = hmacKey ? E2ECrypto.hmacHex(hmacKey, inviteCode) : E2ECrypto.sha256Hex(inviteCode);
+        var hmacKey = localStorage.getItem('e2e_hmac_key');        const inviteCodeHash = E2ECrypto.hmacHex(hmacKey, inviteCode);
 
         const res = await authFetch(`/api/servers/${currentServerId}/invite`, {
             method: 'POST',

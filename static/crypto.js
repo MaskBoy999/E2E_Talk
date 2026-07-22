@@ -476,10 +476,6 @@ var E2ECrypto = (() => {
         x25519DerivePublicKey: x25519DerivePublicKey,
         x25519SharedSecret: x25519SharedSecret,
 
-        // Envelope (ephemeral — backward compat)
-        envelopeEncryptRaw: envelopeEncryptRaw,
-        envelopeDecryptRaw: envelopeDecryptRaw,
-
         // Simplified channel/DM encryption
         encryptMessage: encryptMessage,
         decryptMessage: decryptMessage,
@@ -502,23 +498,16 @@ var E2ECrypto = (() => {
         encryptFileChunk: encryptFileChunk,
         decryptFileChunk: decryptFileChunk,
 
-        // Key escrow
-        encryptKeyForEscrow: encryptKeyForEscrow,
-        decryptKeyFromEscrow: decryptKeyFromEscrow,
-
-        // File Key Storage (backward compat — used by auth.js and chat.js)
+        // File Key Storage
         encryptFileKeyForStorage: encryptFileKeyForStorage,
         decryptFileKeyFromStorage: decryptFileKeyFromStorage,
         encodeEncryptedFileKey: encodeEncryptedFileKey,
         decodeEncryptedFileKey: decodeEncryptedFileKey,
 
-        // DEPRECATED — backward compat (removed in later steps)
-        claimLegacyIdentityKey: claimLegacyIdentityKey,
-        generateServerKey: generateServerKey,
+        // HKDF-chain functions (still used for profile key management)
         deriveChannelKey: deriveChannelKey,
         deriveMetadataKey: deriveMetadataKey,
         encryptWithKey: encryptWithKey,
-        encryptWithKeyAndNonce: encryptWithKeyAndNonce,
         decryptWithKey: decryptWithKey,
         encrypt: encrypt,
         decrypt: decrypt,

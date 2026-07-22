@@ -157,13 +157,6 @@
             addResult('x25519SharedSecret (ECDH symmetry)', ok, ok ? 'shared secrets match' : 'mismatch');
         } catch (e) { addResult('x25519SharedSecret (ECDH symmetry)', false, e.message); }
 
-        // Test 13: sha256Hex
-        try {
-            var hash = E.sha256Hex('hello');
-            var ok = hash && hash.length === 64;
-            addResult('sha256Hex', ok, ok ? hash.slice(0, 16) + '...' : 'invalid hash');
-        } catch (e) { addResult('sha256Hex', false, e.message); }
-
         // Test 14: Random bytes
         try {
             var r1 = E.randomBytes(16);
@@ -192,15 +185,6 @@
             var ok = dec === msg;
             addResult('encryptDm/decryptDm', ok, ok ? 'round-trip OK' : 'mismatch: ' + dec);
         } catch (e) { addResult('encryptDm/decryptDm', false, e.message); }
-
-        // Test 17: encryptKeyForEscrow / decryptKeyFromEscrow
-        try {
-            var privB64 = E.arrayBufferToBase64(E.generateIdentityKeyPair().privateKey);
-            var escrow = E.encryptKeyForEscrow(privB64, 'escrow-password');
-            var recovered = E.decryptKeyFromEscrow(escrow.encrypted_private_key, 'escrow-password', escrow.salt, escrow.nonce);
-            var ok = recovered === privB64;
-            addResult('encryptKeyForEscrow/decryptKeyFromEscrow', ok, ok ? 'round-trip OK' : 'mismatch');
-        } catch (e) { addResult('encryptKeyForEscrow/decryptKeyFromEscrow', false, e.message); }
 
         // Test 18: encryptFileChunk / decryptFileChunk
         try {

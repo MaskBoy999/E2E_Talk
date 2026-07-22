@@ -10,6 +10,7 @@ fn sha256_hex(data: &str) -> String {
     result.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
+#[allow(dead_code)]
 fn hmac_sha256_hex(key: &[u8], data: &str) -> String {
     const BLOCK_SIZE: usize = 64;
     let mut k = vec![0u8; BLOCK_SIZE];
@@ -126,25 +127,6 @@ pub struct DmMessage {
     pub profile_snapshot_nonce: Option<Vec<u8>>,
     pub encrypted_file_key: Option<Vec<u8>>,
     pub file_key_nonce: Option<Vec<u8>>,
-}
-
-#[derive(Debug, Clone)]
-pub struct PreKeyBundle {
-    pub user_id: String,
-    pub identity_key_public: Vec<u8>,
-    pub signed_prekey_public: Vec<u8>,
-    pub signed_prekey_signature: Vec<u8>,
-    pub one_time_prekey_public: Option<Vec<u8>>,
-    pub one_time_prekey_id: Option<i32>,
-}
-
-#[derive(Debug, Clone)]
-pub struct Session {
-    pub id: i64,
-    pub our_user_id: String,
-    pub their_user_id: String,
-    pub session_data: Vec<u8>,
-    pub ratchet_counter: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -569,6 +551,10 @@ impl Database {
         // Migration 022: Streamlined E2E (MUST run LAST — drops obsolete tables/columns,
         // adds encrypted_name, encrypted_profile_snapshot, voice sessions, user_media)
         let _ = conn.execute_batch(include_str!("../migrations/022_streamlined_e2e.sql"));
+
+        // Migration 023: Drop legacy tables (user_devices, prekey_bundles, sessions, user_device_escrow,
+        // user_key_escrow) and migrate escrow to users table columns
+        let _ = conn.execute_batch(include_str!("../migrations/023_streamlined_cleanup.sql"));
 
         Ok(())
     }
@@ -1548,117 +1534,12 @@ impl Database {
 
     // --- PreKey Bundles ---
 
-    pub fn save_prekey_bundle(
-        &self,
-        user_id: &str,
-        identity_key_public: &[u8],
-        signed_prekey_public: &[u8],
-        signed_prekey_signature: &[u8],
-        one_time_prekey_public: Option<&[u8]>,
-        one_time_prekey_id: Option<i32>,
-    ) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "INSERT OR REPLACE INTO prekey_bundles (user_id, identity_key_public, signed_prekey_public, signed_prekey_signature, one_time_prekey_public, one_time_prekey_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![user_id, identity_key_public, signed_prekey_public, signed_prekey_signature, one_time_prekey_public, one_time_prekey_id],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(())
-    }
 
-    pub fn get_prekey_bundle(&self, user_id: &str) -> Result<PreKeyBundle, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.query_row(
-            "SELECT user_id, identity_key_public, signed_prekey_public, signed_prekey_signature, one_time_prekey_public, one_time_prekey_id
-             FROM prekey_bundles WHERE user_id = ?1",
-            params![user_id],
-            |row| {
-                Ok(PreKeyBundle {
-                    user_id: row.get(0)?,
-                    identity_key_public: row.get(1)?,
-                    signed_prekey_public: row.get(2)?,
-                    signed_prekey_signature: row.get(3)?,
-                    one_time_prekey_public: row.get(4)?,
-                    one_time_prekey_id: row.get(5)?,
-                })
-            },
-        )
-        .map_err(|e| e.to_string())
-    }
 
-    pub fn consume_one_time_prekey(&self, user_id: &str) -> Result<Option<(Vec<u8>, i32)>, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-
-        let result: Option<(Vec<u8>, i32)> = conn
-            .query_row(
-                "SELECT one_time_prekey_public, one_time_prekey_id
-                 FROM prekey_bundles
-                 WHERE user_id = ?1 AND one_time_prekey_public IS NOT NULL
-                 LIMIT 1",
-                params![user_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .ok();
-
-        if let Some((key, key_id)) = result {
-            conn.execute(
-                "UPDATE prekey_bundles SET one_time_prekey_public = NULL, one_time_prekey_id = NULL
-                 WHERE user_id = ?1 AND one_time_prekey_id = ?2",
-                params![user_id, key_id],
-            )
-            .map_err(|e| e.to_string())?;
-            Ok(Some((key, key_id)))
-        } else {
-            Ok(None)
-        }
-    }
 
     // --- Sessions ---
 
-    pub fn save_session(
-        &self,
-        our_user_id: &str,
-        their_user_id: &str,
-        session_data: &[u8],
-    ) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "INSERT OR REPLACE INTO sessions (our_user_id, their_user_id, session_data, ratchet_counter)
-             VALUES (?1, ?2, ?3, 0)",
-            params![our_user_id, their_user_id, session_data],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(())
-    }
 
-    pub fn get_session(
-        &self,
-        our_user_id: &str,
-        their_user_id: &str,
-    ) -> Result<Option<Session>, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let result = conn.query_row(
-            "SELECT id, our_user_id, their_user_id, session_data, ratchet_counter
-             FROM sessions
-             WHERE our_user_id = ?1 AND their_user_id = ?2",
-            params![our_user_id, their_user_id],
-            |row| {
-                Ok(Session {
-                    id: row.get(0)?,
-                    our_user_id: row.get(1)?,
-                    their_user_id: row.get(2)?,
-                    session_data: row.get(3)?,
-                    ratchet_counter: row.get(4)?,
-                })
-            },
-        );
-
-        match result {
-            Ok(session) => Ok(Some(session)),
-            Err(_) => Ok(None),
-        }
-    }
 
     pub fn update_session_ratchet(
         &self,
@@ -1699,87 +1580,9 @@ impl Database {
 
     // --- User Devices (multi-device support) ---
 
-    pub fn register_device(
-        &self,
-        user_id: &str,
-        device_id: &str,
-        device_name: &str,
-        identity_key: &[u8],
-        signed_prekey: Option<&[u8]>,
-        signed_prekey_signature: Option<&[u8]>,
-        one_time_prekey: Option<&[u8]>,
-        one_time_prekey_id: Option<i32>,
-    ) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "INSERT OR REPLACE INTO user_devices (device_id, user_id, device_name, identity_key, signed_prekey, signed_prekey_signature, one_time_prekey, one_time_prekey_id, last_active_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, CURRENT_TIMESTAMP)",
-            params![device_id, user_id, device_name, identity_key, signed_prekey, signed_prekey_signature, one_time_prekey, one_time_prekey_id],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(())
-    }
 
-    pub fn get_user_devices(&self, user_id: &str) -> Result<Vec<(String, String, Vec<u8>, Option<Vec<u8>>, Option<String>)>, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let mut stmt = conn
-            .prepare("SELECT device_id, COALESCE(device_name, ''), identity_key, signed_prekey, last_active_at FROM user_devices WHERE user_id = ?1 ORDER BY created_at")
-            .map_err(|e| e.to_string())?;
-        let devices = stmt
-            .query_map(params![user_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Vec<u8>>(2)?,
-                    row.get::<_, Option<Vec<u8>>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                ))
-            })
-            .map_err(|e| e.to_string())?
-            .filter_map(|r| r.ok())
-            .collect();
-        Ok(devices)
-    }
 
-    pub fn get_device_identity_key(&self, user_id: &str, device_id: &str) -> Result<Vec<u8>, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.query_row(
-            "SELECT identity_key FROM user_devices WHERE user_id = ?1 AND device_id = ?2",
-            params![user_id, device_id],
-            |row| row.get(0),
-        )
-        .map_err(|_| "Device not found".to_string())
-    }
 
-    pub fn remove_device(&self, user_id: &str, device_id: &str) -> Result<bool, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let rows = conn.execute(
-            "DELETE FROM user_devices WHERE user_id = ?1 AND device_id = ?2",
-            params![user_id, device_id],
-        )
-        .map_err(|e| e.to_string())?;
-        if rows == 0 {
-            return Ok(false);
-        }
-        // Clean up server_keys and dm_keys for this device
-        conn.execute(
-            "DELETE FROM server_keys WHERE user_id = ?1 AND device_id = ?2",
-            params![user_id, device_id],
-        )
-        .map_err(|e| e.to_string())?;
-        conn.execute(
-            "DELETE FROM dm_keys WHERE user_id = ?1 AND device_id = ?2",
-            params![user_id, device_id],
-        )
-        .map_err(|e| e.to_string())?;
-        // Clean up per-device escrow
-        conn.execute(
-            "DELETE FROM user_device_escrow WHERE user_id = ?1 AND device_id = ?2",
-            params![user_id, device_id],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(true)
-    }
 
     pub fn update_device_last_active(&self, user_id: &str, device_id: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
@@ -1811,35 +1614,7 @@ impl Database {
 
     // --- Per-Device Key Escrow ---
 
-    pub fn save_device_escrowed_key(&self, user_id: &str, device_id: &str, encrypted_key: &[u8], salt: &[u8], nonce: &[u8]) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "INSERT INTO user_device_escrow (user_id, device_id, encrypted_private_key, salt, nonce, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, CURRENT_TIMESTAMP)
-             ON CONFLICT(user_id, device_id) DO UPDATE SET
-                encrypted_private_key = excluded.encrypted_private_key,
-                salt = excluded.salt,
-                nonce = excluded.nonce,
-                updated_at = CURRENT_TIMESTAMP",
-            params![user_id, device_id, encrypted_key, salt, nonce],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(())
-    }
 
-    pub fn get_device_escrowed_key(&self, user_id: &str, device_id: &str) -> Result<Option<(Vec<u8>, Vec<u8>, Vec<u8>)>, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let result = conn.query_row(
-            "SELECT encrypted_private_key, salt, nonce FROM user_device_escrow WHERE user_id = ?1 AND device_id = ?2",
-            params![user_id, device_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        );
-        match result {
-            Ok(row) => Ok(Some(row)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e.to_string()),
-        }
-    }
 
     pub fn save_escrowed_key(&self, user_id: &str, encrypted_key: &[u8], salt: &[u8], nonce: &[u8]) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
@@ -3342,62 +3117,7 @@ impl Database {
         Ok(members)
     }
 
-    pub fn list_all_prekey_bundles_admin(
-        &self,
-    ) -> Result<Vec<(String, Vec<u8>, Vec<u8>, Vec<u8>, Option<Vec<u8>>, Option<i32>)>, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT user_id, identity_key_public, signed_prekey_public, signed_prekey_signature, one_time_prekey_public, one_time_prekey_id
-                 FROM prekey_bundles ORDER BY created_at",
-            )
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Vec<u8>>(1)?,
-                    row.get::<_, Vec<u8>>(2)?,
-                    row.get::<_, Vec<u8>>(3)?,
-                    row.get::<_, Option<Vec<u8>>>(4)?,
-                    row.get::<_, Option<i32>>(5)?,
-                ))
-            })
-            .map_err(|e| e.to_string())?
-            .filter_map(|r| r.ok())
-            .collect();
-        Ok(rows)
-    }
 
-    pub fn list_all_sessions_admin(
-        &self,
-    ) -> Result<Vec<(String, String, String, String, Vec<u8>, i32)>, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT s.our_user_id, COALESCE(u1.username, '?'), s.their_user_id, COALESCE(u2.username, '?'), s.session_data, s.ratchet_counter
-                 FROM sessions s
-                 LEFT JOIN users u1 ON s.our_user_id = u1.id
-                 LEFT JOIN users u2 ON s.their_user_id = u2.id
-                 ORDER BY s.id",
-            )
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, Vec<u8>>(4)?,
-                    row.get::<_, i32>(5)?,
-                ))
-            })
-            .map_err(|e| e.to_string())?
-            .filter_map(|r| r.ok())
-            .collect();
-        Ok(rows)
-    }
 
     pub fn list_all_server_bans_admin(
         &self,
@@ -3588,35 +3308,6 @@ impl Database {
         Ok(rows)
     }
 
-    pub fn list_all_user_devices_admin(
-        &self,
-    ) -> Result<Vec<(String, String, String, String, Vec<u8>, Option<Vec<u8>>, Option<String>, String, String)>, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT ud.user_id, COALESCE(u.username, '?'), ud.device_id, COALESCE(ud.device_name, ''), ud.identity_key, ud.signed_prekey, ud.last_active_at, COALESCE(ud.signed_prekey_signature, ''), ud.created_at
-                 FROM user_devices ud LEFT JOIN users u ON ud.user_id = u.id ORDER BY ud.user_id, ud.device_id",
-            )
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, Vec<u8>>(4)?,
-                    row.get::<_, Option<Vec<u8>>>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, String>(8)?,
-                ))
-            })
-            .map_err(|e| e.to_string())?
-            .filter_map(|r| r.ok())
-            .collect();
-        Ok(rows)
-    }
 
     pub fn list_all_files_admin(
         &self,
@@ -3775,15 +3466,7 @@ impl Database {
             .map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM server_members WHERE user_id = ?1", params![user_id])
             .map_err(|e| e.to_string())?;
-
-        // 4. Clean up Signal protocol tables
-        conn.execute("DELETE FROM prekey_bundles WHERE user_id = ?1", params![user_id])
-            .map_err(|e| e.to_string())?;
-        conn.execute(
-            "DELETE FROM sessions WHERE our_user_id = ?1 OR their_user_id = ?1",
-            params![user_id],
-        )
-        .map_err(|e| e.to_string())?;
+        // Legacy delete removed
 
         // 4a. Clean up DM channels where user is a member (removes dm_messages, dm_keys, dm_members via CASCADE)
         let dm_channel_ids: Vec<String> = {
@@ -3970,32 +3653,6 @@ impl Database {
         Ok(rows)
     }
 
-    pub fn list_all_user_key_escrow_admin(&self) -> Result<Vec<(String, String, String, String, Vec<u8>, Vec<u8>, Vec<u8>)>, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT eke.user_id, COALESCE(u.username, '?'), eke.created_at, eke.updated_at,
-                 COALESCE(eke.encrypted_private_key, X''), COALESCE(eke.salt, X''), COALESCE(eke.nonce, X'')
-                 FROM user_key_escrow eke LEFT JOIN users u ON eke.user_id = u.id ORDER BY eke.created_at",
-            )
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, Vec<u8>>(4)?,
-                    row.get::<_, Vec<u8>>(5)?,
-                    row.get::<_, Vec<u8>>(6)?,
-                ))
-            })
-            .map_err(|e| e.to_string())?
-            .filter_map(|r| r.ok())
-            .collect();
-        Ok(rows)
-    }
 
     pub fn list_all_notification_sounds_admin(&self) -> Result<Vec<(String, String, String, Vec<u8>, Vec<u8>, Vec<u8>, String, String)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
@@ -4033,26 +3690,6 @@ impl Database {
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
     }
 
-    pub fn list_all_user_device_escrow_admin(&self) -> Result<Vec<(String, String, String, Vec<u8>, Vec<u8>, Vec<u8>, String, String)>, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let mut stmt = conn.prepare(
-            "SELECT ude.user_id, COALESCE(u.username, '?'), ude.device_id, ude.encrypted_private_key, ude.salt, ude.nonce, ude.created_at, ude.updated_at \
-             FROM user_device_escrow ude LEFT JOIN users u ON ude.user_id = u.id ORDER BY ude.created_at"
-        ).map_err(|e| e.to_string())?;
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, Vec<u8>>(3)?,
-                row.get::<_, Vec<u8>>(4)?,
-                row.get::<_, Vec<u8>>(5)?,
-                row.get::<_, String>(6)?,
-                row.get::<_, String>(7)?,
-            ))
-        }).map_err(|e| e.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
-    }
 
     /// Return all file IDs currently tracked in the database.
     pub fn list_all_file_ids(&self) -> Result<Vec<String>, String> {
@@ -4146,8 +3783,6 @@ impl Database {
         conn.execute("DELETE FROM server_members", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM channels", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM servers", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM prekey_bundles", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM sessions", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM dm_messages", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM dm_keys", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM dm_members", []).map_err(|e| e.to_string())?;
@@ -4155,8 +3790,6 @@ impl Database {
         conn.execute("DELETE FROM friend_requests", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM friendships", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM notification_sounds", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM user_device_escrow", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM user_devices", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM users", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM admin_config", []).map_err(|e| e.to_string())?;
         Ok(())

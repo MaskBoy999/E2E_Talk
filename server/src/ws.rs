@@ -455,47 +455,19 @@ async fn handle_ws_message(
             }
         }
         "upload_key_bundle" => {
-            let identity_key_public = match parsed.get("identity_key_public").and_then(|v| v.as_str()) {
+            let _identity_key_public = match parsed.get("identity_key_public").and_then(|v| v.as_str()) {
                 Some(k) => k,
                 None => return,
             };
-            let signed_prekey_public = match parsed.get("signed_prekey_public").and_then(|v| v.as_str()) {
+            let _signed_prekey_public = match parsed.get("signed_prekey_public").and_then(|v| v.as_str()) {
                 Some(k) => k,
                 None => return,
             };
-            let signed_prekey_signature = match parsed.get("signed_prekey_signature").and_then(|v| v.as_str()) {
+            let _signed_prekey_signature = match parsed.get("signed_prekey_signature").and_then(|v| v.as_str()) {
                 Some(k) => k,
                 None => return,
             };
-            let one_time_prekey_public = parsed.get("one_time_prekey_public").and_then(|v| v.as_str());
-            let one_time_prekey_id = parsed.get("one_time_prekey_id").and_then(|v| v.as_i64()).map(|v| v as i32);
-
-            let ik = match base64::engine::general_purpose::STANDARD.decode(identity_key_public) {
-                Ok(b) => b,
-                Err(_) => return,
-            };
-            let spk = match base64::engine::general_purpose::STANDARD.decode(signed_prekey_public) {
-                Ok(b) => b,
-                Err(_) => return,
-            };
-            let sig = match base64::engine::general_purpose::STANDARD.decode(signed_prekey_signature) {
-                Ok(b) => b,
-                Err(_) => return,
-            };
-            let otp = one_time_prekey_public.and_then(|k| base64::engine::general_purpose::STANDARD.decode(k).ok());
-
-            match state.db.save_prekey_bundle(user_id, &ik, &spk, &sig, otp.as_deref(), one_time_prekey_id) {
-                Ok(()) => {
-                    let resp = serde_json::json!({
-                        "type": "key_bundle_uploaded",
-                        "ok": true,
-                    });
-                    state.ws_manager.broadcast_to_users(&[user_id.to_string()], &resp.to_string()).await;
-                }
-                Err(e) => {
-                    tracing::error!("Failed to save key bundle: {}", e);
-                }
-            }
+            // Key bundle upload removed (legacy X3DH)
         }
         "profile_key_sync" => {
             let dm_channel_id = match parsed.get("dm_channel_id").and_then(|c| c.as_str()) {
