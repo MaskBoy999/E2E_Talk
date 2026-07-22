@@ -175,6 +175,10 @@ pub struct RegisterRequest {
     pub encrypted_friend_code: Option<String>,
     pub friend_code_salt: Option<String>,
     pub friend_code_nonce: Option<String>,
+    // Identity key escrow (password-wrapped via Argon2id)
+    pub encrypted_identity_priv: Option<String>,
+    pub escrow_salt: Option<String>,
+    pub escrow_nonce: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -247,6 +251,21 @@ pub async fn register(
     if let Some(ref key_bytes) = identity_key_bytes {
         let device_id = uuid::Uuid::new_v4().to_string();
         let _ = state.db.register_device(&user.id, &device_id, "primary", key_bytes, None, None, None, None);
+    }
+
+    // Store escrowed identity key if provided
+    if let (Some(enc_priv), Some(esc_salt), Some(esc_nonce)) = (
+        &req.encrypted_identity_priv,
+        &req.escrow_salt,
+        &req.escrow_nonce,
+    ) {
+        if let (Ok(enc_key), Ok(salt), Ok(nonce)) = (
+            base64::engine::general_purpose::STANDARD.decode(enc_priv),
+            base64::engine::general_purpose::STANDARD.decode(esc_salt),
+            base64::engine::general_purpose::STANDARD.decode(esc_nonce),
+        ) {
+            let _ = state.db.save_escrowed_key(&user.id, &enc_key, &salt, &nonce);
+        }
     }
 
     let token = match auth::create_token(&user.id, &user.username, &state.config.jwt_secret) {
@@ -952,14 +971,24 @@ pub async fn join_server(
             .into_response();
     }
 
-    // Try HMAC hash first, fall back to legacy SHA-256 for backward compat
     let code = req.code.trim();
-    let hmac_hash = hmac_sha256_hex(state.config.hmac_key.as_bytes(), code);
-    let server = match state.db.join_server_by_invite(&hmac_hash, &user_id) {
+
+    // The client may send a pre-hashed invite code (HMAC-SHA256) for the streamlined flow,
+    // or a plaintext invite code (legacy flow). Try the code as-is as a hash first,
+    // then try HMAC-hashing it, then fall back to legacy SHA-256.
+    // Check 1: Try the code directly as an invite code hash (client already hashed it)
+    let server = match state.db.join_server_by_invite(code, &user_id) {
         Ok(s) => Ok(s),
         Err(_) => {
-            // Fall back to legacy SHA-256 hash for old invite codes
-            state.db.join_server_by_invite(&sha256_hex(code), &user_id)
+            // Check 2: Client sent plaintext code — HMAC hash it
+            let hmac_hash = hmac_sha256_hex(state.config.hmac_key.as_bytes(), code);
+            match state.db.join_server_by_invite(&hmac_hash, &user_id) {
+                Ok(s) => Ok(s),
+                Err(_) => {
+                    // Check 3: Legacy SHA-256 hash
+                    state.db.join_server_by_invite(&sha256_hex(code), &user_id)
+                }
+            }
         }
     };
     let server = match server {
@@ -3491,13 +3520,11 @@ pub async fn delete_me(
 
 /// GET /api/friend-code — returns the encrypted friend code + salt + nonce for password-based recovery
 pub async fn get_hmac_key(
-    headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    let _user_id = match extract_user(&headers, &state) {
-        Ok(id) => id,
-        Err(e) => return e.into_response(),
-    };
+    // PUBLIC endpoint — no auth required.
+    // The HMAC key is used by clients to hash friend codes and invite codes
+    // during registration (before the user has a token).
     (StatusCode::OK, Json(serde_json::json!({
         "hmac_key": state.config.hmac_key,
     }))).into_response()

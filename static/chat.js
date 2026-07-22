@@ -4763,16 +4763,29 @@ async function fetchAndDecryptServerKey(serverId) {
 
         for (const entry of keys) {
             try {
-                const serverKey = E2ECrypto.envelopeDecryptRaw(
+                // Try authenticated envelopeDecrypt first (new streamlined format)
+                const serverKey = E2ECrypto.envelopeDecrypt(
                     entry.encrypted_key,
-                    entry.nonce,
-                    entry.sender_public_key,
-                    identity.privateKey
+                    identity.privateKey,
+                    new Uint8Array(E2ECrypto.base64ToArrayBuffer(entry.sender_public_key)),
+                    entry.nonce
                 );
                 E2ECrypto.saveServerKey(serverId, serverKey);
                 return true;
             } catch (e) {
-                continue;
+                try {
+                    // Fall back to ephemeral envelopeDecryptRaw (legacy format)
+                    const serverKey = E2ECrypto.envelopeDecryptRaw(
+                        entry.encrypted_key,
+                        entry.nonce,
+                        entry.sender_public_key,
+                        identity.privateKey
+                    );
+                    E2ECrypto.saveServerKey(serverId, serverKey);
+                    return true;
+                } catch (e2) {
+                    continue;
+                }
             }
         }
         return false;
@@ -4835,7 +4848,8 @@ async function uploadServerKeyForUser(serverId, targetUserId) {
     const serverKey = E2ECrypto.getServerKey(serverId);
     if (!serverKey) return false;
 
-    const encrypted = E2ECrypto.envelopeEncryptRaw(serverKey, recipientPubKey);
+    // Use authenticated envelopeEncrypt (static ECDH) instead of ephemeral envelopeEncryptRaw
+    const encrypted = E2ECrypto.envelopeEncrypt(serverKey, recipientPubKey, identity.privateKey);
 
     const uploadRes = await authFetch(`/api/servers/${serverId}/keys`, {
         method: 'POST',
@@ -4843,7 +4857,7 @@ async function uploadServerKeyForUser(serverId, targetUserId) {
         body: JSON.stringify({
             user_id: targetUserId,
             encrypted_key: encrypted.ciphertext,
-            sender_public_key: encrypted.ephemeralPublicKey,
+            sender_public_key: E2ECrypto.arrayBufferToBase64(identity.publicKey),
             nonce: encrypted.nonce,
         }),
     });
@@ -4889,8 +4903,19 @@ function renderServerList() {
     servers.forEach(s => {
         const div = document.createElement('div');
         div.className = 'server-icon' + (s.id === currentServerId ? ' active' : '');
-        div.textContent = s.name.charAt(0).toUpperCase();
-        div.title = s.name;
+        // Try to decrypt server name, fall back to plaintext name
+        var displayName = s.name;
+        if (s.encrypted_name && s.name_nonce) {
+            try {
+                var serverKey = E2ECrypto.getServerKey(s.id);
+                if (serverKey) {
+                    var decrypted = E2ECrypto.aeadDecrypt(s.encrypted_name, serverKey, s.name_nonce);
+                    if (decrypted) displayName = new TextDecoder().decode(decrypted);
+                }
+            } catch (_) {}
+        }
+        div.textContent = displayName.charAt(0).toUpperCase();
+        div.title = displayName;
         div.dataset.id = s.id;
         div.addEventListener('click', () => selectServer(s.id));
         div.addEventListener('contextmenu', function (e) {
@@ -4917,7 +4942,18 @@ async function selectServer(serverId) {
     isOwner = server && server.is_owner;
     currentInviteCode = isOwner ? localStorage.getItem('e2e_invite_' + serverId) : null;
 
-    document.getElementById('server-name').textContent = server ? server.name : '';
+    // Decrypt server name for display
+    var serverDisplayName = server ? server.name : '';
+    if (server && server.encrypted_name && server.name_nonce) {
+        try {
+            var sk = E2ECrypto.getServerKey(serverId);
+            if (sk) {
+                var dec = E2ECrypto.aeadDecrypt(server.encrypted_name, sk, server.name_nonce);
+                if (dec) serverDisplayName = new TextDecoder().decode(dec);
+            }
+        } catch (_) {}
+    }
+    document.getElementById('server-name').textContent = serverDisplayName;
     document.getElementById('channel-name').textContent = 'Select a channel';
     document.getElementById('message-list').innerHTML = '<div class="welcome">Select a channel to start chatting</div>';
     document.getElementById('message-input').disabled = true;
@@ -4985,10 +5021,21 @@ async function loadChannels(serverId) {
             const div = document.createElement('div');
             div.className = 'channel-item';
             div.dataset.id = ch.id;
-            div.dataset.name = ch.name;
-            div.addEventListener('click', () => selectChannel(ch.id, ch.name, div));
+            // Try to decrypt channel name, fall back to plaintext name
+            var chDisplayName = ch.name;
+            if (ch.encrypted_name && ch.name_nonce) {
+                try {
+                    var sk2 = E2ECrypto.getServerKey(serverId);
+                    if (sk2) {
+                        var decCh = E2ECrypto.aeadDecrypt(ch.encrypted_name, sk2, ch.name_nonce);
+                        if (decCh) chDisplayName = new TextDecoder().decode(decCh);
+                    }
+                } catch (_) {}
+            }
+            div.dataset.name = chDisplayName;
+            div.addEventListener('click', () => selectChannel(ch.id, chDisplayName, div));
             const nameSpan = document.createElement('span');
-            nameSpan.textContent = `# ${ch.name}`;
+            nameSpan.textContent = `# ${chDisplayName}`;
             nameSpan.style.flex = '1';
             div.appendChild(nameSpan);
             if (isOwner) {
@@ -7223,31 +7270,46 @@ async function createServer() {
     if (!name) return;
 
     try {
+        // Generate server channel key (32-byte symmetric key)
+        const channelKey = E2ECrypto.generateSymmetricKey();
+
+        // Encrypt server name with channelKey
+        const encName = E2ECrypto.aeadEncrypt(name, channelKey);
+
         // Generate invite code client-side, send only the hash
-        const inviteCode = generateCode(8);        var hmacKey = localStorage.getItem('e2e_hmac_key');        const inviteCodeHash = hmacKey ? E2ECrypto.hmacHex(hmacKey, inviteCode) : E2ECrypto.sha256Hex(inviteCode);
+        const inviteCode = generateCode(8);
+        var hmacKey = localStorage.getItem('e2e_hmac_key');
+        const inviteCodeHash = hmacKey ? E2ECrypto.hmacHex(hmacKey, inviteCode) : E2ECrypto.sha256Hex(inviteCode);
+
         const res = await authFetch('/api/servers', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, invite_code_hash: inviteCodeHash }),
+            body: JSON.stringify({
+                name,
+                encrypted_name: encName.ciphertext,
+                name_nonce: encName.nonce,
+                invite_code_hash: inviteCodeHash,
+            }),
         });
 
         if (res.ok) {
             const serverData = await res.json();
             localStorage.setItem('e2e_invite_' + serverData.id, inviteCode);
 
-            const serverKey = E2ECrypto.generateServerKey();
-            E2ECrypto.saveServerKey(serverData.id, serverKey);
+            // Save the channel key locally
+            E2ECrypto.saveServerKey(serverData.id, channelKey);
 
             const identity = E2ECrypto.getIdentityKeyPair();
             if (identity) {
-                const encrypted = E2ECrypto.envelopeEncryptRaw(serverKey, identity.publicKey);
+                // Wrap channelKey for self using AUTHENTICATED envelopeEncrypt
+                const encrypted = E2ECrypto.envelopeEncrypt(channelKey, identity.publicKey, identity.privateKey);
                 const keyRes = await authFetch(`/api/servers/${serverData.id}/keys`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         user_id: user.id,
                         encrypted_key: encrypted.ciphertext,
-                        sender_public_key: encrypted.ephemeralPublicKey,
+                        sender_public_key: E2ECrypto.arrayBufferToBase64(identity.publicKey),
                         nonce: encrypted.nonce,
                     }),
                 });
@@ -7272,10 +7334,14 @@ async function joinServer() {
     if (!code) return;
 
     try {
+        // Hash the code client-side before sending (HMAC-SHA256 with server's HMAC key)
+        var hmacKey = localStorage.getItem('e2e_hmac_key');
+        var codeHash = hmacKey ? E2ECrypto.hmacHex(hmacKey, code) : E2ECrypto.sha256Hex(code);
+
         const res = await authFetch('/api/invites/join', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ code }),
+            body: JSON.stringify({ code: codeHash }),
         });
 
         if (res.ok) {
@@ -7292,6 +7358,26 @@ async function joinServer() {
 
             selectServer(serverData.id);
         } else {
+            // Fall back to sending plaintext code (backward compat)
+            try {
+                const res2 = await authFetch('/api/invites/join', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ code }),
+                });
+                if (res2.ok) {
+                    const serverData2 = await res2.json();
+                    hideModal('join-server-modal');
+                    await loadServers();
+                    for (let attempt = 0; attempt < 5; attempt++) {
+                        const ok = await fetchAndDecryptServerKey(serverData2.id);
+                        if (ok) break;
+                        await new Promise(r => setTimeout(r, 1000));
+                    }
+                    selectServer(serverData2.id);
+                    return;
+                }
+            } catch (_) {}
             const err = await res.json();
             alert(err.error || 'Invalid invite code');
         }
@@ -7443,10 +7529,22 @@ async function createChannel() {
     if (!name || !currentServerId) return;
 
     try {
+        // Encrypt channel name with server's channelKey
+        const serverKey = E2ECrypto.getServerKey(currentServerId);
+        if (!serverKey) {
+            alert('Cannot create channel: server key not available');
+            return;
+        }
+        const encName = E2ECrypto.aeadEncrypt(name, serverKey);
+
         const res = await authFetch(`/api/servers/${currentServerId}/channels`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name }),
+            body: JSON.stringify({
+                name,
+                encrypted_name: encName.ciphertext,
+                name_nonce: encName.nonce,
+            }),
         });
 
         if (res.ok) {

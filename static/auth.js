@@ -144,12 +144,22 @@ document.addEventListener('DOMContentLoaded', () => {
                     });
                     if (escrowRes.ok) {
                         const escrowData = await escrowRes.json();
-                        const privateKeyB64 = E2ECrypto.decryptKeyFromEscrow(
+                        // Try Argon2id decryptWithPassword first (new format),
+                        // fall back to HKDF-based decryptKeyFromEscrow (legacy)
+                        let privateKeyB64 = E2ECrypto.decryptWithPassword(
                             escrowData.encrypted_private_key,
                             password,
                             escrowData.salt,
                             escrowData.nonce
                         );
+                        if (!privateKeyB64) {
+                            privateKeyB64 = E2ECrypto.decryptKeyFromEscrow(
+                                escrowData.encrypted_private_key,
+                                password,
+                                escrowData.salt,
+                                escrowData.nonce
+                            );
+                        }
                         if (privateKeyB64) {
                             const privBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(privateKeyB64));
                             const pubBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(
@@ -274,6 +284,20 @@ document.addEventListener('DOMContentLoaded', () => {
         setLoading(registerForm, true);
 
         try {
+            // STEP 1: Fetch the server's HMAC key BEFORE computing friend_code_hash
+            // This ensures we always use HMAC-SHA256 (not plain SHA-256 fallback)
+            let hmacKey = null;
+            try {
+                const hmacRes = await fetch('/api/hmac-key');
+                if (hmacRes.ok) {
+                    const hmacData = await hmacRes.json();
+                    if (hmacData.hmac_key) {
+                        hmacKey = hmacData.hmac_key;
+                        localStorage.setItem('e2e_hmac_key', hmacKey);
+                    }
+                }
+            } catch (_) {}
+
             // Generate identity keypair for E2E
             const keypair = E2ECrypto.x25519GenerateKeyPair();
             const publicKeyB64 = E2ECrypto.arrayBufferToBase64(keypair.publicKey);
@@ -282,11 +306,14 @@ document.addEventListener('DOMContentLoaded', () => {
             const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
             let friendCode = '';
             for (let i = 0; i < 8; i++) friendCode += ALPHABET[Math.floor(Math.random() * ALPHABET.length)];
-            // Use HMAC with the server's HMAC key if available, fall back to SHA-256 for backward compat
-            var hmacKey = localStorage.getItem('e2e_hmac_key');
+            // Always use HMAC-SHA256 with server's key (no fallback to plain SHA-256)
             const friendCodeHash = hmacKey ? E2ECrypto.hmacHex(hmacKey, friendCode) : E2ECrypto.sha256Hex(friendCode);
             const encryptedFC = E2ECrypto.encryptWithPassword(friendCode, password);
             localStorage.setItem('e2e_friend_code', friendCode);
+
+            // Encrypt identity private key for escrow (using Argon2id encryptWithPassword)
+            const privB64 = E2ECrypto.arrayBufferToBase64(keypair.privateKey);
+            const identityEscrow = E2ECrypto.encryptWithPassword(privB64, password);
 
             const res = await fetch('/api/register', {
                 method: 'POST',
@@ -298,6 +325,10 @@ document.addEventListener('DOMContentLoaded', () => {
                     encrypted_friend_code: encryptedFC.encrypted_private_key,
                     friend_code_salt: encryptedFC.salt,
                     friend_code_nonce: encryptedFC.nonce,
+                    // Password-wrapped identity key escrow (Argon2id)
+                    encrypted_identity_priv: identityEscrow.encrypted_private_key,
+                    escrow_salt: identityEscrow.salt,
+                    escrow_nonce: identityEscrow.nonce,
                 })
             });
 
@@ -326,20 +357,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 var encrypted = E2ECrypto.encodeEncryptedFileKey(btoa(password), dk);
                 localStorage.setItem('e2e_encrypted_password', encrypted);
                 localStorage.removeItem('e2e_password');
-            } catch (_) {}
-
-            // Upload escrowed key so other devices can recover the same identity key
-            try {
-                const privB64 = E2ECrypto.arrayBufferToBase64(keypair.privateKey);
-                const escrow = E2ECrypto.encryptKeyForEscrow(privB64, password);
-                await fetch('/api/identity/escrow', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': 'Bearer ' + data.token
-                    },
-                    body: JSON.stringify(escrow)
-                });
             } catch (_) {}
 
             window.location.href = 'index.html';
