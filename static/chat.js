@@ -8717,10 +8717,13 @@ async function sendFriendRequest() {
     const errDiv = document.getElementById('add-friend-error');
     errDiv.style.display = 'none';
     try {
+        const hmacKey = await ensureHmacKey();
+        if (!hmacKey) { errDiv.textContent = 'Failed to get HMAC key'; errDiv.style.display = 'block'; return; }
+        const codeHash = E2ECrypto.hmacHex(hmacKey, code);
         const res = await authFetch('/api/friends/request', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ friend_code: code }),
+            body: JSON.stringify({ friend_code_hash: codeHash }),
         });
         const data = await res.json();
         if (res.ok) {

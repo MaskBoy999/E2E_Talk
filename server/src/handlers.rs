@@ -1401,10 +1401,7 @@ pub async fn list_messages(
                 "id": m.id,
                 "sender_id": m.sender_id,
                 "sender_username": m.sender_username,
-                "sender_display_name": m.sender_display_name,
                 "sender_profile_pic": m.sender_profile_pic,
-                "sender_username_color": m.sender_username_color,
-                "sender_username_border_color": m.sender_username_border_color,
                 "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
                 "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
                 "timestamp": m.timestamp,
@@ -1481,10 +1478,7 @@ pub async fn list_messages_around(
                 "id": m.id,
                 "sender_id": m.sender_id,
                 "sender_username": m.sender_username,
-                "sender_display_name": m.sender_display_name,
                 "sender_profile_pic": m.sender_profile_pic,
-                "sender_username_color": m.sender_username_color,
-                "sender_username_border_color": m.sender_username_border_color,
                 "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
                 "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
                 "timestamp": m.timestamp,
@@ -3496,7 +3490,8 @@ pub async fn set_friend_requests_disabled(
 
 #[derive(Deserialize)]
 pub struct SendFriendRequest {
-    pub friend_code: String,
+    pub friend_code: Option<String>,
+    pub friend_code_hash: Option<String>,
 }
 
 pub async fn send_friend_request(
@@ -3509,24 +3504,32 @@ pub async fn send_friend_request(
         Err(e) => return e.into_response(),
     };
 
-    let code = req.friend_code.trim().to_uppercase();
-    if code.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Friend code is required"})),
-        )
-            .into_response();
-    }
-
-    // Compute HMAC hash; fall back to legacy SHA-256 if HMAC lookup fails
-    let hmac_code_hash = hmac_sha256_hex(state.config.hmac_key.as_bytes(), &code);
-    let friend_request_result = match state.db.create_friend_request(&user_id, &hmac_code_hash) {
-        Ok(target) => Ok(target),
-        Err(_) => {
-            // Fall back to legacy SHA-256 hash for old friend codes
-            state.db.create_friend_request(&user_id, &sha256_hex(&code))
+    // Use pre-hashed friend_code_hash if provided, otherwise hash plaintext friend_code server-side
+    let code_hash = match req.friend_code_hash {
+        Some(ref hash) => hash.clone(),
+        None => {
+            let code = match req.friend_code {
+                Some(ref c) => c.trim().to_uppercase(),
+                None => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({"error": "Friend code or friend_code_hash is required"})),
+                    )
+                        .into_response();
+                }
+            };
+            if code.is_empty() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "Friend code is required"})),
+                )
+                    .into_response();
+            }
+            // Legacy fallback: hash the plaintext code server-side
+            hmac_sha256_hex(state.config.hmac_key.as_bytes(), &code)
         }
     };
+    let friend_request_result = state.db.create_friend_request(&user_id, &code_hash);
     match friend_request_result {
         Ok(target) => {
             // Notify the recipient in real time (best-effort). Include sender username.
@@ -3865,10 +3868,7 @@ pub async fn list_dm_messages(
                         "dm_channel_id": m.dm_channel_id,
                         "sender_id": m.sender_id,
                         "sender_username": m.sender_username,
-                        "sender_display_name": m.sender_display_name,
                         "sender_profile_pic": m.sender_profile_pic,
-                        "sender_username_color": m.sender_username_color,
-                "sender_username_border_color": m.sender_username_border_color,
                         "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
                         "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
                         "timestamp": m.timestamp,
