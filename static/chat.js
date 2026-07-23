@@ -263,6 +263,106 @@ function scheduleProfileKeySave() {
 // Load the cache immediately
 loadProfileKeyCache();
 
+// Fetch another user's profile blob from the server, decrypt it with their profile_data_key,
+// and cache the result in userDisplayNameCache so the DM sidebar and messages show the display name.
+// Also re-renders the DM sidebar if we're in DM view.
+async function fetchAndCacheUserProfile(userId) {
+    if (!userId || userId === user.id) return;
+    if (userDisplayNameCache[userId] && userDisplayNameCache[userId].display_name && userDisplayNameCache[userId].username_color) return;
+    var pdKeyB64 = profileKeyCache[userId + ':profile_data_key'];
+    if (!pdKeyB64) return;
+    try {
+        var res = await authFetch('/api/profile/' + encodeURIComponent(userId));
+        if (!res.ok) return;
+        var data = await res.json();
+        if (!data.encrypted_profile_data) return;
+        var profileKeyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(pdKeyB64));
+        var parts = data.encrypted_profile_data.split(':');
+        if (parts.length !== 2) return;
+        var decrypted = E2ECrypto.decryptProfileData(parts[1], parts[0], profileKeyBytes);
+        if (!decrypted) return;
+        if (!userDisplayNameCache[userId]) userDisplayNameCache[userId] = {};
+        if (decrypted.display_name !== undefined) userDisplayNameCache[userId].display_name = decrypted.display_name;
+        if (decrypted.username_color !== undefined) userDisplayNameCache[userId].username_color = decrypted.username_color;
+        if (decrypted.username_border_color !== undefined) userDisplayNameCache[userId].username_border_color = decrypted.username_border_color;
+        if (data.profile_picture_file_id) userDisplayNameCache[userId].profile_picture_file_id = data.profile_picture_file_id;
+        if (viewMode === 'dms') renderDmSidebar();
+        updateExistingMessageStyles(userId);
+    } catch (e) {
+        // Silently ignore — will retry on next profile_key_sync or message
+    }
+}
+
+// Fetch and cache another user's profile via their server conversation_profile_data (encrypted with server key).
+async function fetchServerConversationProfile(userId, serverId, serverKey) {
+    if (!userId || !serverId || !serverKey) return;
+    if (userDisplayNameCache[userId] && userDisplayNameCache[userId].display_name && userDisplayNameCache[userId].username_color) return;
+    try {
+        var res = await fetch('/api/profile/' + encodeURIComponent(userId) + '/conversation/channel/' + encodeURIComponent(serverId), {
+            headers: { 'Authorization': 'Bearer ' + token() },
+        });
+        if (!res.ok) return;
+        var data = await res.json();
+        if (!data.encrypted_profile_data || !data.nonce) return;
+        var decRaw = E2ECrypto.aeadDecrypt(data.encrypted_profile_data, serverKey, data.nonce);
+        if (!decRaw) return;
+        var decStr = new TextDecoder().decode(decRaw);
+        var decrypted = JSON.parse(decStr);
+        if (!userDisplayNameCache[userId]) userDisplayNameCache[userId] = {};
+        if (decrypted.display_name) userDisplayNameCache[userId].display_name = decrypted.display_name;
+        if (decrypted.username_color) userDisplayNameCache[userId].username_color = decrypted.username_color;
+        if (decrypted.username_border_color) userDisplayNameCache[userId].username_border_color = decrypted.username_border_color;
+        updateExistingMessageStyles(userId);
+    } catch (e) {}
+}
+
+// Fetch and cache another user's profile via their DM conversation_profile_data (encrypted with DM key).
+// This is more reliable than fetchAndCacheUserProfile which requires the profile_data_key.
+// Used after loading DM messages to prefill userDisplayNameCache for senders.
+async function fetchDmConversationProfile(userId, dmChannelId) {
+    if (!userId || !dmChannelId) return;
+    if (userDisplayNameCache[userId] && userDisplayNameCache[userId].display_name && userDisplayNameCache[userId].username_color) return;
+    try {
+        var identity = E2ECrypto.getIdentityKeyPair();
+        if (!identity) return;
+        var conv = dmConversations.find(function(c) { return c.dm_channel_id === dmChannelId; });
+        if (!conv) return;
+        var otherPubKey = null;
+        if (conv.other_public_key) {
+            otherPubKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(conv.other_public_key));
+        } else {
+            try {
+                var _idRes = await authFetch('/api/identity/' + encodeURIComponent(userId));
+                if (_idRes.ok) {
+                    var _idData = await _idRes.json();
+                    if (_idData.identity_public_key) {
+                        otherPubKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(_idData.identity_public_key));
+                        conv.other_public_key = _idData.identity_public_key;
+                    }
+                }
+            } catch (_) {}
+        }
+        if (!otherPubKey) return;
+        var dmKey = E2ECrypto.getDmKey(dmChannelId, identity.privateKey, otherPubKey);
+        if (!dmKey) return;
+        var res = await fetch('/api/profile/' + encodeURIComponent(userId) + '/conversation/dm/' + encodeURIComponent(dmChannelId), {
+            headers: { 'Authorization': 'Bearer ' + token() },
+        });
+        if (!res.ok) return;
+        var data = await res.json();
+        if (!data.encrypted_profile_data || !data.nonce) return;
+        var decRaw = E2ECrypto.aeadDecrypt(data.encrypted_profile_data, dmKey, data.nonce);
+        if (!decRaw) return;
+        var decStr = new TextDecoder().decode(decRaw);
+        var decrypted = JSON.parse(decStr);
+        if (!userDisplayNameCache[userId]) userDisplayNameCache[userId] = {};
+        if (decrypted.display_name) userDisplayNameCache[userId].display_name = decrypted.display_name;
+        if (decrypted.username_color) userDisplayNameCache[userId].username_color = decrypted.username_color;
+        if (decrypted.username_border_color) userDisplayNameCache[userId].username_border_color = decrypted.username_border_color;
+        updateExistingMessageStyles(userId);
+    } catch (e) {}
+}
+
 // Proactively send profile key to a DM conversation so the other user can see our PFP/banner immediately
 async function sendProfileKeySync(dmChannelId, conv) {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -1035,10 +1135,17 @@ document.addEventListener('DOMContentLoaded', () => {
                 editAvatarEl.style.borderColor = color || '#16213e';
             }
         });
-        // Description word count
+        // Description character count
         document.getElementById('profile-edit-description').addEventListener('input', function () {
             updateDescriptionWordCount();
         });
+        // Display name character count
+        var dnCountInput = document.getElementById('profile-edit-display-name');
+        if (dnCountInput) {
+            dnCountInput.addEventListener('input', function () {
+                updateDisplayNameCharCount();
+            });
+        }
         // Live preview inputs
         var dnInput = document.getElementById('profile-edit-display-name');
         var dnPreview = document.getElementById('profile-edit-display-name-preview');
@@ -4630,6 +4737,7 @@ function connectWebSocket(t) {
                                     if (decPdKey) {
                                         profileKeyCache[data.user_id + ':profile_data_key'] = decPdKey;
                                         scheduleProfileKeySave();
+                                        fetchAndCacheUserProfile(data.user_id);
                                     }
                                 } catch (e) {
                                     console.warn('Failed to decrypt profile data key sync:', e);
@@ -4684,6 +4792,7 @@ function connectWebSocket(t) {
                                     if (decPdKey) {
                                         profileKeyCache[data.user_id + ':profile_data_key'] = decPdKey;
                                         scheduleProfileKeySave();
+                                        fetchAndCacheUserProfile(data.user_id);
                                     }
                                 }
                             }
@@ -5276,6 +5385,21 @@ async function loadMessages(channelId, aroundMessageId) {
         for (const msg of messages) {
             await appendMessage(msg);
         }
+        // After loading messages, prefetch profile data for senders whose display name isn't cached yet
+        if (currentServerId) {
+            var srvUncached = {};
+            for (const msg of messages) {
+                if (msg.sender_id && msg.sender_id !== user.id && !userDisplayNameCache[msg.sender_id]) {
+                    srvUncached[msg.sender_id] = true;
+                }
+            }
+            var srvKey = E2ECrypto.getServerKey(currentServerId);
+            if (srvKey) {
+                for (var sid in srvUncached) {
+                    fetchServerConversationProfile(sid, currentServerId, srvKey);
+                }
+            }
+        }
     } catch (err) {
         console.error('Failed to load messages:', err);
         list.innerHTML = '<div class="welcome" style="color:#f44336">Failed to load messages</div>';
@@ -5323,6 +5447,7 @@ async function appendMessage(msg) {
                     if (snap.profile_data_key) {
                         profileKeyCache[msg.sender_id + ':profile_data_key'] = snap.profile_data_key;
                         scheduleProfileKeySave();
+                        fetchAndCacheUserProfile(msg.sender_id);
                     }
                 }
             }
@@ -5352,7 +5477,8 @@ async function appendMessage(msg) {
         } catch (_e) {}
     }
 
-    const displayName = msg.sender_display_name || msg.sender_username || '?';
+    const _srvCache = msg.sender_id ? userDisplayNameCache[msg.sender_id] : null;
+    const displayName = msg.sender_display_name || (_srvCache && _srvCache.display_name) || msg.sender_username || '?';
     const initial = displayName.charAt(0).toUpperCase();
     var senderPicUrl = msg.sender_profile_pic ? getProfilePicUrl(msg.sender_profile_pic, msg.sender_id) : null;
     let time = '';
@@ -5363,15 +5489,8 @@ async function appendMessage(msg) {
     }
 
     // Get username color and border color for this sender
-    var senderColor = null;
-    var senderBorderColor = null;
-    if (msg.sender_username_color) {
-        senderColor = msg.sender_username_color;
-        senderBorderColor = msg.sender_border_color || null;
-    } else if (userDisplayNameCache[msg.sender_id]) {
-        senderColor = userDisplayNameCache[msg.sender_id].username_color;
-        senderBorderColor = userDisplayNameCache[msg.sender_id].username_border_color || null;
-    }
+    var senderColor = msg.sender_username_color || (_srvCache && _srvCache.username_color) || null;
+    var senderBorderColor = msg.sender_username_border_color || (_srvCache && _srvCache.username_border_color) || null;
 
     let textContent = '';
     let fileData = null;
@@ -5458,9 +5577,10 @@ async function appendMessage(msg) {
 
     let contentHtml = '';
     if (replyTo) {
+        var replyPicUrl = replyTo.sender_profile_pic ? getProfilePicUrl(replyTo.sender_profile_pic, replyTo.sender_id) : null;
         contentHtml += '<div class="reply-quote" data-reply-to="' + escapeHtml(replyTo.message_id || '') + '">' +                '<span class="reply-author"' +
                     (replyTo.sender_color ? ' style="color:' + replyTo.sender_color + ';text-shadow:' + getDisplayNameTextShadow(replyTo.sender_color, replyTo.sender_border_color) + '"' : '') + '>' +
-                    (replyTo.sender_profile_pic ? '<img class="reply-author-pic" src="' + escapeAttr(replyTo.sender_profile_pic) + '" alt="" style="width:16px;height:16px;border-radius:50%;vertical-align:middle;margin-right:4px">' : '') +
+                    (replyPicUrl ? '<img class="reply-author-pic" src="' + escapeAttr(replyPicUrl) + '" alt="" style="width:16px;height:16px;border-radius:50%;vertical-align:middle;margin-right:4px">' : '') +
                     '@' + escapeHtml(replyTo.author || 'unknown') + '</span> ' +
             '<span class="reply-preview">' + (replyTo.preview ? renderEmojiText(replyTo.preview) : '') + '</span>' +
             '</div>';
@@ -6897,6 +7017,13 @@ async function loadDmConversations() {
     loadMyFriendCode();
     // After DMs are loaded, broadcast our profile keys to all DM conversations
     broadcastProfileKeySyncToAllDms();
+    // Also prefetch profile data for DM partners where we already have their profile_data_key cached
+    for (var i = 0; i < dmConversations.length; i++) {
+        var conv = dmConversations[i];
+        if (conv && conv.other_user_id && profileKeyCache[conv.other_user_id + ':profile_data_key']) {
+            fetchAndCacheUserProfile(conv.other_user_id);
+        }
+    }
 }
 
 function renderDmSidebar() {
@@ -6930,6 +7057,8 @@ function renderDmSidebar() {
     for (const c of dmConversations) {
         var cacheEntry = userDisplayNameCache[c.other_user_id];
         var displayName = (cacheEntry && cacheEntry.display_name) || c.other_display_name || c.other_username || '?';
+        var dmColor = (cacheEntry && cacheEntry.username_color) || null;
+        var dmBorderColor = (cacheEntry && cacheEntry.username_border_color) || null;
         const initial = displayName.charAt(0).toUpperCase();
         // Profile pic URL for DM avatar
         var dmAvatarHtml = '';
@@ -6973,7 +7102,7 @@ function renderDmSidebar() {
         html += '<div class="channel-item dm-item" data-dm-id="' + c.dm_channel_id + '" data-user-id="' + escapeAttr(c.other_user_id) + '" data-username="' + escapeAttr(c.other_username) + '">' +
             '<div class="dm-avatar' + (dmPicCacheKey ? ' profile-pic-target' : '') + '" data-profile-pic-load="' + (dmPicCacheKey || '') + '">' + dmAvatarHtml + '</div>' +
             '<div class="dm-info">' +
-                '<div class="dm-name">' + escapeHtml(displayName) + '</div>' +
+                '<div class="dm-name' + (dmColor ? ' has-glow' : '') + '"' + (dmColor ? ' style="color:' + dmColor + ';text-shadow:' + getDisplayNameTextShadow(dmColor, dmBorderColor) + '"' : '') + '>' + escapeHtml(displayName) + '</div>' +
                 '<div class="dm-preview">' + escapeHtml(preview) + '</div>' +
             '</div>' +
             (unreadDms[c.dm_channel_id] ? '<span class="badge"></span>' : '') +
@@ -7087,6 +7216,16 @@ async function loadDmMessages(dmChannelId, otherUserId) {
         for (const msg of messages) {
             await appendDmMessage(msg, kp, otherPublicKey);
         }
+        // After loading messages, prefetch profile data for senders whose display name isn't cached yet
+        var uncachedSenders = {};
+        for (const msg of messages) {
+            if (msg.sender_id && msg.sender_id !== user.id && !userDisplayNameCache[msg.sender_id]) {
+                uncachedSenders[msg.sender_id] = true;
+            }
+        }
+        for (var sid in uncachedSenders) {
+            fetchDmConversationProfile(sid, dmChannelId);
+        }
     } catch (err) {
         console.error('Failed to load DM messages:', err);
         list.innerHTML = '<div class="welcome" style="color:#f44336">Failed to load messages</div>';
@@ -7133,6 +7272,7 @@ function appendDmMessage(msg, kp, otherPublicKey) {
                 if (snap.profile_data_key) {
                     profileKeyCache[msg.sender_id + ':profile_data_key'] = snap.profile_data_key;
                     scheduleProfileKeySave();
+                    fetchAndCacheUserProfile(msg.sender_id);
                 }
             }
         } catch (_e) {
@@ -7159,14 +7299,12 @@ function appendDmMessage(msg, kp, otherPublicKey) {
         } catch (_e) {}
     }
 
-    const displayName = msg.sender_display_name || msg.sender_username || '?';
+    const _dmCache = msg.sender_id ? userDisplayNameCache[msg.sender_id] : null;
+    const displayName = msg.sender_display_name || (_dmCache && _dmCache.display_name) || msg.sender_username || '?';
     const initial = displayName.charAt(0).toUpperCase();
     var senderPicUrl = msg.sender_profile_pic ? getProfilePicUrl(msg.sender_profile_pic, msg.sender_id) : null;
-    var senderColor = msg.sender_username_color || null;
-    var senderBorderColor = msg.sender_border_color || null;
-    if (!senderBorderColor && msg.sender_id && userDisplayNameCache[msg.sender_id]) {
-        senderBorderColor = userDisplayNameCache[msg.sender_id].username_border_color || null;
-    }
+    var senderColor = msg.sender_username_color || (_dmCache && _dmCache.username_color) || null;
+    var senderBorderColor = msg.sender_username_border_color || (_dmCache && _dmCache.username_border_color) || null;
     let time = '';
     try {
         time = new Date(msg.timestamp).toLocaleTimeString();
@@ -7258,9 +7396,10 @@ function appendDmMessage(msg, kp, otherPublicKey) {
 
     let contentHtml = '';
     if (replyTo) {
+        var replyPicUrl = replyTo.sender_profile_pic ? getProfilePicUrl(replyTo.sender_profile_pic, replyTo.sender_id) : null;
         contentHtml += '<div class="reply-quote" data-reply-to="' + escapeHtml(replyTo.message_id || '') + '">' +                '<span class="reply-author"' +
                     (replyTo.sender_color ? ' style="color:' + replyTo.sender_color + ';text-shadow:' + getDisplayNameTextShadow(replyTo.sender_color, replyTo.sender_border_color) + '"' : '') + '>' +
-                    (replyTo.sender_profile_pic ? '<img class="reply-author-pic" src="' + escapeAttr(replyTo.sender_profile_pic) + '" alt="" style="width:16px;height:16px;border-radius:50%;vertical-align:middle;margin-right:4px">' : '') +
+                    (replyPicUrl ? '<img class="reply-author-pic" src="' + escapeAttr(replyPicUrl) + '" alt="" style="width:16px;height:16px;border-radius:50%;vertical-align:middle;margin-right:4px">' : '') +
                     '@' + escapeHtml(replyTo.author || 'unknown') + '</span> ' +
             '<span class="reply-preview">' + (replyTo.preview ? renderEmojiText(replyTo.preview) : '') + '</span>' +
             '</div>';
@@ -7678,6 +7817,7 @@ async function loadMembers(serverId) {
         members.forEach(m => {
             const div = document.createElement('div');
             div.className = 'member-item';
+            div.setAttribute('data-user-id', m.id);
             const initial = (m.username || '?').charAt(0).toUpperCase();
             const isMemberOwner = m.role === 'owner';
             let actionBtns = '';
@@ -7686,7 +7826,11 @@ async function loadMembers(serverId) {
                     '<button class="btn-kick" data-action="kick" data-user-id="' + escapeAttr(m.id) + '" data-username="' + escapeAttr(m.username) + '" title="Kick">&#10005;</button>' +
                     '<button class="btn-ban" data-action="ban" data-user-id="' + escapeAttr(m.id) + '" data-username="' + escapeAttr(m.username) + '" title="Ban">&#9888;</button>';
             }
-            var memberInitial = (m.display_name || m.username || '?').charAt(0).toUpperCase();
+            var _mCache = userDisplayNameCache[m.id];
+            var memberDisplayName = (_mCache && _mCache.display_name) || m.display_name || m.username || '?';
+            var memberColor = (_mCache && _mCache.username_color) || null;
+            var memberBorderColor = (_mCache && _mCache.username_border_color) || null;
+            var memberInitial = memberDisplayName.charAt(0).toUpperCase();
             var memberPicUrl = m.profile_picture_file_id ? getProfilePicUrl(m.profile_picture_file_id, m.id) : null;
             var memberPicCacheKey = m.id + ':' + m.profile_picture_file_id;
             var memberAvatarHtml = memberPicUrl ?
@@ -7694,10 +7838,12 @@ async function loadMembers(serverId) {
                 (m.profile_picture_file_id ?
                     '<div class="member-avatar' + (isMemberOwner ? ' owner' : '') + '" data-profile-pic-load="' + memberPicCacheKey + '">' + memberInitial + '</div>' :
                     '<div class="member-avatar' + (isMemberOwner ? ' owner' : '') + '">' + memberInitial + '</div>');
+            var memberNameClass = 'member-name' + (memberColor ? ' has-glow' : '');
+            var memberNameStyle = memberColor ? ' style="color:' + memberColor + ';text-shadow:' + getDisplayNameTextShadow(memberColor, memberBorderColor) + '"' : '';
             div.innerHTML =
                 memberAvatarHtml +
                 '<div>' +
-                    '<div class="member-name">' + escapeHtml(m.display_name || m.username) + '</div>' +
+                    '<div class="' + memberNameClass + '"' + memberNameStyle + '>' + escapeHtml(memberDisplayName) + '</div>' +
                     (isMemberOwner ? '<div class="member-role">Owner</div>' : '') +
                 '</div>' +
                 '<div class="member-actions">' + actionBtns + '</div>';
@@ -12094,9 +12240,12 @@ async function loadDmForwardList() {
             const initial = fwdDisplayName.charAt(0).toUpperCase();
             var fwdPicUrl = c.other_profile_picture_file_id ? getProfilePicUrl(c.other_profile_picture_file_id, c.other_user_id) : null;
             var avatarHtml = fwdPicUrl ? '<img src="' + fwdPicUrl + '" alt="" style="width:32px;height:32px;border-radius:50%;object-fit:cover;flex-shrink:0;">' : '<div style="width:32px;height:32px;border-radius:50%;background:var(--accent);color:var(--bg-primary);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;flex-shrink:0;overflow:hidden;">' + initial + '</div>';
+            var fwdColor = (_fwdCache && _fwdCache.username_color) || null;
+            var fwdBorderColor = (_fwdCache && _fwdCache.username_border_color) || null;
+            var fwdNameStyle = fwdColor ? 'font-size:14px;color:' + fwdColor + ';text-shadow:' + getDisplayNameTextShadow(fwdColor, fwdBorderColor) : 'font-size:14px;color:var(--text-primary)';
             html += '<div class="dm-forward-item" data-user-id="' + c.other_user_id + '" data-username="' + escapeAttr(c.other_username) + '" data-dm-channel-id="' + escapeAttr(c.dm_channel_id || '') + '" style="display:flex;align-items:center;gap:10px;padding:10px 12px;cursor:pointer;border-radius:6px;border-bottom:1px solid var(--bg-border);transition:background .15s;">' +
                 avatarHtml +
-                '<span style="font-size:14px;color:var(--text-primary);">' + escapeHtml(fwdDisplayName) + '</span>' +
+                '<span style="' + fwdNameStyle + ';">' + escapeHtml(fwdDisplayName) + '</span>' +
                 '</div>';
         }
         if (!html) {
@@ -13664,6 +13813,7 @@ function renderProfileEdit() {
     document.getElementById('profile-edit-nickname').value = decrypted.nickname || '';
     document.getElementById('profile-edit-description').value = decrypted.description || '';
     updateDescriptionWordCount();
+    updateDisplayNameCharCount();
     
     var color = (decrypted && decrypted.username_color) || data.username_color || '#4fc3f7';
     document.getElementById('profile-edit-color').value = color;
@@ -13697,11 +13847,20 @@ function renderProfileEdit() {
 
 function updateDescriptionWordCount() {
     var descInput = document.getElementById('profile-edit-description');
-    var counter = document.getElementById('profile-desc-word-count');
+    var counter = document.getElementById('profile-desc-char-count');
     if (!descInput || !counter) return;
-    var words = descInput.value.trim() ? descInput.value.trim().split(/\s+/).length : 0;
-    counter.textContent = words + '/300 words';
-    counter.style.color = words > 300 ? 'var(--danger)' : 'var(--text-muted)';
+    var chars = descInput.value.length;
+    counter.textContent = chars;
+    counter.style.color = chars > 300 ? 'var(--danger)' : 'var(--text-muted)';
+}
+
+function updateDisplayNameCharCount() {
+    var dnInput = document.getElementById('profile-edit-display-name');
+    var counter = document.getElementById('profile-dn-char-count');
+    if (!dnInput || !counter) return;
+    var chars = dnInput.value.length;
+    counter.textContent = chars;
+    counter.style.color = chars > 21 ? 'var(--danger)' : 'var(--text-muted)';
 }
 
 function updateProfileEditPreview() {
@@ -14015,21 +14174,15 @@ async function saveProfile() {
     var borderColor = glowBtn ? glowBtn.dataset.value : '';
     
     // Validate
-    if (displayName.length > 32) { statusEl.textContent = 'Display name too long (max 32 chars)'; statusEl.style.color = 'var(--danger)'; return; }
+    if (displayName.length > 21) { statusEl.textContent = 'Display name too long (max 21 chars)'; statusEl.style.color = 'var(--danger)'; return; }
     if (nickname.length > 32) { statusEl.textContent = 'Nickname too long (max 32 chars)'; statusEl.style.color = 'var(--danger)'; return; }
-    // Hard-cap description at 300 words — truncate if over
-    if (description) {
-        var words = description.split(/\s+/);
-        if (words.length > 300) {
-            words = words.slice(0, 300);
-            description = words.join(' ');
-            // Update the input field so the user sees the truncated value
-            document.getElementById('profile-edit-description').value = description;
-            updateDescriptionWordCount();
-        }
+    // Hard-cap description at 300 characters
+    if (description.length > 300) {
+        description = description.substring(0, 300);
+        document.getElementById('profile-edit-description').value = description;
+        updateDescriptionWordCount();
     }
-    var wordCount = description ? description.trim().split(/\s+/).length : 0;
-    if (wordCount > 300) { statusEl.textContent = 'Description too long (max 300 words)'; statusEl.style.color = 'var(--danger)'; return; }
+    if (description.length > 300) { statusEl.textContent = 'Description too long (max 300 characters)'; statusEl.style.color = 'var(--danger)'; return; }
     
     try {
         // Build profile data to encrypt

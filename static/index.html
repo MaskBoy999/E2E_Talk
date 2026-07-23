@@ -699,7 +699,8 @@
 
                     <div class="profile-edit-row">
                         <label>Display Name</label>
-                        <input type="text" id="profile-edit-display-name" maxlength="32" placeholder="Display name">
+                        <input type="text" id="profile-edit-display-name" maxlength="21" placeholder="Display name">
+                        <div style="font-size:11px;color:#888;margin-top:4px;"><span id="profile-dn-char-count">0</span>/21 characters</div>
                     </div>
                     <div class="profile-edit-row">
                         <label>Nickname</label>
@@ -707,8 +708,8 @@
                     </div>
                     <div class="profile-edit-row">
                         <label>Description</label>
-                        <textarea id="profile-edit-description" placeholder="Tell us about yourself..." rows="3" style="resize:vertical;"></textarea>
-                        <div style="font-size:11px;color:#888;margin-top:4px;"><span id="profile-desc-word-count">0</span>/300 words</div>
+                        <textarea id="profile-edit-description" maxlength="300" placeholder="Tell us about yourself..." rows="3" style="resize:vertical;"></textarea>
+                        <div style="font-size:11px;color:#888;margin-top:4px;"><span id="profile-desc-char-count">0</span>/300 characters</div>
                     </div>
                     <div class="profile-edit-row">
                         <label>Profile Background</label>
