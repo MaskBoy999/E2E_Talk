@@ -3581,6 +3581,7 @@ pub async fn accept_friend_request(
             let notify = serde_json::json!({
                 "type": "friend_request_accepted",
                 "by_user_id": user_id,
+                "from_user_id": from_id,
             });
             let _ = state
                 .ws_manager

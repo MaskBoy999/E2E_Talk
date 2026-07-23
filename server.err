@@ -1,1 +1,4 @@
-The system cannot find the file e2e-chat.
+
+thread 'tokio-rt-worker' (30684) panicked at src\main.rs:338:80:
+called `Result::unwrap()` on an `Err` value: Os { code: 10013, kind: PermissionDenied, message: "An attempt was made to access a socket in a way forbidden by its access permissions." }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

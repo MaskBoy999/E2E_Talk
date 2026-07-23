@@ -4642,20 +4642,42 @@ function connectWebSocket(t) {
                 }
                 break;
             case 'friend_request_accepted':
-                if (viewMode === 'dms') {
-                    await loadDmConversations();
-                    // Send our profile key to the new friend's DM
-                    var newConv = dmConversations.find(function(c) { return c.other_user_id === data.by_user_id; });
-                    if (newConv && newConv.dm_channel_id) {
-                        sendProfileKeySync(newConv.dm_channel_id, newConv);
-                    }
-                } else {
-                    // Reload DMs in background so we have the new conversation
-                    await loadDmConversations();
-                    var newConv = dmConversations.find(function(c) { return c.other_user_id === data.by_user_id; });
-                    if (newConv && newConv.dm_channel_id) {
-                        sendProfileKeySync(newConv.dm_channel_id, newConv);
-                    }
+                await loadDmConversations();
+                // Auto-select the new DM conversation and send profile keys.
+                // by_user_id is the accepting user's ID, from_user_id is the original sender.
+                // Both users can find the right conversation by looking for the other person's ID.
+                var _acceptingUserId = data.by_user_id;
+                var _senderUserId = data.from_user_id;
+                var _myId = user ? user.id : '';
+                var newConv = null;
+                // We are the sender: the new friend is the accepting user (by_user_id)
+                if (_myId === _senderUserId && _acceptingUserId) {
+                    newConv = dmConversations.find(function(c) { return c.other_user_id === _acceptingUserId; });
+                }
+                // We are the acceptor: the new friend is the sender (from_user_id)
+                if (!newConv && _myId === _acceptingUserId && _senderUserId) {
+                    newConv = dmConversations.find(function(c) { return c.other_user_id === _senderUserId; });
+                }
+                // Fallback: last conversation
+                if (!newConv && dmConversations.length > 0) {
+                    newConv = dmConversations[dmConversations.length - 1];
+                }
+                if (newConv && newConv.dm_channel_id) {
+                    sendProfileKeySync(newConv.dm_channel_id, newConv);
+                    viewMode = 'dms';
+                    currentServerId = null;
+                    currentChannelId = null;
+                    document.getElementById('server-name').textContent = 'Direct Messages';
+                    document.getElementById('invite-btn').style.display = 'none';
+                    document.getElementById('server-settings-btn').style.display = 'none';
+                    document.getElementById('members-toggle').style.display = 'none';
+                    var _mp = document.getElementById('members-panel');
+                    if (_mp) _mp.classList.remove('open');
+                    membersPanelOpen = false;
+                    document.getElementById('dm-strip-btn').classList.add('active');
+                    document.querySelectorAll('.server-icon:not(.add-server):not(.dm-strip-btn)').forEach(function(el) { el.classList.remove('active'); });
+                    selectDmChannel(newConv.dm_channel_id, newConv.other_user_id, newConv.other_username, null);
+                    setTimeout(function() { loadMyFriendCode(); }, 0);
                 }
                 // Upload per-conversation profile data for all conversations (including the new one)
                 try { await uploadCurrentProfileToConversations(); } catch (_) {}
@@ -5211,9 +5233,14 @@ async function selectServer(serverId) {
     document.getElementById('server-settings-btn').style.display = isOwner ? '' : 'none';
     document.getElementById('members-toggle').style.display = '';
 
-    // Ensure we have the server key
+    // Ensure we have the server key — retry several times to handle race conditions
     if (!E2ECrypto.getServerKey(serverId)) {
-        const ok = await fetchAndDecryptServerKey(serverId);
+        var ok = false;
+        for (var attempt = 0; attempt < 10; attempt++) {
+            ok = await fetchAndDecryptServerKey(serverId);
+            if (ok) break;
+            await new Promise(function(r) { setTimeout(r, 1500); });
+        }
         if (!ok) {
             if (isOwner) {
                 document.getElementById('channel-list').innerHTML = '<div class="channel-item" style="color:#f44336;cursor:default">Cannot decrypt server key. <a href="#" id="regenerate-server-key-btn" style="color:#4fc3f7;text-decoration:underline">Regenerate server key</a></div>';
@@ -8121,10 +8148,10 @@ async function joinServer() {
             await loadServers();
 
             // Retry fetching the server key (owner may need to upload it first)
-            for (let attempt = 0; attempt < 5; attempt++) {
+            for (let attempt = 0; attempt < 10; attempt++) {
                 const ok = await fetchAndDecryptServerKey(serverData.id);
                 if (ok) break;
-                await new Promise(r => setTimeout(r, 1000));
+                await new Promise(r => setTimeout(r, 1500));
             }
 
             // Upload per-conversation profile data for the new server
@@ -8143,10 +8170,10 @@ async function joinServer() {
                     const serverData2 = await res2.json();
                     hideModal('join-server-modal');
                     await loadServers();
-                    for (let attempt = 0; attempt < 5; attempt++) {
+                    for (let attempt = 0; attempt < 10; attempt++) {
                         const ok = await fetchAndDecryptServerKey(serverData2.id);
                         if (ok) break;
-                        await new Promise(r => setTimeout(r, 1000));
+                        await new Promise(r => setTimeout(r, 1500));
                     }
                     selectServer(serverData2.id);
                     return;
@@ -8746,6 +8773,13 @@ async function loadFriendRequests() {
 }
 
 async function acceptFriendRequest(requestId) {
+    // Capture sender BEFORE the request is deleted from the cache
+    var fromUserId = null;
+    try {
+        var reqData = cachedFriendRequests.find(function(r) { return r.id === requestId; });
+        if (reqData) fromUserId = reqData.from_user_id;
+    } catch (_) {}
+    
     try {
         const res = await authFetch('/api/friends/requests/accept', {
             method: 'POST',
@@ -8759,6 +8793,27 @@ async function acceptFriendRequest(requestId) {
             await loadDmConversations();
             // Send our profile keys to the new friend's DM
             broadcastProfileKeySyncToAllDms();
+            // Auto-select the new DM conversation
+            if (fromUserId && dmConversations) {
+                var newConv = dmConversations.find(function(c) { return c.other_user_id === fromUserId; });
+                if (newConv && newConv.dm_channel_id) {
+                    viewMode = 'dms';
+                    currentServerId = null;
+                    currentChannelId = null;
+                    document.getElementById('server-name').textContent = 'Direct Messages';
+                    document.getElementById('invite-btn').style.display = 'none';
+                    document.getElementById('server-settings-btn').style.display = 'none';
+                    document.getElementById('members-toggle').style.display = 'none';
+                    var membersPanel = document.getElementById('members-panel');
+                    if (membersPanel) membersPanel.classList.remove('open');
+                    membersPanelOpen = false;
+                    document.getElementById('dm-strip-btn').classList.add('active');
+                    document.querySelectorAll('.server-icon:not(.add-server):not(.dm-strip-btn)').forEach(function(el) { el.classList.remove('active'); });
+                    selectDmChannel(newConv.dm_channel_id, newConv.other_user_id, newConv.other_username, null);
+                    // selectDmChannel calls renderDmSidebar which replaces the friend code DOM — re-bind the buttons
+                    setTimeout(function() { loadMyFriendCode(); }, 0);
+                }
+            }
         }
     } catch (_) {}
 }

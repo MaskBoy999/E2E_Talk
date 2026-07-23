@@ -1,0 +1,12 @@
+[2m2026-07-23T16:47:22.516809Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Database setup status: fresh — redirecting to admin setup
+[2m2026-07-23T16:47:22.516979Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Running orphan file cleanup...
+[2m2026-07-23T16:47:22.517249Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Orphan file cleanup complete.
+[2m2026-07-23T16:47:22.517660Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Auto-generated self-signed TLS certificates in certs
+[2m2026-07-23T16:47:22.517691Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m For trusted HTTPS, install mkcert and run:
+[2m2026-07-23T16:47:22.517721Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m   mkcert -install
+[2m2026-07-23T16:47:22.517739Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m   mkcert localhost 127.0.0.1 ::1
+[2m2026-07-23T16:47:22.517976Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Then set TLS_CERT_PATH and TLS_KEY_PATH env vars
+[2m2026-07-23T16:47:22.531757Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Server starting on 0.0.0.0:63187
+[2m2026-07-23T16:47:22.531785Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m HTTPS available on https://localhost:3443
+[2m2026-07-23T16:47:22.531795Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m HTTP available on http://localhost:63187
+[2m2026-07-23T17:10:26.783982Z[0m [31mERROR[0m [2me2e_chat::ws[0m[2m:[0m Failed to edit message: Invalid column type Integer at index: 13, name: key_version
