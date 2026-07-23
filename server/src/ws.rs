@@ -487,6 +487,8 @@ async fn handle_ws_message(
             let banner_key_nonce = parsed.get("banner_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
             let banner_key_message_nonce = parsed.get("banner_key_message_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
             let profile_banner_file_id = parsed.get("profile_banner_file_id").and_then(|c| c.as_str()).map(|s| s.to_string());
+            let encrypted_profile_data_key = parsed.get("encrypted_profile_data_key").and_then(|c| c.as_str()).map(|s| s.to_string());
+            let profile_data_key_nonce = parsed.get("profile_data_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
 
             let sync_msg = serde_json::json!({
                 "type": "profile_key_sync",
@@ -500,6 +502,8 @@ async fn handle_ws_message(
                 "encrypted_banner_key": encrypted_banner_key,
                 "banner_key_nonce": banner_key_nonce,
                 "banner_key_message_nonce": banner_key_message_nonce,
+                "encrypted_profile_data_key": encrypted_profile_data_key,
+                "profile_data_key_nonce": profile_data_key_nonce,
             });
 
             // Broadcast to both DM members
@@ -914,6 +918,8 @@ async fn handle_ws_message(
             let encrypted_banner_key = parsed.get("encrypted_banner_key").and_then(|c| c.as_str()).map(|s| s.to_string());
             let banner_key_nonce = parsed.get("banner_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
             let profile_banner_file_id = parsed.get("profile_banner_file_id").and_then(|c| c.as_str()).map(|s| s.to_string());
+            let encrypted_profile_data_key = parsed.get("encrypted_profile_data_key").and_then(|c| c.as_str()).map(|s| s.to_string());
+            let profile_data_key_nonce = parsed.get("profile_data_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
 
             let sync_msg = serde_json::json!({
                 "type": "profile_key_server_sync",
@@ -925,6 +931,8 @@ async fn handle_ws_message(
                 "profile_banner_file_id": profile_banner_file_id,
                 "encrypted_banner_key": encrypted_banner_key,
                 "banner_key_nonce": banner_key_nonce,
+                "encrypted_profile_data_key": encrypted_profile_data_key,
+                "profile_data_key_nonce": profile_data_key_nonce,
             });
 
             // Broadcast to all server members

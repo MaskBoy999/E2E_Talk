@@ -1389,6 +1389,11 @@ pub async fn list_messages(
         }
     };
 
+    // Collect unique sender IDs and fetch their conversation profiles for this server
+    let mut sender_ids: Vec<&str> = messages.iter().map(|m| m.sender_id.as_str()).collect();
+    sender_ids.dedup();
+    let conv_profiles = state.db.get_conversation_profiles_batch("channel", &server_id, &sender_ids).unwrap_or_default();
+
     let message_infos: Vec<serde_json::Value> = messages
         .iter()
         .map(|m| {
@@ -1414,6 +1419,10 @@ pub async fn list_messages(
                 "profile_snapshot_nonce": m.profile_snapshot_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                 "encrypted_file_key": m.encrypted_file_key.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                 "file_key_nonce": m.file_key_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+                "conversation_profile": conv_profiles.get(&m.sender_id).map(|(data, nonce)| serde_json::json!({
+                    "encrypted_profile_data": data,
+                    "nonce": nonce,
+                })),
             })
         })
         .collect();
@@ -1461,6 +1470,10 @@ pub async fn list_messages_around(
         }
     };
 
+    let mut sender_ids2: Vec<&str> = messages.iter().map(|m| m.sender_id.as_str()).collect();
+    sender_ids2.dedup();
+    let conv_profiles2 = state.db.get_conversation_profiles_batch("channel", &server_id, &sender_ids2).unwrap_or_default();
+
     let message_infos: Vec<serde_json::Value> = messages
         .iter()
         .map(|m| {
@@ -1486,6 +1499,10 @@ pub async fn list_messages_around(
                 "profile_snapshot_nonce": m.profile_snapshot_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                 "encrypted_file_key": m.encrypted_file_key.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                 "file_key_nonce": m.file_key_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+                "conversation_profile": conv_profiles2.get(&m.sender_id).map(|(data, nonce)| serde_json::json!({
+                    "encrypted_profile_data": data,
+                    "nonce": nonce,
+                })),
             })
         })
         .collect();
@@ -3090,10 +3107,16 @@ pub async fn upsert_conversation_profile(
     let is_member = match req.conversation_type.as_str() {
         "dm" => state.db.is_member_of_dm(&user_id, &req.conversation_id).unwrap_or(false),
         "channel" => {
-            let server_id = state.db.get_server_id_for_channel(&req.conversation_id).ok();
-            match server_id {
-                Some(sid) => state.db.is_member_of_server(&user_id, &sid).unwrap_or(false),
-                None => false,
+            // conversation_id may be a server ID (used by uploadConversationProfiles
+            // and queried by list_messages) or a channel ID (legacy). Try both.
+            if state.db.is_member_of_server(&user_id, &req.conversation_id).unwrap_or(false) {
+                true
+            } else {
+                let server_id = state.db.get_server_id_for_channel(&req.conversation_id).ok();
+                match server_id {
+                    Some(sid) => state.db.is_member_of_server(&user_id, &sid).unwrap_or(false),
+                    None => false,
+                }
             }
         }
         _ => false,
@@ -3123,10 +3146,15 @@ pub async fn get_conversation_profile(
     let is_member = match conv_type.as_str() {
         "dm" => state.db.is_member_of_dm(&user_id, &conv_id).unwrap_or(false),
         "channel" => {
-            let server_id = state.db.get_server_id_for_channel(&conv_id).ok();
-            match server_id {
-                Some(sid) => state.db.is_member_of_server(&user_id, &sid).unwrap_or(false),
-                None => false,
+            // conv_id may be a server ID or a channel ID — try both
+            if state.db.is_member_of_server(&user_id, &conv_id).unwrap_or(false) {
+                true
+            } else {
+                let server_id = state.db.get_server_id_for_channel(&conv_id).ok();
+                match server_id {
+                    Some(sid) => state.db.is_member_of_server(&user_id, &sid).unwrap_or(false),
+                    None => false,
+                }
             }
         }
         _ => false,
@@ -3824,6 +3852,10 @@ pub async fn list_dm_messages(
     }
     match state.db.list_dm_messages(&dm_channel_id, 100) {
         Ok(msgs) => {
+            let mut dm_sender_ids: Vec<&str> = msgs.iter().map(|m| m.sender_id.as_str()).collect();
+            dm_sender_ids.dedup();
+            let dm_conv_profiles = state.db.get_conversation_profiles_batch("dm", &dm_channel_id, &dm_sender_ids).unwrap_or_default();
+
             let result: Vec<serde_json::Value> = msgs
                 .iter()
                 .map(|m| {
@@ -3846,6 +3878,10 @@ pub async fn list_dm_messages(
                         "profile_key_nonce": m.profile_key_nonce,
                         "encrypted_banner_key": m.encrypted_banner_key,
                         "banner_key_nonce": m.banner_key_nonce,
+                        "conversation_profile": dm_conv_profiles.get(&m.sender_id).map(|(data, nonce)| serde_json::json!({
+                            "encrypted_profile_data": data,
+                            "nonce": nonce,
+                        })),
                     })
                 })
                 .collect();

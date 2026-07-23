@@ -501,6 +501,7 @@ impl Database {
             ("encrypted_profile_data", "TEXT DEFAULT ''"),
             ("encrypted_profile_salt", "TEXT DEFAULT ''"),
             ("encrypted_profile_nonce", "TEXT DEFAULT ''"),
+            ("encrypted_profile_data_key", "TEXT DEFAULT ''"),
         ] {
             let col_exists: bool = conn
                 .query_row(
@@ -574,6 +575,21 @@ impl Database {
                 PRIMARY KEY (user_id, conversation_type, conversation_id)
             );"
         );
+
+        // Migration: Drop legacy plaintext profile columns (now in encrypted_profile_data)
+        for col in ["display_name", "username_color", "username_border_color", "description", "nickname", "profile_background_color"] {
+            let col_exists: bool = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) > 0 FROM pragma_table_info('users') WHERE name = '{}'", col),
+                    [],
+                    |row| row.get::<_, i32>(0),
+                )
+                .map(|c| c > 0)
+                .unwrap_or(false);
+            if col_exists {
+                let _ = conn.execute(&format!("ALTER TABLE users DROP COLUMN {}", col), []);
+            }
+        }
 
         // Re-create tables that are still used by the codebase but were dropped by migration 022/023
         // notification_sounds: used for cross-device notification sound sync
@@ -690,51 +706,37 @@ impl Database {
     pub fn get_user_profile(&self, id: &str) -> Result<(String, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
 
-        // Build column list dynamically — check which columns exist
-        let cols = vec!["username_border_color", "profile_banner_file_id", "profile_banner_file_key", "description", "nickname", "username_color"];
-        let mut present: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
-        for col in &cols {
-            let exists: bool = conn
-                .query_row(
-                    &format!("SELECT COUNT(*) > 0 FROM pragma_table_info('users') WHERE name = '{}'", col),
-                    [],
-                    |row| row.get::<_, i32>(0),
-                )
-                .map(|c| c > 0)
-                .unwrap_or(false);
-            present.insert(col.to_string(), exists);
-        }
-
-        let has_border = *present.get("username_border_color").unwrap_or(&false);
-        let has_banner = *present.get("profile_banner_file_id").unwrap_or(&false);
-        let has_banner_key = *present.get("profile_banner_file_key").unwrap_or(&false);
-        // description/nickname removed — use encrypted_profile_data instead
-        let has_color = *present.get("username_color").unwrap_or(&false);
-
-        let sql = if has_border && has_banner && has_banner_key {
-            format!(
-                "SELECT id, username, display_name, profile_picture_file_id, profile_picture_file_key,
-                        username_color, username_border_color,
-                        profile_banner_file_id, profile_banner_file_key
-                 FROM users WHERE id = ?1"
+        // Check which banner columns exist (display_name, username_color, username_border_color dropped)
+        let has_banner: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('users') WHERE name = 'profile_banner_file_id'",
+                [],
+                |row| row.get::<_, i32>(0),
             )
-        } else if has_color && has_border {
-            format!(
-                "SELECT id, username, display_name, profile_picture_file_id, profile_picture_file_key,
-                        username_color, username_border_color,
-                        NULL as banner_id, NULL as banner_key
-                 FROM users WHERE id = ?1"
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        let has_banner_key: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('users') WHERE name = 'profile_banner_file_key'",
+                [],
+                |row| row.get::<_, i32>(0),
             )
+            .map(|c| c > 0)
+            .unwrap_or(false);
+
+        let sql = if has_banner && has_banner_key {
+            "SELECT id, username, NULL as display_name, profile_picture_file_id, profile_picture_file_key,
+                    NULL as color, NULL as border,
+                    profile_banner_file_id, profile_banner_file_key
+             FROM users WHERE id = ?1"
         } else {
-            format!(
-                "SELECT id, username, display_name, profile_picture_file_id, profile_picture_file_key,
-                        NULL as color, NULL as border,
-                        NULL as banner_id, NULL as banner_key
-                 FROM users WHERE id = ?1"
-            )
+            "SELECT id, username, NULL as display_name, profile_picture_file_id, profile_picture_file_key,
+                    NULL as color, NULL as border,
+                    NULL as banner_id, NULL as banner_key
+             FROM users WHERE id = ?1"
         };
 
-        conn.query_row(&sql, params![id], |row| {
+        conn.query_row(sql, params![id], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -865,17 +867,6 @@ impl Database {
         .map_err(|_| "User not found".to_string())
     }
 
-    pub fn get_profile_background_color(&self, user_id: &str) -> Result<String, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.query_row(
-            "SELECT profile_background_color FROM users WHERE id = ?1",
-            params![user_id],
-            |row| row.get::<_, Option<String>>(0),
-        )
-        .map(|c| c.unwrap_or_else(|| "#16213e".to_string()))
-        .map_err(|_| "User not found".to_string())
-    }
-
     pub fn upsert_conversation_profile(&self, user_id: &str, conv_type: &str, conv_id: &str, encrypted_data: &str, nonce: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
@@ -899,6 +890,22 @@ impl Database {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.to_string()),
         }
+    }
+
+    pub fn get_conversation_profiles_batch(&self, conv_type: &str, conv_id: &str, user_ids: &[&str]) -> Result<std::collections::HashMap<String, (String, String)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut map = std::collections::HashMap::new();
+        for uid in user_ids {
+            match conn.query_row(
+                "SELECT encrypted_profile_data, nonce FROM conversation_profile_data WHERE user_id = ?1 AND conversation_type = ?2 AND conversation_id = ?3",
+                params![uid, conv_type, conv_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            ) {
+                Ok(val) => { map.insert(uid.to_string(), val); }
+                Err(_) => {}
+            }
+        }
+        Ok(map)
     }
 
     pub fn get_password_hash(&self, username: &str) -> Result<String, String> {
@@ -1161,7 +1168,7 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT u.id, u.username, sm.role, u.display_name, u.profile_picture_file_id
+                "SELECT u.id, u.username, sm.role, NULL as display_name, u.profile_picture_file_id
                  FROM server_members sm
                  INNER JOIN users u ON sm.user_id = u.id
                  WHERE sm.server_id = ?1
@@ -1384,7 +1391,7 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT m.id, m.channel_id, m.sender_id, u.username, u.display_name, u.profile_picture_file_id, u.username_color, u.username_border_color,                        m.encrypted_content, m.nonce, m.timestamp,
+                "SELECT m.id, m.channel_id, m.sender_id, u.username, NULL as display_name, u.profile_picture_file_id, NULL as username_color, NULL as username_border_color,                        m.encrypted_content, m.nonce, m.timestamp,
                         m.message_nonce, m.edited_at, m.message_signature,
                         m.encrypted_profile_key, m.profile_key_nonce, m.encrypted_banner_key, m.banner_key_nonce,
                         m.key_version, m.encrypted_profile_snapshot, m.profile_snapshot_nonce, m.encrypted_file_key, m.file_key_nonce
@@ -1443,7 +1450,7 @@ impl Database {
         let half = limit / 2;
         let mut stmt = conn
             .prepare(
-                "SELECT m.id, m.channel_id, m.sender_id, u.username, u.display_name, u.profile_picture_file_id, u.username_color, u.username_border_color,                        m.encrypted_content, m.nonce, m.timestamp,
+                "SELECT m.id, m.channel_id, m.sender_id, u.username, NULL as display_name, u.profile_picture_file_id, NULL as username_color, NULL as username_border_color,                        m.encrypted_content, m.nonce, m.timestamp,
                         m.message_nonce, m.edited_at, m.message_signature,
                         m.encrypted_profile_key, m.profile_key_nonce, m.encrypted_banner_key, m.banner_key_nonce,
                         m.key_version, m.encrypted_profile_snapshot, m.profile_snapshot_nonce, m.encrypted_file_key, m.file_key_nonce
@@ -2217,7 +2224,7 @@ impl Database {
         // Returns (dm_channel_id, other_user_id, other_username, other_display_name, other_profile_pic) ordered by most recent message.
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn.prepare(
-             "SELECT dm.id, other.user_id, u.username, u.display_name, u.profile_picture_file_id
+             "SELECT dm.id, other.user_id, u.username, NULL as display_name, u.profile_picture_file_id
               FROM dm_members mine
              INNER JOIN dm_channels dm ON dm.id = mine.dm_channel_id
              INNER JOIN (
@@ -2342,7 +2349,7 @@ impl Database {
     pub fn list_dm_messages(&self, dm_channel_id: &str, limit: i64) -> Result<Vec<DmMessage>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn.prepare(
-            "SELECT m.id, m.dm_channel_id, m.sender_id, u.username, u.display_name, u.profile_picture_file_id, u.username_color, u.username_border_color,
+            "SELECT m.id, m.dm_channel_id, m.sender_id, u.username, NULL as display_name, u.profile_picture_file_id, NULL as username_color, NULL as username_border_color,
                     m.encrypted_content, m.nonce, m.timestamp,
                     m.message_nonce, m.edited_at, m.message_signature,
                     m.encrypted_profile_key, m.profile_key_nonce, m.encrypted_banner_key, m.banner_key_nonce,
@@ -2778,7 +2785,7 @@ impl Database {
     pub fn get_dm_last_message(&self, dm_channel_id: &str) -> Result<Option<DmMessage>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let result = conn.query_row(
-            "SELECT m.id, m.dm_channel_id, m.sender_id, u.username, u.display_name, u.profile_picture_file_id, u.username_color, u.username_border_color,                        m.encrypted_content, m.nonce, m.timestamp, m.message_nonce, m.edited_at
+            "SELECT m.id, m.dm_channel_id, m.sender_id, u.username, NULL as display_name, u.profile_picture_file_id, NULL as username_color, NULL as username_border_color,                        m.encrypted_content, m.nonce, m.timestamp, m.message_nonce, m.edited_at
              FROM dm_messages m INNER JOIN users u ON m.sender_id = u.id
              WHERE m.dm_channel_id = ?1
              ORDER BY m.timestamp DESC LIMIT 1",
@@ -2984,7 +2991,7 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, username, password_hash, created_at, COALESCE(display_name, ''), COALESCE(identity_public_key, ''), COALESCE(profile_picture_file_id, ''), COALESCE(profile_picture_file_key, ''), COALESCE(username_color, '#4fc3f7'), COALESCE(username_border_color, ''), COALESCE(friend_requests_disabled, 0), COALESCE(encrypted_friend_code, ''), COALESCE(friend_code_salt, ''), COALESCE(friend_code_nonce, ''), COALESCE(encrypted_profile_data, ''), COALESCE(encrypted_profile_salt, ''), COALESCE(encrypted_profile_nonce, ''), COALESCE(profile_banner_file_id, ''), COALESCE(profile_banner_file_key, ''), COALESCE(description, ''), COALESCE(nickname, ''), COALESCE(profile_background_color, '#16213e'), COALESCE(friend_code_hash, '') FROM users ORDER BY created_at",
+                "SELECT id, username, password_hash, created_at, '' as display_name, COALESCE(identity_public_key, ''), COALESCE(profile_picture_file_id, ''), COALESCE(profile_picture_file_key, ''), '' as username_color, '' as username_border_color, COALESCE(friend_requests_disabled, 0), COALESCE(encrypted_friend_code, ''), COALESCE(friend_code_salt, ''), COALESCE(friend_code_nonce, ''), COALESCE(encrypted_profile_data, ''), COALESCE(encrypted_profile_salt, ''), COALESCE(encrypted_profile_nonce, ''), COALESCE(profile_banner_file_id, ''), COALESCE(profile_banner_file_key, ''), '' as description, '' as nickname, '#16213e' as profile_background_color, COALESCE(friend_code_hash, '') FROM users ORDER BY created_at",
             )
             .map_err(|e| e.to_string())?;
         let users = stmt
@@ -3073,7 +3080,7 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT m.id, m.channel_id, m.sender_id, COALESCE(u.username, '?'), u.display_name, u.profile_picture_file_id, u.username_color, u.username_border_color,                        m.encrypted_content, m.nonce, m.timestamp, COALESCE(m.message_nonce, ''), COALESCE(m.edited_at, ''), COALESCE(m.message_signature, ''), COALESCE(m.encrypted_profile_key, ''), COALESCE(m.profile_key_nonce, ''), COALESCE(m.encrypted_banner_key, ''), COALESCE(m.banner_key_nonce, ''), m.key_version, m.encrypted_profile_snapshot, m.profile_snapshot_nonce, m.encrypted_file_key, m.file_key_nonce
+                "SELECT m.id, m.channel_id, m.sender_id, COALESCE(u.username, '?'), NULL as display_name, u.profile_picture_file_id, NULL as username_color, NULL as username_border_color,                        m.encrypted_content, m.nonce, m.timestamp, COALESCE(m.message_nonce, ''), COALESCE(m.edited_at, ''), COALESCE(m.message_signature, ''), COALESCE(m.encrypted_profile_key, ''), COALESCE(m.profile_key_nonce, ''), COALESCE(m.encrypted_banner_key, ''), COALESCE(m.banner_key_nonce, ''), m.key_version, m.encrypted_profile_snapshot, m.profile_snapshot_nonce, m.encrypted_file_key, m.file_key_nonce
                  FROM messages m LEFT JOIN users u ON m.sender_id = u.id ORDER BY m.timestamp DESC LIMIT 500",
             )
             .map_err(|e| e.to_string())?;
@@ -3571,6 +3578,14 @@ impl Database {
         conn.execute("DELETE FROM server_stickers WHERE uploaded_by = ?1", params![user_id])
             .map_err(|e| e.to_string())?;
 
+        // 4h. Clean up conversation_profile_data and user_media for this user
+        conn.execute("DELETE FROM conversation_profile_data WHERE user_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM user_media WHERE user_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM user_stickers WHERE user_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+
         // 5. Delete the user
         conn.execute("DELETE FROM users WHERE id = ?1", params![user_id])
             .map_err(|e| e.to_string())?;
@@ -3956,11 +3971,6 @@ impl Database {
         conn.execute("DELETE FROM messages", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM dm_messages", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM server_keys", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM server_keys_new", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM dm_keys", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM dm_keys_new", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM prekey_bundles", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM sessions", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM server_bans", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM server_members", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM channels", []).map_err(|e| e.to_string())?;
@@ -3971,10 +3981,7 @@ impl Database {
         conn.execute("DELETE FROM friendships", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM user_stickers", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM server_stickers", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM user_key_escrow", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM user_device_escrow", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM user_devices", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM user_public_keys", []).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM conversation_profile_data", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM notification_sounds", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM users", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM admin_config", []).map_err(|e| e.to_string())?;
