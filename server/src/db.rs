@@ -58,7 +58,6 @@ pub struct User {
 #[derive(Debug, Clone)]
 pub struct Server {
     pub id: String,
-    pub name: String,
     pub encrypted_name: Option<Vec<u8>>,
     pub name_nonce: Option<Vec<u8>>,
     pub owner_id: String,
@@ -71,7 +70,6 @@ pub struct Server {
 pub struct Channel {
     pub id: String,
     pub server_id: String,
-    pub name: String,
     pub encrypted_name: Option<Vec<u8>>,
     pub name_nonce: Option<Vec<u8>>,
     pub channel_type: String,
@@ -102,6 +100,8 @@ pub struct Message {
     pub profile_snapshot_nonce: Option<Vec<u8>>,
     pub encrypted_file_key: Option<Vec<u8>>,
     pub file_key_nonce: Option<Vec<u8>>,
+    pub encrypted_sender_username: Option<String>,
+    pub sender_username_nonce: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +127,8 @@ pub struct DmMessage {
     pub profile_snapshot_nonce: Option<Vec<u8>>,
     pub encrypted_file_key: Option<Vec<u8>>,
     pub file_key_nonce: Option<Vec<u8>>,
+    pub encrypted_sender_username: Option<String>,
+    pub sender_username_nonce: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -586,6 +588,56 @@ impl Database {
             }
         }
 
+
+        // Migration: Drop plaintext server.name and channels.name columns
+        for tbl_col in [("servers", "name"), ("channels", "name")] {
+            let (tbl, col) = tbl_col;
+            let col_exists: bool = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) > 0 FROM pragma_table_info('{}') WHERE name = '{}'", tbl, col),
+                    [],
+                    |row| row.get::<_, i32>(0),
+                )
+                .map(|c| c > 0)
+                .unwrap_or(false);
+            if col_exists {
+                let _ = conn.execute(&format!("ALTER TABLE {} DROP COLUMN {}", tbl, col), []);
+            }
+        }
+
+        // P3 Migration: Add encrypted_sender_username and sender_username_nonce columns
+        // to messages and dm_messages tables (for sender username encryption)
+        for tbl in ["messages", "dm_messages"] {
+            let col_exists: bool = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) > 0 FROM pragma_table_info('{}') WHERE name = 'encrypted_sender_username'", tbl),
+                    [],
+                    |row| row.get::<_, i32>(0),
+                )
+                .map(|c| c > 0)
+                .unwrap_or(false);
+            if !col_exists {
+                let _ = conn.execute(
+                    &format!("ALTER TABLE {} ADD COLUMN encrypted_sender_username TEXT", tbl),
+                    [],
+                );
+            }
+            let nonce_col_exists: bool = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) > 0 FROM pragma_table_info('{}') WHERE name = 'sender_username_nonce'", tbl),
+                    [],
+                    |row| row.get::<_, i32>(0),
+                )
+                .map(|c| c > 0)
+                .unwrap_or(false);
+            if !nonce_col_exists {
+                let _ = conn.execute(
+                    &format!("ALTER TABLE {} ADD COLUMN sender_username_nonce TEXT", tbl),
+                    [],
+                );
+            }
+        }
+
         // Re-create tables that are still used by the codebase but were dropped by migration 022/023
         // notification_sounds: used for cross-device notification sound sync
         let _ = conn.execute_batch(
@@ -925,16 +977,34 @@ impl Database {
 
     // --- Servers ---
 
-    pub fn create_server(&self, name: &str, owner_id: &str, invite_code_hash: &str, encrypted_name: Option<&[u8]>, name_nonce: Option<&[u8]>) -> Result<Server, String> {
+    pub fn create_server(&self, owner_id: &str, invite_code_hash: &str, encrypted_name: Option<&[u8]>, name_nonce: Option<&[u8]>) -> Result<Server, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let server_id = Uuid::new_v4().to_string();
         let general_id = Uuid::new_v4().to_string();
 
-        conn.execute(
-            "INSERT INTO servers (id, name, owner_id, invite_code_hash, encrypted_name, name_nonce) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![server_id, name, owner_id, invite_code_hash, encrypted_name, name_nonce],
-        )
-        .map_err(|e| e.to_string())?;
+        // If the legacy 'name' column still exists (e.g., on older SQLite where DROP COLUMN failed),
+        // include a default value to avoid NOT NULL constraint errors.
+        let has_name_col: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('servers') WHERE name = 'name'",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if has_name_col {
+            conn.execute(
+                "INSERT INTO servers (id, owner_id, invite_code_hash, encrypted_name, name_nonce, name) VALUES (?1, ?2, ?3, ?4, ?5, '')",
+                params![server_id, owner_id, invite_code_hash, encrypted_name, name_nonce],
+            )
+            .map_err(|e| e.to_string())?;
+        } else {
+            conn.execute(
+                "INSERT INTO servers (id, owner_id, invite_code_hash, encrypted_name, name_nonce) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![server_id, owner_id, invite_code_hash, encrypted_name, name_nonce],
+            )
+            .map_err(|e| e.to_string())?;
+        }
 
         conn.execute(
             "INSERT INTO server_members (user_id, server_id, role) VALUES (?1, ?2, 'owner')",
@@ -943,14 +1013,13 @@ impl Database {
         .map_err(|e| e.to_string())?;
 
         conn.execute(
-            "INSERT INTO channels (id, server_id, name, type, position) VALUES (?1, ?2, 'general', 'text', 0)",
+            "INSERT INTO channels (id, server_id, type, position) VALUES (?1, ?2, 'text', 0)",
             params![general_id, server_id],
         )
         .map_err(|e| e.to_string())?;
 
         Ok(Server {
             id: server_id,
-            name: name.to_string(),
             encrypted_name: encrypted_name.map(|v| v.to_vec()),
             name_nonce: name_nonce.map(|v| v.to_vec()),
             owner_id: owner_id.to_string(),
@@ -964,23 +1033,22 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT s.id, s.name, s.encrypted_name, s.name_nonce, s.owner_id, COALESCE(s.invite_code_hash, ''), COALESCE(s.joins_disabled, 0)
+                "SELECT s.id, s.encrypted_name, s.name_nonce, s.owner_id, COALESCE(s.invite_code_hash, ''), COALESCE(s.joins_disabled, 0)
                  FROM servers s
                  INNER JOIN server_members sm ON s.id = sm.server_id
                  WHERE sm.user_id = ?1
-                 ORDER BY s.name",
+                 ORDER BY s.id",
             )
             .map_err(|e| e.to_string())?;
         let servers = stmt
             .query_map(params![user_id], |row| {
                 Ok(Server {
                     id: row.get(0)?,
-                    name: row.get(1)?,
-                    encrypted_name: row.get(2)?,
-                    name_nonce: row.get(3)?,
-                    owner_id: row.get(4)?,
-                    invite_code_hash: row.get(5)?,
-                    joins_disabled: row.get::<_, i64>(6)? != 0,
+                    encrypted_name: row.get(1)?,
+                    name_nonce: row.get(2)?,
+                    owner_id: row.get(3)?,
+                    invite_code_hash: row.get(4)?,
+                    joins_disabled: row.get::<_, i64>(5)? != 0,
                     created_at: String::new(),
                 })
             })
@@ -1028,17 +1096,16 @@ impl Database {
 
         let server: Server = conn
             .query_row(
-                "SELECT id, name, encrypted_name, name_nonce, owner_id, COALESCE(invite_code_hash, ''), COALESCE(joins_disabled, 0) FROM servers WHERE invite_code_hash = ?1",
+                "SELECT id, encrypted_name, name_nonce, owner_id, COALESCE(invite_code_hash, ''), COALESCE(joins_disabled, 0) FROM servers WHERE invite_code_hash = ?1",
                 params![code_hash],
                 |row| {
                     Ok(Server {
                         id: row.get(0)?,
-                        name: row.get(1)?,
-                        encrypted_name: row.get(2)?,
-                        name_nonce: row.get(3)?,
-                        owner_id: row.get(4)?,
-                        invite_code_hash: row.get(5)?,
-                        joins_disabled: row.get::<_, i64>(6)? != 0,
+                        encrypted_name: row.get(1)?,
+                        name_nonce: row.get(2)?,
+                        owner_id: row.get(3)?,
+                        invite_code_hash: row.get(4)?,
+                        joins_disabled: row.get::<_, i64>(5)? != 0,
                         created_at: String::new(),
                     })
                 },
@@ -1127,23 +1194,13 @@ impl Database {
     }
 
     pub fn get_channel_name(&self, channel_id: &str) -> Result<String, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.query_row(
-            "SELECT name FROM channels WHERE id = ?1",
-            params![channel_id],
-            |row| row.get(0),
-        )
-        .map_err(|_| "Channel not found".to_string())
+        // name column has been removed — return channel_id as fallback
+        Ok(channel_id.to_string())
     }
 
     pub fn get_server_name(&self, server_id: &str) -> Result<String, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.query_row(
-            "SELECT name FROM servers WHERE id = ?1",
-            params![server_id],
-            |row| row.get(0),
-        )
-        .map_err(|_| "Server not found".to_string())
+        // name column has been removed — return server_id as fallback
+        Ok(server_id.to_string())
     }
 
     pub fn get_server_members(&self, server_id: &str) -> Result<Vec<String>, String> {
@@ -1327,7 +1384,7 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, server_id, name, encrypted_name, name_nonce, type, COALESCE(position, 0), COALESCE(created_at, '') FROM channels
+                "SELECT id, server_id, encrypted_name, name_nonce, type, COALESCE(position, 0), COALESCE(created_at, '') FROM channels
                  WHERE server_id = ?1 ORDER BY position",
             )
             .map_err(|e| e.to_string())?;
@@ -1336,12 +1393,11 @@ impl Database {
                 Ok(Channel {
                     id: row.get(0)?,
                     server_id: row.get(1)?,
-                    name: row.get(2)?,
-                    encrypted_name: row.get(3)?,
-                    name_nonce: row.get(4)?,
-                    channel_type: row.get(5)?,
-                    position: row.get::<_, i32>(6)?,
-                    created_at: row.get::<_, String>(7)?,
+                    encrypted_name: row.get(2)?,
+                    name_nonce: row.get(3)?,
+                    channel_type: row.get(4)?,
+                    position: row.get::<_, i32>(5)?,
+                    created_at: row.get::<_, String>(6)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -1350,7 +1406,7 @@ impl Database {
         Ok(channels)
     }
 
-    pub fn create_channel(&self, server_id: &str, name: &str, encrypted_name: Option<&[u8]>, name_nonce: Option<&[u8]>) -> Result<Channel, String> {
+    pub fn create_channel(&self, server_id: &str, encrypted_name: Option<&[u8]>, name_nonce: Option<&[u8]>) -> Result<Channel, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let id = Uuid::new_v4().to_string();
 
@@ -1362,16 +1418,32 @@ impl Database {
             )
             .map_err(|e| e.to_string())?;
 
-        conn.execute(
-            "INSERT INTO channels (id, server_id, name, encrypted_name, name_nonce, type, position) VALUES (?1, ?2, ?3, ?4, ?5, 'text', ?6)",
-            params![id, server_id, name, encrypted_name, name_nonce, max_pos + 1],
-        )
-        .map_err(|e| e.to_string())?;
+        // If the legacy 'name' column still exists, include a default value
+        let has_name_col: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('channels') WHERE name = 'name'",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if has_name_col {
+            conn.execute(
+                "INSERT INTO channels (id, server_id, encrypted_name, name_nonce, type, position, name) VALUES (?1, ?2, ?3, ?4, 'text', ?5, '')",
+                params![id, server_id, encrypted_name, name_nonce, max_pos + 1],
+            )
+            .map_err(|e| e.to_string())?;
+        } else {
+            conn.execute(
+                "INSERT INTO channels (id, server_id, encrypted_name, name_nonce, type, position) VALUES (?1, ?2, ?3, ?4, 'text', ?5)",
+                params![id, server_id, encrypted_name, name_nonce, max_pos + 1],
+            )
+            .map_err(|e| e.to_string())?;
+        }
 
         Ok(Channel {
             id,
             server_id: server_id.to_string(),
-            name: name.to_string(),
             encrypted_name: encrypted_name.map(|v| v.to_vec()),
             name_nonce: name_nonce.map(|v| v.to_vec()),
             channel_type: "text".to_string(),
@@ -1390,12 +1462,14 @@ impl Database {
                         m.encrypted_content, m.nonce, m.timestamp,
                         m.message_nonce, m.edited_at, m.message_signature,
                         m.encrypted_profile_key, m.profile_key_nonce, m.encrypted_banner_key, m.banner_key_nonce,
-                        m.key_version, m.encrypted_profile_snapshot, m.profile_snapshot_nonce, m.encrypted_file_key, m.file_key_nonce
+                        m.key_version, m.encrypted_profile_snapshot, m.profile_snapshot_nonce, m.encrypted_file_key, m.file_key_nonce,
+                        m.encrypted_sender_username, m.sender_username_nonce
                  FROM (
                      SELECT id, channel_id, sender_id, encrypted_content, nonce, timestamp,
                             message_nonce, edited_at, message_signature,
                             encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce,
-                            key_version, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce
+                            key_version, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce,
+                            encrypted_sender_username, sender_username_nonce
                      FROM messages
                      WHERE channel_id = ?1
                      ORDER BY timestamp DESC
@@ -1428,6 +1502,8 @@ impl Database {
                     profile_snapshot_nonce: row.get(17)?,
                     encrypted_file_key: row.get(18)?,
                     file_key_nonce: row.get(19)?,
+                    encrypted_sender_username: row.get(20)?,
+                    sender_username_nonce: row.get(21)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -1447,12 +1523,14 @@ impl Database {
                         m.encrypted_content, m.nonce, m.timestamp,
                         m.message_nonce, m.edited_at, m.message_signature,
                         m.encrypted_profile_key, m.profile_key_nonce, m.encrypted_banner_key, m.banner_key_nonce,
-                        m.key_version, m.encrypted_profile_snapshot, m.profile_snapshot_nonce, m.encrypted_file_key, m.file_key_nonce
+                        m.key_version, m.encrypted_profile_snapshot, m.profile_snapshot_nonce, m.encrypted_file_key, m.file_key_nonce,
+                        m.encrypted_sender_username, m.sender_username_nonce
                  FROM (
                      SELECT id, channel_id, sender_id, encrypted_content, nonce, timestamp,
                             message_nonce, edited_at, message_signature,
                             encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce,
-                            key_version, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce
+                            key_version, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce,
+                            encrypted_sender_username, sender_username_nonce
                      FROM messages
                      WHERE channel_id = ?1 AND timestamp <= (SELECT COALESCE(timestamp, '') FROM messages WHERE id = ?2)
                      ORDER BY timestamp DESC
@@ -1461,7 +1539,8 @@ impl Database {
                      SELECT id, channel_id, sender_id, encrypted_content, nonce, timestamp,
                             message_nonce, edited_at, message_signature,
                             encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce,
-                            key_version, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce
+                            key_version, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce,
+                            encrypted_sender_username, sender_username_nonce
                      FROM messages
                      WHERE channel_id = ?1 AND timestamp > (SELECT COALESCE(timestamp, '') FROM messages WHERE id = ?2)
                      ORDER BY timestamp ASC
@@ -1494,6 +1573,8 @@ impl Database {
                     profile_snapshot_nonce: row.get(17)?,
                     encrypted_file_key: row.get(18)?,
                     file_key_nonce: row.get(19)?,
+                    encrypted_sender_username: row.get(20)?,
+                    sender_username_nonce: row.get(21)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -1519,6 +1600,8 @@ impl Database {
         profile_snapshot_nonce: Option<&[u8]>,
         encrypted_file_key: Option<&[u8]>,
         file_key_nonce: Option<&[u8]>,
+        encrypted_sender_username: Option<&str>,
+        sender_username_nonce: Option<&str>,
     ) -> Result<Message, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let id = Uuid::new_v4().to_string();
@@ -1532,8 +1615,8 @@ impl Database {
             .map_err(|_| "Sender not found".to_string())?;
 
         conn.execute(
-            "INSERT INTO messages (id, channel_id, sender_id, encrypted_content, nonce, message_nonce, message_signature, encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
-            params![id, channel_id, sender_id, encrypted_content, nonce, message_nonce, message_signature, encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce],
+            "INSERT INTO messages (id, channel_id, sender_id, encrypted_content, nonce, message_nonce, message_signature, encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce, encrypted_sender_username, sender_username_nonce) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            params![id, channel_id, sender_id, encrypted_content, nonce, message_nonce, message_signature, encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce, encrypted_sender_username, sender_username_nonce],
         )
         .map_err(|e| e.to_string())?;
 
@@ -1558,6 +1641,8 @@ impl Database {
             profile_snapshot_nonce: profile_snapshot_nonce.map(|v| v.to_vec()),
             encrypted_file_key: encrypted_file_key.map(|v| v.to_vec()),
             file_key_nonce: file_key_nonce.map(|v| v.to_vec()),
+            encrypted_sender_username: encrypted_sender_username.map(|s| s.to_string()),
+            sender_username_nonce: sender_username_nonce.map(|s| s.to_string()),
         })
     }
 
@@ -2342,12 +2427,14 @@ impl Database {
                     m.encrypted_content, m.nonce, m.timestamp,
                     m.message_nonce, m.edited_at, m.message_signature,
                     m.encrypted_profile_key, m.profile_key_nonce, m.encrypted_banner_key, m.banner_key_nonce,
-                    m.key_version, m.encrypted_profile_snapshot, m.profile_snapshot_nonce, m.encrypted_file_key, m.file_key_nonce
+                    m.key_version, m.encrypted_profile_snapshot, m.profile_snapshot_nonce, m.encrypted_file_key, m.file_key_nonce,
+                    m.encrypted_sender_username, m.sender_username_nonce
              FROM (
                   SELECT id, dm_channel_id, sender_id, encrypted_content, nonce, timestamp,
                          message_nonce, edited_at, message_signature,
                          encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce,
-                         key_version, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce
+                         key_version, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce,
+                         encrypted_sender_username, sender_username_nonce
                   FROM dm_messages
                   WHERE dm_channel_id = ?1
                   ORDER BY timestamp DESC
@@ -2378,8 +2465,11 @@ impl Database {
                 profile_snapshot_nonce: row.get(17)?,
                 encrypted_file_key: row.get(18)?,
                 file_key_nonce: row.get(19)?,
+                encrypted_sender_username: row.get(20)?,
+                sender_username_nonce: row.get(21)?,
+                })
             })
-        }).map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r.map_err(|e| e.to_string())?);
@@ -2404,6 +2494,8 @@ impl Database {
         profile_snapshot_nonce: Option<&[u8]>,
         encrypted_file_key: Option<&[u8]>,
         file_key_nonce: Option<&[u8]>,
+        encrypted_sender_username: Option<&str>,
+        sender_username_nonce: Option<&str>,
     ) -> Result<DmMessage, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let id = Uuid::new_v4().to_string();
@@ -2415,8 +2507,8 @@ impl Database {
             )
             .map_err(|_| "Sender not found".to_string())?;
         conn.execute(
-            "INSERT INTO dm_messages (id, dm_channel_id, sender_id, encrypted_content, nonce, message_nonce, message_signature, encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
-            params![id, dm_channel_id, sender_id, encrypted_content, nonce, message_nonce, message_signature, encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce],
+            "INSERT INTO dm_messages (id, dm_channel_id, sender_id, encrypted_content, nonce, message_nonce, message_signature, encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce, encrypted_sender_username, sender_username_nonce) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            params![id, dm_channel_id, sender_id, encrypted_content, nonce, message_nonce, message_signature, encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce, encrypted_sender_username, sender_username_nonce],
         )
         .map_err(|e| e.to_string())?;
 
@@ -2441,6 +2533,8 @@ impl Database {
             profile_snapshot_nonce: profile_snapshot_nonce.map(|v| v.to_vec()),
             encrypted_file_key: encrypted_file_key.map(|v| v.to_vec()),
             file_key_nonce: file_key_nonce.map(|v| v.to_vec()),
+            encrypted_sender_username: encrypted_sender_username.map(|s| s.to_string()),
+            sender_username_nonce: sender_username_nonce.map(|s| s.to_string()),
         })
     }
 
@@ -2508,6 +2602,8 @@ impl Database {
                         profile_snapshot_nonce: row.get(15)?,
                         encrypted_file_key: row.get(16)?,
                         file_key_nonce: None,
+                    encrypted_sender_username: None,
+                    sender_username_nonce: None,
                     })
                 },
             )
@@ -2594,6 +2690,8 @@ impl Database {
                         profile_snapshot_nonce: row.get(15)?,
                         encrypted_file_key: row.get(16)?,
                         file_key_nonce: None,
+                    encrypted_sender_username: None,
+                    sender_username_nonce: None,
                     })
                 },
             )
@@ -2793,6 +2891,8 @@ impl Database {
                     profile_snapshot_nonce: None,
                     encrypted_file_key: None,
                     file_key_nonce: None,
+                    encrypted_sender_username: None,
+                    sender_username_nonce: None,
                 })
             },
         );
@@ -3009,19 +3109,18 @@ impl Database {
     pub fn list_all_servers_admin(&self) -> Result<Vec<Server>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT id, name, owner_id, COALESCE(invite_code_hash, ''), COALESCE(joins_disabled, 0), COALESCE(created_at, '') FROM servers ORDER BY created_at")
+            .prepare("SELECT id, owner_id, COALESCE(invite_code_hash, ''), COALESCE(joins_disabled, 0), COALESCE(created_at, '') FROM servers ORDER BY created_at")
             .map_err(|e| e.to_string())?;
         let servers = stmt
             .query_map([], |row| {
                 Ok(Server {
                     id: row.get(0)?,
-                    name: row.get(1)?,
                     encrypted_name: None,
                     name_nonce: None,
-                    owner_id: row.get(2)?,
-                    invite_code_hash: row.get(3)?,
-                    joins_disabled: row.get::<_, i64>(4)? != 0,
-                    created_at: row.get(5)?,
+                    owner_id: row.get(1)?,
+                    invite_code_hash: row.get(2)?,
+                    joins_disabled: row.get::<_, i64>(3)? != 0,
+                    created_at: row.get(4)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -3033,19 +3132,18 @@ impl Database {
     pub fn list_all_channels_admin(&self) -> Result<Vec<Channel>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT id, server_id, name, type, COALESCE(position, 0), COALESCE(created_at, '') FROM channels ORDER BY created_at")
+            .prepare("SELECT id, server_id, type, COALESCE(position, 0), COALESCE(created_at, '') FROM channels ORDER BY created_at")
             .map_err(|e| e.to_string())?;
         let channels = stmt
             .query_map([], |row| {
                 Ok(Channel {
                     id: row.get(0)?,
                     server_id: row.get(1)?,
-                    name: row.get(2)?,
                     encrypted_name: None,
                     name_nonce: None,
-                    channel_type: row.get(3)?,
-                    position: row.get::<_, i32>(4)?,
-                    created_at: row.get(5)?,
+                    channel_type: row.get(2)?,
+                    position: row.get::<_, i32>(3)?,
+                    created_at: row.get(4)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -3086,6 +3184,8 @@ impl Database {
                     profile_snapshot_nonce: row.get(17)?,
                     encrypted_file_key: row.get(18)?,
                     file_key_nonce: row.get(19)?,
+                    encrypted_sender_username: row.get(20)?,
+                    sender_username_nonce: row.get(21)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -3100,7 +3200,7 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT sk.server_id, COALESCE(s.name, '?'), sk.user_id, sk.encrypted_key, sk.sender_public_key, sk.nonce, sk.version, COALESCE(sk.device_id, ''), sk.created_at
+                "SELECT sk.server_id, s.id, sk.user_id, sk.encrypted_key, sk.sender_public_key, sk.nonce, sk.version, COALESCE(sk.device_id, ''), sk.created_at
                  FROM server_keys sk LEFT JOIN servers s ON sk.server_id = s.id ORDER BY sk.created_at",
             )
             .map_err(|e| e.to_string())?;
@@ -3130,7 +3230,7 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT sm.user_id, COALESCE(u.username, '?'), sm.server_id, COALESCE(s.name, '?'), COALESCE(sm.role, 'member'), COALESCE(sm.joined_at, '')
+                "SELECT sm.user_id, COALESCE(u.username, '?'), sm.server_id, s.id, COALESCE(sm.role, 'member'), COALESCE(sm.joined_at, '')
                  FROM server_members sm
                  LEFT JOIN users u ON sm.user_id = u.id
                  LEFT JOIN servers s ON sm.server_id = s.id
@@ -3162,7 +3262,7 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT sb.server_id, COALESCE(s.name, '?'), sb.user_id, COALESCE(u.username, '?'), COALESCE(sb.reason, ''), sb.created_at
+                "SELECT sb.server_id, s.id, sb.user_id, COALESCE(u.username, '?'), COALESCE(sb.reason, ''), sb.created_at
                  FROM server_bans sb
                  LEFT JOIN servers s ON sb.server_id = s.id
                  LEFT JOIN users u ON sb.user_id = u.id
@@ -3666,7 +3766,7 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT ss.id, ss.server_id, COALESCE(s.name, '?'), ss.file_id, ss.uploaded_by, ss.sticker_name, COALESCE(ss.file_key, ''), ss.encrypted_file_key, ss.file_key_nonce, COALESCE(ss.created_at, '')
+                "SELECT ss.id, ss.server_id, s.id, ss.file_id, ss.uploaded_by, ss.sticker_name, COALESCE(ss.file_key, ''), ss.encrypted_file_key, ss.file_key_nonce, COALESCE(ss.created_at, '')
                  FROM server_stickers ss LEFT JOIN servers s ON ss.server_id = s.id ORDER BY ss.created_at DESC",
             )
             .map_err(|e| e.to_string())?;

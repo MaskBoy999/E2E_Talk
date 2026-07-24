@@ -660,7 +660,6 @@ pub async fn get_escrowed_key(
 
 #[derive(Deserialize)]
 pub struct CreateServerRequest {
-    pub name: String,
     pub invite_code_hash: String,
     pub encrypted_name: Option<String>,
     pub name_nonce: Option<String>,
@@ -676,18 +675,10 @@ pub async fn create_server(
         Err(e) => return e.into_response(),
     };
 
-    if req.name.trim().is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Server name is required"})),
-        )
-            .into_response();
-    }
-
     let encrypted_name_bytes = req.encrypted_name.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
     let name_nonce_bytes = req.name_nonce.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
 
-    let server = match state.db.create_server(req.name.trim(), &user_id, &req.invite_code_hash, encrypted_name_bytes.as_deref(), name_nonce_bytes.as_deref()) {
+    let server = match state.db.create_server(&user_id, &req.invite_code_hash, encrypted_name_bytes.as_deref(), name_nonce_bytes.as_deref()) {
         Ok(s) => s,
         Err(e) => {
             return (
@@ -702,7 +693,6 @@ pub async fn create_server(
         StatusCode::CREATED,
         Json(serde_json::json!({
             "id": server.id,
-            "name": server.name,
             "encrypted_name": server.encrypted_name.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
             "name_nonce": server.name_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
         })),
@@ -736,7 +726,6 @@ pub async fn list_servers(
             let is_owner = s.owner_id == user_id;
             serde_json::json!({
                 "id": s.id,
-                "name": s.name,
                 "encrypted_name": s.encrypted_name.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                 "name_nonce": s.name_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                 "is_owner": is_owner,
@@ -784,7 +773,6 @@ pub async fn list_channels(
         .map(|c| {
             serde_json::json!({
                 "id": c.id,
-                "name": c.name,
                 "encrypted_name": c.encrypted_name.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                 "name_nonce": c.name_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
             })
@@ -796,7 +784,6 @@ pub async fn list_channels(
 
 #[derive(Deserialize)]
 pub struct CreateChannelRequest {
-    pub name: String,
     pub encrypted_name: Option<String>,
     pub name_nonce: Option<String>,
 }
@@ -820,18 +807,10 @@ pub async fn create_channel(
             .into_response();
     }
 
-    if req.name.trim().is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Channel name is required"})),
-        )
-            .into_response();
-    }
-
     let encrypted_name_bytes = req.encrypted_name.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
     let name_nonce_bytes = req.name_nonce.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
 
-    let channel = match state.db.create_channel(&server_id, req.name.trim(), encrypted_name_bytes.as_deref(), name_nonce_bytes.as_deref()) {
+    let channel = match state.db.create_channel(&server_id, encrypted_name_bytes.as_deref(), name_nonce_bytes.as_deref()) {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -855,7 +834,6 @@ pub async fn create_channel(
         StatusCode::CREATED,
         Json(serde_json::json!({
             "id": channel.id,
-            "name": channel.name,
             "encrypted_name": channel.encrypted_name.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
             "name_nonce": channel.name_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
         })),
@@ -1019,7 +997,6 @@ pub async fn join_server(
         StatusCode::OK,
         Json(serde_json::json!({
             "id": server.id,
-            "name": server.name,
         })),
     )
         .into_response()
@@ -1401,6 +1378,8 @@ pub async fn list_messages(
                 "id": m.id,
                 "sender_id": m.sender_id,
                 "sender_username": m.sender_username,
+                "encrypted_sender_username": m.encrypted_sender_username,
+                "sender_username_nonce": m.sender_username_nonce,
                 "sender_profile_pic": m.sender_profile_pic,
                 "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
                 "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
@@ -1478,6 +1457,8 @@ pub async fn list_messages_around(
                 "id": m.id,
                 "sender_id": m.sender_id,
                 "sender_username": m.sender_username,
+                "encrypted_sender_username": m.encrypted_sender_username,
+                "sender_username_nonce": m.sender_username_nonce,
                 "sender_profile_pic": m.sender_profile_pic,
                 "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
                 "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
@@ -1899,7 +1880,6 @@ pub async fn admin_list_servers(
         .map(|s| {
             serde_json::json!({
                 "id": s.id,
-                "name": s.name,
                 "owner_id": s.owner_id,
                 "invite_code_hash": s.invite_code_hash,
                 "joins_disabled": s.joins_disabled,
@@ -1930,7 +1910,6 @@ pub async fn admin_list_channels(
             serde_json::json!({
                 "id": c.id,
                 "server_id": c.server_id,
-                "name": c.name,
                 "type": c.channel_type,
                 "position": c.position,
                 "created_at": c.created_at,
@@ -3879,6 +3858,8 @@ pub async fn list_dm_messages(
                         "profile_key_nonce": m.profile_key_nonce,
                         "encrypted_banner_key": m.encrypted_banner_key,
                         "banner_key_nonce": m.banner_key_nonce,
+                        "encrypted_sender_username": m.encrypted_sender_username,
+                        "sender_username_nonce": m.sender_username_nonce,
                         "conversation_profile": dm_conv_profiles.get(&m.sender_id).map(|(data, nonce)| serde_json::json!({
                             "encrypted_profile_data": data,
                             "nonce": nonce,

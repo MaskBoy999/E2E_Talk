@@ -89,6 +89,12 @@
                     <a href="index.html" class="back-link">Back to chat</a>
                 </div>
             </div>
+            <div style="display:flex;gap:6px;align-items:center;margin-bottom:12px;padding:8px 12px;background:#1a1a2e;border:1px solid #333;border-radius:6px;">
+                <span style="color:#888;font-size:12px;white-space:nowrap;">🔑 Decrypt Names:</span>
+                <input type="password" id="admin-decrypt-key" placeholder="Paste server key (base64)..." style="flex:1;padding:6px 10px;border:1px solid #333;border-radius:4px;background:#0f0f23;color:#e0e0e0;font-size:12px;font-family:monospace;" title="Paste the 32-byte server key (base64) from your browser's IndexedDB">
+                <button id="admin-decrypt-apply" style="background:#1565c0;color:#fff;border:none;padding:6px 12px;border-radius:4px;cursor:pointer;font-size:12px;white-space:nowrap;">Apply</button>
+                <button id="admin-decrypt-clear" style="background:transparent;color:#888;border:1px solid #444;padding:6px 10px;border-radius:4px;cursor:pointer;font-size:12px;white-space:nowrap;">Clear</button>
+            </div>
 
             <div class="tabs">
                 <button class="tab-btn active" data-tab="users">Users</button>

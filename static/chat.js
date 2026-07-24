@@ -82,7 +82,7 @@ function renderMutedList() {
     // Muted servers
     mutedServers.forEach(function (sid) {
         var sv = servers.find(function (s) { return s.id === sid; });
-        var name = sv ? sv.name : sid.slice(0, 8);
+        var name = sv ? (sv.displayName || '[encrypted]') : sid.slice(0, 8);
         html += '<div class="muted-list-item"><span>🔇 Server: ' + escapeHtml(name) + '</span><button class="unmute-btn" data-type="server" data-id="' + sid + '">Unmute</button></div>';
     });
     // Muted channels
@@ -3983,7 +3983,7 @@ function showChannelContextMenu(e, channelId, channelName) {
         if (sv) {
             var svItem = document.createElement('div');
             svItem.className = 'context-menu-item';
-            svItem.textContent = isMutedSrv ? 'Unmute ' + sv.name : 'Mute ' + sv.name;
+            svItem.textContent = isMutedSrv ? 'Unmute ' + (sv.displayName || '[encrypted]') : 'Mute ' + (sv.displayName || '[encrypted]');
             svItem.addEventListener('click', function () {
                 toggleMuteServer(currentServerId);
                 menu.remove();
@@ -4344,6 +4344,16 @@ function connectWebSocket(t) {
                 break;
             case 'message_new':
                 if (data.channel_id && data.message) {
+                    // Decrypt encrypted_sender_username if present (P3)
+                    if (data.message.encrypted_sender_username && data.message.sender_username_nonce && data.server_id) {
+                        try {
+                            var svKey = E2ECrypto.getServerKey(data.server_id);
+                            if (svKey) {
+                                var decU = E2ECrypto.decryptSenderUsername(data.message.encrypted_sender_username, data.message.sender_username_nonce, svKey);
+                                if (decU) data.message.sender_username = decU;
+                            }
+                        } catch (_) {}
+                    }
                     if (data.channel_id === currentChannelId) {
                         await appendMessage(data.message);
                         // Check if the newly appended message mentions the current user
@@ -4374,6 +4384,14 @@ function connectWebSocket(t) {
                                 const res = await authFetch('/api/identity/' + currentDmOtherUser.id);
                                 const d = await res.json();
                                 otherPubKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(d.identity_public_key));
+                            } catch (_) {}
+                        }
+                        // Decrypt encrypted_sender_username if present (P3)
+                        if (data.message.encrypted_sender_username && data.message.sender_username_nonce && kp) {
+                            try {
+                                var dmKey = E2ECrypto.getDmKey(data.dm_channel_id, kp.privateKey, otherPubKey);
+                                var decU = E2ECrypto.decryptMessage(data.message.encrypted_sender_username, data.message.sender_username_nonce, dmKey);
+                                if (decU) data.message.sender_username = decU;
                             } catch (_) {}
                         }
                         await appendDmMessage(data.message, kp, otherPubKey);
@@ -5174,24 +5192,23 @@ function renderServerList() {
     servers.forEach(s => {
         const div = document.createElement('div');
         div.className = 'server-icon' + (s.id === currentServerId ? ' active' : '');
-        // Try to decrypt server name, fall back to plaintext name
-        var displayName = s.name;
+        // Decrypt server name — try all keys (current + history) since key may have been rotated
+        var displayName = '[encrypted]';
         if (s.encrypted_name && s.name_nonce) {
             try {
-                var serverKey = E2ECrypto.getServerKey(s.id);
-                if (serverKey) {
-                    var decrypted = E2ECrypto.aeadDecrypt(s.encrypted_name, serverKey, s.name_nonce);
-                    if (decrypted) displayName = new TextDecoder().decode(decrypted);
-                }
+                var decrypted = E2ECrypto.decryptWithAnyServerKey(s.encrypted_name, s.name_nonce, s.id);
+                if (decrypted) displayName = new TextDecoder().decode(decrypted);
             } catch (_) {}
         }
+        s.displayName = displayName;
         div.textContent = displayName.charAt(0).toUpperCase();
         div.title = displayName;
         div.dataset.id = s.id;
+        div.dataset.name = displayName;
         div.addEventListener('click', () => selectServer(s.id));
         div.addEventListener('contextmenu', function (e) {
             e.preventDefault();
-            showServerContextMenu(e, s.id, s.name);
+            showServerContextMenu(e, s.id, displayName);
         });
         list.appendChild(div);
     });
@@ -5213,15 +5230,12 @@ async function selectServer(serverId) {
     isOwner = server && server.is_owner;
     currentInviteCode = isOwner ? localStorage.getItem('e2e_invite_' + serverId) : null;
 
-    // Decrypt server name for display
-    var serverDisplayName = server ? server.name : '';
+    // Decrypt server name for display — try all keys (current + history)
+    var serverDisplayName = '[encrypted]';
     if (server && server.encrypted_name && server.name_nonce) {
         try {
-            var sk = E2ECrypto.getServerKey(serverId);
-            if (sk) {
-                var dec = E2ECrypto.aeadDecrypt(server.encrypted_name, sk, server.name_nonce);
-                if (dec) serverDisplayName = new TextDecoder().decode(dec);
-            }
+            var dec = E2ECrypto.decryptWithAnyServerKey(server.encrypted_name, server.name_nonce, serverId);
+            if (dec) serverDisplayName = new TextDecoder().decode(dec);
         } catch (_) {}
     }
     document.getElementById('server-name').textContent = serverDisplayName;
@@ -5297,15 +5311,12 @@ async function loadChannels(serverId) {
             const div = document.createElement('div');
             div.className = 'channel-item';
             div.dataset.id = ch.id;
-            // Try to decrypt channel name, fall back to plaintext name
-            var chDisplayName = ch.name;
+            // Decrypt channel name — try all keys (current + history) since key may have been rotated
+            var chDisplayName = '[encrypted]';
             if (ch.encrypted_name && ch.name_nonce) {
                 try {
-                    var sk2 = E2ECrypto.getServerKey(serverId);
-                    if (sk2) {
-                        var decCh = E2ECrypto.aeadDecrypt(ch.encrypted_name, sk2, ch.name_nonce);
-                        if (decCh) chDisplayName = new TextDecoder().decode(decCh);
-                    }
+                    var decCh = E2ECrypto.decryptWithAnyServerKey(ch.encrypted_name, ch.name_nonce, serverId);
+                    if (decCh) chDisplayName = new TextDecoder().decode(decCh);
                 } catch (_) {}
             }
             div.dataset.name = chDisplayName;
@@ -5321,7 +5332,7 @@ async function loadChannels(serverId) {
                 delBtn.title = 'Delete channel';
                 delBtn.addEventListener('click', (e) => {
                     e.stopPropagation();
-                    deleteChannel(ch.id, ch.name);
+                    deleteChannel(ch.id, chDisplayName);
                 });
                 div.appendChild(delBtn);
             }
@@ -6572,10 +6583,17 @@ async function loadForwardChannels() {
         const chRes = await authFetch('/api/servers/' + sourceServerId + '/channels');
         const channels = await chRes.json();
         const server = servers.find(s => s.id === sourceServerId);
-        const serverName = server ? server.name : 'Server';
+        const serverName = server ? (server.displayName || '[encrypted]') : '[encrypted]';
         let html = '<div class="forward-server"><div class="forward-server-name">' + escapeHtml(serverName) + '</div>';
         for (const ch of channels) {
-            html += '<div class="forward-channel-item" data-server-id="' + sourceServerId + '" data-server-name="' + escapeHtml(serverName) + '" data-channel-id="' + ch.id + '" data-channel-name="' + escapeHtml(ch.name) + '">' + escapeHtml(ch.name) + '</div>';
+            var chName = '[encrypted]';
+            if (ch.encrypted_name && ch.name_nonce) {
+                try {
+                    var dec = E2ECrypto.decryptWithAnyServerKey(ch.encrypted_name, ch.name_nonce, sourceServerId);
+                    if (dec) chName = new TextDecoder().decode(dec);
+                } catch (_) {}
+            }
+            html += '<div class="forward-channel-item" data-server-id="' + sourceServerId + '" data-server-name="' + escapeHtml(serverName) + '" data-channel-id="' + ch.id + '" data-channel-name="' + escapeHtml(chName) + '">' + escapeHtml(chName) + '</div>';
         }
         html += '</div>';
         list.innerHTML = html || '<div style="color:#888">No channels found</div>';
@@ -6598,9 +6616,16 @@ async function loadAllForwardChannels() {
             const chRes = await authFetch('/api/servers/' + server.id + '/channels');
             if (!chRes.ok) continue;
             const channels = await chRes.json();
-            html += '<div class="forward-server"><div class="forward-server-name">' + escapeHtml(server.name) + '</div>';
+            html += '<div class="forward-server"><div class="forward-server-name">' + escapeHtml(server.displayName || '[encrypted]') + '</div>';
             for (const ch of channels) {
-                html += '<div class="forward-channel-item" data-server-id="' + server.id + '" data-server-name="' + escapeHtml(server.name) + '" data-channel-id="' + ch.id + '" data-channel-name="' + escapeHtml(ch.name) + '">' + escapeHtml(ch.name) + '</div>';
+                var fwdChName = '[encrypted]';
+                if (ch.encrypted_name && ch.name_nonce) {
+                    try {
+                        var fwdDec = E2ECrypto.decryptWithAnyServerKey(ch.encrypted_name, ch.name_nonce, server.id);
+                        if (fwdDec) fwdChName = new TextDecoder().decode(fwdDec);
+                    } catch (_) {}
+                }
+                html += '<div class="forward-channel-item" data-server-id="' + server.id + '" data-server-name="' + escapeHtml(server.displayName || '[encrypted]') + '" data-channel-id="' + ch.id + '" data-channel-name="' + escapeHtml(fwdChName) + '">' + escapeHtml(fwdChName) + '</div>';
             }
             html += '</div>';
         }
@@ -6993,6 +7018,18 @@ async function sendMessage() {
         }
     }
 
+    // Encrypt sender_username with server key so host can't identify the sender
+    try {
+        if (encKey) {
+            var encUsername = E2ECrypto.encryptSenderUsername(user.username, encKey);
+            if (encUsername) {
+                msgPayload.encrypted_sender_username = encUsername.ciphertext;
+                msgPayload.sender_username_nonce = encUsername.nonce;
+            }
+        }
+    } catch (e) {
+        console.warn('Failed to encrypt sender_username:', e);
+    }
     ws.send(JSON.stringify(msgPayload));
 
     input.value = '';
@@ -7766,6 +7803,21 @@ async function sendDmMessage() {
         }
     }
 
+    // Encrypt sender_username with DM key so host can't identify the sender
+    try {
+        if (kp && otherPublicKey) {
+            var dmKey = E2ECrypto.getDmKey(currentDmChannelId, kp.privateKey, otherPublicKey);
+            if (dmKey) {
+                var encUsername = E2ECrypto.encryptSenderUsername(user.username, dmKey);
+                if (encUsername) {
+                    msgPayload.encrypted_sender_username = encUsername.ciphertext;
+                    msgPayload.sender_username_nonce = encUsername.nonce;
+                }
+            }
+        }
+    } catch (e) {
+        console.warn('Failed to encrypt DM sender_username:', e);
+    }
     ws.send(JSON.stringify(msgPayload));
 
     input.value = '';
@@ -8344,7 +8396,6 @@ async function createChannel() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                name,
                 encrypted_name: encName.ciphertext,
                 name_nonce: encName.nonce,
             }),

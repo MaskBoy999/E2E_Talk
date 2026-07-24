@@ -43,8 +43,8 @@ let tabFilteredCache = {};
 
 const csvColumns = {
     'users': { headers: ['Username', 'User ID', 'Created', 'Display Name', 'Identity Pub Key', 'PFP File ID', 'PFP File Key', 'Username Color', 'Border Color', 'Banner File ID', 'Banner File Key', 'BG Color', 'Friend Req Disabled', 'Profile Data', 'FC Hash'], map: (r) => [r.username, r.id, r.created_at || '', r.display_name || '', r.identity_public_key || '', r.profile_picture_file_id || '', r.profile_picture_file_key || '', r.username_color || '', r.username_border_color || '', r.profile_banner_file_id || '', r.profile_banner_file_key || '', r.profile_background_color || '', String(r.friend_requests_disabled != null ? r.friend_requests_disabled : ''), r.encrypted_profile_data || '', r.friend_code_hash || ''] },
-    'servers': { headers: ['Name', 'Server ID', 'Owner ID', 'Created', 'Invite Code Hash', 'Joins Disabled'], map: (r) => [r.name, r.id, r.owner_id, r.created_at || '', r.invite_code_hash || '', r.joins_disabled ? 'Yes' : 'No'] },
-    'channels': { headers: ['Name', 'Channel ID', 'Server ID', 'Type', 'Position', 'Created'], map: (r) => [r.name, r.id, r.server_id, r.type, String(r.position != null ? r.position : ''), r.created_at || ''] },
+    'servers': { headers: ['Encrypted Name', 'Server ID', 'Owner ID', 'Created', 'Invite Code Hash', 'Joins Disabled'], map: (r) => [r.encrypted_name || '(encrypted)', r.id, r.owner_id, r.created_at || '', r.invite_code_hash || '', r.joins_disabled ? 'Yes' : 'No'] },
+    'channels': { headers: ['Encrypted Name', 'Channel ID', 'Server ID', 'Type', 'Position', 'Created'], map: (r) => [r.encrypted_name || '(encrypted)', r.id, r.server_id, r.type, String(r.position != null ? r.position : ''), r.created_at || ''] },
     'messages': { headers: ['Sender', 'Sender ID', 'Channel ID', 'Encrypted Content', 'Nonce', 'Timestamp', 'Message ID', 'Edited At', 'Msg Nonce', 'Msg Sig', 'Profile Key', 'Profile Key Nonce', 'Banner Key', 'Banner Key Nonce'], map: (r) => [r.sender_username || r.sender_id, r.sender_id || '', r.channel_id, r.encrypted_content, r.nonce, r.timestamp, r.id || '', r.edited_at || '', r.message_nonce || '', r.message_signature || '', r.encrypted_profile_key || '', r.profile_key_nonce || '', r.encrypted_banner_key || '', r.banner_key_nonce || ''] },
     'server-keys': { headers: ['Server', 'Server ID', 'User ID', 'Encrypted Key', 'Sender Public Key', 'Nonce', 'Version', 'Device ID', 'Created'], map: (r) => [r.server_name, r.server_id || '', r.user_id, r.encrypted_key, r.sender_public_key, r.nonce, String(r.version), r.device_id || '', r.created_at || ''] },
     'server-members': { headers: ['Username', 'User ID', 'Server', 'Server ID', 'Role', 'Joined At'], map: (r) => [r.username, r.user_id, r.server_name, r.server_id, r.role || '', r.joined_at || ''] },
@@ -233,6 +233,47 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('clear-all-btn').addEventListener('click', clearAll);
     document.getElementById('reset-factory-btn').addEventListener('click', resetToFactory);
 
+    // Decrypt names key input
+    var decryptKeyInput = document.getElementById('admin-decrypt-key');
+    var decryptKeyBtn = document.getElementById('admin-decrypt-apply');
+    if (decryptKeyBtn && decryptKeyInput) {
+        // Restore saved key
+        var savedKey = sessionStorage.getItem('admin_decrypt_key');
+        if (savedKey) decryptKeyInput.value = savedKey;
+        decryptKeyBtn.addEventListener('click', function () {
+            var key = decryptKeyInput.value.trim();
+            if (key) {
+                sessionStorage.setItem('admin_decrypt_key', key);
+                decryptKeyInput.style.borderColor = '#4caf50';
+                // Re-render active tab to decrypt names
+                var activeTab = document.querySelector('.tab-btn.active');
+                if (activeTab) {
+                    filterTab(activeTab.dataset.tab);
+                }
+            } else {
+                sessionStorage.removeItem('admin_decrypt_key');
+                decryptKeyInput.style.borderColor = '';
+                adminDecryptedNames = {};
+                var activeTab = document.querySelector('.tab-btn.active');
+                if (activeTab) filterTab(activeTab.dataset.tab);
+            }
+        });
+        decryptKeyInput.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter') decryptKeyBtn.click();
+        });
+    }
+    // Clear decrypt cache button
+    var clearDecryptBtn = document.getElementById('admin-decrypt-clear');
+    if (clearDecryptBtn) {
+        clearDecryptBtn.addEventListener('click', function () {
+            adminDecryptedNames = {};
+            var keyInput = document.getElementById('admin-decrypt-key');
+            keyInput.style.borderColor = '';
+            var activeTab = document.querySelector('.tab-btn.active');
+            if (activeTab) filterTab(activeTab.dataset.tab);
+        });
+    }
+
 });
 
 function showError(msg) {
@@ -246,6 +287,27 @@ function showPanel() {
     document.getElementById('admin-login').style.display = 'none';
     document.getElementById('admin-panel').style.display = 'block';
 }
+
+// Admin E2EE decryption helper — decrypts AES-256-GCM ciphertext with a raw key
+// encrypted_b64: base64-encoded ciphertext
+// nonce_b64: base64-encoded 12-byte nonce
+// key_b64: base64-encoded 32-byte AES key
+async function adminDecryptName(encrypted_b64, nonce_b64, key_b64) {
+    if (!encrypted_b64 || !nonce_b64 || !key_b64) return null;
+    try {
+        var keyBytes = Uint8Array.from(atob(key_b64), function(c) { return c.charCodeAt(0); });
+        var nonce = Uint8Array.from(atob(nonce_b64), function(c) { return c.charCodeAt(0); });
+        var data = Uint8Array.from(atob(encrypted_b64), function(c) { return c.charCodeAt(0); });
+        var cryptoKey = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-GCM' }, false, ['decrypt']);
+        var plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: nonce }, cryptoKey, data);
+        return new TextDecoder().decode(plain);
+    } catch (e) {
+        return null;
+    }
+}
+
+// Cached decrypted names: serverId/channelId -> name string
+var adminDecryptedNames = {};
 
 function escapeHtml(str) {
     const div = document.createElement('div');
@@ -292,8 +354,8 @@ function filterTab(tab) {
     var filtered;
     switch (tab) {
         case 'users': filtered = rawData.users.filter(u => !q || u.username.toLowerCase().includes(q) || u.id.toLowerCase().includes(q)); tabFilteredCache['users'] = filtered; renderUsers(filtered); break;
-        case 'servers': filtered = rawData.servers.filter(s => !q || s.name.toLowerCase().includes(q) || s.id.toLowerCase().includes(q)); tabFilteredCache['servers'] = filtered; renderServers(filtered); break;
-        case 'channels': filtered = rawData.channels.filter(c => !q || c.name.toLowerCase().includes(q) || c.server_id.toLowerCase().includes(q)); tabFilteredCache['channels'] = filtered; renderChannels(filtered); break;
+        case 'servers': filtered = rawData.servers.filter(s => !q || (s.encrypted_name || '').toLowerCase().includes(q) || s.id.toLowerCase().includes(q) || (adminDecryptedNames['svr_' + s.id] || '').toLowerCase().includes(q)); tabFilteredCache['servers'] = filtered; renderServers(filtered); break;
+        case 'channels': filtered = rawData.channels.filter(c => !q || (c.encrypted_name || '').toLowerCase().includes(q) || c.server_id.toLowerCase().includes(q) || (adminDecryptedNames['ch_' + c.id] || '').toLowerCase().includes(q)); tabFilteredCache['channels'] = filtered; renderChannels(filtered); break;
         case 'messages': filtered = rawData.messages.filter(m => !q || (m.sender_username || m.sender_id).toLowerCase().includes(q) || m.channel_id.toLowerCase().includes(q) || (m.timestamp || '').toLowerCase().includes(q)); tabFilteredCache['messages'] = filtered; renderMessages(filtered); break;
         case 'server-keys': filtered = rawData.serverKeys.filter(k => !q || k.server_name.toLowerCase().includes(q) || k.user_id.toLowerCase().includes(q) || String(k.version).includes(q)); tabFilteredCache['server-keys'] = filtered; renderServerKeys(filtered); break;
         case 'server-members': filtered = rawData.serverMembers.filter(m => !q || m.username.toLowerCase().includes(q) || m.user_id.toLowerCase().includes(q) || m.server_name.toLowerCase().includes(q)); tabFilteredCache['server-members'] = filtered; renderServerMembers(filtered); break;
@@ -397,19 +459,41 @@ async function loadServers() {
     }
 }
 
+function getDecryptKey() {
+    return sessionStorage.getItem('admin_decrypt_key') || '';
+}
+
 function renderServers(servers) {
     tabTotals['servers'] = servers.length;
     const p = paginate(servers, 'servers');
     updateCount('servers-count', p.total);
+    var decryptKey = getDecryptKey();
     renderTable('server-list', 6,
-        p.items.map(s =>
-            '<td>' + escapeHtml(s.name) + '</td>' +
-            '<td class="id-cell" title="' + escapeHtml(s.id) + '">' + escapeHtml(truncate(s.id, 12)) + '</td>' +
-            '<td class="id-cell" title="' + escapeHtml(s.owner_id) + '">' + escapeHtml(truncate(s.owner_id, 12)) + '</td>' +
-            '<td class="ts-cell">' + escapeHtml(s.created_at || '') + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(s.invite_code_hash || '', 20)) + '</td>' +
-            '<td>' + (s.joins_disabled ? 'Yes' : 'No') + '</td>'
-        ),
+        p.items.map(s => {
+            var nameHtml;
+            if (decryptKey && s.encrypted_name && s.name_nonce && adminDecryptedNames['svr_' + s.id]) {
+                nameHtml = escapeHtml(adminDecryptedNames['svr_' + s.id]);
+            } else if (decryptKey && s.encrypted_name && s.name_nonce) {
+                // Try to decrypt asynchronously; show blob for now
+                adminDecryptName(s.encrypted_name, s.name_nonce, decryptKey).then(function(dec) {
+                    if (dec) {
+                        adminDecryptedNames['svr_' + s.id] = dec;
+                        filterTab('servers'); // re-render with decrypted name
+                    }
+                });
+                nameHtml = '<span class="blob-cell">' + escapeHtml(truncate(s.encrypted_name, 30)) + '</span> <span class="decrypt-spinner" style="color:#888;font-size:10px;">&#8987;</span>';
+            } else if (s.encrypted_name) {
+                nameHtml = '<span class="blob-cell">' + escapeHtml(truncate(s.encrypted_name, 30)) + '</span>';
+            } else {
+                nameHtml = '<span class="empty-state">(no name)</span>';
+            }
+            return '<td>' + nameHtml + '</td>' +
+                '<td class="id-cell" title="' + escapeHtml(s.id) + '">' + escapeHtml(truncate(s.id, 12)) + '</td>' +
+                '<td class="id-cell" title="' + escapeHtml(s.owner_id) + '">' + escapeHtml(truncate(s.owner_id, 12)) + '</td>' +
+                '<td class="ts-cell">' + escapeHtml(s.created_at || '') + '</td>' +
+                '<td class="blob-cell">' + escapeHtml(truncate(s.invite_code_hash || '', 20)) + '</td>' +
+                '<td>' + (s.joins_disabled ? 'Yes' : 'No') + '</td>';
+        }),
         'No servers'
     );
     renderPaginationControls('servers');
@@ -431,15 +515,32 @@ function renderChannels(channels) {
     tabTotals['channels'] = channels.length;
     const p = paginate(channels, 'channels');
     updateCount('channels-count', p.total);
+    var decryptKey = getDecryptKey();
     renderTable('channel-list', 6,
-        p.items.map(c =>
-            '<td>' + escapeHtml(c.name) + '</td>' +
-            '<td class="id-cell" title="' + escapeHtml(c.id) + '">' + escapeHtml(truncate(c.id, 12)) + '</td>' +
-            '<td class="id-cell" title="' + escapeHtml(c.server_id) + '">' + escapeHtml(truncate(c.server_id, 12)) + '</td>' +
-            '<td>' + escapeHtml(c.type) + '</td>' +
-            '<td>' + (c.position != null ? c.position : '') + '</td>' +
-            '<td class="ts-cell">' + escapeHtml(c.created_at || '') + '</td>'
-        ),
+        p.items.map(c => {
+            var nameHtml;
+            if (decryptKey && c.encrypted_name && c.name_nonce && adminDecryptedNames['ch_' + c.id]) {
+                nameHtml = escapeHtml(adminDecryptedNames['ch_' + c.id]);
+            } else if (decryptKey && c.encrypted_name && c.name_nonce) {
+                adminDecryptName(c.encrypted_name, c.name_nonce, decryptKey).then(function(dec) {
+                    if (dec) {
+                        adminDecryptedNames['ch_' + c.id] = dec;
+                        filterTab('channels');
+                    }
+                });
+                nameHtml = '<span class="blob-cell">' + escapeHtml(truncate(c.encrypted_name, 30)) + '</span> <span class="decrypt-spinner" style="color:#888;font-size:10px;">&#8987;</span>';
+            } else if (c.encrypted_name) {
+                nameHtml = '<span class="blob-cell">' + escapeHtml(truncate(c.encrypted_name, 30)) + '</span>';
+            } else {
+                nameHtml = '<span class="empty-state">(no name)</span>';
+            }
+            return '<td>' + nameHtml + '</td>' +
+                '<td class="id-cell" title="' + escapeHtml(c.id) + '">' + escapeHtml(truncate(c.id, 12)) + '</td>' +
+                '<td class="id-cell" title="' + escapeHtml(c.server_id) + '">' + escapeHtml(truncate(c.server_id, 12)) + '</td>' +
+                '<td>' + escapeHtml(c.type) + '</td>' +
+                '<td>' + (c.position != null ? c.position : '') + '</td>' +
+                '<td class="ts-cell">' + escapeHtml(c.created_at || '') + '</td>';
+        }),
         'No channels'
     );
     renderPaginationControls('channels');

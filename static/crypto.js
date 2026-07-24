@@ -356,6 +356,16 @@ var E2ECrypto = (() => {
         localStorage.removeItem('e2e_server_' + serverId);
         localStorage.removeItem('e2e_server_history_' + serverId);
     }
+    function decryptWithAnyServerKey(ciphertextB64, nonceB64, serverId) {
+        const keys = getAllServerKeys(serverId);
+        for (let i = 0; i < keys.length; i++) {
+            try {
+                const dec = aeadDecrypt(ciphertextB64, keys[i], nonceB64);
+                if (dec) return dec;
+            } catch (_) {}
+        }
+        return null;
+    }
 
     // ---- File Key Storage helpers (backward compat for auth.js/chat.js) ----
     function encryptFileKeyForStorage(fileKeyB64, symmetricKey) {
@@ -453,6 +463,7 @@ var E2ECrypto = (() => {
         getAllServerKeys: getAllServerKeys,
         saveServerKey: saveServerKey,
         removeServerKey: removeServerKey,
+        decryptWithAnyServerKey: decryptWithAnyServerKey,
 
         // File encryption
         generateFileKey: generateFileKey,
@@ -467,5 +478,18 @@ var E2ECrypto = (() => {
         generateProfileDataKey: generateProfileDataKey,
         encryptProfileData: encryptProfileData,
         decryptProfileData: decryptProfileData,
+
+        // Sender username encryption (P3 — encrypt sender_username with channel/server key)
+        encryptSenderUsername: function(username, channelKey) {
+            return aeadEncrypt(username, channelKey);
+        },
+        decryptSenderUsername: function(ciphertextB64, nonceB64, channelKey) {
+            try {
+                var raw = aeadDecrypt(ciphertextB64, channelKey, nonceB64);
+                return new TextDecoder().decode(raw);
+            } catch (_) {
+                return null;
+            }
+        },
     };
 })();
