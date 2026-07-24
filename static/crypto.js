@@ -419,6 +419,44 @@ var E2ECrypto = (() => {
         } catch (_) { return null; }
     }
 
+    // ---- Key Bundle (password-encrypted key backup for full recovery) ----
+    function buildKeyBundle() {
+        const bundle = { v: 1 };
+        for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            if (!k) continue;
+            if (k.indexOf('e2e_identity_private_') === 0 ||
+                k.indexOf('e2e_identity_public_') === 0 ||
+                (k.indexOf('e2e_server_') === 0 && k.indexOf('e2e_server_history_') !== 0) ||
+                k.indexOf('e2e_server_history_') === 0 ||
+                k === 'profile_key_cache' ||
+                k === 'e2e_hmac_key' ||
+                k === 'e2e_friend_code') {
+                bundle[k] = localStorage.getItem(k);
+            }
+        }
+        return bundle;
+    }
+
+    function encryptKeyBundle(bundle, password) {
+        return encryptWithPassword(JSON.stringify(bundle), password);
+    }
+
+    function decryptKeyBundle(encryptedBlob, password, saltB64, nonceB64) {
+        const json = decryptWithPassword(encryptedBlob, password, saltB64, nonceB64);
+        if (!json) return null;
+        try { return JSON.parse(json); } catch (_) { return null; }
+    }
+
+    function restoreKeyBundle(bundle) {
+        if (!bundle || typeof bundle !== 'object') return;
+        for (const k in bundle) {
+            if (bundle.hasOwnProperty(k) && bundle[k] != null) {
+                localStorage.setItem(k, bundle[k]);
+            }
+        }
+    }
+
     // ---- Build public API ----
     return {
         // Core primitives (Step 1)
@@ -436,6 +474,12 @@ var E2ECrypto = (() => {
         decryptWithPassword: decryptWithPassword,
         hmacHex: hmacHex,
         sha256Hex: sha256Hex,
+
+        // Key Bundle (password-encrypted key backup)
+        buildKeyBundle: buildKeyBundle,
+        encryptKeyBundle: encryptKeyBundle,
+        decryptKeyBundle: decryptKeyBundle,
+        restoreKeyBundle: restoreKeyBundle,
 
         // Helper utilities
         arrayBufferToBase64: arrayBufferToBase64,

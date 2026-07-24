@@ -125,8 +125,29 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
-            // If no local identity key exists, try to recover from escrow
+            // Try to restore full key bundle from server (password-encrypted backup)
             let identityKeyPair = E2ECrypto.getIdentityKeyPair(data.user.id);
+            let blobRestored = false;
+            try {
+                const blobRes = await fetch('/api/key-blob', {
+                    headers: { 'Authorization': 'Bearer ' + data.token }
+                });
+                if (blobRes.ok) {
+                    const blobData = await blobRes.json();
+                    if (blobData.encrypted_blob && blobData.salt && blobData.nonce) {
+                        const bundle = E2ECrypto.decryptKeyBundle(
+                            blobData.encrypted_blob, password, blobData.salt, blobData.nonce
+                        );
+                        if (bundle) {
+                            E2ECrypto.restoreKeyBundle(bundle);
+                            identityKeyPair = E2ECrypto.getIdentityKeyPair(data.user.id);
+                            blobRestored = true;
+                        }
+                    }
+                }
+            } catch (_) {}
+
+            // Fallback: legacy escrow recovery (identity key only)
             if (!identityKeyPair) {
                 try {
                     const escrowRes = await fetch('/api/identity/escrow', {
@@ -168,37 +189,59 @@ document.addEventListener('DOMContentLoaded', () => {
             } catch (_) {}
 
             // Try to recover encrypted friend code from server and decrypt with password
-            try {
-                const fcRes = await fetch('/api/friend-code', {
-                    headers: { 'Authorization': 'Bearer ' + data.token }
-                });
-                if (fcRes.ok) {
-                    const fcData = await fcRes.json();
-                    if (fcData.encrypted_friend_code && fcData.salt && fcData.nonce) {
-                        const decryptedFC = E2ECrypto.decryptWithPassword(
-                            fcData.encrypted_friend_code,
-                            password,
-                            fcData.salt,
-                            fcData.nonce
-                        );
-                        if (decryptedFC) {
-                            localStorage.setItem('e2e_friend_code', decryptedFC);
+            if (!blobRestored) {
+                try {
+                    const fcRes = await fetch('/api/friend-code', {
+                        headers: { 'Authorization': 'Bearer ' + data.token }
+                    });
+                    if (fcRes.ok) {
+                        const fcData = await fcRes.json();
+                        if (fcData.encrypted_friend_code && fcData.salt && fcData.nonce) {
+                            const decryptedFC = E2ECrypto.decryptWithPassword(
+                                fcData.encrypted_friend_code,
+                                password,
+                                fcData.salt,
+                                fcData.nonce
+                            );
+                            if (decryptedFC) {
+                                localStorage.setItem('e2e_friend_code', decryptedFC);
+                            }
                         }
                     }
-                }
-            } catch (_) {}
+                } catch (_) {}
+            }
 
             // Fetch HMAC key for hashing friend codes and invite codes
-            try {
-                const hmacRes = await fetch('/api/hmac-key', {
-                    headers: { 'Authorization': 'Bearer ' + data.token }
-                });
-                if (hmacRes.ok) {
-                    const hmacData = await hmacRes.json();
-                    if (hmacData.hmac_key) {
-                        localStorage.setItem('e2e_hmac_key', hmacData.hmac_key);
+            if (!blobRestored) {
+                try {
+                    const hmacRes = await fetch('/api/hmac-key', {
+                        headers: { 'Authorization': 'Bearer ' + data.token }
+                    });
+                    if (hmacRes.ok) {
+                        const hmacData = await hmacRes.json();
+                        if (hmacData.hmac_key) {
+                            localStorage.setItem('e2e_hmac_key', hmacData.hmac_key);
+                        }
                     }
-                }
+                } catch (_) {}
+            }
+
+            // Save/update the key blob on the server (ensures backup is current)
+            try {
+                const bundle = E2ECrypto.buildKeyBundle();
+                const enc = E2ECrypto.encryptKeyBundle(bundle, password);
+                await fetch('/api/key-blob', {
+                    method: 'PUT',
+                    headers: {
+                        'Authorization': 'Bearer ' + data.token,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        encrypted_blob: enc.encrypted_private_key,
+                        salt: enc.salt,
+                        nonce: enc.nonce,
+                    })
+                });
             } catch (_) {}
 
             window.location.href = 'index.html';
@@ -306,6 +349,24 @@ document.addEventListener('DOMContentLoaded', () => {
                 var encrypted = E2ECrypto.encodeEncryptedFileKey(btoa(password), dk);
                 localStorage.setItem('e2e_encrypted_password', encrypted);
                 localStorage.removeItem('e2e_password');
+            } catch (_) {}
+
+            // Save initial key blob on registration
+            try {
+                const bundle = E2ECrypto.buildKeyBundle();
+                const enc = E2ECrypto.encryptKeyBundle(bundle, password);
+                await fetch('/api/key-blob', {
+                    method: 'PUT',
+                    headers: {
+                        'Authorization': 'Bearer ' + data.token,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        encrypted_blob: enc.encrypted_private_key,
+                        salt: enc.salt,
+                        nonce: enc.nonce,
+                    })
+                });
             } catch (_) {}
 
             window.location.href = 'index.html';

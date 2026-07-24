@@ -559,6 +559,9 @@ impl Database {
         // user_key_escrow) and migrate escrow to users table columns
         let _ = conn.execute_batch(include_str!("../migrations/023_streamlined_cleanup.sql"));
 
+        // Migration 024: user_key_blobs — password-encrypted key bundle for full key recovery
+        let _ = conn.execute_batch(include_str!("../migrations/024_user_key_blob.sql"));
+
         // Migration P1.5: conversation_profile_data — per-conversation encrypted profile data
         // so any user with access to a DM/channel can decrypt the user's current profile.
         let _ = conn.execute_batch(
@@ -1795,6 +1798,38 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let result = conn.query_row(
             "SELECT encrypted_private_key, salt, nonce FROM user_key_escrow WHERE user_id = ?1",
+            params![user_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        );
+        match result {
+            Ok(row) => Ok(Some(row)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    // --- User Key Blob (password-encrypted key bundle) ---
+
+    pub fn save_user_key_blob(&self, user_id: &str, encrypted_blob: &str, salt: &str, nonce: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO user_key_blobs (user_id, encrypted_blob, salt, nonce, updated_at)
+             VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)
+             ON CONFLICT(user_id) DO UPDATE SET
+                encrypted_blob = excluded.encrypted_blob,
+                salt = excluded.salt,
+                nonce = excluded.nonce,
+                updated_at = CURRENT_TIMESTAMP",
+            params![user_id, encrypted_blob, salt, nonce],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn get_user_key_blob(&self, user_id: &str) -> Result<Option<(String, String, String)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let result = conn.query_row(
+            "SELECT encrypted_blob, salt, nonce FROM user_key_blobs WHERE user_id = ?1",
             params![user_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         );

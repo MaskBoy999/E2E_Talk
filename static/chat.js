@@ -258,10 +258,48 @@ var _profileKeySaveTimer = null;
 function scheduleProfileKeySave() {
     if (_profileKeySaveTimer) clearTimeout(_profileKeySaveTimer);
     _profileKeySaveTimer = setTimeout(saveProfileKeyCache, 500);
+    scheduleKeyBlobSave();
 }
 
 // Load the cache immediately
 loadProfileKeyCache();
+
+// --- Key Blob (password-encrypted backup for full key recovery) ---
+// The password is stored encrypted in localStorage (e2e_encrypted_password).
+// We decrypt it in memory to encrypt the key blob on key changes.
+var _keyBlobTimer = null;
+function scheduleKeyBlobSave() {
+    if (_keyBlobTimer) clearTimeout(_keyBlobTimer);
+    _keyBlobTimer = setTimeout(saveKeyBlobToServer, 3000);
+}
+function saveKeyBlobToServer() {
+    try {
+        // Recover the password from e2e_encrypted_password using the device key
+        var encPw = localStorage.getItem('e2e_encrypted_password');
+        var devKeyStr = localStorage.getItem('e2e_device_key');
+        if (!encPw || !devKeyStr) return;
+        var dk = new Uint8Array(E2ECrypto.base64ToArrayBuffer(devKeyStr));
+        var pwB64 = E2ECrypto.decodeEncryptedFileKey(encPw, dk);
+        if (!pwB64) return;
+        var password = atob(pwB64);
+        var bundle = E2ECrypto.buildKeyBundle();
+        var enc = E2ECrypto.encryptKeyBundle(bundle, password);
+        var t = token();
+        if (!t) return;
+        fetch('/api/key-blob', {
+            method: 'PUT',
+            headers: {
+                'Authorization': 'Bearer ' + t,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                encrypted_blob: enc.encrypted_private_key,
+                salt: enc.salt,
+                nonce: enc.nonce,
+            })
+        }).catch(function() {});
+    } catch (_) {}
+}
 
 // Fetch another user's profile blob from the server, decrypt it with their profile_data_key,
 // and cache the result in userDisplayNameCache so the DM sidebar and messages show the display name.
@@ -874,8 +912,25 @@ document.addEventListener('DOMContentLoaded', () => {
     // Delete account
     // Clear all client-side data (localStorage, sessionStorage, non-HttpOnly cookies).
     // HttpOnly cookies can only be cleared by the server (see /api/logout GET).
-    function clearAllClientData() {
+    // If preserveIdentity is true, keep identity keys so server keys remain decryptable after re-login.
+    function clearAllClientData(preserveIdentity) {
+        var preservedKeys = {};
+        if (preserveIdentity) {
+            // Save identity keys, profile key cache, and HMAC key before clearing
+            for (var i = 0; i < localStorage.length; i++) {
+                var k = localStorage.key(i);
+                if (k && (k.indexOf('e2e_identity_private_') === 0 || k.indexOf('e2e_identity_public_') === 0 || k === 'profile_key_cache' || k === 'e2e_hmac_key' || k.indexOf('e2e_server_') === 0)) {
+                    preservedKeys[k] = localStorage.getItem(k);
+                }
+            }
+        }
         localStorage.clear();
+        if (preserveIdentity) {
+            // Restore preserved keys
+            for (var k2 in preservedKeys) {
+                localStorage.setItem(k2, preservedKeys[k2]);
+            }
+        }
         try { sessionStorage.clear(); } catch (_) {}
         document.cookie.split(';').forEach(function(c) {
             document.cookie = c.replace(/^ +/, '').replace(/=.*/, '=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/');
@@ -912,15 +967,18 @@ document.addEventListener('DOMContentLoaded', () => {
     // Logout is handled in settings (Clear All Data / Sign Out)
 
     // Clear all data button in settings — robust logout + wipe sequence
+    // Preserves identity keys so server keys remain decryptable after re-login
     document.getElementById('clear-all-data-btn').addEventListener('click', async () => {
-        if (!confirm('This will clear ALL local data (logins, keys, settings) and sign you out. Continue?')) return;
-        // 1. Close websocket first so no more messages arrive
+        if (!confirm('This will clear all local data (logins, settings) and sign you out. Your encryption identity will be preserved. Continue?')) return;
+        // 1. Save key blob to server before clearing
+        saveKeyBlobToServer();
+        // 2. Close websocket first so no more messages arrive
         if (ws) { try { ws.close(); } catch (_) {} ws = null; }
-        // 2. Call server logout to clear HttpOnly cookie (while token is still present)
+        // 3. Call server logout to clear HttpOnly cookie (while token is still present)
         await serverLogout();
-        // 3. Clear all client-side data
-        clearAllClientData();
-        // 4. Redirect directly to login page since the server already cleared the cookie
+        // 4. Clear all client-side data (preserve identity keys so server keys stay decryptable)
+        clearAllClientData(true);
+        // 5. Redirect directly to login page since the server already cleared the cookie
         window.location.href = '/login.html';
     });
 
@@ -5050,6 +5108,7 @@ async function fetchAndDecryptServerKey(serverId) {
                     entry.nonce
                 );
                 E2ECrypto.saveServerKey(serverId, serverKey);
+                scheduleKeyBlobSave();
                 return true;
             } catch (_) {}
             // Fallback: try old ephemeral envelopeDecryptRaw (server_keys encrypted before migration)
@@ -5061,6 +5120,7 @@ async function fetchAndDecryptServerKey(serverId) {
                     identity.privateKey
                 );
                 E2ECrypto.saveServerKey(serverId, serverKey);
+                scheduleKeyBlobSave();
                 return true;
             } catch (_) {}
         }
@@ -5081,6 +5141,7 @@ async function rotateServerKey(serverId) {
     // Generate a new server key
     const newKey = E2ECrypto.generateSymmetricKey();
     E2ECrypto.saveServerKey(serverId, newKey);
+    scheduleKeyBlobSave();
 
     // Get all members of the server
     const membersRes = await authFetch(`/api/servers/${serverId}/members`);
@@ -5594,8 +5655,18 @@ async function appendMessage(msg) {
     let extraEmojis = null; // emoji refs embedded in message payload by sender
     if (msg.encrypted_content && msg.nonce && currentChannelId && currentServerId) {
         try {
+            // Try current key first, then all historical keys (after key rotation)
             var decryptKey = E2ECrypto.getServerKey(currentServerId);
             textContent = decryptKey ? E2ECrypto.decryptMessage(msg.encrypted_content, msg.nonce, decryptKey) : null;
+            if (!textContent) {
+                var allKeys = E2ECrypto.getAllServerKeys(currentServerId);
+                for (var ki = 0; ki < allKeys.length; ki++) {
+                    try {
+                        textContent = E2ECrypto.decryptMessage(msg.encrypted_content, msg.nonce, allKeys[ki]);
+                        if (textContent) { decryptKey = allKeys[ki]; break; }
+                    } catch (_k) {}
+                }
+            }
             // Verify message signature if present
 
             // Decrypt and cache sender's profile picture key from message
@@ -6478,6 +6549,15 @@ async function handleEditedMessage(msg, mode) {
                 var editDecryptKey = E2ECrypto.getServerKey(currentServerId);
                 if (editDecryptKey) {
                     decrypted = E2ECrypto.decryptMessage(msg.encrypted_content, msg.nonce, editDecryptKey);
+                }
+                if (!decrypted) {
+                    var editKeys = E2ECrypto.getAllServerKeys(currentServerId);
+                    for (var eki = 0; eki < editKeys.length; eki++) {
+                        try {
+                            decrypted = E2ECrypto.decryptMessage(msg.encrypted_content, msg.nonce, editKeys[eki]);
+                            if (decrypted) break;
+                        } catch (_ek) {}
+                    }
                 }
             } catch (_e) {}
         }
@@ -8207,6 +8287,7 @@ async function createServer() {
 
             // Save the channel key locally
             E2ECrypto.saveServerKey(serverData.id, channelKey);
+            scheduleKeyBlobSave();
 
             const identity = E2ECrypto.getIdentityKeyPair();
             if (identity) {

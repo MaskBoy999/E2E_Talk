@@ -656,6 +656,63 @@ pub async fn get_escrowed_key(
     }
 }
 
+// --- User Key Blob (password-encrypted key bundle for full key recovery) ---
+
+#[derive(Deserialize)]
+pub struct SaveKeyBlobRequest {
+    pub encrypted_blob: String,
+    pub salt: String,
+    pub nonce: String,
+}
+
+pub async fn save_user_key_blob(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SaveKeyBlobRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    match state.db.save_user_key_blob(&user_id, &req.encrypted_blob, &req.salt, &req.nonce) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn get_user_key_blob(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    match state.db.get_user_key_blob(&user_id) {
+        Ok(Some((encrypted_blob, salt, nonce))) => {
+            (StatusCode::OK, Json(serde_json::json!({
+                "encrypted_blob": encrypted_blob,
+                "salt": salt,
+                "nonce": nonce,
+            }))).into_response()
+        }
+        Ok(None) => {
+            (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "No key blob found"}))).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
 // --- Servers ---
 
 #[derive(Deserialize)]

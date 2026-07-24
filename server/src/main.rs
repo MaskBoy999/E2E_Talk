@@ -223,6 +223,7 @@ async fn main() {
         // Device management routes
         .route("/api/logout", post(handlers::logout).get(handlers::logout_get))
         .route("/api/reauth", post(handlers::reauth))
+        .route("/api/key-blob", put(handlers::save_user_key_blob).get(handlers::get_user_key_blob))
         .route("/api/user/{username}", get(handlers::get_user_id))
         .route("/api/profile/{user_id}", get(handlers::get_profile))
         .route("/api/profile", patch(handlers::update_profile))
