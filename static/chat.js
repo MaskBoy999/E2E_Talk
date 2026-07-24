@@ -10203,6 +10203,9 @@ function extractRawMessageText(textEl) {
             if (node.classList && node.classList.contains('time-hover')) {
                 // Skip time-hover spans
                 continue;
+            } else if (node.classList && node.classList.contains('edited-label')) {
+                // Skip (edited) label
+                continue;
             } else if (node.classList && node.classList.contains('emoji-inline')) {
                 // Use alt text which contains :emoji_name:
                 result += node.getAttribute('alt') || '';
@@ -11544,8 +11547,8 @@ function renderStickerGrid(container) {
         grid.id = 'user-sticker-grid';
         container.appendChild(grid);
 
-        // Filter out GIFs — they have their own tab
-        const nonGifStickers = stickers.filter(s => !/gif/i.test(s.mime_type));
+        // Filter out GIFs (they have their own tab) and emojis (they have their own tab)
+        const nonGifStickers = stickers.filter(s => !/gif/i.test(s.mime_type) && s.mime_type !== 'image/emoji');
         renderStickerItems(grid, nonGifStickers);
 
         document.getElementById('sticker-search-input')?.addEventListener('input', (e) => {
@@ -12916,6 +12919,16 @@ async function loadMyProfile() {
             }
         }
         myProfile = data;
+        
+        // Cache own profile data so own messages get display name/color/glow on page refresh
+        if (user && user.id) {
+            if (!userDisplayNameCache[user.id]) userDisplayNameCache[user.id] = {};
+            if (data.display_name) userDisplayNameCache[user.id].display_name = data.display_name;
+            if (data.username_color) userDisplayNameCache[user.id].username_color = data.username_color;
+            if (data.username_border_color) userDisplayNameCache[user.id].username_border_color = data.username_border_color;
+            if (data.profile_picture_file_id) userDisplayNameCache[user.id].profile_picture_file_id = data.profile_picture_file_id;
+            updateExistingMessageStyles(user.id);
+        }
         
         // Update sidebar footer
         updateSidebarFooter();
