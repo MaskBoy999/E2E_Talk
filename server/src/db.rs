@@ -977,7 +977,7 @@ impl Database {
 
     // --- Servers ---
 
-    pub fn create_server(&self, owner_id: &str, invite_code_hash: &str, encrypted_name: Option<&[u8]>, name_nonce: Option<&[u8]>) -> Result<Server, String> {
+    pub fn create_server(&self, owner_id: &str, invite_code_hash: &str, encrypted_name: Option<&[u8]>, name_nonce: Option<&[u8]>, channel_encrypted_name: Option<&[u8]>, channel_name_nonce: Option<&[u8]>) -> Result<Server, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let server_id = Uuid::new_v4().to_string();
         let general_id = Uuid::new_v4().to_string();
@@ -1012,11 +1012,36 @@ impl Database {
         )
         .map_err(|e| e.to_string())?;
 
-        conn.execute(
-            "INSERT INTO channels (id, server_id, type, position) VALUES (?1, ?2, 'text', 0)",
-            params![general_id, server_id],
-        )
-        .map_err(|e| e.to_string())?;
+        // Check if channels table has encrypted_name and name_nonce columns
+        let has_ch_name_col: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('channels') WHERE name = 'encrypted_name'",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        let has_ch_nonce_col: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('channels') WHERE name = 'name_nonce'",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if has_ch_name_col && has_ch_nonce_col {
+            conn.execute(
+                "INSERT INTO channels (id, server_id, encrypted_name, name_nonce, type, position) VALUES (?1, ?2, ?3, ?4, 'text', 0)",
+                params![general_id, server_id, channel_encrypted_name, channel_name_nonce],
+            )
+            .map_err(|e| e.to_string())?;
+        } else {
+            conn.execute(
+                "INSERT INTO channels (id, server_id, type, position) VALUES (?1, ?2, 'text', 0)",
+                params![general_id, server_id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
 
         Ok(Server {
             id: server_id,
@@ -1027,6 +1052,26 @@ impl Database {
             joins_disabled: false,
             created_at: String::new(),
         })
+    }
+
+    pub fn update_server_name(&self, server_id: &str, encrypted_name: &[u8], name_nonce: &[u8]) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE servers SET encrypted_name = ?1, name_nonce = ?2 WHERE id = ?3",
+            params![encrypted_name, name_nonce, server_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn update_channel_name(&self, channel_id: &str, encrypted_name: &[u8], name_nonce: &[u8]) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE channels SET encrypted_name = ?1, name_nonce = ?2 WHERE id = ?3",
+            params![encrypted_name, name_nonce, channel_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     pub fn list_user_servers(&self, user_id: &str) -> Result<Vec<Server>, String> {

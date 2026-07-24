@@ -131,15 +131,19 @@ test.describe('Bug fixes: DM auto-select & server key decryption', () => {
     const channelText = await pageB.evaluate(() => {
         return document.getElementById('channel-list')?.textContent || '';
     });
+    // VERIFY: Channel names are decrypted (not showing [encrypted])
     console.log('Channels:', channelText);
     expect(channelText).not.toContain('Cannot decrypt server key');
+    expect(channelText).not.toContain('[encrypted]');
 
-    // VERIFY: Server name is visible
+    // VERIFY: Server name is visible and not "[encrypted]"
     const srvName = await pageB.evaluate(() => {
         return document.getElementById('server-name')?.textContent || '';
     });
     console.log('Server name:', srvName);
     expect(srvName).not.toBe('Direct Messages');
+    expect(srvName).not.toBe('[encrypted]');
+    expect(srvName).not.toBe('');
 
     await ctxA.close();
     await ctxB.close();

@@ -4440,6 +4440,12 @@ function connectWebSocket(t) {
                     // Re-upload our conversation profile for this server encrypted with the new key
                     // so other members can see our display name / colors
                     try { await uploadCurrentProfileToConversations(); } catch (_) {}
+                    // Re-fetch server list to pick up re-encrypted server/channel names
+                    await loadServers();
+                    // If viewing this server, reload channels (names re-encrypted with new key)
+                    if (data.server_id === currentServerId) {
+                        await loadChannels(currentServerId);
+                    }
                     // Reload messages if we're viewing this server (they were encrypted with old key)
                     if (data.server_id === currentServerId && currentChannelId) {
                         await loadMessages(currentChannelId);
@@ -5069,6 +5075,9 @@ async function rotateServerKey(serverId) {
     const identity = E2ECrypto.getIdentityKeyPair();
     if (!identity) return false;
 
+    // Get the old key BEFORE saving the new one (so we can re-encrypt names)
+    const oldKey = E2ECrypto.getServerKey(serverId);
+
     // Generate a new server key
     const newKey = E2ECrypto.generateSymmetricKey();
     E2ECrypto.saveServerKey(serverId, newKey);
@@ -5117,6 +5126,51 @@ async function rotateServerKey(serverId) {
     } catch (e) {
         console.error('Failed to rotate server keys:', e);
         return false;
+    }
+
+    // Re-encrypt server name and all channel names with the new key
+    // so new members (who only have the new key) can decrypt them
+    if (oldKey) {
+        try {
+            const server = servers.find(s => s.id === serverId);
+            if (server && server.encrypted_name && server.name_nonce) {
+                const plainBytes = E2ECrypto.aeadDecrypt(server.encrypted_name, oldKey, server.name_nonce);
+                if (plainBytes) {
+                    const plainStr = new TextDecoder().decode(plainBytes);
+                    const reEnc = E2ECrypto.aeadEncrypt(plainStr, newKey);
+                    await authFetch(`/api/servers/${serverId}/name`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ encrypted_name: reEnc.ciphertext, name_nonce: reEnc.nonce }),
+                    });
+                }
+            }
+        } catch (_) {}
+
+        try {
+            const channelsRes = await authFetch(`/api/servers/${serverId}/channels`);
+            if (channelsRes.ok) {
+                const channels = await channelsRes.json();
+                if (Array.isArray(channels)) {
+                    for (const ch of channels) {
+                        try {
+                            if (ch.encrypted_name && ch.name_nonce) {
+                                const plainBytes = E2ECrypto.aeadDecrypt(ch.encrypted_name, oldKey, ch.name_nonce);
+                                if (plainBytes) {
+                                    const plainStr = new TextDecoder().decode(plainBytes);
+                                    const reEnc = E2ECrypto.aeadEncrypt(plainStr, newKey);
+                                    await authFetch(`/api/servers/${serverId}/channels/${ch.id}/name`, {
+                                        method: 'PUT',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ encrypted_name: reEnc.ciphertext, name_nonce: reEnc.nonce }),
+                                    });
+                                }
+                            }
+                        } catch (_) {}
+                    }
+                }
+            }
+        } catch (_) {}
     }
 
     // Re-upload our own conversation profile for this server with the new key
@@ -8126,6 +8180,9 @@ async function createServer() {
         // Encrypt server name with channelKey
         const encName = E2ECrypto.aeadEncrypt(name, channelKey);
 
+        // Also encrypt the default "General" channel name
+        const encChName = E2ECrypto.aeadEncrypt('General', channelKey);
+
         // Generate invite code client-side, send only the hash
         const inviteCode = generateCode(8);
         var hmacKey = await ensureHmacKey();
@@ -8138,6 +8195,8 @@ async function createServer() {
                 name,
                 encrypted_name: encName.ciphertext,
                 name_nonce: encName.nonce,
+                channel_encrypted_name: encChName.ciphertext,
+                channel_name_nonce: encChName.nonce,
                 invite_code_hash: inviteCodeHash,
             }),
         });
@@ -8205,6 +8264,9 @@ async function joinServer() {
                 if (ok) break;
                 await new Promise(r => setTimeout(r, 1500));
             }
+
+            // Re-fetch server list in case the owner rotated keys and re-encrypted names
+            await loadServers();
 
             // Upload per-conversation profile data for the new server
             try { await uploadCurrentProfileToConversations(); } catch (_) {}

@@ -663,6 +663,8 @@ pub struct CreateServerRequest {
     pub invite_code_hash: String,
     pub encrypted_name: Option<String>,
     pub name_nonce: Option<String>,
+    pub channel_encrypted_name: Option<String>,
+    pub channel_name_nonce: Option<String>,
 }
 
 pub async fn create_server(
@@ -677,8 +679,10 @@ pub async fn create_server(
 
     let encrypted_name_bytes = req.encrypted_name.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
     let name_nonce_bytes = req.name_nonce.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+    let ch_enc_name_bytes = req.channel_encrypted_name.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+    let ch_name_nonce_bytes = req.channel_name_nonce.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
 
-    let server = match state.db.create_server(&user_id, &req.invite_code_hash, encrypted_name_bytes.as_deref(), name_nonce_bytes.as_deref()) {
+    let server = match state.db.create_server(&user_id, &req.invite_code_hash, encrypted_name_bytes.as_deref(), name_nonce_bytes.as_deref(), ch_enc_name_bytes.as_deref(), ch_name_nonce_bytes.as_deref()) {
         Ok(s) => s,
         Err(e) => {
             return (
@@ -1704,6 +1708,66 @@ pub async fn rotate_server_keys(
         state.ws_manager.broadcast_to_users(&members, &rotation_msg.to_string()).await;
     }
 
+    (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct UpdateEncryptedNameRequest {
+    pub encrypted_name: String,
+    pub name_nonce: String,
+}
+
+pub async fn update_server_name(
+    Path(server_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UpdateEncryptedNameRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    if !state.db.is_server_owner(&user_id, &server_id).unwrap_or(false) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Only the server owner can update server name"}))).into_response();
+    }
+    let enc_name = match base64::engine::general_purpose::STANDARD.decode(&req.encrypted_name) {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid encrypted_name"}))).into_response(),
+    };
+    let nonce = match base64::engine::general_purpose::STANDARD.decode(&req.name_nonce) {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid name_nonce"}))).into_response(),
+    };
+    if let Err(e) = state.db.update_server_name(&server_id, &enc_name, &nonce) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
+    }
+    (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+}
+
+pub async fn update_channel_name(
+    Path((server_id, channel_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UpdateEncryptedNameRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    if !state.db.is_server_owner(&user_id, &server_id).unwrap_or(false) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Only the server owner can update channel name"}))).into_response();
+    }
+    let enc_name = match base64::engine::general_purpose::STANDARD.decode(&req.encrypted_name) {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid encrypted_name"}))).into_response(),
+    };
+    let nonce = match base64::engine::general_purpose::STANDARD.decode(&req.name_nonce) {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid name_nonce"}))).into_response(),
+    };
+    if let Err(e) = state.db.update_channel_name(&channel_id, &enc_name, &nonce) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
+    }
     (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
 }
 
