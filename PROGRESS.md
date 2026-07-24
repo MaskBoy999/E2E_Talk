@@ -77,6 +77,8 @@
 | Endpoint | What Client SENDS | Encrypted Before Send? | What Server RETURNS | Server Can Read? |
 |----------|------------------|----------------------|-------------------|-----------------|
 | `GET /api/hmac-key` | (none) | — | `hmac_key` (plaintext HMAC key) | ✅ YES — server generated it |
+| `PUT /api/profile/data-key` | `encrypted_key` + `nonce` | 🟢 Profile_data_key encrypted with identity key | `{"ok": true}` | ❌ NO — server stores encrypted blob, can't unwrap without identity private key |
+| `GET /api/profile/data-key/{userId}` | (auth only) | — | `encrypted_key` + `nonce` | ❌ NO — same encrypted blob; only the owning user can decrypt with their identity key |
 | `GET /api/friend-code` | (auth only) | — | `encrypted_friend_code` + `salt` + `nonce` | ❌ NO — password-wrapped Argon2id |
 | `POST /api/friend-code/store-encrypted` | `friend_code` (plaintext!) + `encrypted_friend_code` + `salt` + `nonce` | 🟣 Friend code is PLAINTEXT in HTTPS body; encrypted copy is 🟢 | ok/error | ✅ YES — server sees the plaintext friend code (it needs it to compute the HMAC hash) |
 | `POST /api/friend-code/regenerate` | (auth only) | — | `friend_code` (plaintext!) + ok | ✅ YES — server generates and returns the raw code |
@@ -336,6 +338,25 @@ All columns are 🔴 Plaintext. Host can see who is friends with whom, all DM ch
 | `user_id`, `conversation_type`, `conversation_id` | 🔴 Plaintext | ✅ YES — host sees who uploaded profile data for which conversation |
 | `encrypted_profile_data` | 🟢 With conversation key (DM/server) | ❌ NO |
 | `nonce` | 🔴 Plaintext | ✅ YES |
+
+### `user_key_blobs` table (key bundle for full recovery)
+
+| Column | Encrypted? | Host Can Read? |
+|--------|-----------|---------------|
+| `user_id` | 🔴 Plaintext | ✅ YES |
+| `encrypted_blob` | 🟢 Password-wrapped (Argon2id) — contains all e2e_* keys + profile_key_cache | ❌ NO — can't unwrap without password |
+| `salt`, `nonce` | 🔴 Plaintext | ✅ YES — needed for decryption |
+| `needs_rebuild` | 🔴 Plaintext flag | ✅ YES — migration 026; triggers client to rebuild blob with profile_key_cache |
+| `updated_at` | 🔴 Plaintext | ✅ YES |
+
+### `profile_data_keys` table (server-side profile key backup)
+
+| Column | Encrypted? | Host Can Read? |
+|--------|-----------|---------------|
+| `user_id` | 🔴 Plaintext | ✅ YES |
+| `encrypted_key` | 🟢 Encrypted with user's X25519 identity key | ❌ NO — server can't unwrap without identity private key |
+| `nonce` | 🔴 Plaintext | ✅ YES |
+| `created_at` | 🔴 Plaintext | ✅ YES |
 
 ### `notification_sounds` table
 
@@ -622,6 +643,66 @@ Stickers and file attachments use a separate file-level encryption system:
 - **WebSocket sender metadata**: `sender_display_name`, `sender_username_color`, `sender_profile_pic` broadcast in plaintext to all message recipients.
 
 ---
+
+## Server-Side Profile Data Key Recovery (2026-07-24)
+
+### Problem
+If the blob save (`saveKeyBlobToServer`) fails silently through any of the 5 known failure paths, the user's `profile_data_key` (used to decrypt their encrypted profile data) is permanently lost on cookie clear. Unlike server keys (which can be recovered via `GET /api/servers/{id}/keys` + identity key decryption), profile data keys had no server-side fallback.
+
+### Solution: Dedicated API Endpoints
+
+**`PUT /api/profile/data-key`**:
+- Stores the user's raw `profile_data_key` encrypted with their X25519 identity key
+- Called fire-and-forget from `saveProfile()`, `loadMyProfile()`, and `saveBeforeClose()`
+- Only the authenticated user can save (no user_id in URL — extracted from auth token)
+- Server stores the encrypted blob in the `profile_data_keys` table but CANNOT decrypt it
+
+**`GET /api/profile/data-key/{userId}`**:
+- Returns the encrypted `profile_data_key` for the requested user
+- Self: always authorized (can decrypt with own identity key)
+- Friends/server-mates: also authorized to fetch but CANNOT decrypt (key is encrypted with the owner's identity key, not shared)
+- Returns 403 for unauthorized users
+
+### Client-side recovery flow
+```
+Startup (1.5s delay):
+  → recoverProfileDataKey()
+     → Check cache: already have profile_key_cache[user.id]?
+        YES → exit (no recovery needed)
+        NO  → GET /api/profile/data-key/{user.id}
+             → Decrypt response with identity key
+             → Cache in profileKeyCache
+             → Re-load profile to decrypt with recovered key
+```
+
+### Tests verified
+All 5 failure paths in `blob-bug-integration.spec.ts` confirm:
+```
+Profile data key from API recovery: ✅ RECOVERED
+CONTRIBUTION: API endpoint provides fallback recovery even when blob save fails.
+```
+
+## Migration 026: Blob needs_rebuild Flag (2026-07-24)
+
+### Problem
+Existing user key blobs (password-encrypted bundles in `user_key_blobs`) were created before `profile_key_cache` became part of the bundle. These old blobs lack the `profile_key_cache` entry, meaning even though Fix 6 in auth.js initializes it on every login, the blob re-save was the only way to persist it.
+
+### Solution: needs_rebuild flag
+Since blobs are password-encrypted (server CANNOT decrypt/modify them), a server-side backfill is impossible. Instead, migration 026:
+- Adds `needs_rebuild INTEGER NOT NULL DEFAULT 0` to `user_key_blobs`
+- Sets `needs_rebuild = 1` for ALL existing blobs
+- Every successful `PUT /api/key-blob` clears the flag (via `save_user_key_blob`)
+- `GET /api/key-blob` includes the flag in the response
+- The client checks the flag on login; Fix 6 ensures `profile_key_cache` is included in the rebuild
+
+### Flow
+```
+Migration 026 deploys → all existing blobs get needs_rebuild=1
+User logs in → GET /api/key-blob responds with needs_rebuild=true
+Fix 6 (auth.js): initializes profile_key_cache='{}' if missing
+Build fresh bundle → PUT /api/key-blob → save() clears needs_rebuild to 0
+Next login: needs_rebuild=false (already fixed)
+```
 
 ## P3 Implementation: Encrypt Sender Username (2026-07-24)
 

@@ -277,15 +277,24 @@ function saveKeyBlobToServer() {
         // Recover the password from e2e_encrypted_password using the device key
         var encPw = localStorage.getItem('e2e_encrypted_password');
         var devKeyStr = localStorage.getItem('e2e_device_key');
-        if (!encPw || !devKeyStr) return;
+        if (!encPw || !devKeyStr) {
+            console.error('saveKeyBlobToServer: missing e2e_encrypted_password or e2e_device_key');
+            return;
+        }
         var dk = new Uint8Array(E2ECrypto.base64ToArrayBuffer(devKeyStr));
         var pwB64 = E2ECrypto.decodeEncryptedFileKey(encPw, dk);
-        if (!pwB64) return;
+        if (!pwB64) {
+            console.error('saveKeyBlobToServer: failed to decode password from e2e_encrypted_password');
+            return;
+        }
         var password = atob(pwB64);
         var bundle = E2ECrypto.buildKeyBundle();
         var enc = E2ECrypto.encryptKeyBundle(bundle, password);
         var t = token();
-        if (!t) return;
+        if (!t) {
+            console.error('saveKeyBlobToServer: no auth token available');
+            return;
+        }
         fetch('/api/key-blob', {
             method: 'PUT',
             headers: {
@@ -297,8 +306,12 @@ function saveKeyBlobToServer() {
                 salt: enc.salt,
                 nonce: enc.nonce,
             })
-        }).catch(function() {});
-    } catch (_) {}
+        }).catch(function(err) {
+            console.error('saveKeyBlobToServer: HTTP PUT failed', err);
+        });
+    } catch (err) {
+        console.error('saveKeyBlobToServer: unexpected error', err);
+    }
 }
 
 // Fetch another user's profile blob from the server, decrypt it with their profile_data_key,
@@ -1052,6 +1065,10 @@ document.addEventListener('DOMContentLoaded', () => {
     loadFriendRequestBadge();
     loadEmojiCache(); // Load custom emojis
     loadMyProfile(); // Load own profile for sidebar footer
+    // Try to recover profile_data_key from server-side API if not cached
+    setTimeout(function() {
+        recoverProfileDataKey();
+    }, 1500);
     requestNotificationPermission();
     setupMentionAutocomplete();
     initMentionsInbox();
@@ -1073,6 +1090,14 @@ document.addEventListener('DOMContentLoaded', () => {
     function saveBeforeClose() {
         saveMentionState();
         localStorage.setItem('e2e_last_seen', new Date().toISOString());
+        // Save key blob immediately (bypass debounce) so the server has our latest keys
+        // when the user closes the tab. If the blob is stale on the server, clearing
+        // cookies and re-logging in will lose recent keys.
+        if (_keyBlobTimer) clearTimeout(_keyBlobTimer);
+        saveKeyBlobToServer();
+        // Also upload profile data key to server-side API for recovery
+        // Fire and forget — if the browser aborts the fetch on close, no harm done.
+        uploadProfileDataKey();
     }
     window.addEventListener('beforeunload', saveBeforeClose);
     // pagehide is more reliable on mobile browsers where beforeunload may not fire
@@ -13017,6 +13042,12 @@ async function loadMyProfile() {
         // Update settings UI if open
         updateProfileSettingsUI(data);
         
+        // Upload profile_data_key to server-side API for recovery after cookie clear
+        // Fire and forget — ensures the key is backed up server-side
+        setTimeout(function() {
+            uploadProfileDataKey();
+        }, 100);
+        
         // Now that profile is loaded, broadcast our keys to all DM conversations
         if (dmConversations && dmConversations.length > 0) {
             broadcastProfileKeySyncToAllDms();
@@ -14421,6 +14452,59 @@ async function verifyStoredPassword() {
     return null;
 }
 
+// Upload profile_data_key to server-side API for recovery after cookie clear
+async function uploadProfileDataKey() {
+    var pdKeyB64 = profileKeyCache[user.id + ':profile_data_key'];
+    if (!pdKeyB64) return;
+    try {
+        var identity = E2ECrypto.getIdentityKeyPair();
+        if (!identity) return;
+        // Encrypt the profile_data_key with identity key (same as encrypted_profile_data_key format)
+        var encryptedKey = E2ECrypto.encodeEncryptedFileKey(pdKeyB64, identity.privateKey);
+        var parts = encryptedKey.split(':');
+        if (parts.length !== 2) return;
+        await authFetch('/api/profile/data-key', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ encrypted_key: parts[1], nonce: parts[0] }),
+        });
+    } catch (e) {
+        console.warn('Failed to upload profile data key:', e);
+    }
+}
+
+async function fetchProfileDataKeyFromServer(userId) {
+    try {
+        var res = await authFetch('/api/profile/data-key/' + encodeURIComponent(userId));
+        if (!res.ok) return null;
+        var data = await res.json();
+        if (!data.encrypted_key || !data.nonce) return null;
+        var identity = E2ECrypto.getIdentityKeyPair();
+        if (!identity) return null;
+        // Reconstruct the nonce:ciphertext format that decodeEncryptedFileKey expects
+        var combined = data.nonce + ':' + data.encrypted_key;
+        var decKeyB64 = E2ECrypto.decodeEncryptedFileKey(combined, identity.privateKey);
+        if (!decKeyB64) return null;
+        return decKeyB64;
+    } catch (e) {
+        console.warn('Failed to fetch profile data key for ' + userId + ':', e);
+        return null;
+    }
+}
+
+async function recoverProfileDataKey() {
+    if (!user || !user.id) return;
+    // If we already have the key cached, no need to recover
+    if (profileKeyCache[user.id + ':profile_data_key']) return;
+    var decKeyB64 = await fetchProfileDataKeyFromServer(user.id);
+    if (decKeyB64) {
+        profileKeyCache[user.id + ':profile_data_key'] = decKeyB64;
+        scheduleProfileKeySave();
+        // Re-decrypt own profile data now that we have the key
+        await loadMyProfile();
+    }
+}
+
 async function saveProfile() {
     var statusEl = document.getElementById('profile-edit-status');
     if (!statusEl) return;
@@ -14482,6 +14566,12 @@ async function saveProfile() {
         
         // Build the encrypted_profile_data as nonce:ciphertext (same format as encodeEncryptedFileKey so existing code works)
         var encryptedProfileData = encrypted.nonce + ':' + encrypted.ciphertext;
+        
+        // Upload profile_data_key to server-side API for recovery after cookie clear
+        // Fire and forget — don't block the save response
+        setTimeout(function() {
+            uploadProfileDataKey();
+        }, 100);
         
         // Build API request — send ONLY encrypted data + encrypted key.
         // No plaintext profile fields are sent to the server.

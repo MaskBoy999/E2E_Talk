@@ -225,8 +225,12 @@ async fn main() {
         .route("/api/reauth", post(handlers::reauth))
         .route("/api/key-blob", put(handlers::save_user_key_blob).get(handlers::get_user_key_blob))
         .route("/api/user/{username}", get(handlers::get_user_id))
-        .route("/api/profile/{user_id}", get(handlers::get_profile))
+        // Specific routes must come before parameterized routes to avoid Axum
+        // matching literal path segments as parameters and returning 405.
+        .route("/api/profile/data-key", put(handlers::save_profile_data_key))
+        .route("/api/profile/data-key/{user_id}", get(handlers::get_profile_data_key))
         .route("/api/profile", patch(handlers::update_profile))
+        .route("/api/profile/{user_id}", get(handlers::get_profile))
         .route("/api/profile/conversation", put(handlers::upsert_conversation_profile))
         .route("/api/profile/{target_user_id}/conversation/{conv_type}/{conv_id}", get(handlers::get_conversation_profile))
         .route("/api/admin/login", post(handlers::admin_login))

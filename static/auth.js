@@ -142,6 +142,12 @@ document.addEventListener('DOMContentLoaded', () => {
                             E2ECrypto.restoreKeyBundle(bundle);
                             identityKeyPair = E2ECrypto.getIdentityKeyPair(data.user.id);
                             blobRestored = true;
+                            // If the server flagged this blob as needing a rebuild
+                            // (missing profile_key_cache etc.), the re-save below will
+                            // create a fresh bundle with all local keys included.
+                            if (blobData.needs_rebuild) {
+                                console.log('auth: blob needs rebuild (flag from server) — Fix 6 will produce a complete bundle');
+                            }
                         }
                     }
                 }
@@ -228,6 +234,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // Save/update the key blob on the server (ensures backup is current)
             try {
+                // Ensure profile_key_cache is present in localStorage before building the bundle,
+                // so the blob includes it for future recovery. Even an empty cache entry is better
+                // than a missing one — the empty entry seeds localStorage after restore, and
+                // subsequent WS profile_key_sync messages populate it.
+                if (!localStorage.getItem('profile_key_cache')) {
+                    localStorage.setItem('profile_key_cache', '{}');
+                }
                 const bundle = E2ECrypto.buildKeyBundle();
                 const enc = E2ECrypto.encryptKeyBundle(bundle, password);
                 await fetch('/api/key-blob', {

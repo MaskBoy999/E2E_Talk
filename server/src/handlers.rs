@@ -685,6 +685,75 @@ pub async fn save_user_key_blob(
     }
 }
 
+// --- Profile Data Key (server-side backup) ---
+
+#[derive(Deserialize)]
+pub struct SaveProfileDataKeyRequest {
+    pub encrypted_key: String,
+    pub nonce: String,
+}
+
+pub async fn save_profile_data_key(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SaveProfileDataKeyRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    match state.db.save_profile_data_key(&user_id, &req.encrypted_key, &req.nonce) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn get_profile_data_key(
+    Path(requested_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let caller_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    // Self: always authorized (can decrypt with own identity key).
+    // Friends / server-mates: also authorized to fetch but cannot decrypt the result
+    // (the key is encrypted with the owner's identity key). This is still useful
+    // because the client can re-encrypt it with a shared channel key.
+    if caller_id != requested_id {
+        // Check if they're friends or share a server
+        let is_friend = state.db.are_friends(&caller_id, &requested_id).unwrap_or(false);
+        let share_server = state.db.share_server(&caller_id, &requested_id).unwrap_or(false);
+        if !is_friend && !share_server {
+            return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Not authorized"}))).into_response();
+        }
+    }
+
+    match state.db.get_profile_data_key(&requested_id) {
+        Ok(Some((encrypted_key, nonce))) => {
+            (StatusCode::OK, Json(serde_json::json!({
+                "encrypted_key": encrypted_key,
+                "nonce": nonce,
+            }))).into_response()
+        }
+        Ok(None) => {
+            (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "No profile data key found"}))).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
 pub async fn get_user_key_blob(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
@@ -695,11 +764,12 @@ pub async fn get_user_key_blob(
     };
 
     match state.db.get_user_key_blob(&user_id) {
-        Ok(Some((encrypted_blob, salt, nonce))) => {
+        Ok(Some((encrypted_blob, salt, nonce, needs_rebuild))) => {
             (StatusCode::OK, Json(serde_json::json!({
                 "encrypted_blob": encrypted_blob,
                 "salt": salt,
                 "nonce": nonce,
+                "needs_rebuild": needs_rebuild,
             }))).into_response()
         }
         Ok(None) => {

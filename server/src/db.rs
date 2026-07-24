@@ -562,6 +562,16 @@ impl Database {
         // Migration 024: user_key_blobs — password-encrypted key bundle for full key recovery
         let _ = conn.execute_batch(include_str!("../migrations/024_user_key_blob.sql"));
 
+        // Migration 025: profile_data_keys — stores each user's profile_data_key
+        // encrypted with their identity key, so it can be recovered server-side
+        // if the local blob save fails or cookies are cleared.
+        let _ = conn.execute_batch(include_str!("../migrations/025_profile_data_keys.sql"));
+
+        // Migration 026: blob_needs_rebuild — flag existing blobs to trigger client-side
+        // rebuild with profile_key_cache (Fix 6). The server can't modify encrypted blobs,
+        // so we set a flag and let the client rebuild on next login.
+        let _ = conn.execute_batch(include_str!("../migrations/026_blob_needs_rebuild.sql"));
+
         // Migration P1.5: conversation_profile_data — per-conversation encrypted profile data
         // so any user with access to a DM/channel can decrypt the user's current profile.
         let _ = conn.execute_batch(
@@ -1812,26 +1822,104 @@ impl Database {
 
     pub fn save_user_key_blob(&self, user_id: &str, encrypted_blob: &str, salt: &str, nonce: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        // Include needs_rebuild=0 in the insert/update so the flag is cleared
+        // when the client re-saves the blob after a rebuild.
+        let col_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('user_key_blobs') WHERE name = 'needs_rebuild'",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if col_exists {
+            conn.execute(
+                "INSERT INTO user_key_blobs (user_id, encrypted_blob, salt, nonce, updated_at, needs_rebuild)
+                 VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP, 0)
+                 ON CONFLICT(user_id) DO UPDATE SET
+                    encrypted_blob = excluded.encrypted_blob,
+                    salt = excluded.salt,
+                    nonce = excluded.nonce,
+                    updated_at = CURRENT_TIMESTAMP,
+                    needs_rebuild = 0",
+                params![user_id, encrypted_blob, salt, nonce],
+            )
+            .map_err(|e| e.to_string())?;
+        } else {
+            conn.execute(
+                "INSERT INTO user_key_blobs (user_id, encrypted_blob, salt, nonce, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)
+                 ON CONFLICT(user_id) DO UPDATE SET
+                    encrypted_blob = excluded.encrypted_blob,
+                    salt = excluded.salt,
+                    nonce = excluded.nonce,
+                    updated_at = CURRENT_TIMESTAMP",
+                params![user_id, encrypted_blob, salt, nonce],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    pub fn get_user_key_blob(&self, user_id: &str) -> Result<Option<(String, String, String, bool)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        // Check if needs_rebuild column exists (migration 026)
+        let rebuild_col: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('user_key_blobs') WHERE name = 'needs_rebuild'",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if rebuild_col {
+            let result = conn.query_row(
+                "SELECT encrypted_blob, salt, nonce, COALESCE(needs_rebuild, 0) FROM user_key_blobs WHERE user_id = ?1",
+                params![user_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i32>(3)? != 0)),
+            );
+            match result {
+                Ok(row) => Ok(Some(row)),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(e.to_string()),
+            }
+        } else {
+            let result = conn.query_row(
+                "SELECT encrypted_blob, salt, nonce FROM user_key_blobs WHERE user_id = ?1",
+                params![user_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, false)),
+            );
+            match result {
+                Ok(row) => Ok(Some(row)),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(e.to_string()),
+            }
+        }
+    }
+
+    // --- Profile Data Key (server-side backup) ---
+
+    pub fn save_profile_data_key(&self, user_id: &str, encrypted_key: &str, nonce: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
-            "INSERT INTO user_key_blobs (user_id, encrypted_blob, salt, nonce, updated_at)
-             VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)
+            "INSERT INTO profile_data_keys (user_id, encrypted_key, nonce, created_at)
+             VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)
              ON CONFLICT(user_id) DO UPDATE SET
-                encrypted_blob = excluded.encrypted_blob,
-                salt = excluded.salt,
+                encrypted_key = excluded.encrypted_key,
                 nonce = excluded.nonce,
-                updated_at = CURRENT_TIMESTAMP",
-            params![user_id, encrypted_blob, salt, nonce],
+                created_at = CURRENT_TIMESTAMP",
+            params![user_id, encrypted_key, nonce],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
     }
 
-    pub fn get_user_key_blob(&self, user_id: &str) -> Result<Option<(String, String, String)>, String> {
+    pub fn get_profile_data_key(&self, user_id: &str) -> Result<Option<(String, String)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let result = conn.query_row(
-            "SELECT encrypted_blob, salt, nonce FROM user_key_blobs WHERE user_id = ?1",
+            "SELECT encrypted_key, nonce FROM profile_data_keys WHERE user_id = ?1",
             params![user_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         );
         match result {
             Ok(row) => Ok(Some(row)),
