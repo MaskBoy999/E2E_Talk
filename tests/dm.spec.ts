@@ -95,6 +95,7 @@ await page.click('#register-form button[type="submit"]');
     });
 
     test('direct messages: send and receive encrypted message', async ({ page, context }) => {
+        test.setTimeout(60000);
         const ts = Date.now();
         const user1 = 'alice_' + ts;
         const user2 = 'bob_' + ts;
@@ -111,6 +112,7 @@ await page.click('#register-form button[type="submit"]');
 
         // Create DM via API directly
         const { dmChannelId, userId2 } = await createDmViaApi(page, page2, body1.token, user2);
+        await page.waitForTimeout(500);
 
         // Navigate user1 to DM view and select the channel via JS
         await page.goto(`${BASE}/index.html`);
@@ -120,12 +122,10 @@ await page.click('#register-form button[type="submit"]');
 
         // Wait for WS and select DM channel directly via evaluate
         const selected = await page.evaluate(async ({ dmChannelId, userId2, user2 }) => {
-            // Wait for WebSocket to be connected
             for (let i = 0; i < 50; i++) {
                 if (ws && ws.readyState === WebSocket.OPEN) break;
                 await new Promise(r => setTimeout(r, 100));
             }
-            // Select DM channel directly
             if (typeof selectDmChannel === 'function') {
                 try {
                     await selectDmChannel(dmChannelId, userId2, user2, null);
@@ -141,24 +141,58 @@ await page.click('#register-form button[type="submit"]');
         expect(selected).toContain('ok:');
         await page.waitForTimeout(500);
 
-        // Send message via WebSocket (inside browser context)
-        await page.evaluate(async ({ dmChannelId, msg }) => {
-            const kp = E2ECrypto.getIdentityKeyPair();
-            const res = await fetch('/api/identity/' + currentDmOtherUser.id, {
-                headers: { Authorization: 'Bearer ' + localStorage.getItem('token') }
-            });
-            const data = await res.json();
-            const otherPubKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(data.identity_public_key));
-            const encrypted = E2ECrypto.encryptDm(msg, dmChannelId, kp.privateKey, otherPubKey);
-            ws.send(JSON.stringify({
-                type: 'dm_send',
-                dm_channel_id: dmChannelId,
-                encrypted_content: encrypted.ciphertext,
-                nonce: encrypted.nonce,
-                message_nonce: encrypted.messageNonce || null,
-            }));
+        // Send message via WebSocket (inside browser context) with proper error checking
+        const sendResult = await page.evaluate(async ({ dmChannelId, msg }) => {
+            // Verify WS is connected (ws is declared with let, not accessible as window.ws)
+            if (typeof ws === 'undefined' || !ws || ws.readyState !== WebSocket.OPEN) {
+                return 'WS_NOT_OPEN: ' + (typeof ws === 'undefined' ? 'undefined' : !ws ? 'null' : 'state=' + ws.readyState);
+            }
+            if (typeof currentDmOtherUser === 'undefined' || !currentDmOtherUser) {
+                return 'NO_OTHER_USER';
+            }
+            try {
+                const kp = E2ECrypto.getIdentityKeyPair();
+                if (!kp) return 'NO_IDENTITY_KEY';
+                const res = await fetch('/api/identity/' + currentDmOtherUser.id, {
+                    headers: { Authorization: 'Bearer ' + localStorage.getItem('token') }
+                });
+                if (!res.ok) return 'IDENTITY_FETCH_FAILED: ' + res.status;
+                const data = await res.json();
+                if (!data.identity_public_key) return 'NO_OTHER_PUB_KEY';
+                const otherPubKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(data.identity_public_key));
+                const encrypted = E2ECrypto.encryptDm(msg, dmChannelId, kp.privateKey, otherPubKey);
+                ws.send(JSON.stringify({
+                    type: 'dm_send',
+                    dm_channel_id: dmChannelId,
+                    encrypted_content: encrypted.ciphertext,
+                    nonce: encrypted.nonce,
+                    message_nonce: encrypted.messageNonce || null,
+                }));
+                return 'SENT';
+            } catch (e) {
+                return 'ERROR: ' + e.message;
+            }
         }, { dmChannelId, msg: 'Hello from DM, user2!' });
-        await page.waitForTimeout(1000);
+        console.log('DM send result:', sendResult);
+        expect(sendResult).toBe('SENT');
+
+        // Poll the API until the message is persisted (WS send is async)
+        let msgCount = 0;
+        for (let i = 0; i < 30; i++) {
+            await new Promise(r => setTimeout(r, 500));
+            const checkRes = await page.request.get(`${BASE}/api/dm/${dmChannelId}/messages`, {
+                headers: { Authorization: `Bearer ${body1.token}` },
+            });
+            if (checkRes.ok) {
+                const checkMsgs = await checkRes.json();
+                if (Array.isArray(checkMsgs) && checkMsgs.length >= 1) {
+                    msgCount = checkMsgs.length;
+                    break;
+                }
+            }
+        }
+        console.log('DM message count after polling:', msgCount);
+        expect(msgCount).toBeGreaterThanOrEqual(1);
 
         // User2 should see the message
         await page2.goto(`${BASE}/index.html`);
@@ -166,7 +200,7 @@ await page.click('#register-form button[type="submit"]');
         await page2.waitForSelector('.dm-item', { timeout: 5000 });
         await page2.click('.dm-item');
 
-        await page2.waitForSelector('.text');
+        await page2.waitForSelector('.text', { timeout: 10000 });
         await page2.waitForTimeout(2000);
 
         const messageText = await page2.locator('.text').first().textContent();

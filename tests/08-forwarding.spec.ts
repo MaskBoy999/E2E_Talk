@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 
-const BASE = 'http://localhost:3000';
+const BASE = 'https://localhost:3443';
 
 test.describe('Step 8: Message Forwarding', () => {
 
@@ -243,7 +243,9 @@ test.describe('Step 8: Message Forwarding', () => {
         const ts = Date.now();
         const username = 'fwd_dm_btn_' + ts;
         const page = await loginUser(browser, username);
-        await page.waitForTimeout(1500);
+        await page.waitForTimeout(1000);
+        const tokenAlice = await page.evaluate(() => localStorage.getItem('token'));
+        const aliceId = await page.evaluate(() => JSON.parse(localStorage.getItem('user') || '{}').id);
 
         // Register Bob in a new context
         const bobCtx = await browser.newContext();
@@ -258,89 +260,115 @@ test.describe('Step 8: Message Forwarding', () => {
         await bobPage.click('#register-form button[type="submit"]');
         await bobPage.waitForFunction(() => localStorage.getItem('token'), { timeout: 15000 });
         await bobPage.waitForTimeout(1000);
+        const tokenBob = await bobPage.evaluate(() => localStorage.getItem('token'));
+        const bobId = await bobPage.evaluate(() => JSON.parse(localStorage.getItem('user') || '{}').id);
+        const friendCodeBob = await bobPage.evaluate(() => localStorage.getItem('e2e_friend_code'));
 
-        // Navigate Alice to index and get friend code
-        await page.goto(`${BASE}/index.html`);
-        await page.waitForFunction(() => localStorage.getItem('token'), { timeout: 10000 });
-        await page.waitForTimeout(1500);
+        // Alice sends friend request to Bob via API using Bob's friend code
+        const aliceFr = await page.request.post(`${BASE}/api/friends/request`, {
+            headers: { Authorization: `Bearer ${tokenAlice}`, 'Content-Type': 'application/json' },
+            data: { friend_code: friendCodeBob },
+        });
+        expect(aliceFr.ok()).toBeTruthy();
 
-        // Get Alice's friend code via settings
-        await page.click('#settings-btn');
+        // Bob accepts the friend request via API
+        const incoming = await (await bobPage.request.get(`${BASE}/api/friends/requests/incoming`, {
+            headers: { Authorization: `Bearer ${tokenBob}` },
+        })).json();
+        expect(Array.isArray(incoming)).toBe(true);
+        expect(incoming.length).toBe(1);
+        const accept = await bobPage.request.post(`${BASE}/api/friends/requests/accept`, {
+            headers: { Authorization: `Bearer ${tokenBob}`, 'Content-Type': 'application/json' },
+            data: { request_id: incoming[0].id },
+        });
+        expect(accept.ok()).toBeTruthy();
         await page.waitForTimeout(1000);
-        const friendCode = await page.locator('#my-friend-code').textContent();
-        await page.click('#close-settings');
-        await page.waitForTimeout(500);
 
-        if (friendCode) {
-            // Bob sends friend request to Alice
-            await bobPage.goto(`${BASE}/index.html`);
-            await bobPage.waitForFunction(() => localStorage.getItem('token'), { timeout: 10000 });
-            await bobPage.waitForTimeout(1500);
-            const addFriendBtn = bobPage.locator('#add-friend-btn');
-            if (await addFriendBtn.isVisible()) {
-                await addFriendBtn.click();
-                await bobPage.waitForTimeout(500);
-                const fcInput = bobPage.locator('#add-friend-code');
-                if (await fcInput.isVisible()) {
-                    await fcInput.fill(friendCode.trim());
-                    await bobPage.click('#confirm-add-friend');
-                    await bobPage.waitForTimeout(1000);
-                }
-                const closeBtn = bobPage.locator('#close-add-friend');
-                if (await closeBtn.isVisible()) await closeBtn.click();
-            }
-        }
+        // Create DM channel via API (Alice creates DM with Bob)
+        const dmRes = await page.request.post(`${BASE}/api/dm/${bobId}`, {
+            headers: { Authorization: `Bearer ${tokenAlice}` },
+        });
+        expect(dmRes.ok()).toBeTruthy();
+        const dmChannel = await dmRes.json();
+        const dmChannelId = dmChannel.id;
 
-        // Alice accepts friend request
+        // Navigate Alice to index.html and enter DM view
         await page.goto(`${BASE}/index.html`);
         await page.waitForFunction(() => localStorage.getItem('token'), { timeout: 10000 });
         await page.waitForTimeout(2000);
 
-        // Enter DM view
+        // Open DM strip
         await page.evaluate(() => {
             const dmBtn = document.getElementById('dm-strip-btn');
             if (dmBtn) dmBtn.click();
         });
-        await page.waitForTimeout(2000);
+        await page.waitForTimeout(1500);
 
-        // Click Bob in DM list
-        const dmItem = page.locator('.dm-item').first();
-        const dmCount = await dmItem.count();
-        if (dmCount > 0) {
-            await dmItem.click();
-            await page.waitForTimeout(1500);
+        // Select the DM channel via evaluate (selectDmChannel)
+        const selResult = await page.evaluate(async ({ dmChannelId, bobId, bobName }) => {
+            for (let i = 0; i < 50; i++) {
+                if (ws && ws.readyState === WebSocket.OPEN) break;
+                await new Promise(r => setTimeout(r, 100));
+            }
+            if (typeof selectDmChannel === 'function') {
+                await selectDmChannel(dmChannelId, bobId, bobName, null);
+                return 'ok';
+            }
+            return 'selectDmChannel not found';
+        }, { dmChannelId, bobId, bobName });
+        expect(selResult).toBe('ok');
+        await page.waitForTimeout(500);
 
-            // Send a DM
-            await page.fill('#message-input', 'Hello DM ' + ts);
-            await page.click('#send-btn');
-            await page.waitForTimeout(1500);
+        // Send a DM message via WebSocket
+        const sendResult = await page.evaluate(async ({ dmChannelId, msg }) => {
+            if (!ws || ws.readyState !== WebSocket.OPEN) return 'ws_not_open';
+            const kp = E2ECrypto.getIdentityKeyPair();
+            if (!kp) return 'no_key';
+            const res = await fetch('/api/identity/' + currentDmOtherUser.id, {
+                headers: { Authorization: 'Bearer ' + localStorage.getItem('token') }
+            });
+            if (!res.ok) return 'identity_fetch_failed';
+            const data = await res.json();
+            if (!data.identity_public_key) return 'no_other_pub_key';
+            const otherPubKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(data.identity_public_key));
+            const encrypted = E2ECrypto.encryptDm(msg, dmChannelId, kp.privateKey, otherPubKey);
+            ws.send(JSON.stringify({
+                type: 'dm_send',
+                dm_channel_id: dmChannelId,
+                encrypted_content: encrypted.ciphertext,
+                nonce: encrypted.nonce,
+            }));
+            return 'sent';
+        }, { dmChannelId, msg: 'Hello DM ' + ts });
+        expect(sendResult).toBe('sent');
+        await page.waitForTimeout(1500);
 
-            // Hover over the DM message
-            const msgEl = page.locator('.message').last();
-            await msgEl.hover();
-            await page.waitForTimeout(500);
+        // Hover over the DM message to reveal forward buttons
+        const msgEl = page.locator('.message').last();
+        await msgEl.hover();
+        await page.waitForTimeout(500);
 
-            // Verify DM forward buttons
-            const dmFwdChannelBtn = msgEl.locator('.msg-action-btn[data-action="dm-forward"]');
-            await expect(dmFwdChannelBtn).toBeVisible({ timeout: 5000 });
+        // Verify DM forward-to-channel button
+        const dmFwdChannelBtn = msgEl.locator('.msg-action-btn[data-action="dm-forward"]');
+        await expect(dmFwdChannelBtn).toBeVisible({ timeout: 5000 });
 
-            const dmFwdDmBtn = msgEl.locator('.msg-action-btn[data-action="dm-forward-dm"]');
-            await expect(dmFwdDmBtn).toBeVisible({ timeout: 5000 });
+        // Verify DM forward-to-DM button
+        const dmFwdDmBtn = msgEl.locator('.msg-action-btn[data-action="dm-forward-dm"]');
+        await expect(dmFwdDmBtn).toBeVisible({ timeout: 5000 });
 
-            // Click forward-to-channel and verify modal
-            await dmFwdChannelBtn.click();
-            await page.waitForSelector('#forward-modal', { state: 'visible', timeout: 5000 });
-            await page.click('#cancel-forward');
-            await page.waitForTimeout(500);
+        // Click forward-to-channel and verify modal
+        await dmFwdChannelBtn.click();
+        await page.waitForSelector('#forward-modal', { state: 'visible', timeout: 5000 });
+        await page.click('#cancel-forward');
+        await page.waitForTimeout(500);
 
-            // Click forward-to-DM and verify modal
-            await msgEl.hover();
-            await page.waitForTimeout(300);
-            const dmFwdDmBtn2 = msgEl.locator('.msg-action-btn[data-action="dm-forward-dm"]');
-            await dmFwdDmBtn2.click();
-            await page.waitForSelector('#dm-forward-modal', { state: 'visible', timeout: 5000 });
-            await page.click('#cancel-dm-forward');
-        }
+        // Click forward-to-DM and verify modal
+        await msgEl.hover();
+        await page.waitForTimeout(300);
+        const dmFwdDmBtn2 = msgEl.locator('.msg-action-btn[data-action="dm-forward-dm"]');
+        await dmFwdDmBtn2.click();
+        await page.waitForSelector('#dm-forward-modal', { state: 'visible', timeout: 5000 });
+        await page.click('#cancel-dm-forward');
 
         await bobCtx.close();
     });

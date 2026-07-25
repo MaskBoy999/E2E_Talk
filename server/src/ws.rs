@@ -44,6 +44,11 @@ impl WsManager {
         self.connections.write().await.remove(&conn_id);
     }
 
+    pub async fn is_user_connected(&self, user_id: &str) -> bool {
+        let conns = self.connections.read().await;
+        conns.values().any(|(uid, _, _)| uid == user_id)
+    }
+
     pub async fn broadcast_to_device(&self, user_id: &str, device_id: &str, message: &str) {
         let conns = self.connections.read().await;
         for (uid, did, sender) in conns.values() {
@@ -110,11 +115,11 @@ struct OutgoingChatMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     dm_channel_id: Option<String>,
     sender_id: String,
-    sender_username: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     sender_profile_pic: Option<String>,
     encrypted_sender_username: Option<String>,
     sender_username_nonce: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sender_id_hash: Option<String>,
     encrypted_content: String,
     nonce: String,
     timestamp: String,
@@ -248,6 +253,18 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         }
     }
 
+    // Replay pending events (key rotation notifications for servers where owner was offline)
+    if let Ok(events) = state.db.get_and_delete_pending_events(&user_id) {
+        for (server_id, event_type, affected_user_id) in events {
+            let replay_msg = serde_json::json!({
+                "type": event_type,
+                "server_id": server_id,
+                "user_id": affected_user_id,
+            });
+            let _ = sender.send(Message::Text(replay_msg.to_string().into())).await;
+        }
+    }
+
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 
     let conn_id = state.ws_manager.add_connection(user_id.clone(), device_id, tx).await;
@@ -367,11 +384,11 @@ async fn handle_ws_message(
                 server_id: Some(server_id_clone),
                 dm_channel_id: None,
                 message: Some(OutgoingChatMessage {
+                    sender_id: user_id.to_string(),
                     id: message.id,
                     channel_id: message.channel_id,
                     dm_channel_id: None,
-                    sender_id: message.sender_id,
-                    sender_username: message.sender_username,
+                    sender_id_hash: message.sender_id_hash.clone(),
                     encrypted_sender_username: message.encrypted_sender_username.clone(),
                     sender_username_nonce: message.sender_username_nonce.clone(),
                     sender_profile_pic: sender_profile_pic.clone(),
@@ -424,7 +441,6 @@ async fn handle_ws_message(
                         "channel_name": channel_name,
                         "server_name": server_name,
                         "sender_username": msg_sender_username,
-                        "sender_id": user_id,
                         "sender_profile_pic": sender_profile_pic,
                         "message_id": msg_id
                     });
@@ -444,7 +460,6 @@ async fn handle_ws_message(
                         "channel_name": channel_name,
                         "server_name": server_name,
                         "sender_username": msg_sender_username,
-                        "sender_id": user_id,
                         "sender_profile_pic": sender_profile_pic,
                         "message_id": msg_id
                     });
@@ -578,13 +593,13 @@ async fn handle_ws_message(
                 server_id: None,
                 dm_channel_id: Some(message.dm_channel_id.clone()),
                 message: Some(OutgoingChatMessage {
+                    sender_id: user_id.to_string(),
                     id: message.id,
                     channel_id: String::new(),
                     dm_channel_id: Some(message.dm_channel_id.clone()),
-                    sender_id: message.sender_id,
-                    sender_username: message.sender_username,
                     encrypted_sender_username: message.encrypted_sender_username.clone(),
                     sender_username_nonce: message.sender_username_nonce.clone(),
+                    sender_id_hash: message.sender_id_hash.clone(),
                     sender_profile_pic: sender_profile_pic.clone(),
                     encrypted_content: encrypted_content_b64.to_string(),
                     nonce: nonce_b64.to_string(),
@@ -630,7 +645,6 @@ async fn handle_ws_message(
                         "type": "mention_notification",
                         "dm_channel_id": dm_channel_id,
                         "sender_username": msg_sender_username,
-                        "sender_id": user_id,
                         "sender_profile_pic": sender_profile_pic,
                         "message_id": msg_id
                     });
@@ -645,7 +659,6 @@ async fn handle_ws_message(
                         "type": "reply_notification",
                         "dm_channel_id": dm_channel_id,
                         "sender_username": msg_sender_username,
-                        "sender_id": user_id,
                         "sender_profile_pic": sender_profile_pic,
                         "message_id": msg_id
                     });
@@ -704,13 +717,13 @@ async fn handle_ws_message(
                 server_id: Some(server_id.clone()),
                 dm_channel_id: None,
                 message: Some(OutgoingChatMessage {
+                    sender_id: user_id.to_string(),
                     id: message.id,
                     channel_id: message.channel_id,
                     dm_channel_id: None,
-                    sender_id: message.sender_id,
-                    sender_username: message.sender_username,
                     encrypted_sender_username: message.encrypted_sender_username.clone(),
                     sender_username_nonce: message.sender_username_nonce.clone(),
+                    sender_id_hash: message.sender_id_hash.clone(),
                     sender_profile_pic: sender_profile_pic.clone(),
                     encrypted_content: encrypted_content_b64.to_string(),
                     nonce: nonce_b64.to_string(),
@@ -828,13 +841,13 @@ async fn handle_ws_message(
                 server_id: None,
                 dm_channel_id: Some(message.dm_channel_id.clone()),
                 message: Some(OutgoingChatMessage {
+                    sender_id: user_id.to_string(),
                     id: message.id,
                     channel_id: String::new(),
                     dm_channel_id: Some(message.dm_channel_id.clone()),
-                    sender_id: message.sender_id,
-                    sender_username: message.sender_username,
                     encrypted_sender_username: message.encrypted_sender_username.clone(),
                     sender_username_nonce: message.sender_username_nonce.clone(),
+                    sender_id_hash: message.sender_id_hash.clone(),
                     sender_profile_pic: sender_profile_pic.clone(),
                     encrypted_content: encrypted_content_b64.to_string(),
                     nonce: nonce_b64.to_string(),

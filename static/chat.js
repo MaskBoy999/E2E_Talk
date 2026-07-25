@@ -82,7 +82,7 @@ function renderMutedList() {
     // Muted servers
     mutedServers.forEach(function (sid) {
         var sv = servers.find(function (s) { return s.id === sid; });
-        var name = sv ? (sv.displayName || '[encrypted]') : sid.slice(0, 8);
+        var name = sv ? sv.name : sid.slice(0, 8);
         html += '<div class="muted-list-item"><span>🔇 Server: ' + escapeHtml(name) + '</span><button class="unmute-btn" data-type="server" data-id="' + sid + '">Unmute</button></div>';
     });
     // Muted channels
@@ -258,43 +258,37 @@ var _profileKeySaveTimer = null;
 function scheduleProfileKeySave() {
     if (_profileKeySaveTimer) clearTimeout(_profileKeySaveTimer);
     _profileKeySaveTimer = setTimeout(saveProfileKeyCache, 500);
-    scheduleKeyBlobSave();
 }
 
-// Load the cache immediately
-loadProfileKeyCache();
-
-// --- Key Blob (password-encrypted backup for full key recovery) ---
-// The password is stored encrypted in localStorage (e2e_encrypted_password).
-// We decrypt it in memory to encrypt the key blob on key changes.
+// Key blob save to server for recovery after cookie clear
 var _keyBlobTimer = null;
 function scheduleKeyBlobSave() {
     if (_keyBlobTimer) clearTimeout(_keyBlobTimer);
     _keyBlobTimer = setTimeout(saveKeyBlobToServer, 3000);
 }
+
 function saveKeyBlobToServer() {
     try {
-        // Recover the password from e2e_encrypted_password using the device key
-        var encPw = localStorage.getItem('e2e_encrypted_password');
-        var devKeyStr = localStorage.getItem('e2e_device_key');
+        const encPw = localStorage.getItem('e2e_encrypted_password');
+        const devKeyStr = localStorage.getItem('e2e_device_key');
         if (!encPw || !devKeyStr) {
             console.error('saveKeyBlobToServer: missing e2e_encrypted_password or e2e_device_key');
             return;
         }
-        var dk = new Uint8Array(E2ECrypto.base64ToArrayBuffer(devKeyStr));
-        var pwB64 = E2ECrypto.decodeEncryptedFileKey(encPw, dk);
+        const dk = new Uint8Array(E2ECrypto.base64ToArrayBuffer(devKeyStr));
+        const pwB64 = E2ECrypto.decodeEncryptedFileKey(encPw, dk);
         if (!pwB64) {
             console.error('saveKeyBlobToServer: failed to decode password from e2e_encrypted_password');
             return;
         }
-        var password = atob(pwB64);
-        var bundle = E2ECrypto.buildKeyBundle();
-        var enc = E2ECrypto.encryptKeyBundle(bundle, password);
-        var t = token();
+        const pw = atob(pwB64);
+        const t = localStorage.getItem('token');
         if (!t) {
             console.error('saveKeyBlobToServer: no auth token available');
             return;
         }
+        const bundle = E2ECrypto.buildKeyBundle();
+        const enc = E2ECrypto.encryptKeyBundle(bundle, pw);
         fetch('/api/key-blob', {
             method: 'PUT',
             headers: {
@@ -313,6 +307,9 @@ function saveKeyBlobToServer() {
         console.error('saveKeyBlobToServer: unexpected error', err);
     }
 }
+
+// Load the cache immediately
+loadProfileKeyCache();
 
 // Fetch another user's profile blob from the server, decrypt it with their profile_data_key,
 // and cache the result in userDisplayNameCache so the DM sidebar and messages show the display name.
@@ -650,6 +647,15 @@ async function copyToClipboard(text) {
     }
 }
 
+// Global helper: compute HMAC-SHA256 hash of password using cached auth_key
+// Used by the reauth flow in settings (client-side password hashing feature)
+async function computeHashedPasswordGlobal(password) {
+    const authKeyB64 = localStorage.getItem('e2e_auth_key');
+    if (!authKeyB64) throw new Error('e2e_auth_key not found in localStorage');
+    const hashKeyBytes = E2ECrypto.base64ToArrayBuffer(authKeyB64);
+    return E2ECrypto.hmacHex(new Uint8Array(hashKeyBytes), password);
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     checkTokenExpiry();
 
@@ -925,25 +931,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // Delete account
     // Clear all client-side data (localStorage, sessionStorage, non-HttpOnly cookies).
     // HttpOnly cookies can only be cleared by the server (see /api/logout GET).
-    // If preserveIdentity is true, keep identity keys so server keys remain decryptable after re-login.
-    function clearAllClientData(preserveIdentity) {
-        var preservedKeys = {};
-        if (preserveIdentity) {
-            // Save identity keys, profile key cache, and HMAC key before clearing
-            for (var i = 0; i < localStorage.length; i++) {
-                var k = localStorage.key(i);
-                if (k && (k.indexOf('e2e_identity_private_') === 0 || k.indexOf('e2e_identity_public_') === 0 || k === 'profile_key_cache' || k === 'e2e_hmac_key' || k.indexOf('e2e_server_') === 0)) {
-                    preservedKeys[k] = localStorage.getItem(k);
-                }
-            }
-        }
+    function clearAllClientData() {
         localStorage.clear();
-        if (preserveIdentity) {
-            // Restore preserved keys
-            for (var k2 in preservedKeys) {
-                localStorage.setItem(k2, preservedKeys[k2]);
-            }
-        }
         try { sessionStorage.clear(); } catch (_) {}
         document.cookie.split(';').forEach(function(c) {
             document.cookie = c.replace(/^ +/, '').replace(/=.*/, '=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/');
@@ -980,18 +969,15 @@ document.addEventListener('DOMContentLoaded', () => {
     // Logout is handled in settings (Clear All Data / Sign Out)
 
     // Clear all data button in settings — robust logout + wipe sequence
-    // Preserves identity keys so server keys remain decryptable after re-login
     document.getElementById('clear-all-data-btn').addEventListener('click', async () => {
-        if (!confirm('This will clear all local data (logins, settings) and sign you out. Your encryption identity will be preserved. Continue?')) return;
-        // 1. Save key blob to server before clearing
-        saveKeyBlobToServer();
-        // 2. Close websocket first so no more messages arrive
+        if (!confirm('This will clear ALL local data (logins, keys, settings) and sign you out. Continue?')) return;
+        // 1. Close websocket first so no more messages arrive
         if (ws) { try { ws.close(); } catch (_) {} ws = null; }
-        // 3. Call server logout to clear HttpOnly cookie (while token is still present)
+        // 2. Call server logout to clear HttpOnly cookie (while token is still present)
         await serverLogout();
-        // 4. Clear all client-side data (preserve identity keys so server keys stay decryptable)
-        clearAllClientData(true);
-        // 5. Redirect directly to login page since the server already cleared the cookie
+        // 3. Clear all client-side data
+        clearAllClientData();
+        // 4. Redirect directly to login page since the server already cleared the cookie
         window.location.href = '/login.html';
     });
 
@@ -1061,14 +1047,17 @@ document.addEventListener('DOMContentLoaded', () => {
     setupForwardModal();
     setupStickerPanel();
     loadMutedState();
-    loadServers();
+    loadServers().then(function () {
+        // After servers load, default to DM view if no server was auto-selected.
+        // This runs after loadServers() completes, so there's no race:
+        // if loadServers() auto-selected a server, currentServerId is set and we skip.
+        if (!currentServerId) {
+            enterDmView();
+        }
+    });
     loadFriendRequestBadge();
     loadEmojiCache(); // Load custom emojis
     loadMyProfile(); // Load own profile for sidebar footer
-    // Try to recover profile_data_key from server-side API if not cached
-    setTimeout(function() {
-        recoverProfileDataKey();
-    }, 1500);
     requestNotificationPermission();
     setupMentionAutocomplete();
     initMentionsInbox();
@@ -1080,24 +1069,12 @@ document.addEventListener('DOMContentLoaded', () => {
     // Restore notification sound from server (syncs across devices)
     restoreNotificationSoundFromServer();
 
-    // Default to DM view instead of auto-selecting first server
-    setTimeout(function () {
-        enterDmView();
-    }, 400);
-
     // Save unread state + last seen timestamp when page is closing or hidden,
     // so missed notifications are restored on next load.
     function saveBeforeClose() {
         saveMentionState();
         localStorage.setItem('e2e_last_seen', new Date().toISOString());
-        // Save key blob immediately (bypass debounce) so the server has our latest keys
-        // when the user closes the tab. If the blob is stale on the server, clearing
-        // cookies and re-logging in will lose recent keys.
-        if (_keyBlobTimer) clearTimeout(_keyBlobTimer);
         saveKeyBlobToServer();
-        // Also upload profile data key to server-side API for recovery
-        // Fire and forget — if the browser aborts the fetch on close, no harm done.
-        uploadProfileDataKey();
     }
     window.addEventListener('beforeunload', saveBeforeClose);
     // pagehide is more reliable on mobile browsers where beforeunload may not fire
@@ -4066,7 +4043,7 @@ function showChannelContextMenu(e, channelId, channelName) {
         if (sv) {
             var svItem = document.createElement('div');
             svItem.className = 'context-menu-item';
-            svItem.textContent = isMutedSrv ? 'Unmute ' + (sv.displayName || '[encrypted]') : 'Mute ' + (sv.displayName || '[encrypted]');
+            svItem.textContent = isMutedSrv ? 'Unmute ' + (sv.name || 'Server') : 'Mute ' + (sv.name || 'Server');
             svItem.addEventListener('click', function () {
                 toggleMuteServer(currentServerId);
                 menu.remove();
@@ -4458,6 +4435,8 @@ function connectWebSocket(t) {
             case 'dm_new':
                 if (data.dm_channel_id && data.message) {
                     if (data.dm_channel_id === currentDmChannelId) {
+                        // Decrypt encrypted_sender_username if present (P3) — runs inside the
+                        // active channel block so we can reuse the otherPubKey fetched below.
                         // Clear any unread badge when viewing the DM
                         clearUnreadDmMentions(data.dm_channel_id);
                         const kp = E2ECrypto.getIdentityKeyPair();
@@ -4467,14 +4446,14 @@ function connectWebSocket(t) {
                                 const res = await authFetch('/api/identity/' + currentDmOtherUser.id);
                                 const d = await res.json();
                                 otherPubKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(d.identity_public_key));
-                            } catch (_) {}
-                        }
-                        // Decrypt encrypted_sender_username if present (P3)
-                        if (data.message.encrypted_sender_username && data.message.sender_username_nonce && kp) {
-                            try {
-                                var dmKey = E2ECrypto.getDmKey(data.dm_channel_id, kp.privateKey, otherPubKey);
-                                var decU = E2ECrypto.decryptMessage(data.message.encrypted_sender_username, data.message.sender_username_nonce, dmKey);
-                                if (decU) data.message.sender_username = decU;
+                                // Reuse fetched otherPubKey to decrypt sender_username
+                                if (data.message.encrypted_sender_username && data.message.sender_username_nonce && kp) {
+                                    try {
+                                        var dmKey = E2ECrypto.getDmKey(data.dm_channel_id, kp.privateKey, otherPubKey);
+                                        var decU = E2ECrypto.decryptMessage(data.message.encrypted_sender_username, data.message.sender_username_nonce, dmKey);
+                                        if (decU) data.message.sender_username = decU;
+                                    } catch (_) {}
+                                }
                             } catch (_) {}
                         }
                         await appendDmMessage(data.message, kp, otherPubKey);
@@ -4523,15 +4502,18 @@ function connectWebSocket(t) {
                     // Re-upload our conversation profile for this server encrypted with the new key
                     // so other members can see our display name / colors
                     try { await uploadCurrentProfileToConversations(); } catch (_) {}
-                    // Re-fetch server list to pick up re-encrypted server/channel names
-                    await loadServers();
-                    // If viewing this server, reload channels (names re-encrypted with new key)
-                    if (data.server_id === currentServerId) {
-                        await loadChannels(currentServerId);
-                    }
                     // Reload messages if we're viewing this server (they were encrypted with old key)
                     if (data.server_id === currentServerId && currentChannelId) {
                         await loadMessages(currentChannelId);
+                    }
+                }
+                break;
+            case 'key_needed':
+                if (data.server_id && data.user_id && data.user_id !== user.id) {
+                    // Someone needs the server key — upload it if we have it
+                    var needKey = E2ECrypto.getServerKey(data.server_id);
+                    if (needKey) {
+                        try { await uploadServerKeyForUser(data.server_id, data.user_id); } catch (_) {}
                     }
                 }
                 break;
@@ -4541,13 +4523,12 @@ function connectWebSocket(t) {
                     // which only reflects the currently selected server)
                     const ownedByMe = servers.some(s => s.id === data.server_id && s.is_owner);
                     if (ownedByMe) {
-                        // Rotate the server key so the new member can't decrypt old messages
-                        // (forward secrecy). The new key is encrypted for all remaining members
-                        // and the new member via the /keys/rotate endpoint which broadcasts
-                        // server_key_rotated to everyone.
-                        await rotateServerKey(data.server_id);
+                        // Upload the CURRENT server key for the new member instead of rotating.
+                        // Rotating would overwrite the key and break decryption of existing
+                        // server/channel names that were encrypted with the old key.
+                        await uploadServerKeyForUser(data.server_id, data.user_id);
                     } else {
-                        // Non-owner: fetch the server key in case the owner rotated it
+                        // Non-owner: fetch the server key
                         await fetchAndDecryptServerKey(data.server_id);
                         // Re-upload our conversation profile with the potentially new key
                         try { await uploadCurrentProfileToConversations(); } catch (_) {}
@@ -4567,7 +4548,13 @@ function connectWebSocket(t) {
             case 'member_banned':
             case 'member_left':
                 if (data.server_id) {
-                    if (isOwner && data.server_id === currentServerId) {
+                    // Check if the current user is the owner of THIS server (not just the currently viewed one).
+                    // The servers array has .is_owner set for any server the user owns.
+                    const ownedByMe = servers.some(s => s.id === data.server_id && s.is_owner);
+                    if (ownedByMe) {
+                        // Rotate the server key so the removed member can't decrypt new messages.
+                        // The old key is preserved (rotateServerKey uploads old key versions before
+                        // creating the new one) so existing server/channel names remain decryptable.
                         await rotateServerKey(data.server_id);
                     }
                     if (data.server_id === currentServerId) {
@@ -4790,12 +4777,18 @@ function connectWebSocket(t) {
                 try { await uploadCurrentProfileToConversations(); } catch (_) {}
                 break;
             case 'friend_removed':
-                // Filter out the DM conversation with the unfriended user
-                dmConversations = dmConversations.filter(function(c) {
-                    return c.other_user_id !== data.by_user_id;
-                });
-                if (viewMode === 'dms') {
+                // If WE initiated the unfriend (by_user_id is our own ID),
+                // reload conversations from the server since we don't know
+                // the unfriended user's ID from the payload alone.
+                if (data.by_user_id === user.id) {
                     await loadDmConversations();
+                } else {
+                    // Filter out the DM conversation with the unfriended user
+                    dmConversations = dmConversations.filter(function(c) {
+                        return c.other_user_id !== data.by_user_id;
+                    });
+                }
+                if (viewMode === 'dms') {
                     renderDmSidebar();
                 }
                 // If currently viewing the DM with the unfriended user, clear the view
@@ -5120,9 +5113,19 @@ async function fetchAndDecryptServerKey(serverId) {
         const keys = await res.json();
         if (!Array.isArray(keys) || keys.length === 0) return false;
 
+        // Sort keys by version ascending so the newest key (highest version)
+        // is processed LAST and becomes the "current" key via saveServerKey.
+        // Without this sort, the DB may return keys in arbitrary order,
+        // causing an old key to overwrite the new one as "current" and
+        // breaking server/channel name decryption for non-owner members.
+        keys.sort(function(a, b) {
+            return (a.version || 0) - (b.version || 0);
+        });
+
         const identity = E2ECrypto.getIdentityKeyPair();
         if (!identity) return false;
 
+        var anySuccess = false;
         for (const entry of keys) {
             // Try authenticated envelopeDecrypt first (new streamlined format)
             try {
@@ -5132,24 +5135,25 @@ async function fetchAndDecryptServerKey(serverId) {
                     new Uint8Array(E2ECrypto.base64ToArrayBuffer(entry.sender_public_key)),
                     entry.nonce
                 );
+                // saveServerKey pushes the current key to history before overwriting,
+                // preserving all versions the client can decrypt
                 E2ECrypto.saveServerKey(serverId, serverKey);
-                scheduleKeyBlobSave();
-                return true;
-            } catch (_) {}
-            // Fallback: try old ephemeral envelopeDecryptRaw (server_keys encrypted before migration)
-            try {
-                const serverKey = E2ECrypto.envelopeDecryptRaw(
-                    entry.encrypted_key,
-                    entry.nonce,
-                    entry.sender_public_key,
-                    identity.privateKey
-                );
-                E2ECrypto.saveServerKey(serverId, serverKey);
-                scheduleKeyBlobSave();
-                return true;
-            } catch (_) {}
+                anySuccess = true;
+            } catch (_) {
+                // Fallback: try old ephemeral envelopeDecryptRaw
+                try {
+                    const serverKey = E2ECrypto.envelopeDecryptRaw(
+                        entry.encrypted_key,
+                        entry.nonce,
+                        entry.sender_public_key,
+                        identity.privateKey
+                    );
+                    E2ECrypto.saveServerKey(serverId, serverKey);
+                    anySuccess = true;
+                } catch (_) {}
+            }
         }
-        return false;
+        return anySuccess;
     } catch (err) {
         console.error('Failed to fetch server key:', err);
         return false;
@@ -5160,103 +5164,137 @@ async function rotateServerKey(serverId) {
     const identity = E2ECrypto.getIdentityKeyPair();
     if (!identity) return false;
 
-    // Get the old key BEFORE saving the new one (so we can re-encrypt names)
+    // Save the old key before overwriting, so existing encrypted names remain decryptable
     const oldKey = E2ECrypto.getServerKey(serverId);
+    if (oldKey) {
+        try {
+            localStorage.setItem('e2e_server_old_' + serverId, E2ECrypto.arrayBufferToBase64(oldKey));
+        } catch (_) {}
+    }
 
     // Generate a new server key
     const newKey = E2ECrypto.generateSymmetricKey();
     E2ECrypto.saveServerKey(serverId, newKey);
-    scheduleKeyBlobSave();
 
-    // Get all members of the server
+    // Upload the old key for all members first (so old messages remain decryptable),
+    // then upload the new key.
+    // Each call to POST /api/servers/{id}/keys appends a new versioned entry
+    // (the server no longer deletes old keys on rotate).
     const membersRes = await authFetch(`/api/servers/${serverId}/members`);
     if (!membersRes.ok) return false;
     const members = await membersRes.json();
     if (!Array.isArray(members) || members.length === 0) return false;
 
-    // Build encrypted key entries for each member
-    const encryptedKeys = [];
-    for (const member of members) {
-        try {
-            const recipientRes = await authFetch(`/api/identity/${member.id}`);
-            if (!recipientRes.ok) continue;
-            const recipientData = await recipientRes.json();
-            if (!recipientData.identity_public_key) continue;
-            const recipientPub = new Uint8Array(E2ECrypto.base64ToArrayBuffer(recipientData.identity_public_key));
-            const encrypted = E2ECrypto.envelopeEncrypt(newKey, recipientPub, identity.privateKey);
-            encryptedKeys.push({
-                user_id: member.id,
-                encrypted_key: encrypted.ciphertext,
-                sender_public_key: E2ECrypto.arrayBufferToBase64(identity.publicKey),
-                nonce: encrypted.nonce,
-            });
-        } catch (e) {
-            console.error('Failed to encrypt rotated key for member', member.id, e);
+    // Upload all keys (old versions + new) for each member
+    const allKeys = E2ECrypto.getAllServerKeys(serverId);
+    // allKeys[0] is the current key (the old one, before saveServerKey was called),
+    // allKeys[1..] are older versions from history.
+    // The newKey was just saved as current, so it's NOT in allKeys yet.
+    // Actually, let me re-build: saveServerKey was already called with newKey,
+    // pushing the old key to history. So getAllServerKeys returns:
+    //   [newKey, oldKey, olderKey, ...]
+    // We need to upload ALL except the newest (which is the replacement).
+    // Wait — we want all VERSIONS uploaded. Let me just upload all keys from getAllServerKeys.
+    
+    var uploadCount = 0;
+    // Upload old keys (all versions from localStorage)
+    for (var vi = 0; vi < allKeys.length; vi++) {
+        var keyToUpload = allKeys[vi];
+        for (const member of members) {
+            try {
+                const recipientRes = await authFetch(`/api/identity/${member.id}`);
+                if (!recipientRes.ok) continue;
+                const recipientData = await recipientRes.json();
+                if (!recipientData.identity_public_key) continue;
+                const recipientPub = new Uint8Array(E2ECrypto.base64ToArrayBuffer(recipientData.identity_public_key));
+                const encrypted = E2ECrypto.envelopeEncrypt(keyToUpload, recipientPub, identity.privateKey);
+                const keyRes = await authFetch(`/api/servers/${serverId}/keys`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        user_id: member.id,
+                        encrypted_key: encrypted.ciphertext,
+                        sender_public_key: E2ECrypto.arrayBufferToBase64(identity.publicKey),
+                        nonce: encrypted.nonce,
+                    }),
+                });
+                if (keyRes.ok) uploadCount++;
+            } catch (e) {
+                console.error('Failed to upload key for member', member.id, e);
+            }
         }
     }
 
-    if (encryptedKeys.length === 0) return false;
+    if (uploadCount === 0) return false;
 
-    // Use the server-side rotate endpoint which deletes old keys, saves new ones,
-    // and broadcasts server_key_rotated to all members via WebSocket
+    // Broadcast server_key_rotated so all members re-fetch keys
     try {
+        // Use the rotate endpoint to broadcast the WS event (old keys are preserved)
         const rotateRes = await authFetch(`/api/servers/${serverId}/keys/rotate`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ encrypted_keys: encryptedKeys }),
+            body: JSON.stringify({ encrypted_keys: [] }),
         });
         if (!rotateRes.ok) {
-            console.error('Failed to rotate server keys:', rotateRes.status);
-            return false;
+            console.warn('Rotate broadcast failed:', rotateRes.status);
         }
     } catch (e) {
-        console.error('Failed to rotate server keys:', e);
-        return false;
+        console.warn('Rotate broadcast error:', e);
     }
 
-    // Re-encrypt server name and all channel names with the new key
-    // so new members (who only have the new key) can decrypt them
-    if (oldKey) {
-        try {
-            const server = servers.find(s => s.id === serverId);
-            if (server && server.encrypted_name && server.name_nonce) {
-                const plainBytes = E2ECrypto.aeadDecrypt(server.encrypted_name, oldKey, server.name_nonce);
-                if (plainBytes) {
-                    const plainStr = new TextDecoder().decode(plainBytes);
-                    const reEnc = E2ECrypto.aeadEncrypt(plainStr, newKey);
-                    await authFetch(`/api/servers/${serverId}/name`, {
-                        method: 'PUT',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ encrypted_name: reEnc.ciphertext, name_nonce: reEnc.nonce }),
-                    });
-                }
+    // Re-encrypt server name and channel names with the latest key so new members
+    // don't need to try all old keys to find the one that was used for names.
+    // The client decrypts with the old key, re-encrypts with the current key, and uploads.
+    try {
+        var curKey = E2ECrypto.getServerKey(serverId);
+        // Re-encrypt server name
+        var reencServer = servers.find(function(s) { return s.id === serverId; });
+        if (reencServer && reencServer.encrypted_name && reencServer.name_nonce && curKey) {
+            var serverNameDec = tryDecryptWithAllKeys(serverId, reencServer.encrypted_name, reencServer.name_nonce);
+            if (serverNameDec) {
+                var encServerName = E2ECrypto.aeadEncrypt(serverNameDec, curKey);
+                await authFetch('/api/servers/' + serverId + '/name', {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        encrypted_name: encServerName.ciphertext,
+                        name_nonce: encServerName.nonce,
+                    }),
+                });
+                reencServer.encrypted_name = encServerName.ciphertext;
+                reencServer.name_nonce = encServerName.nonce;
             }
-        } catch (_) {}
-
-        try {
-            const channelsRes = await authFetch(`/api/servers/${serverId}/channels`);
-            if (channelsRes.ok) {
-                const channels = await channelsRes.json();
-                if (Array.isArray(channels)) {
-                    for (const ch of channels) {
-                        try {
-                            if (ch.encrypted_name && ch.name_nonce) {
-                                const plainBytes = E2ECrypto.aeadDecrypt(ch.encrypted_name, oldKey, ch.name_nonce);
-                                if (plainBytes) {
-                                    const plainStr = new TextDecoder().decode(plainBytes);
-                                    const reEnc = E2ECrypto.aeadEncrypt(plainStr, newKey);
-                                    await authFetch(`/api/servers/${serverId}/channels/${ch.id}/name`, {
-                                        method: 'PUT',
-                                        headers: { 'Content-Type': 'application/json' },
-                                        body: JSON.stringify({ encrypted_name: reEnc.ciphertext, name_nonce: reEnc.nonce }),
-                                    });
-                                }
-                            }
-                        } catch (_) {}
+        }
+        // Re-encrypt channel names with the latest key
+        var channelsRes = await authFetch('/api/servers/' + serverId + '/channels');
+        if (channelsRes.ok) {
+            var channels = await channelsRes.json();
+            for (var ci = 0; ci < channels.length; ci++) {
+                var ch = channels[ci];
+                if (ch.encrypted_name && ch.name_nonce && curKey) {
+                    var chNameDec = tryDecryptWithAllKeys(serverId, ch.encrypted_name, ch.name_nonce);
+                    if (chNameDec) {
+                        var encChName = E2ECrypto.aeadEncrypt(chNameDec, curKey);
+                        await authFetch('/api/servers/' + serverId + '/channels/' + ch.id + '/name', {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                encrypted_name: encChName.ciphertext,
+                                name_nonce: encChName.nonce,
+                            }),
+                        });
                     }
                 }
             }
-        } catch (_) {}
+        }
+        // Re-render UI with new names
+        renderServerList();
+        if (serverId === currentServerId) {
+            document.getElementById('server-name').textContent = reencServer ? (reencServer.name || '') : '';
+            await loadChannels(serverId);
+        }
+    } catch (e) {
+        console.warn('Failed to re-encrypt names after rotation:', e);
     }
 
     // Re-upload our own conversation profile for this server with the new key
@@ -5274,23 +5312,30 @@ async function uploadServerKeyForUser(serverId, targetUserId) {
     const recipientData = await recipientRes.json();
     const recipientPubKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(recipientData.identity_public_key));
 
-    const serverKey = E2ECrypto.getServerKey(serverId);
-    if (!serverKey) return false;
+    const allKeys = E2ECrypto.getAllServerKeys(serverId);
+    if (!allKeys || allKeys.length === 0) return false;
 
-    // Use authenticated envelopeEncrypt (static ECDH) instead of ephemeral envelopeEncryptRaw
-    const encrypted = E2ECrypto.envelopeEncrypt(serverKey, recipientPubKey, identity.privateKey);
-
-    const uploadRes = await authFetch(`/api/servers/${serverId}/keys`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            user_id: targetUserId,
-            encrypted_key: encrypted.ciphertext,
-            sender_public_key: E2ECrypto.arrayBufferToBase64(identity.publicKey),
-            nonce: encrypted.nonce,
-        }),
-    });
-    return uploadRes.ok;
+    // Upload ALL known key versions for the new member so they can decrypt old messages
+    var anySuccess = false;
+    for (var vi = 0; vi < allKeys.length; vi++) {
+        try {
+            const encrypted = E2ECrypto.envelopeEncrypt(allKeys[vi], recipientPubKey, identity.privateKey);
+            const res = await authFetch(`/api/servers/${serverId}/keys`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    user_id: targetUserId,
+                    encrypted_key: encrypted.ciphertext,
+                    sender_public_key: E2ECrypto.arrayBufferToBase64(identity.publicKey),
+                    nonce: encrypted.nonce,
+                }),
+            });
+            if (res.ok) anySuccess = true;
+        } catch (e) {
+            console.error('Failed to upload key v' + (vi + 1) + ' for user', targetUserId, e);
+        }
+    }
+    return anySuccess;
 }
 
 // --- Servers ---
@@ -5314,6 +5359,9 @@ async function loadServers() {
             }
         }
 
+        // Re-render server list with decrypted names now that keys are available
+        renderServerList();
+
         if (servers.length > 0 && !currentServerId) {
             selectServer(servers[0].id);
         } else if (servers.length === 0) {
@@ -5325,6 +5373,17 @@ async function loadServers() {
     }
 }
 
+// Try decrypting server/channel names with an old key if the current key fails
+function decryptWithOldKey(serverId, encryptedName, nameNonce) {
+    var b64 = localStorage.getItem('e2e_server_old_' + serverId);
+    if (!b64) return null;
+    try {
+        var k = new Uint8Array(E2ECrypto.base64ToArrayBuffer(b64));
+        var d = E2ECrypto.aeadDecrypt(encryptedName, k, nameNonce);
+        return d ? new TextDecoder().decode(d) : null;
+    } catch (_) { return null; }
+}
+
 function renderServerList() {
     const list = document.getElementById('server-list');
     list.innerHTML = '';
@@ -5332,23 +5391,27 @@ function renderServerList() {
     servers.forEach(s => {
         const div = document.createElement('div');
         div.className = 'server-icon' + (s.id === currentServerId ? ' active' : '');
-        // Decrypt server name — try all keys (current + history) since key may have been rotated
-        var displayName = '[encrypted]';
+        // Decrypt server name using server key
+        var displayName = '';
         if (s.encrypted_name && s.name_nonce) {
             try {
-                var decrypted = E2ECrypto.decryptWithAnyServerKey(s.encrypted_name, s.name_nonce, s.id);
-                if (decrypted) displayName = new TextDecoder().decode(decrypted);
+                // Try all known keys (current + history) to handle key rotations
+                displayName = tryDecryptWithAllKeys(s.id, s.encrypted_name, s.name_nonce);
+                if (displayName) s.name = displayName;
+                // Fallback: try old key saved by rotateServerKey (owner-only legacy path)
+                if (!displayName) {
+                    var oldName = decryptWithOldKey(s.id, s.encrypted_name, s.name_nonce);
+                    if (oldName) { displayName = oldName; s.name = oldName; }
+                }
             } catch (_) {}
         }
-        s.displayName = displayName;
-        div.textContent = displayName.charAt(0).toUpperCase();
+        div.textContent = displayName ? displayName.charAt(0).toUpperCase() : '';
         div.title = displayName;
         div.dataset.id = s.id;
-        div.dataset.name = displayName;
         div.addEventListener('click', () => selectServer(s.id));
         div.addEventListener('contextmenu', function (e) {
             e.preventDefault();
-            showServerContextMenu(e, s.id, displayName);
+            showServerContextMenu(e, s.id, s.name);
         });
         list.appendChild(div);
     });
@@ -5370,12 +5433,17 @@ async function selectServer(serverId) {
     isOwner = server && server.is_owner;
     currentInviteCode = isOwner ? localStorage.getItem('e2e_invite_' + serverId) : null;
 
-    // Decrypt server name for display — try all keys (current + history)
-    var serverDisplayName = '[encrypted]';
+    // Decrypt server name for display
+    var serverDisplayName = '';
     if (server && server.encrypted_name && server.name_nonce) {
         try {
-            var dec = E2ECrypto.decryptWithAnyServerKey(server.encrypted_name, server.name_nonce, serverId);
-            if (dec) serverDisplayName = new TextDecoder().decode(dec);
+            // Try all known keys (current + history) to handle key rotations
+            serverDisplayName = tryDecryptWithAllKeys(serverId, server.encrypted_name, server.name_nonce);
+            // Fallback: try old key saved by rotateServerKey (owner-only legacy path)
+            if (!serverDisplayName) {
+                var oldName = decryptWithOldKey(serverId, server.encrypted_name, server.name_nonce);
+                if (oldName) serverDisplayName = oldName;
+            }
         } catch (_) {}
     }
     document.getElementById('server-name').textContent = serverDisplayName;
@@ -5451,12 +5519,17 @@ async function loadChannels(serverId) {
             const div = document.createElement('div');
             div.className = 'channel-item';
             div.dataset.id = ch.id;
-            // Decrypt channel name — try all keys (current + history) since key may have been rotated
-            var chDisplayName = '[encrypted]';
+                    // Decrypt channel name from encrypted_name (API no longer returns plaintext name)
+            var chDisplayName = '';
             if (ch.encrypted_name && ch.name_nonce) {
                 try {
-                    var decCh = E2ECrypto.decryptWithAnyServerKey(ch.encrypted_name, ch.name_nonce, serverId);
-                    if (decCh) chDisplayName = new TextDecoder().decode(decCh);
+                    // Try all known keys (current + history) to handle key rotations
+                    chDisplayName = tryDecryptWithAllKeys(serverId, ch.encrypted_name, ch.name_nonce);
+                    // Fallback: try old key saved by rotateServerKey (owner-only legacy path)
+                    if (!chDisplayName) {
+                        var oldName = decryptWithOldKey(serverId, ch.encrypted_name, ch.name_nonce);
+                        if (oldName) chDisplayName = oldName;
+                    }
                 } catch (_) {}
             }
             div.dataset.name = chDisplayName;
@@ -5472,7 +5545,7 @@ async function loadChannels(serverId) {
                 delBtn.title = 'Delete channel';
                 delBtn.addEventListener('click', (e) => {
                     e.stopPropagation();
-                    deleteChannel(ch.id, chDisplayName);
+                    deleteChannel(ch.id, ch.name);
                 });
                 div.appendChild(delBtn);
             }
@@ -5584,6 +5657,20 @@ async function loadMessages(channelId, aroundMessageId) {
     }
 }
 
+// Try decrypting message content / snapshot / keys with ALL known server key versions
+function tryDecryptWithAllKeys(serverId, ciphertextB64, nonceB64) {
+    if (!serverId || !ciphertextB64 || !nonceB64) return null;
+    // getAllServerKeys returns [currentKey, ...historicalKeys]
+    var allKeys = E2ECrypto.getAllServerKeys(serverId);
+    for (var i = 0; i < allKeys.length; i++) {
+        try {
+            var dec = E2ECrypto.decryptMessage(ciphertextB64, nonceB64, allKeys[i]);
+            if (dec) return dec;
+        } catch (_) {}
+    }
+    return null;
+}
+
 async function appendMessage(msg) {
     const list = document.getElementById('message-list');
     const div = document.createElement('div');
@@ -5655,9 +5742,23 @@ async function appendMessage(msg) {
         } catch (_e) {}
     }
 
+    // Decrypt encrypted_sender_username from API response (not WS) so we always have a sender_username
+    if (!msg.sender_username && msg.encrypted_sender_username && msg.sender_username_nonce && currentServerId) {
+        try {
+            var _esuKey = E2ECrypto.getServerKey(currentServerId);
+            if (_esuKey) {
+                var _esuDec = E2ECrypto.decryptSenderUsername(msg.encrypted_sender_username, msg.sender_username_nonce, _esuKey);
+                if (_esuDec) msg.sender_username = _esuDec;
+            }
+        } catch (_e) {
+            console.warn('Failed to decrypt encrypted_sender_username:', _e);
+        }
+    }
+
     const _srvCache = msg.sender_id ? userDisplayNameCache[msg.sender_id] : null;
-    const displayName = msg.sender_display_name || (_srvCache && _srvCache.display_name) || msg.sender_username || '?';
-    const initial = displayName.charAt(0).toUpperCase();
+    const displayName = msg.sender_display_name || (_srvCache && _srvCache.display_name) || msg.sender_username;
+    const initial = displayName ? displayName.charAt(0).toUpperCase() : '';
+    var senderPicUrl = msg.sender_profile_pic ? getProfilePicUrl(msg.sender_profile_pic, msg.sender_id) : null;
     var senderPicUrl = msg.sender_profile_pic ? getProfilePicUrl(msg.sender_profile_pic, msg.sender_id) : null;
     let time = '';
     try {
@@ -5680,24 +5781,13 @@ async function appendMessage(msg) {
     let extraEmojis = null; // emoji refs embedded in message payload by sender
     if (msg.encrypted_content && msg.nonce && currentChannelId && currentServerId) {
         try {
-            // Try current key first, then all historical keys (after key rotation)
-            var decryptKey = E2ECrypto.getServerKey(currentServerId);
-            textContent = decryptKey ? E2ECrypto.decryptMessage(msg.encrypted_content, msg.nonce, decryptKey) : null;
-            if (!textContent) {
-                var allKeys = E2ECrypto.getAllServerKeys(currentServerId);
-                for (var ki = 0; ki < allKeys.length; ki++) {
-                    try {
-                        textContent = E2ECrypto.decryptMessage(msg.encrypted_content, msg.nonce, allKeys[ki]);
-                        if (textContent) { decryptKey = allKeys[ki]; break; }
-                    } catch (_k) {}
-                }
-            }
+            textContent = tryDecryptWithAllKeys(currentServerId, msg.encrypted_content, msg.nonce);
             // Verify message signature if present
 
             // Decrypt and cache sender's profile picture key from message
-            if (msg.encrypted_profile_key && msg.profile_key_nonce && msg.sender_profile_pic && msg.sender_id && decryptKey) {
+            if (msg.encrypted_profile_key && msg.profile_key_nonce && msg.sender_profile_pic && msg.sender_id && textContent) {
                 try {
-                    var decryptedPicKey = E2ECrypto.decryptMessage(msg.encrypted_profile_key, msg.profile_key_nonce, decryptKey);
+                    var decryptedPicKey = tryDecryptWithAllKeys(currentServerId, msg.encrypted_profile_key, msg.profile_key_nonce);
                     if (decryptedPicKey) {
                         profileKeyCache[msg.sender_id + ':' + msg.sender_profile_pic] = decryptedPicKey;
                         scheduleProfileKeySave();
@@ -5707,9 +5797,9 @@ async function appendMessage(msg) {
                 }
             }
             // Decrypt and cache sender's banner key from message
-            if (msg.encrypted_banner_key && msg.banner_key_nonce && msg.sender_id && decryptKey) {
+            if (msg.encrypted_banner_key && msg.banner_key_nonce && msg.sender_id && textContent) {
                 try {
-                    var decryptedBannerKey = E2ECrypto.decryptMessage(msg.encrypted_banner_key, msg.banner_key_nonce, decryptKey);
+                    var decryptedBannerKey = tryDecryptWithAllKeys(currentServerId, msg.encrypted_banner_key, msg.banner_key_nonce);
                     if (decryptedBannerKey) {
                         // Cache banner key with ':banner' suffix since the banner file_id
                         // is not included in the WS message (it's fetched from the profile API)
@@ -5793,8 +5883,7 @@ async function appendMessage(msg) {
         // Forward text preview
         if (forwardData.preview_content && forwardData.preview_nonce) {
             try {
-                var srcKey = forwardData.source_server_id ? E2ECrypto.getServerKey(forwardData.source_server_id) : null;
-                let previewText = srcKey ? E2ECrypto.decryptMessage(forwardData.preview_content, forwardData.preview_nonce, srcKey) : null;
+                let previewText = forwardData.source_server_id ? tryDecryptWithAllKeys(forwardData.source_server_id, forwardData.preview_content, forwardData.preview_nonce) : null;
                 let previewEmojis = null;
                 try {
                     const parsed = JSON.parse(previewText);
@@ -6464,6 +6553,16 @@ function handleEdit(messageId, msgDiv) {
                 console.error('DM edit encrypt failed:', e);
             }
         } else {
+        // Show the new text immediately (don't wait for WS echo)
+        if (oldText) {
+            oldText.innerHTML = '<span class="time-hover"></span>' + escapeHtml(newText);
+            oldText.style.display = '';
+        }
+        if (oldReply) oldReply.style.display = '';
+        if (oldForward) oldForward.style.display = '';
+        if (actionsEl) actionsEl.style.display = '';
+        textarea.remove();
+        btnRow.remove();
             // Channel edit: encrypt with server key and send as message_edit
             if (!currentChannelId || !currentServerId) return;
             if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -6501,6 +6600,14 @@ function handleEdit(messageId, msgDiv) {
                 console.error('Edit encrypt failed:', e);
             }
         }
+        // Show the new text immediately (don't wait for WS echo)
+        if (oldText) {
+            oldText.innerHTML = '<span class="time-hover"></span>' + escapeHtml(newText);
+            oldText.style.display = '';
+        }
+        if (oldReply) oldReply.style.display = '';
+        if (oldForward) oldForward.style.display = '';
+        if (actionsEl) actionsEl.style.display = '';
         textarea.remove();
         btnRow.remove();
         // Immediately update the local text with new content so the editor sees the change
@@ -6571,19 +6678,7 @@ async function handleEditedMessage(msg, mode) {
         // Try channel decryption: use the server key from currentServerId
         if (!decrypted && currentServerId) {
             try {
-                var editDecryptKey = E2ECrypto.getServerKey(currentServerId);
-                if (editDecryptKey) {
-                    decrypted = E2ECrypto.decryptMessage(msg.encrypted_content, msg.nonce, editDecryptKey);
-                }
-                if (!decrypted) {
-                    var editKeys = E2ECrypto.getAllServerKeys(currentServerId);
-                    for (var eki = 0; eki < editKeys.length; eki++) {
-                        try {
-                            decrypted = E2ECrypto.decryptMessage(msg.encrypted_content, msg.nonce, editKeys[eki]);
-                            if (decrypted) break;
-                        } catch (_ek) {}
-                    }
-                }
+                decrypted = tryDecryptWithAllKeys(currentServerId, msg.encrypted_content, msg.nonce);
             } catch (_e) {}
         }
 
@@ -6702,6 +6797,12 @@ async function handleEditedMessage(msg, mode) {
                 contentEl.insertAdjacentHTML('beforeend', '<span class="edited-label">(edited)</span>');
             }
         }
+
+        // Restore message-actions display (may have been hidden during edit)
+        var msgActions = existing.querySelector('.message-actions');
+        if (msgActions) {
+            msgActions.style.display = '';
+        }
     } catch (_) {}
 }
 
@@ -6742,17 +6843,10 @@ async function loadForwardChannels() {
         const chRes = await authFetch('/api/servers/' + sourceServerId + '/channels');
         const channels = await chRes.json();
         const server = servers.find(s => s.id === sourceServerId);
-        const serverName = server ? (server.displayName || '[encrypted]') : '[encrypted]';
+        const serverName = server ? server.name : 'Server';
         let html = '<div class="forward-server"><div class="forward-server-name">' + escapeHtml(serverName) + '</div>';
         for (const ch of channels) {
-            var chName = '[encrypted]';
-            if (ch.encrypted_name && ch.name_nonce) {
-                try {
-                    var dec = E2ECrypto.decryptWithAnyServerKey(ch.encrypted_name, ch.name_nonce, sourceServerId);
-                    if (dec) chName = new TextDecoder().decode(dec);
-                } catch (_) {}
-            }
-            html += '<div class="forward-channel-item" data-server-id="' + sourceServerId + '" data-server-name="' + escapeHtml(serverName) + '" data-channel-id="' + ch.id + '" data-channel-name="' + escapeHtml(chName) + '">' + escapeHtml(chName) + '</div>';
+            html += '<div class="forward-channel-item" data-server-id="' + sourceServerId + '" data-server-name="' + escapeHtml(serverName || '') + '" data-channel-id="' + ch.id + '" data-channel-name="' + escapeHtml(ch.name || '') + '">' + escapeHtml(ch.name || '(unnamed)') + '</div>';
         }
         html += '</div>';
         list.innerHTML = html || '<div style="color:#888">No channels found</div>';
@@ -6775,16 +6869,9 @@ async function loadAllForwardChannels() {
             const chRes = await authFetch('/api/servers/' + server.id + '/channels');
             if (!chRes.ok) continue;
             const channels = await chRes.json();
-            html += '<div class="forward-server"><div class="forward-server-name">' + escapeHtml(server.displayName || '[encrypted]') + '</div>';
+            html += '<div class="forward-server"><div class="forward-server-name">' + escapeHtml(server.name || '(unnamed)') + '</div>';
             for (const ch of channels) {
-                var fwdChName = '[encrypted]';
-                if (ch.encrypted_name && ch.name_nonce) {
-                    try {
-                        var fwdDec = E2ECrypto.decryptWithAnyServerKey(ch.encrypted_name, ch.name_nonce, server.id);
-                        if (fwdDec) fwdChName = new TextDecoder().decode(fwdDec);
-                    } catch (_) {}
-                }
-                html += '<div class="forward-channel-item" data-server-id="' + server.id + '" data-server-name="' + escapeHtml(server.displayName || '[encrypted]') + '" data-channel-id="' + ch.id + '" data-channel-name="' + escapeHtml(fwdChName) + '">' + escapeHtml(fwdChName) + '</div>';
+                html += '<div class="forward-channel-item" data-server-id="' + server.id + '" data-server-name="' + escapeHtml(server.name || '') + '" data-channel-id="' + ch.id + '" data-channel-name="' + escapeHtml(ch.name || '') + '">' + escapeHtml(ch.name || '(unnamed)') + '</div>';
             }
             html += '</div>';
         }
@@ -7178,6 +7265,7 @@ async function sendMessage() {
     }
 
     // Encrypt sender_username with server key so host can't identify the sender
+    // (P3 improvement — the encrypted sender_username is decrypted by recipients)
     try {
         if (encKey) {
             var encUsername = E2ECrypto.encryptSenderUsername(user.username, encKey);
@@ -7189,6 +7277,7 @@ async function sendMessage() {
     } catch (e) {
         console.warn('Failed to encrypt sender_username:', e);
     }
+
     ws.send(JSON.stringify(msgPayload));
 
     input.value = '';
@@ -7522,9 +7611,25 @@ function appendDmMessage(msg, kp, otherPublicKey) {
         } catch (_e) {}
     }
 
+    // Decrypt encrypted_sender_username from API response for DM messages
+    if (!msg.sender_username && msg.encrypted_sender_username && msg.sender_username_nonce && kp && otherPublicKey) {
+        try {
+            var _esuDmId = msg.dm_channel_id || currentDmChannelId;
+            if (_esuDmId) {
+                var _esuDmKey = E2ECrypto.getDmKey(_esuDmId, kp.privateKey, otherPublicKey);
+                if (_esuDmKey) {
+                    var _esuRaw = E2ECrypto.aeadDecrypt(msg.encrypted_sender_username, _esuDmKey, msg.sender_username_nonce);
+                    if (_esuRaw) msg.sender_username = new TextDecoder().decode(_esuRaw);
+                }
+            }
+        } catch (_e) {
+            console.warn('Failed to decrypt DM encrypted_sender_username:', _e);
+        }
+    }
+
     const _dmCache = msg.sender_id ? userDisplayNameCache[msg.sender_id] : null;
-    const displayName = msg.sender_display_name || (_dmCache && _dmCache.display_name) || msg.sender_username || '?';
-    const initial = displayName.charAt(0).toUpperCase();
+    const displayName = msg.sender_display_name || (_dmCache && _dmCache.display_name) || msg.sender_username;
+    const initial = displayName ? displayName.charAt(0).toUpperCase() : '';
     var senderPicUrl = msg.sender_profile_pic ? getProfilePicUrl(msg.sender_profile_pic, msg.sender_id) : null;
     var senderColor = msg.sender_username_color || (_dmCache && _dmCache.username_color) || null;
     var senderBorderColor = msg.sender_username_border_color || (_dmCache && _dmCache.username_border_color) || null;
@@ -7963,6 +8068,7 @@ async function sendDmMessage() {
     }
 
     // Encrypt sender_username with DM key so host can't identify the sender
+    // (consistent with sendMessage which uses encryptSenderUsername + server key)
     try {
         if (kp && otherPublicKey) {
             var dmKey = E2ECrypto.getDmKey(currentDmChannelId, kp.privateKey, otherPublicKey);
@@ -7977,6 +8083,7 @@ async function sendDmMessage() {
     } catch (e) {
         console.warn('Failed to encrypt DM sender_username:', e);
     }
+
     ws.send(JSON.stringify(msgPayload));
 
     input.value = '';
@@ -8285,8 +8392,8 @@ async function createServer() {
         // Encrypt server name with channelKey
         const encName = E2ECrypto.aeadEncrypt(name, channelKey);
 
-        // Also encrypt the default "General" channel name
-        const encChName = E2ECrypto.aeadEncrypt('General', channelKey);
+        // Encrypt the initial channel name "general" with the same channel key
+        const encChName = E2ECrypto.aeadEncrypt('general', channelKey);
 
         // Generate invite code client-side, send only the hash
         const inviteCode = generateCode(8);
@@ -8312,7 +8419,6 @@ async function createServer() {
 
             // Save the channel key locally
             E2ECrypto.saveServerKey(serverData.id, channelKey);
-            scheduleKeyBlobSave();
 
             const identity = E2ECrypto.getIdentityKeyPair();
             if (identity) {
@@ -8364,15 +8470,16 @@ async function joinServer() {
             hideModal('join-server-modal');
             await loadServers();
 
-            // Retry fetching the server key (owner may need to upload it first)
-            for (let attempt = 0; attempt < 10; attempt++) {
+            // Wait briefly then retry fetching the server key.
+            // The owner receives member_joined via WS and uploads the key for us.
+            // The first attempt is via loadServers() above; give the owner ~500ms to process
+            // before starting the retry loop.
+            await new Promise(r => setTimeout(r, 500));
+            for (let attempt = 0; attempt < 15; attempt++) {
                 const ok = await fetchAndDecryptServerKey(serverData.id);
                 if (ok) break;
-                await new Promise(r => setTimeout(r, 1500));
+                await new Promise(r => setTimeout(r, 1000));
             }
-
-            // Re-fetch server list in case the owner rotated keys and re-encrypted names
-            await loadServers();
 
             // Upload per-conversation profile data for the new server
             try { await uploadCurrentProfileToConversations(); } catch (_) {}
@@ -8390,10 +8497,11 @@ async function joinServer() {
                     const serverData2 = await res2.json();
                     hideModal('join-server-modal');
                     await loadServers();
-                    for (let attempt = 0; attempt < 10; attempt++) {
+                    await new Promise(r => setTimeout(r, 500));
+                    for (let attempt = 0; attempt < 15; attempt++) {
                         const ok = await fetchAndDecryptServerKey(serverData2.id);
                         if (ok) break;
-                        await new Promise(r => setTimeout(r, 1500));
+                        await new Promise(r => setTimeout(r, 1000));
                     }
                     selectServer(serverData2.id);
                     return;
@@ -8564,6 +8672,7 @@ async function createChannel() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
+                name,
                 encrypted_name: encName.ciphertext,
                 name_nonce: encName.nonce,
             }),
@@ -10309,9 +10418,6 @@ function extractRawMessageText(textEl) {
             if (node.classList && node.classList.contains('time-hover')) {
                 // Skip time-hover spans
                 continue;
-            } else if (node.classList && node.classList.contains('edited-label')) {
-                // Skip (edited) label
-                continue;
             } else if (node.classList && node.classList.contains('emoji-inline')) {
                 // Use alt text which contains :emoji_name:
                 result += node.getAttribute('alt') || '';
@@ -11653,8 +11759,8 @@ function renderStickerGrid(container) {
         grid.id = 'user-sticker-grid';
         container.appendChild(grid);
 
-        // Filter out GIFs (they have their own tab) and emojis (they have their own tab)
-        const nonGifStickers = stickers.filter(s => !/gif/i.test(s.mime_type) && s.mime_type !== 'image/emoji');
+        // Filter out GIFs — they have their own tab
+        const nonGifStickers = stickers.filter(s => !/gif/i.test(s.mime_type));
         renderStickerItems(grid, nonGifStickers);
 
         document.getElementById('sticker-search-input')?.addEventListener('input', (e) => {
@@ -13026,27 +13132,18 @@ async function loadMyProfile() {
         }
         myProfile = data;
         
-        // Cache own profile data so own messages get display name/color/glow on page refresh
-        if (user && user.id) {
-            if (!userDisplayNameCache[user.id]) userDisplayNameCache[user.id] = {};
-            if (data.display_name) userDisplayNameCache[user.id].display_name = data.display_name;
-            if (data.username_color) userDisplayNameCache[user.id].username_color = data.username_color;
-            if (data.username_border_color) userDisplayNameCache[user.id].username_border_color = data.username_border_color;
-            if (data.profile_picture_file_id) userDisplayNameCache[user.id].profile_picture_file_id = data.profile_picture_file_id;
-            updateExistingMessageStyles(user.id);
-        }
+        // Cache own display name/colors in userDisplayNameCache so DM messages
+        // from self render with the display name instead of falling back to username.
+        if (!userDisplayNameCache[user.id]) userDisplayNameCache[user.id] = {};
+        if (data.display_name) userDisplayNameCache[user.id].display_name = data.display_name;
+        if (data.username_color) userDisplayNameCache[user.id].username_color = data.username_color;
+        if (data.username_border_color) userDisplayNameCache[user.id].username_border_color = data.username_border_color;
         
         // Update sidebar footer
         updateSidebarFooter();
         
         // Update settings UI if open
         updateProfileSettingsUI(data);
-        
-        // Upload profile_data_key to server-side API for recovery after cookie clear
-        // Fire and forget — ensures the key is backed up server-side
-        setTimeout(function() {
-            uploadProfileDataKey();
-        }, 100);
         
         // Now that profile is loaded, broadcast our keys to all DM conversations
         if (dmConversations && dmConversations.length > 0) {
@@ -13119,35 +13216,8 @@ function updateProfileSettingsUI(data) {
     }
 }
 
-// Save display name
-async function saveDisplayName() {
-    var input = document.getElementById('profile-display-name-input');
-    var status = document.getElementById('profile-save-status');
-    if (!input) return;
-    var name = input.value.trim();
-    if (name.length > 50) {
-        if (status) { status.textContent = 'Display name too long (max 50 chars)'; status.className = 'profile-save-status error'; }
-        return;
-    }
-    try {
-        var res = await authFetch('/api/profile', {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ display_name: name })
-        });
-        if (!res.ok) {
-            var err = await res.json();
-            if (status) { status.textContent = err.error || 'Failed to save'; status.className = 'profile-save-status error'; }
-            return;
-        }
-        if (status) { status.textContent = 'Display name saved!'; status.className = 'profile-save-status'; }
-        setTimeout(function () { if (status) status.textContent = ''; }, 3000);
-        await loadMyProfile();
-        await loadDmConversations();
-    } catch (e) {
-        if (status) { status.textContent = 'Failed to connect to server'; status.className = 'profile-save-status error'; }
-    }
-}
+// Save display name — now handled via encrypted_profile_data in saveProfile()
+// This legacy function is kept as a stub to avoid breaking callers that reference it.
 
 // ===== Profile Picture Crop Modal =====
 let profileCropState = {
@@ -13485,35 +13555,8 @@ async function removeProfilePic() {
 }
 
 // Wire up profile settings event handlers
-// Save username color
-async function saveUsernameColor() {
-    var colorPicker = document.getElementById('username-color-picker');
-    var status = document.getElementById('profile-save-status');
-    var color = colorPicker ? colorPicker.value : '#4fc3f7';
-    try {
-        var res = await authFetch('/api/profile', {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ username_color: color })
-        });
-        if (!res.ok) {
-            var err = await res.json();
-            if (status) { status.textContent = err.error || 'Failed to save color'; status.className = 'profile-save-status error'; }
-            return;
-        }
-        if (status) { status.textContent = 'Username color saved!'; status.className = 'profile-save-status'; }
-        setTimeout(function () { if (status) status.textContent = ''; }, 3000);
-        await loadMyProfile();
-        // Regenerate glow options with the saved color
-        var borderColor = null;
-        if (myProfile && myProfile.username_border_color) {
-            borderColor = myProfile.username_border_color;
-        }
-        renderBorderGlowOptions(color, borderColor);
-    } catch (e) {
-        if (status) { status.textContent = 'Failed to connect to server'; status.className = 'profile-save-status error'; }
-    }
-}
+// Save username color — now handled via encrypted_profile_data in saveProfile()
+// This legacy function is kept as a stub to avoid breaking callers that reference it.
 
 // Render the 10 border glow option swatches in the settings
 function renderBorderGlowOptions(baseColor, selectedBorderColor) {
@@ -13573,38 +13616,8 @@ function renderBorderGlowOptions(baseColor, selectedBorderColor) {
     }
 }
 
-// Save the selected border glow color
-async function saveBorderGlowColor() {
-    var previewEl = document.getElementById('border-glow-preview');
-    var status = document.getElementById('profile-save-status');
-    var selectedGlow = previewEl ? previewEl.dataset.selectedGlow : null;
-    if (!selectedGlow) {
-        // Try to find selected button
-        var selectedBtn = document.querySelector('.glow-option-btn.selected');
-        selectedGlow = selectedBtn ? selectedBtn.dataset.glow : null;
-    }
-    if (!selectedGlow) {
-        if (status) { status.textContent = 'Select a glow option first'; status.className = 'profile-save-status error'; }
-        return;
-    }
-    try {
-        var res = await authFetch('/api/profile', {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ username_border_color: selectedGlow })
-        });
-        if (!res.ok) {
-            var err = await res.json();
-            if (status) { status.textContent = err.error || 'Failed to save glow'; status.className = 'profile-save-status error'; }
-            return;
-        }
-        if (status) { status.textContent = 'Glow color saved!'; status.className = 'profile-save-status'; }
-        setTimeout(function () { if (status) status.textContent = ''; }, 3000);
-        await loadMyProfile();
-    } catch (e) {
-        if (status) { status.textContent = 'Failed to connect to server'; status.className = 'profile-save-status error'; }
-    }
-}
+// Save the selected border glow color — now handled via encrypted_profile_data in saveProfile()
+// This legacy function is kept as a stub to avoid breaking callers that reference it.
 
 function setupProfileSettings() {
     var saveBtn = document.getElementById('profile-save-name-btn');
@@ -14452,59 +14465,6 @@ async function verifyStoredPassword() {
     return null;
 }
 
-// Upload profile_data_key to server-side API for recovery after cookie clear
-async function uploadProfileDataKey() {
-    var pdKeyB64 = profileKeyCache[user.id + ':profile_data_key'];
-    if (!pdKeyB64) return;
-    try {
-        var identity = E2ECrypto.getIdentityKeyPair();
-        if (!identity) return;
-        // Encrypt the profile_data_key with identity key (same as encrypted_profile_data_key format)
-        var encryptedKey = E2ECrypto.encodeEncryptedFileKey(pdKeyB64, identity.privateKey);
-        var parts = encryptedKey.split(':');
-        if (parts.length !== 2) return;
-        await authFetch('/api/profile/data-key', {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ encrypted_key: parts[1], nonce: parts[0] }),
-        });
-    } catch (e) {
-        console.warn('Failed to upload profile data key:', e);
-    }
-}
-
-async function fetchProfileDataKeyFromServer(userId) {
-    try {
-        var res = await authFetch('/api/profile/data-key/' + encodeURIComponent(userId));
-        if (!res.ok) return null;
-        var data = await res.json();
-        if (!data.encrypted_key || !data.nonce) return null;
-        var identity = E2ECrypto.getIdentityKeyPair();
-        if (!identity) return null;
-        // Reconstruct the nonce:ciphertext format that decodeEncryptedFileKey expects
-        var combined = data.nonce + ':' + data.encrypted_key;
-        var decKeyB64 = E2ECrypto.decodeEncryptedFileKey(combined, identity.privateKey);
-        if (!decKeyB64) return null;
-        return decKeyB64;
-    } catch (e) {
-        console.warn('Failed to fetch profile data key for ' + userId + ':', e);
-        return null;
-    }
-}
-
-async function recoverProfileDataKey() {
-    if (!user || !user.id) return;
-    // If we already have the key cached, no need to recover
-    if (profileKeyCache[user.id + ':profile_data_key']) return;
-    var decKeyB64 = await fetchProfileDataKeyFromServer(user.id);
-    if (decKeyB64) {
-        profileKeyCache[user.id + ':profile_data_key'] = decKeyB64;
-        scheduleProfileKeySave();
-        // Re-decrypt own profile data now that we have the key
-        await loadMyProfile();
-    }
-}
-
 async function saveProfile() {
     var statusEl = document.getElementById('profile-edit-status');
     if (!statusEl) return;
@@ -14566,12 +14526,6 @@ async function saveProfile() {
         
         // Build the encrypted_profile_data as nonce:ciphertext (same format as encodeEncryptedFileKey so existing code works)
         var encryptedProfileData = encrypted.nonce + ':' + encrypted.ciphertext;
-        
-        // Upload profile_data_key to server-side API for recovery after cookie clear
-        // Fire and forget — don't block the save response
-        setTimeout(function() {
-            uploadProfileDataKey();
-        }, 100);
         
         // Build API request — send ONLY encrypted data + encrypted key.
         // No plaintext profile fields are sent to the server.

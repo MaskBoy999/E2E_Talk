@@ -111,10 +111,41 @@ document.addEventListener('DOMContentLoaded', () => {
         setLoading(loginForm, true);
 
         try {
+            // Step 1: Fetch encrypted hash_key from server
+            let hashKeyBytes = null;
+            try {
+                const paramsRes = await fetch('/api/auth-params/' + encodeURIComponent(username));
+                if (paramsRes.ok) {
+                    const params = await paramsRes.json();
+                    if (params.encrypted_hash_key && params.hash_key_salt && params.hash_key_nonce) {
+                        const hashKeyB64 = E2ECrypto.decryptWithPassword(
+                            params.encrypted_hash_key, password,
+                            params.hash_key_salt, params.hash_key_nonce
+                        );
+                        if (hashKeyB64) {
+                            hashKeyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(hashKeyB64));
+                            // Cache for reauth
+                            localStorage.setItem('e2e_auth_key', hashKeyB64);
+                        }
+                    }
+                }
+            } catch (_) {}
+
+            // Step 2: Determine password to send (hashed for new users, raw for legacy)
+            var loginPassword;
+            if (hashKeyBytes) {
+                loginPassword = E2ECrypto.hmacHex(hashKeyBytes, password);
+            } else {
+                // Legacy fallback: auth-params not available (user registered before
+                // client-side hashing). Send raw password — server detects Argon2 hash.
+                loginPassword = password;
+            }
+
+            // Step 3: Attempt login
             const res = await fetch('/api/login', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username, password })
+                body: JSON.stringify({ username, password: loginPassword })
             });
 
             const data = await res.json();
@@ -290,7 +321,20 @@ document.addEventListener('DOMContentLoaded', () => {
         setLoading(registerForm, true);
 
         try {
-            // STEP 1: Fetch the server's HMAC key BEFORE computing friend_code_hash
+            // STEP 1: Generate random hash_key (32 bytes) for client-side password hashing
+            // The hash_key is encrypted with the raw password and stored on the server.
+            // On login, the client fetches the encrypted hash_key, decrypts it with the
+            // raw password, derives the pre-hashed password, and sends the hash.
+            // The server never sees the raw password.
+            const hashKey = E2ECrypto.randomBytes(32);
+            const hashKeyB64 = E2ECrypto.arrayBufferToBase64(hashKey);
+            const encryptedHashKey = E2ECrypto.encryptWithPassword(hashKeyB64, password);
+            const hashedPassword = E2ECrypto.hmacHex(hashKey, password);
+
+            // Cache for later use (reauth, etc.)
+            localStorage.setItem('e2e_auth_key', hashKeyB64);
+
+            // STEP 2: Fetch the server's HMAC key BEFORE computing friend_code_hash
             // This ensures we always use HMAC-SHA256 (not plain SHA-256 fallback)
             let hmacKey = null;
             try {
@@ -324,7 +368,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    username, password,
+                    // Send the pre-hashed password (server never sees raw password)
+                    username, password: hashedPassword,
+                    // Hash_key escrow: encrypted with raw password via Argon2id + AEAD
+                    encrypted_hash_key: encryptedHashKey.encrypted_private_key,
+                    hash_key_salt: encryptedHashKey.salt,
+                    hash_key_nonce: encryptedHashKey.nonce,
                     identity_public_key: publicKeyB64,
                     friend_code_hash: friendCodeHash,
                     encrypted_friend_code: encryptedFC.encrypted_private_key,

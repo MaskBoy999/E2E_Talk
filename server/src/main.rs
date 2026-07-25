@@ -199,6 +199,7 @@ async fn main() {
     }
 
     let app = Router::new()
+        .route("/api/auth-params/{username}", get(handlers::get_auth_params))
         .route("/api/register", post(handlers::register))
         .route("/api/login", post(handlers::login))
         .route("/api/servers", get(handlers::list_servers).post(handlers::create_server))
@@ -229,6 +230,9 @@ async fn main() {
         // matching literal path segments as parameters and returning 405.
         .route("/api/profile/data-key", put(handlers::save_profile_data_key))
         .route("/api/profile/data-key/{user_id}", get(handlers::get_profile_data_key))
+        .route("/api/profile/data-key/shared", put(handlers::save_shared_profile_data_key))
+        .route("/api/profile/data-key/shared/batch", post(handlers::get_shared_profile_data_keys_batch))
+        .route("/api/profile/data-key/shared/{target_type}/{target_id}", get(handlers::get_shared_profile_data_keys).delete(handlers::delete_shared_profile_data_key))
         .route("/api/profile", patch(handlers::update_profile))
         .route("/api/profile/{user_id}", get(handlers::get_profile))
         .route("/api/profile/conversation", put(handlers::upsert_conversation_profile))

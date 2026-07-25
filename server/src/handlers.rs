@@ -3,7 +3,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::{
-    extract::{Json, Path, State},
+    extract::{Json, Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
 };
@@ -169,7 +169,7 @@ fn extract_admin_token(headers: &HeaderMap) -> Result<(), (StatusCode, Json<serd
 #[derive(Deserialize)]
 pub struct RegisterRequest {
     pub username: String,
-    pub password: String,
+    pub password: String,  // Client-computed hash: HMAC-SHA256(hash_key, raw_password)
     pub identity_public_key: Option<String>,
     pub friend_code_hash: Option<String>,
     pub encrypted_friend_code: Option<String>,
@@ -179,6 +179,10 @@ pub struct RegisterRequest {
     pub encrypted_identity_priv: Option<String>,
     pub escrow_salt: Option<String>,
     pub escrow_nonce: Option<String>,
+    // Client-side password hash_key escrow (Argon2id-encrypted, server never sees raw password)
+    pub encrypted_hash_key: Option<String>,
+    pub hash_key_salt: Option<String>,
+    pub hash_key_nonce: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -213,30 +217,22 @@ pub async fn register(
             .into_response();
     }
 
-    if req.password.len() < 6 {
+    if req.password.len() < 64 {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Password must be at least 6 characters"})),
+            Json(serde_json::json!({"error": "Password hash required (client-side hashing)"})),
         )
             .into_response();
     }
 
-    let password_hash = match auth::hash_password(&req.password) {
-        Ok(h) => h,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e})),
-            )
-                .into_response();
-        }
-    };
+    // Password is already client-computed hash. Store it as-is.
+    let password_hash = &req.password;
 
     let identity_key_bytes = req.identity_public_key.as_ref().and_then(|k| {
         base64::engine::general_purpose::STANDARD.decode(k).ok()
     });
 
-    let user = match state.db.create_user(&req.username, &password_hash, identity_key_bytes.as_deref(), req.friend_code_hash.as_deref(), req.encrypted_friend_code.as_deref(), req.friend_code_salt.as_deref(), req.friend_code_nonce.as_deref()) {
+    let user = match state.db.create_user(&req.username, &password_hash, identity_key_bytes.as_deref(), req.friend_code_hash.as_deref(), req.encrypted_friend_code.as_deref(), req.friend_code_salt.as_deref(), req.friend_code_nonce.as_deref(), req.encrypted_hash_key.as_deref(), req.hash_key_salt.as_deref(), req.hash_key_nonce.as_deref()) {
         Ok(u) => u,
         Err(e) => {
             return (
@@ -327,16 +323,8 @@ pub async fn login(
         }
     };
 
-    let valid = match auth::verify_password(&req.password, &password_hash) {
-        Ok(v) => v,
-        Err(_) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": "Wrong username or password"})),
-            )
-                .into_response();
-        }
-    };
+    // Client-computed hash (HMAC-SHA256) — direct comparison
+    let valid = req.password == password_hash;
 
     if !valid {
         return (
@@ -391,6 +379,30 @@ pub async fn login(
             "profile_picture_file_id": profile_pic
         }
     }))).into_response()
+}
+
+// --- Auth-Params (pre-login hash_key fetch) ---
+
+/// GET /api/auth-params/:username — returns encrypted_hash_key + salt + nonce
+/// so the client can decrypt the hash_key with the raw password, derive the
+/// pre-hashed password, and submit it to /api/login.
+/// No authentication required (these are already encrypted with the user's password).
+pub async fn get_auth_params(
+    Path(username): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match state.db.get_auth_params(&username) {
+        Ok((encrypted_hash_key, hash_key_salt, hash_key_nonce)) => {
+            (StatusCode::OK, Json(serde_json::json!({
+                "encrypted_hash_key": encrypted_hash_key,
+                "hash_key_salt": hash_key_salt,
+                "hash_key_nonce": hash_key_nonce,
+            }))).into_response()
+        }
+        Err(_) => {
+            (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "User not found"}))).into_response()
+        }
+    }
 }
 
 // --- Re-authenticate ---
@@ -507,16 +519,8 @@ pub async fn reauth(
         }
     };
 
-    let valid = match auth::verify_password(&req.password, &password_hash) {
-        Ok(v) => v,
-        Err(_) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": "Wrong password"})),
-            )
-                .into_response();
-        }
-    };
+    // Client-computed hash (HMAC-SHA256) — direct comparison
+    let valid = req.password == password_hash;
 
     if !valid {
         return (
@@ -691,6 +695,229 @@ pub async fn save_user_key_blob(
 pub struct SaveProfileDataKeyRequest {
     pub encrypted_key: String,
     pub nonce: String,
+}
+
+// --- Shared Profile Data Keys (pre-encrypted for friends/server-mates) ---
+
+#[derive(Deserialize)]
+pub struct SaveSharedProfileDataKeyRequest {
+    pub target_type: String,  // 'dm_channel' or 'server'
+    pub target_id: String,
+    pub encrypted_key: String,
+    pub nonce: String,
+}
+
+/// PUT /api/profile/data-key/shared
+/// Uploads a profile_data_key pre-encrypted with a DM channel or server key.
+/// Only the owner can upload their own key.
+pub async fn save_shared_profile_data_key(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SaveSharedProfileDataKeyRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    // Validate target_type
+    if req.target_type != "dm_channel" && req.target_type != "server" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid target_type, must be 'dm_channel' or 'server'"})),
+        )
+            .into_response();
+    }
+
+    match state.db.save_shared_profile_data_key(
+        &user_id,
+        &req.target_type,
+        &req.target_id,
+        &req.encrypted_key,
+        &req.nonce,
+    ) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/profile/data-key/shared/{target_type}/{target_id}
+/// Fetches all shared profile_data_keys for a given DM channel or server.
+/// The caller must be a member of the target DM/server.
+pub async fn get_shared_profile_data_keys(
+    Path((target_type, target_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let caller_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    // Validate target_type
+    if target_type != "dm_channel" && target_type != "server" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid target_type, must be 'dm_channel' or 'server'"})),
+        )
+            .into_response();
+    }
+
+    // Verify caller is a member of the target DM/server
+    let is_member = if target_type == "dm_channel" {
+        state.db.is_dm_member(&target_id, &caller_id).unwrap_or(false)
+    } else {
+        state.db.is_member_of_server(&caller_id, &target_id).unwrap_or(false)
+    };
+
+    if !is_member {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Not a member of this DM channel or server"})),
+        )
+            .into_response();
+    }
+
+    match state.db.get_shared_profile_data_keys(&target_type, &target_id) {
+        Ok(keys) => {
+            // Return as an array of objects
+            let result: Vec<serde_json::Value> = keys
+                .into_iter()
+                .map(|(owner_user_id, encrypted_key, nonce)| {
+                    serde_json::json!({
+                        "owner_user_id": owner_user_id,
+                        "encrypted_key": encrypted_key,
+                        "nonce": nonce,
+                    })
+                })
+                .collect();
+            (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
+// --- Batch Shared Profile Data Keys ---
+
+#[derive(Deserialize)]
+pub struct BatchSharedKeysRequest {
+    pub targets: Vec<BatchTarget>,
+}
+
+#[derive(Deserialize)]
+pub struct BatchTarget {
+    pub target_type: String,
+    pub target_id: String,
+}
+
+/// POST /api/profile/data-key/shared/batch
+/// Accepts multiple (target_type, target_id) pairs and returns all shared keys
+/// grouped by a composite key "{target_type}:{target_id}".
+/// The caller must be a member of each target DM/server.
+pub async fn get_shared_profile_data_keys_batch(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BatchSharedKeysRequest>,
+) -> impl IntoResponse {
+    let caller_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    if req.targets.is_empty() {
+        return (StatusCode::OK, Json(serde_json::json!([]))).into_response();
+    }
+
+    // Validate and check membership for all targets in parallel
+    let mut valid_targets: Vec<(String, String)> = Vec::new();
+    for target in &req.targets {
+        if target.target_type != "dm_channel" && target.target_type != "server" {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("Invalid target_type '{}', must be 'dm_channel' or 'server'", target.target_type)})),
+            )
+                .into_response();
+        }
+        let is_member = if target.target_type == "dm_channel" {
+            state.db.is_dm_member(&target.target_id, &caller_id).unwrap_or(false)
+        } else {
+            state.db.is_member_of_server(&caller_id, &target.target_id).unwrap_or(false)
+        };
+        if !is_member {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": format!("Not a member of {} {}", target.target_type, target.target_id)})),
+            )
+                .into_response();
+        }
+        valid_targets.push((target.target_type.clone(), target.target_id.clone()));
+    }
+
+    match state.db.get_shared_profile_data_keys_batch(&valid_targets) {
+        Ok(results) => {
+            // Return as a map: { "{target_type}:{target_id}": [{ owner_user_id, encrypted_key, nonce }, ...] }
+            let mut map = serde_json::Map::new();
+            for (composite, keys) in results {
+                let entries: Vec<serde_json::Value> = keys
+                    .into_iter()
+                    .map(|(owner_user_id, encrypted_key, nonce)| {
+                        serde_json::json!({
+                            "owner_user_id": owner_user_id,
+                            "encrypted_key": encrypted_key,
+                            "nonce": nonce,
+                        })
+                    })
+                    .collect();
+                map.insert(composite, serde_json::Value::Array(entries));
+            }
+            (StatusCode::OK, Json(serde_json::Value::Object(map))).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
+/// DELETE /api/profile/data-key/shared/{target_type}/{target_id}
+/// Removes the caller's shared profile_data_key for the given target.
+/// Used when leaving a server or unfriending someone to clean up stale keys.
+pub async fn delete_shared_profile_data_key(
+    Path((target_type, target_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    // Validate target_type
+    if target_type != "dm_channel" && target_type != "server" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid target_type, must be 'dm_channel' or 'server'"})),
+        )
+            .into_response();
+    }
+
+    match state.db.delete_shared_profile_data_key(&user_id, &target_type, &target_id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
 }
 
 pub async fn save_profile_data_key(
@@ -1122,6 +1349,17 @@ pub async fn join_server(
     });
     if let Ok(members) = state.db.get_server_members(&server.id) {
         let _ = state.ws_manager.broadcast_to_users(&members, &join_msg.to_string()).await;
+
+        // Save pending key_needed events for offline members so the new member gets
+        // the server key when someone reconnects (handles the case where all members
+        // are offline at join time)
+        let new_user_id = user_id.clone();
+        let sid = server.id.clone();
+        for mid in &members {
+            if *mid != new_user_id && !state.ws_manager.is_user_connected(mid).await {
+                let _ = state.db.save_pending_event(mid, &sid, "key_needed", &new_user_id);
+            }
+        }
     }
 
     (
@@ -1178,6 +1416,10 @@ pub async fn kick_member(
                 broadcast_users.push(req.user_id.clone());
                 let _ = state.ws_manager.broadcast_to_users(&broadcast_users, &kick_msg.to_string()).await;
             }
+            // If owner is offline, save a pending event so they rotate the key on reconnect
+            if !state.ws_manager.is_user_connected(&caller_id).await {
+                let _ = state.db.save_pending_event(&caller_id, &server_id, "member_kicked", &req.user_id);
+            }
             (
                 StatusCode::OK,
                 Json(serde_json::json!({"ok": true})),
@@ -1204,6 +1446,8 @@ pub async fn leave_server(
 
     // Collect members BEFORE leaving (owner case deletes the server from DB, making get_server_members fail)
     let server_members = state.db.get_server_members(&server_id).ok();
+    // Find the owner ID before leave_server potentially deletes the server
+    let owner_id = state.db.get_server_owner_id(&server_id).ok();
 
     match state.db.leave_server(&server_id, &user_id) {
         Ok(server_deleted) => {
@@ -1224,7 +1468,16 @@ pub async fn leave_server(
                     "user_id": user_id,
                 });
                 if let Ok(members) = state.db.get_server_members(&server_id) {
-                    let _ = state.ws_manager.broadcast_to_users(&members, &leave_msg.to_string()).await;
+                    // Also broadcast to the leaving user so their UI updates in all tabs
+                    let mut broadcast_users = members.clone();
+                    broadcast_users.push(user_id.clone());
+                    let _ = state.ws_manager.broadcast_to_users(&broadcast_users, &leave_msg.to_string()).await;
+                }
+                // If owner is offline, save a pending event so they rotate the key on reconnect
+                if let Some(ref oid) = owner_id {
+                    if oid != &user_id && !state.ws_manager.is_user_connected(oid).await {
+                        let _ = state.db.save_pending_event(oid, &server_id, "member_left", &user_id);
+                    }
                 }
             }
             (
@@ -1285,6 +1538,10 @@ pub async fn ban_member(
                 let mut broadcast_users = members.clone();
                 broadcast_users.push(req.user_id.clone());
                 let _ = state.ws_manager.broadcast_to_users(&broadcast_users, &ban_msg.to_string()).await;
+            }
+            // If owner is offline, save a pending event so they rotate the key on reconnect
+            if !state.ws_manager.is_user_connected(&caller_id).await {
+                let _ = state.db.save_pending_event(&caller_id, &server_id, "member_banned", &req.user_id);
             }
             (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
         }
@@ -1461,6 +1718,7 @@ pub async fn list_messages(
     Path(channel_id): Path<String>,
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let user_id = match extract_user(&headers, &state) {
         Ok(id) => id,
@@ -1486,14 +1744,28 @@ pub async fn list_messages(
             .into_response();
     }
 
-    let messages = match state.db.list_messages(&channel_id, 100) {
-        Ok(m) => m,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e})),
-            )
-                .into_response();
+    let limit: i64 = params.get("limit").and_then(|v| v.parse().ok()).unwrap_or(50);
+    let before = params.get("before").map(|s| s.as_str());
+
+    let messages = if let Some(ts) = before {
+        match state.db.list_messages_before(&channel_id, ts, limit) {
+            Ok(m) => m,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": e})),
+                ).into_response();
+            }
+        }
+    } else {
+        match state.db.list_messages(&channel_id, limit) {
+            Ok(m) => m,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": e})),
+                ).into_response();
+            }
         }
     };
 
@@ -1508,7 +1780,7 @@ pub async fn list_messages(
             serde_json::json!({
                 "id": m.id,
                 "sender_id": m.sender_id,
-                "sender_username": m.sender_username,
+                "sender_id_hash": m.sender_id_hash,
                 "encrypted_sender_username": m.encrypted_sender_username,
                 "sender_username_nonce": m.sender_username_nonce,
                 "sender_profile_pic": m.sender_profile_pic,
@@ -1587,7 +1859,7 @@ pub async fn list_messages_around(
             serde_json::json!({
                 "id": m.id,
                 "sender_id": m.sender_id,
-                "sender_username": m.sender_username,
+                "sender_id_hash": m.sender_id_hash,
                 "encrypted_sender_username": m.encrypted_sender_username,
                 "sender_username_nonce": m.sender_username_nonce,
                 "sender_profile_pic": m.sender_profile_pic,
@@ -1766,6 +2038,32 @@ pub async fn get_server_keys(
                     })
                 })
                 .collect();
+
+            // If this user has no key entries but other users do, broadcast key_needed
+            // so any online member can upload the key for this user
+            let user_has_keys = keys.iter().any(|(uid, _, _, _, _)| uid == &user_id);
+            if !user_has_keys && !keys.is_empty() {
+                if let Ok(members) = state.db.get_server_members(&server_id) {
+                    let need_msg = serde_json::json!({
+                        "type": "key_needed",
+                        "server_id": server_id,
+                        "user_id": user_id,
+                    });
+                    let _ = state.ws_manager.broadcast_to_users(&members, &need_msg.to_string()).await;
+
+                    // Also save pending key_needed for offline members as a safety net
+                    // (the join_server handler also saves these, but this covers edge cases
+                    // where the user fetches keys before any member has reconnected)
+                    let need_uid = user_id.clone();
+                    let need_sid = server_id.clone();
+                    for mid in &members {
+                        if !state.ws_manager.is_user_connected(mid).await {
+                            let _ = state.db.save_pending_event(mid, &need_sid, "key_needed", &need_uid);
+                        }
+                    }
+                }
+            }
+
             (StatusCode::OK, Json(serde_json::json!(result))).into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
@@ -1804,12 +2102,7 @@ pub async fn rotate_server_keys(
             .into_response();
     }
 
-    // Delete old keys
-    if let Err(e) = state.db.delete_server_keys(&server_id) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
-    }
-
-    // Save new keys
+    // Save new keys (old keys are preserved so new members can decrypt old messages)
     for entry in &req.encrypted_keys {
         let encrypted_key = match base64::engine::general_purpose::STANDARD.decode(&entry.encrypted_key) {
             Ok(b) => b,
@@ -2130,8 +2423,6 @@ pub async fn admin_list_messages(
             serde_json::json!({
                 "id": m.id,
                 "channel_id": m.channel_id,
-                "sender_id": m.sender_id,
-                "sender_username": m.sender_username,
                 "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
                 "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
                 "timestamp": m.timestamp,
@@ -2141,6 +2432,7 @@ pub async fn admin_list_messages(
                 "profile_key_nonce": m.profile_key_nonce,
                 "encrypted_banner_key": m.encrypted_banner_key,
                 "banner_key_nonce": m.banner_key_nonce,
+                "sender_id_hash": m.sender_id_hash,
             })
         })
         .collect();
@@ -2268,12 +2560,14 @@ pub async fn admin_list_dm_messages(
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     };
-    let result: Vec<serde_json::Value> = rows.iter().map(|(id, dm_id, sid, sname, enc, nonce, ts, _kv, _snap, _snap_nonce, _file_key, _file_key_nonce)| {
+    let result: Vec<serde_json::Value> = rows.iter().map(|(id, dm_id, sid, _sname, enc, nonce, ts, _kv, _snap, _snap_nonce, _file_key, _file_key_nonce, _sender_id_hash)| {
         serde_json::json!({
-            "id": id, "dm_channel_id": dm_id, "sender_id": sid, "sender_username": sname,
+            "id": id, "dm_channel_id": dm_id,
+            "sender_id": sid,
             "encrypted_content": base64::engine::general_purpose::STANDARD.encode(enc),
             "nonce": base64::engine::general_purpose::STANDARD.encode(nonce),
             "timestamp": ts,
+            "sender_id_hash": _sender_id_hash,
         })
     }).collect();
     (StatusCode::OK, Json(serde_json::json!(result))).into_response()
@@ -3889,14 +4183,15 @@ pub async fn remove_friend(
     };
     match state.db.remove_friend(&user_id, &req.user_id) {
         Ok(()) => {
-            // Notify the other user that they've been unfriended
+            // Notify both users that the friendship was removed
+            // Include both the caller and the other user for multi-tab consistency
             let notify = serde_json::json!({
                 "type": "friend_removed",
                 "by_user_id": user_id,
             });
             let _ = state
                 .ws_manager
-                .broadcast_to_users(&[req.user_id.clone()], &notify.to_string())
+                .broadcast_to_users(&[req.user_id.clone(), user_id.clone()], &notify.to_string())
                 .await;
             (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
         }
@@ -3982,7 +4277,6 @@ pub async fn list_dm_conversations(
                     Some(m) => serde_json::json!({
                         "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
                         "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
-                        "sender_id": m.sender_id,
                         "timestamp": m.timestamp,
                         "message_nonce": m.message_nonce,
                     }),
@@ -4012,6 +4306,7 @@ pub async fn list_dm_messages(
     Path(dm_channel_id): Path<String>,
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let user_id = match extract_user(&headers, &state) {
         Ok(id) => id,
@@ -4024,9 +4319,32 @@ pub async fn list_dm_messages(
         )
             .into_response();
     }
-    match state.db.list_dm_messages(&dm_channel_id, 100) {
-        Ok(msgs) => {
-            let mut dm_sender_ids: Vec<&str> = msgs.iter().map(|m| m.sender_id.as_str()).collect();
+    let limit: i64 = params.get("limit").and_then(|v| v.parse().ok()).unwrap_or(50);
+    let before = params.get("before").map(|s| s.as_str());
+
+    let msgs = if let Some(ts) = before {
+        match state.db.list_dm_messages_before(&dm_channel_id, ts, limit) {
+            Ok(m) => m,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": e})),
+                ).into_response();
+            }
+        }
+    } else {
+        match state.db.list_dm_messages(&dm_channel_id, limit) {
+            Ok(m) => m,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": e})),
+                ).into_response();
+            }
+        }
+    };
+
+    let mut dm_sender_ids: Vec<&str> = msgs.iter().map(|m| m.sender_id.as_str()).collect();
             dm_sender_ids.dedup();
             let dm_conv_profiles = state.db.get_conversation_profiles_batch("dm", &dm_channel_id, &dm_sender_ids).unwrap_or_default();
 
@@ -4037,18 +4355,17 @@ pub async fn list_dm_messages(
                         "id": m.id,
                         "dm_channel_id": m.dm_channel_id,
                         "sender_id": m.sender_id,
-                        "sender_username": m.sender_username,
                         "sender_profile_pic": m.sender_profile_pic,
                         "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
                         "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
                         "timestamp": m.timestamp,
                         "message_nonce": m.message_nonce,
                         "edited_at": m.edited_at,
-
                         "encrypted_profile_key": m.encrypted_profile_key,
                         "profile_key_nonce": m.profile_key_nonce,
                         "encrypted_banner_key": m.encrypted_banner_key,
                         "banner_key_nonce": m.banner_key_nonce,
+                        "sender_id_hash": m.sender_id_hash,
                         "encrypted_sender_username": m.encrypted_sender_username,
                         "sender_username_nonce": m.sender_username_nonce,
                         "conversation_profile": dm_conv_profiles.get(&m.sender_id).map(|(data, nonce)| serde_json::json!({
@@ -4059,13 +4376,6 @@ pub async fn list_dm_messages(
                 })
                 .collect();
             (StatusCode::OK, Json(serde_json::json!(result))).into_response()
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
-        )
-            .into_response(),
-    }
 }
 
 // --- DM Keys (envelope-encrypted distribution, same pattern as server keys) ---
