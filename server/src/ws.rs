@@ -1007,6 +1007,36 @@ async fn handle_ws_message(
                 }
             }
         }
+        "key_heartbeat" => {
+            // Periodic heartbeat: check all servers the user is a member of and
+            // re-broadcast key_needed for servers where the user has no key entries
+            // but other members do. This ensures recovery even if the initial
+            // key_needed WS event was missed (e.g. the responding member was offline).
+            if let Ok(servers) = state.db.list_user_servers(user_id) {
+                for sv in &servers {
+                    if let Ok(keys) = state.db.get_all_server_keys(&sv.id) {
+                        let user_has_keys = keys.iter().any(|(uid, _, _, _, _)| uid == user_id);
+                        if !user_has_keys && !keys.is_empty() {
+                            if let Ok(members) = state.db.get_server_members(&sv.id) {
+                                let need_msg = serde_json::json!({
+                                    "type": "key_needed",
+                                    "server_id": sv.id,
+                                    "user_id": user_id,
+                                });
+                                let _ = state.ws_manager.broadcast_to_users(&members, &need_msg.to_string()).await;
+
+                                // Save pending events for offline members
+                                for mid in &members {
+                                    if !state.ws_manager.is_user_connected(mid).await {
+                                        let _ = state.db.save_pending_event(mid, &sv.id, "key_needed", user_id);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         "ping" => {
             let pong = serde_json::json!({
                 "type": "pong"

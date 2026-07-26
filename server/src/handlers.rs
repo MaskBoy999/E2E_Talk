@@ -2011,6 +2011,7 @@ pub async fn upload_server_key(
 
 pub async fn get_server_keys(
     Path(server_id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
@@ -2026,6 +2027,10 @@ pub async fn get_server_keys(
         )
             .into_response();
     }
+
+    // Check if the client requests to skip the key_needed broadcast
+    // (used when the user has disabled the refresh heartbeat)
+    let skip_key_needed = params.get("skip_key_needed").map(|v| v == "1").unwrap_or(false);
 
     match state.db.get_all_server_keys(&server_id) {
         Ok(keys) => {
@@ -2043,9 +2048,10 @@ pub async fn get_server_keys(
                 .collect();
 
             // If this user has no key entries but other users do, broadcast key_needed
-            // so any online member can upload the key for this user
+            // so any online member can upload the key for this user.
+            // Skip if the client requested opt-out (heartbeat disabled).
             let user_has_keys = keys.iter().any(|(uid, _, _, _, _)| uid == &user_id);
-            if !user_has_keys && !keys.is_empty() {
+            if !skip_key_needed && !user_has_keys && !keys.is_empty() {
                 if let Ok(members) = state.db.get_server_members(&server_id) {
                     let need_msg = serde_json::json!({
                         "type": "key_needed",

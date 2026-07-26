@@ -1101,6 +1101,33 @@ document.addEventListener('DOMContentLoaded', () => {
     updateSessionCountdown();
     setInterval(updateSessionCountdown, 60000);
 
+    // Heartbeat interval selector + checkbox toggles (security tab)
+    var heartbeatSelect = document.getElementById('heartbeat-interval-select');
+    if (heartbeatSelect) {
+        var savedInterval = localStorage.getItem('key_heartbeat_interval') || '0';
+        heartbeatSelect.value = savedInterval;
+        heartbeatSelect.addEventListener('change', function() {
+            localStorage.setItem('key_heartbeat_interval', this.value);
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                restartRefreshHeartbeat();
+            }
+        });
+    }
+    // Wire refresh-action checkboxes
+    var refreshCheckboxes = ['hb_refresh_keys', 'hb_refresh_profiles', 'hb_refresh_members', 'hb_refresh_dms', 'hb_refresh_messages'];
+    refreshCheckboxes.forEach(function(id) {
+        var cb = document.getElementById(id);
+        if (!cb) return;
+        // The HTML id IS the localStorage key — ensures consistency with refreshAll()
+        // Default: disabled (user must explicitly opt in to each action)
+        var saved = localStorage.getItem(id);
+        cb.checked = saved === 'true';
+        // Save on change
+        cb.addEventListener('change', function() {
+            localStorage.setItem(id, this.checked ? 'true' : 'false');
+        });
+    });
+
     // Re-auth button
     const reauthBtn = document.getElementById('reauth-btn');
     const reauthSection = document.getElementById('reauth-section');
@@ -3828,14 +3855,21 @@ function clearUnreadChannelMentions(channelId) {
         mentionItems = mentionItems.filter(function (item) {
             return !(item.channelId === channelId && item.serverId === serverId);
         });
-        updateServerBadges();
-        updateChannelBadges();
-        updateMentionsBadge();
-        saveMentionState();
-        // Re-render inbox if it's open
-        var mentionsPanel = document.getElementById('mentions-panel');
-        if (mentionsPanel && mentionsPanel.style.display === 'flex') renderMentionsInbox();
     }
+    // Always clear the missed-summary aggregate when a channel is visited —
+    // the user is acknowledging their notifications regardless of whether there
+    // are per-channel mention entries (the __missed__ key can exist independently
+    // from the missed_summary event, e.g. regular channel messages without mentions).
+    delete unreadMentionsByServer['__missed__'];
+    mentionItems = mentionItems.filter(function (item) {
+        return item.id.indexOf('missed-msg-') !== 0;
+    });
+    updateServerBadges();
+    updateChannelBadges();
+    updateMentionsBadge();
+    saveMentionState();
+    var mentionsPanel = document.getElementById('mentions-panel');
+    if (mentionsPanel && mentionsPanel.style.display === 'flex') renderMentionsInbox();
 }
 
 function clearUnreadDmMentions(dmChannelId) {
@@ -4619,7 +4653,76 @@ function setupMentionAutocomplete() {
     });
 }
 
-// --- WebSocket ---
+// --- Refresh Heartbeat (periodic cache/state refresh) ---
+
+function refreshAll() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    
+    // 1. Key broadcast heartbeat (send key_needed re-broadcast request)
+    if (localStorage.getItem('hb_refresh_keys') !== 'false') {
+        ws.send(JSON.stringify({ type: 'key_heartbeat' }));
+    }
+    
+    // 2. Refresh profile data for visible users (display names, colors, PFPs)
+    // Clears cache entries first so the fetch functions don't short-circuit on stale data.
+    if (localStorage.getItem('hb_refresh_profiles') !== 'false' && user) {
+        // Refresh DM sidebar users
+        if (viewMode === 'dms' && dmConversations) {
+            dmConversations.forEach(function(conv) {
+                if (conv && conv.other_user_id) {
+                    delete userDisplayNameCache[conv.other_user_id];
+                    fetchAndCacheUserProfile(conv.other_user_id);
+                    fetchDmConversationProfile(conv.other_user_id, conv.dm_channel_id);
+                }
+            });
+        }
+        // Refresh current server's members
+        if (currentServerId) {
+            currentServerMemberList.forEach(function(m) {
+                if (m && m.id && m.id !== user.id) {
+                    delete userDisplayNameCache[m.id];
+                    fetchServerConversationProfile(m.id, currentServerId, E2ECrypto.getServerKey(currentServerId));
+                }
+            });
+        }
+        // Refresh own profile's cached display data
+        if (myProfile) {
+            loadMyProfile();
+        }
+    }
+    
+    // 3. Refresh server member list (updates display names, PFPs in members panel)
+    if (localStorage.getItem('hb_refresh_members') !== 'false' && currentServerId) {
+        loadMembers(currentServerId);
+    }
+    
+    // 4. Refresh DM conversation list (updates sidebar snippets, display names)
+    if (localStorage.getItem('hb_refresh_dms') !== 'false' && viewMode === 'dms') {
+        loadDmConversations();
+    }
+    
+    // 5. Update existing message DOM styles (text-shadow, colors from refreshed cache)
+    if (localStorage.getItem('hb_refresh_messages') !== 'false') {
+        for (var uid in userDisplayNameCache) {
+            if (userDisplayNameCache.hasOwnProperty(uid)) {
+                updateExistingMessageStyles(uid);
+            }
+        }
+    }
+}
+
+function restartRefreshHeartbeat() {
+    if (window._refreshHeartbeatInterval) {
+        clearInterval(window._refreshHeartbeatInterval);
+        window._refreshHeartbeatInterval = null;
+    }
+    var intervalMs = parseInt(localStorage.getItem('key_heartbeat_interval') || '0', 10);
+    // 0 = disabled; otherwise validate range 5000ms–300000ms
+    if (intervalMs === 0) return;
+    if (isNaN(intervalMs) || intervalMs < 5000) intervalMs = 30000;
+    if (intervalMs > 300000) intervalMs = 300000;
+    window._refreshHeartbeatInterval = setInterval(refreshAll, intervalMs);
+}
 
 function connectWebSocket(t) {
     const isSecure = window.location.protocol === 'https:';
@@ -4633,6 +4736,9 @@ function connectWebSocket(t) {
         var devId = localStorage.getItem('e2e_device_key');
         var lastSeen = localStorage.getItem('e2e_last_seen') || undefined;
         ws.send(JSON.stringify({ type: 'auth', token: t, device_id: devId || undefined, last_seen_timestamp: lastSeen }));
+        
+        // Start periodic key heartbeat (configurable via security tab)
+        restartRefreshHeartbeat();
     };
 
     ws.onmessage = async (event) => {
@@ -5476,8 +5582,14 @@ function connectWebSocket(t) {
 // --- E2E Key Management ---
 
 async function fetchAndDecryptServerKey(serverId) {
+    // Skip key_needed broadcast when the user has disabled the refresh heartbeat
+    // or the keys-refresh action specifically. Pass ?skip_key_needed=1 so the server
+    // doesn't broadcast key_needed on initial reconnect.
+    var skipKeyNeeded = localStorage.getItem('key_heartbeat_interval') === '0' ||
+                         localStorage.getItem('hb_refresh_keys') === 'false';
+    var url = `/api/servers/${serverId}/keys` + (skipKeyNeeded ? '?skip_key_needed=1' : '');
     try {
-        const res = await authFetch(`/api/servers/${serverId}/keys`);
+        const res = await authFetch(url);
         if (!res.ok) return false;
         const keys = await res.json();
         if (!Array.isArray(keys) || keys.length === 0) return false;
@@ -5721,11 +5833,19 @@ async function loadServers() {
         updateDmStripBadge();
         updateMentionsBadge();
 
-        // Fetch server keys for all servers we're missing keys for
+        // Fetch server keys for all servers where keys are missing or stale.
+        // After blob restore (cookie clear + login), the local key from the blob
+        // may be a previous version if the server key was rotated since the last
+        // blob save. In that case getServerKey() returns non-null but the name
+        // can't be decrypted. We check name decryptability to detect stale keys.
         for (const s of servers) {
-            if (!E2ECrypto.getServerKey(s.id)) {
-                await fetchAndDecryptServerKey(s.id);
+            var hasKey = E2ECrypto.getServerKey(s.id);
+            if (hasKey && s.encrypted_name && s.name_nonce) {
+                // Key exists — verify it can decrypt the server name
+                var canDecryptName = tryDecryptWithAllKeys(s.id, s.encrypted_name, s.name_nonce);
+                if (canDecryptName) continue; // Key is fine, skip fetch
             }
+            await fetchAndDecryptServerKey(s.id);
         }
 
         // Re-render server list with decrypted names now that keys are available
@@ -5827,6 +5947,15 @@ async function selectServer(serverId) {
         } catch (_) {}
     }
     document.getElementById('server-name').textContent = serverDisplayName;
+    // Clear missed-summary aggregate — user is acknowledging notifications by viewing the server
+    delete unreadMentionsByServer['__missed__'];
+    delete unreadDms['__missed__'];
+    mentionItems = mentionItems.filter(function (item) {
+        return item.id.indexOf('missed-msg-') !== 0 && item.id.indexOf('missed-dm-') !== 0;
+    });
+    updateMentionsBadge();
+    updateDmStripBadge();
+
     document.getElementById('channel-name').textContent = 'Select a channel';
     document.getElementById('message-list').innerHTML = '<div class="welcome">Select a channel to start chatting</div>';
     document.getElementById('message-input').disabled = true;
@@ -5835,15 +5964,29 @@ async function selectServer(serverId) {
     document.getElementById('server-settings-btn').style.display = isOwner ? '' : 'none';
     document.getElementById('members-toggle').style.display = '';
 
-    // Ensure we have the server key — retry several times to handle race conditions
-    if (!E2ECrypto.getServerKey(serverId)) {
+    // Ensure we have the server key — retry several times to handle race conditions.
+    // Also retry if the server name is blank (stale key from blob restore after rotation).
+    // When heartbeat is disabled, skip retries entirely — try once and show error immediately.
+    if (!E2ECrypto.getServerKey(serverId) || !serverDisplayName) {
+        var hbDisabled = localStorage.getItem('key_heartbeat_interval') === '0';
         var ok = false;
-        for (var attempt = 0; attempt < 10; attempt++) {
+        var maxAttempts = hbDisabled ? 1 : 10;
+        for (var attempt = 0; attempt < maxAttempts; attempt++) {
             ok = await fetchAndDecryptServerKey(serverId);
-            if (ok) break;
+            if (ok) {
+                // Re-decrypt server name now that we have fresh keys
+                if (server && server.encrypted_name && server.name_nonce) {
+                    try {
+                        serverDisplayName = tryDecryptWithAllKeys(serverId, server.encrypted_name, server.name_nonce);
+                        if (serverDisplayName) document.getElementById('server-name').textContent = serverDisplayName;
+                    } catch (_) {}
+                }
+                break;
+            }
+            if (hbDisabled) break;
             await new Promise(function(r) { setTimeout(r, 1500); });
         }
-        if (!ok) {
+        if (!ok && !serverDisplayName) {
             if (isOwner) {
                 document.getElementById('channel-list').innerHTML = '<div class="channel-item" style="color:#f44336;cursor:default">Cannot decrypt server key. <a href="#" id="regenerate-server-key-btn" style="color:#4fc3f7;text-decoration:underline">Regenerate server key</a></div>';
                 document.getElementById('regenerate-server-key-btn').addEventListener('click', async (e) => {
@@ -5858,7 +6001,26 @@ async function selectServer(serverId) {
                     }
                 });
             } else {
-                document.getElementById('channel-list').innerHTML = '<div class="channel-item" style="color:#f44336;cursor:default">Cannot decrypt server key</div>';
+                document.getElementById('channel-list').innerHTML = '<div class="channel-item" style="color:#f44336;cursor:default">Cannot decrypt server key <a href="#" id="retry-server-key-btn" style="color:#4fc3f7;text-decoration:underline">Retry now</a></div>';
+                document.getElementById('retry-server-key-btn').addEventListener('click', async function retryKeyFn(e) {
+                    e.preventDefault();
+                    document.getElementById('channel-list').innerHTML = '<div class="channel-item" style="color:#666;cursor:default">Retrying...</div>';
+                    var retryOk = await fetchAndDecryptServerKey(serverId);
+                    if (retryOk) {
+                        // Re-decrypt server name
+                        if (server && server.encrypted_name && server.name_nonce) {
+                            try {
+                                serverDisplayName = tryDecryptWithAllKeys(serverId, server.encrypted_name, server.name_nonce);
+                                if (serverDisplayName) document.getElementById('server-name').textContent = serverDisplayName;
+                            } catch (_) {}
+                        }
+                        await loadChannels(serverId);
+                        loadMembers(serverId);
+                    } else {
+                        document.getElementById('channel-list').innerHTML = '<div class="channel-item" style="color:#f44336;cursor:default">Cannot decrypt server key <a href="#" id="retry-server-key-btn" style="color:#4fc3f7;text-decoration:underline">Retry now</a></div>';
+                        document.getElementById('retry-server-key-btn').addEventListener('click', retryKeyFn);
+                    }
+                });
             }
             return;
         }
@@ -15308,73 +15470,48 @@ function updateProfileEditPreview() {
 }
 
 function renderEditGlowOptions(baseColor) {
-    var container = document.getElementById('profile-edit-glow-options');
-    if (!container) return;
-    var options = generateBorderGlowOptions(baseColor);
-    if (!options || options.length === 0) {
-        container.innerHTML = '<div style="color:#888;font-size:12px;">No glow options available</div>';
-        return;
-    }
+    var glowInput = document.getElementById('profile-edit-glow-color');
+    var glowPreview = document.getElementById('profile-edit-glow-preview');
+    if (!glowInput) return;
     var currentBorder = (profileOriginalData && profileOriginalData.data && profileOriginalData.data.username_border_color) || '';
-    var html = '';
-    var baseIsLight = isLightColor(baseColor);
-    var bestGlow = '';
-    var bestContrast = -1;
-    
-    options.forEach(function(o) {
-        var val = o.hex || o.value || '';
-        // Determine contrasting background for color indicator
-        var isLight = isLightColor(val);
-        var indicatorBg = isLight ? '#555' : '#ccc';
-        html += '<button class="glow-btn" data-value="' + escapeAttr(val) + '">' +
-            '<span class="glow-color-circle" style="background:' + val + ';box-shadow:inset 0 0 0 2px ' + indicatorBg + ';"></span>' +
-            escapeHtml(o.name) +
-            '</button>';
-        
-        // Track best contrasting glow (opposite brightness from base color)
-        var glowBrightness = getColorBrightness(val);
-        var baseBrightness = getColorBrightness(baseColor);
-        var contrast = Math.abs(glowBrightness - baseBrightness);
-        if (contrast > bestContrast) {
-            bestContrast = contrast;
-            bestGlow = val;
-        }
-    });
-    container.innerHTML = html;
-    
-    // Auto-select best contrasting glow if no saved glow or base color changed significantly
-    var autoSelectGlow = bestGlow;
-    if (currentBorder) {
-        // Check if current border provides enough contrast
-        var currentContrast = Math.abs(getColorBrightness(currentBorder) - getColorBrightness(baseColor));
-        if (currentContrast < 60) autoSelectGlow = bestGlow; // Too similar, switch
-        else autoSelectGlow = currentBorder;
+    // Preserve the user's currently selected glow if one was picked (don't overwrite
+    // on every base-color change unless the contrast becomes unreadable).
+    var glowInputVal = glowInput.value;
+    if (glowInputVal && glowInputVal !== '#000000' && glowInputVal !== '#ffffff') {
+        var glowContrast = Math.abs(getColorBrightness(glowInputVal) - getColorBrightness(baseColor));
+        if (glowContrast >= 60) currentBorder = glowInputVal;
     }
-    
-    container.querySelectorAll('.glow-btn').forEach(function(btn) {
-        if (btn.dataset.value === autoSelectGlow) {
-            btn.classList.add('active');
-            // Also update preview textShadow when auto-selecting (e.g. when color changes)
-            var editPreview = document.getElementById('profile-edit-display-name-preview');
-            if (editPreview && autoSelectGlow) {
-                editPreview.style.textShadow = '0 0 8px ' + autoSelectGlow + ', 0 0 16px ' + autoSelectGlow;
-            }
-        }
-        btn.addEventListener('click', function() {
-            container.querySelectorAll('.glow-btn').forEach(function(b) { b.classList.remove('active'); });
-            btn.classList.add('active');
-            // Update live preview glow immediately
-            var val = btn.dataset.value;
-            var editPreview = document.getElementById('profile-edit-display-name-preview');
-            if (editPreview) {
+    // Fall back to saved profile border color
+    if (!currentBorder) currentBorder = (profileOriginalData && profileOriginalData.data && profileOriginalData.data.username_border_color) || '';
+    // Set a sensible default: complementary/brightness-opposite color
+    if (!currentBorder) {
+        var baseBrightness = getColorBrightness(baseColor);
+        currentBorder = baseBrightness > 128 ? '#000000' : '#ffffff';
+    }
+    glowInput.value = currentBorder;
+    if (glowPreview) glowPreview.style.background = currentBorder;
+    // Update preview text-shadow
+    var editPreview = document.getElementById('profile-edit-display-name-preview');
+    if (editPreview) {
+        editPreview.style.textShadow = '0 0 8px ' + currentBorder + ', 0 0 16px ' + currentBorder;
+    }
+    // Wire live preview on input change (only once via dataset flag)
+    if (!glowInput.dataset.glowInit) {
+        glowInput.dataset.glowInit = '1';
+        glowInput.addEventListener('input', function() {
+            var val = this.value;
+            var gp = document.getElementById('profile-edit-glow-preview');
+            if (gp) gp.style.background = val;
+            var ep = document.getElementById('profile-edit-display-name-preview');
+            if (ep) {
                 if (val) {
-                    editPreview.style.textShadow = '0 0 8px ' + val + ', 0 0 16px ' + val;
+                    ep.style.textShadow = '0 0 8px ' + val + ', 0 0 16px ' + val;
                 } else {
-                    editPreview.style.textShadow = 'none';
+                    ep.style.textShadow = 'none';
                 }
             }
         });
-    });
+    }
 }
 
 function getColorBrightness(hex) {
@@ -15509,8 +15646,8 @@ async function saveProfile() {
     
     var bgColor = document.getElementById('profile-edit-bg-color').value;
     
-    var glowBtn = document.querySelector('#profile-edit-glow-options .glow-btn.active');
-    var borderColor = glowBtn ? glowBtn.dataset.value : '';
+    var glowInput = document.getElementById('profile-edit-glow-color');
+    var borderColor = glowInput ? glowInput.value : '';
     
     // Validate
     if (displayName.length > 21) { statusEl.textContent = 'Display name too long (max 21 chars)'; statusEl.style.color = 'var(--danger)'; return; }
