@@ -16395,6 +16395,8 @@ async function processBannerCrop() {
         
         profileBannerFileId = uploadResult.fileId;
         profileBannerFileKey = uploadResult.fileKey;
+        // Show remove button for the newly uploaded banner
+        document.getElementById('profile-banner-remove-btn').style.display = '';
         document.getElementById('profile-banner-crop-container').style.display = 'none';
         if (bannerCropState && bannerCropState._cleanup) bannerCropState._cleanup();
         bannerCropState = null;
