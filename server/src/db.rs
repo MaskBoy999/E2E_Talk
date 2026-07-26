@@ -1761,73 +1761,110 @@ impl Database {
     pub fn list_messages_around(&self, channel_id: &str, around_message_id: &str, limit: i64) -> Result<Vec<Message>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let half = limit / 2;
-        let mut stmt = conn
+
+        // Query messages before the target (inclusive) — newest first, limited to half
+        let mut before_stmt = conn
             .prepare(
-                "SELECT m.id, m.channel_id, m.sender_id, u.username, u.profile_picture_file_id,
+                "SELECT m.id, m.channel_id, m.sender_id,
                         m.encrypted_content, m.nonce, m.timestamp,
                         m.message_nonce, m.edited_at, m.message_signature,
                         m.encrypted_profile_key, m.profile_key_nonce, m.encrypted_banner_key, m.banner_key_nonce,
                         m.key_version, m.encrypted_profile_snapshot, m.profile_snapshot_nonce, m.encrypted_file_key, m.file_key_nonce,
-                        m.encrypted_sender_username, m.sender_username_nonce
-                 FROM (
-                     SELECT id, channel_id, sender_id, encrypted_content, nonce, timestamp,
-                            message_nonce, edited_at, message_signature,
-                            encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce,
-                            key_version, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce,
-                            encrypted_sender_username, sender_username_nonce
-                     FROM messages
-                     WHERE channel_id = ?1 AND timestamp <= (SELECT COALESCE(timestamp, '') FROM messages WHERE id = ?2)
-                     ORDER BY timestamp DESC
-                     LIMIT ?3
-                     UNION ALL
-                     SELECT id, channel_id, sender_id, encrypted_content, nonce, timestamp,
-                            message_nonce, edited_at, message_signature,
-                            encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce,
-                            key_version, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce,
-                            encrypted_sender_username, sender_username_nonce
-                     FROM messages
-                     WHERE channel_id = ?1 AND timestamp > (SELECT COALESCE(timestamp, '') FROM messages WHERE id = ?2)
-                     ORDER BY timestamp ASC
-                     LIMIT ?3
-                 ) m
-                 INNER JOIN users u ON m.sender_id = u.id
-                 ORDER BY m.timestamp ASC",
+                        m.encrypted_sender_username, m.sender_username_nonce,
+                        m.sender_id_hash
+                 FROM messages m
+                 WHERE m.channel_id = ?1 AND m.timestamp <= (SELECT COALESCE(timestamp, '') FROM messages WHERE id = ?2)
+                 ORDER BY m.timestamp DESC
+                 LIMIT ?3",
             )
             .map_err(|e| e.to_string())?;
-        let messages = stmt
+        let mut before: Vec<Message> = before_stmt
             .query_map(params![channel_id, around_message_id, half], |row| {
                 Ok(Message {
                     id: row.get(0)?,
                     channel_id: row.get(1)?,
                     sender_id: row.get(2)?,
-                    sender_username: row.get(3)?,
-                    sender_profile_pic: row.get(4)?,
-                    encrypted_content: row.get(5)?,
-                    nonce: row.get(6)?,
-                    timestamp: row.get(7)?,
-                    message_nonce: row.get(8)?,
-                    edited_at: row.get(9)?,
-                    message_signature: row.get(10)?,
-                    encrypted_profile_key: row.get(11)?,
-                    profile_key_nonce: row.get(12)?,
-                    encrypted_banner_key: row.get(13)?,
-                    banner_key_nonce: row.get(14)?,
-                    key_version: row.get(15)?,
-                    encrypted_profile_snapshot: row.get(16)?,
-                    profile_snapshot_nonce: row.get(17)?,
-                    encrypted_file_key: row.get(18)?,
-                    file_key_nonce: row.get(19)?,
-                    encrypted_sender_username: row.get(20)?,
-                    sender_username_nonce: row.get(21)?,
-                    sender_id_hash: None,
+                    sender_username: String::new(),
+                    sender_profile_pic: None,
+                    encrypted_content: row.get(3)?,
+                    nonce: row.get(4)?,
+                    timestamp: row.get(5)?,
+                    message_nonce: row.get(6)?,
+                    edited_at: row.get(7)?,
+                    message_signature: row.get(8)?,
+                    encrypted_profile_key: row.get(9)?,
+                    profile_key_nonce: row.get(10)?,
+                    encrypted_banner_key: row.get(11)?,
+                    banner_key_nonce: row.get(12)?,
+                    key_version: row.get(13)?,
+                    encrypted_profile_snapshot: row.get(14)?,
+                    profile_snapshot_nonce: row.get(15)?,
+                    encrypted_file_key: row.get(16)?,
+                    file_key_nonce: row.get(17)?,
+                    encrypted_sender_username: row.get(18)?,
+                    sender_username_nonce: row.get(19)?,
+                    sender_id_hash: row.get(20).ok().flatten(),
                 })
             })
             .map_err(|e| e.to_string())?
             .filter_map(|r| r.ok())
             .collect();
-        Ok(messages)
-    }
 
+        // before is newest-first, reverse to get oldest-first
+        before.reverse();
+
+        // Query messages after the target — oldest first, limited to half
+        let mut after_stmt = conn
+            .prepare(
+                "SELECT m.id, m.channel_id, m.sender_id,
+                        m.encrypted_content, m.nonce, m.timestamp,
+                        m.message_nonce, m.edited_at, m.message_signature,
+                        m.encrypted_profile_key, m.profile_key_nonce, m.encrypted_banner_key, m.banner_key_nonce,
+                        m.key_version, m.encrypted_profile_snapshot, m.profile_snapshot_nonce, m.encrypted_file_key, m.file_key_nonce,
+                        m.encrypted_sender_username, m.sender_username_nonce,
+                        m.sender_id_hash
+                 FROM messages m
+                 WHERE m.channel_id = ?1 AND m.timestamp > (SELECT COALESCE(timestamp, '') FROM messages WHERE id = ?2)
+                 ORDER BY m.timestamp ASC
+                 LIMIT ?3",
+            )
+            .map_err(|e| e.to_string())?;
+        let after: Vec<Message> = after_stmt
+            .query_map(params![channel_id, around_message_id, half], |row| {
+                Ok(Message {
+                    id: row.get(0)?,
+                    channel_id: row.get(1)?,
+                    sender_id: row.get(2)?,
+                    sender_username: String::new(),
+                    sender_profile_pic: None,
+                    encrypted_content: row.get(3)?,
+                    nonce: row.get(4)?,
+                    timestamp: row.get(5)?,
+                    message_nonce: row.get(6)?,
+                    edited_at: row.get(7)?,
+                    message_signature: row.get(8)?,
+                    encrypted_profile_key: row.get(9)?,
+                    profile_key_nonce: row.get(10)?,
+                    encrypted_banner_key: row.get(11)?,
+                    banner_key_nonce: row.get(12)?,
+                    key_version: row.get(13)?,
+                    encrypted_profile_snapshot: row.get(14)?,
+                    profile_snapshot_nonce: row.get(15)?,
+                    encrypted_file_key: row.get(16)?,
+                    file_key_nonce: row.get(17)?,
+                    encrypted_sender_username: row.get(18)?,
+                    sender_username_nonce: row.get(19)?,
+                    sender_id_hash: row.get(20).ok().flatten(),
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // Combine: before (oldest-first) + after (oldest-first)
+        before.extend(after);
+        Ok(before)
+    }
     pub fn save_encrypted_message(
         &self,
         channel_id: &str,

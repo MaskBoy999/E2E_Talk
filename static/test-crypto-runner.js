@@ -196,6 +196,79 @@
             addResult('encryptFileChunk/decryptFileChunk', ok, ok ? 'round-trip OK' : 'mismatch');
         } catch (e) { addResult('encryptFileChunk/decryptFileChunk', false, e.message); }
 
+        // Test 19: padPlaintext / unpadPlaintext round-trip (short message)
+        try {
+            var pt = 'Hello, World!';
+            var padded = E.padPlaintext(pt);
+            var ok = padded.length > pt.length;
+            var unpadded = E.unpadPlaintext(padded);
+            var dec = new TextDecoder().decode(unpadded);
+            ok = ok && dec === pt;
+            addResult('padPlaintext/unpadPlaintext (short)', ok, ok ? 'round-trip OK, padded length=' + padded.length : 'mismatch');
+        } catch (e) { addResult('padPlaintext/unpadPlaintext (short)', false, e.message); }
+
+        // Test 20: padPlaintext / unpadPlaintext with exact block boundary
+        try {
+            var pt = new Uint8Array(254); // 254 + 2 = 256 (exact block)
+            for (var i = 0; i < 254; i++) pt[i] = i & 0xff;
+            var padded = E.padPlaintext(pt);
+            var ok = padded.length === 256;
+            var unpadded = E.unpadPlaintext(padded);
+            ok = ok && unpadded.length === 254 && unpadded[0] === 0 && unpadded[253] === 253;
+            addResult('padPlaintext (exact block boundary 256)', ok, ok ? 'padded to ' + padded.length : 'wrong');
+        } catch (e) { addResult('padPlaintext (exact block boundary 256)', false, e.message); }
+
+        // Test 21: padPlaintext with empty message
+        try {
+            var pt = '';
+            var padded = E.padPlaintext(pt);
+            var ok = padded.length === 256; // 0 + 2 = 2, padded to 256
+            var unpadded = E.unpadPlaintext(padded);
+            var dec = new TextDecoder().decode(unpadded);
+            ok = ok && dec === '';
+            addResult('padPlaintext (empty)', ok, ok ? 'padded to ' + padded.length : 'wrong');
+        } catch (e) { addResult('padPlaintext (empty)', false, e.message); }
+
+        // Test 22: padPlaintext with large message (> 65535) returns unchanged
+        try {
+            var pt = new Uint8Array(70000);
+            var padded = E.padPlaintext(pt);
+            var ok = padded.length === 70000; // unchanged
+            addResult('padPlaintext (large >65535 unchanged)', ok, ok ? 'returned as-is ' + padded.length : 'wrong');
+        } catch (e) { addResult('padPlaintext (large >65535 unchanged)', false, e.message); }
+
+        // Test 23: unpadPlaintext backward compat — old unpadded message returns as-is
+        try {
+            var oldPadded = new Uint8Array([0x7b, 0x22, 0x61, 0x22]); // '{"a"' — a realistic JSON start
+            var result = E.unpadPlaintext(oldPadded);
+            // First two bytes 0x7b, 0x22 = 0x7b22 = 31522, 31522 + 2 = 31524 > 4, so returns as-is
+            var ok = result.length === 4 && result[0] === 0x7b;
+            addResult('unpadPlaintext (backward compat old message)', ok, ok ? 'returned as-is' : 'wrong');
+        } catch (e) { addResult('unpadPlaintext (backward compat old message)', false, e.message); }
+
+        // Test 24: encryptMessage/decryptMessage uses padding (ciphertext should be padded)
+        try {
+            var key = E.generateSymmetricKey();
+            var shortMsg = 'Hi';
+            var enc = E.encryptMessage(shortMsg, key);
+            var dec = E.decryptMessage(enc.ciphertext, enc.nonce, key);
+            var ok = dec === shortMsg;
+            // Also verify the ciphertext is larger than an unpadded version would be
+            addResult('encryptMessage/decryptMessage with padding', ok, ok ? 'round-trip OK, ciphertext length=' + enc.ciphertext.length : 'mismatch: ' + dec);
+        } catch (e) { addResult('encryptMessage/decryptMessage with padding', false, e.message); }
+
+        // Test 25: encryptDm/decryptDm uses padding (ciphertext should be padded)
+        try {
+            var alice = E.generateIdentityKeyPair();
+            var bob = E.generateIdentityKeyPair();
+            var dmId = 'dm-padding-test';
+            var shortMsg = 'Yo';
+            var enc = E.encryptDm(shortMsg, dmId, alice.privateKey, bob.publicKey);
+            var dec = E.decryptDm(enc.ciphertext, enc.nonce, dmId, bob.privateKey, alice.publicKey);
+            var ok = dec === shortMsg;
+            addResult('encryptDm/decryptDm with padding', ok, ok ? 'round-trip OK' : 'mismatch: ' + dec);
+        } catch (e) { addResult('encryptDm/decryptDm with padding', false, e.message); }
+
     } catch (e) {
         addResult('Sodium init', false, e.message);
     }

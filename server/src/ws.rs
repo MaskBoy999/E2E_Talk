@@ -115,7 +115,6 @@ struct OutgoingChatMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     dm_channel_id: Option<String>,
     sender_id: String,
-    sender_profile_pic: Option<String>,
     encrypted_sender_username: Option<String>,
     sender_username_nonce: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -372,12 +371,7 @@ async fn handle_ws_message(
 
             let server_id_clone = server_id.clone();
             let msg_id = message.id.clone();
-            let msg_sender_username = message.sender_username.clone();
-            // Fetch sender's profile pic only (display name/colors come from encrypted snapshot/conversation_profile)
-            let sender_profile_pic = match state.db.get_user_profile(user_id) {
-                Ok((_, _, _, pp, _fk, _, _, _, _)) => pp,
-                Err(_) => None,
-            };
+            let msg_sender_username = state.db.get_user_by_id(&user_id).map(|u| u.username).unwrap_or_default();
             let outgoing = OutgoingMessage {
                 msg_type: "message_new".to_string(),
                 channel_id: Some(message.channel_id.clone()),
@@ -391,7 +385,6 @@ async fn handle_ws_message(
                     sender_id_hash: message.sender_id_hash.clone(),
                     encrypted_sender_username: message.encrypted_sender_username.clone(),
                     sender_username_nonce: message.sender_username_nonce.clone(),
-                    sender_profile_pic: sender_profile_pic.clone(),
                     encrypted_content: encrypted_content_b64.to_string(),
                     nonce: nonce_b64.to_string(),
                     timestamp: message.timestamp,
@@ -441,7 +434,7 @@ async fn handle_ws_message(
                         "channel_name": channel_name,
                         "server_name": server_name,
                         "sender_username": msg_sender_username,
-                        "sender_profile_pic": sender_profile_pic,
+
                         "message_id": msg_id
                     });
                     state.ws_manager.broadcast_to_users(&mentioned_ids, &mention_notification.to_string()).await;
@@ -460,7 +453,7 @@ async fn handle_ws_message(
                         "channel_name": channel_name,
                         "server_name": server_name,
                         "sender_username": msg_sender_username,
-                        "sender_profile_pic": sender_profile_pic,
+
                         "message_id": msg_id
                     });
                     state.ws_manager.broadcast_to_users(&[reply_to_user_id.to_string()], &reply_notification.to_string()).await;
@@ -581,12 +574,7 @@ async fn handle_ws_message(
             };
 
             let msg_id = message.id.clone();
-            let msg_sender_username = message.sender_username.clone();
-            // Fetch sender's profile pic only (display name/colors come from encrypted snapshot/conversation_profile)
-            let sender_profile_pic = match state.db.get_user_profile(user_id) {
-                Ok((_, _, _, pp, _fk, _, _, _, _)) => pp,
-                Err(_) => None,
-            };
+            let msg_sender_username = state.db.get_user_by_id(&user_id).map(|u| u.username).unwrap_or_default();
             let outgoing = OutgoingMessage {
                 msg_type: "dm_new".to_string(),
                 channel_id: None,
@@ -600,7 +588,6 @@ async fn handle_ws_message(
                     encrypted_sender_username: message.encrypted_sender_username.clone(),
                     sender_username_nonce: message.sender_username_nonce.clone(),
                     sender_id_hash: message.sender_id_hash.clone(),
-                    sender_profile_pic: sender_profile_pic.clone(),
                     encrypted_content: encrypted_content_b64.to_string(),
                     nonce: nonce_b64.to_string(),
                     timestamp: message.timestamp,
@@ -645,7 +632,7 @@ async fn handle_ws_message(
                         "type": "mention_notification",
                         "dm_channel_id": dm_channel_id,
                         "sender_username": msg_sender_username,
-                        "sender_profile_pic": sender_profile_pic,
+
                         "message_id": msg_id
                     });
                     state.ws_manager.broadcast_to_users(&mentioned_ids, &mention_notification.to_string()).await;
@@ -659,7 +646,7 @@ async fn handle_ws_message(
                         "type": "reply_notification",
                         "dm_channel_id": dm_channel_id,
                         "sender_username": msg_sender_username,
-                        "sender_profile_pic": sender_profile_pic,
+
                         "message_id": msg_id
                     });
                     state.ws_manager.broadcast_to_users(&[reply_to_user_id.to_string()], &reply_notification.to_string()).await;
@@ -707,11 +694,6 @@ async fn handle_ws_message(
                 Ok(id) => id,
                 Err(_) => return,
             };
-            // Fetch sender's profile pic only (display name/colors come from encrypted snapshot/conversation_profile)
-            let sender_profile_pic = match state.db.get_user_profile(user_id) {
-                Ok((_, _, _, pp, _fk, _, _, _, _)) => pp,
-                Err(_) => None,
-            };
             let outgoing = OutgoingMessage {                    msg_type: "message_edited".to_string(),
                 channel_id: Some(message.channel_id.clone()),
                 server_id: Some(server_id.clone()),
@@ -724,7 +706,6 @@ async fn handle_ws_message(
                     encrypted_sender_username: message.encrypted_sender_username.clone(),
                     sender_username_nonce: message.sender_username_nonce.clone(),
                     sender_id_hash: message.sender_id_hash.clone(),
-                    sender_profile_pic: sender_profile_pic.clone(),
                     encrypted_content: encrypted_content_b64.to_string(),
                     nonce: nonce_b64.to_string(),
                     timestamp: message.timestamp,
@@ -831,11 +812,6 @@ async fn handle_ws_message(
                     return;
                 }
             };
-            // Fetch sender's profile pic only (display name/colors come from encrypted snapshot/conversation_profile)
-            let sender_profile_pic = match state.db.get_user_profile(user_id) {
-                Ok((_, _, _, pp, _fk, _, _, _, _)) => pp,
-                Err(_) => None,
-            };
             let outgoing = OutgoingMessage {                    msg_type: "dm_edited".to_string(),
                 channel_id: None,
                 server_id: None,
@@ -848,7 +824,6 @@ async fn handle_ws_message(
                     encrypted_sender_username: message.encrypted_sender_username.clone(),
                     sender_username_nonce: message.sender_username_nonce.clone(),
                     sender_id_hash: message.sender_id_hash.clone(),
-                    sender_profile_pic: sender_profile_pic.clone(),
                     encrypted_content: encrypted_content_b64.to_string(),
                     nonce: nonce_b64.to_string(),
                     timestamp: message.timestamp,

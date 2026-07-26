@@ -1,10 +1,10 @@
 # E2E Talk — Implementation Analysis & Bug Fix Log
 
-## P3 Completion: Remove Plaintext Sender Username (2026-07-24)
+## P3 Completion: Remove Plaintext Sender Username (2026-07-24) (changed)
 
 **Goal:** Stop the host from being able to identify message senders by reading plaintext `sender_username` in API responses or WS broadcasts.
 
-### What was done
+### What was done (changed)
 
 **Server-side (`handlers.rs`):**
 - Removed `"sender_username": m.sender_username` from all 5 message API response locations: `list_messages`, `list_messages_around`, `list_dm_messages`, admin `list_dm_messages`, admin `list_all_dm_messages_admin`
@@ -93,6 +93,46 @@ When User A creates a DM with User B or joins a server:
 | 05 | No `sender_username` in WS `message_new` broadcast payloads |
 
 Uses `createServerViaPage` helper that exercises the full crypto flow (key generation, name encryption, server key upload) so tests are realistic end-to-end.
+
+---
+
+## P2/P3 Implementation: Rate Limiting, Metadata Hardening, Message Padding (2026-07-26) (changed)
+
+### Rate Limiting (P0 — Quick Win) (changed)
+
+Added `JOIN_SERVER_RATE_LIMITER` and `FRIEND_REQUEST_RATE_LIMITER` to `handlers.rs`:
+- **Server joins**: 10 attempts per 10 minutes per user (uses existing `RateLimiter` pattern)
+- **Friend requests**: 10 attempts per 10 minutes per user
+- Returns `429 TOO_MANY_REQUESTS` with descriptive error message when limit exceeded
+- Window resets after 10 minutes from the first attempt in the window
+
+### #5 — Encrypt profile_picture_file_id with channel key (Already Implemented) (changed)
+
+**Audit found:** The `profile_picture_file_id` was already being included inside `encrypted_profile_snapshot` (encrypted with channel/DM key) on the client side. Both `appendMessage()` and `appendDmMessage()` already extract `snap.profile_picture_file_id` from the decrypted snapshot. **No changes needed** — this is already properly encrypted per-message.
+
+### #6 — Remove profile_picture_file_id from member/DM list responses (changed)
+
+**Files:** `server/src/handlers.rs`
+
+- **`list_server_members`**: Removed `"profile_picture_file_id": profile_pic` from JSON response. The client already discovers profile pic file IDs via `encrypted_profile_snapshot` (per-message) and `conversation_profile_data` (per-conversation, encrypted with server/DM key).
+- **`list_dm_conversations`**: Removed `"other_profile_picture_file_id": other_profile_pic` from JSON response.
+- Suppressed unused variables with `_` prefix to avoid compiler warnings.
+
+### #7 — Message Padding (Traffic Analysis Protection) (changed)
+
+**Files:** `static/crypto.js`
+
+Added `padPlaintext()` and `unpadPlaintext()` functions that:
+- Prepend a 2-byte big-endian original length before encrypting
+- Append random bytes to pad the total to the nearest 256 bytes
+- On decrypt, read the 2-byte length prefix and strip padding
+- **Backward compatible**: For old unpadded messages, the `origLen + 2 > padded.length` guard detects that the first 2 bytes don't encode a valid length and returns the full buffer unchanged (works because JSON always starts with `{` = 0x7b, producing a large implausible length).
+- Updated `encryptMessage()`/`decryptMessage()` and `encryptDm()`/`decryptDm()` to use padding
+
+### Build & Verify (changed)
+- ✅ Server: 0 errors, 0 warnings
+- ✅ crypto.js message padding applied and exported via public API
+- ✅ Rate limiters wired into join_server and send_friend_request
 
 ---
 
@@ -361,8 +401,8 @@ Uses `createServerViaPage` helper that exercises the full crypto flow (key gener
 | `id` | 🔴 Plaintext | ✅ YES |
 | `channel_id` | 🔴 Plaintext | ✅ YES | Shows which channel the message is in |
 | `sender_id` | 🔴 Plaintext | ✅ YES | **Host knows WHO sent the message** |
-| `sender_username` | 🔴 Plaintext | ✅ YES | **Host knows who sent it (by username)** |
-| `sender_profile_pic` | 🔴 Plaintext | ✅ YES | File reference |
+| `sender_username`~~ — ~~field removed from struct (defense-in-depth)~~ | 🟢 Removed from struct | ❌ NO — field removed from server-side struct | Cleaned up 2026-07-26: field removed from Message/DmMessage structs to prevent accidental re-exposure (changed) |
+| `sender_profile_pic` | 🟢 Removed from API/WS | ❌ NO — no longer included in responses | Cleaned up 2026-07-26: removed from API JSON and WS broadcasts (changed) |
 | `encrypted_content` | 🟢 AES-GCM ciphertext | ❌ NO | **Message body is secret** |
 | `nonce` | 🔴 Plaintext | ✅ YES | Needed for decryption; useless without key |
 | `timestamp` | 🔴 Plaintext | ✅ YES | **Host knows WHEN messages were sent** |

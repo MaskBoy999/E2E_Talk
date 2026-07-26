@@ -42,6 +42,14 @@ static LOGIN_RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(|| RateLimiter 
     attempts: Mutex::new(HashMap::new()),
 });
 
+static JOIN_SERVER_RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(|| RateLimiter {
+    attempts: Mutex::new(HashMap::new()),
+});
+
+static FRIEND_REQUEST_RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(|| RateLimiter {
+    attempts: Mutex::new(HashMap::new()),
+});
+
 static ADMIN_TOKENS: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
 
 fn get_admin_tokens() -> std::sync::MutexGuard<'static, Option<HashMap<String, Instant>>> {
@@ -1302,6 +1310,16 @@ pub async fn join_server(
         Err(e) => return e.into_response(),
     };
 
+    // Rate limit: 10 attempts per 10 minutes
+    let rate_key = format!("join_server:{}", user_id);
+    if !JOIN_SERVER_RATE_LIMITER.check_and_increment(&rate_key, 10, Duration::from_secs(600)) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "Too many server join attempts. Try again in 10 minutes."})),
+        )
+            .into_response();
+    }
+
     if req.code.trim().is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -1698,13 +1716,12 @@ pub async fn list_server_members(
 
     let result: Vec<serde_json::Value> = members
         .iter()
-        .map(|(id, username, role, display_name, profile_pic)| {
+        .map(|(id, username, role, display_name, _profile_pic)| {
             serde_json::json!({
                 "id": id,
                 "username": username,
                 "role": role,
                 "display_name": display_name,
-                "profile_picture_file_id": profile_pic,
             })
         })
         .collect();
@@ -1783,7 +1800,7 @@ pub async fn list_messages(
                 "sender_id_hash": m.sender_id_hash,
                 "encrypted_sender_username": m.encrypted_sender_username,
                 "sender_username_nonce": m.sender_username_nonce,
-                "sender_profile_pic": m.sender_profile_pic,
+
                 "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
                 "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
                 "timestamp": m.timestamp,
@@ -1862,7 +1879,7 @@ pub async fn list_messages_around(
                 "sender_id_hash": m.sender_id_hash,
                 "encrypted_sender_username": m.encrypted_sender_username,
                 "sender_username_nonce": m.sender_username_nonce,
-                "sender_profile_pic": m.sender_profile_pic,
+
                 "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
                 "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
                 "timestamp": m.timestamp,
@@ -3968,6 +3985,16 @@ pub async fn send_friend_request(
         Err(e) => return e.into_response(),
     };
 
+    // Rate limit: 10 friend request attempts per 10 minutes
+    let rate_key = format!("friend_request:{}", user_id);
+    if !FRIEND_REQUEST_RATE_LIMITER.check_and_increment(&rate_key, 10, Duration::from_secs(600)) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "Too many friend request attempts. Try again in 10 minutes."})),
+        )
+            .into_response();
+    }
+
     // Use pre-hashed friend_code_hash if provided, otherwise hash plaintext friend_code server-side
     let code_hash = match req.friend_code_hash {
         Some(ref hash) => hash.clone(),
@@ -4266,7 +4293,7 @@ pub async fn list_dm_conversations(
     match state.db.list_dm_channels_for_user(&user_id) {
         Ok(channels) => {
             let mut result: Vec<serde_json::Value> = Vec::new();
-            for (dm_id, other_id, other_username, other_display_name, other_profile_pic) in channels {
+            for (dm_id, other_id, other_username, other_display_name, _other_profile_pic) in channels {
                 let identity_pub = state
                     .db
                     .get_identity_public_key(&other_id)
@@ -4287,7 +4314,6 @@ pub async fn list_dm_conversations(
                     "other_user_id": other_id,
                     "other_username": other_username,
                     "other_display_name": other_display_name,
-                    "other_profile_picture_file_id": other_profile_pic,
                     "other_public_key": identity_pub,
                     "last_message": last_json,
                 }));
@@ -4355,7 +4381,7 @@ pub async fn list_dm_messages(
                         "id": m.id,
                         "dm_channel_id": m.dm_channel_id,
                         "sender_id": m.sender_id,
-                        "sender_profile_pic": m.sender_profile_pic,
+        
                         "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
                         "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
                         "timestamp": m.timestamp,

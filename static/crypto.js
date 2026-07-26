@@ -271,26 +271,63 @@ var E2ECrypto = (() => {
         return hex;
     }
 
-    // ---- Simplified Channel Encryption ----
-    function encryptMessage(plaintext, channelKey) { return aeadEncrypt(plaintext, channelKey); }
-    function decryptMessage(ciphertextB64, nonceB64, channelKey) {
-        var raw = aeadDecrypt(ciphertextB64, channelKey, nonceB64);
-        return new TextDecoder().decode(raw);
+    // ---- Message Padding (P3 — hide plaintext length) ----
+    // Pads plaintext to nearest 256 bytes so ciphertext size doesn't
+    // reveal message content length. Prepends a 2-byte original length
+    // and appends random padding bytes.
+    var PADDING_BLOCK = 256;
+    function padPlaintext(pt) {
+        var bytes = pt instanceof Uint8Array ? pt : new TextEncoder().encode(pt);
+        var origLen = bytes.length;
+        if (origLen > 65535) return bytes;
+        var paddedLen = origLen + 2;
+        var rem = paddedLen % PADDING_BLOCK;
+        var totalLen = rem === 0 ? paddedLen : paddedLen + (PADDING_BLOCK - rem);
+        var result = new Uint8Array(totalLen);
+        result[0] = (origLen >> 8) & 0xff;
+        result[1] = origLen & 0xff;
+        result.set(bytes, 2);
+        if (totalLen > origLen + 2) {
+            var padBytes = sodium.randombytes_buf(totalLen - origLen - 2);
+            result.set(padBytes, origLen + 2);
+        }
+        return result;
+    }
+    function unpadPlaintext(padded) {
+        if (padded.length < 2) return padded;
+        var origLen = (padded[0] << 8) | padded[1];
+        if (origLen + 2 > padded.length) return padded;
+        return padded.slice(2, 2 + origLen);
     }
 
-    // ---- Simplified DM Encryption (ECDH + HKDF per-channel) ----
+    // ---- Simplified Channel Encryption (with message padding) ----
+    function encryptMessage(plaintext, channelKey) {
+        var padded = padPlaintext(plaintext);
+        return aeadEncrypt(padded, channelKey);
+    }
+    function decryptMessage(ciphertextB64, nonceB64, channelKey) {
+        var raw = aeadDecrypt(ciphertextB64, channelKey, nonceB64);
+        if (!raw) return null;
+        var unpadded = unpadPlaintext(new Uint8Array(raw));
+        return new TextDecoder().decode(unpadded);
+    }
+
+    // ---- Simplified DM Encryption (ECDH + HKDF per-channel, with message padding) ----
     function getDmKey(dmChannelId, myPrivateKey, otherPublicKey) {
         const shared = x25519SharedSecret(myPrivateKey, otherPublicKey);
         return hkdf(shared, shared, 'dm-channel:' + dmChannelId, 32);
     }
     function encryptDm(plaintext, dmChannelId, myPrivateKey, otherPublicKey) {
         const dmKey = getDmKey(dmChannelId, myPrivateKey, otherPublicKey);
-        return aeadEncrypt(plaintext, dmKey);
+        var padded = padPlaintext(plaintext);
+        return aeadEncrypt(padded, dmKey);
     }
     function decryptDm(ciphertextB64, nonceB64, dmChannelId, myPrivateKey, otherPublicKey) {
         const dmKey = getDmKey(dmChannelId, myPrivateKey, otherPublicKey);
         var raw = aeadDecrypt(ciphertextB64, dmKey, nonceB64);
-        return new TextDecoder().decode(raw);
+        if (!raw) return null;
+        var unpadded = unpadPlaintext(new Uint8Array(raw));
+        return new TextDecoder().decode(unpadded);
     }
 
     // ---- File Encryption (XChaCha20-Poly1305 chunked) ----
@@ -522,6 +559,10 @@ var E2ECrypto = (() => {
         generateProfileDataKey: generateProfileDataKey,
         encryptProfileData: encryptProfileData,
         decryptProfileData: decryptProfileData,
+
+        // Message padding (P3 — traffic analysis protection)
+        padPlaintext: padPlaintext,
+        unpadPlaintext: unpadPlaintext,
 
         // Sender username encryption (P3 — encrypt sender_username with channel/server key)
         encryptSenderUsername: function(username, channelKey) {
