@@ -1526,3 +1526,68 @@ This logic is actually correct — non-owners can upload keys for themselves onl
 ### Build
 - ✅ Server rebuilt: 0 errors, 9 warnings (pre-existing unused variable warnings)
 - ✅ All JS files clean
+
+---
+
+## Online/Offline Presence System & Notification Controls (2026-07-26)
+
+**Goal:** Show real-time online/offline status for users, replay missed notifications when users reconnect, and add granular notification clearing controls.
+
+### Server-side Changes
+
+**WsManager presence tracking (`ws.rs`):**
+- Added `get_online_user_ids()` — collects unique user IDs from all active connections
+- Added `broadcast_all()` — sends message to every connected user
+- On connect: broadcasts `presence_update` with full online user list to all clients
+- On disconnect: broadcasts updated online user list to all clients
+
+**`/api/online` endpoint (`handlers.rs`):**
+- New `list_online_users` handler — returns JSON array of currently connected user IDs
+- Called by client on page load for initial presence state
+
+**Expanded offline notification queue (`db.rs`, `migrations/033_pending_notifications.sql`):**
+- New `pending_notifications` table with `user_id`, `notification_type`, `payload`
+- `save_pending_notification()` — stores notification JSON for offline users
+- `get_and_delete_pending_notifications()` — fetches + deletes on reconnect (read-then-delete)
+
+**Notification saving for offline users (`ws.rs`, `handlers.rs`):**
+- DM messages: saves `dm_new` payload for offline DM members
+- Mentions: saves `mention_notification` for offline mentioned users (both server and DM)
+- Replies: saves `reply_notification` for offline replied-to users
+- Friend requests: saves `friend_request_received` for offline recipients
+- Friend request accepted: saves `friend_request_accepted` for offline accepter
+
+**Replay on reconnect (`ws.rs`):**
+- After existing pending events replay, replays all `pending_notifications` as WebSocket messages
+
+### Client-side Changes
+
+**Presence tracking (`chat.js`):**
+- `onlineUsers` Set tracks currently online user IDs
+- Handles `presence_update` WebSocket messages — updates Set and re-renders dots
+- Fetches `/api/online` on `auth_ok` for initial state
+
+**Presence dot rendering (`chat.js`, `style.css`):**
+- `updatePresenceDots()` — renders green (online) / grey (offline) dots on:
+  - Member list: bottom-right of each `.member-avatar`
+  - DM sidebar: bottom-right of each `.dm-avatar`
+  - Bottom profile bar: bottom-right of `.sidebar-profile-avatar`
+- Dots: 12px circles, 2px border matching sidebar background, `z-index: 2`
+- Called after `loadMembers()`, `renderDmSidebar()`, and `updateSidebarFooter()`
+
+**Right-click notification clearing:**
+- DM sidebar items: "Clear notifications (N)" clears `unreadDms[dmChannelId]` + related mention items
+- DM strip button: "Clear all DM notifications (N)" clears all `unreadDms`
+- Server icons: "Clear notifications (N)" clears `unreadMentionsByServer[serverId]`
+- Channel items: "Clear notifications (N)" clears `unreadMentionsByChannel[channelId]`
+
+### Tests
+| Test | Result |
+|------|--------|
+| `tests/key-blob-recovery.spec.ts` | ✅ **Passed** |
+| `tests/dm-message-persistence.spec.ts` | ✅ **Passed** |
+
+### Build
+- ✅ Server rebuilt: 0 errors, 10 warnings (pre-existing)
+- ✅ `static/chat.js` — syntax clean
+- ✅ `static/style.css` — clean

@@ -592,6 +592,9 @@ impl Database {
         // Migration 032: server_picture — encrypted server picture/avatar support
         let _ = conn.execute_batch(include_str!("../migrations/032_server_picture.sql"));
 
+        // Migration 033: pending_notifications — expanded offline notification queue
+        let _ = conn.execute_batch(include_str!("../migrations/033_pending_notifications.sql"));
+
         // Migration 029: Backfill sender_id_hash for existing rows that have NULL
         // Use Rust sha256_hex() instead of SQLite's built-in sha256() (not available in older SQLite)
         {
@@ -1107,6 +1110,39 @@ impl Database {
             .map_err(|e| e.to_string())?;
 
         Ok(events)
+    }
+
+    // --- Pending Notifications (expanded offline replay) ---
+
+    pub fn save_pending_notification(&self, user_id: &str, notification_type: &str, payload: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO pending_notifications (user_id, notification_type, payload) VALUES (?1, ?2, ?3)",
+            params![user_id, notification_type, payload],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn get_and_delete_pending_notifications(&self, user_id: &str) -> Result<Vec<(String, String)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT notification_type, payload FROM pending_notifications WHERE user_id = ?1 ORDER BY created_at ASC"
+            )
+            .map_err(|e| e.to_string())?;
+        let notifs: Vec<(String, String)> = stmt
+            .query_map(params![user_id], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        conn.execute("DELETE FROM pending_notifications WHERE user_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+
+        Ok(notifs)
     }
 
     pub fn get_auth_params(&self, username: &str) -> Result<(String, String, String), String> {

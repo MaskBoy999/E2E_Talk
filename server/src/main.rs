@@ -298,6 +298,7 @@ async fn main() {
         // Phase 12: User Stickers/GIFs
         .route("/api/users/me/stickers", get(handlers::list_user_stickers).post(handlers::add_user_sticker))
         .route("/api/users/me/stickers/{sticker_id}", delete(handlers::remove_user_sticker))
+        .route("/api/online", get(handlers::list_online_users))
         .route("/ws", get(ws::ws_handler))
         .fallback(get(serve_static))
         .with_state(state);

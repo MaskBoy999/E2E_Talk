@@ -73,6 +73,25 @@ impl WsManager {
             let _ = sender.send(message.to_string());
         }
     }
+
+    pub async fn get_online_user_ids(&self) -> Vec<String> {
+        let conns = self.connections.read().await;
+        let mut seen = std::collections::HashSet::new();
+        let mut result = Vec::new();
+        for (uid, _, _) in conns.values() {
+            if seen.insert(uid.clone()) {
+                result.push(uid.clone());
+            }
+        }
+        result
+    }
+
+    pub async fn broadcast_all(&self, message: &str) {
+        let conns = self.connections.read().await;
+        for (_, _, sender) in conns.values() {
+            let _ = sender.send(message.to_string());
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -264,9 +283,28 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         }
     }
 
+    // Replay pending notifications (DMs, mentions, replies while offline)
+    if let Ok(notifs) = state.db.get_and_delete_pending_notifications(&user_id) {
+        for (notif_type, payload) in notifs {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&payload) {
+                let _ = sender.send(Message::Text(parsed.to_string().into())).await;
+            }
+        }
+    }
+
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 
     let conn_id = state.ws_manager.add_connection(user_id.clone(), device_id, tx).await;
+
+    // Broadcast presence: this user is now online
+    {
+        let online = state.ws_manager.get_online_user_ids().await;
+        let presence_msg = serde_json::json!({
+            "type": "presence_update",
+            "online_user_ids": online,
+        });
+        state.ws_manager.broadcast_all(&presence_msg.to_string()).await;
+    }
 
     let mut send_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
@@ -297,6 +335,16 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     }
 
     state.ws_manager.remove_connection(conn_id).await;
+
+    // Broadcast presence: this user is now offline
+    {
+        let online = state.ws_manager.get_online_user_ids().await;
+        let presence_msg = serde_json::json!({
+            "type": "presence_update",
+            "online_user_ids": online,
+        });
+        state.ws_manager.broadcast_all(&presence_msg.to_string()).await;
+    }
 }
 
 async fn handle_ws_message(
@@ -438,6 +486,13 @@ async fn handle_ws_message(
                         "message_id": msg_id
                     });
                     state.ws_manager.broadcast_to_users(&mentioned_ids, &mention_notification.to_string()).await;
+                    // Save for offline mentioned users
+                    let notif_str = mention_notification.to_string();
+                    for mid in &mentioned_ids {
+                        if !state.ws_manager.is_user_connected(mid).await {
+                            let _ = state.db.save_pending_notification(mid, "mention_notification", &notif_str);
+                        }
+                    }
                 }
             }
 
@@ -457,6 +512,9 @@ async fn handle_ws_message(
                         "message_id": msg_id
                     });
                     state.ws_manager.broadcast_to_users(&[reply_to_user_id.to_string()], &reply_notification.to_string()).await;
+                    if !state.ws_manager.is_user_connected(reply_to_user_id).await {
+                        let _ = state.db.save_pending_notification(reply_to_user_id, "reply_notification", &reply_notification.to_string());
+                    }
                 }
             }
         }
@@ -614,6 +672,13 @@ async fn handle_ws_message(
             match state.db.get_dm_members(dm_channel_id) {
                 Ok(members) => {
                     state.ws_manager.broadcast_to_users(&members, &json).await;
+                    // Save notification for offline members
+                    let outgoing_str = serde_json::to_string(&outgoing).unwrap();
+                    for member_id in &members {
+                        if member_id != user_id && !state.ws_manager.is_user_connected(member_id).await {
+                            let _ = state.db.save_pending_notification(member_id, "dm_new", &outgoing_str);
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::error!("Failed to get DM members: {}", e);
@@ -636,6 +701,12 @@ async fn handle_ws_message(
                         "message_id": msg_id
                     });
                     state.ws_manager.broadcast_to_users(&mentioned_ids, &mention_notification.to_string()).await;
+                    let notif_str = mention_notification.to_string();
+                    for mid in &mentioned_ids {
+                        if !state.ws_manager.is_user_connected(mid).await {
+                            let _ = state.db.save_pending_notification(mid, "mention_notification", &notif_str);
+                        }
+                    }
                 }
             }
 
@@ -650,6 +721,9 @@ async fn handle_ws_message(
                         "message_id": msg_id
                     });
                     state.ws_manager.broadcast_to_users(&[reply_to_user_id.to_string()], &reply_notification.to_string()).await;
+                    if !state.ws_manager.is_user_connected(reply_to_user_id).await {
+                        let _ = state.db.save_pending_notification(reply_to_user_id, "reply_notification", &reply_notification.to_string());
+                    }
                 }
             }
         }

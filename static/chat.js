@@ -42,6 +42,7 @@ let selectedFiles = [];
 let currentServerMemberList = [];
 let unreadMentionsByServer = {}; // serverId -> count
 let unreadMentionsByChannel = {}; // channelId -> { count, message_id }
+let onlineUsers = new Set(); // user IDs currently connected via WebSocket
 
 // Chronological mention inbox: [{ id, serverId, channelId, dmChannelId, messageId, senderUsername, channelName, serverName, type: 'mention'|'reply'|'dm', time }]
 let mentionItems = [];
@@ -4183,6 +4184,23 @@ function showDmContextMenu(e, dmChannelId, otherUsername) {
     });
     menu.appendChild(muteItem);
 
+    // Clear notifications for this DM
+    var unreadDmCount = unreadDms[dmChannelId] || 0;
+    var clearItem = document.createElement('div');
+    clearItem.className = 'context-menu-item';
+    clearItem.textContent = unreadDmCount > 0 ? 'Clear notifications (' + unreadDmCount + ')' : 'No notifications';
+    if (unreadDmCount === 0) clearItem.style.opacity = '0.5';
+    clearItem.addEventListener('click', function () {
+        delete unreadDms[dmChannelId];
+        mentionItems = mentionItems.filter(function (item) { return item.dmChannelId !== dmChannelId; });
+        updateDmStripBadge();
+        updateMentionsBadge();
+        saveMentionState();
+        if (viewMode === 'dms') renderDmSidebar();
+        menu.remove();
+    });
+    menu.appendChild(clearItem);
+
     document.body.appendChild(menu);
 
     // Close on click outside
@@ -4268,6 +4286,18 @@ function showChannelContextMenu(e, channelId, channelName) {
             menu.appendChild(svItem);
         }
     }
+
+    // Clear notifications for this channel
+    var unreadChCount = unreadMentionsByChannel[channelId] ? unreadMentionsByChannel[channelId].count : 0;
+    var clearChItem = document.createElement('div');
+    clearChItem.className = 'context-menu-item';
+    clearChItem.textContent = unreadChCount > 0 ? 'Clear notifications (' + unreadChCount + ')' : 'No notifications';
+    if (unreadChCount === 0) clearChItem.style.opacity = '0.5';
+    clearChItem.addEventListener('click', function () {
+        clearUnreadChannelMentions(channelId);
+        menu.remove();
+    });
+    menu.appendChild(clearChItem);
 
     document.body.appendChild(menu);
 
@@ -4627,6 +4657,11 @@ function connectWebSocket(t) {
                         try { await uploadCurrentProfileToConversations(); } catch (_) {}
                     }
                 }, 2000);
+                // Fetch initial online users list
+                fetch('/api/online', { headers: { 'Authorization': 'Bearer ' + t } })
+                    .then(r => r.json())
+                    .then(ids => { if (Array.isArray(ids)) { onlineUsers = new Set(ids); updatePresenceDots(); } })
+                    .catch(() => {});
                 break;
             case 'auth_error':
                 localStorage.removeItem('token');
@@ -4985,6 +5020,12 @@ function connectWebSocket(t) {
                     updateMentionsBadge();
                     updateDmStripBadge();
                     showMissedActivityNotification(data.new_dms || 0, data.new_server_messages || 0);
+                }
+                break;
+            case 'presence_update':
+                if (Array.isArray(data.online_user_ids)) {
+                    onlineUsers = new Set(data.online_user_ids);
+                    updatePresenceDots();
                 }
                 break;
             case 'pong':
@@ -7818,6 +7859,7 @@ function renderDmSidebar() {
         await loadFriendRequests();
         showModal('friend-requests-modal');
     });
+    updatePresenceDots();
 }
 
 async function selectDmChannel(dmChannelId, otherUserId, otherUsername, element) {
@@ -7837,9 +7879,17 @@ async function selectDmChannel(dmChannelId, otherUserId, otherUsername, element)
     var convForPic = dmConversations.find(function (c) { return c.dm_channel_id === dmChannelId; });
     var dmHeaderPicFileId = convForPic ? (convForPic.other_profile_picture_file_id || (userDisplayNameCache[otherUserId] && userDisplayNameCache[otherUserId].profile_picture_file_id)) : (userDisplayNameCache[otherUserId] && userDisplayNameCache[otherUserId].profile_picture_file_id);
     var dmHeaderPicUrl = dmHeaderPicFileId ? getProfilePicUrl(dmHeaderPicFileId, otherUserId) : null;
-    var dmHeaderPicHtml = dmHeaderPicUrl ? '<img class="dm-chat-header-pic" src="' + dmHeaderPicUrl + '" alt="">' : (dmHeaderPicFileId ? '<div class="dm-chat-header-pic dm-chat-header-pic-load" data-profile-pic-load="' + otherUserId + ':' + dmHeaderPicFileId + '">' + displayName.charAt(0).toUpperCase() + '</div>' : '');
+    var dmHeaderPicHtml = dmHeaderPicUrl ? '<div class="dm-header-pic-wrap"><img class="dm-chat-header-pic" src="' + dmHeaderPicUrl + '" alt=""></div>' : (dmHeaderPicFileId ? '<div class="dm-header-pic-wrap"><div class="dm-chat-header-pic dm-chat-header-pic-load" data-profile-pic-load="' + otherUserId + ':' + dmHeaderPicFileId + '">' + displayName.charAt(0).toUpperCase() + '</div></div>' : '');
+    var headerDotClass = 'presence-dot ' + (onlineUsers.has(otherUserId) ? 'online' : 'offline');
     document.getElementById('channel-name').innerHTML = dmHeaderPicHtml + '<span>' + escapeHtml(displayName) + '</span>' +
         ' <button class="btn-unfriend" id="unfriend-btn" title="Unfriend">Unfriend</button>';
+    // Add presence dot to header pic
+    var headerWrap = document.querySelector('#channel-name .dm-header-pic-wrap');
+    if (headerWrap) {
+        var dot = document.createElement('div');
+        dot.className = headerDotClass;
+        headerWrap.appendChild(dot);
+    }
     document.getElementById('message-input').disabled = false;
     document.getElementById('send-btn').disabled = false;
 
@@ -8591,6 +8641,7 @@ async function loadMembers(serverId) {
                 }
             }
         }
+        updatePresenceDots();
     } catch (err) {
         console.error('Failed to load members:', err);
     }
@@ -8619,6 +8670,60 @@ function updateMemberListItem(userId) {
             }
         }
     });
+}
+
+function updatePresenceDots() {
+    // Member list dots
+    document.querySelectorAll('.member-item[data-user-id]').forEach(function(el) {
+        var uid = el.dataset.userId;
+        var avatar = el.querySelector('.member-avatar');
+        if (!avatar) return;
+        var dot = avatar.querySelector('.presence-dot');
+        if (!dot) {
+            dot = document.createElement('div');
+            dot.className = 'presence-dot';
+            avatar.style.position = 'relative';
+            avatar.appendChild(dot);
+        }
+        dot.className = 'presence-dot ' + (onlineUsers.has(uid) ? 'online' : 'offline');
+    });
+    // DM sidebar dots
+    document.querySelectorAll('.dm-item[data-user-id]').forEach(function(el) {
+        var uid = el.dataset.userId;
+        var avatar = el.querySelector('.dm-avatar');
+        if (!avatar) return;
+        var dot = avatar.querySelector('.presence-dot');
+        if (!dot) {
+            dot = document.createElement('div');
+            dot.className = 'presence-dot';
+            avatar.style.position = 'relative';
+            avatar.appendChild(dot);
+        }
+        dot.className = 'presence-dot ' + (onlineUsers.has(uid) ? 'online' : 'offline');
+    });
+    // Bottom profile bar dot
+    var profileAvatar = document.getElementById('footer-user-avatar');
+    if (profileAvatar && user) {
+        var dot = profileAvatar.querySelector('.presence-dot');
+        if (!dot) {
+            dot = document.createElement('div');
+            dot.className = 'presence-dot';
+            profileAvatar.style.position = 'relative';
+            profileAvatar.appendChild(dot);
+        }
+        dot.className = 'presence-dot ' + (onlineUsers.has(user.id) ? 'online' : 'offline');
+    }
+    // DM chat header dot
+    var headerWrap = document.querySelector('#channel-name .dm-header-pic-wrap');
+    if (headerWrap && currentDmOtherUser) {
+        var dot = headerWrap.querySelector('.presence-dot');
+        if (!dot) {
+            dot = document.createElement('div');
+            dot.className = 'presence-dot';
+            headerWrap.appendChild(dot);
+        }
+        dot.className = 'presence-dot ' + (onlineUsers.has(currentDmOtherUser.id) ? 'online' : 'offline');
+    }
 }
 
 async function kickMember(targetUserId, username) {
@@ -13490,9 +13595,8 @@ function updateSidebarFooter() {
     } else {
         avatarEl.innerHTML = initial;
     }
+    updatePresenceDots();
 }
-
-// Load own profile from server
 // Upload per-conversation encrypted profile data so any user with access
 // to a DM or server channel can decrypt the user's current profile.
 // Stores the ACTUAL profile data (description, nickname, colors) re-encrypted

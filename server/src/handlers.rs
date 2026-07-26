@@ -3866,21 +3866,19 @@ pub async fn regen_friend_code_with_password(
         Err(e) => return e.into_response(),
     };
 
-    // Verify password against stored hash
+    // Verify password against stored hash (direct string comparison — matches login/reauth)
     let stored_password_hash = match state.db.get_password_hash_by_id(&user_id) {
         Ok(h) => h,
         Err(_) => return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "User not found"}))).into_response(),
     };
 
-    match auth::verify_password(&req.password, &stored_password_hash) {
-        Ok(true) => {}
-        Ok(false) => return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Wrong password"}))).into_response(),
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    if req.password != stored_password_hash {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Wrong password"}))).into_response();
     }
 
     // Validate the new friend code
     let code = req.friend_code.trim().to_uppercase();
-    if code.len() != 8 || !code.chars().all(|c| c.is_ascii_alphanumeric()) {
+    if code.len() < 8 || code.len() > 16 || !code.chars().all(|c| c.is_ascii_alphanumeric()) {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid friend code format"}))).into_response();
     }
 
@@ -4037,6 +4035,10 @@ pub async fn send_friend_request(
                 .ws_manager
                 .broadcast_to_users(&[target.id.clone()], &notify.to_string())
                 .await;
+            // Save for offline recipient
+            if !state.ws_manager.is_user_connected(&target.id).await {
+                let _ = state.db.save_pending_notification(&target.id, "friend_request_received", &notify.to_string());
+            }
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -4082,8 +4084,12 @@ pub async fn accept_friend_request(
             });
             let _ = state
                 .ws_manager
-                .broadcast_to_users(&[from_id, user_id], &notify.to_string())
+                .broadcast_to_users(&[from_id.clone(), user_id.clone()], &notify.to_string())
                 .await;
+            // Save for offline users
+            if !state.ws_manager.is_user_connected(&from_id).await {
+                let _ = state.db.save_pending_notification(&from_id, "friend_request_accepted", &notify.to_string());
+            }
             (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
         }
         Err(e) => (
@@ -4497,4 +4503,11 @@ pub async fn get_dm_keys(
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
+}
+
+pub async fn list_online_users(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let online = state.ws_manager.get_online_user_ids().await;
+    (StatusCode::OK, Json(serde_json::json!(online))).into_response()
 }
