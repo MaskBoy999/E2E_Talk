@@ -1,23 +1,391 @@
 # E2E Talk — Implementation Analysis & Bug Fix Log
 
-## Implementation Changelog
+## P3 Completion: Remove Plaintext Sender Username (2026-07-24) (changed)
 
-| Date | Feature | Description |
-|------|---------|-------------|
-| 07-24 | P3: Sender username encrypted | Removed plaintext sender_username from all API/WS responses. Uses AEAD encrypt with channel key. |
-| 07-24 | Shared profile data keys API | Users can recover profile_data_key without WS roundtrip. Stored pre-encrypted with DM/server key. |
-| 07-24 | Server member key upload | Every server member's shared profile key uploaded on page load, not just owner's. |
-| 07-24 | Test suite: shared keys regression | 5 end-to-end tests verifying shared key retrieval, sender username removal, and WS broadcasts. |
-| 07-26 | Rate limiting + metadata hardening | Added JOIN_SERVER_RATE_LIMITER, FRIEND_REQUEST_RATE_LIMITER, message padding (256-byte), removed profile_picture_file_id from member/DM list responses. |
-| 07-23 | Bug fixes | Friend request accept creates DM chat. Server key retry loop (10 attempts × 1.5s). |
-| 07-26 | Encrypted server pictures | Server avatar: file encrypted client-side, key encrypted with server key. Migration 032. |
-| 07-26 | Accompanying changes | Friend code 8→16 chars, sticker square-crop fix, memory leak fixes. |
-| 07-26 | Proactive profile sync | Profile data + keys synced on page load via dedicated recover/upload functions. |
-| 07-26 | Presence system | Online/offline WebSocket broadcasts, mute controls for servers/channels/DMs. |
-| 07-26 | Security hardening batch | Sticker file_key leak fixed, IP-based rate limiting (login/HMAC/friend requests), constant-time password comparison, file size limit 50MB. |
-| 07-26 | server_stickers removed | Dead feature removal (table, handlers, admin tab). Migration 035. |
-| 07-26 | Notification encryption | Mention/reply notifications now send encrypted channel/server/sender names instead of plaintext. Client decrypts with server/DM key. |
-| 07-27 | Migration 036: Drop plaintext profile columns | Removed username_color, username_border_color, profile_background_color from DB. Already stored in encrypted_profile_data. |
+**Goal:** Stop the host from being able to identify message senders by reading plaintext `sender_username` in API responses or WS broadcasts.
+
+### What was done (changed)
+
+**Server-side (`handlers.rs`):**
+- Removed `"sender_username": m.sender_username` from all 5 message API response locations: `list_messages`, `list_messages_around`, `list_dm_messages`, admin `list_dm_messages`, admin `list_all_dm_messages_admin`
+- The `encrypted_sender_username` + `sender_username_nonce` fields remain intact for clients to decrypt
+
+**Server-side (`ws.rs`):**
+- Removed `sender_username: String` from the `OutgoingChatMessage` struct (serialized into all WS broadcasts)
+- Removed `sender_username: message.sender_username` from all 4 message broadcast construction sites (`message_new`, `dm_new`, `message_edited`, `dm_edited`)
+- **Kept** `"sender_username": msg_sender_username` in 4 notification-only broadcasts (server mention/reply, DM mention/reply) — these are real-time UX metadata broadcast only to the affected user, not stored message payloads
+
+**Client-side (`chat.js`):**
+- Added `encrypted_sender_username` decryption in `appendMessage()` (server messages from API)
+- Added `encrypted_sender_username` decryption in `appendDmMessage()` (DM messages from API)
+- Both use the channel/server key to decrypt the username before the display-name fallback runs
+
+### Security benefit
+- **🔴→🟢 Host can no longer identify message senders by reading API responses or WS broadcasts**
+- The host only sees `sender_id` (a UUID) and opaque `encrypted_sender_username` ciphertext
+- The client decrypts the username client-side using the shared server/DM key
+- Mention/reply notifications still carry `sender_username` (broadcast only to the mentioned/replied user), which is acceptable UX metadata
+
+### Build & Verify
+- ✅ Server: 0 errors, 0 warnings
+- ✅ All JS files syntax-clean
+- ✅ Grep confirms zero `"sender_username"` in handlers.rs
+
+---
+
+## Shared Profile Data Keys API (2026-07-24)
+
+**Goal:** Allow users to recover other users' `profile_data_key` without waiting for a WebSocket `profile_key_sync` roundtrip — the key is stored pre-encrypted server-side.
+
+### How it works
+
+When User A creates a DM with User B or joins a server:
+1. User A's client encrypts their `profile_data_key` with the DM channel key (derived from X25519 shared secret) or server metadata key
+2. Uploads the pre-encrypted key to `PUT /api/profile/data-key/shared`
+3. User B can fetch it via `GET /api/profile/data-key/shared/dm_channel/{channelId}` (or `server/{serverId}`)
+4. User B decrypts with their copy of the same shared key
+
+### Endpoints
+
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| `PUT` | `/api/profile/data-key/shared` | Upload own key pre-encrypted with DM/server key |
+| `GET` | `/api/profile/data-key/shared/{type}/{id}` | Fetch keys for one target |
+| `POST` | `/api/profile/data-key/shared/batch` | **NEW** Fetch keys for multiple targets in one request |
+
+### Security benefit
+- **Eliminates WS dependency**: Users can recover profile_data_key on cookie clear without waiting for the other user to re-send `profile_key_sync`
+- **Server can't read**: The key is encrypted with the DM/server key before upload; the server stores opaque ciphertext
+- **Access control**: Only DM/server members can fetch keys (membership check on every request)
+
+### Performance benefit (batch endpoint)
+- **Before**: `loadDmConversations()` made N sequential HTTP calls (one per DM channel) + `loadServers()` made M calls (one per server)
+- **After**: `recoverAllSharedProfileDataKeys()` sends 1 POST with all N+M targets → returns everything at once
+- Wired into both `loadDmConversations()` and `loadServers()` on page load
+
+---
+
+## Server Member Key Upload on Page Load (2026-07-24)
+
+**Goal:** Ensure every server the user is a member of gets their shared profile_data_key uploaded, not just the auto-selected first server.
+
+**Fix:** Added a loop in `loadServers()` that calls `uploadSharedProfileDataKey('server', s.id)` for every server, running after the key-fetch loop ensures all server keys are available.
+
+### Benefit
+- **All members' keys become discoverable**, not just the owner's
+- Combined with `reuploadAllSharedProfileDataKeys()` in `saveProfile()`, keys stay fresh after profile changes
+- Coverage: page load, profile save, server join, individual server click
+
+---
+
+## Test Suite: Shared Keys + Sender Username Regression (2026-07-24)
+
+**File:** `tests/shared-keys-regression.spec.ts`
+
+5 tests covering all recent features:
+
+| Test | Coverage |
+|------|----------|
+| 01 | Shared key uploaded after DM creation, retrievable via individual GET |
+| 02 | Batch endpoint returns keys for multiple targets with correct structure |
+| 03 | No `sender_username` field in `list_messages` or `list_messages_around` responses |
+| 04 | Server member shared key uploaded after page load, visible to other members |
+| 05 | No `sender_username` in WS `message_new` broadcast payloads |
+
+Uses `createServerViaPage` helper that exercises the full crypto flow (key generation, name encryption, server key upload) so tests are realistic end-to-end.
+
+---
+
+## P2/P3 Implementation: Rate Limiting, Metadata Hardening, Message Padding (2026-07-26) (changed)
+
+### Rate Limiting (P0 — Quick Win) (changed)
+
+Added `JOIN_SERVER_RATE_LIMITER` and `FRIEND_REQUEST_RATE_LIMITER` to `handlers.rs`:
+- **Server joins**: 10 attempts per 10 minutes per user (uses existing `RateLimiter` pattern)
+- **Friend requests**: 10 attempts per 10 minutes per user
+- Returns `429 TOO_MANY_REQUESTS` with descriptive error message when limit exceeded
+- Window resets after 10 minutes from the first attempt in the window
+
+### #5 — Encrypt profile_picture_file_id with channel key (Already Implemented) (changed)
+
+**Audit found:** The `profile_picture_file_id` was already being included inside `encrypted_profile_snapshot` (encrypted with channel/DM key) on the client side. Both `appendMessage()` and `appendDmMessage()` already extract `snap.profile_picture_file_id` from the decrypted snapshot. **No changes needed** — this is already properly encrypted per-message.
+
+### #6 — Remove profile_picture_file_id from member/DM list responses (changed)
+
+**Files:** `server/src/handlers.rs`
+
+- **`list_server_members`**: Removed `"profile_picture_file_id": profile_pic` from JSON response. The client already discovers profile pic file IDs via `encrypted_profile_snapshot` (per-message) and `conversation_profile_data` (per-conversation, encrypted with server/DM key).
+- **`list_dm_conversations`**: Removed `"other_profile_picture_file_id": other_profile_pic` from JSON response.
+- Suppressed unused variables with `_` prefix to avoid compiler warnings.
+
+### #7 — Message Padding (Traffic Analysis Protection) (changed)
+
+**Files:** `static/crypto.js`
+
+Added `padPlaintext()` and `unpadPlaintext()` functions that:
+- Prepend a 2-byte big-endian original length before encrypting
+- Append random bytes to pad the total to the nearest 256 bytes
+- On decrypt, read the 2-byte length prefix and strip padding
+- **Backward compatible**: For old unpadded messages, the `origLen + 2 > padded.length` guard detects that the first 2 bytes don't encode a valid length and returns the full buffer unchanged (works because JSON always starts with `{` = 0x7b, producing a large implausible length).
+- Updated `encryptMessage()`/`decryptMessage()` and `encryptDm()`/`decryptDm()` to use padding
+
+### Build & Verify (changed)
+- ✅ Server: 0 errors, 0 warnings
+- ✅ crypto.js message padding applied and exported via public API
+- ✅ Rate limiters wired into join_server and send_friend_request
+
+---
+
+## Bug Fixes Applied (2026-07-23)
+
+### Bug 1: Friend request accept doesn't create/select DM chat
+
+**Root cause:** Two code paths handled friend request acceptance but neither auto-selected the DM conversation:
+1. The `acceptFriendRequest()` UI function (called when clicking Accept in the modal) loaded DMs but never navigated to the new conversation.
+2. The WebSocket `friend_request_accepted` handler also loaded DMs but never switched views.
+
+**Fixes:**
+1. **Server** (`server/src/handlers.rs`): Added `"from_user_id": from_id` to the `friend_request_accepted` WebSocket JSON payload so the client can identify the original sender regardless of which end of the friendship they're on.
+2. **Client WS handler** (`static/chat.js`): Updated to use both `by_user_id` and `from_user_id` to find the correct conversation for sender (looks for the acceptor's ID) vs acceptor (looks for the sender's ID), switches to DM view, and selects the channel.
+3. **Client `acceptFriendRequest`** (`static/chat.js`): Captures the sender's user ID from `cachedFriendRequests` BEFORE the cache is cleared by `loadFriendRequests()`, then sets DM view state and calls `selectDmChannel()` to navigate to the new DM.
+
+### Bug 2: Server key "Cannot decrypt server key" stuck
+
+**Root cause:** The `selectServer()` function called `fetchAndDecryptServerKey()` only once. If the owner hadn't finished rotating the key yet (receives `member_joined` WS message, fetches new member's identity key, encrypts+uploads the server key), the user saw "Cannot decrypt server key" with no recovery.
+
+**Fixes:**
+1. **`selectServer()`** (`static/chat.js`): Changed from single `fetchAndDecryptServerKey()` call to a 10-attempt retry loop with 1.5s delays (~15s total wait).
+2. **`joinServer()`** (`static/chat.js`): Both retry loops increased from 5 attempts/1s delay to 10 attempts/1.5s delay to give more time for the key to propagate.
+
+### Test Status
+| Test | Status |
+|------|--------|
+| Server key decryption after joining | ✅ **Passed** — channels load correctly |
+| Friend code features (4 tests) | ✅ **Passed** |
+| DM auto-select after friend accept | 🟡 **Partial** — DM auto-selects correctly, friend code button re-binding has minor timing sensitivity |
+
+---
+
+## Custom Encrypted Server Pictures (2026-07-26)
+
+**Goal:** Allow server owners to upload an encrypted server picture/avatar that is displayed in the server sidebar and server settings. The picture file is encrypted client-side with a random file key, and the file key is encrypted with the server key so only server members can decrypt it.
+
+### Server-Side Changes
+
+**Migration 032** (`server/migrations/032_server_picture.sql`):
+- Added `server_picture_file_id TEXT` to `servers` table — reference to the uploaded encrypted file
+- Added `encrypted_server_picture_key BLOB` — file key encrypted with the server key (AES-256-GCM)
+- Added `server_picture_key_nonce BLOB` — nonce for the encrypted file key
+
+**`db.rs`:**
+- `Server` struct updated with 3 new `Option` fields: `server_picture_file_id`, `encrypted_server_picture_key`, `server_picture_key_nonce`
+- `update_server_picture(server_id, file_id, encrypted_key, key_nonce)` — sets the picture fields
+- `remove_server_picture(server_id)` — sets all 3 columns to NULL
+- All SQL queries (`get_user_servers`, `get_server_by_invite_code`, `list_all_servers_admin`) updated to include the new columns in SELECT statements and struct initialization
+- Migration 032 registered in `run_migrations()`
+
+**`handlers.rs`:**
+- `UpdateServerPictureRequest` struct with `server_picture_file_id`, `encrypted_server_picture_key`, `server_picture_key_nonce`, and optional `remove` flag
+- `update_server_picture` handler — validates server ownership, decodes base64 fields, calls update or remove on DB
+- `list_servers` response now includes:
+  - `server_picture_file_id` — plaintext file reference
+  - `encrypted_server_picture_key` — base64-encoded ciphertext
+  - `server_picture_key_nonce` — base64-encoded nonce
+
+**`main.rs`:**
+- New route: `.route("/api/servers/{server_id}/picture", put(handlers::update_server_picture))`
+
+### Client-Side Changes
+
+**`chat.js` (~497 lines added):**
+- `serverPictureCropState` — state management for the crop/resize UI (image, crop coordinates, size)
+- `processAndUploadServerPicture()` — crops image to 420×420, uploads in encrypted 64KB chunks via file API, encrypts file key with server key via `E2ECrypto.aeadEncrypt()`, sends `PUT /api/servers/{id}/picture`
+- `removeServerPicture()` — sends `PUT /api/servers/{id}/picture` with `remove: true` to clear picture
+- `getServerPictureUrl(fileId, serverId)` — async download + decrypt pipeline: fetches encrypted file via `GET /api/files/{id}/download`, decrypts file key from `encrypted_server_picture_key` using all available server keys (`E2ECrypto.getAllServerKeys`), decrypts file chunks via `E2ECrypto.decryptFile()`, creates blob URL, caches result in `serverPictureCache`
+- `initServerPictureCropBox()` — interactive crop box UI with drag-and-resize, using box overlay and corner handle
+- `updateServerSettingsPreview()` — shows current picture (or fallback initial letter) in server settings modal
+- `renderServerList()` — shows server picture in sidebar (uses `getServerPictureUrl` for blob URL; falls back to initial letter while async download completes)
+- `openServerSettings()` — calls `updateServerSettingsPreview()` to initialize picture preview
+- **Memory leak fixes:**
+  - Crop event listeners stored as `cleanupCropListeners()` on state, called on cancel/confirm to remove `document` mousemove/mouseup/touch listeners
+  - Old blob URLs revoked via `URL.revokeObjectURL()` before re-uploading
+  - `serverPictureCache` entries cleared in `removeServerPicture` and on re-upload
+
+**`crypto.js`:**
+- Added `E2ECrypto.decryptFile(fileKey, encryptedData)` — decrypts a complete file from concatenated encrypted chunks (matches existing `downloadAndDecryptFile` pattern in `chat.js`)
+- Exported in the public API return block
+
+**`index.html`:**
+- Server picture preview circle (`#server-settings-picture-preview`)
+- Upload button (`#server-picture-upload-btn`) with hidden file input (`#server-picture-file-input`)
+- Remove button (`#server-picture-remove-btn`)
+- Crop container (`#server-picture-crop-container`) with image, overlay, info text, confirm/cancel buttons
+- Upload progress bar (`#server-picture-upload-progress`) with fill and text
+- Status and error message divs
+
+**`style.css`:**
+- Styles for `#server-settings-picture-preview` (60px circle with flexbox centering)
+- Styles for `#server-picture-crop-overlay` (absolute positioning over image)
+- Styles for `#server-picture-upload-progress` and `#server-picture-upload-progress-fill`
+
+### Encryption Flow
+
+```
+Upload:
+1. User selects image → crop to square (max 420×420) via canvas
+2. Generate random 32-byte file_key via E2ECrypto.generateFileKey()
+3. Upload encrypted chunks to POST /api/files/init + chunk uploads
+4. Encrypt file_key with server key: E2ECrypto.aeadEncrypt(fileKeyB64, serverKey)
+5. PUT /api/servers/{id}/picture with encrypted key, nonce, file_id
+
+Download:
+1. Receive encrypted_server_picture_key (base64) + server_picture_key_nonce (base64) from list_servers
+2. Try each server key version:
+   for each serverKey in E2ECrypto.getAllServerKeys(serverId):
+       fileKeyB64 = E2ECrypto.decryptMessage(encKeyB64, keyNonceB64, serverKey)
+       if fileKeyB64, break (first successful decryption wins)
+3. Convert file key from base64: fileKeyBytes = E2ECrypto.base64ToArrayBuffer(fileKeyB64)
+4. Fetch encrypted file via GET /api/files/{id}/download
+5. Decrypt file: E2ECrypto.decryptFile(fileKeyBytes, encryptedArray) → chunked decryption
+6. Create blob URL: URL.createObjectURL(new Blob([decrypted], {type: 'image/png'}))
+   → cache in serverPictureCache[serverId + ':' + fileId]
+7. Render <img> in server strip or settings preview
+```
+
+### Security
+- **Picture data:** 🟢 Encrypted — file chunks encrypted with random 32-byte file key (same as all file uploads)
+- **File key:** 🟢 Encrypted with server key — only server members who have the server key can decrypt
+- **Server stores:** 🔴 Opaque ciphertext — cannot decrypt the picture without the server key
+- **`server_picture_file_id`:** 🔴 Plaintext — but this is just a file reference, not the actual image
+- **Access control:** Only the server owner can upload/change/remove the picture (ownership validated server-side via `is_server_owner` check)
+- **Memory safety:** Crop listeners cleaned up; blob URLs revoked on re-upload/remove
+- **Async rendering:** Server strip shows initial letter while picture loads asynchronously; cache prevents re-download on re-render
+
+### Build & Verify
+- ✅ Server: 0 errors, 0 warnings (`cargo build` clean)
+- ✅ crypto.js: `decryptFile` function added and exported
+- ✅ All JS files syntax-clean
+
+---
+
+## Accompanying Changes (2026-07-26)
+
+### Friend & Invite Code Length Extended (8→16)
+
+**Files:** `static/auth.js`, `static/chat.js`
+
+Friend codes and invite codes were increased from 8 to 16 characters to improve security:
+- **Friend code registration** (`auth.js`): Loop incremented from `i < 8` to `i < 16`
+- **Friend code regeneration** (`chat.js` line 9015): `generateCode(8)` → `generateCode(16)`
+- **Invite code on server creation** (`chat.js` line 8485): `generateCode(8)` → `generateCode(16)`
+- **Invite code on show modal** (`chat.js` line 8609): `generateCode(8)` → `generateCode(16)`
+- **Invite code on regenerate** (`chat.js` line 8715): `generateCode(8)` → `generateCode(16)`
+
+The alphabet (`ABCDEFGHJKLMNPQRSTUVWXYZ23456789`, 32 chars excluding ambiguous characters I/O/0/1) remains unchanged. Entropy increased from 32^8 ≈ 1.0×10^12 to 32^16 ≈ 1.2×10^24.
+
+### Sticker Square-Crop Fix
+
+**File:** `static/chat.js`
+
+The sticker processing code was changed to always crop to the selected square region at its original resolution, instead of preserving non-square dimensions for images ≤420px:
+- **Before**: Images ≤420 kept their original non-square dimensions; larger images were cropped to square and resized to 420×420
+- **After**: All sticker images are cropped to the square region (using `cropX`, `cropY`, `cropSize`) at whatever resolution the cropped area has
+- Emojis and GIFs are unchanged (emojis still resized to 420×420 max, GIFs uploaded as-is)
+
+### Memory Leak Fixes (Event Listeners)
+
+**File:** `static/chat.js` (`initServerPictureCropBox`)
+
+Fixed duplicate `document` event listeners that were never cleaned up:
+- Removed 4 redundant `addEventListener` calls (duplicate `mousemove`, `touchmove`, `mouseup`, `touchend` on document)
+- `cleanupCropListeners()` now perfectly mirrors all 10 `addEventListener` calls (box, handle, document)
+- Cancel button and upload confirmation both call `cleanupCropListeners()` before resetting state
+- Blob URLs in `serverPictureCache` are revoked via `URL.revokeObjectURL()` on both remove and re-upload
+
+---
+
+## Test Suite: Session Changes Regression (2026-07-26)
+
+**File:** `tests/session-changes.spec.ts`
+
+10 tests covering all session changes:
+
+| Test | Coverage | Result |
+|------|----------|--------|
+| 01 | Friend code is 16 characters after registration | ✅ **Passed** |
+| 02 | Friend code is 16 characters after regeneration (via `generateCode`) | ✅ **Passed** |
+| 03 | `generateCode(16)` produces 16-char invite codes with valid alphabet | ✅ **Passed** |
+| 04 | Invite code regeneration produces a 16-char code accepted by API | ✅ **Passed** |
+| 05 | Server picture API: upload encrypted file → set as picture → verify in list → remove → verify null | ✅ **Passed** |
+| 06 | Non-owner cannot set server picture (returns 403/405) | ✅ **Passed** |
+| 07 | Sticker processing code uses `cropSize` for both dimensions (square only) | ✅ **Passed** |
+| 08 | `stickerCropState` initializes with correct defaults (`cropSize: 0`) | ✅ **Passed** |
+| 09 | `initServerPictureCropBox` stores `cleanupCropListeners` with ≥10 `removeEventListener` calls | ✅ **Passed** |
+| 10 | No duplicate document event listeners — each event type has correct count (mousemove=2, mouseup=1, touchmove=2, touchend=1) | ✅ **Passed** |
+
+**Note:** Server had to be rebuilt (`cargo build`) after adding the `/picture` route since the old binary did not have it; the first run failed with 405 until the binary was updated.
+
+---
+
+## Display Name & Colors Proactive Sync (2026-07-26)
+
+**Goal:** Proactively share `display_name`, `username_color`, and `username_border_color` via `profile_key_sync` (DM) and `profile_key_server_sync` (server) events — same encryption pattern as profile picture keys — so recipients can render them immediately without waiting for a message.
+
+### What Changed
+
+**File:** `static/chat.js`
+
+**`sendProfileKeySync()`** (DM sync):
+- Added `encrypted_display_name` + `display_name_nonce` + `display_name_message_nonce` — display_name encrypted with DM channel key via `E2ECrypto.encryptDm()`
+- Added `encrypted_username_color` + `username_color_nonce` + `username_color_message_nonce` — same pattern
+- Added `encrypted_username_border_color` + `username_border_color_nonce` + `username_border_color_message_nonce` — same pattern
+
+**`broadcastProfileKeySyncToServer()`** (server sync):
+- Same 3 fields encrypted with server key via `E2ECrypto.aeadEncrypt()` + nonce
+
+**Receiving handlers:**
+- `profile_key_sync` handler: Decrypts 3 fields with `E2ECrypto.decryptDm()`, stores in `userDisplayNameCache`, calls `updateExistingMessageStyles()` + `renderDmSidebar()` for immediate UI update
+- `profile_key_server_sync` handler: Decrypts 3 fields with `TextDecoder + E2ECrypto.aeadDecrypt()`, stores in `userDisplayNameCache`, calls `updateExistingMessageStyles()`
+
+**Guard condition fixes:**
+- Both handler entry conditions updated to accept `encrypted_display_name` (was: only `encrypted_profile_key` / `encrypted_profile_data_key`)
+- Server sync send condition updated to also send when `encrypted_display_name` is present
+
+### How It Works
+
+```
+Send (DM):
+1. myProfile.display_name → E2ECrypto.encryptDm(field, dmChannelId, privateKey, otherPubKey)
+2. encrypted_display_name + display_name_nonce + display_name_message_nonce added to profile_key_sync payload
+3. Recipient receives WebSocket message → decrypts with E2ECrypto.decryptDm()
+4. Stores in userDisplayNameCache[userId].display_name → all rendering paths pick it up
+
+Send (Server):
+1. myProfile.display_name → E2ECrypto.aeadEncrypt(field, serverKey)
+2. encrypted_display_name + display_name_nonce added to profile_key_server_sync payload
+3. Recipient receives WebSocket message → decrypts with E2ECrypto.aeadDecrypt()
+4. Stores in userDisplayNameCache[userId].display_name → all rendering paths pick it up
+```
+
+### Security
+- **Display name and colors:** 🟢 Encrypted with channel/DM key — only conversation participants can decrypt
+- **Server cannot read:** Only opaque ciphertext travels through the server; the server has no access to the encryption keys
+- **Proactive push:** No need to wait for a message — the data is shared immediately when a user connects or changes their profile
+
+### Rendering Coverage
+
+The data flows into `userDisplayNameCache`, which feeds all rendering paths:
+- `appendMessage()` / `appendDmMessage()` — all message types (text, sticker, file, forward)
+- `renderDmSidebar()` — DM conversation list
+- `renderMemberList()` — server member list
+
+No rendering code changes were needed — the cache already powers all of these.
+
+### Build & Verify
+- ✅ All JS files syntax-clean (`node --check static/chat.js`)
+- ✅ Code review: field names consistent, crypto methods match between send/receive
+
+---
 
 ## 🔍 Plaintext Data Flow Audit: What Still Reaches the Server Unencrypted
 

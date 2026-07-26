@@ -419,7 +419,6 @@ async fn handle_ws_message(
 
             let server_id_clone = server_id.clone();
             let msg_id = message.id.clone();
-            let msg_sender_username = state.db.get_user_by_id(&user_id).map(|u| u.username).unwrap_or_default();
             let outgoing = OutgoingMessage {
                 msg_type: "message_new".to_string(),
                 channel_id: Some(message.channel_id.clone()),
@@ -473,16 +472,22 @@ async fn handle_ws_message(
                     .filter(|id| id != user_id)
                     .collect();
                 if !mentioned_ids.is_empty() {
-                    let channel_name = state.db.get_channel_name(channel_id).unwrap_or_default();
-                    let server_name = state.db.get_server_name(&server_id).unwrap_or_default();
+                    let ch_enc = state.db.get_channel_encrypted_name(channel_id).ok();
+                    let sv_enc = state.db.get_server_encrypted_name(&server_id).ok();
+                    let ch_enc_name = ch_enc.as_ref().map(|(n, _)| base64::engine::general_purpose::STANDARD.encode(n));
+                    let ch_name_nonce = ch_enc.as_ref().map(|(_, nn)| base64::engine::general_purpose::STANDARD.encode(nn));
+                    let sv_enc_name = sv_enc.as_ref().map(|(n, _)| base64::engine::general_purpose::STANDARD.encode(n));
+                    let sv_name_nonce = sv_enc.as_ref().map(|(_, nn)| base64::engine::general_purpose::STANDARD.encode(nn));
                     let mention_notification = serde_json::json!({
                         "type": "mention_notification",
                         "channel_id": channel_id,
                         "server_id": server_id,
-                        "channel_name": channel_name,
-                        "server_name": server_name,
-                        "sender_username": msg_sender_username,
-
+                        "channel_encrypted_name": ch_enc_name,
+                        "channel_name_nonce": ch_name_nonce,
+                        "server_encrypted_name": sv_enc_name,
+                        "server_name_nonce": sv_name_nonce,
+                        "encrypted_sender_username": message.encrypted_sender_username,
+                        "sender_username_nonce": message.sender_username_nonce,
                         "message_id": msg_id
                     });
                     state.ws_manager.broadcast_to_users(&mentioned_ids, &mention_notification.to_string()).await;
@@ -499,16 +504,22 @@ async fn handle_ws_message(
             // Notify replied user
             if let Some(reply_to_user_id) = parsed.get("reply_to_user_id").and_then(|r| r.as_str()) {
                 if reply_to_user_id != user_id {
-                    let channel_name = state.db.get_channel_name(channel_id).unwrap_or_default();
-                    let server_name = state.db.get_server_name(&server_id).unwrap_or_default();
+                    let ch_enc = state.db.get_channel_encrypted_name(channel_id).ok();
+                    let sv_enc = state.db.get_server_encrypted_name(&server_id).ok();
+                    let ch_enc_name = ch_enc.as_ref().map(|(n, _)| base64::engine::general_purpose::STANDARD.encode(n));
+                    let ch_name_nonce = ch_enc.as_ref().map(|(_, nn)| base64::engine::general_purpose::STANDARD.encode(nn));
+                    let sv_enc_name = sv_enc.as_ref().map(|(n, _)| base64::engine::general_purpose::STANDARD.encode(n));
+                    let sv_name_nonce = sv_enc.as_ref().map(|(_, nn)| base64::engine::general_purpose::STANDARD.encode(nn));
                     let reply_notification = serde_json::json!({
                         "type": "reply_notification",
                         "channel_id": channel_id,
                         "server_id": server_id,
-                        "channel_name": channel_name,
-                        "server_name": server_name,
-                        "sender_username": msg_sender_username,
-
+                        "channel_encrypted_name": ch_enc_name,
+                        "channel_name_nonce": ch_name_nonce,
+                        "server_encrypted_name": sv_enc_name,
+                        "server_name_nonce": sv_name_nonce,
+                        "encrypted_sender_username": message.encrypted_sender_username,
+                        "sender_username_nonce": message.sender_username_nonce,
                         "message_id": msg_id
                     });
                     state.ws_manager.broadcast_to_users(&[reply_to_user_id.to_string()], &reply_notification.to_string()).await;
@@ -632,7 +643,7 @@ async fn handle_ws_message(
             };
 
             let msg_id = message.id.clone();
-            let msg_sender_username = state.db.get_user_by_id(&user_id).map(|u| u.username).unwrap_or_default();
+            let _msg_sender_username = state.db.get_user_by_id(&user_id).map(|u| u.username).unwrap_or_default();
             let outgoing = OutgoingMessage {
                 msg_type: "dm_new".to_string(),
                 channel_id: None,
@@ -696,8 +707,8 @@ async fn handle_ws_message(
                     let mention_notification = serde_json::json!({
                         "type": "mention_notification",
                         "dm_channel_id": dm_channel_id,
-                        "sender_username": msg_sender_username,
-
+                        "encrypted_sender_username": message.encrypted_sender_username,
+                        "sender_username_nonce": message.sender_username_nonce,
                         "message_id": msg_id
                     });
                     state.ws_manager.broadcast_to_users(&mentioned_ids, &mention_notification.to_string()).await;
@@ -716,8 +727,8 @@ async fn handle_ws_message(
                     let reply_notification = serde_json::json!({
                         "type": "reply_notification",
                         "dm_channel_id": dm_channel_id,
-                        "sender_username": msg_sender_username,
-
+                        "encrypted_sender_username": message.encrypted_sender_username,
+                        "sender_username_nonce": message.sender_username_nonce,
                         "message_id": msg_id
                     });
                     state.ws_manager.broadcast_to_users(&[reply_to_user_id.to_string()], &reply_notification.to_string()).await;

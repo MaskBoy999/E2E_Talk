@@ -5612,37 +5612,110 @@ function connectWebSocket(t) {
                 }
                 break;
             case 'mention_notification':
-                if (data.sender_username) {
+            {
+                // Decrypt notification fields client-side
+                var decSender = 'Someone';
+                var decChannel = 'a channel';
+                var decServer = '';
+                if (data.server_id) {
+                    // Server notification — use server key to decrypt
+                    if (data.encrypted_sender_username && data.sender_username_nonce) {
+                        var _su = tryDecryptWithAllKeysRaw(data.server_id, data.encrypted_sender_username, data.sender_username_nonce);
+                        if (_su) decSender = _su;
+                    }
+                    if (data.channel_encrypted_name && data.channel_name_nonce) {
+                        var _cn = tryDecryptWithAllKeys(data.server_id, data.channel_encrypted_name, data.channel_name_nonce);
+                        if (_cn) decChannel = '#' + _cn;
+                    }
+                    if (data.server_encrypted_name && data.server_name_nonce) {
+                        var _sn = tryDecryptWithAllKeys(data.server_id, data.server_encrypted_name, data.server_name_nonce);
+                        if (_sn) decServer = _sn;
+                    }
+                } else if (data.dm_channel_id) {
+                    // DM notification — use DM key to decrypt sender_username
+                    if (data.encrypted_sender_username && data.sender_username_nonce) {
+                        var _id = E2ECrypto.getIdentityKeyPair();
+                        if (_id) {
+                            var _conv = dmConversations.find(function(c) { return c.dm_channel_id === data.dm_channel_id; });
+                            if (_conv && _conv.other_public_key) {
+                                var _opk = new Uint8Array(E2ECrypto.base64ToArrayBuffer(_conv.other_public_key));
+                                var _dk = E2ECrypto.getDmKey(data.dm_channel_id, _id.privateKey, _opk);
+                                if (_dk) {
+                                    var _du = E2ECrypto.decryptSenderUsername(data.encrypted_sender_username, data.sender_username_nonce, _dk);
+                                    if (_du) decSender = _du;
+                                }
+                            }
+                        }
+                    }
+                }
+                if (decSender) {
                     if (!isMuted(data.server_id, data.channel_id) && !isUserMuted(data.sender_id)) {
-                        trackUnreadMention(data.server_id, data.channel_id, data.dm_channel_id, data.message_id, data.sender_username, data.channel_name, data.server_name, 'mention', data.sender_id, data.sender_profile_pic);
+                        trackUnreadMention(data.server_id, data.channel_id, data.dm_channel_id, data.message_id, decSender, decChannel, decServer, 'mention', data.sender_id, data.sender_profile_pic);
                         playNotificationSound();
-                        var loc = data.channel_name ? '#' + data.channel_name : (data.dm_channel_id ? 'your DM' : 'a channel');
-                        showBrowserNotification('Mentioned by ' + data.sender_username, 'You were mentioned in ' + (data.server_name ? data.server_name + ' ' : '') + loc, function () {
+                        var loc = decChannel ? decChannel : (data.dm_channel_id ? 'your DM' : 'a channel');
+                        showBrowserNotification('Mentioned by ' + decSender, 'You were mentioned in ' + (decServer ? decServer + ' ' : '') + loc, function () {
                             navigateToMessage(data.server_id, data.channel_id, data.dm_channel_id, data.message_id);
                         });
                         // Show in-app toast + flash server icon if currently viewing this channel
                         if (data.channel_id && data.channel_id === currentChannelId && data.server_id && data.server_id === currentServerId) {
                             if (!isUserMuted(data.sender_id)) {
-                                showMentionToast(data.sender_username, data.server_id, data.channel_id, data.message_id);
+                                showMentionToast(decSender, data.server_id, data.channel_id, data.message_id);
                                 flashServerIcon(data.server_id);
-                            }                          }
-                      }
-                      
-
-                  }
-                  break;
+                            }
+                        }
+                    }
+                }
+                break;
+            }
             case 'reply_notification':
-                if (data.sender_username) {
+            {
+                // Decrypt notification fields client-side
+                var decSender = 'Someone';
+                var decChannel = 'a channel';
+                var decServer = '';
+                if (data.server_id) {
+                    // Server notification — use server key to decrypt
+                    if (data.encrypted_sender_username && data.sender_username_nonce) {
+                        var _su = tryDecryptWithAllKeysRaw(data.server_id, data.encrypted_sender_username, data.sender_username_nonce);
+                        if (_su) decSender = _su;
+                    }
+                    if (data.channel_encrypted_name && data.channel_name_nonce) {
+                        var _cn = tryDecryptWithAllKeys(data.server_id, data.channel_encrypted_name, data.channel_name_nonce);
+                        if (_cn) decChannel = '#' + _cn;
+                    }
+                    if (data.server_encrypted_name && data.server_name_nonce) {
+                        var _sn = tryDecryptWithAllKeys(data.server_id, data.server_encrypted_name, data.server_name_nonce);
+                        if (_sn) decServer = _sn;
+                    }
+                } else if (data.dm_channel_id) {
+                    // DM notification — use DM key to decrypt sender_username
+                    if (data.encrypted_sender_username && data.sender_username_nonce) {
+                        var _id = E2ECrypto.getIdentityKeyPair();
+                        if (_id) {
+                            var _conv = dmConversations.find(function(c) { return c.dm_channel_id === data.dm_channel_id; });
+                            if (_conv && _conv.other_public_key) {
+                                var _opk = new Uint8Array(E2ECrypto.base64ToArrayBuffer(_conv.other_public_key));
+                                var _dk = E2ECrypto.getDmKey(data.dm_channel_id, _id.privateKey, _opk);
+                                if (_dk) {
+                                    var _du = E2ECrypto.decryptSenderUsername(data.encrypted_sender_username, data.sender_username_nonce, _dk);
+                                    if (_du) decSender = _du;
+                                }
+                            }
+                        }
+                    }
+                }
+                if (decSender) {
                     if (!isMuted(data.server_id, data.channel_id) && !isUserMuted(data.sender_id)) {
-                        trackUnreadMention(data.server_id, data.channel_id, data.dm_channel_id, data.message_id, data.sender_username, data.channel_name, data.server_name, 'reply', data.sender_id, data.sender_profile_pic);
+                        trackUnreadMention(data.server_id, data.channel_id, data.dm_channel_id, data.message_id, decSender, decChannel, decServer, 'reply', data.sender_id, data.sender_profile_pic);
                         playNotificationSound();
-                        var loc = data.channel_name ? '#' + data.channel_name : (data.dm_channel_id ? 'your DM' : 'a channel');
-                        showBrowserNotification('Reply from ' + data.sender_username, data.sender_username + ' replied to you in ' + (data.server_name ? data.server_name + ' ' : '') + loc, function () {
+                        var loc = decChannel ? decChannel : (data.dm_channel_id ? 'your DM' : 'a channel');
+                        showBrowserNotification('Reply from ' + decSender, decSender + ' replied to you in ' + (decServer ? decServer + ' ' : '') + loc, function () {
                             navigateToMessage(data.server_id, data.channel_id, data.dm_channel_id, data.message_id);
                         });
                     }
                 }
                 break;
+            }
         }
     };
 

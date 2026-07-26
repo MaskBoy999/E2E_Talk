@@ -365,7 +365,7 @@ impl Database {
         // Migration 009: key escrow
         let _ = conn.execute_batch(include_str!("../migrations/009_key_escrow.sql"));
 
-        // Migration 010: edit tracking + server stickers
+        // Migration 010: edit tracking
         let _ = conn.execute_batch(include_str!("../migrations/010_message_features.sql"));
 
         // Migration 011: sticker file_key column
@@ -638,6 +638,25 @@ impl Database {
             }
         }
 
+        // Migration 035: remove server_stickers table (unused — chat client never used it)
+        let _ = conn.execute_batch(include_str!("../migrations/035_remove_server_stickers.sql"));
+
+        // Migration 036: drop plaintext profile style columns (username_color, username_border_color, profile_background_color)
+        // These are now exclusively stored in encrypted_profile_data
+        for col in ["username_color", "username_border_color", "profile_background_color"] {
+            let col_exists: bool = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) > 0 FROM pragma_table_info('users') WHERE name = '{}'", col),
+                    [],
+                    |row| row.get::<_, i32>(0),
+                )
+                .map(|c| c > 0)
+                .unwrap_or(false);
+            if col_exists {
+                let _ = conn.execute(&format!("ALTER TABLE users DROP COLUMN {}", col), []);
+            }
+        }
+
         // Migration P1.5: conversation_profile_data — per-conversation encrypted profile data
         // so any user with access to a DM/channel can decrypt the user's current profile.
         let _ = conn.execute_batch(
@@ -653,7 +672,8 @@ impl Database {
         );
 
         // Migration: Drop legacy plaintext profile columns (now in encrypted_profile_data)
-        for col in ["display_name", "username_color", "username_border_color", "description", "nickname", "profile_background_color"] {
+        // Note: username_color, username_border_color, profile_background_color are handled by migration 036
+        for col in ["display_name", "description", "nickname"] {
             let col_exists: bool = conn
                 .query_row(
                     &format!("SELECT COUNT(*) > 0 FROM pragma_table_info('users') WHERE name = '{}'", col),
@@ -747,20 +767,7 @@ impl Database {
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );"
         );
-        // server_stickers: still referenced by admin and API handlers
-        let _ = conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS server_stickers (
-                id TEXT PRIMARY KEY,
-                server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
-                file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
-                uploaded_by TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                sticker_name TEXT NOT NULL,
-                file_key TEXT,
-                encrypted_file_key BLOB,
-                file_key_nonce BLOB,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            );"
-        );
+        // server_stickers was removed in migration 035 — table no longer exists
         // user_stickers: still referenced by API handlers
         let _ = conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS user_stickers (
@@ -1455,6 +1462,26 @@ impl Database {
     pub fn get_server_name(&self, server_id: &str) -> Result<String, String> {
         // name column has been removed — return server_id as fallback
         Ok(server_id.to_string())
+    }
+
+    pub fn get_channel_encrypted_name(&self, channel_id: &str) -> Result<(Vec<u8>, Vec<u8>), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT encrypted_name, name_nonce FROM channels WHERE id = ?1",
+            params![channel_id],
+            |row| Ok((row.get::<_, Option<Vec<u8>>>(0)?.unwrap_or_default(), row.get::<_, Option<Vec<u8>>>(1)?.unwrap_or_default())),
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    pub fn get_server_encrypted_name(&self, server_id: &str) -> Result<(Vec<u8>, Vec<u8>), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT encrypted_name, name_nonce FROM servers WHERE id = ?1",
+            params![server_id],
+            |row| Ok((row.get::<_, Option<Vec<u8>>>(0)?.unwrap_or_default(), row.get::<_, Option<Vec<u8>>>(1)?.unwrap_or_default())),
+        )
+        .map_err(|e| e.to_string())
     }
 
     pub fn get_server_members(&self, server_id: &str) -> Result<Vec<String>, String> {
@@ -3389,70 +3416,7 @@ impl Database {
         .map_err(|_| "Message not found".to_string())
     }
 
-    // --- Server Stickers ---
-
-    pub fn add_server_sticker(
-        &self,
-        server_id: &str,
-        file_id: &str,
-        uploaded_by: &str,
-        sticker_name: &str,
-        file_key: &str,
-        encrypted_file_key: Option<&[u8]>,
-        file_key_nonce: Option<&[u8]>,
-    ) -> Result<String, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let id = Uuid::new_v4().to_string();
-        conn.execute(
-            "INSERT INTO server_stickers (id, server_id, file_id, uploaded_by, sticker_name, file_key, encrypted_file_key, file_key_nonce) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![id, server_id, file_id, uploaded_by, sticker_name, file_key, encrypted_file_key, file_key_nonce],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(id)
-    }
-
-    pub fn remove_server_sticker(&self, sticker_id: &str, server_id: &str) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "DELETE FROM server_stickers WHERE id = ?1 AND server_id = ?2",
-            params![sticker_id, server_id],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
-    pub fn list_server_stickers(&self, server_id: &str) -> Result<Vec<(String, String, String, String, String, Option<String>, Option<Vec<u8>>, Option<Vec<u8>>)>, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT s.id, s.file_id, s.sticker_name, f.mime_type, COALESCE(u.username, '?'), s.file_key, s.encrypted_file_key, s.file_key_nonce
-                 FROM server_stickers s
-                 INNER JOIN files f ON s.file_id = f.id
-                 LEFT JOIN users u ON s.uploaded_by = u.id
-                 WHERE s.server_id = ?1
-                 ORDER BY s.created_at DESC",
-            )
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map(params![server_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, Option<Vec<u8>>>(6)?,
-                    row.get::<_, Option<Vec<u8>>>(7)?,
-                ))
-            })
-            .map_err(|e| e.to_string())?
-            .filter_map(|r| r.ok())
-            .collect();
-        Ok(rows)
-    }
-
-    // --- User Stickers ---
+    // --- User Stickers --- (server_stickers removed in migration 035)
 
     pub fn add_user_sticker(
         &self,
@@ -3693,36 +3657,33 @@ impl Database {
         &self,
     ) -> Result<
         Vec<(
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            i32,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
+            String,  // 0: id
+            String,  // 1: username
+            String,  // 2: password_hash
+            String,  // 3: created_at
+            String,  // 4: display_name (legacy)
+            String,  // 5: identity_public_key
+            String,  // 6: profile_picture_file_id
+            String,  // 7: profile_picture_file_key
+            i32,     // 8: friend_requests_disabled
+            String,  // 9: encrypted_friend_code
+            String,  // 10: friend_code_salt
+            String,  // 11: friend_code_nonce
+            String,  // 12: encrypted_profile_data
+            String,  // 13: encrypted_profile_salt
+            String,  // 14: encrypted_profile_nonce
+            String,  // 15: profile_banner_file_id
+            String,  // 16: profile_banner_file_key
+            String,  // 17: description (legacy)
+            String,  // 18: nickname (legacy)
+            String,  // 19: friend_code_hash
         )>,
         String,
     > {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, username, password_hash, created_at, '' as display_name, COALESCE(identity_public_key, ''), COALESCE(profile_picture_file_id, ''), COALESCE(profile_picture_file_key, ''), '' as username_color, '' as username_border_color, COALESCE(friend_requests_disabled, 0), COALESCE(encrypted_friend_code, ''), COALESCE(friend_code_salt, ''), COALESCE(friend_code_nonce, ''), COALESCE(encrypted_profile_data, ''), COALESCE(encrypted_profile_salt, ''), COALESCE(encrypted_profile_nonce, ''), COALESCE(profile_banner_file_id, ''), COALESCE(profile_banner_file_key, ''), '' as description, '' as nickname, '#16213e' as profile_background_color, COALESCE(friend_code_hash, '') FROM users ORDER BY created_at",
+                "SELECT id, username, password_hash, created_at, '' as display_name, COALESCE(identity_public_key, ''), COALESCE(profile_picture_file_id, ''), COALESCE(profile_picture_file_key, ''), COALESCE(friend_requests_disabled, 0), COALESCE(encrypted_friend_code, ''), COALESCE(friend_code_salt, ''), COALESCE(friend_code_nonce, ''), COALESCE(encrypted_profile_data, ''), COALESCE(encrypted_profile_salt, ''), COALESCE(encrypted_profile_nonce, ''), COALESCE(profile_banner_file_id, ''), COALESCE(profile_banner_file_key, ''), '' as description, '' as nickname, COALESCE(friend_code_hash, '') FROM users ORDER BY created_at",
             )
             .map_err(|e| e.to_string())?;
         let users = stmt
@@ -3736,9 +3697,9 @@ impl Database {
                     row.get::<_, String>(5)?,
                     row.get::<_, String>(6)?,
                     row.get::<_, String>(7)?,
-                    row.get::<_, String>(8)?,
+                    row.get::<_, i32>(8)?,
                     row.get::<_, String>(9)?,
-                    row.get::<_, i32>(10)?,
+                    row.get::<_, String>(10)?,
                     row.get::<_, String>(11)?,
                     row.get::<_, String>(12)?,
                     row.get::<_, String>(13)?,
@@ -3748,9 +3709,6 @@ impl Database {
                     row.get::<_, String>(17)?,
                     row.get::<_, String>(18)?,
                     row.get::<_, String>(19)?,
-                    row.get::<_, String>(20)?,
-                    row.get::<_, String>(21)?,
-                    row.get::<_, String>(22)?,
                 ))
             })
             .map_err(|e| e.to_string())?
@@ -4307,11 +4265,7 @@ impl Database {
         conn.execute("DELETE FROM server_bans WHERE user_id = ?1", params![user_id])
             .map_err(|e| e.to_string())?;
 
-        // 4g. Clean up server_stickers where user was uploader
-        conn.execute("DELETE FROM server_stickers WHERE uploaded_by = ?1", params![user_id])
-            .map_err(|e| e.to_string())?;
-
-        // 4h. Clean up conversation_profile_data and user_media for this user
+        // 4g. Clean up conversation_profile_data and user_media for this user
         conn.execute("DELETE FROM conversation_profile_data WHERE user_id = ?1", params![user_id])
             .map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM user_media WHERE user_id = ?1", params![user_id])
@@ -4418,36 +4372,6 @@ impl Database {
             .collect();
         Ok(rows)
     }
-
-    pub fn list_all_server_stickers_admin(&self) -> Result<Vec<(String, String, String, String, String, String, String, Option<Vec<u8>>, Option<Vec<u8>>, String)>, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT ss.id, ss.server_id, s.id, ss.file_id, ss.uploaded_by, ss.sticker_name, COALESCE(ss.file_key, ''), ss.encrypted_file_key, ss.file_key_nonce, COALESCE(ss.created_at, '')
-                 FROM server_stickers ss LEFT JOIN servers s ON ss.server_id = s.id ORDER BY ss.created_at DESC",
-            )
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, Option<Vec<u8>>>(7)?,
-                    row.get::<_, Option<Vec<u8>>>(8)?,
-                    row.get::<_, String>(9)?,
-                ))
-            })
-            .map_err(|e| e.to_string())?
-            .filter_map(|r| r.ok())
-            .collect();
-        Ok(rows)
-    }
-
 
     pub fn list_all_notification_sounds_admin(&self) -> Result<Vec<(String, String, String, Vec<u8>, Vec<u8>, Vec<u8>, String, String)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
@@ -4713,7 +4637,6 @@ impl Database {
         conn.execute("DELETE FROM friend_requests", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM friendships", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM user_stickers", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM server_stickers", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM conversation_profile_data", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM notification_sounds", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM users", []).map_err(|e| e.to_string())?;

@@ -256,9 +256,7 @@ async fn main() {
         .route("/api/admin/dm-keys", get(handlers::admin_list_dm_keys))
         .route("/api/admin/friend-requests", get(handlers::admin_list_friend_requests))
         .route("/api/admin/friendships", get(handlers::admin_list_friendships))
-.route("/api/admin/files", get(handlers::admin_list_files))
-.route("/api/admin/user-stickers", get(handlers::admin_list_user_stickers))
-.route("/api/admin/server-stickers", get(handlers::admin_list_server_stickers))
+.route("/api/admin/files", get(handlers::admin_list_files)).route("/api/admin/user-stickers", get(handlers::admin_list_user_stickers))
         .route("/api/admin/notification-sounds", get(handlers::admin_list_notification_sounds))
         .route("/api/admin/admin-config", get(handlers::admin_list_admin_config))
         .route("/api/admin/prekey-bundles", get(handlers::admin_list_prekey_bundles))
@@ -293,8 +291,7 @@ async fn main() {
         .route("/api/files/{file_id}/complete", post(handlers::complete_file_upload))
         .route("/api/files/{file_id}/download", get(handlers::download_file))
         // Phase 10: Server Stickers
-        .route("/api/servers/{server_id}/stickers", get(handlers::list_server_stickers).post(handlers::add_server_sticker))
-        .route("/api/servers/{server_id}/stickers/{sticker_id}", delete(handlers::remove_server_sticker))
+        
         // Phase 12: User Stickers/GIFs
         .route("/api/users/me/stickers", get(handlers::list_user_stickers).post(handlers::add_user_sticker))
         .route("/api/users/me/stickers/{sticker_id}", delete(handlers::remove_user_sticker))

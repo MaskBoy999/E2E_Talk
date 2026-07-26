@@ -50,6 +50,18 @@ static FRIEND_REQUEST_RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(|| Rat
     attempts: Mutex::new(HashMap::new()),
 });
 
+static HMAC_KEY_RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(|| RateLimiter {
+    attempts: Mutex::new(HashMap::new()),
+});
+
+static LOGIN_IP_RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(|| RateLimiter {
+    attempts: Mutex::new(HashMap::new()),
+});
+
+static FRIEND_REQUEST_IP_RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(|| RateLimiter {
+    attempts: Mutex::new(HashMap::new()),
+});
+
 static ADMIN_TOKENS: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
 
 fn get_admin_tokens() -> std::sync::MutexGuard<'static, Option<HashMap<String, Instant>>> {
@@ -141,6 +153,20 @@ pub async fn logout_get(
         HeaderValue::from_str("/login.html").unwrap(),
     );
     (StatusCode::FOUND, resp_headers, ())
+}
+
+fn get_client_ip(headers: &HeaderMap) -> String {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next().map(|s| s.trim().to_string()))
+        .or_else(|| {
+            headers
+                .get("x-real-ip")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 fn extract_admin_token(headers: &HeaderMap) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
@@ -307,9 +333,22 @@ pub async fn register(
 }
 
 pub async fn login(
+    headers: HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(req): Json<LoginRequest>,
 ) -> impl IntoResponse {
+    // Per-IP rate limiting: 10 attempts per 5 minutes
+    let ip = get_client_ip(&headers);
+    let ip_rate_key = format!("login_ip:{}", ip);
+    if !LOGIN_IP_RATE_LIMITER.check_and_increment(&ip_rate_key, 10, Duration::from_secs(300)) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "Too many login attempts. Try again in 5 minutes."})),
+        )
+            .into_response();
+    }
+
+    // Per-username rate limiting (already existed)
     let rate_key = format!("login:{}", req.username);
     if !LOGIN_RATE_LIMITER.check_and_increment(&rate_key, 10, Duration::from_secs(300)) {
         return (
@@ -330,8 +369,9 @@ pub async fn login(
         }
     };
 
-    // Client-computed hash (HMAC-SHA256) — direct comparison
-    let valid = req.password == password_hash;
+    // Client-computed hash (HMAC-SHA256) — constant-time comparison to prevent timing attacks
+    use subtle::ConstantTimeEq;
+    let valid: bool = req.password.as_bytes().ct_eq(password_hash.as_bytes()).into();
 
     if !valid {
         return (
@@ -525,8 +565,9 @@ pub async fn reauth(
         }
     };
 
-    // Client-computed hash (HMAC-SHA256) — direct comparison
-    let valid = req.password == password_hash;
+    // Client-computed hash (HMAC-SHA256) — constant-time comparison
+    use subtle::ConstantTimeEq;
+    let valid: bool = req.password.as_bytes().ct_eq(password_hash.as_bytes()).into();
 
     if !valid {
         return (
@@ -2352,7 +2393,7 @@ pub async fn admin_list_users(
 
     let user_infos: Vec<serde_json::Value> = users
         .iter()
-        .map(|(id, username, _pw_hash, created_at, display_name, identity_public_key, profile_picture_file_id, profile_picture_file_key, username_color, username_border_color, friend_requests_disabled, encrypted_friend_code, friend_code_salt, friend_code_nonce, encrypted_profile_data, encrypted_profile_salt, encrypted_profile_nonce, profile_banner_file_id, profile_banner_file_key, _description, _nickname, profile_background_color, friend_code_hash)| {
+        .map(|(id, username, _pw_hash, created_at, _display_name, identity_public_key, profile_picture_file_id, profile_picture_file_key, friend_requests_disabled, encrypted_friend_code, friend_code_salt, friend_code_nonce, encrypted_profile_data, encrypted_profile_salt, encrypted_profile_nonce, profile_banner_file_id, profile_banner_file_key, _description, _nickname, friend_code_hash)| {
             serde_json::json!({
                 "id": id,
                 "username": username,
@@ -2369,7 +2410,7 @@ pub async fn admin_list_users(
                 "encrypted_profile_nonce": encrypted_profile_nonce,
                 "profile_banner_file_id": profile_banner_file_id,
                 "profile_banner_file_key": profile_banner_file_key,
-                // display_name, username_color, username_border_color, profile_background_color removed — all now in encrypted_profile_data
+                // display_name, description, nickname (legacy columns) — all now in encrypted_profile_data
                 "friend_code_hash": friend_code_hash,
             })
         })
@@ -2768,11 +2809,11 @@ pub async fn admin_list_user_stickers(
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     };
-    let result: Vec<serde_json::Value> = rows.iter().map(|(id, uid, uname, fid, sname, fkey, mime, ekey, eknonce, created_at)| {
+    let result: Vec<serde_json::Value> = rows.iter().map(|(id, uid, uname, fid, sname, _fkey, mime, ekey, eknonce, created_at)| {
         serde_json::json!({
             "id": id, "user_id": uid, "username": uname,
             "file_id": fid, "sticker_name": sname,
-            "file_key": if fkey.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(fkey.clone()) },
+            // file_key intentionally omitted — use encrypted_file_key instead
             "mime_type": mime,
             "created_at": created_at,
             "encrypted_file_key": ekey.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
@@ -2781,29 +2822,6 @@ pub async fn admin_list_user_stickers(
     }).collect();
     (StatusCode::OK, Json(serde_json::json!(result))).into_response()
 }
-
-pub async fn admin_list_server_stickers(
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
-    let rows = match state.db.list_all_server_stickers_admin() {
-        Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-    };
-    let result: Vec<serde_json::Value> = rows.iter().map(|(id, sid, sname, fid, uby, stname, fkey, ekey, eknonce, created_at)| {
-        serde_json::json!({
-            "id": id, "server_id": sid, "server_name": sname,
-            "file_id": fid, "uploaded_by": uby, "sticker_name": stname,
-            "file_key": if fkey.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(fkey.clone()) },
-            "created_at": created_at,
-            "encrypted_file_key": ekey.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
-            "file_key_nonce": eknonce.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
-        })
-    }).collect();
-    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
-}
-
 
 pub async fn admin_list_notification_sounds(
     headers: HeaderMap,
@@ -2970,7 +2988,7 @@ pub async fn admin_clear_all(
 
 // ===== Phase 5: File Sharing =====
 
-const MAX_FILE_SIZE: i64 = 1024 * 1024 * 1024; // 1 GB
+const MAX_FILE_SIZE: i64 = 50 * 1024 * 1024; // 50 MB
 const UPLOAD_DIR: &str = "uploads";
 
 #[derive(Deserialize)]
@@ -3000,7 +3018,7 @@ pub async fn init_file_upload(
     if req.size > MAX_FILE_SIZE {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
-            Json(serde_json::json!({"error": "File too large (max 1 GB)"})),
+            Json(serde_json::json!({"error": "File too large (max 50 MB)"})),
         )
             .into_response();
     }
@@ -3205,102 +3223,6 @@ pub async fn download_file(
 
 // ===== Server Stickers =====
 
-#[derive(Deserialize)]
-pub struct AddStickerRequest {
-    pub file_id: String,
-    pub sticker_name: String,
-    pub file_key: Option<String>,
-    pub encrypted_file_key: Option<String>,
-    pub file_key_nonce: Option<String>,
-}
-
-pub async fn list_server_stickers(
-    Path(server_id): Path<String>,
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    let user_id = match extract_user(&headers, &state) {
-        Ok(id) => id,
-        Err(e) => return e.into_response(),
-    };
-    if !state.db.is_member_of_server(&user_id, &server_id).unwrap_or(false) {
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Not a member"}))).into_response();
-    }
-    match state.db.list_server_stickers(&server_id) {
-        Ok(stickers) => {
-            let result: Vec<serde_json::Value> = stickers
-                .iter()
-                .map(|(id, file_id, name, mime, uploaded_by, file_key, ekey, eknounce)| {
-                    serde_json::json!({
-                        "id": id,
-                        "file_id": file_id,
-                        "sticker_name": name,
-                        "mime_type": mime,
-                        "uploaded_by": uploaded_by,
-                        "file_key": file_key,
-                        "encrypted_file_key": ekey.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
-                        "file_key_nonce": eknounce.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
-                    })
-                })
-                .collect();
-            (StatusCode::OK, Json(serde_json::json!(result))).into_response()
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-    }
-}
-
-pub async fn add_server_sticker(
-    Path(server_id): Path<String>,
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<AddStickerRequest>,
-) -> impl IntoResponse {
-    let user_id = match extract_user(&headers, &state) {
-        Ok(id) => id,
-        Err(e) => return e.into_response(),
-    };
-    if !state.db.is_member_of_server(&user_id, &server_id).unwrap_or(false) {
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Not a member"}))).into_response();
-    }
-    // Verify file exists and is uploaded
-    match state.db.get_file_info(&body.file_id) {
-        Ok(f) => {
-            if !f.upload_complete {
-                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Upload not complete"}))).into_response();
-            }
-        }
-        Err(_) => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "File not found"}))).into_response(),
-    }
-    // Decode encrypted_file_key and file_key_nonce if provided
-    let encrypted_key_bytes = body.encrypted_file_key.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
-    let key_nonce_bytes = body.file_key_nonce.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
-
-    match state.db.add_server_sticker(&server_id, &body.file_id, &user_id, &body.sticker_name, body.file_key.as_deref().unwrap_or(""), encrypted_key_bytes.as_deref(), key_nonce_bytes.as_deref()) {
-        Ok(id) => (StatusCode::OK, Json(serde_json::json!({"id": id}))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-    }
-}
-
-pub async fn remove_server_sticker(
-    Path((server_id, sticker_id)): Path<(String, String)>,
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    let user_id = match extract_user(&headers, &state) {
-        Ok(id) => id,
-        Err(e) => return e.into_response(),
-    };
-    // Only server owner or sticker uploader can remove
-    let is_owner = state.db.is_server_owner(&user_id, &server_id).unwrap_or(false);
-    if !is_owner {
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Only server owner can remove stickers"}))).into_response();
-    }
-    match state.db.remove_server_sticker(&sticker_id, &server_id) {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-    }
-}
-
 // ===== User Stickers/GIFs =====
 
 #[derive(Deserialize)]
@@ -3325,13 +3247,13 @@ pub async fn list_user_stickers(
         Ok(stickers) => {
             let result: Vec<serde_json::Value> = stickers
                 .iter()
-                .map(|(id, file_id, name, mime, file_key, ekey, eknounce)| {
+                .map(|(id, file_id, name, mime, _file_key, ekey, eknounce)| {
                     serde_json::json!({
                         "id": id,
                         "file_id": file_id,
                         "sticker_name": name,
                         "mime_type": mime,
-                        "file_key": file_key,
+                        // file_key intentionally omitted — use encrypted_file_key instead
                         "encrypted_file_key": ekey.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
                         "file_key_nonce": eknounce.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
                     })
@@ -3782,11 +3704,22 @@ pub async fn delete_me(
 
 /// GET /api/friend-code — returns the encrypted friend code + salt + nonce for password-based recovery
 pub async fn get_hmac_key(
+    headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     // PUBLIC endpoint — no auth required.
     // The HMAC key is used by clients to hash friend codes and invite codes
     // during registration (before the user has a token).
+    // Rate limited per-IP to prevent offline brute-force of friend codes.
+    let ip = get_client_ip(&headers);
+    let rate_key = format!("hmac_key:{}", ip);
+    if !HMAC_KEY_RATE_LIMITER.check_and_increment(&rate_key, 6, Duration::from_secs(60)) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "Too many requests. Try again later."})),
+        )
+            .into_response();
+    }
     (StatusCode::OK, Json(serde_json::json!({
         "hmac_key": state.config.hmac_key,
     }))).into_response()
@@ -4018,7 +3951,18 @@ pub async fn send_friend_request(
         Err(e) => return e.into_response(),
     };
 
-    // Rate limit: 10 friend request attempts per 10 minutes
+    // Per-IP rate limiting: 10 friend request attempts per 10 minutes
+    let ip = get_client_ip(&headers);
+    let ip_rate_key = format!("friend_request_ip:{}", ip);
+    if !FRIEND_REQUEST_IP_RATE_LIMITER.check_and_increment(&ip_rate_key, 10, Duration::from_secs(600)) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "Too many friend request attempts. Try again in 10 minutes."})),
+        )
+            .into_response();
+    }
+
+    // Per-user rate limiting (already existed)
     let rate_key = format!("friend_request:{}", user_id);
     if !FRIEND_REQUEST_RATE_LIMITER.check_and_increment(&rate_key, 10, Duration::from_secs(600)) {
         return (
@@ -4028,7 +3972,15 @@ pub async fn send_friend_request(
             .into_response();
     }
 
+    // Validate friend_code_hash is a proper 64-char hex string
     let code_hash = &req.friend_code_hash;
+    if code_hash.len() != 64 || !code_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid friend code hash format"})),
+        )
+            .into_response();
+    }
     let friend_request_result = state.db.create_friend_request(&user_id, &code_hash);
     match friend_request_result {
         Ok(target) => {

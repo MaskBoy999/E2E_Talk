@@ -115,7 +115,6 @@
                 <button class="tab-btn" data-tab="user-public-keys">Pub Keys</button>
                 <button class="tab-btn" data-tab="files">Files</button>
                 <button class="tab-btn" data-tab="user-stickers">User Stickers</button>
-                <button class="tab-btn" data-tab="server-stickers">Srv Stickers</button>
                 <button class="tab-btn" data-tab="user-key-escrow">Key Escrow</button>
                 <button class="tab-btn" data-tab="notification-sounds">Notif Sounds</button>
                 <button class="tab-btn" data-tab="admin-config">Config</button>
@@ -133,8 +132,8 @@
                 </div>
                 <div class="table-scroll">
                     <table class="data-table">
-                        <thead><tr><th>Username</th><th>User ID</th><th>Created</th><th>Display Name</th><th>Identity Pub Key</th><th>PFP File ID</th><th>PFP File Key</th><th>Username Color</th><th>Border Color</th><th>Banner File ID</th><th>Banner File Key</th><th>Description</th><th>Nickname</th><th>BG Color</th><th>Friend Req Disabled</th><th>Profile Data</th><th>FC Hash</th></tr></thead>
-                        <tbody id="user-list"><tr><td colspan="17" class="empty-state">Loading...</td></tr></tbody>
+                        <thead><tr><th>Username</th><th>User ID</th><th>Created</th><th>Display Name</th><th>Identity Pub Key</th><th>PFP File ID</th><th>PFP File Key</th><th>Banner File ID</th><th>Banner File Key</th><th>Friend Req Disabled</th><th>Profile Data</th><th>FC Hash</th></tr></thead>
+                        <tbody id="user-list"><tr><td colspan="12" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
                 <div id="users-pagination" class="pagination-container"></div>
@@ -439,29 +438,11 @@
                 </div>
                 <div class="table-scroll">
                     <table class="data-table">
-                        <thead><tr><th>Username</th><th>Sticker Name</th><th>File ID</th><th>File Key</th><th>MIME</th><th>Created</th><th>Enc File Key</th><th>File Key Nonce</th></tr></thead>
-                        <tbody id="user-sticker-list"><tr><td colspan="8" class="empty-state">Loading...</td></tr></tbody>
+                        <thead><tr><th>Username</th><th>Sticker Name</th><th>File ID</th><th>MIME</th><th>Created</th><th>Enc File Key</th><th>File Key Nonce</th></tr></thead>
+                        <tbody id="user-sticker-list"><tr><td colspan="7" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
                 <div id="user-stickers-pagination" class="pagination-container"></div>
-            </div>
-
-            <!-- Server Stickers Tab -->
-            <div class="tab-content" id="tab-server-stickers">
-                <div class="table-header">
-                    <div class="search-bar">
-                        <input type="text" id="search-server-stickers" placeholder="Search by server name, sticker name..." oninput="searchTab('server-stickers')">
-                        <button class="csv-export-btn" data-tab="server-stickers">📥 CSV</button>
-                        <span class="record-count" id="server-stickers-count"></span>
-                    </div>
-                </div>
-                <div class="table-scroll">
-                    <table class="data-table">
-                        <thead><tr><th>Server</th><th>Sticker Name</th><th>Uploaded By</th><th>File ID</th><th>Created</th><th>Enc File Key</th><th>File Key Nonce</th></tr></thead>
-                        <tbody id="server-sticker-list"><tr><td colspan="7" class="empty-state">Loading...</td></tr></tbody>
-                    </table>
-                </div>
-                <div id="server-stickers-pagination" class="pagination-container"></div>
             </div>
 
             <!-- User Key Escrow Tab -->

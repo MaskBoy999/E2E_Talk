@@ -2,7 +2,7 @@ let rawData = {
     users: [], servers: [], channels: [], messages: [], serverKeys: [], serverMembers: [],
     prekeyBundles: [], sessions: [], serverBans: [], dmChannels: [], dmMembers: [],
     dmMessages: [], dmKeys: [], friendRequests: [], friendships: [], userPublicKeys: [], files: [],
-    userStickers: [], serverStickers: [], userKeyEscrow: [], notificationSounds: [],
+    userStickers: [], userKeyEscrow: [], notificationSounds: [],
     adminConfig: [], userDeviceEscrow: []
 };
 
@@ -42,7 +42,7 @@ let tabTotals = {};
 let tabFilteredCache = {};
 
 const csvColumns = {
-    'users': { headers: ['Username', 'User ID', 'Created', 'Display Name', 'Identity Pub Key', 'PFP File ID', 'PFP File Key', 'Username Color', 'Border Color', 'Banner File ID', 'Banner File Key', 'BG Color', 'Friend Req Disabled', 'Profile Data', 'FC Hash'], map: (r) => [r.username, r.id, r.created_at || '', r.display_name || '', r.identity_public_key || '', r.profile_picture_file_id || '', r.profile_picture_file_key || '', r.username_color || '', r.username_border_color || '', r.profile_banner_file_id || '', r.profile_banner_file_key || '', r.profile_background_color || '', String(r.friend_requests_disabled != null ? r.friend_requests_disabled : ''), r.encrypted_profile_data || '', r.friend_code_hash || ''] },
+    'users': { headers: ['Username', 'User ID', 'Created', 'Display Name', 'Identity Pub Key', 'PFP File ID', 'PFP File Key', 'Banner File ID', 'Banner File Key', 'Friend Req Disabled', 'Profile Data', 'FC Hash'], map: (r) => [r.username, r.id, r.created_at || '', r.display_name || '', r.identity_public_key || '', r.profile_picture_file_id || '', r.profile_picture_file_key || '', r.profile_banner_file_id || '', r.profile_banner_file_key || '', String(r.friend_requests_disabled != null ? r.friend_requests_disabled : ''), r.encrypted_profile_data || '', r.friend_code_hash || ''] },
     'servers': { headers: ['Encrypted Name', 'Server ID', 'Owner ID', 'Created', 'Invite Code Hash', 'Joins Disabled'], map: (r) => [r.encrypted_name || '(encrypted)', r.id, r.owner_id, r.created_at || '', r.invite_code_hash || '', r.joins_disabled ? 'Yes' : 'No'] },
     'channels': { headers: ['Encrypted Name', 'Channel ID', 'Server ID', 'Type', 'Position', 'Created'], map: (r) => [r.encrypted_name || '(encrypted)', r.id, r.server_id, r.type, String(r.position != null ? r.position : ''), r.created_at || ''] },
     'messages': { headers: ['Sender', 'Sender ID', 'Channel ID', 'Encrypted Content', 'Nonce', 'Timestamp', 'Message ID', 'Edited At', 'Msg Nonce', 'Msg Sig', 'Profile Key', 'Profile Key Nonce', 'Banner Key', 'Banner Key Nonce'], map: (r) => [r.sender_username || r.sender_id, r.sender_id || '', r.channel_id, r.encrypted_content, r.nonce, r.timestamp, r.id || '', r.edited_at || '', r.message_nonce || '', r.message_signature || '', r.encrypted_profile_key || '', r.profile_key_nonce || '', r.encrypted_banner_key || '', r.banner_key_nonce || ''] },
@@ -59,8 +59,7 @@ const csvColumns = {
     'friendships': { headers: ['User 1', 'User 1 ID', 'User 2', 'User 2 ID', 'Created At'], map: (r) => [r.username_1, r.user_id_1, r.username_2, r.user_id_2, r.created_at] },
     'user-public-keys': { headers: ['Username', 'User ID', 'Device ID', 'Device Name', 'Identity Key', 'Signed Prekey', 'Signed Prekey Sig', 'Last Active', 'Created'], map: (r) => [r.username, r.user_id, r.device_id, r.device_name || '', r.identity_key, r.signed_prekey || '', r.signed_prekey_signature || '', r.last_active_at || '', r.created_at || ''] },
     'files': { headers: ['Filename', 'Uploader', 'Uploader ID', 'MIME Type', 'Size', 'Server ID', 'Channel ID', 'Chunks', 'Complete', 'Created'], map: (r) => [r.original_name, r.uploader_username, r.uploader_id || '', r.mime_type, String(r.file_size), r.server_id || '', r.channel_id || '', String(r.chunk_count != null ? r.chunk_count : ''), r.upload_complete ? 'Yes' : 'No', r.created_at] },
-    'user-stickers': { headers: ['Username', 'Sticker Name', 'File ID', 'File Key', 'MIME', 'Created', 'Enc File Key', 'File Key Nonce'], map: (r) => [r.username, r.sticker_name || '(unnamed)', r.file_id, r.file_key || '', r.mime_type || '', r.created_at || '', r.encrypted_file_key || '', r.file_key_nonce || ''] },
-    'server-stickers': { headers: ['Server', 'Sticker Name', 'Uploaded By', 'File ID', 'Created', 'Enc File Key', 'File Key Nonce'], map: (r) => [r.server_name, r.sticker_name || '(unnamed)', r.uploaded_by || '', r.file_id, r.created_at || '', r.encrypted_file_key || '', r.file_key_nonce || ''] },
+    'user-stickers': { headers: ['Username', 'Sticker Name', 'File ID', 'MIME', 'Created', 'Enc File Key', 'File Key Nonce'], map: (r) => [r.username, r.sticker_name || '(unnamed)', r.file_id, r.mime_type || '', r.created_at || '', r.encrypted_file_key || '', r.file_key_nonce || ''] },
     'user-key-escrow': { headers: ['Username', 'User ID', 'Created', 'Updated', 'Has Key', 'Encrypted Private Key', 'Salt', 'Nonce'], map: (r) => [r.username, r.user_id, r.created_at || '', r.updated_at || '', r.has_key ? 'Yes' : 'No', r.encrypted_private_key || '', r.salt || '', r.nonce || ''] },
     'notification-sounds': { headers: ['Username', 'User ID', 'File Name', 'Encrypted Sound', 'Nonce', 'Sender Public Key', 'Created', 'Updated'], map: (r) => [r.username, r.user_id, r.file_name || '', r.encrypted_sound, r.nonce, r.sender_public_key, r.created_at || '', r.updated_at || ''] },
     'admin-config': { headers: ['Key', 'Value'], map: (r) => [r.key, r.value] },
@@ -371,7 +370,6 @@ function filterTab(tab) {
         case 'user-public-keys': filtered = rawData.userPublicKeys.filter(k => !q || k.username.toLowerCase().includes(q) || k.user_id.toLowerCase().includes(q) || k.device_id.toLowerCase().includes(q) || (k.device_name || '').toLowerCase().includes(q)); tabFilteredCache['user-public-keys'] = filtered; renderUserPublicKeys(filtered); break;
         case 'files': filtered = rawData.files.filter(f => !q || f.original_name.toLowerCase().includes(q) || f.uploader_username.toLowerCase().includes(q) || f.mime_type.toLowerCase().includes(q)); tabFilteredCache['files'] = filtered; renderFiles(filtered); break;
         case 'user-stickers': filtered = rawData.userStickers.filter(s => !q || s.username.toLowerCase().includes(q) || (s.sticker_name || '').toLowerCase().includes(q)); tabFilteredCache['user-stickers'] = filtered; renderUserStickers(filtered); break;
-        case 'server-stickers': filtered = rawData.serverStickers.filter(s => !q || s.server_name.toLowerCase().includes(q) || (s.sticker_name || '').toLowerCase().includes(q)); tabFilteredCache['server-stickers'] = filtered; renderServerStickers(filtered); break;
         case 'user-key-escrow': filtered = rawData.userKeyEscrow.filter(e => !q || e.username.toLowerCase().includes(q) || e.user_id.toLowerCase().includes(q)); tabFilteredCache['user-key-escrow'] = filtered; renderUserKeyEscrow(filtered); break;
         case 'notification-sounds': filtered = rawData.notificationSounds.filter(n => !q || n.username.toLowerCase().includes(q) || n.user_id.toLowerCase().includes(q)); tabFilteredCache['notification-sounds'] = filtered; renderNotificationSounds(filtered); break;
         case 'admin-config': filtered = rawData.adminConfig.filter(c => !q || c.key.toLowerCase().includes(q) || c.value.toLowerCase().includes(q)); tabFilteredCache['admin-config'] = filtered; renderAdminConfig(filtered); break;
@@ -399,7 +397,6 @@ async function loadAllData() {
         loadUserPublicKeys(),
         loadFiles(),
         loadUserStickers(),
-        loadServerStickers(),
         loadUserKeyEscrow(),
         loadNotificationSounds(),
         loadAdminConfig(),
@@ -432,12 +429,9 @@ function renderUsers(users) {
             '<td class="blob-cell">' + escapeHtml(truncate(u.identity_public_key || '', 20)) + '</td>' +
             '<td class="id-cell">' + escapeHtml(truncate(u.profile_picture_file_id || '', 12)) + '</td>' +
             '<td class="blob-cell">' + escapeHtml(truncate(u.profile_picture_file_key || '', 20)) + '</td>' +
-            '<td>' + escapeHtml(u.username_color || '') + '</td>' +
-            '<td>' + escapeHtml(u.username_border_color || '') + '</td>' +
             '<td class="id-cell">' + escapeHtml(truncate(u.profile_banner_file_id || '', 12)) + '</td>' +
             '<td class="blob-cell">' + escapeHtml(truncate(u.profile_banner_file_key || '', 20)) + '</td>' +
-            // description and nickname removed — use encrypted_profile_data instead
-            '<td>' + escapeHtml(u.profile_background_color || '') + '</td>' +
+            // description, nickname, username_color, username_border_color, profile_background_color removed — all in encrypted_profile_data
             '<td>' + (u.friend_requests_disabled ? 'Yes' : 'No') + '</td>' +
             '<td class="blob-cell">' + escapeHtml(truncate(u.encrypted_profile_data || '', 30)) + '</td>' +
             '<td class="blob-cell">' + escapeHtml(truncate(u.friend_code_hash || '', 20)) + '</td>'
@@ -986,12 +980,11 @@ function renderUserStickers(rows) {
     tabTotals['user-stickers'] = rows.length;
     const p = paginate(rows, 'user-stickers');
     updateCount('user-stickers-count', p.total);
-    renderTable('user-sticker-list', 8,
+    renderTable('user-sticker-list', 7,
         p.items.map(r =>
             '<td>' + escapeHtml(r.username) + '</td>' +
             '<td>' + escapeHtml(r.sticker_name || '(unnamed)') + '</td>' +
             '<td class="id-cell">' + escapeHtml(truncate(r.file_id, 12)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(r.file_key || '', 30)) + '</td>' +
             '<td>' + escapeHtml(r.mime_type || '') + '</td>' +
             '<td class="ts-cell">' + escapeHtml(r.created_at || '') + '</td>' +
             '<td class="blob-cell">' + escapeHtml(truncate(r.encrypted_file_key || '', 30)) + '</td>' +
@@ -1004,34 +997,6 @@ function renderUserStickers(rows) {
 
 // --- Server Stickers ---
 async function loadServerStickers() {
-    try {
-        const rows = await apiFetch('/api/admin/server-stickers');
-        rawData.serverStickers = Array.isArray(rows) ? rows : [];
-        renderServerStickers(rawData.serverStickers);
-    } catch (err) {
-        rawData.serverStickers = [];
-        renderServerStickers([]);
-    }
-}
-function renderServerStickers(rows) {
-    tabTotals['server-stickers'] = rows.length;
-    const p = paginate(rows, 'server-stickers');
-    updateCount('server-stickers-count', p.total);
-    renderTable('server-sticker-list', 7,
-        p.items.map(r =>
-            '<td>' + escapeHtml(r.server_name) + '</td>' +
-            '<td>' + escapeHtml(r.sticker_name || '(unnamed)') + '</td>' +
-            '<td>' + escapeHtml(r.uploaded_by || '') + '</td>' +
-            '<td class="id-cell">' + escapeHtml(truncate(r.file_id, 12)) + '</td>' +
-            '<td class="ts-cell">' + escapeHtml(r.created_at || '') + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(r.encrypted_file_key || '', 30)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(r.file_key_nonce || '', 30)) + '</td>'
-        ),
-        'No server stickers'
-    );
-    renderPaginationControls('server-stickers');
-}
-
 // --- User Key Escrow ---
 async function loadUserKeyEscrow() {
     try {
