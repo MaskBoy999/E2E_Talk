@@ -4549,71 +4549,138 @@ function setupMentionAutocomplete() {
     let filterText = '';
     let isOpen = false;
 
+    // Build an enriched candidate list with cached display name, color, glow, PFP
     function getCandidateList() {
-        if (viewMode === 'dms' && currentDmOtherUser) {
-            return [{ username: currentDmOtherUser.username, id: currentDmOtherUser.id }];
+        if (viewMode === 'dms') {
+            // In DM view: include ALL DM conversation partners so the user can
+            // mention anyone from their friend list, not just the current conversation
+            var candidates = [];
+            if (dmConversations) {
+                dmConversations.forEach(function(conv) {
+                    if (conv && conv.other_user_id && conv.other_user_id !== (user ? user.id : null)) {
+                        var c = userDisplayNameCache[conv.other_user_id] || {};
+                        candidates.push({
+                            id: conv.other_user_id,
+                            username: conv.other_username || 'unknown',
+                            display_name: c.display_name || conv.other_display_name || conv.other_username || 'Unknown',
+                            color: c.username_color || null,
+                            border_color: c.username_border_color || null,
+                            profile_picture_file_id: c.profile_picture_file_id || conv.other_profile_picture_file_id || null,
+                        });
+                    }
+                });
+            }
+            return candidates;
         }
-        return currentServerMemberList.filter(m => m.id !== (user ? user.id : null));
+        // Server view: exclude self, enrich with cached display data
+        return currentServerMemberList
+            .filter(function(m) { return m.id !== (user ? user.id : null); })
+            .map(function(m) {
+                var c = userDisplayNameCache[m.id] || {};
+                return {
+                    id: m.id,
+                    username: m.username || 'unknown',
+                    display_name: c.display_name || m.display_name || m.username || 'Unknown',
+                    color: c.username_color || null,
+                    border_color: c.username_border_color || null,
+                    profile_picture_file_id: c.profile_picture_file_id || m.profile_picture_file_id || null,
+                };
+            });
     }
 
     function updateDropdown() {
-        const candidates = getCandidateList();
-        const filtered = candidates.filter(m =>
-            (m.username && m.username.toLowerCase().startsWith(filterText.toLowerCase())) ||
-            (m.display_name && m.display_name.toLowerCase().startsWith(filterText.toLowerCase()))
-        );
-        if (filtered.length === 0 || !isOpen) {
+        var candidates = getCandidateList();
+        var filterLower = filterText.toLowerCase();
+        var filtered = candidates.filter(function(m) {
+            // Match against display name OR username starting with the typed text
+            return (m.display_name && m.display_name.toLowerCase().indexOf(filterLower) === 0) ||
+                   (m.username && m.username.toLowerCase().indexOf(filterLower) === 0);
+        });
+        if (!isOpen) {
             container.style.display = 'none';
+            return;
+        }
+        if (filtered.length === 0) {
+            // Show a hint instead of a blank dropdown
+            container.style.display = 'block';
+            container.innerHTML = '<div class="mention-empty">' +
+                (candidates.length === 0
+                    ? (viewMode === 'dms' ? 'No conversations available' : 'No members loaded')
+                    : 'No users matching &quot;' + escapeHtml(filterText) + '&quot;') +
+                '</div>';
             return;
         }
         container.style.display = 'block';
         container.innerHTML = '';
-        filtered.forEach((m, idx) => {
-            const item = document.createElement('div');
+        filtered.forEach(function(m, idx) {
+            var item = document.createElement('div');
             item.className = 'mention-item' + (idx === activeIndex ? ' active' : '');
-            const initial = (m.username || '?').charAt(0).toUpperCase();
-            var mInitial = (m.username || '?').charAt(0).toUpperCase();
-            var mPicUrl = m.profile_picture_file_id ? getProfilePicUrl(m.profile_picture_file_id, m.id) : null;
             item.dataset.username = m.username;
-            var mAvatarHtml = mPicUrl ? '<img class="mention-item-avatar" src="' + mPicUrl + '" alt="">' : '<span class="mention-item-avatar">' + mInitial + '</span>';
-            item.innerHTML = mAvatarHtml + '<span class="mention-item-name">' + escapeHtml(m.display_name || m.username) + '</span>';
-            item.addEventListener('click', () => selectMention(m.username));
-            item.addEventListener('mouseenter', () => { activeIndex = idx; highlightItem(); });
+            
+            // PFP or initial
+            var initial = (m.username || '?').charAt(0).toUpperCase();
+            var picUrl = m.profile_picture_file_id ? getProfilePicUrl(m.profile_picture_file_id, m.id) : null;
+            
+            // Online/offline status dot
+            var isOnline = onlineUsers.has(m.id);
+            var statusDot = '<span class="mention-status-dot ' + (isOnline ? 'online' : 'offline') + '"></span>';
+            
+            // Avatar wrapper with status dot
+            var avatarHtml = '<span class="mention-item-avatar-wrap">' +
+                (picUrl ? '<img class="mention-item-avatar" src="' + picUrl + '" alt="">' : '<span class="mention-item-avatar">' + initial + '</span>') +
+                statusDot + '</span>';
+            
+            // Display name with color and glow
+            var nameStyle = '';
+            if (m.color) {
+                var shadow = m.border_color ? getDisplayNameTextShadow(m.color, m.border_color) : getDisplayNameTextShadow(m.color, null);
+                nameStyle = ' style="color:' + m.color + ';text-shadow:' + shadow + '"';
+            }
+            var nameHtml = '<span class="mention-item-name"' + nameStyle + '>' + escapeHtml(m.display_name) + '</span>';
+            
+            // Username hint (dimmed @username below the display name)
+            var hintHtml = m.username && m.username !== m.display_name ?
+                '<span class="mention-item-hint">@' + escapeHtml(m.username) + '</span>' : '';
+            
+            item.innerHTML = avatarHtml + '<span class="mention-item-text">' + nameHtml + hintHtml + '</span>';
+            
+            item.addEventListener('click', function() { selectMention(m.username); });
+            item.addEventListener('mouseenter', function() { activeIndex = idx; highlightItem(); });
             container.appendChild(item);
         });
         highlightItem();
     }
 
     function highlightItem() {
-        const items = container.querySelectorAll('.mention-item');
-        items.forEach((el, idx) => el.classList.toggle('active', idx === activeIndex));
+        var items = container.querySelectorAll('.mention-item');
+        items.forEach(function(el, idx) { el.classList.toggle('active', idx === activeIndex); });
     }
 
     function selectMention(username) {
-        const cursorPos = input.selectionStart;
-        const text = input.value;
-        const lastAtIndex = text.lastIndexOf('@', cursorPos - 1);
+        var cursorPos = input.selectionStart;
+        var text = input.value;
+        var lastAtIndex = text.lastIndexOf('@', cursorPos - 1);
         if (lastAtIndex === -1) return;
-        const before = text.substring(0, lastAtIndex);
-        const after = text.substring(cursorPos);
+        var before = text.substring(0, lastAtIndex);
+        var after = text.substring(cursorPos);
         input.value = before + '@' + username + ' ' + after;
-        const newPos = before.length + username.length + 2;
+        var newPos = before.length + username.length + 2;
         input.setSelectionRange(newPos, newPos);
         container.style.display = 'none';
         isOpen = false;
         input.focus();
     }
 
-    input.addEventListener('input', () => {
-        const cursorPos = input.selectionStart;
-        const text = input.value;
-        const lastAtIndex = text.lastIndexOf('@', cursorPos - 1);
+    input.addEventListener('input', function() {
+        var cursorPos = input.selectionStart;
+        var text = input.value;
+        var lastAtIndex = text.lastIndexOf('@', cursorPos - 1);
         if (lastAtIndex === -1 || (lastAtIndex > 0 && text[lastAtIndex - 1].match(/[a-zA-Z0-9_]/))) {
             container.style.display = 'none';
             isOpen = false;
             return;
         }
-        const afterAt = text.substring(lastAtIndex + 1, cursorPos);
+        var afterAt = text.substring(lastAtIndex + 1, cursorPos);
         if (afterAt.indexOf(' ') !== -1 || afterAt.indexOf('@') !== -1) {
             container.style.display = 'none';
             isOpen = false;
@@ -4625,9 +4692,9 @@ function setupMentionAutocomplete() {
         updateDropdown();
     });
 
-    input.addEventListener('keydown', (e) => {
+    input.addEventListener('keydown', function(e) {
         if (!isOpen || container.style.display === 'none') return;
-        const items = container.querySelectorAll('.mention-item');
+        var items = container.querySelectorAll('.mention-item');
         if (e.key === 'ArrowDown') {
             e.preventDefault();
             activeIndex = Math.min(activeIndex + 1, items.length - 1);
@@ -4636,10 +4703,15 @@ function setupMentionAutocomplete() {
             e.preventDefault();
             activeIndex = Math.max(activeIndex - 1, 0);
             highlightItem();
+        } else if (e.key === 'Tab' && e.shiftKey) {
+            // Shift+Tab cycles backwards through suggestions
+            e.preventDefault();
+            activeIndex = Math.max(activeIndex - 1, 0);
+            highlightItem();
         } else if (e.key === 'Enter' || e.key === 'Tab') {
             if (activeIndex >= 0 && activeIndex < items.length) {
                 e.preventDefault();
-                const username = items[activeIndex].dataset.username || items[activeIndex].querySelector('.mention-item-name')?.textContent;
+                var username = items[activeIndex].dataset.username;
                 if (username) selectMention(username);
             }
         } else if (e.key === 'Escape') {
@@ -4648,8 +4720,8 @@ function setupMentionAutocomplete() {
         }
     });
 
-    input.addEventListener('blur', () => {
-        setTimeout(() => { container.style.display = 'none'; isOpen = false; }, 200);
+    input.addEventListener('blur', function() {
+        setTimeout(function() { container.style.display = 'none'; isOpen = false; }, 200);
     });
 }
 

@@ -990,7 +990,7 @@ body {
     background: #1e1e2e;
     border: 1px solid #2a2a4a;
     border-radius: 8px;
-    max-height: 180px;
+    max-height: 220px;
     overflow-y: auto;
     z-index: 1000;
     box-shadow: 0 -4px 16px rgba(0,0,0,0.4);
@@ -999,8 +999,8 @@ body {
 .mention-item {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 8px 12px;
+    gap: 10px;
+    padding: 6px 12px;
     cursor: pointer;
     transition: background 0.1s;
 }
@@ -1008,6 +1008,13 @@ body {
 .mention-item:hover,
 .mention-item.active {
     background: rgba(79,195,247,0.12);
+}
+
+.mention-item-avatar-wrap {
+    position: relative;
+    flex-shrink: 0;
+    width: 28px;
+    height: 28px;
 }
 
 .mention-item-avatar {
@@ -1022,11 +1029,58 @@ body {
     font-weight: 700;
     font-size: 12px;
     flex-shrink: 0;
+    overflow: hidden;
+}
+
+.mention-item-avatar img {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    object-fit: cover;
+}
+
+.mention-status-dot {
+    position: absolute;
+    bottom: -1px;
+    right: -1px;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    border: 2px solid #1e1e2e;
+    z-index: 2;
+}
+.mention-status-dot.online { background: #4caf50; }
+.mention-status-dot.offline { background: #757575; }
+
+.mention-empty {
+    padding: 12px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 13px;
+}
+
+.mention-item-text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    flex: 1;
 }
 
 .mention-item-name {
     font-size: 14px;
-    color: var(--text-primary);
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.mention-item-hint {
+    font-size: 11px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-top: 1px;
 }
 
 .message .avatar {
@@ -2725,18 +2779,8 @@ body {
     width: 100%;
     height: 100%;
     object-fit: cover;
-    border-radius: 50%;
 }
 
-/* Mention item with profile pic */
-.mention-item-avatar img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    border-radius: 50%;
-}
-
-/* ===== Settings Toggle Switch ===== */
 .settings-toggle {
     display: flex;
     align-items: center;
