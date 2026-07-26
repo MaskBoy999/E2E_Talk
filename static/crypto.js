@@ -343,6 +343,38 @@ var E2ECrypto = (() => {
         return _aeadDecryptRaw(ct, fileKey, null, nonce);
     }
 
+    // Decrypt a complete file (all chunks concatenated) with the given file key.
+    // Each encrypted chunk is [24-byte nonce] + [ciphertext + 16-byte tag].
+    // Plaintext chunk = 64KB. Encrypted full chunk = 65536 + 16 + 24 = 65576 bytes.
+    function decryptFile(fileKey, encryptedData) {
+        const CHUNK_PLAINTEXT = 65536;
+        const CHUNK_ENCRYPTED_FULL = CHUNK_PLAINTEXT + 16 + 24;
+        const encBytes = encryptedData instanceof Uint8Array ? encryptedData : new Uint8Array(encryptedData);
+        const totalChunks = Math.ceil(encBytes.length / CHUNK_ENCRYPTED_FULL);
+        const decryptedChunks = [];
+        for (let i = 0; i < totalChunks; i++) {
+            const start = i * CHUNK_ENCRYPTED_FULL;
+            let chunkData;
+            if (i < totalChunks - 1) {
+                chunkData = encBytes.slice(start, start + CHUNK_ENCRYPTED_FULL);
+            } else {
+                chunkData = encBytes.slice(start);
+            }
+            if (chunkData.length < 40) throw new Error('Encrypted chunk too short');
+            const decrypted = decryptFileChunk(fileKey, chunkData);
+            decryptedChunks.push(decrypted);
+        }
+        let totalLength = 0;
+        for (const c of decryptedChunks) totalLength += c.length;
+        const result = new Uint8Array(totalLength);
+        let offset = 0;
+        for (const c of decryptedChunks) {
+            result.set(c, offset);
+            offset += c.length;
+        }
+        return result;
+    }
+
     // ---- Key storage in localStorage ----
     function identityStorageSuffix(accountId) {
         if (accountId) return accountId;
@@ -468,7 +500,9 @@ var E2ECrypto = (() => {
                 k.indexOf('e2e_server_history_') === 0 ||
                 k === 'profile_key_cache' ||
                 k === 'e2e_hmac_key' ||
-                k === 'e2e_friend_code') {
+                k === 'e2e_friend_code' ||
+                k.indexOf('e2e_file_key_') === 0 ||
+                k.indexOf('fkc_') === 0) {
                 bundle[k] = localStorage.getItem(k);
             }
         }
@@ -550,6 +584,7 @@ var E2ECrypto = (() => {
         generateFileKey: generateFileKey,
         encryptFileChunk: encryptFileChunk,
         decryptFileChunk: decryptFileChunk,
+        decryptFile: decryptFile,
 
         // File Key Storage
         encodeEncryptedFileKey: encodeEncryptedFileKey,

@@ -253,11 +253,64 @@ function saveProfileKeyCache() {
     }
 }
 
+// Save userDisplayNameCache to localStorage so display names/colors/borders/PFP file IDs survive page refresh
+function saveUserDisplayNameCache() {
+    try {
+        // Only save serializable data (not blob URLs or functions)
+        var saveable = {};
+        for (var uid in userDisplayNameCache) {
+            if (userDisplayNameCache.hasOwnProperty(uid)) {
+                var entry = userDisplayNameCache[uid];
+                var saveEntry = {};
+                if (entry.display_name) saveEntry.dn = entry.display_name;
+                if (entry.username_color) saveEntry.uc = entry.username_color;
+                if (entry.username_border_color) saveEntry.ubc = entry.username_border_color;
+                if (entry.profile_picture_file_id) saveEntry.pf = entry.profile_picture_file_id;
+                if (entry.profile_picture_file_key) saveEntry.pk = entry.profile_picture_file_key;
+                if (Object.keys(saveEntry).length > 0) saveable[uid] = saveEntry;
+            }
+        }
+        localStorage.setItem('user_display_name_cache', JSON.stringify(saveable));
+    } catch (e) {
+        // localStorage might be full or unavailable
+    }
+}
+
+// Load userDisplayNameCache from localStorage
+function loadUserDisplayNameCache() {
+    try {
+        var saved = localStorage.getItem('user_display_name_cache');
+        if (saved) {
+            var parsed = JSON.parse(saved);
+            for (var uid in parsed) {
+                if (parsed.hasOwnProperty(uid)) {
+                    var entry = parsed[uid];
+                    if (!userDisplayNameCache[uid]) userDisplayNameCache[uid] = {};
+                    if (entry.dn) userDisplayNameCache[uid].display_name = entry.dn;
+                    if (entry.uc) userDisplayNameCache[uid].username_color = entry.uc;
+                    if (entry.ubc) userDisplayNameCache[uid].username_border_color = entry.ubc;
+                    if (entry.pf) userDisplayNameCache[uid].profile_picture_file_id = entry.pf;
+                    if (entry.pk) userDisplayNameCache[uid].profile_picture_file_key = entry.pk;
+                }
+            }
+        }
+    } catch (e) {
+        // Ignore parse errors
+    }
+}
+
 // Debounced save after each modification
 var _profileKeySaveTimer = null;
 function scheduleProfileKeySave() {
     if (_profileKeySaveTimer) clearTimeout(_profileKeySaveTimer);
     _profileKeySaveTimer = setTimeout(saveProfileKeyCache, 500);
+}
+
+// Debounced save for userDisplayNameCache
+var _userDisplayNameSaveTimer = null;
+function scheduleUserDisplayNameSave() {
+    if (_userDisplayNameSaveTimer) clearTimeout(_userDisplayNameSaveTimer);
+    _userDisplayNameSaveTimer = setTimeout(saveUserDisplayNameCache, 500);
 }
 
 // Key blob save to server for recovery after cookie clear
@@ -308,8 +361,9 @@ function saveKeyBlobToServer() {
     }
 }
 
-// Load the cache immediately
+// Load the caches immediately
 loadProfileKeyCache();
+loadUserDisplayNameCache();
 
 // Fetch another user's profile blob from the server, decrypt it with their profile_data_key,
 // and cache the result in userDisplayNameCache so the DM sidebar and messages show the display name.
@@ -334,8 +388,10 @@ async function fetchAndCacheUserProfile(userId) {
         if (decrypted.username_color !== undefined) userDisplayNameCache[userId].username_color = decrypted.username_color;
         if (decrypted.username_border_color !== undefined) userDisplayNameCache[userId].username_border_color = decrypted.username_border_color;
         if (data.profile_picture_file_id) userDisplayNameCache[userId].profile_picture_file_id = data.profile_picture_file_id;
+        scheduleUserDisplayNameSave();
         if (viewMode === 'dms') renderDmSidebar();
         updateExistingMessageStyles(userId);
+        updateMemberListItem(userId);
     } catch (e) {
         // Silently ignore — will retry on next profile_key_sync or message
     }
@@ -361,7 +417,9 @@ async function fetchServerConversationProfile(userId, serverId, serverKey) {
         if (decrypted.username_color) userDisplayNameCache[userId].username_color = decrypted.username_color;
         if (decrypted.username_border_color) userDisplayNameCache[userId].username_border_color = decrypted.username_border_color;
         if (decrypted.profile_picture_file_id) userDisplayNameCache[userId].profile_picture_file_id = decrypted.profile_picture_file_id;
+        scheduleUserDisplayNameSave();
         updateExistingMessageStyles(userId);
+        updateMemberListItem(userId);
     } catch (e) {}
 }
 
@@ -408,7 +466,10 @@ async function fetchDmConversationProfile(userId, dmChannelId) {
         if (decrypted.display_name) userDisplayNameCache[userId].display_name = decrypted.display_name;
         if (decrypted.username_color) userDisplayNameCache[userId].username_color = decrypted.username_color;
         if (decrypted.username_border_color) userDisplayNameCache[userId].username_border_color = decrypted.username_border_color;
+        scheduleUserDisplayNameSave();
+        if (viewMode === 'dms') renderDmSidebar();
         updateExistingMessageStyles(userId);
+        updateMemberListItem(userId);
     } catch (e) {}
 }
 
@@ -442,6 +503,28 @@ async function sendProfileKeySync(dmChannelId, conv) {
             type: 'profile_key_sync',
             dm_channel_id: dmChannelId,
         };
+        
+        // Share display name and colors (encrypted with DM key so recipient can render immediately)
+        if (myProfile) {
+            if (myProfile.display_name) {
+                var encDn = E2ECrypto.encryptDm(myProfile.display_name, dmChannelId, identity.privateKey, otherPubKey);
+                payload.encrypted_display_name = encDn.ciphertext;
+                payload.display_name_nonce = encDn.nonce;
+                payload.display_name_message_nonce = encDn.messageNonce;
+            }
+            if (myProfile.username_color) {
+                var encColor = E2ECrypto.encryptDm(myProfile.username_color, dmChannelId, identity.privateKey, otherPubKey);
+                payload.encrypted_username_color = encColor.ciphertext;
+                payload.username_color_nonce = encColor.nonce;
+                payload.username_color_message_nonce = encColor.messageNonce;
+            }
+            if (myProfile.username_border_color) {
+                var encBorder = E2ECrypto.encryptDm(myProfile.username_border_color, dmChannelId, identity.privateKey, otherPubKey);
+                payload.encrypted_username_border_color = encBorder.ciphertext;
+                payload.username_border_color_nonce = encBorder.nonce;
+                payload.username_border_color_message_nonce = encBorder.messageNonce;
+            }
+        }
         
         // Share PFP key if available
         if (myProfile && myProfile.profile_picture_file_id && myProfile.profile_picture_file_key) {
@@ -516,6 +599,25 @@ async function broadcastProfileKeySyncToServer(serverId) {
             server_id: serverId,
         };
         
+        // Share display name and colors (encrypted with server key so members can render immediately)
+        if (myProfile) {
+            if (myProfile.display_name) {
+                var encDn = E2ECrypto.aeadEncrypt(myProfile.display_name, serverKey);
+                payload.encrypted_display_name = encDn.ciphertext;
+                payload.display_name_nonce = encDn.nonce;
+            }
+            if (myProfile.username_color) {
+                var encColor = E2ECrypto.aeadEncrypt(myProfile.username_color, serverKey);
+                payload.encrypted_username_color = encColor.ciphertext;
+                payload.username_color_nonce = encColor.nonce;
+            }
+            if (myProfile.username_border_color) {
+                var encBorder = E2ECrypto.aeadEncrypt(myProfile.username_border_color, serverKey);
+                payload.encrypted_username_border_color = encBorder.ciphertext;
+                payload.username_border_color_nonce = encBorder.nonce;
+            }
+        }
+        
         // Share PFP key if available
         if (myProfile.profile_picture_file_id && myProfile.profile_picture_file_key) {
             var rawPicKey = myProfile.profile_picture_file_key;
@@ -553,7 +655,7 @@ async function broadcastProfileKeySyncToServer(serverId) {
         }
         
         // Only send if there's something to share
-        if (payload.encrypted_profile_key || payload.encrypted_profile_data_key) {
+        if (payload.encrypted_profile_key || payload.encrypted_profile_data_key || payload.encrypted_display_name) {
             ws.send(JSON.stringify(payload));
         }
     } catch (e) {
@@ -1049,10 +1151,21 @@ document.addEventListener('DOMContentLoaded', () => {
     setupStickerPanel();
     loadMutedState();
     loadServers().then(function () {
-        // After servers load, default to DM view if no server was auto-selected.
-        // This runs after loadServers() completes, so there's no race:
-        // if loadServers() auto-selected a server, currentServerId is set and we skip.
-        if (!currentServerId) {
+        // Check for saved DM conversation to restore on page refresh
+        var savedDmId = null;
+        try { savedDmId = localStorage.getItem('last_dm_channel_id'); } catch (_) {}
+        
+        if (savedDmId) {
+            // Prefer the saved DM over auto-selecting a server.
+            // enterDmView loads DMs, then .then() restores the saved conversation.
+            enterDmView().then(function () {
+                var savedConv = dmConversations.find(function(c) { return c.dm_channel_id === savedDmId; });
+                if (savedConv) {
+                    selectDmChannel(savedConv.dm_channel_id, savedConv.other_user_id, savedConv.other_username, null);
+                }
+            });
+        } else if (!currentServerId) {
+            // No saved DM — default to DM view if no server was auto-selected
             enterDmView();
         }
     });
@@ -1074,6 +1187,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // so missed notifications are restored on next load.
     function saveBeforeClose() {
         saveMentionState();
+        saveUserDisplayNameCache();
         localStorage.setItem('e2e_last_seen', new Date().toISOString());
         saveKeyBlobToServer();
     }
@@ -2999,9 +3113,75 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('close-server-settings').addEventListener('click', () => {
         document.getElementById('server-settings-modal').style.display = 'none';
     });
+    
+    // Server picture upload
+    document.getElementById('server-picture-upload-btn').addEventListener('click', function () {
+        document.getElementById('server-picture-file-input').click();
+    });
+    document.getElementById('server-picture-file-input').addEventListener('change', function (e) {
+        var file = e.target.files[0];
+        if (!file) return;
+        serverPictureCropState.file = file;
+        var reader = new FileReader();
+        reader.onload = function (ev) {
+            var img = new Image();
+            img.onload = function () {
+                serverPictureCropState.image = img;
+                serverPictureCropState.naturalWidth = img.naturalWidth;
+                serverPictureCropState.naturalHeight = img.naturalHeight;
+                document.getElementById('server-picture-crop-container').style.display = 'block';
+                var cropImg = document.getElementById('server-picture-crop-image');
+                cropImg.src = ev.target.result;
+                cropImg.onload = function () {
+                    var frame = document.getElementById('server-picture-crop-frame');
+                    var needsCrop = img.naturalWidth > 420 || img.naturalHeight > 420;
+                    if (needsCrop) {
+                        // Scale image to FIT within the frame (like profile banner/PFP crop)
+                        var imgW = cropImg.naturalWidth;
+                        var imgH = cropImg.naturalHeight;
+                        var maxFrameW = frame.offsetWidth;
+                        var maxFrameH = 300;
+                        var scale = Math.min(maxFrameW / imgW, maxFrameH / imgH, 1);
+                        var dispW = Math.round(imgW * scale);
+                        var dispH = Math.round(imgH * scale);
+                        frame.style.width = dispW + 'px';
+                        frame.style.height = dispH + 'px';
+                        cropImg.style.cssText = 'width:' + dispW + 'px;height:' + dispH + 'px;display:block;position:absolute;top:0;left:0;';
+                        document.getElementById('server-picture-crop-overlay').style.display = '';
+                        initServerPictureCropBox(cropImg);
+                        document.getElementById('server-picture-crop-info').textContent = 'Drag or resize the square to select the area to keep. It will be resized to 420x420.';
+                    } else {
+                        frame.style.width = '';
+                        frame.style.height = 'auto';
+                        cropImg.style.cssText = 'width:100%;display:block;';
+                        document.getElementById('server-picture-crop-overlay').style.display = 'none';
+                        document.getElementById('server-picture-crop-info').textContent = 'Image is already ' + img.naturalWidth + 'x' + img.naturalHeight + '. It will be saved as-is.';
+                        serverPictureCropState.cropX = 0;
+                        serverPictureCropState.cropY = 0;
+                        serverPictureCropState.cropSize = Math.min(img.naturalWidth, img.naturalHeight);
+                        serverPictureCropState.maxCropSize = Math.min(img.naturalWidth, img.naturalHeight);
+                    }
+                };
+            };
+            img.src = ev.target.result;
+        };
+        reader.readAsDataURL(file);
+        e.target.value = '';
+    });
+    document.getElementById('server-picture-crop-cancel').addEventListener('click', function () {
+        document.getElementById('server-picture-crop-container').style.display = 'none';
+        if (serverPictureCropState.cleanupCropListeners) serverPictureCropState.cleanupCropListeners();
+        serverPictureCropState = { file: null, image: null, naturalWidth: 0, naturalHeight: 0, cropX: 0, cropY: 0, cropSize: 420, maxCropSize: 0 };
+    });
+    document.getElementById('server-picture-crop-confirm').addEventListener('click', processAndUploadServerPicture);
+    document.getElementById('server-picture-remove-btn').addEventListener('click', removeServerPicture);
 
     // DM listeners
     document.getElementById('dm-strip-btn').addEventListener('click', enterDmView);
+    document.getElementById('dm-strip-btn').addEventListener('contextmenu', function (e) {
+        e.preventDefault();
+        showDmStripContextMenu(e);
+    });
 
     // Friend listeners
     document.getElementById('cancel-add-friend').addEventListener('click', () => hideModal('add-friend-modal'));
@@ -4015,6 +4195,42 @@ function showDmContextMenu(e, dmChannelId, otherUsername) {
     setTimeout(function () { document.addEventListener('click', closeMenu); }, 0);
 }
 
+function showDmStripContextMenu(e) {
+    var existing = document.querySelector('.channel-context-menu');
+    if (existing) existing.remove();
+
+    var menu = document.createElement('div');
+    menu.className = 'channel-context-menu';
+    menu.style.left = e.clientX + 'px';
+    menu.style.top = e.clientY + 'px';
+
+    var unreadCount = Object.keys(unreadDms).length;
+    var clearItem = document.createElement('div');
+    clearItem.className = 'context-menu-item';
+    clearItem.textContent = unreadCount > 0 ? 'Clear all DM notifications (' + unreadCount + ')' : 'No DM notifications';
+    if (unreadCount === 0) clearItem.style.opacity = '0.5';
+    clearItem.addEventListener('click', function () {
+        unreadDms = {};
+        mentionItems = mentionItems.filter(function (item) { return !item.dmChannelId; });
+        updateDmStripBadge();
+        updateMentionsBadge();
+        saveMentionState();
+        if (viewMode === 'dms') renderDmSidebar();
+        menu.remove();
+    });
+    menu.appendChild(clearItem);
+
+    document.body.appendChild(menu);
+
+    function closeMenu(e2) {
+        if (!menu.contains(e2.target)) {
+            menu.remove();
+            document.removeEventListener('click', closeMenu);
+        }
+    }
+    setTimeout(function () { document.addEventListener('click', closeMenu); }, 0);
+}
+
 function showChannelContextMenu(e, channelId, channelName) {
     // Remove any existing context menu
     var existing = document.querySelector('.channel-context-menu');
@@ -4127,6 +4343,22 @@ function showServerContextMenu(e, serverId, serverName) {
     });
     menu.appendChild(muteItem);
 
+    // Clear notifications for this server
+    var unreadSrvCount = unreadMentionsByServer[serverId] || 0;
+    var clearNotifItem = document.createElement('div');
+    clearNotifItem.className = 'context-menu-item';
+    clearNotifItem.textContent = unreadSrvCount > 0 ? 'Clear notifications (' + unreadSrvCount + ')' : 'No notifications';
+    if (unreadSrvCount === 0) clearNotifItem.style.opacity = '0.5';
+    clearNotifItem.addEventListener('click', function () {
+        delete unreadMentionsByServer[serverId];
+        mentionItems = mentionItems.filter(function (item) { return item.serverId !== serverId; });
+        updateServerBadges();
+        updateMentionsBadge();
+        saveMentionState();
+        menu.remove();
+    });
+    menu.appendChild(clearNotifItem);
+
     document.body.appendChild(menu);
 
     // Close on click outside
@@ -4181,7 +4413,7 @@ async function navigateToMessage(serverId, channelId, dmChannelId, messageId) {
         if (conv) {
             currentDmChannelId = dmChannelId;
             var _convCache = userDisplayNameCache[conv.other_user_id];
-            currentDmOtherUser = { id: conv.other_user_id, username: conv.other_username, display_name: (_convCache && _convCache.display_name) || conv.other_display_name };
+            currentDmOtherUser = { id: conv.other_user_id, username: conv.other_username, display_name: (_convCache && _convCache.display_name) || conv.other_username || conv.other_display_name };
             currentChannelId = null;
             currentServerId = null;
             document.querySelectorAll('.channel-item').forEach(function (el) { el.classList.remove('active'); });
@@ -4674,6 +4906,33 @@ function connectWebSocket(t) {
                     }
                 }
                 break;
+            case 'server_picture_updated':
+                if (data.server_id) {
+                    var srv = servers.find(function(s) { return s.id === data.server_id; });
+                    if (srv) {
+                        // Clear the cache for this server's picture
+                        for (var cacheKey in serverPictureCache) {
+                            if (cacheKey.indexOf(data.server_id + ':') === 0) {
+                                URL.revokeObjectURL(serverPictureCache[cacheKey]);
+                                delete serverPictureCache[cacheKey];
+                            }
+                        }
+                        if (data.removed) {
+                            srv.server_picture_file_id = null;
+                            srv.encrypted_server_picture_key = null;
+                            srv.server_picture_key_nonce = null;
+                        } else {
+                            srv.server_picture_file_id = data.server_picture_file_id || null;
+                            srv.encrypted_server_picture_key = data.encrypted_server_picture_key || null;
+                            srv.server_picture_key_nonce = data.server_picture_key_nonce || null;
+                        }
+                        renderServerList();
+                        if (data.server_id === currentServerId) {
+                            updateServerSettingsPreview();
+                        }
+                    }
+                }
+                break;
             case 'channel_created':
             case 'channel_deleted':
                 if (data.server_id && data.server_id === currentServerId) {
@@ -4732,8 +4991,8 @@ function connectWebSocket(t) {
                 break;
             case 'friend_request_received':
                 loadFriendRequestBadge();
-                if (data.from_username) {
-                    showBrowserNotification('Friend Request', data.from_username + ' sent you a friend request');
+                if (data.from_user_id) {
+                    showBrowserNotification('Friend Request', 'You have a new friend request');
                     playNotificationSound();
                 }
                 break;
@@ -4813,7 +5072,7 @@ function connectWebSocket(t) {
                 }
                 break;
             case 'profile_key_sync':
-                if (data.user_id && data.dm_channel_id && (data.encrypted_profile_key || data.encrypted_profile_data_key)) {
+                if (data.user_id && data.dm_channel_id && (data.encrypted_profile_key || data.encrypted_profile_data_key || data.encrypted_display_name)) {
                     if (user && data.user_id !== user.id) {
                         var kpSync = E2ECrypto.getIdentityKeyPair();
                         var otherPubKeySync = null;
@@ -4850,9 +5109,36 @@ function connectWebSocket(t) {
                                         profileKeyCache[data.user_id + ':banner'] = decryptedBannerKey;
                                         scheduleProfileKeySave();
                                     }
-                                } catch (e) {
-                                    console.warn('Failed to decrypt banner key sync:', e);
-                                }
+                                } catch (e) {}
+                            }
+                            // Decrypt display name and colors from sync
+                            if (data.encrypted_display_name && data.display_name_nonce) {
+                                try {
+                                    var decDn = E2ECrypto.decryptDm(data.encrypted_display_name, data.display_name_nonce, data.dm_channel_id, kpSync.privateKey, otherPubKeySync, data.display_name_message_nonce || null);
+                                    if (decDn) {
+                                        if (!userDisplayNameCache[data.user_id]) userDisplayNameCache[data.user_id] = {};
+                                        userDisplayNameCache[data.user_id].display_name = decDn;
+                                    }
+                                } catch (e) {}
+                            }
+                            if (data.encrypted_username_color && data.username_color_nonce) {
+                                try {
+                                    var decColor = E2ECrypto.decryptDm(data.encrypted_username_color, data.username_color_nonce, data.dm_channel_id, kpSync.privateKey, otherPubKeySync, data.username_color_message_nonce || null);
+                                    if (decColor) {
+                                        if (!userDisplayNameCache[data.user_id]) userDisplayNameCache[data.user_id] = {};
+                                        userDisplayNameCache[data.user_id].username_color = decColor;
+                                    }
+                                } catch (e) {}
+                            }
+                            if (data.encrypted_username_border_color && data.username_border_color_nonce) {
+                                try {
+                                    var decBorder = E2ECrypto.decryptDm(data.encrypted_username_border_color, data.username_border_color_nonce, data.dm_channel_id, kpSync.privateKey, otherPubKeySync, data.username_border_color_message_nonce || null);
+                                    if (decBorder) {
+                                        if (!userDisplayNameCache[data.user_id]) userDisplayNameCache[data.user_id] = {};
+                                        userDisplayNameCache[data.user_id].username_border_color = decBorder;
+                                    }
+                                } catch (e) {}
+                                scheduleUserDisplayNameSave();
                             }
                             // Decrypt and cache profile data key so we can decrypt description/nickname
                             if (data.encrypted_profile_data_key && data.profile_data_key_nonce) {
@@ -4861,19 +5147,23 @@ function connectWebSocket(t) {
                                     if (decPdKey) {
                                         profileKeyCache[data.user_id + ':profile_data_key'] = decPdKey;
                                         scheduleProfileKeySave();
-                                        fetchAndCacheUserProfile(data.user_id);
-                                    }
-                                } catch (e) {
-                                    console.warn('Failed to decrypt profile data key sync:', e);
+                                    fetchAndCacheUserProfile(data.user_id);
                                 }
+                            } catch (e) {
+                                console.warn('Failed to decrypt profile data key sync:', e);
                             }
-                            // Re-render profile modal if open for this user
-                            if (profileModalUserId === data.user_id) {
-                                var profileModal = document.getElementById('profile-modal');
-                                if (profileModal && profileModal.style.display !== 'none') {
-                                    openProfileModal(profileModalUserId);
-                                }
-                            }                          }
+                        }
+                        // Refresh existing messages and DM sidebar with updated display name/colors
+                        updateExistingMessageStyles(data.user_id);
+                        updateMemberListItem(data.user_id);
+                        if (viewMode === 'dms') renderDmSidebar();
+                        // Re-render profile modal if open for this user
+                        if (profileModalUserId === data.user_id) {
+                            var profileModal = document.getElementById('profile-modal');
+                            if (profileModal && profileModal.style.display !== 'none') {
+                                openProfileModal(profileModalUserId);
+                            }
+                        }                          }
                       }
                       
                       // Auto-respond with our keys so the sender's other devices get them too.
@@ -4890,7 +5180,7 @@ function connectWebSocket(t) {
                   }
                   break;
             case 'profile_key_server_sync':
-                if (data.user_id && data.server_id && (data.encrypted_profile_key || data.encrypted_profile_data_key)) {
+                if (data.user_id && data.server_id && (data.encrypted_profile_key || data.encrypted_profile_data_key || data.encrypted_display_name)) {
                     if (user && data.user_id !== user.id) {
                         try {
                             // Decrypt the PFP key with the server's metadata key
@@ -4919,6 +5209,38 @@ function connectWebSocket(t) {
                                         fetchAndCacheUserProfile(data.user_id);
                                     }
                                 }
+                                // Decrypt display name and colors from server sync
+                                if (data.encrypted_display_name && data.display_name_nonce) {
+                                    try {
+                                        var decDn = new TextDecoder().decode(E2ECrypto.aeadDecrypt(data.encrypted_display_name, serverKeyForSync, data.display_name_nonce));
+                                        if (decDn) {
+                                            if (!userDisplayNameCache[data.user_id]) userDisplayNameCache[data.user_id] = {};
+                                            userDisplayNameCache[data.user_id].display_name = decDn;
+                                        }
+                                    } catch (e) {}
+                                }
+                                if (data.encrypted_username_color && data.username_color_nonce) {
+                                    try {
+                                        var decColor = new TextDecoder().decode(E2ECrypto.aeadDecrypt(data.encrypted_username_color, serverKeyForSync, data.username_color_nonce));
+                                        if (decColor) {
+                                            if (!userDisplayNameCache[data.user_id]) userDisplayNameCache[data.user_id] = {};
+                                            userDisplayNameCache[data.user_id].username_color = decColor;
+                                        }
+                                    } catch (e) {}
+                                }
+                                if (data.encrypted_username_border_color && data.username_border_color_nonce) {
+                                    try {
+                                        var decBorder = new TextDecoder().decode(E2ECrypto.aeadDecrypt(data.encrypted_username_border_color, serverKeyForSync, data.username_border_color_nonce));
+                                        if (decBorder) {
+                                            if (!userDisplayNameCache[data.user_id]) userDisplayNameCache[data.user_id] = {};
+                                            userDisplayNameCache[data.user_id].username_border_color = decBorder;
+                                        }
+                                    } catch (e) {}
+                                }
+                                scheduleUserDisplayNameSave();
+                                // Refresh existing messages with updated display name/colors
+                                updateExistingMessageStyles(data.user_id);
+                                updateMemberListItem(data.user_id);
                             }
                         } catch (e) {
                             console.warn('Failed to decrypt server profile key sync:', e);                          }
@@ -5009,7 +5331,11 @@ function connectWebSocket(t) {
                         if (decryptedProfileUpdate.display_name !== undefined) userDisplayNameCache[data.user_id].display_name = decryptedProfileUpdate.display_name;
                         if (decryptedProfileUpdate.username_color !== undefined) userDisplayNameCache[data.user_id].username_color = decryptedProfileUpdate.username_color;
                         if (decryptedProfileUpdate.username_border_color !== undefined) userDisplayNameCache[data.user_id].username_border_color = decryptedProfileUpdate.username_border_color;
+                        scheduleUserDisplayNameSave();
                     }
+                    // Refresh existing messages with updated display name/colors
+                    updateExistingMessageStyles(data.user_id);
+                    updateMemberListItem(data.user_id);
 
                     // Invalidate profile pic cache and profile key cache for this user
                     for (var pk in profilePicCache) {
@@ -5407,7 +5733,18 @@ function renderServerList() {
                 }
             } catch (_) {}
         }
-        div.textContent = displayName ? displayName.charAt(0).toUpperCase() : '';
+        // Show server picture if available, otherwise initial letter
+        var serverPicUrl = s.server_picture_file_id ? getServerPictureUrl(s.server_picture_file_id, s.id) : null;
+        if (serverPicUrl) {
+            div.innerHTML = '<img src="' + serverPicUrl + '" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;">';
+            div.dataset.serverPic = s.server_picture_file_id;
+        } else if (s.server_picture_file_id) {
+            div.textContent = displayName ? displayName.charAt(0).toUpperCase() : '';
+            // Trigger async fetch of server picture
+            getServerPictureUrl(s.server_picture_file_id, s.id);
+        } else {
+            div.textContent = displayName ? displayName.charAt(0).toUpperCase() : '';
+        }
         div.title = displayName;
         div.dataset.id = s.id;
         div.addEventListener('click', () => selectServer(s.id));
@@ -5673,6 +6010,20 @@ function tryDecryptWithAllKeys(serverId, ciphertextB64, nonceB64) {
     return null;
 }
 
+// Like tryDecryptWithAllKeys but uses AEAD decrypt directly (no padding removal).
+// Used for sender_username which is encrypted with raw aeadEncrypt (no padding).
+function tryDecryptWithAllKeysRaw(serverId, ciphertextB64, nonceB64) {
+    if (!serverId || !ciphertextB64 || !nonceB64) return null;
+    var allKeys = E2ECrypto.getAllServerKeys(serverId);
+    for (var i = 0; i < allKeys.length; i++) {
+        try {
+            var dec = E2ECrypto.aeadDecrypt(ciphertextB64, allKeys[i], nonceB64);
+            if (dec) return new TextDecoder().decode(dec);
+        } catch (_) {}
+    }
+    return null;
+}
+
 async function appendMessage(msg) {
     const list = document.getElementById('message-list');
     const div = document.createElement('div');
@@ -5695,10 +6046,8 @@ async function appendMessage(msg) {
     // so the snapshot values override the API response values
     if (msg.encrypted_profile_snapshot && msg.profile_snapshot_nonce && msg.sender_id && currentServerId) {
         try {
-            var snapKey = E2ECrypto.getServerKey(currentServerId);
-            if (snapKey) {
-                var snapDec = E2ECrypto.decryptMessage(msg.encrypted_profile_snapshot, msg.profile_snapshot_nonce, snapKey);
-                if (snapDec) {
+            var snapDec = tryDecryptWithAllKeys(currentServerId, msg.encrypted_profile_snapshot, msg.profile_snapshot_nonce);
+            if (snapDec) {
                     var snap = JSON.parse(snapDec);
                     if (snap.display_name) msg.sender_display_name = snap.display_name;
                     if (snap.username_color) msg.sender_username_color = snap.username_color;
@@ -5717,7 +6066,6 @@ async function appendMessage(msg) {
                         fetchAndCacheUserProfile(msg.sender_id);
                     }
                 }
-            }
         } catch (_e) {
             console.warn('Failed to decrypt profile snapshot:', _e);
         }
@@ -5726,10 +6074,8 @@ async function appendMessage(msg) {
     // Decrypt conversation_profile (current profile for this conversation) for display name/colors
     if (msg.conversation_profile && msg.sender_id && currentServerId) {
         try {
-            var cpKey = E2ECrypto.getServerKey(currentServerId);
-            if (cpKey) {
-                var cpDec = E2ECrypto.decryptMessage(msg.conversation_profile.encrypted_profile_data, msg.conversation_profile.nonce, cpKey);
-                if (cpDec) {
+            var cpDec = tryDecryptWithAllKeys(currentServerId, msg.conversation_profile.encrypted_profile_data, msg.conversation_profile.nonce);
+            if (cpDec) {
                     var cp = JSON.parse(cpDec);
                     if (cp.display_name) msg.sender_display_name = cp.display_name;
                     if (cp.username_color) msg.sender_username_color = cp.username_color;
@@ -5739,28 +6085,23 @@ async function appendMessage(msg) {
                     if (cp.display_name) userDisplayNameCache[msg.sender_id].display_name = cp.display_name;
                     if (cp.username_color) userDisplayNameCache[msg.sender_id].username_color = cp.username_color;
                     if (cp.username_border_color) userDisplayNameCache[msg.sender_id].username_border_color = cp.username_border_color;
+                    scheduleUserDisplayNameSave();
                 }
-            }
         } catch (_e) {}
-    }
-
-    // Decrypt encrypted_sender_username from API response (not WS) so we always have a sender_username
-    if (!msg.sender_username && msg.encrypted_sender_username && msg.sender_username_nonce && currentServerId) {
-        try {
-            var _esuKey = E2ECrypto.getServerKey(currentServerId);
-            if (_esuKey) {
-                var _esuDec = E2ECrypto.decryptSenderUsername(msg.encrypted_sender_username, msg.sender_username_nonce, _esuKey);
+    }        // Decrypt encrypted_sender_username from API response (not WS) so we always have a sender_username
+        // Uses tryDecryptWithAllKeysRaw because sender_username is encrypted with raw aeadEncrypt (no padding)
+        if (!msg.sender_username && msg.encrypted_sender_username && msg.sender_username_nonce && currentServerId) {
+            try {
+                var _esuDec = tryDecryptWithAllKeysRaw(currentServerId, msg.encrypted_sender_username, msg.sender_username_nonce);
                 if (_esuDec) msg.sender_username = _esuDec;
+            } catch (_e) {
+                console.warn('Failed to decrypt encrypted_sender_username:', _e);
             }
-        } catch (_e) {
-            console.warn('Failed to decrypt encrypted_sender_username:', _e);
         }
-    }
 
     const _srvCache = msg.sender_id ? userDisplayNameCache[msg.sender_id] : null;
     const displayName = msg.sender_display_name || (_srvCache && _srvCache.display_name) || msg.sender_username;
     const initial = displayName ? displayName.charAt(0).toUpperCase() : '';
-    var senderPicUrl = msg.sender_profile_pic ? getProfilePicUrl(msg.sender_profile_pic, msg.sender_id) : null;
     var senderPicUrl = msg.sender_profile_pic ? getProfilePicUrl(msg.sender_profile_pic, msg.sender_id) : null;
     let time = '';
     try {
@@ -6245,7 +6586,7 @@ async function navigateToMessage(serverId, channelId, messageId) {
         const conv = dmConversations.find(c => c.dm_channel_id === channelId);
         var _convCache2 = conv ? userDisplayNameCache[conv.other_user_id] : null;
         var displayName = conv ? ((_convCache2 && _convCache2.display_name) || conv.other_display_name || conv.other_username) : 'DM';
-        const otherUser = conv ? { id: conv.other_user_id, username: conv.other_username, display_name: (_convCache2 && _convCache2.display_name) || conv.other_display_name } : null;
+        const otherUser = conv ? { id: conv.other_user_id, username: conv.other_username, display_name: (_convCache2 && _convCache2.display_name) || conv.other_username || conv.other_display_name } : null;
         currentDmOtherUser = otherUser;
         var dmPicFileId2 = conv && (conv.other_profile_picture_file_id || (userDisplayNameCache[conv.other_user_id] && userDisplayNameCache[conv.other_user_id].profile_picture_file_id));
         var dmPicUrl2 = dmPicFileId2 ? getProfilePicUrl(dmPicFileId2, conv.other_user_id) : null;
@@ -7179,7 +7520,7 @@ async function sendMessage() {
         try {
             if (encKey && myProfile) {
                 var snapshot = {
-                    display_name: myProfile.display_name || user.display_name || user.username,
+                    display_name: myProfile.display_name || user.username,
                     username_color: myProfile.username_color || user.username_color || null,
                     username_border_color: myProfile.username_border_color || null,
                     nickname: myProfile.nickname || null,
@@ -7291,7 +7632,7 @@ async function sendMessage() {
 
 // --- DM View ---
 
-function enterDmView() {
+async function enterDmView() {
     viewMode = 'dms';
     currentChannelId = null;
     currentServerId = null;
@@ -7314,7 +7655,7 @@ function enterDmView() {
     document.getElementById('message-input').disabled = true;
     document.getElementById('send-btn').disabled = true;
     document.getElementById('message-list').innerHTML = '<div class="welcome">Select a conversation to start chatting</div>';
-    loadDmConversations();
+    await loadDmConversations();
 }
 
 async function loadDmConversations() {
@@ -7330,6 +7671,22 @@ async function loadDmConversations() {
     }
     renderDmSidebar();
     loadMyFriendCode();
+    // Prune stale unreadDms entries for channels that no longer exist
+    var validDmIds = {};
+    for (var i = 0; i < dmConversations.length; i++) {
+        validDmIds[dmConversations[i].dm_channel_id] = true;
+    }
+    var pruned = false;
+    for (var dk in unreadDms) {
+        if (unreadDms.hasOwnProperty(dk) && dk !== '__missed__' && !validDmIds[dk]) {
+            delete unreadDms[dk];
+            pruned = true;
+        }
+    }
+    if (pruned) {
+        updateDmStripBadge();
+        saveMentionState();
+    }
     // After DMs are loaded, broadcast our profile keys to all DM conversations
     broadcastProfileKeySyncToAllDms();
     // Prefetch profile data for ALL DM partners so display names, colors, and PFPs show immediately.
@@ -7465,11 +7822,13 @@ function renderDmSidebar() {
 
 async function selectDmChannel(dmChannelId, otherUserId, otherUsername, element) {
     currentDmChannelId = dmChannelId;
+    // Save last active DM channel so it can be restored after page refresh
+    try { localStorage.setItem('last_dm_channel_id', dmChannelId); } catch (_) {}
     // Look up the user's display name
     var conv = dmConversations.find(c => c.dm_channel_id === dmChannelId);
     var _selCache = conv ? userDisplayNameCache[conv.other_user_id] : null;
     var displayName = conv ? ((_selCache && _selCache.display_name) || conv.other_display_name || conv.other_username || otherUsername) : otherUsername;
-    currentDmOtherUser = { id: otherUserId, username: otherUsername, display_name: (_selCache && _selCache.display_name) || (conv ? conv.other_display_name : null) };
+    currentDmOtherUser = { id: otherUserId, username: otherUsername, display_name: (_selCache && _selCache.display_name) || (conv ? (conv.other_username || conv.other_display_name) : null) };
     currentChannelId = null;
     currentServerId = null;
 
@@ -7625,6 +7984,7 @@ function appendDmMessage(msg, kp, otherPublicKey) {
                 if (cp.display_name) userDisplayNameCache[msg.sender_id].display_name = cp.display_name;
                 if (cp.username_color) userDisplayNameCache[msg.sender_id].username_color = cp.username_color;
                 if (cp.username_border_color) userDisplayNameCache[msg.sender_id].username_border_color = cp.username_border_color;
+                scheduleUserDisplayNameSave();
             }
         } catch (_e) {}
     }
@@ -8221,9 +8581,44 @@ async function loadMembers(serverId) {
                 '<div class="member-actions">' + actionBtns + '</div>';
             list.appendChild(div);
         });
+        // After rendering members, prefetch display names and PFPs for uncached members
+        var srvKey = E2ECrypto.getServerKey(serverId);
+        if (srvKey) {
+            for (var i = 0; i < members.length; i++) {
+                var m2 = members[i];
+                if (m2.id !== user.id && !userDisplayNameCache[m2.id]) {
+                    fetchServerConversationProfile(m2.id, serverId, srvKey);
+                }
+            }
+        }
     } catch (err) {
         console.error('Failed to load members:', err);
     }
+}
+
+// Update a member list item's display name, colors, and PFP when profile data is fetched asynchronously.
+function updateMemberListItem(userId) {
+    var cache = userDisplayNameCache[userId];
+    if (!cache) return;
+    document.querySelectorAll('.member-item[data-user-id="' + userId + '"]').forEach(function(el) {
+        var nameEl = el.querySelector('.member-name');
+        if (nameEl && cache.display_name) {
+            nameEl.textContent = cache.display_name;
+        }
+        if (nameEl && cache.username_color) {
+            nameEl.style.color = cache.username_color;
+            nameEl.style.textShadow = getDisplayNameTextShadow(cache.username_color, cache.username_border_color);
+        }
+        var avatarEl = el.querySelector('.member-avatar');
+        if (avatarEl && cache.profile_picture_file_id) {
+            var picUrl = getProfilePicUrl(cache.profile_picture_file_id, userId);
+            if (picUrl) {
+                avatarEl.innerHTML = '<img src="' + picUrl + '" alt="" style="width:100%;height:100%;border-radius:50%;object-fit:cover;">';
+            } else if (!avatarEl.hasAttribute('data-profile-pic-load')) {
+                avatarEl.setAttribute('data-profile-pic-load', userId + ':' + cache.profile_picture_file_id);
+            }
+        }
+    });
 }
 
 async function kickMember(targetUserId, username) {
@@ -8323,6 +8718,8 @@ async function openServerSettings() {
     document.getElementById('server-settings-modal').style.display = 'flex';
     await loadServerSettings();
     await loadBannedUsers();
+    // Show server picture preview in settings
+    updateServerSettingsPreview();
 }
 
 async function loadServerSettings() {
@@ -8423,7 +8820,7 @@ async function createServer() {
         const encChName = E2ECrypto.aeadEncrypt('general', channelKey);
 
         // Generate invite code client-side, send only the hash
-        const inviteCode = generateCode(8);
+        const inviteCode = generateCode(16);
         var hmacKey = await ensureHmacKey();
         const inviteCodeHash = hmacKey ? E2ECrypto.hmacHex(hmacKey, inviteCode) : E2ECrypto.sha256Hex(inviteCode);
 
@@ -8513,27 +8910,6 @@ async function joinServer() {
 
             selectServer(serverData.id);
         } else {
-            // Fall back to sending plaintext code (backward compat)
-            try {
-                const res2 = await authFetch('/api/invites/join', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ code }),
-                });
-                if (res2.ok) {
-                    const serverData2 = await res2.json();
-                    hideModal('join-server-modal');
-                    await loadServers();
-                    await new Promise(r => setTimeout(r, 500));
-                    for (let attempt = 0; attempt < 15; attempt++) {
-                        const ok = await fetchAndDecryptServerKey(serverData2.id);
-                        if (ok) break;
-                        await new Promise(r => setTimeout(r, 1000));
-                    }
-                    selectServer(serverData2.id);
-                    return;
-                }
-            } catch (_) {}
             const err = await res.json();
             alert(err.error || 'Invalid invite code');
         }
@@ -8547,7 +8923,7 @@ async function showInviteModal() {
     if (!currentInviteCode && isOwner) {
         // Silently generate a new invite code if missing from localStorage
         try {
-            const inviteCode = generateCode(8);
+            const inviteCode = generateCode(16);
             var hmacKey = await ensureHmacKey();
             const inviteCodeHash = hmacKey ? E2ECrypto.hmacHex(hmacKey, inviteCode) : E2ECrypto.sha256Hex(inviteCode);
             const res = await authFetch(`/api/servers/${currentServerId}/invite`, {
@@ -8653,7 +9029,7 @@ async function regenerateInvite() {
     if (!confirm('Regenerate invite code? The old code will stop working immediately.')) return;
 
     try {
-        const inviteCode = generateCode(8);
+        const inviteCode = generateCode(16);
         var hmacKey = await ensureHmacKey();
         const inviteCodeHash = hmacKey ? E2ECrypto.hmacHex(hmacKey, inviteCode) : E2ECrypto.sha256Hex(inviteCode);
 
@@ -8953,7 +9329,7 @@ async function handleFriendCodeRegenerate(preverifiedPw) {
     if (regenStatusEl) { regenStatusEl.textContent = '⏳ Generating new friend code...'; regenStatusEl.style.color = '#888'; }
     try {
         // Generate a new friend code client-side
-        var newCode = generateCode(8);
+        var newCode = generateCode(16);
         if (regenStatusEl) { regenStatusEl.textContent = '⏳ Encrypting...'; }
         // Encrypt it with the password (same as key escrow encryption)
         if (typeof E2ECrypto === 'undefined' || !E2ECrypto.encryptWithPassword) {
@@ -9115,7 +9491,7 @@ async function loadFriendRequests() {
     let html = '';
     for (const r of cachedFriendRequests) {
         html += '<div class="friend-request-item">' +
-            '<span class="friend-request-name">' + escapeHtml(r.from_username) + '</span>' +
+            '<span class="friend-request-name">' + escapeHtml(r.from_username || r.from_user_id || 'Unknown') + '</span>' +
             '<div class="friend-request-actions">' +
             '<button class="btn-accept" data-rid="' + r.id + '">Accept</button>' +
             '<button class="btn-decline" data-rid="' + r.id + '">Decline</button>' +
@@ -10347,12 +10723,63 @@ async function startFileUpload() {
                 throw new Error('Failed to fetch recipient key');
             }
             const encrypted = E2ECrypto.encryptDm(messagePayload, currentDmChannelId, kp.privateKey, otherPublicKey);
-            ws.send(JSON.stringify({ type: 'dm_send', dm_channel_id: currentDmChannelId, encrypted_content: encrypted.ciphertext, nonce: encrypted.nonce, message_nonce: encrypted.messageNonce || null }));
+            var filePayload = { type: 'dm_send', dm_channel_id: currentDmChannelId, encrypted_content: encrypted.ciphertext, nonce: encrypted.nonce, message_nonce: encrypted.messageNonce || null };
+            try {
+                if (myProfile && myProfile.profile_picture_file_id && myProfile.profile_picture_file_key) {
+                    var snapshot = {
+                        display_name: myProfile.display_name || user.username,
+                        username_color: myProfile.username_color || user.username_color || null,
+                        username_border_color: myProfile.username_border_color || null,
+                        nickname: myProfile.nickname || null,
+                        description: myProfile.description || null,
+                        profile_background_color: myProfile.profile_background_color || null,
+                        profile_picture_file_id: myProfile.profile_picture_file_id || null,
+                        profile_picture_file_key: null
+                    };
+                    var rawPicKey = myProfile.profile_picture_file_key;
+                    if (rawPicKey && rawPicKey.indexOf(':') > 0) {
+                        var dk = E2ECrypto.decodeEncryptedFileKey(rawPicKey, kp.privateKey);
+                        if (dk) rawPicKey = dk;
+                    }
+                    snapshot.profile_picture_file_key = rawPicKey;
+                    var snapStr = JSON.stringify(snapshot);
+                    var encSnap = E2ECrypto.encryptDm(snapStr, currentDmChannelId, kp.privateKey, otherPublicKey);
+                    filePayload.encrypted_profile_snapshot = encSnap.ciphertext;
+                    filePayload.profile_snapshot_nonce = encSnap.nonce;
+                }
+            } catch (_) {}
+            ws.send(JSON.stringify(filePayload));
         } else {
             var fileMsgKey = E2ECrypto.getServerKey(currentServerId);
             const encrypted = fileMsgKey ? E2ECrypto.encryptMessage(messagePayload, fileMsgKey) : null;
             if (encrypted) {
-                ws.send(JSON.stringify({ type: 'message_send', channel_id: currentChannelId, encrypted_content: encrypted.ciphertext, nonce: encrypted.nonce, message_nonce: encrypted.messageNonce || null }));
+                var filePayload = { type: 'message_send', channel_id: currentChannelId, encrypted_content: encrypted.ciphertext, nonce: encrypted.nonce, message_nonce: encrypted.messageNonce || null };
+                try {
+                    if (myProfile && myProfile.profile_picture_file_id && myProfile.profile_picture_file_key) {
+                        var snapshot = {
+                            display_name: myProfile.display_name || user.username,
+                            username_color: myProfile.username_color || user.username_color || null,
+                            username_border_color: myProfile.username_border_color || null,
+                            nickname: myProfile.nickname || null,
+                            description: myProfile.description || null,
+                            profile_background_color: myProfile.profile_background_color || null,
+                            profile_picture_file_id: myProfile.profile_picture_file_id || null,
+                            profile_picture_file_key: null
+                        };
+                        var rawPicKey = myProfile.profile_picture_file_key;
+                        if (rawPicKey && rawPicKey.indexOf(':') > 0) {
+                            var identity = E2ECrypto.getIdentityKeyPair();
+                            var dk = E2ECrypto.decodeEncryptedFileKey(rawPicKey, identity.privateKey);
+                            if (dk) rawPicKey = dk;
+                        }
+                        snapshot.profile_picture_file_key = rawPicKey;
+                        var snapStr = JSON.stringify(snapshot);
+                        var encSnap = E2ECrypto.encryptMessage(snapStr, fileMsgKey);
+                        filePayload.encrypted_profile_snapshot = encSnap.ciphertext;
+                        filePayload.profile_snapshot_nonce = encSnap.nonce;
+                    }
+                } catch (_) {}
+                ws.send(JSON.stringify(filePayload));
             }
         }
 
@@ -12068,7 +12495,32 @@ async function sendStickerMessage(sticker) {
                 otherPubKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(d.identity_public_key));
             } catch (e) { hideStickerProgress(); setStickerSendingCooldown(false); return; }
             const encrypted = E2ECrypto.encryptDm(filePayload, currentDmChannelId, kp.privateKey, otherPubKey);
-            ws.send(JSON.stringify({ type: 'dm_send', dm_channel_id: currentDmChannelId, encrypted_content: encrypted.ciphertext, nonce: encrypted.nonce, message_nonce: encrypted.messageNonce || null }));
+            var stickerPayload = { type: 'dm_send', dm_channel_id: currentDmChannelId, encrypted_content: encrypted.ciphertext, nonce: encrypted.nonce, message_nonce: encrypted.messageNonce || null };
+            try {
+                if (myProfile && myProfile.profile_picture_file_id && myProfile.profile_picture_file_key) {
+                    var snapshot = {
+                        display_name: myProfile.display_name || user.username,
+                        username_color: myProfile.username_color || user.username_color || null,
+                        username_border_color: myProfile.username_border_color || null,
+                        nickname: myProfile.nickname || null,
+                        description: myProfile.description || null,
+                        profile_background_color: myProfile.profile_background_color || null,
+                        profile_picture_file_id: myProfile.profile_picture_file_id || null,
+                        profile_picture_file_key: null
+                    };
+                    var rawPicKey = myProfile.profile_picture_file_key;
+                    if (rawPicKey && rawPicKey.indexOf(':') > 0) {
+                        var dk = E2ECrypto.decodeEncryptedFileKey(rawPicKey, kp.privateKey);
+                        if (dk) rawPicKey = dk;
+                    }
+                    snapshot.profile_picture_file_key = rawPicKey;
+                    var snapStr = JSON.stringify(snapshot);
+                    var encSnap = E2ECrypto.encryptDm(snapStr, currentDmChannelId, kp.privateKey, otherPubKey);
+                    stickerPayload.encrypted_profile_snapshot = encSnap.ciphertext;
+                    stickerPayload.profile_snapshot_nonce = encSnap.nonce;
+                }
+            } catch (_) {}
+            ws.send(JSON.stringify(stickerPayload));
             // Brief success glow then cleanup
             const fill = document.getElementById('sticker-send-fill');
             if (fill) { fill.classList.add('success'); fill.style.width = '100%'; }
@@ -12078,13 +12530,38 @@ async function sendStickerMessage(sticker) {
             var stickerKey = E2ECrypto.getServerKey(currentServerId);
             const encrypted = stickerKey ? E2ECrypto.encryptMessage(filePayload, stickerKey) : null;
             if (encrypted) {
-                ws.send(JSON.stringify({
+                var stickerPayload = {
                     type: 'message_send',
                     channel_id: currentChannelId,
                     encrypted_content: encrypted.ciphertext,
                     nonce: encrypted.nonce,
                     message_nonce: encrypted.messageNonce || null,
-                }));
+                };
+                try {
+                    if (myProfile && myProfile.profile_picture_file_id && myProfile.profile_picture_file_key) {
+                        var snapshot = {
+                            display_name: myProfile.display_name || user.username,
+                            username_color: myProfile.username_color || user.username_color || null,
+                            username_border_color: myProfile.username_border_color || null,
+                            nickname: myProfile.nickname || null,
+                            description: myProfile.description || null,
+                            profile_background_color: myProfile.profile_background_color || null,
+                            profile_picture_file_id: myProfile.profile_picture_file_id || null,
+                            profile_picture_file_key: null
+                        };
+                        var rawPicKey = myProfile.profile_picture_file_key;
+                        if (rawPicKey && rawPicKey.indexOf(':') > 0) {
+                            var dk = E2ECrypto.decodeEncryptedFileKey(rawPicKey, identity.privateKey);
+                            if (dk) rawPicKey = dk;
+                        }
+                        snapshot.profile_picture_file_key = rawPicKey;
+                        var snapStr = JSON.stringify(snapshot);
+                        var encSnap = E2ECrypto.encryptMessage(snapStr, stickerKey);
+                        stickerPayload.encrypted_profile_snapshot = encSnap.ciphertext;
+                        stickerPayload.profile_snapshot_nonce = encSnap.nonce;
+                    }
+                } catch (_) {}
+                ws.send(JSON.stringify(stickerPayload));
                 // Brief success glow then cleanup
                 const fill = document.getElementById('sticker-send-fill');
                 if (fill) { fill.classList.add('success'); fill.style.width = '100%'; }
@@ -12113,7 +12590,7 @@ function renderUploadStickerPanel(container) {
         '<button id="emoji-upload-trigger" style="background:#6a3a8a;color:#fff;border:none;padding:10px 18px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;">😊 Upload Emoji</button>' +
         '</div>' +
         '<p style="color:#666;font-size:11px;margin-top:10px;">Emoji: small inline images • use :emoji_name: in messages to insert</p>' +
-        '<p style="color:#666;font-size:11px;margin-top:4px;">Stickers: cropped/resized to 420×420 • GIFs always uploaded as-is</p>' +
+        '<p style="color:#666;font-size:11px;margin-top:4px;">Stickers: cropped to square • GIFs always uploaded as-is</p>' +
         '<div style="margin-top:16px;"><button id="sticker-upload-cancel-btn" style="background:rgba(255,255,255,0.1);color:#aaa;border:1px solid #444;padding:8px 20px;border-radius:8px;font-size:13px;cursor:pointer;transition:all 0.15s;">Cancel</button></div>';
     container.appendChild(wrap);
 
@@ -12323,7 +12800,7 @@ function initCropBox(cropImg) {
     delete stickerCropState.needsCrop;
     // Always show the crop box for images > 420
     document.getElementById('sticker-crop-info').textContent =
-        'Drag or resize the square to select the area to keep. The selection will be resized to 420×420.';
+        'Drag or resize the square to select the area to keep. The selection will preserve its original resolution.';
 
     // Drag state
     let isDragging = false;
@@ -12486,17 +12963,10 @@ async function processAndUploadSticker() {
             blob = originalFile;
             mimeType = 'image/gif';
         } else {
-            // For images ≤ 420, preserve original non-square dimensions
-            // For larger images (GIF or sticker), scale the cropped square area down to 420x420
-            if (img.naturalWidth <= 420 && img.naturalHeight <= 420) {
-                canvas.width = img.naturalWidth;
-                canvas.height = img.naturalHeight;
-                ctx.drawImage(img, 0, 0);
-            } else {
-                canvas.width = 420;
-                canvas.height = 420;
-                ctx.drawImage(img, cropX, cropY, cropSize, cropSize, 0, 0, 420, 420);
-            }
+            // Always crop to the selected square region, keep its original resolution
+            canvas.width = cropSize;
+            canvas.height = cropSize;
+            ctx.drawImage(img, cropX, cropY, cropSize, cropSize, 0, 0, cropSize, cropSize);
 
             // Convert to blob (canvas can only encode PNG/JPEG/WebP, never animated GIF)
             const outputMime = 'image/png';
@@ -13166,9 +13636,18 @@ async function loadMyProfile() {
         if (data.display_name) userDisplayNameCache[user.id].display_name = data.display_name;
         if (data.username_color) userDisplayNameCache[user.id].username_color = data.username_color;
         if (data.username_border_color) userDisplayNameCache[user.id].username_border_color = data.username_border_color;
+        scheduleUserDisplayNameSave();
         
         // Update sidebar footer
         updateSidebarFooter();
+        
+        // Re-trigger PFP loading for own messages that were rendered before myProfile was set.
+        // These have placeholders (<div data-profile-pic-load="userId:fileId">initial</div>)
+        // but getProfilePicUrl returned null earlier because myProfile wasn't populated yet.
+        // A single call is sufficient — its async callback updates ALL matching DOM elements.
+        if (myProfile && myProfile.profile_picture_file_id) {
+            getProfilePicUrl(myProfile.profile_picture_file_id, user.id);
+        }
         
         // Update settings UI if open
         updateProfileSettingsUI(data);
@@ -13248,6 +13727,17 @@ function updateProfileSettingsUI(data) {
 // This legacy function is kept as a stub to avoid breaking callers that reference it.
 
 // ===== Profile Picture Crop Modal =====
+let serverPictureCropState = {
+    file: null,
+    image: null,
+    naturalWidth: 0,
+    naturalHeight: 0,
+    cropX: 0,
+    cropY: 0,
+    cropSize: 420,
+    maxCropSize: 0,
+};
+
 let profileCropState = {
     file: null,
     image: null,
@@ -13580,6 +14070,388 @@ async function removeProfilePic() {
         var status = document.getElementById('profile-save-status');
         if (status) { status.textContent = 'Failed to connect to server'; status.className = 'profile-save-status error'; }
     }
+}
+
+// ---- Server Picture Upload ----
+
+// Process and upload cropped server picture with server-key encryption
+async function processAndUploadServerPicture() {
+    var progressContainer = document.getElementById('server-picture-upload-progress');
+    var progressFill = document.getElementById('server-picture-upload-progress-fill');
+    var progressText = document.getElementById('server-picture-upload-progress-text');
+    var errorDiv = document.getElementById('server-picture-upload-error');
+    var statusDiv = document.getElementById('server-picture-upload-status');
+    
+    if (!serverPictureCropState.image || !currentServerId) return;
+    if (errorDiv) errorDiv.style.display = 'none';
+    if (statusDiv) statusDiv.style.display = 'none';
+    if (progressContainer) progressContainer.style.display = 'block';
+    if (progressText) progressText.textContent = 'Processing image...';
+    if (progressFill) progressFill.style.width = '2%';
+    
+    try {
+        var img = serverPictureCropState.image;
+        var cropX = serverPictureCropState.cropX || 0;
+        var cropY = serverPictureCropState.cropY || 0;
+        var cropSize = serverPictureCropState.cropSize || Math.min(serverPictureCropState.naturalWidth || 420, serverPictureCropState.naturalHeight || 420);
+        
+        var canvas = document.createElement('canvas');
+        var ctx = canvas.getContext('2d');
+        var MAX_PIC_SIZE = 420;
+        var finalSize = Math.min(cropSize, MAX_PIC_SIZE);
+        if (finalSize < 1) finalSize = Math.min(serverPictureCropState.naturalWidth || 420, serverPictureCropState.naturalHeight || 420, MAX_PIC_SIZE);
+        canvas.width = finalSize;
+        canvas.height = finalSize;
+        ctx.drawImage(img, cropX, cropY, cropSize, cropSize, 0, 0, finalSize, finalSize);
+        
+        var blob = await new Promise(function (resolve) { canvas.toBlob(resolve, 'image/png'); });
+        if (!blob) throw new Error('Failed to process image');
+        
+        if (progressText) progressText.textContent = 'Encrypting...';
+        if (progressFill) progressFill.style.width = '10%';
+        
+        var fileKey = E2ECrypto.generateFileKey();
+        var fileKeyB64 = E2ECrypto.arrayBufferToBase64(fileKey);
+        
+        if (progressText) progressText.textContent = 'Uploading...';
+        if (progressFill) progressFill.style.width = '15%';
+        
+        var initRes = await authFetch('/api/files/init', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ size: blob.size, mime: 'image/png' })
+        });
+        if (!initRes.ok) throw new Error('Upload init failed');
+        var initData = await initRes.json();
+        var fileId = initData.file_id;
+        if (!fileId) throw new Error('No file ID received');
+        
+        var CHUNK_SIZE = 64 * 1024;
+        var totalChunks = Math.ceil(blob.size / CHUNK_SIZE);
+        var arrayBuffer = await blob.arrayBuffer();
+        var bytes = new Uint8Array(arrayBuffer);
+        
+        for (var i = 0; i < totalChunks; i++) {
+            var start = i * CHUNK_SIZE;
+            var end = Math.min(start + CHUNK_SIZE, bytes.length);
+            var chunkData = bytes.slice(start, end);
+            var encryptedChunk = E2ECrypto.encryptFileChunk(fileKey, chunkData);
+            var chunkRes = await authFetch('/api/files/' + fileId + '/chunk/' + i, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/octet-stream' },
+                body: encryptedChunk
+            });
+            if (!chunkRes.ok) throw new Error('Chunk ' + (i + 1) + ' upload failed');
+            if (progressFill) {
+                var pct = 15 + ((i + 1) / totalChunks) * 70;
+                progressFill.style.width = Math.min(pct, 85) + '%';
+            }
+        }
+        
+        if (progressText) progressText.textContent = 'Finalizing...';
+        if (progressFill) progressFill.style.width = '90%';
+        
+        var completeRes = await authFetch('/api/files/' + fileId + '/complete', { method: 'POST' });
+        if (!completeRes.ok) throw new Error('Upload finalize failed');
+        
+        fileKeyCache.set(fileId, fileKeyB64);
+        
+        // Encrypt file key with server key so only server members can decrypt
+        var serverKey = E2ECrypto.getServerKey(currentServerId);
+        if (!serverKey) throw new Error('Server key not available');
+        var encKey = E2ECrypto.aeadEncrypt(fileKeyB64, serverKey);
+        
+        // Send to server
+        var res = await authFetch('/api/servers/' + currentServerId + '/picture', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                server_picture_file_id: fileId,
+                encrypted_server_picture_key: encKey.ciphertext,
+                server_picture_key_nonce: encKey.nonce
+            })
+        });
+        if (!res.ok) {
+            var errData = await res.json();
+            throw new Error(errData.error || 'Failed to set server picture');
+        }
+        
+        // Update local server data with the new picture info
+        var srv = servers.find(function(s) { return s.id === currentServerId; });
+        if (srv) srv.server_picture_file_id = fileId;
+        
+        // Revoke old cached blob URL to prevent memory leak
+        var oldCacheKey = currentServerId + ':' + (srv ? srv.server_picture_file_id : '');
+        if (serverPictureCache[oldCacheKey]) {
+            URL.revokeObjectURL(serverPictureCache[oldCacheKey]);
+            delete serverPictureCache[oldCacheKey];
+        }
+        
+        // Cleanup crop event listeners to prevent memory leak
+        if (serverPictureCropState.cleanupCropListeners) serverPictureCropState.cleanupCropListeners();
+        
+        // Reset crop state and hide crop UI
+        serverPictureCropState = { file: null, image: null, naturalWidth: 0, naturalHeight: 0, cropX: 0, cropY: 0, cropSize: 420, maxCropSize: 0 };
+        document.getElementById('server-picture-crop-container').style.display = 'none';
+        if (progressContainer) progressContainer.style.display = 'none';
+        if (statusDiv) { statusDiv.textContent = 'Server picture updated!'; statusDiv.style.display = 'block'; }
+        
+        // Reload server list to show picture
+        renderServerList();
+        updateServerSettingsPreview();
+        
+        setTimeout(function () { if (statusDiv) statusDiv.style.display = 'none'; }, 3000);
+    } catch (e) {
+        if (errorDiv) { errorDiv.textContent = e.message || 'Failed to upload server picture'; errorDiv.style.display = 'block'; }
+        if (progressContainer) progressContainer.style.display = 'none';
+    }
+}
+
+async function removeServerPicture() {
+    if (!currentServerId) return;
+    try {
+        var res = await authFetch('/api/servers/' + currentServerId + '/picture', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                server_picture_file_id: '',
+                encrypted_server_picture_key: '',
+                server_picture_key_nonce: '',
+                remove: true
+            })
+        });
+        if (!res.ok) {
+            var err = await res.json();
+            alert(err.error || 'Failed to remove picture');
+            return;
+        }
+        var srv = servers.find(function(s) { return s.id === currentServerId; });
+        if (srv) {
+            // Revoke any cached blob URL for this server to prevent memory leak
+            for (var key in serverPictureCache) {
+                if (key.startsWith(currentServerId + ':')) {
+                    URL.revokeObjectURL(serverPictureCache[key]);
+                    delete serverPictureCache[key];
+                }
+            }
+            srv.server_picture_file_id = null;
+        }
+        renderServerList();
+        updateServerSettingsPreview();
+        document.getElementById('server-picture-remove-btn').style.display = 'none';
+        var statusDiv = document.getElementById('server-picture-upload-status');
+        if (statusDiv) { statusDiv.textContent = 'Server picture removed'; statusDiv.style.display = 'block'; }
+        setTimeout(function () { if (statusDiv) statusDiv.style.display = 'none'; }, 3000);
+    } catch (e) {
+        alert('Failed to connect to server');
+    }
+}
+
+function initServerPictureCropBox(serverPicCropImg) {
+    var overlay = document.getElementById('server-picture-crop-overlay');
+    if (!overlay) return;
+    overlay.style.display = '';
+    
+    var displayW = serverPicCropImg.offsetWidth || serverPicCropImg.clientWidth;
+    var displayH = serverPicCropImg.offsetHeight || serverPicCropImg.clientHeight;
+    var natW = serverPicCropImg.naturalWidth;
+    var natH = serverPicCropImg.naturalHeight;
+    if (displayW < 1 || displayH < 1 || natW < 1 || natH < 1) return;
+    
+    var scaleX = natW / displayW;
+    var scaleY = natH / displayH;
+    
+    // Create crop box
+    var box = document.createElement('div');
+    box.className = 'crop-box';
+    
+    var initSize = Math.min(displayW, displayH);
+    var initLeft = (displayW - initSize) / 2;
+    var initTop = (displayH - initSize) / 2;
+    box.style.cssText = 'position:absolute;left:' + initLeft + 'px;top:' + initTop + 'px;width:' + initSize + 'px;height:' + initSize + 'px;border:2px solid #fff;box-shadow:0 0 0 9999px rgba(0,0,0,0.5);cursor:move;';
+    
+    // Corner resize handle
+    var handle = document.createElement('div');
+    handle.style.cssText = 'position:absolute;right:-6px;bottom:-6px;width:12px;height:12px;background:#fff;border:2px solid var(--accent);border-radius:2px;cursor:nwse-resize;';
+    box.appendChild(handle);
+    overlay.innerHTML = '';
+    overlay.appendChild(box);
+    
+    serverPictureCropState.cropX = Math.round(initLeft * scaleX);
+    serverPictureCropState.cropY = Math.round(initTop * scaleY);
+    serverPictureCropState.cropSize = Math.round(initSize * scaleX);
+    serverPictureCropState.maxCropSize = Math.min(natW, natH);
+    
+    var scale = Math.max(scaleX, scaleY);
+    var displayMaxSize = Math.min(displayW - initLeft, displayH - initTop, serverPictureCropState.maxCropSize / scale);
+    
+    var isDragging = false, isResizing = false;
+    var dragStartX, dragStartY, startLeft, startTop, startSize;
+    
+    function getPointerClient(ev) {
+        return ev.touches ? { x: ev.touches[0].clientX, y: ev.touches[0].clientY } : { x: ev.clientX, y: ev.clientY };
+    }
+    
+    function onDragStart(ev) {
+        if (ev.target === handle) return;
+        ev.preventDefault();
+        isDragging = true;
+        var pt = getPointerClient(ev);
+        dragStartX = pt.x; dragStartY = pt.y;
+        startLeft = parseInt(box.style.left) || 0;
+        startTop = parseInt(box.style.top) || 0;
+    }
+    
+    function onDragMove(ev) {
+        if (!isDragging) return;
+        ev.preventDefault();
+        var pt = getPointerClient(ev);
+        var dx = pt.x - dragStartX;
+        var dy = pt.y - dragStartY;
+        var bw = parseInt(box.style.width) || 0;
+        var bh = parseInt(box.style.height) || 0;
+        var newLeft = Math.max(0, Math.min(displayW - bw, startLeft + dx));
+        var newTop = Math.max(0, Math.min(displayH - bh, startTop + dy));
+        box.style.left = newLeft + 'px';
+        box.style.top = newTop + 'px';
+        serverPictureCropState.cropX = Math.round(newLeft * scaleX);
+        serverPictureCropState.cropY = Math.round(newTop * scaleY);
+    }
+    
+    function onResizeStart(ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        isResizing = true;
+        var pt = getPointerClient(ev);
+        dragStartX = pt.x; dragStartY = pt.y;
+        startSize = parseInt(box.style.width) || 0;
+        startLeft = parseInt(box.style.left) || 0;
+        startTop = parseInt(box.style.top) || 0;
+    }
+    
+    function onResizeMove(ev) {
+        if (!isResizing) return;
+        ev.preventDefault();
+        var pt = getPointerClient(ev);
+        var dx = pt.x - dragStartX;
+        var dy = pt.y - dragStartY;
+        var newSize = Math.max(32, Math.min(displayMaxSize, startSize + Math.max(dx, dy)));
+        box.style.width = newSize + 'px';
+        box.style.height = newSize + 'px';
+        serverPictureCropState.cropSize = Math.round(newSize * scaleX);
+    }
+    
+    function endDrag() {
+        isDragging = false;
+        isResizing = false;
+    }
+    
+    box.addEventListener('mousedown', onDragStart);
+    box.addEventListener('touchstart', onDragStart, { passive: false });
+    handle.addEventListener('mousedown', onResizeStart);
+    handle.addEventListener('touchstart', onResizeStart, { passive: false });
+    document.addEventListener('mousemove', onDragMove);
+    document.addEventListener('mousemove', onResizeMove);
+    document.addEventListener('touchmove', onDragMove, { passive: false });
+    document.addEventListener('touchmove', onResizeMove, { passive: false });
+    document.addEventListener('mouseup', endDrag);
+    document.addEventListener('touchend', endDrag);
+    
+    // Store cleanup function so listeners can be removed on cancel/confirm
+    serverPictureCropState.cleanupCropListeners = function() {
+        box.removeEventListener('mousedown', onDragStart);
+        box.removeEventListener('touchstart', onDragStart);
+        handle.removeEventListener('mousedown', onResizeStart);
+        handle.removeEventListener('touchstart', onResizeStart);
+        document.removeEventListener('mousemove', onDragMove);
+        document.removeEventListener('mousemove', onResizeMove);
+        document.removeEventListener('touchmove', onDragMove);
+        document.removeEventListener('touchmove', onResizeMove);
+        document.removeEventListener('mouseup', endDrag);
+        document.removeEventListener('touchend', endDrag);
+    };
+}
+
+function updateServerSettingsPreview() {
+    var srv = servers.find(function(s) { return s.id === currentServerId; });
+    if (!srv) return;
+    var preview = document.getElementById('server-settings-picture-preview');
+    var fallback = document.getElementById('server-settings-pic-fallback');
+    var removeBtn = document.getElementById('server-picture-remove-btn');
+    if (!preview) return;
+    
+    // Get decrypted server name for fallback letter
+    var serverName = '';
+    if (srv.encrypted_name && srv.name_nonce) {
+        try { serverName = tryDecryptWithAllKeys(srv.id, srv.encrypted_name, srv.name_nonce); } catch (_) {}
+    }
+    
+    if (srv.server_picture_file_id) {
+        var picUrl = getServerPictureUrl(srv.server_picture_file_id, srv.id);
+        if (picUrl) {
+            preview.innerHTML = '<img src="' + picUrl + '" alt="" style="width:100%;height:100%;object-fit:cover;">';
+        } else {
+            // Trigger async fetch; show fallback for now
+            getServerPictureUrl(srv.server_picture_file_id, srv.id);
+            preview.innerHTML = '<span style="font-size:22px;font-weight:700;">' + (serverName ? serverName.charAt(0).toUpperCase() : '#') + '</span>';
+        }
+        if (removeBtn) removeBtn.style.display = '';
+    } else {
+        preview.innerHTML = '<span style="font-size:22px;font-weight:700;">' + (serverName ? serverName.charAt(0).toUpperCase() : '#') + '</span>';
+        if (removeBtn) removeBtn.style.display = 'none';
+    }
+}
+
+// Cache for decrypted server picture URLs: serverId -> blob URL
+var serverPictureCache = {};
+
+function getServerPictureUrl(fileId, serverId) {
+    if (!fileId || !serverId) return null;
+    var cacheKey = serverId + ':' + fileId;
+    if (serverPictureCache[cacheKey]) return serverPictureCache[cacheKey];
+    
+    // Fetch encrypted file
+    authFetch('/api/files/' + fileId + '/download').then(async function (res) {
+        if (!res.ok) return;
+        var encryptedArray = new Uint8Array(await res.arrayBuffer());
+        
+        // Get the encrypted file key and nonce from server data
+        var srv = servers.find(function(s) { return s.id === serverId; });
+        if (!srv || !srv.encrypted_server_picture_key || !srv.server_picture_key_nonce) return;
+        
+        // These come as base64-encoded strings from the JSON API response
+        var encKeyB64 = srv.encrypted_server_picture_key;
+        var keyNonceB64 = srv.server_picture_key_nonce;
+        
+        // Try to decrypt the file key with all available server keys
+        var allKeys = E2ECrypto.getAllServerKeys(serverId);
+        var fileKeyB64 = null;
+        for (var ki = 0; ki < allKeys.length; ki++) {
+            try {
+                var dec = E2ECrypto.decryptMessage(encKeyB64, keyNonceB64, allKeys[ki]);
+                if (dec) { fileKeyB64 = dec; break; }
+            } catch (_) {}
+        }
+        
+        if (!fileKeyB64) return;
+        
+        // Decrypt file using the file key
+        var fileKeyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(fileKeyB64));
+        var decrypted = E2ECrypto.decryptFile(fileKeyBytes, encryptedArray);
+        if (!decrypted) return;
+        
+        var blob = new Blob([decrypted], { type: 'image/png' });
+        var blobUrl = URL.createObjectURL(blob);
+        serverPictureCache[cacheKey] = blobUrl;
+        
+        // Re-render the server list and settings preview to show the picture
+        renderServerList();
+        updateServerSettingsPreview();
+    }).catch(function(err) {
+        console.warn('Failed to load server picture:', err);
+    });
+    
+    return null;
 }
 
 // Wire up profile settings event handlers

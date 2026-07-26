@@ -777,6 +777,48 @@ body {
     color: var(--accent);
 }
 
+/* Server picture in settings preview */
+.server-settings-picture {
+    position: relative;
+    overflow: hidden;
+    border: 2px solid var(--bg-border);
+    transition: border-color 0.2s;
+}
+.server-settings-picture:hover {
+    border-color: var(--accent);
+}
+
+/* Server picture crop overlay */
+.crop-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+}
+
+.crop-overlay .crop-box {
+    position: absolute;
+    border: 2px solid #fff;
+    box-shadow: 0 0 0 9999px rgba(0,0,0,0.5);
+    cursor: move;
+    touch-action: none;
+}
+
+/* Progress bar for server picture upload */
+#server-picture-upload-progress .progress-bar {
+    height: 6px;
+    border-radius: 3px;
+    background: var(--bg-secondary);
+    overflow: hidden;
+}
+#server-picture-upload-progress .progress-fill {
+    height: 100%;
+    background: var(--accent);
+    transition: width 0.2s;
+}
+
 .settings-section {
     margin-bottom: 16px;
 }

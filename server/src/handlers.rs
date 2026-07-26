@@ -283,10 +283,10 @@ pub async fn register(
         }
     };
 
-    // Fetch profile data
-    let (display_name, profile_pic) = match state.db.get_user_profile(&user.id) {
-        Ok((_, _, dn, pp, _fk, _uc, _bc, _, _)) => (dn, pp),
-        Err(_) => (None, None),
+    // Fetch profile picture only (display_name and other profile fields are now encrypted-only)
+    let profile_pic = match state.db.get_user_profile(&user.id) {
+        Ok((_, _, pp, _fk, _, _)) => pp,
+        Err(_) => None,
     };
 
     // First user registration means setup is complete
@@ -299,7 +299,6 @@ pub async fn register(
             "user": {
                 "id": user.id,
                 "username": user.username,
-                "display_name": display_name,
                 "profile_picture_file_id": profile_pic
             }
         })),
@@ -372,10 +371,10 @@ pub async fn login(
         ).unwrap(),
     );
 
-    // Fetch profile data
-    let (display_name, profile_pic) = match state.db.get_user_profile(&user.id) {
-        Ok((_, _, dn, pp, _fk, _uc, _bc, _, _)) => (dn, pp),
-        Err(_) => (None, None),
+    // Fetch profile picture only (display_name and other profile fields are now encrypted-only)
+    let profile_pic = match state.db.get_user_profile(&user.id) {
+        Ok((_, _, pp, _fk, _, _)) => pp,
+        Err(_) => None,
     };
 
     (StatusCode::OK, headers, Json(serde_json::json!({
@@ -383,7 +382,6 @@ pub async fn login(
         "user": {
             "id": user.id,
             "username": user.username,
-            "display_name": display_name,
             "profile_picture_file_id": profile_pic
         }
     }))).into_response()
@@ -557,10 +555,10 @@ pub async fn reauth(
         ).unwrap(),
     );
 
-    // Fetch profile data
-    let (display_name, profile_pic) = match state.db.get_user_profile(&user.id) {
-        Ok((_, _, dn, pp, _fk, _uc, _bc, _, _)) => (dn, pp),
-        Err(_) => (None, None),
+    // Fetch profile picture only (display_name and other profile fields are now encrypted-only)
+    let profile_pic = match state.db.get_user_profile(&user.id) {
+        Ok((_, _, pp, _fk, _, _)) => pp,
+        Err(_) => None,
     };
 
     (StatusCode::OK, headers, Json(serde_json::json!({
@@ -568,7 +566,6 @@ pub async fn reauth(
         "user": {
             "id": user.id,
             "username": user.username,
-            "display_name": display_name,
             "profile_picture_file_id": profile_pic
         }
     }))).into_response()
@@ -1096,6 +1093,9 @@ pub async fn list_servers(
                 "name_nonce": s.name_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                 "is_owner": is_owner,
                 "joins_disabled": s.joins_disabled,
+                "server_picture_file_id": s.server_picture_file_id,
+                "encrypted_server_picture_key": s.encrypted_server_picture_key.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+                "server_picture_key_nonce": s.server_picture_key_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
             })
         })
         .collect();
@@ -1333,21 +1333,8 @@ pub async fn join_server(
     // The client may send a pre-hashed invite code (HMAC-SHA256) for the streamlined flow,
     // or a plaintext invite code (legacy flow). Try the code as-is as a hash first,
     // then try HMAC-hashing it, then fall back to legacy SHA-256.
-    // Check 1: Try the code directly as an invite code hash (client already hashed it)
-    let server = match state.db.join_server_by_invite(code, &user_id) {
-        Ok(s) => Ok(s),
-        Err(_) => {
-            // Check 2: Client sent plaintext code — HMAC hash it
-            let hmac_hash = hmac_sha256_hex(state.config.hmac_key.as_bytes(), code);
-            match state.db.join_server_by_invite(&hmac_hash, &user_id) {
-                Ok(s) => Ok(s),
-                Err(_) => {
-                    // Check 3: Legacy SHA-256 hash
-                    state.db.join_server_by_invite(&sha256_hex(code), &user_id)
-                }
-            }
-        }
-    };
+    // Client already hashed the code, use it directly
+    let server = state.db.join_server_by_invite(code, &user_id);
     let server = match server {
         Ok(s) => s,
         Err(e) => {
@@ -1716,12 +1703,11 @@ pub async fn list_server_members(
 
     let result: Vec<serde_json::Value> = members
         .iter()
-        .map(|(id, username, role, display_name, _profile_pic)| {
+        .map(|(id, username, role, _display_name, _profile_pic)| {
             serde_json::json!({
                 "id": id,
                 "username": username,
                 "role": role,
-                "display_name": display_name,
             })
         })
         .collect();
@@ -2154,6 +2140,15 @@ pub struct UpdateEncryptedNameRequest {
     pub name_nonce: String,
 }
 
+#[derive(Deserialize)]
+pub struct UpdateServerPictureRequest {
+    pub server_picture_file_id: String,
+    pub encrypted_server_picture_key: String,
+    pub server_picture_key_nonce: String,
+    #[serde(default)]
+    pub remove: Option<bool>,
+}
+
 pub async fn update_server_name(
     Path(server_id): Path<String>,
     headers: HeaderMap,
@@ -2178,6 +2173,53 @@ pub async fn update_server_name(
     if let Err(e) = state.db.update_server_name(&server_id, &enc_name, &nonce) {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
     }
+    (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+}
+
+pub async fn update_server_picture(
+    Path(server_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UpdateServerPictureRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    if !state.db.is_server_owner(&user_id, &server_id).unwrap_or(false) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Only the server owner can update the server picture"}))).into_response();
+    }
+    let encrypted_key = match base64::engine::general_purpose::STANDARD.decode(&req.encrypted_server_picture_key) {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid encrypted_server_picture_key"}))).into_response(),
+    };
+    let key_nonce = match base64::engine::general_purpose::STANDARD.decode(&req.server_picture_key_nonce) {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid server_picture_key_nonce"}))).into_response(),
+    };
+    if req.remove == Some(true) {
+        if let Err(e) = state.db.remove_server_picture(&server_id) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
+        }
+    } else {
+        if let Err(e) = state.db.update_server_picture(&server_id, &req.server_picture_file_id, &encrypted_key, &key_nonce) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
+        }
+    }
+
+    // Broadcast the picture change to all server members so their UI updates in real-time
+    let picture_msg = serde_json::json!({
+        "type": "server_picture_updated",
+        "server_id": server_id,
+        "server_picture_file_id": req.server_picture_file_id,
+        "encrypted_server_picture_key": req.encrypted_server_picture_key,
+        "server_picture_key_nonce": req.server_picture_key_nonce,
+        "removed": req.remove.unwrap_or(false),
+    });
+    if let Ok(members) = state.db.get_server_members(&server_id) {
+        let _ = state.ws_manager.broadcast_to_users(&members, &picture_msg.to_string()).await;
+    }
+
     (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
 }
 
@@ -2309,12 +2351,9 @@ pub async fn admin_list_users(
                 "id": id,
                 "username": username,
                 "created_at": created_at,
-                "display_name": display_name,
                 "identity_public_key": if identity_public_key.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(identity_public_key.clone()) },
                 "profile_picture_file_id": profile_picture_file_id,
                 "profile_picture_file_key": profile_picture_file_key,
-                "username_color": username_color,
-                "username_border_color": username_border_color,
                 "friend_requests_disabled": *friend_requests_disabled != 0,
                 "encrypted_friend_code": encrypted_friend_code,
                 "friend_code_salt": friend_code_salt,
@@ -2324,8 +2363,7 @@ pub async fn admin_list_users(
                 "encrypted_profile_nonce": encrypted_profile_nonce,
                 "profile_banner_file_id": profile_banner_file_id,
                 "profile_banner_file_key": profile_banner_file_key,
-                // description/nickname removed — use encrypted_profile_data
-                "profile_background_color": profile_background_color,
+                // display_name, username_color, username_border_color, profile_background_color removed — all now in encrypted_profile_data
                 "friend_code_hash": friend_code_hash,
             })
         })
@@ -2621,10 +2659,10 @@ pub async fn admin_list_friend_requests(
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     };
-    let result: Vec<serde_json::Value> = rows.iter().map(|(id, fid, fname, tid, tname, status, ts, responded_at)| {
+    let result: Vec<serde_json::Value> = rows.iter().map(|(id, fid, _fname, tid, _tname, status, ts, responded_at)| {
         serde_json::json!({
-            "id": id, "from_user_id": fid, "from_username": fname,
-            "to_user_id": tid, "to_username": tname, "status": status, "created_at": ts,
+            "id": id, "from_user_id": fid,
+            "to_user_id": tid, "status": status, "created_at": ts,
             "responded_at": responded_at,
         })
     }).collect();
@@ -3382,7 +3420,7 @@ pub async fn get_profile(
         || state.db.share_server(&caller_id, &requested_id).unwrap_or(false);
 
     match state.db.get_user_profile(&requested_id) {
-        Ok((id, username, _display_name, profile_picture_file_id, file_key, _username_color, _username_border_color, banner_id, banner_key)) => {
+        Ok((id, username, profile_picture_file_id, file_key, banner_id, banner_key)) => {
             let encrypted = state.db.get_encrypted_profile(&requested_id).ok().flatten();
             (StatusCode::OK, Json(serde_json::json!({
                 "id": id,
@@ -3422,7 +3460,7 @@ pub async fn update_profile(
 
     // Before changing profile picture, delete the old one's file from DB and disk
     let delete_current_pic = || -> Result<(), String> {
-        let (_, _, _, old_file_id, _, _, _, _, _) = state.db.get_user_profile(&user_id)?;
+        let (_, _, old_file_id, _, _, _) = state.db.get_user_profile(&user_id)?;
         if let Some(old_id) = old_file_id {
             // Delete from DB (checks ownership)
             if let Ok(old_info) = state.db.delete_file_record(&old_id) {
@@ -3509,8 +3547,7 @@ pub async fn update_profile(
 
     // Broadcast profile update to the user, friends, and all server members
     if let Ok(profile) = state.db.get_user_profile(&user_id) {
-        let (_id, username, _display_name, profile_picture_file_id, profile_picture_file_key, _username_color, 
-_username_border_color, banner_id, banner_file_key) = profile;
+        let (_id, username, profile_picture_file_id, profile_picture_file_key, banner_id, banner_file_key) = profile;
         let encrypted = state.db.get_encrypted_profile(&user_id).ok().flatten();
         let profile_updated_at = state.db.get_profile_updated_at(&user_id).ok();
         let profile_msg = serde_json::json!({
@@ -3890,13 +3927,6 @@ fn hmac_sha256_hex(key: &[u8], data: &str) -> String {
     result.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-fn sha256_hex(data: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(data.as_bytes());
-    let result = hasher.finalize();
-    result.iter().map(|b| format!("{:02x}", b)).collect()
-}
 
 #[derive(Deserialize)]
 pub struct StoreEncryptedFriendCodeRequest {
@@ -3971,8 +4001,7 @@ pub async fn set_friend_requests_disabled(
 
 #[derive(Deserialize)]
 pub struct SendFriendRequest {
-    pub friend_code: Option<String>,
-    pub friend_code_hash: Option<String>,
+    pub friend_code_hash: String,
 }
 
 pub async fn send_friend_request(
@@ -3995,40 +4024,14 @@ pub async fn send_friend_request(
             .into_response();
     }
 
-    // Use pre-hashed friend_code_hash if provided, otherwise hash plaintext friend_code server-side
-    let code_hash = match req.friend_code_hash {
-        Some(ref hash) => hash.clone(),
-        None => {
-            let code = match req.friend_code {
-                Some(ref c) => c.trim().to_uppercase(),
-                None => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({"error": "Friend code or friend_code_hash is required"})),
-                    )
-                        .into_response();
-                }
-            };
-            if code.is_empty() {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": "Friend code is required"})),
-                )
-                    .into_response();
-            }
-            // Legacy fallback: hash the plaintext code server-side
-            hmac_sha256_hex(state.config.hmac_key.as_bytes(), &code)
-        }
-    };
+    let code_hash = &req.friend_code_hash;
     let friend_request_result = state.db.create_friend_request(&user_id, &code_hash);
     match friend_request_result {
         Ok(target) => {
-            // Notify the recipient in real time (best-effort). Include sender username.
-            let sender_username = state.db.get_user_by_id(&user_id).ok().map(|u| u.username).unwrap_or_default();
+            // Notify the recipient in real time (best-effort). No username included — client resolves from user_id.
             let notify = serde_json::json!({
                 "type": "friend_request_received",
                 "from_user_id": user_id,
-                "from_username": sender_username,
             });
             let _ = state
                 .ws_manager
@@ -4154,7 +4157,6 @@ pub async fn list_outgoing_friend_requests(
                     serde_json::json!({
                         "id": r.id,
                         "to_user_id": r.to_user_id,
-                        "to_username": r.to_username,
                         "status": r.status,
                         "created_at": r.created_at,
                     })
@@ -4313,7 +4315,7 @@ pub async fn list_dm_conversations(
                     "dm_channel_id": dm_id,
                     "other_user_id": other_id,
                     "other_username": other_username,
-                    "other_display_name": other_display_name,
+                    // other_display_name removed — now in encrypted profile data
                     "other_public_key": identity_pub,
                     "last_message": last_json,
                 }));
@@ -4381,7 +4383,6 @@ pub async fn list_dm_messages(
                         "id": m.id,
                         "dm_channel_id": m.dm_channel_id,
                         "sender_id": m.sender_id,
-        
                         "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
                         "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
                         "timestamp": m.timestamp,
@@ -4391,6 +4392,11 @@ pub async fn list_dm_messages(
                         "profile_key_nonce": m.profile_key_nonce,
                         "encrypted_banner_key": m.encrypted_banner_key,
                         "banner_key_nonce": m.banner_key_nonce,
+                        "key_version": m.key_version,
+                        "encrypted_profile_snapshot": base64::engine::general_purpose::STANDARD.encode(m.encrypted_profile_snapshot.as_deref().unwrap_or(&[])),
+                        "profile_snapshot_nonce": m.profile_snapshot_nonce,
+                        "encrypted_file_key": m.encrypted_file_key,
+                        "file_key_nonce": m.file_key_nonce,
                         "sender_id_hash": m.sender_id_hash,
                         "encrypted_sender_username": m.encrypted_sender_username,
                         "sender_username_nonce": m.sender_username_nonce,

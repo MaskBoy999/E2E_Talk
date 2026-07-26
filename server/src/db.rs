@@ -64,6 +64,9 @@ pub struct Server {
     pub invite_code_hash: String,
     pub joins_disabled: bool,
     pub created_at: String,
+    pub server_picture_file_id: Option<String>,
+    pub encrypted_server_picture_key: Option<Vec<u8>>,
+    pub server_picture_key_nonce: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone)]
@@ -82,8 +85,6 @@ pub struct Message {
     pub id: String,
     pub channel_id: String,
     pub sender_id: String,
-    pub sender_username: String,
-    pub sender_profile_pic: Option<String>,
     pub encrypted_content: Vec<u8>,
     pub nonce: Vec<u8>,
     pub timestamp: String,
@@ -110,8 +111,6 @@ pub struct DmMessage {
     pub id: String,
     pub dm_channel_id: String,
     pub sender_id: String,
-    pub sender_username: String,
-    pub sender_profile_pic: Option<String>,
     pub encrypted_content: Vec<u8>,
     pub nonce: Vec<u8>,
     pub timestamp: String,
@@ -590,6 +589,9 @@ impl Database {
         // Migration 031: pending_events — stores key rotation events for offline owners
         let _ = conn.execute_batch(include_str!("../migrations/031_pending_events.sql"));
 
+        // Migration 032: server_picture — encrypted server picture/avatar support
+        let _ = conn.execute_batch(include_str!("../migrations/032_server_picture.sql"));
+
         // Migration 029: Backfill sender_id_hash for existing rows that have NULL
         // Use Rust sha256_hex() instead of SQLite's built-in sha256() (not available in older SQLite)
         {
@@ -662,6 +664,23 @@ impl Database {
             }
         }
 
+
+        // Migration: Drop sender_username and sender_profile_pic from messages/dm_messages (plaintext sender info)
+        for tbl in ["messages", "dm_messages"] {
+            for col in ["sender_username", "sender_profile_pic"] {
+                let col_exists: bool = conn
+                    .query_row(
+                        &format!("SELECT COUNT(*) > 0 FROM pragma_table_info('{}') WHERE name = '{}'", tbl, col),
+                        [],
+                        |row| row.get::<_, i32>(0),
+                    )
+                    .map(|c| c > 0)
+                    .unwrap_or(false);
+                if col_exists {
+                    let _ = conn.execute(&format!("ALTER TABLE {} DROP COLUMN {}", tbl, col), []);
+                }
+            }
+        }
 
         // Migration: Drop plaintext server.name and channels.name columns
         for tbl_col in [("servers", "name"), ("channels", "name")] {
@@ -824,10 +843,10 @@ impl Database {
         .map_err(|_| "User not found".to_string())
     }
 
-    pub fn get_user_profile(&self, id: &str) -> Result<(String, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>), String> {
+    pub fn get_user_profile(&self, id: &str) -> Result<(String, String, Option<String>, Option<String>, Option<String>, Option<String>), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
 
-        // Check which banner columns exist (display_name, username_color, username_border_color dropped)
+        // Check which banner columns exist
         let has_banner: bool = conn
             .query_row(
                 "SELECT COUNT(*) > 0 FROM pragma_table_info('users') WHERE name = 'profile_banner_file_id'",
@@ -846,13 +865,11 @@ impl Database {
             .unwrap_or(false);
 
         let sql = if has_banner && has_banner_key {
-            "SELECT id, username, NULL as display_name, profile_picture_file_id, profile_picture_file_key,
-                    NULL as color, NULL as border,
+            "SELECT id, username, profile_picture_file_id, profile_picture_file_key,
                     profile_banner_file_id, profile_banner_file_key
              FROM users WHERE id = ?1"
         } else {
-            "SELECT id, username, NULL as display_name, profile_picture_file_id, profile_picture_file_key,
-                    NULL as color, NULL as border,
+            "SELECT id, username, profile_picture_file_id, profile_picture_file_key,
                     NULL as banner_id, NULL as banner_key
              FROM users WHERE id = ?1"
         };
@@ -865,9 +882,6 @@ impl Database {
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, Option<String>>(4)?,
                 row.get::<_, Option<String>>(5)?,
-                row.get::<_, Option<String>>(6)?,
-                row.get::<_, Option<String>>(7)?,
-                row.get::<_, Option<String>>(8)?,
             ))
         })
         .map_err(|_| "User not found".to_string())
@@ -1181,6 +1195,9 @@ impl Database {
             invite_code_hash: invite_code_hash.to_string(),
             joins_disabled: false,
             created_at: String::new(),
+            server_picture_file_id: None,
+            encrypted_server_picture_key: None,
+            server_picture_key_nonce: None,
         })
     }
 
@@ -1189,6 +1206,26 @@ impl Database {
         conn.execute(
             "UPDATE servers SET encrypted_name = ?1, name_nonce = ?2 WHERE id = ?3",
             params![encrypted_name, name_nonce, server_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn update_server_picture(&self, server_id: &str, file_id: &str, encrypted_key: &[u8], key_nonce: &[u8]) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE servers SET server_picture_file_id = ?1, encrypted_server_picture_key = ?2, server_picture_key_nonce = ?3 WHERE id = ?4",
+            params![file_id, encrypted_key, key_nonce, server_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn remove_server_picture(&self, server_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE servers SET server_picture_file_id = NULL, encrypted_server_picture_key = NULL, server_picture_key_nonce = NULL WHERE id = ?1",
+            params![server_id],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -1208,7 +1245,7 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT s.id, s.encrypted_name, s.name_nonce, s.owner_id, COALESCE(s.invite_code_hash, ''), COALESCE(s.joins_disabled, 0)
+                "SELECT s.id, s.encrypted_name, s.name_nonce, s.owner_id, COALESCE(s.invite_code_hash, ''), COALESCE(s.joins_disabled, 0), s.server_picture_file_id, s.encrypted_server_picture_key, s.server_picture_key_nonce
                  FROM servers s
                  INNER JOIN server_members sm ON s.id = sm.server_id
                  WHERE sm.user_id = ?1
@@ -1225,6 +1262,9 @@ impl Database {
                     invite_code_hash: row.get(4)?,
                     joins_disabled: row.get::<_, i64>(5)? != 0,
                     created_at: String::new(),
+                    server_picture_file_id: row.get(6)?,
+                    encrypted_server_picture_key: row.get(7)?,
+                    server_picture_key_nonce: row.get(8)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -1271,7 +1311,7 @@ impl Database {
 
         let server: Server = conn
             .query_row(
-                "SELECT id, encrypted_name, name_nonce, owner_id, COALESCE(invite_code_hash, ''), COALESCE(joins_disabled, 0) FROM servers WHERE invite_code_hash = ?1",
+                "SELECT id, encrypted_name, name_nonce, owner_id, COALESCE(invite_code_hash, ''), COALESCE(joins_disabled, 0), server_picture_file_id, encrypted_server_picture_key, server_picture_key_nonce FROM servers WHERE invite_code_hash = ?1",
                 params![code_hash],
                 |row| {
                     Ok(Server {
@@ -1282,6 +1322,9 @@ impl Database {
                         invite_code_hash: row.get(4)?,
                         joins_disabled: row.get::<_, i64>(5)? != 0,
                         created_at: String::new(),
+                        server_picture_file_id: row.get(6)?,
+                        encrypted_server_picture_key: row.get(7)?,
+                        server_picture_key_nonce: row.get(8)?,
                     })
                 },
             )
@@ -1662,8 +1705,6 @@ impl Database {
                     id: row.get(0)?,
                     channel_id: row.get(1)?,
                     sender_id: row.get(2)?,
-                    sender_username: row.get(3)?,
-                    sender_profile_pic: row.get(4)?,
                     encrypted_content: row.get(5)?,
                     nonce: row.get(6)?,
                     timestamp: row.get(7)?,
@@ -1723,8 +1764,6 @@ impl Database {
                     id: row.get(0)?,
                     channel_id: row.get(1)?,
                     sender_id: row.get(2)?,
-                    sender_username: row.get(3)?,
-                    sender_profile_pic: row.get(4)?,
                     encrypted_content: row.get(5)?,
                     nonce: row.get(6)?,
                     timestamp: row.get(7)?,
@@ -1784,8 +1823,6 @@ impl Database {
                     id: row.get(0)?,
                     channel_id: row.get(1)?,
                     sender_id: row.get(2)?,
-                    sender_username: String::new(),
-                    sender_profile_pic: None,
                     encrypted_content: row.get(3)?,
                     nonce: row.get(4)?,
                     timestamp: row.get(5)?,
@@ -1835,8 +1872,6 @@ impl Database {
                     id: row.get(0)?,
                     channel_id: row.get(1)?,
                     sender_id: row.get(2)?,
-                    sender_username: String::new(),
-                    sender_profile_pic: None,
                     encrypted_content: row.get(3)?,
                     nonce: row.get(4)?,
                     timestamp: row.get(5)?,
@@ -1907,8 +1942,6 @@ impl Database {
             id,
             channel_id: channel_id.to_string(),
             sender_id: sender_id.to_string(),
-            sender_username: username,
-            sender_profile_pic: None,
             encrypted_content: encrypted_content.to_vec(),
             nonce: nonce.to_vec(),
             timestamp: chrono::Utc::now().to_rfc3339(),
@@ -2974,8 +3007,7 @@ impl Database {
                 id: row.get(0)?,
                 dm_channel_id: row.get(1)?,
                 sender_id: row.get(2)?,
-                sender_username: row.get(3)?,
-                sender_profile_pic: row.get(4)?,
+                // cols 3=u.username, 4=u.profile_picture_file_id (skipped)
                 encrypted_content: row.get(5)?,
                 nonce: row.get(6)?,
                 timestamp: row.get(7)?,
@@ -2991,11 +3023,12 @@ impl Database {
                 profile_snapshot_nonce: row.get(17)?,
                 encrypted_file_key: row.get(18)?,
                 file_key_nonce: row.get(19)?,
-                encrypted_sender_username: row.get(20)?,                    sender_username_nonce: row.get(21)?,
-                    sender_id_hash: row.get(22).ok().flatten(),
-                })
+                encrypted_sender_username: row.get(20)?,
+                sender_username_nonce: row.get(21)?,
+                sender_id_hash: row.get(22).ok().flatten(),
             })
-            .map_err(|e| e.to_string())?;
+        })
+        .map_err(|e| e.to_string())?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r.map_err(|e| e.to_string())?);
@@ -3033,8 +3066,7 @@ impl Database {
                 id: row.get(0)?,
                 dm_channel_id: row.get(1)?,
                 sender_id: row.get(2)?,
-                sender_username: row.get(3)?,
-                sender_profile_pic: row.get(4)?,
+                // cols 3=u.username, 4=u.profile_picture_file_id (skipped)
                 encrypted_content: row.get(5)?,
                 nonce: row.get(6)?,
                 timestamp: row.get(7)?,
@@ -3102,8 +3134,6 @@ impl Database {
             id,
             dm_channel_id: dm_channel_id.to_string(),
             sender_id: sender_id.to_string(),
-            sender_username: username,
-            sender_profile_pic: None,
             encrypted_content: encrypted_content.to_vec(),
             nonce: nonce.to_vec(),
             timestamp: chrono::Utc::now().to_rfc3339(),
@@ -3172,8 +3202,7 @@ impl Database {
                         id: row.get(0)?,
                         channel_id: row.get(1)?,
                         sender_id: row.get(2)?,
-                        sender_username: username.clone(),
-            sender_profile_pic: None,
+
                         encrypted_content: row.get(3)?,
                         nonce: row.get(4)?,
                         timestamp: row.get(5)?,
@@ -3261,8 +3290,7 @@ impl Database {
                         id: row.get(0)?,
                         dm_channel_id: row.get(1)?,
                         sender_id: row.get(2)?,
-            sender_profile_pic: None,
-                        sender_username: username.clone(),
+
                         encrypted_content: row.get(3)?,
                         nonce: row.get(4)?,
                         timestamp: row.get(5)?,
@@ -3463,8 +3491,7 @@ impl Database {
                     id: row.get(0)?,
                     dm_channel_id: row.get(1)?,
                     sender_id: row.get(2)?,
-                    sender_username: row.get(3)?,
-                sender_profile_pic: row.get(4)?,
+
                     encrypted_content: row.get(5)?,
                     nonce: row.get(6)?,
                     timestamp: row.get(7)?,
@@ -3699,7 +3726,7 @@ impl Database {
     pub fn list_all_servers_admin(&self) -> Result<Vec<Server>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT id, owner_id, COALESCE(invite_code_hash, ''), COALESCE(joins_disabled, 0), COALESCE(created_at, '') FROM servers ORDER BY created_at")
+            .prepare("SELECT id, owner_id, COALESCE(invite_code_hash, ''), COALESCE(joins_disabled, 0), COALESCE(created_at, ''), server_picture_file_id, encrypted_server_picture_key, server_picture_key_nonce FROM servers ORDER BY created_at")
             .map_err(|e| e.to_string())?;
         let servers = stmt
             .query_map([], |row| {
@@ -3711,6 +3738,9 @@ impl Database {
                     invite_code_hash: row.get(2)?,
                     joins_disabled: row.get::<_, i64>(3)? != 0,
                     created_at: row.get(4)?,
+                    server_picture_file_id: row.get(5)?,
+                    encrypted_server_picture_key: row.get(6)?,
+                    server_picture_key_nonce: row.get(7)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -3757,8 +3787,7 @@ impl Database {
                     id: row.get(0)?,
                     channel_id: row.get(1)?,
                     sender_id: row.get(2)?,
-                    sender_username: row.get(3)?,
-                sender_profile_pic: row.get(4)?,
+
                     encrypted_content: row.get(5)?,
                     nonce: row.get(6)?,
                     timestamp: row.get(7)?,

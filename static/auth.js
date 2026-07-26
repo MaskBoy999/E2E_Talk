@@ -355,7 +355,7 @@ document.addEventListener('DOMContentLoaded', () => {
             // Generate friend code client-side, encrypt with password, send encrypted + hash
             const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
             let friendCode = '';
-            for (let i = 0; i < 8; i++) friendCode += ALPHABET[Math.floor(Math.random() * ALPHABET.length)];
+            for (let i = 0; i < 16; i++) friendCode += ALPHABET[Math.floor(Math.random() * ALPHABET.length)];
             const friendCodeHash = E2ECrypto.hmacHex(hmacKey, friendCode);
             const encryptedFC = E2ECrypto.encryptWithPassword(friendCode, password);
             localStorage.setItem('e2e_friend_code', friendCode);
@@ -400,6 +400,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
             localStorage.setItem('token', data.token);
             localStorage.setItem('user', JSON.stringify(data.user));
+            // Clear stale notification state from any previous account on this browser
+            localStorage.removeItem('mention_unread_dms');
+            localStorage.removeItem('mention_unread_server');
+            localStorage.removeItem('mention_unread_channel');
+            localStorage.removeItem('mention_items');
             // Store password encrypted at rest with a device-specific key
             try {
                 var devKey = localStorage.getItem('e2e_device_key');

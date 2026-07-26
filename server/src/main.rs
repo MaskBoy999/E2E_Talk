@@ -215,6 +215,7 @@ async fn main() {
         .route("/api/servers/{server_id}/keys/rotate", post(handlers::rotate_server_keys))
         .route("/api/servers/{server_id}/settings", patch(handlers::set_joins_disabled))
         .route("/api/servers/{server_id}/name", put(handlers::update_server_name))
+        .route("/api/servers/{server_id}/picture", put(handlers::update_server_picture))
         .route("/api/servers/{server_id}/channels/{channel_id}/name", put(handlers::update_channel_name))
         .route("/api/channels/{channel_id}/messages", get(handlers::list_messages))
         .route("/api/channels/{channel_id}/messages/around/{message_id}", get(handlers::list_messages_around))
