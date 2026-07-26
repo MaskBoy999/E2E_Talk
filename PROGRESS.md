@@ -1591,3 +1591,201 @@ This logic is actually correct — non-owners can upload keys for themselves onl
 - ✅ Server rebuilt: 0 errors, 10 warnings (pre-existing)
 - ✅ `static/chat.js` — syntax clean
 - ✅ `static/style.css` — clean
+
+---
+
+## Comprehensive Security Audit (2026-07-26)
+
+### A. What Is Stored — Plaintext on Server
+
+| Column/Table | Data | Risk |
+|---|---|---|
+| `users.username` | Display identity | Low — required for login |
+| `users.password_hash` | **HMAC-SHA256** of raw password | **CRITICAL** — see Section E |
+| `users.profile_picture_file_id` | File reference | Low — but reveals which file belongs to whom |
+| `users.profile_banner_file_id` | File reference | Low |
+| `users.friend_requests_disabled` | Boolean | None |
+| `servers.owner_id` | Plaintext user UUID | Low |
+| `servers.invite_code_hash` | SHA-256 of invite code | Low — one-way hash |
+| `channels.server_id`, `type`, `position` | Metadata | Low |
+| `messages.sender_id` | Plaintext user UUID | **Medium** — reveals who sent what |
+| `messages.timestamp` | Timestamp | **Medium** — reveals activity patterns |
+| `messages.sender_id_hash` | SHA-256(sender_id:channel_id) | Low — used for @mention lookup |
+| `dm_messages.sender_id` | Plaintext user UUID | **Medium** — reveals who talks to whom |
+| `dm_messages.timestamp` | Timestamp | **Medium** — activity patterns |
+| `server_members` | Who is in which servers | **Medium** — social graph |
+| `dm_members` | Who is in which DM channels | **Medium** — social graph |
+| `friendships` | Who is friends with whom | **Medium** — social graph |
+| `friend_requests` | Request history | Low |
+| `files.uploader_id`, `mime_type`, `original_size` | Upload metadata | **Medium** — what type/size of file, who uploaded |
+| `server_stickers.file_key` | **PLAINTEXT file encryption key** | **HIGH** — legacy column alongside `encrypted_file_key` |
+| `user_stickers.file_key` | **PLAINTEXT file encryption key** | **HIGH** — legacy column alongside `encrypted_file_key` |
+| `pending_notifications.payload` | Plaintext JSON with sender_username, message_id, channel_id | **Medium** — metadata leak |
+| `pending_events` | Plaintext user/server IDs, event types | Low |
+| `notification_sounds.file_name` | Plaintext filename | Low |
+
+### B. What Is Stored — Encrypted on Server
+
+| Column/Table | Encrypted With | Can Server Decrypt? |
+|---|---|---|
+| `users.encrypted_private_key` | Argon2id(raw_password) + AEAD | **YES** if server has raw password |
+| `users.encrypted_hash_key` | Argon2id(raw_password) + AEAD | **YES** if server has raw password |
+| `users.encrypted_friend_code` | Argon2id(raw_password) + AEAD | **YES** if server has raw password |
+| `users.encrypted_profile_data` | XChaCha20-Poly1305 + identity_key | **YES** if server has raw password (decrypts identity key → decrypts profile) |
+| `users.profile_picture_file_key` | Envelope(identity_key) | **YES** if server has raw password |
+| `users.profile_banner_file_key` | Envelope(identity_key) | **YES** if server has raw password |
+| `users.encrypted_profile_data_key` | Envelope(identity_key) | **YES** if server has raw password |
+| `messages.encrypted_content` (server channels) | XChaCha20-Poly1305 + server_key | **YES** if server has raw password (password → identity key → server_key → content) |
+| `messages.encrypted_content` (DMs) | XChaCha20-Poly1305 + dm_key (ECDH) | **YES** if server has raw password (password → identity key → dm_key → content) |
+| `messages.encrypted_sender_username` | server_key | **YES** via same chain |
+| `messages.encrypted_profile_snapshot` | server_key | **YES** via same chain |
+| `messages.encrypted_file_key` | server_key or dm_key | **YES** via same chain |
+| `server_keys.encrypted_key` | Envelope(identity_key) | **YES** if server has raw password |
+| `dm_keys.encrypted_key` | Envelope(identity_key) | **YES** if server has raw password |
+| `user_key_blobs.encrypted_blob` | Argon2id(raw_password) + AEAD | **YES** if server has raw password — **contains ALL localStorage keys** |
+| `escrowed_keys.encrypted_key` | Argon2id(raw_password) + AEAD | **YES** if server has raw password |
+| `profile_data_keys.encrypted_key` | Envelope(identity_key) | **YES** via same chain |
+| `shared_profile_data_keys.encrypted_key` | server_key or dm_key | **YES** via same chain |
+| `conversation_profile_data.encrypted_profile_data` | server_key or dm_key | **YES** via same chain |
+| `notification_sounds.encrypted_sound` | Envelope(identity_key) | **YES** if server has raw password |
+| `server_stickers.encrypted_file_key` | server_key | **YES** via same chain |
+| `user_stickers.encrypted_file_key` | server_key or identity_key | **YES** via same chain |
+| File chunks on disk | File key (random 32 bytes) | **YES** if server has raw password (file_key is in message metadata, encrypted with server_key) |
+
+### C. What Is Sent Over the Wire
+
+| Data | Plaintext or Encrypted | Notes |
+|---|---|---|
+| `username` (registration/login) | **PLAINTEXT** | Required for auth |
+| `password` (login) | **HMAC-SHA256** (hashed) | Server sees hash, not raw password |
+| `password` (registration) | **HMAC-SHA256** (hashed) | Same |
+| JWT token | **PLAINTEXT** | HttpOnly cookie or Bearer header |
+| `encrypted_content` | Ciphertext (base64) | Server never sees plaintext |
+| `nonce`, `message_nonce` | Nonce (not secret) | Required for AEAD |
+| `mentions` (user ID array) | **PLAINTEXT** | For notification routing |
+| `reply_to_user_id` | **PLAINTEXT** | For notification routing |
+| `sender_id` | **PLAINTEXT** | In WebSocket messages |
+| `channel_id`, `dm_channel_id`, `server_id` | **PLAINTEXT** | Routing metadata |
+| `encrypted_profile_key/banner_key/file_key` | Ciphertext (base64) | Encrypted with server/dm key |
+| `identity_public_key` | Public key (safe) | Registration only |
+| `encrypted_private_key` | Argon2id-encrypted | Registration/escrow |
+| `hmac_key` | **PLAINTEXT** | **CRITICAL** — public unauthenticated endpoint |
+
+### D. Server Metadata Visibility (Without User's Password)
+
+The server can observe **without** needing any password:
+
+- **Social graph**: Who is in which servers, who is in which DM channels, who is friends with whom
+- **Activity patterns**: When users send messages (timestamps), message frequency, who talks to whom
+- **File metadata**: Who uploaded what file type, file sizes, upload times
+- **Mention/reply targets**: Who mentions whom, who replies to whom (user IDs)
+- **Friend requests**: Who sent requests to whom, acceptance/decline patterns
+- **Server membership changes**: Joins, leaves, bans
+- **Profile picture/banner file IDs**: Which file belongs to which user (not the content)
+- **Pending notifications**: Who was offline when, what type of notification (sender_username in plaintext)
+- **Sticker names and file IDs**: What stickers exist, who uploaded them
+
+The server **cannot** see without a user's password:
+
+- Message content (server channel or DM)
+- Profile data (display_name, colors, description)
+- Private keys (identity, server, DM)
+- File content (all chunks encrypted)
+- Sticker/image content (encrypted)
+- Notification sound audio (encrypted)
+
+### E. CRITICAL: The password_hash Column Problem
+
+**Current design**: `users.password_hash` stores `HMAC-SHA256(hmac_key, raw_password)` — a keyed hash of the raw password. Login does a **direct string comparison**:
+
+```rust
+// handlers.rs:334
+let valid = req.password == password_hash;
+```
+
+**This means the server's `password_hash` column is functionally equivalent to storing the raw password** — anyone with DB access can use it to log in as that user by sending the same hash to the login endpoint.
+
+**Why this matters**: In a normal password hashing scheme (bcrypt, Argon2), the stored hash cannot be used to authenticate — you need the raw password. Here, the HMAC hash IS the credential. If the DB is compromised, every user's account is immediately compromised.
+
+**The server never sees the raw password** during normal login — the client hashes it first. But the hash IS the authentication token, so possessing it is equivalent to possessing the password.
+
+### F. Force-Insertion Attack Analysis
+
+#### Can the server insert a fake user into a server to spy?
+
+**YES.** An attacker with DB access could:
+
+1. Insert a row into `users` with a known password hash
+2. Generate X25519 key pairs for the fake user
+3. Insert a row into `server_members` adding the fake user to the target server
+4. Insert a row into `server_keys` with the server symmetric key encrypted for the fake user's identity key
+5. The fake user can now **decrypt all server channel messages** (since it has the server key)
+
+**Mitigation**: None — this is inherent to the symmetric key design. All server members share the same server key. The server controls membership.
+
+#### Can the server insert a fake user into a DM to spy?
+
+**YES, with caveats.** An attacker with DB access could:
+
+1. Insert the fake user as a DM member (`dm_members` table)
+2. **New messages** after insertion: The real user's client would derive a new DM key using ECDH with the fake user's public key — but only if the client knows about the fake user. Since the DM key is `HKDF(ECDH(myPriv, otherPub), dmChannelId)`, and the fake user doesn't have the real user's private key, new messages would use the existing DM key between the two real users.
+3. **However**: The server can decrypt the DM key if it has the real user's password (from `dm_keys` table). So the server can decrypt ALL existing and future DM messages.
+
+**Bottom line**: DMs are only as secure as the users' passwords. If the server has a user's raw password, it can decrypt everything that user can see.
+
+#### Can the server impersonate a user?
+
+**YES.** An attacker with DB access could:
+
+1. Decrypt the user's identity private key (using the password hash to authenticate, then decrypting `encrypted_private_key`)
+2. Create messages signed with that identity key
+3. The server could send messages as that user to any channel
+
+**Note**: The `message_signature` field exists but is not verified server-side, so forged messages would be accepted.
+
+### G. HMAC Key Exposure
+
+`GET /api/hmac-key` returns the server's HMAC key with **no authentication**. This key is used to hash friend codes and invite codes.
+
+**Impact**: An attacker can brute-force friend codes offline:
+- Friend codes are 8 chars from `[A-Z2-9]` (32 chars) = 32^8 ≈ 10^12 combinations
+- With a single GPU: ~10 billion HMAC-SHA256/sec → **~100 seconds** to crack any friend code
+- Once cracked, the attacker can send a friend request to that user
+
+**Mitigation**: Friend codes are meant to be shareable. The HMAC is for O(1) DB lookup, not security. The real protection is that you need the code to initiate contact.
+
+### H. Legacy Sticker file_key Leak
+
+Both `server_stickers.file_key` and `user_stickers.file_key` are **plaintext TEXT columns** alongside the newer `encrypted_file_key` BLOB column. If a client sent a plaintext `file_key` (legacy flow), it's stored in plaintext and returned to all server members via `list_server_stickers`.
+
+**Impact**: Anyone in the server can see the plaintext file key for stickers, allowing decryption of sticker file content.
+
+### I. Recommendations
+
+#### Critical Fixes
+
+1. **password_hash column**: Replace HMAC with proper Argon2id hashing. Server should compute `Argon2id(raw_password)` and verify with `Argon2::verify_password()`. This way the stored hash cannot be used to authenticate directly. The client should still hash before sending, but the server should ALSO hash server-side.
+
+2. **Legacy sticker file_key**: Migrate `file_key` column data into `encrypted_file_key` and drop the plaintext column. Add a migration to re-encrypt any plaintext file keys with the server key.
+
+3. **HMAC key endpoint**: Either:
+   - Require authentication (users get the key after logging in)
+   - Or accept the current design (friend codes are semi-public by nature)
+
+#### Medium Priority
+
+4. **Pending notification payloads**: Encrypt `pending_notifications.payload` with the target user's key so the server can't see sender_username/message metadata.
+
+5. **Message signatures**: Actually verify `message_signature` server-side to prevent impersonation even with DB access.
+
+6. **Forward secrecy**: Server and DM keys are static — compromise of a key reveals all past messages. Consider periodic key rotation with re-encryption of old messages.
+
+7. **JWT expiry**: Tokens last 30 days. Consider shorter expiry + refresh tokens.
+
+#### Low Priority
+
+8. **Admin endpoints**: The 20+ admin endpoints return extensive metadata (all server keys, all DM keys, all messages as ciphertext, all friendships, etc.). Consider restricting admin capabilities or adding audit logging.
+
+9. **Auth params endpoint**: `GET /api/auth-params/{username}` is unauthenticated and confirms whether a username exists (user enumeration). Consider rate-limiting or requiring CAPTCHA.
+
+10. **Rate limiting**: Login rate limiting exists but is per-username, not per-IP. Consider IP-based rate limiting to prevent credential stuffing.
