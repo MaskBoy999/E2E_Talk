@@ -4562,13 +4562,86 @@ body {
 
 @media (max-width: 480px) {
     .sticker-panel {
-        left: 5px;
-        right: 5px;
-        width: auto;
-        height: min(70vh, 400px);
-        bottom: 56px;
-        border-radius: 8px;
+        position: fixed;
+        bottom: calc(56px + env(safe-area-inset-bottom, 0px));
+        right: 8px;
+        left: auto;
+        width: min(82vw, 330px);
+        max-width: calc(100vw - 60px);
+        height: min(65vh, 380px);
+        border-radius: 10px;
     }
+    .sticker-panel .emoji-grid {
+        grid-template-columns: repeat(7, 1fr);
+    }
+    .sticker-panel .emoji-item {
+        font-size: 26px;
+        padding: 6px 2px;
+    }
+    .sticker-panel .sticker-grid {
+        grid-template-columns: repeat(3, 1fr);
+    }
+    .sticker-panel .gif-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+    .sticker-panel .gif-grid-item img {
+        width: 100%;
+    }
+    .sticker-panel-content {
+        padding: 6px;
+    }
+}
+
+/* Very small screens: further reduce emoji columns */
+@media (max-width: 360px) {
+    .sticker-panel .emoji-grid {
+        grid-template-columns: repeat(6, 1fr);
+    }
+    .sticker-panel .emoji-item {
+        font-size: 22px;
+    }
+    .sticker-panel .sticker-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+
+/* Emoji search input */
+.emoji-search {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 8px;
+}
+.emoji-search input {
+    flex: 1;
+    background: #1e1e1e;
+    border: 1px solid #3d3d3d;
+    border-radius: 4px;
+    padding: 6px 10px;
+    color: #d4d4d4;
+    font-size: 13px;
+    outline: none;
+}
+.emoji-search input:focus {
+    border-color: #569cd6;
+}
+.emoji-search input::placeholder {
+    color: #666;
+}
+.emoji-search-clear {
+    background: none;
+    border: none;
+    color: #888;
+    cursor: pointer;
+    font-size: 16px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    line-height: 1;
+    display: flex;
+    align-items: center;
+}
+.emoji-search-clear:hover {
+    background: #3d3d3d;
+    color: #fff;
 }
 .sticker-panel-tabs {
     display: flex;
@@ -4624,25 +4697,22 @@ body {
     position: absolute;
     top: 0;
     right: 0;
-    width: 16px;
-    height: 16px;
+    width: 20px;
+    height: 20px;
     background: #c62828;
     color: #fff;
     border: none;
     border-radius: 0 6px 0 6px;
-    font-size: 11px;
-    line-height: 1;
+    font-size: 12px;
+    line-height: 20px;
+    text-align: center;
     cursor: pointer;
-    display: none;
-    z-index: 2;
+    z-index: 3;
     padding: 0;
-    transition: background 0.15s;
+    transition: background 0.15s, opacity 0.15s;
 }
 .emoji-del-btn:hover {
     background: #e53935;
-}
-.emoji-item-custom:hover .emoji-del-btn {
-    display: block;
 }
 
 .emoji-grid {

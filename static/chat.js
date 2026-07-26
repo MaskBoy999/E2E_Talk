@@ -12139,6 +12139,152 @@ const EMOJI_DATA = [
     { cat: 'Symbols', emojis: ['❤️','🧡','💛','💚','💙','💜','🖤','🤍','🤎','💔','❣️','💕','💞','💓','💗','💖','💘','💝','💟','☮️','✝️','☪️','🕉️','☸️','✡️','🔯','🕎','☯️','☦️','🛐','⛎','♈','♉','♊','♋','♌','♍','♎','♏','♐','♑','♒','♓','🆔','⚛️','🉑','☢️','☣️','📴','📳','🈶','🈚','🈸','🈺','🈷️','✴️','🆚','💮','🉐','㊙️','㊗️','🈴','🈵','🈹','🈲','🅰️','🅱️','🆎','🆑','🅾️','🆘','❌','⭕','🛑','⛔','📛','🚫','💯','💢','♨️','🚷','🚯','🚳','🚱','🔞','📵','🚭','❗','❕','❓','❔','‼️','⁉️','🔅','🔆','〽️','⚠️','🚸','🔱','⚜️','🔰','♻️','✅','🈯','💹','❇️','✳️','❎','🌐','💠','Ⓜ️','🌀','💤','🏧','🚾','♿','🅿️','🛗','🈳','🈂️','🛂','🛃','🛄','🛅','🚹','🚺','🚼','⚧️','🚻','🚮','🎦','📶','🈁','🔣','ℹ️','🔤','🔡','🔠','🆖','🆗','🆙','🆒','🆕','🆓','0️⃣','1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟','🔢','#️⃣','*️⃣','⏏️','▶️','⏸️','⏯️','⏹️','⏺️','⏭️','⏮️','⏩','⏪','⏫','⏬','◀️','🔼','🔽','➡️','⬅️','⬆️','⬇️','↗️','↘️','↙️','↖️','↕️','↔️','↪️','↩️','⤴️','⤵️','🔀','🔁','🔂','🔄','🔃','🎵','🎶','➕','➖','➗','✖️','🟰','♾️','💲','💱','™️','©️','®️','〰️','➰','➿','🔚','🔙','🔛','🔝','🔜','✔️','☑️','🔘','🔴','🟠','🟡','🟢','🔵','🟣','⚫','⚪','🟤','🔺','🔻','🔸','🔶','🔷','🔳','🔲','▪️','▫️','◾','◽','◼️','◻️','🟥','🟧','🟨','🟩','🟦','🟪','⬛','⬜','🟫','🔈','🔇','🔉','🔊','🔔','🔕','📣','📢'] },
 ];
 
+// Emoji name lookup for search — maps emoji characters to common name keywords
+// This is a compact list covering the most searched emojis
+var EMOJI_SEARCH_MAP = (function() {
+    var map = {};
+    function add(emoji, names) {
+        var lower = names.toLowerCase();
+        map[emoji] = lower;
+        // Also index individual words for substring matching
+        lower.split(/[,\s]+/).forEach(function(w) {
+            if (w.length >= 2 && !map['__' + w]) map['__' + w] = true;
+        });
+    }
+    // Smileys
+    add('😀','grinning'); add('😃','grinning big eyes'); add('😄','grinning smiling eyes');
+    add('😁','beaming smiling eyes'); add('😆','grinning squinting'); add('😅','grinning sweat');
+    add('🤣','rolling floor laughing'); add('😂','joy tears'); add('🙂','slight smile');
+    add('😊','smiling blush'); add('😇','innocent halo angel'); add('🥰','smiling hearts');
+    add('😍','heart eyes'); add('🤩','star struck'); add('😘','kiss blowing');
+    add('😗','kiss'); add('😚','kiss closed eyes'); add('😙','kiss smiling eyes');
+    add('😋','savouring delicious'); add('😛','tongue'); add('😜','winking tongue');
+    add('🤪','zany'); add('😝','squinting tongue'); add('🤑','money mouth');
+    add('🤗','hugging'); add('🤭','hand over mouth'); add('🤫','shushing');
+    add('🤔','thinking'); add('🤐','zipper mouth'); add('🤨','raised eyebrow');
+    add('😐','neutral'); add('😑','expressionless'); add('😶','no mouth');
+    add('😏','smirking'); add('😒','unamused'); add('🙄','rolling eyes');
+    add('😬','grimacing'); add('🤥','lying'); add('😌','relieved');
+    add('😔','pensive'); add('😪','sleepy'); add('🤤','drooling');
+    add('😴','sleeping'); add('😷','mask'); add('🤒','thermometer sick');
+    add('🤕','head bandage injured'); add('🤢','nauseated sick'); add('🤮','vomiting');
+    add('🥵','hot face'); add('🥶','cold freezing'); add('🥴','woozy');
+    add('😵','dizzy'); add('🤯','exploding head'); add('🥳','partying');
+    add('😎','sunglasses cool'); add('🤓','nerd'); add('🧐','monocle');
+    add('😕','confused'); add('😟','worried'); add('😮','surprised');
+    add('😯','hushed'); add('😲','astonished'); add('😳','flushed');
+    add('🥺','pleading'); add('😦','frowning open'); add('😧','anguished');
+    add('😨','fearful'); add('😰','anxious sweat'); add('😥','sad relieved');
+    add('😢','cry'); add('😭','loudly crying'); add('😱','screaming fear');
+    add('😖','confounded'); add('😣','persevering'); add('😞','disappointed');
+    add('😓','cold sweat'); add('😩','weary'); add('😫','tired');
+    add('😤','steam nose'); add('😡','pout angry'); add('😠','angry');
+    add('🤬','cursing'); add('😈','smiling devil'); add('👿','angry devil');
+    add('💀','skull death'); add('💩','poop'); add('🤡','clown');
+    add('👻','ghost'); add('👽','alien'); add('🤖','robot');
+    // Gestures
+    add('👋','wave waving'); add('🤚','raised back hand'); add('✋','high five hand');
+    add('👌','ok hand'); add('✌️','victory peace'); add('🤞','crossed fingers');
+    add('👍','thumbs up'); add('👎','thumbs down'); add('👊','fist oncoming');
+    add('✊','fist raised'); add('👏','clapping'); add('🙌','raising hands');
+    add('🤝','handshake'); add('🙏','folded hands please thank you pray');
+    add('👆','point up'); add('👇','point down'); add('👈','point left');
+    add('👉','point right'); add('🖕','middle finger'); add('☝️','index point up');
+    // Hearts
+    add('❤️','heart red'); add('🧡','heart orange'); add('💛','heart yellow');
+    add('💚','heart green'); add('💙','heart blue'); add('💜','heart purple');
+    add('🖤','heart black'); add('🤍','heart white'); add('🤎','heart brown');
+    add('💔','broken heart'); add('💕','two hearts'); add('💞','revolving hearts');
+    add('💓','beating heart'); add('💗','growing heart'); add('💖','sparkling heart');
+    add('💘','cupid arrow'); add('💝','ribbon heart'); add('💟','heart decoration');
+    // Animals
+    add('🐶','dog'); add('🐱','cat'); add('🐭','mouse'); add('🐹','hamster');
+    add('🐰','rabbit'); add('🦊','fox'); add('🐻','bear'); add('🐼','panda');
+    add('🐨','koala'); add('🐯','tiger'); add('🦁','lion'); add('🐮','cow');
+    add('🐷','pig'); add('🐸','frog'); add('🐵','monkey'); add('🐔','chicken');
+    add('🐧','penguin'); add('🐦','bird'); add('🦆','duck'); add('🦅','eagle');
+    add('🦉','owl'); add('🐺','wolf'); add('🐴','horse'); add('🦄','unicorn');
+    add('🐝','bee honey'); add('🦋','butterfly'); add('🐌','snail'); add('🐞','ladybug');
+    add('🐍','snake'); add('🦎','lizard'); add('🐢','turtle'); add('🐊','crocodile');
+    add('🐳','whale'); add('🐬','dolphin'); add('🐟','fish'); add('🦈','shark');
+    // Food
+    add('🍎','apple red'); add('🍐','pear'); add('🍊','orange tangerine');
+    add('🍋','lemon'); add('🍌','banana'); add('🍉','watermelon');
+    add('🍇','grapes'); add('🍓','strawberry'); add('🍒','cherry');
+    add('🍑','peach'); add('🥭','mango'); add('🍍','pineapple');
+    add('🍅','tomato'); add('🥑','avocado'); add('🍆','eggplant');
+    add('🥦','broccoli'); add('🌽','corn'); add('🥕','carrot');
+    add('🍞','bread'); add('🧀','cheese'); add('🍳','cooking egg');
+    add('🍔','burger hamburger'); add('🍟','fries'); add('🍕','pizza');
+    add('🌭','hot dog'); add('🥪','sandwich'); add('🌮','taco');
+    add('🍜','noodles ramen'); add('🍝','spaghetti pasta'); add('🍣','sushi');
+    add('🍦','ice cream'); add('🍰','cake'); add('🍪','cookie');
+    add('🍫','chocolate'); add('🍩','donut'); add('☕','coffee tea');
+    add('🍺','beer'); add('🍷','wine'); add('🥤','cup drink soda');
+    // Activities
+    add('⚽','soccer'); add('🏀','basketball'); add('🏈','football');
+    add('⚾','baseball'); add('🎾','tennis'); add('🏐','volleyball');
+    add('🏉','rugby'); add('🎱','billiards pool 8 ball'); add('🏓','table tennis ping pong');
+    add('🎯','darts target'); add('🎿','ski skiing'); add('🏆','trophy');
+    add('🥇','gold medal'); add('🥈','silver medal'); add('🥉','bronze medal');
+    add('🎨','art palette'); add('🎭','theater performing arts');
+    // Travel
+    add('🚗','car'); add('🚕','taxi'); add('🚌','bus');
+    add('🚓','police car'); add('🚑','ambulance'); add('🚒','fire truck');
+    add('🚁','helicopter'); add('✈️','airplane'); add('🚀','rocket');
+    add('🛸','ufo flying saucer'); add('🚢','ship'); add('⛵','sailboat');
+    add('🚲','bike bicycle'); add('🛴','scooter'); add('🏠','house');
+    add('🏢','office building'); add('🏥','hospital'); add('🏦','bank');
+    add('⛪','church'); add('🗼','eiffel tower'); add('🗽','statue liberty');
+    add('🌋','volcano'); add('🗻','mountain fuji'); add('🏖️','beach');
+    // Objects
+    add('⌚','watch'); add('📱','phone smartphone mobile'); add('💻','laptop computer');
+    add('⌨️','keyboard'); add('📷','camera'); add('📸','camera flash');
+    add('📹','video camera'); add('🎥','movie camera'); add('📞','phone receiver');
+    add('☎️','telephone'); add('📺','tv television'); add('📻','radio');
+    add('⏰','alarm clock'); add('💡','light bulb'); add('🔦','flashlight torch');
+    add('🔋','battery'); add('🔌','plug'); add('💰','money bag');
+    add('💎','diamond gem'); add('🔑','key'); add('🔨','hammer');
+    add('🔧','wrench'); add('🔪','knife'); add('💣','bomb');
+    add('🔫','gun pistol'); add('🚬','cigarette smoking'); add('💊','pill medicine');
+    add('💉','syringe needle'); add('🔮','crystal ball'); add('🎁','gift present');
+    add('🎈','balloon'); add('🎉','party popper'); add('📖','book');
+    add('✉️','envelope mail'); add('📦','package box'); add('📎','paperclip');
+    // Symbols
+    add('🔴','red circle'); add('🟠','orange circle'); add('🟡','yellow circle');
+    add('🟢','green circle'); add('🔵','blue circle'); add('🟣','purple circle');
+    add('⚫','black circle'); add('⚪','white circle'); add('⬛','black square');
+    add('⬜','white square'); add('✅','check mark'); add('❌','cross mark');
+    add('⭕','hollow red circle'); add('💯','100 percent'); add('⚠️','warning');
+    add('🚫','prohibited'); add('♻️','recycle recycling'); add('♿','wheelchair');
+    add('ℹ️','information'); add('🚾','restroom wc'); add('🚹','men restroom');
+    add('🚺','women restroom'); add('🚻','restroom'); add('🚼','baby');
+    add('📶','signal bars wifi'); add('🔇','mute speaker'); add('🔈','speaker low');
+    add('🔊','speaker loud volume'); add('📢','loudspeaker announcement');
+    add('🔔','bell notification'); add('🔕','bell slash no');
+    return map;
+})();
+
+// Filter emojis by search query (matches against name keywords)
+function searchEmojis(query) {
+    if (!query || query.trim() === '') return null; // null = show all
+    var q = query.toLowerCase().trim();
+    var all = [];
+    EMOJI_DATA.forEach(function(group) {
+        group.emojis.forEach(function(emoji) {
+            var names = EMOJI_SEARCH_MAP[emoji] || '';
+            // Match: query is part of the name keywords, or the emoji char itself
+            if (names.indexOf(q) !== -1 || emoji === q || emoji.indexOf(q) === 0) {
+                all.push({ emoji: emoji, cat: group.cat, names: names });
+            }
+        });
+    });
+    return all;
+}
+
+// Detect touch device globally for delete button behavior
+var isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+
 let stickerPanelOpen = false;
 let activePanelTab = 'emojis';
 let userStickersCache = []; // cached list of user's stickers from /api/users/me/stickers
@@ -12185,14 +12331,48 @@ function renderPanelTab(tab) {
     else if (tab === 'upload') renderUploadStickerPanel(content);
 }
 
-function renderEmojiGrid(container) {
-    container.innerHTML = '';
+function renderEmojiGrid(container, searchQuery) {
+    // Preserve the search bar if it already exists (avoids losing focus on every keystroke)
+    var searchBar = container.querySelector('.emoji-search');
+    if (!searchBar) {
+        searchBar = document.createElement('div');
+        searchBar.className = 'emoji-search';
+        var searchInput = document.createElement('input');
+        searchInput.type = 'text';
+        searchInput.placeholder = 'Search emojis...';
+        var clearBtn = document.createElement('button');
+        clearBtn.className = 'emoji-search-clear';
+        clearBtn.textContent = '✕';
+        clearBtn.style.display = 'none';
+        searchInput.addEventListener('input', function() {
+            renderEmojiGrid(container, this.value);
+        });
+        clearBtn.addEventListener('click', function() {
+            renderEmojiGrid(container, '');
+        });
+        searchBar.appendChild(searchInput);
+        searchBar.appendChild(clearBtn);
+        container.appendChild(searchBar);
+    }
+    // Update existing search input value without destroying it
+    var searchInput = searchBar.querySelector('input');
+    if (searchInput) searchInput.value = searchQuery || '';
+    var clearBtn = searchBar.querySelector('.emoji-search-clear');
+    if (clearBtn) clearBtn.style.display = searchQuery ? 'flex' : 'none';
+    
+    // Clear only the grid content below the search bar (NOT the search bar itself)
+    while (container.lastChild && container.lastChild !== searchBar) {
+        container.removeChild(container.lastChild);
+    }
+
+    var query = searchQuery ? searchQuery.trim().toLowerCase() : '';
+    var filtered = query ? searchEmojis(query) : null;
 
     // Show custom uploaded emojis if available
     const emojiNames = emojiCache ? Object.keys(emojiCache) : [];
-    if (emojiNames.length > 0) {
+    if (emojiNames.length > 0 && (!query || emojiNames.some(function(n) { return n.indexOf(query) !== -1; }))) {
         const uploadsSection = document.createElement('div');
-        uploadsSection.style.cssText = 'margin-bottom:8px;padding:8px;';
+        uploadsSection.style.cssText = 'margin-bottom:8px;padding:4px 8px;';
         const header = document.createElement('div');
         header.style.cssText = 'font-size:12px;color:#888;font-weight:600;padding:4px 0 8px;text-transform:uppercase;';
         header.textContent = 'Custom Emojis';
@@ -12202,6 +12382,7 @@ function renderEmojiGrid(container) {
         grid.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;justify-content:flex-start;';
 
         emojiNames.forEach(name => {
+            if (query && name.indexOf(query) === -1) return;
             const cacheEntry = emojiCache[name];
             const item = document.createElement('div');
             item.className = 'emoji-item emoji-item-custom';
@@ -12209,12 +12390,19 @@ function renderEmojiGrid(container) {
             item.style.cssText = 'width:36px;height:36px;display:flex;align-items:center;justify-content:center;cursor:pointer;border-radius:6px;transition:background 0.15s;font-size:14px;overflow:hidden;position:relative;';
             item.title = ':' + name + ':';
 
-            // Delete button (shown on hover)
+            // Delete button — always visible on touch devices, hover-only on desktop
             const delBtn = document.createElement('button');
             delBtn.className = 'emoji-del-btn';
             delBtn.textContent = '×';
             delBtn.title = 'Delete emoji :' + name + ':';
-            delBtn.style.cssText = 'position:absolute;top:0;right:0;width:16px;height:16px;background:#c62828;color:#fff;border:none;border-radius:0 6px 0 6px;font-size:11px;line-height:1;cursor:pointer;display:none;z-index:2;padding:0;';
+            delBtn.style.cssText = 'position:absolute;top:0;right:0;width:20px;height:20px;background:#c62828;color:#fff;border:none;border-radius:0 6px 0 6px;font-size:12px;line-height:20px;text-align:center;cursor:pointer;z-index:3;padding:0;' + 
+                (isTouchDevice ? '' : 'opacity:0.4;transition:opacity 0.15s;');
+            if (!isTouchDevice) {
+                delBtn.addEventListener('mouseenter', function() { this.style.opacity = '1'; });
+                delBtn.addEventListener('mouseleave', function() { this.style.opacity = '0.4'; });
+                item.addEventListener('mouseenter', function() { delBtn.style.opacity = '1'; });
+                item.addEventListener('mouseleave', function() { delBtn.style.opacity = '0.4'; });
+            }
             delBtn.addEventListener('click', async (e) => {
                 e.stopPropagation();
                 if (!confirm('Delete emoji :' + name + ':?')) return;
@@ -12223,21 +12411,15 @@ function renderEmojiGrid(container) {
                         await authFetch('/api/users/me/stickers/' + cacheEntry.id, { method: 'DELETE' });
                     } catch (_) {}
                 }
-                // Clean up blob URL
                 if (emojiBlobCache[name]) {
                     URL.revokeObjectURL(emojiBlobCache[name]);
                     delete emojiBlobCache[name];
                 }
                 delete emojiCache[name];
-                renderEmojiGrid(container);
+                renderEmojiGrid(container, searchQuery);
             });
             item.appendChild(delBtn);
 
-            // Show delete button on hover
-            item.addEventListener('mouseenter', () => { delBtn.style.display = 'block'; });
-            item.addEventListener('mouseleave', () => { delBtn.style.display = 'none'; });
-
-            // Try to load the emoji preview (use cached blob if available)
             if (cacheEntry) {
                 if (emojiBlobCache[name]) {
                     const img = document.createElement('img');
@@ -12293,21 +12475,51 @@ function renderEmojiGrid(container) {
     const grid = document.createElement('div');
     grid.className = 'emoji-grid';
 
-    EMOJI_DATA.forEach(group => {
-        const header = document.createElement('div');
-        header.style.cssText = 'grid-column:1/-1;font-size:12px;color:#888;font-weight:600;padding:8px 0 4px;text-transform:uppercase;';
-        header.textContent = group.cat;
-        grid.appendChild(header);
+    if (filtered !== null && filtered.length === 0) {
+        grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:#888;padding:20px;font-size:13px;">No emojis matching &quot;' + escapeHtml(searchQuery) + '&quot;</div>';
+        container.appendChild(grid);
+        return;
+    }
 
-        group.emojis.forEach(emoji => {
-            const item = document.createElement('div');
-            item.className = 'emoji-item';
-            item.textContent = emoji;
-            item.title = emoji;
-            item.addEventListener('click', () => insertEmojiIntoInput(emoji));
-            grid.appendChild(item);
+    if (filtered) {
+        // Show filtered results grouped by category
+        var cats = {};
+        filtered.forEach(function(f) {
+            if (!cats[f.cat]) cats[f.cat] = [];
+            cats[f.cat].push(f.emoji);
         });
-    });
+        Object.keys(cats).forEach(function(cat) {
+            var header = document.createElement('div');
+            header.style.cssText = 'grid-column:1/-1;font-size:12px;color:#888;font-weight:600;padding:8px 0 4px;text-transform:uppercase;';
+            header.textContent = cat;
+            grid.appendChild(header);
+            cats[cat].forEach(function(emoji) {
+                var item = document.createElement('div');
+                item.className = 'emoji-item';
+                item.textContent = emoji;
+                item.title = EMOJI_SEARCH_MAP[emoji] || emoji;
+                item.addEventListener('click', function() { insertEmojiIntoInput(emoji); });
+                grid.appendChild(item);
+            });
+        });
+    } else {
+        // Show all emojis (no search query)
+        EMOJI_DATA.forEach(group => {
+            const header = document.createElement('div');
+            header.style.cssText = 'grid-column:1/-1;font-size:12px;color:#888;font-weight:600;padding:8px 0 4px;text-transform:uppercase;';
+            header.textContent = group.cat;
+            grid.appendChild(header);
+
+            group.emojis.forEach(emoji => {
+                const item = document.createElement('div');
+                item.className = 'emoji-item';
+                item.textContent = emoji;
+                item.title = EMOJI_SEARCH_MAP[emoji] || emoji;
+                item.addEventListener('click', () => insertEmojiIntoInput(emoji));
+                grid.appendChild(item);
+            });
+        });
+    }
 
     container.appendChild(grid);
 }
@@ -12332,9 +12544,6 @@ async function loadUserStickers() {
             const identity = E2ECrypto.getIdentityKeyPair();
             if (identity) {
                 for (const s of userStickersCache) {
-                    // Prefer encrypted_file_key + file_key_nonce (separate columns) over plaintext file_key.
-                    // The server stores nonce and ciphertext in two separate BLOB columns, so we must
-                    // combine them back into nonce:ciphertext format for decodeEncryptedFileKey.
                     if (s.encrypted_file_key && s.file_key_nonce) {
                         var combined = s.file_key_nonce + ':' + s.encrypted_file_key;
                         var decrypted = E2ECrypto.decodeEncryptedFileKey(combined, identity.privateKey);
@@ -12345,6 +12554,30 @@ async function loadUserStickers() {
                     }
                 }
             }
+            // Also refresh emojiCache from the same response so both caches stay in sync.
+            // This is needed because the server doesn't broadcast sticker/emoji uploads
+            // via WebSocket — the only trigger for re-fetching is opening the sticker/emoji tabs.
+            var emojiCacheNew = {};
+            userStickersCache.forEach(function(s) {
+                if (s.mime_type === 'image/emoji') {
+                    var ek = null;
+                    if (s.encrypted_file_key && s.file_key_nonce && identity) {
+                        var combined = s.file_key_nonce + ':' + s.encrypted_file_key;
+                        var decrypted = E2ECrypto.decodeEncryptedFileKey(combined, identity.privateKey);
+                        if (decrypted) ek = decrypted;
+                    } else if (s.file_key && identity) {
+                        var decrypted = E2ECrypto.decodeEncryptedFileKey(s.file_key, identity.privateKey);
+                        if (decrypted) ek = decrypted;
+                    }
+                    emojiCacheNew[s.sticker_name] = {
+                        id: s.id,
+                        file_id: s.file_id,
+                        file_key: ek,
+                        mime_type: s.mime_type,
+                    };
+                }
+            });
+            emojiCache = emojiCacheNew;
         } else {
             userStickersCache = [];
         }
@@ -12580,11 +12813,17 @@ function renderStickerGrid(container) {
 
         // Filter out GIFs — they have their own tab
         const nonGifStickers = stickers.filter(s => !/gif/i.test(s.mime_type));
-        renderStickerItems(grid, nonGifStickers);
+        // Filter out uploaded emojis (they have their own tab) by cross-referencing with emojiCache
+        var filteredStickers = nonGifStickers.filter(function(s) {
+            return !emojiCache || !emojiCache[s.sticker_name];
+        });
+        renderStickerItems(grid, filteredStickers);
 
         document.getElementById('sticker-search-input')?.addEventListener('input', (e) => {
             const q = e.target.value.toLowerCase();
-            const filtered = nonGifStickers.filter(s => s.sticker_name.toLowerCase().includes(q));
+            var filtered = nonGifStickers.filter(s => s.sticker_name.toLowerCase().includes(q));
+            // Also filter out emojis from search results
+            filtered = filtered.filter(function(s) { return !emojiCache || !emojiCache[s.sticker_name]; });
             grid.innerHTML = '';
             renderStickerItems(grid, filtered);
         });
@@ -12604,7 +12843,6 @@ function renderStickerItems(grid, stickers) {
         (async () => {
             const identity = E2ECrypto.getIdentityKeyPair();
             if (!identity) return;
-            // sticker.file_key is already decrypted by loadUserStickers()
             const stickerKey = sticker.file_key
                 ? new Uint8Array(E2ECrypto.base64ToArrayBuffer(sticker.file_key))
                 : identity.privateKey;
@@ -12614,11 +12852,19 @@ function renderStickerItems(grid, stickers) {
             } catch (_) {}
         })();
 
-        // Delete button
+        // Delete button — always visible on touch devices, hover-only on desktop
         const delBtn = document.createElement('button');
         delBtn.innerHTML = '&#128465;';
         delBtn.title = 'Delete sticker';
-        delBtn.style.cssText = 'position:absolute;top:2px;right:2px;width:20px;height:20px;border-radius:50%;background:rgba(244,67,54,0.85);color:#fff;border:none;font-size:11px;line-height:20px;text-align:center;cursor:pointer;display:none;z-index:2;padding:0;';
+        delBtn.className = 'sticker-del-btn';
+        delBtn.style.cssText = 'position:absolute;top:2px;right:2px;width:24px;height:24px;border-radius:50%;background:rgba(244,67,54,0.9);color:#fff;border:2px solid rgba(255,255,255,0.3);font-size:12px;line-height:20px;text-align:center;cursor:pointer;z-index:3;padding:0;' + 
+            (isTouchDevice ? '' : 'opacity:0.4;transition:opacity 0.15s;');
+        if (!isTouchDevice) {
+            delBtn.addEventListener('mouseenter', function() { this.style.opacity = '1'; });
+            delBtn.addEventListener('mouseleave', function() { this.style.opacity = '0.4'; });
+            item.addEventListener('mouseenter', function() { delBtn.style.opacity = '1'; });
+            item.addEventListener('mouseleave', function() { delBtn.style.opacity = '0.4'; });
+        }
         delBtn.addEventListener('click', async (e) => {
             e.stopPropagation();
             if (!confirm('Delete sticker "' + sticker.sticker_name + '"?')) return;
@@ -12628,8 +12874,6 @@ function renderStickerItems(grid, stickers) {
             } catch (_) {}
         });
         item.appendChild(delBtn);
-        item.addEventListener('mouseenter', () => delBtn.style.display = 'block');
-        item.addEventListener('mouseleave', () => delBtn.style.display = 'none');
 
         item.appendChild(img);
         item.addEventListener('click', () => sendStickerMessage(sticker));
@@ -12637,24 +12881,54 @@ function renderStickerItems(grid, stickers) {
     });
 }
 
-function renderGifPanel(container) {
-    // GIFs are just stickers with image/gif mime type - show user's GIF stickers
-    const header = document.createElement('div');
-    header.style.cssText = 'padding:8px 12px;font-size:12px;color:#888;';
-    header.textContent = 'Your GIFs';
-    container.appendChild(header);
+function renderGifPanel(container, searchQuery) {
+    // Preserve the search bar if it already exists (avoids losing focus on every keystroke)
+    var searchBar = container.querySelector('.gif-search');
+    if (!searchBar) {
+        searchBar = document.createElement('div');
+        searchBar.className = 'gif-search';
+        var searchInput = document.createElement('input');
+        searchInput.type = 'text';
+        searchInput.placeholder = 'Search your GIFs...';
+        searchInput.addEventListener('input', function() {
+            renderGifPanel(container, this.value);
+        });
+        searchBar.appendChild(searchInput);
+        container.appendChild(searchBar);
+    }
+    // Update existing search input value without destroying it
+    var searchInput = searchBar.querySelector('input');
+    if (searchInput) searchInput.value = searchQuery || '';
+
+    var query = searchQuery ? searchQuery.trim().toLowerCase() : '';
+
+    // Remove any existing grid below the search bar
+    while (container.lastChild && container.lastChild !== searchBar) {
+        container.removeChild(container.lastChild);
+    }
 
     const grid = document.createElement('div');
     grid.className = 'gif-grid';
     container.appendChild(grid);
 
     loadUserStickers().then(stickers => {
-        const gifs = stickers.filter(s => /gif/i.test(s.mime_type));
+        var gifs = stickers.filter(function(s) { return /gif/i.test(s.mime_type); });
+        
+        // Apply search filter
+        if (query) {
+            gifs = gifs.filter(function(s) {
+                return (s.sticker_name && s.sticker_name.toLowerCase().indexOf(query) !== -1);
+            });
+        }
+        
         if (gifs.length === 0) {
-            grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:#888;padding:20px;font-size:13px;">No GIFs yet. Upload one from the + tab.</div>';
+            grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:#888;padding:20px;font-size:13px;">' +
+                (query ? 'No GIFs matching &quot;' + escapeHtml(query) + '&quot;' : 'No GIFs yet. Upload one from the + tab.') +
+                '</div>';
             return;
         }
-        gifs.forEach(sticker => {
+        
+        gifs.forEach(function(sticker) {
             const item = document.createElement('div');
             item.className = 'gif-grid-item';
             item.style.position = 'relative';
@@ -12665,7 +12939,6 @@ function renderGifPanel(container) {
             (async () => {
                 const identity = E2ECrypto.getIdentityKeyPair();
                 if (!identity) return;
-                // sticker.file_key is already decrypted by loadUserStickers()
                 const stickerKey = sticker.file_key
                     ? new Uint8Array(E2ECrypto.base64ToArrayBuffer(sticker.file_key))
                     : identity.privateKey;
@@ -12676,11 +12949,18 @@ function renderGifPanel(container) {
             })();
             item.appendChild(img);
 
-            // Delete button
+            // Delete button — always visible on touch devices, hover-only on desktop
             const delBtn = document.createElement('button');
             delBtn.innerHTML = '&#128465;';
             delBtn.title = 'Delete GIF';
-            delBtn.style.cssText = 'position:absolute;top:2px;right:2px;width:20px;height:20px;border-radius:50%;background:rgba(244,67,54,0.85);color:#fff;border:none;font-size:11px;line-height:20px;text-align:center;cursor:pointer;display:none;z-index:2;padding:0;';
+            delBtn.style.cssText = 'position:absolute;top:2px;right:2px;width:24px;height:24px;border-radius:50%;background:rgba(244,67,54,0.9);color:#fff;border:2px solid rgba(255,255,255,0.3);font-size:12px;line-height:20px;text-align:center;cursor:pointer;z-index:3;padding:0;' + 
+                (isTouchDevice ? '' : 'opacity:0.4;transition:opacity 0.15s;');
+            if (!isTouchDevice) {
+                delBtn.addEventListener('mouseenter', function() { this.style.opacity = '1'; });
+                delBtn.addEventListener('mouseleave', function() { this.style.opacity = '0.4'; });
+                item.addEventListener('mouseenter', function() { delBtn.style.opacity = '1'; });
+                item.addEventListener('mouseleave', function() { delBtn.style.opacity = '0.4'; });
+            }
             delBtn.addEventListener('click', async (e) => {
                 e.stopPropagation();
                 if (!confirm('Delete "' + sticker.sticker_name + '"?')) return;
@@ -12690,8 +12970,6 @@ function renderGifPanel(container) {
                 } catch (_) {}
             });
             item.appendChild(delBtn);
-            item.addEventListener('mouseenter', () => delBtn.style.display = 'block');
-            item.addEventListener('mouseleave', () => delBtn.style.display = 'none');
 
             item.addEventListener('click', () => sendStickerMessage(sticker));
             grid.appendChild(item);
