@@ -9413,13 +9413,39 @@ async function handleFriendCodeRegenerate(preverifiedPw) {
     const errorEl = document.getElementById('fc-password-error');
     const successEl = document.getElementById('fc-password-success');
     var regenStatusEl = document.getElementById('friend-code-status');
-    // Use pre-verified password if provided, otherwise verify now
-    var password = preverifiedPw || '';
-    if (!password) {
-        password = await verifyStoredPassword();
+    // Get raw password from input or stored
+    var rawPw = preverifiedPw || '';
+    if (!rawPw) {
+        rawPw = await verifyStoredPassword();
+    }
+    if (!rawPw && input) {
+        rawPw = input.value.trim();
+    }
+    if (!rawPw) {
+        if (errorEl) { errorEl.textContent = 'Please enter your password to authorize regeneration.'; errorEl.style.display = 'block'; }
+        if (successEl) successEl.style.display = 'none';
+        return;
+    }
+    // Hash the raw password like login does (fetch auth-params, decrypt hash_key, compute HMAC)
+    var password = '';
+    if (user && user.username) {
+        try {
+            var paramsRes = await fetch('/api/auth-params/' + encodeURIComponent(user.username));
+            if (paramsRes.ok) {
+                var params = await paramsRes.json();
+                if (params.encrypted_hash_key && params.hash_key_salt && params.hash_key_nonce) {
+                    var hashKeyB64 = E2ECrypto.decryptWithPassword(params.encrypted_hash_key, rawPw, params.hash_key_salt, params.hash_key_nonce);
+                    if (hashKeyB64) {
+                        var hashKeyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(hashKeyB64));
+                        password = E2ECrypto.hmacHex(hashKeyBytes, rawPw);
+                    }
+                }
+            }
+        } catch (_) {}
     }
     if (!password) {
-        password = input ? input.value.trim() : '';
+        if (errorEl) { errorEl.textContent = 'Failed to verify password. Please try again.'; errorEl.style.display = 'block'; }
+        return;
     }
     if (!password) {
         if (errorEl) { errorEl.textContent = 'Please enter your password to authorize regeneration.'; errorEl.style.display = 'block'; }
