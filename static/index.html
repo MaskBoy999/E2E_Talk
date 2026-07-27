@@ -353,6 +353,44 @@
                     <p class="settings-hint">Customize how messages and media appear in the chat.</p>
                 </div>
                 <div class="settings-group">
+                    <h4>Accent Color</h4>
+                    <p class="settings-hint">Choose your accent color — applies to active items, text, and highlights.</p>
+                    <div class="theme-color-row">
+                        <input type="color" id="theme-color-picker" value="#4fc3f7" class="theme-color-input">
+                        <input type="text" id="theme-color-hex" class="theme-hex-input" placeholder="#4fc3f7" maxlength="7">
+                        <button class="btn btn-secondary" id="theme-color-reset">Reset</button>
+                    </div>
+                    <div class="theme-color-preview" id="theme-color-preview">
+                        <div class="theme-swatch theme-swatch-accent"></div>
+                        <div class="theme-swatch theme-swatch-accent-hover"></div>
+                        <div class="theme-swatch theme-swatch-text-primary"></div>
+                        <div class="theme-swatch theme-swatch-text-muted"></div>
+                        <div class="theme-swatch theme-swatch-text-faint"></div>
+                    </div>
+                </div>
+                <div class="settings-group">
+                    <h4>Background Color</h4>
+                    <p class="settings-hint">Choose your background shade — applies to panels, sidebars, and borders.</p>
+                    <div class="theme-color-row">
+                        <input type="color" id="theme-bg-picker" value="#4fc3f7" class="theme-color-input">
+                        <input type="text" id="theme-bg-hex" class="theme-hex-input" placeholder="#4fc3f7" maxlength="7">
+                        <button class="btn btn-secondary" id="theme-bg-reset">Reset</button>
+                    </div>
+                    <div class="theme-color-preview" id="theme-bg-preview">
+                        <div class="theme-swatch theme-swatch-bg-primary"></div>
+                        <div class="theme-swatch theme-swatch-bg-secondary"></div>
+                        <div class="theme-swatch theme-swatch-bg-border"></div>
+                    </div>
+                </div>
+                <div class="settings-group" style="padding-bottom:12px;border-bottom:1px solid var(--bg-border)">
+                    <h4>Theme Mode</h4>
+                    <p class="settings-hint">Switch between dark and light mode. Custom colors apply to both modes.</p>
+                    <div class="theme-mode-row">
+                        <button class="theme-mode-btn active" id="theme-mode-dark" data-mode="dark">🌙 Dark</button>
+                        <button class="theme-mode-btn" id="theme-mode-light" data-mode="light">☀️ Light</button>
+                    </div>
+                </div>
+                <div class="settings-group">
                     <h4>Media Previews</h4>
                     <label class="settings-toggle">
                         <input type="checkbox" id="auto-load-previews">
@@ -763,21 +801,24 @@
                     <div class="profile-edit-row">
                         <label>Profile Background</label>
                         <div class="profile-color-row">
-                            <input type="color" id="profile-edit-bg-color" value="#16213e" class="profile-edit-color-input">
+                            <input type="color" id="profile-edit-bg-color" value="#16213e" class="profile-edit-color-input" title="Click to pick a color">
+                            <input type="text" id="profile-edit-bg-color-hex" class="theme-hex-input profile-hex-input" placeholder="#16213e" maxlength="7">
                             <span class="profile-color-preview" id="profile-edit-bg-preview" style="width:32px;height:32px;border-radius:6px;background:#16213e;"></span>
                         </div>
                     </div>
                     <div class="profile-edit-row">
                         <label>Username Color</label>
                         <div class="profile-color-row">
-                            <input type="color" id="profile-edit-color" value="#4fc3f7" class="profile-edit-color-input">
-                            <span class="profile-color-preview" id="profile-edit-color-preview">Preview</span>
+                            <input type="color" id="profile-edit-color" value="#4fc3f7" class="profile-edit-color-input" title="Click to pick a color">
+                            <input type="text" id="profile-edit-color-hex" class="theme-hex-input profile-hex-input" placeholder="#4fc3f7" maxlength="7">
+                            <span class="profile-color-preview" id="profile-edit-color-preview" style="width:32px;height:32px;border-radius:6px;background:#4fc3f7;"></span>
                         </div>
                     </div>
                     <div class="profile-edit-row">
                         <label>Glow / Border</label>
-                        <div class="profile-glow-options" id="profile-edit-glow-options">
-                            <input type="color" id="profile-edit-glow-color" value="#ffffff" class="profile-edit-color-input">
+                        <div class="profile-color-row">
+                            <input type="color" id="profile-edit-glow-color" value="#ffffff" class="profile-edit-color-input" title="Click to pick a color">
+                            <input type="text" id="profile-edit-glow-color-hex" class="theme-hex-input profile-hex-input" placeholder="#ffffff" maxlength="7">
                             <span class="profile-color-preview" id="profile-edit-glow-preview" style="width:32px;height:32px;border-radius:6px;background:#ffffff;"></span>
                         </div>
                     </div>

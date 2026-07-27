@@ -18,6 +18,13 @@
 | 07-26 | server_stickers removed | Dead feature removal (table, handlers, admin tab). Migration 035. |
 | 07-26 | Notification encryption | Mention/reply notifications now send encrypted channel/server/sender names instead of plaintext. Client decrypts with server/DM key. |
 | 07-27 | Migration 036: Drop plaintext profile columns | Removed username_color, username_border_color, profile_background_color from DB. Already stored in encrypted_profile_data. |
+| 07-27 | File ID hashing (all tables) | SHA-256 hash stored for file_id in files, servers.server_picture_file_id, user_stickers, and messages/dm_messages.file_id. Host cannot map raw UUIDs to messages/stickers/servers. |
+| 07-27 | Message file cleanup on delete | Deleting a message with a file attachment now also deletes the file record + encrypted chunks from disk. Prevents orphaned files. |
+| 07-27 | File download by hash (full coverage) | `GET /api/files/by-hash/{hash}/download` now falls back to the `files` table, serving message attachments and stickers too (not just profile pics). |
+| 07-27 | Forward file fix (audio + multi-file) | Forwarding now extracts all file cards including `.audio-file-card` and multi-file galleries. API endpoint rate limiting (IP-based) for login, HMAC key, join server, friend requests. |
+| 07-27 | Admin panel JS syntax fix | Broken `loadServerStickers()` stub caused admin page to not load at all. Removed dead function. |
+| 07-27 | Forward channel name decryption | Forward modal showed '(unnamed)' because it used removed plaintext `name` columns. Now decrypts `encrypted_name` with server key. |
+| 07-27 | Theme color feature | Per-user accent color chosen from color wheel, stored encrypted in encrypted_profile_data, synced across devices via WS profile_updated. |
 
 ## 🔍 Plaintext Data Flow Audit: What Still Reaches the Server Unencrypted
 
@@ -1789,3 +1796,154 @@ Removed 3 plaintext columns from the `users` table that were already stored in `
 - ✅ Admin panel column counts match across all 3 layers (headers=12, render cells=12, CSV columns=12)
 - ✅ Tests: **10/10 passing**
 - ✅ Git diff clean — only the intended changes
+
+## Forward PFP Fix — Own Profile Picture Now Renders on Forwarded Messages
+
+### What
+When forwarding your own message to another channel or user, the sender's profile picture was missing from the forward label because the PFP decryption key was identity-key-encrypted and the recipient couldn't decrypt it.
+
+### Files changed
+| File | Change |
+|------|--------|
+| `static/chat.js` | `executeForward()` and `executeDmForward()` now decrypt `myProfile.profile_picture_file_key` with `decodeEncryptedFileKey()` before including `sender_profile_pic_file_key` in the forward payload. `appendMessage()` and `appendDmMessage()` pre-populate `profileKeyCache` with the key before calling `getProfilePicUrl()` |
+
+### Security benefit
+- Recipients can decrypt and display the original sender's profile picture in forwarded messages
+- Key is included only inside the encrypted forward payload (encrypted with channel/DM key), never sent in plaintext
+- No new keys or server changes needed
+
+## Background Color Theme — Independent Accent & Background Color Pickers
+
+### What
+Split the original single `applyThemeColor()` into two independent functions so users can choose separate hues for accent/text elements vs background/panel/border elements.
+
+### Files changed
+| File | Change |
+|------|--------|
+| `static/index.html` | Added second color picker (`#theme-bg-picker`) with reset button and 3 preview swatches. Renamed first picker to "Accent Color" |
+| `static/chat.js` | `applyThemeColor(hex, mode)` — now only sets `--accent`, `--accent-hover`, `--text-primary`, `--text-muted`, `--text-faint`. `applyThemeBgColor(hex, mode)` — new function, sets `--bg-primary`, `--bg-secondary`, `--bg-border`. Both accept optional `mode` ('dark'/'light'). `saveThemeColor(accent, bg)` — saves both. WS sync + loadMyProfile handle both |
+| `static/style.css` | No changes needed — second picker reuses existing `.theme-color-*` classes |
+
+### Security benefit
+- Both colors stored in `encrypted_profile_data` (AES-GCM with profile data key)
+- Synced to other devices via `profile_updated` WS broadcast
+- Backward-compatible fallback: profiles saved before the split use `theme_color` for both accent and background
+
+## Light Mode / Dark Mode Toggle
+
+### What
+Added a one-click toggle between dark (default) and light mode in the Display settings. Light mode inverts the lightness range of all CSS variables while preserving the user's custom accent/background hues.
+
+### Files changed
+| File | Change |
+|------|--------|
+| `static/index.html` | Added Theme Mode section with ☀️ Light / 🌙 Dark toggle buttons |
+| `static/chat.js` | `applyThemeColor(hex, mode)` and `applyThemeBgColor(hex, mode)` now accept mode parameter. Light mode: accent L=40%, text L=15%, bg L=95/90/80%. Dark mode: accent L=64%, text L=88%, bg L=9/11/18%. `applyThemeMode(mode)` — new function, sets localStorage, re-applies both colors, toggles buttons. `theme_mode` field in `encrypted_profile_data` for multi-device sync |
+| `static/style.css` | `.theme-mode-row`, `.theme-mode-btn` with accent-color active state |
+
+### Security benefit
+- `theme_mode` stored in `encrypted_profile_data` alongside `theme_color`/`theme_bg_color`
+- All call sites consistently pass the mode parameter (6 input/reset handlers, WS sync, loadMyProfile)
+- `data-theme-mode="dark|light"` attribute on `<body>` for future CSS targeting
+
+### Backward Compatibility
+- Profiles saved before bg/accent split use `theme_color` as fallback for `theme_bg_color`
+- Profiles saved before mode feature use existing localStorage value or default to 'dark'
+- No data migration needed — handled gracefully on both initial DOMContentLoaded and `loadMyProfile` paths
+
+### Verification
+- ✅ JS syntax: **valid** (0 errors)
+- ✅ Code review: **no critical issues** across 3 review passes
+- ✅ All CSS variables properly set and toggled
+- ✅ Server strip background changed from hardcoded `#111127` to `var(--bg-primary)` so it respects theme
+- ✅ Forward PFP key properly decrypted before inclusion in payload (critical bugfix)
+
+## Smooth Theme Transitions
+
+### What
+Added CSS transitions to ~25 key layout elements so the dark↔light mode switch animates smoothly instead of snapping instantly.
+
+### Files changed
+| File | Change |
+|------|--------|
+| `static/style.css` | Added `transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease` to body, .app, .sidebar, .server-strip, .server-icon, .channel-item, .dm-item, .message, .chat-header/body/input, .auth-container/card, .member-item, .reply-quote, .forward-label, .forward-sender-pic, .sticker/gif/file cards, .modal-content, .settings-panel, .theme-color-input, .theme-mode-btn, .context-menu, .drop-zone, .file-drop-area, .emoji-picker, .sticker-panel, .member/dm/channel-lists |
+
+### Benefit
+- Theme switch feels polished with a subtle 150ms ease transition
+- Fast enough (150ms) that hover states don't feel sluggish
+- No JS changes needed
+
+## Hex Color Text Inputs
+
+### What
+Added text input fields alongside every color picker so users can type hex codes directly (e.g., `#ff6b6b`) instead of only using the color wheel.
+
+### Files changed
+| File | Change |
+|------|--------|
+| `static/index.html` | Added `<input type="text" class="theme-hex-input" placeholder="#4fc3f7" maxlength="7">` next to accent picker (`#theme-color-hex`), bg picker (`#theme-bg-hex`), profile username color (`#profile-edit-color-hex`), profile glow (`#profile-edit-glow-color-hex`), and profile bg color (`#profile-edit-bg-color-hex`) |
+| `static/chat.js` | Bidirectional sync: picker→hex updates on input/change, hex→picker updates on input with regex `/^#[0-9a-f]{6}$/i` validation. Profile hex inputs initialized in `renderProfileEdit()`. Glow hex input wired in `renderEditGlowOptions()` |
+| `static/style.css` | `.theme-hex-input` — monospace font, centered text, 80px wide, accent focus border; `.profile-hex-input` — 70px wide for tighter modal layout |
+
+### Benefit
+- Power users can type exact hex codes instead of using the color wheel
+- Validated with regex — only valid 6-char hex codes trigger changes
+- Synced bidirectionally — picker drag updates hex field, typing hex updates picker
+- Initialized on modal open (critical bugfix from review)
+
+## Accent vs Background Color Fix — Hardcoded Colors to CSS Variables
+
+### What
+Converted hardcoded hex colors in panels that should respond to theme changes to use CSS variables instead.
+
+### Files changed
+| File | Change |
+|------|--------|
+| `static/style.css` | Changed `.sticker-panel` bg from `#2d2d2d`→`var(--bg-secondary)`, border from `#3d3d3d`→`var(--bg-border)`. `.sticker-tab` colors from hardcoded grays to `var(--bg-border)`/`var(--text-muted)`/`var(--bg-primary)`. `.mention-inbox-icon.mention`/`.dm` from `#3a6ea5`/`#8a5a3a`→`var(--bg-border)` (neutral). `.mention-inbox-icon.reply` from `#5a8a3a`→`var(--success)` |
+
+### Benefit
+- Panel backgrounds now change with the user's background color theme instead of staying fixed gray
+- Notification icons use neutral border shade, not accent color (accent reserved for interactive elements)
+- Reply icon keeps distinct green (`var(--success)`)
+
+## Glow Border Row Layout Fix
+
+### What
+Changed the glow/border color section in the profile edit modal from a grid layout (`.profile-glow-options`) to a flex layout (`.profile-color-row`), matching the username color and background color rows.
+
+### Files changed
+| File | Change |
+|------|--------|
+| `static/index.html` | Changed container from `<div class="profile-glow-options">` to `<div class="profile-color-row">` |
+
+### Benefit
+- All three color rows now use the exact same flex layout for visual consistency
+- Color picker, hex input, and preview swatch are identically aligned across all rows
+- No JS changes needed (all wiring uses getElementById)
+
+## Username Color Preview Block + Color Picker Click Indicator
+
+### What
+Changed the username color preview from showing "Preview" text to a colored block matching the other two previews. Added `title` attributes and hover effects to make color pickers more obviously clickable.
+
+### Files changed
+| File | Change |
+|------|--------|
+| `static/index.html` | Username color preview changed from `<span>Preview</span>` to styled colored block. All 3 color inputs got `title="Click to pick a color"` |
+| `static/chat.js` | All 3 references to `profile-edit-color-preview.style.color` changed to `style.background` (picker handler, hex handler, renderProfileEdit) |
+| `static/style.css` | `.profile-edit-color-input` border 1px→2px, added `transition`, `:hover` border-color, `:active` box-shadow using `color-mix(in srgb, var(--accent) 30%, transparent)` for theme-aware click feedback |
+
+### Benefit
+- Username color preview now shows the actual color (like the other two previews)
+- Color pickers have clear hover/click feedback signaling they're interactive
+- Click feedback adapts to the user's accent color theme (not hardcoded blue)
+- Title tooltip tells users what the element does on hover
+
+### Verification (all recent theme changes)
+- ✅ JS syntax: **valid** (0 errors)
+- ✅ CSS: no conflicts, no dead code
+- ✅ Code reviews: **no critical issues** across all review passes
+- ✅ All hardcoded grays/blues reviewed and converted where appropriate
+- ✅ Theme-aware color-mix() used instead of hardcoded rgba values
+- ✅ Profile edit modal color rows are visually consistent
+- ✅ Color pickers have clear interactive indicators (border, hover, title, active)

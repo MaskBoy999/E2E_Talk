@@ -814,6 +814,150 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    // Theme color pickers
+    var themeColorPicker = document.getElementById('theme-color-picker');
+    var themeColorReset = document.getElementById('theme-color-reset');
+    var themeBgPicker = document.getElementById('theme-bg-picker');
+    var themeBgReset = document.getElementById('theme-bg-reset');
+
+    // Helper to save both theme colors at once
+    function saveThemeColors(accentHex, bgHex) {
+        saveThemeColor(accentHex, bgHex);
+    }
+
+    if (themeColorPicker) {
+        var savedTheme = localStorage.getItem('theme_color');
+        if (savedTheme) {
+            themeColorPicker.value = savedTheme;
+            var mode = localStorage.getItem('theme_mode') || 'dark';
+            applyThemeColor(savedTheme, mode);
+        }
+        // Sync hex text input with color picker
+        var themeColorHex = document.getElementById('theme-color-hex');
+        if (themeColorHex) {
+            if (savedTheme) themeColorHex.value = savedTheme;
+            themeColorHex.addEventListener('input', function () {
+                var val = this.value.trim();
+                if (/^#[0-9a-f]{6}$/i.test(val)) {
+                    themeColorPicker.value = val;
+                    var mode = localStorage.getItem('theme_mode') || 'dark';
+                    applyThemeColor(val, mode);
+                }
+            });
+            themeColorHex.addEventListener('change', function () {
+                var val = this.value.trim();
+                if (/^#[0-9a-f]{6}$/i.test(val)) {
+                    localStorage.setItem('theme_color', val);
+                    themeColorPicker.value = val;
+                    var bgVal = themeBgPicker ? themeBgPicker.value : (localStorage.getItem('theme_bg_color') || '#4fc3f7');
+                    saveThemeColors(val, bgVal);
+                }
+            });
+        }
+        themeColorPicker.addEventListener('input', function () {
+            var mode = localStorage.getItem('theme_mode') || 'dark';
+            applyThemeColor(this.value, mode);
+            if (themeColorHex) themeColorHex.value = this.value;
+        });
+        themeColorPicker.addEventListener('change', function () {
+            localStorage.setItem('theme_color', this.value);
+            var bgVal = themeBgPicker ? themeBgPicker.value : (localStorage.getItem('theme_bg_color') || '#4fc3f7');
+            saveThemeColors(this.value, bgVal);
+            if (themeColorHex) themeColorHex.value = this.value;
+        });
+    }
+    if (themeColorReset) {
+        themeColorReset.addEventListener('click', function () {
+            var defaultColor = '#4fc3f7';
+            var mode = localStorage.getItem('theme_mode') || 'dark';
+            themeColorPicker.value = defaultColor;
+            applyThemeColor(defaultColor, mode);
+            localStorage.setItem('theme_color', defaultColor);
+            var bgVal = themeBgPicker ? themeBgPicker.value : (localStorage.getItem('theme_bg_color') || '#4fc3f7');
+            saveThemeColors(defaultColor, bgVal);
+        });
+    }
+
+    // Background color picker
+    if (themeBgPicker) {
+        var savedBgTheme = localStorage.getItem('theme_bg_color');
+        // Backward compat: profiles saved before bg split only have theme_color
+        if (!savedBgTheme && savedTheme) {
+            savedBgTheme = savedTheme;
+        }
+        if (savedBgTheme) {
+            var mode = localStorage.getItem('theme_mode') || 'dark';
+            themeBgPicker.value = savedBgTheme;
+            applyThemeBgColor(savedBgTheme, mode);
+        }
+        // Sync hex text input with bg color picker
+        var themeBgHex = document.getElementById('theme-bg-hex');
+        if (themeBgHex) {
+            if (savedBgTheme) themeBgHex.value = savedBgTheme;
+            themeBgHex.addEventListener('input', function () {
+                var val = this.value.trim();
+                if (/^#[0-9a-f]{6}$/i.test(val)) {
+                    themeBgPicker.value = val;
+                    var mode = localStorage.getItem('theme_mode') || 'dark';
+                    applyThemeBgColor(val, mode);
+                }
+            });
+            themeBgHex.addEventListener('change', function () {
+                var val = this.value.trim();
+                if (/^#[0-9a-f]{6}$/i.test(val)) {
+                    localStorage.setItem('theme_bg_color', val);
+                    themeBgPicker.value = val;
+                    var accentVal = themeColorPicker ? themeColorPicker.value : (localStorage.getItem('theme_color') || '#4fc3f7');
+                    saveThemeColors(accentVal, val);
+                }
+            });
+        }
+        themeBgPicker.addEventListener('input', function () {
+            var mode = localStorage.getItem('theme_mode') || 'dark';
+            applyThemeBgColor(this.value, mode);
+            if (themeBgHex) themeBgHex.value = this.value;
+        });
+        themeBgPicker.addEventListener('change', function () {
+            localStorage.setItem('theme_bg_color', this.value);
+            var accentVal = themeColorPicker ? themeColorPicker.value : (localStorage.getItem('theme_color') || '#4fc3f7');
+            saveThemeColors(accentVal, this.value);
+            if (themeBgHex) themeBgHex.value = this.value;
+        });
+    }
+    if (themeBgReset) {
+        themeBgReset.addEventListener('click', function () {
+            var defaultBg = '#4fc3f7';
+            var mode = localStorage.getItem('theme_mode') || 'dark';
+            themeBgPicker.value = defaultBg;
+            applyThemeBgColor(defaultBg, mode);
+            localStorage.setItem('theme_bg_color', defaultBg);
+            var accentVal = themeColorPicker ? themeColorPicker.value : (localStorage.getItem('theme_color') || '#4fc3f7');
+            saveThemeColors(accentVal, defaultBg);
+        });
+    }
+
+    // Theme mode toggle (dark/light)
+    var themeModeDark = document.getElementById('theme-mode-dark');
+    var themeModeLight = document.getElementById('theme-mode-light');
+    var savedMode = localStorage.getItem('theme_mode') || 'dark';
+    applyThemeMode(savedMode);
+    if (themeModeDark) {
+        themeModeDark.addEventListener('click', function () {
+            applyThemeMode('dark');
+            var accentVal = themeColorPicker ? themeColorPicker.value : (localStorage.getItem('theme_color') || '#4fc3f7');
+            var bgVal = themeBgPicker ? themeBgPicker.value : (localStorage.getItem('theme_bg_color') || '#4fc3f7');
+            saveThemeColors(accentVal, bgVal);
+        });
+    }
+    if (themeModeLight) {
+        themeModeLight.addEventListener('click', function () {
+            applyThemeMode('light');
+            var accentVal = themeColorPicker ? themeColorPicker.value : (localStorage.getItem('theme_color') || '#4fc3f7');
+            var bgVal = themeBgPicker ? themeBgPicker.value : (localStorage.getItem('theme_bg_color') || '#4fc3f7');
+            saveThemeColors(accentVal, bgVal);
+        });
+    }
+
     // Friend requests disabled setting
     const disableFrToggle = document.getElementById('disable-friend-requests-toggle');
     if (disableFrToggle) {
@@ -1327,23 +1471,55 @@ document.addEventListener('DOMContentLoaded', () => {
         // Edit color picker
         document.getElementById('profile-edit-color').addEventListener('input', function () {
             var color = this.value;
-            document.getElementById('profile-edit-color-preview').style.color = color;
+            document.getElementById('profile-edit-color-preview').style.background = color;
             var dnPreview = document.getElementById('profile-edit-display-name-preview');
             if (dnPreview) dnPreview.style.color = color;
             renderEditGlowOptions(color);
+            var hexInput = document.getElementById('profile-edit-color-hex');
+            if (hexInput) hexInput.value = color;
         });
+        // Username color hex input
+        var profileColorHex = document.getElementById('profile-edit-color-hex');
+        if (profileColorHex) {
+            profileColorHex.addEventListener('input', function () {
+                var val = this.value.trim();
+                if (/^#[0-9a-f]{6}$/i.test(val)) {
+                    document.getElementById('profile-edit-color').value = val;
+                    document.getElementById('profile-edit-color-preview').style.background = val;
+                    var dnPreview = document.getElementById('profile-edit-display-name-preview');
+                    if (dnPreview) dnPreview.style.color = val;
+                    renderEditGlowOptions(val);
+                }
+            });
+        }
         // Edit bg color picker
         document.getElementById('profile-edit-bg-color').addEventListener('input', function () {
             var color = this.value;
             document.getElementById('profile-edit-bg-preview').style.background = color;
             var card = document.querySelector('#profile-edit-modal .profile-edit-preview-card');
             if (card) card.style.background = color;
-            // Make edit avatar border match background color
             var editAvatarEl = document.getElementById('profile-edit-avatar');
             if (editAvatarEl) {
                 editAvatarEl.style.borderColor = color || '#16213e';
             }
+            var hexInput = document.getElementById('profile-edit-bg-color-hex');
+            if (hexInput) hexInput.value = color;
         });
+        // Profile bg color hex input
+        var profileBgHex = document.getElementById('profile-edit-bg-color-hex');
+        if (profileBgHex) {
+            profileBgHex.addEventListener('input', function () {
+                var val = this.value.trim();
+                if (/^#[0-9a-f]{6}$/i.test(val)) {
+                    document.getElementById('profile-edit-bg-color').value = val;
+                    document.getElementById('profile-edit-bg-preview').style.background = val;
+                    var card = document.querySelector('#profile-edit-modal .profile-edit-preview-card');
+                    if (card) card.style.background = val;
+                    var editAvatarEl = document.getElementById('profile-edit-avatar');
+                    if (editAvatarEl) editAvatarEl.style.borderColor = val;
+                }
+            });
+        }
         // Description character count
         document.getElementById('profile-edit-description').addEventListener('input', function () {
             updateDescriptionWordCount();
@@ -5540,6 +5716,34 @@ function connectWebSocket(t) {
                                 myProfile.username_border_color = decryptedProfileUpdate.username_border_color;
                                 if (decryptedProfileUpdate.nickname !== undefined) myProfile.nickname = decryptedProfileUpdate.nickname;
                                 if (decryptedProfileUpdate.description !== undefined) myProfile.description = decryptedProfileUpdate.description;
+                                if (decryptedProfileUpdate.theme_color) {
+                                    myProfile.theme_color = decryptedProfileUpdate.theme_color;
+                                    if (myProfile.decrypted) myProfile.decrypted.theme_color = decryptedProfileUpdate.theme_color;
+                                }
+                                if (decryptedProfileUpdate.theme_bg_color) {
+                                    myProfile.theme_bg_color = decryptedProfileUpdate.theme_bg_color;
+                                    if (myProfile.decrypted) myProfile.decrypted.theme_bg_color = decryptedProfileUpdate.theme_bg_color;
+                                }
+                            }
+                            // Apply theme colors if present in the update
+                            var mode = localStorage.getItem('theme_mode') || 'dark';
+                            var themeFromUpdate = decryptedProfileUpdate.theme_color;
+                            if (themeFromUpdate) {
+                                localStorage.setItem('theme_color', themeFromUpdate);
+                                applyThemeColor(themeFromUpdate, mode);
+                                var picker = document.getElementById('theme-color-picker');
+                                if (picker) picker.value = themeFromUpdate;
+                            }
+                            var themeBgFromUpdate = decryptedProfileUpdate.theme_bg_color;
+                            if (themeBgFromUpdate) {
+                                localStorage.setItem('theme_bg_color', themeBgFromUpdate);
+                                applyThemeBgColor(themeBgFromUpdate, mode);
+                                var bgPicker = document.getElementById('theme-bg-picker');
+                                if (bgPicker) bgPicker.value = themeBgFromUpdate;
+                            }
+                            var themeModeFromUpdate = decryptedProfileUpdate.theme_mode;
+                            if (themeModeFromUpdate) {
+                                applyThemeMode(themeModeFromUpdate);
                             }
                         }
                         user.profile_picture_file_id = data.profile_picture_file_id || user.profile_picture_file_id;
@@ -6577,6 +6781,11 @@ async function appendMessage(msg) {
             // Server-sourced forward: show original sender info with source link
             var fwdFileId = forwardData.sender_profile_pic_file_id || forwardData.sender_profile_pic || '';
             var fwdUserId = forwardData.sender_id || forwardData.source_server_id || '';
+            // Pre-populate profileKeyCache with the key from forward payload so getProfilePicUrl can decrypt
+            if (fwdFileId && fwdUserId && forwardData.sender_profile_pic_file_key) {
+                var ck = fwdUserId + ':' + fwdFileId;
+                if (!profileKeyCache[ck]) profileKeyCache[ck] = forwardData.sender_profile_pic_file_key;
+            }
             var fwdSenderPicUrl = fwdFileId && fwdUserId ? getProfilePicUrl(fwdFileId, fwdUserId) : null;
             var fwdPicHtml = fwdSenderPicUrl ? '<img class="forward-sender-pic" src="' + fwdSenderPicUrl + '" alt="">' : '<span class="forward-sender-initial">' + (forwardData.sender_username ? forwardData.sender_username.charAt(0).toUpperCase() : '?') + '</span>';
             contentHtml += '<div class="forward-label" data-source-server-id="' + escapeAttr(forwardData.source_server_id || '') + '" data-source-channel-id="' + escapeAttr(forwardData.source_channel_id || '') + '" data-source-message-id="' + escapeAttr(forwardData.source_message_id || '') + '">' +
@@ -7549,10 +7758,18 @@ async function loadForwardChannels() {
         const chRes = await authFetch('/api/servers/' + sourceServerId + '/channels');
         const channels = await chRes.json();
         const server = servers.find(s => s.id === sourceServerId);
-        const serverName = server ? server.name : 'Server';
+        // Decrypt server and channel names with the server key
+        var serverName = 'Server';
+        if (server && server.encrypted_name && server.name_nonce) {
+            try { serverName = tryDecryptWithAllKeys(sourceServerId, server.encrypted_name, server.name_nonce) || serverName; } catch (_) {}
+        }
         let html = '<div class="forward-server"><div class="forward-server-name">' + escapeHtml(serverName) + '</div>';
         for (const ch of channels) {
-            html += '<div class="forward-channel-item" data-server-id="' + sourceServerId + '" data-server-name="' + escapeHtml(serverName || '') + '" data-channel-id="' + ch.id + '" data-channel-name="' + escapeHtml(ch.name || '') + '">' + escapeHtml(ch.name || '(unnamed)') + '</div>';
+            var chName = '(unnamed)';
+            if (ch.encrypted_name && ch.name_nonce) {
+                try { chName = tryDecryptWithAllKeys(sourceServerId, ch.encrypted_name, ch.name_nonce) || chName; } catch (_) {}
+            }
+            html += '<div class="forward-channel-item" data-server-id="' + sourceServerId + '" data-server-name="' + escapeHtml(serverName || '') + '" data-channel-id="' + ch.id + '" data-channel-name="' + escapeHtml(chName || '') + '">' + escapeHtml(chName || '(unnamed)') + '</div>';
         }
         html += '</div>';
         list.innerHTML = html || '<div style="color:#888">No channels found</div>';
@@ -7572,12 +7789,20 @@ async function loadAllForwardChannels() {
         }
         let html = '';
         for (const server of servers) {
+            var srvName = '(unnamed)';
+            if (server.encrypted_name && server.name_nonce) {
+                try { srvName = tryDecryptWithAllKeys(server.id, server.encrypted_name, server.name_nonce) || srvName; } catch (_) {}
+            }
             const chRes = await authFetch('/api/servers/' + server.id + '/channels');
             if (!chRes.ok) continue;
             const channels = await chRes.json();
-            html += '<div class="forward-server"><div class="forward-server-name">' + escapeHtml(server.name || '(unnamed)') + '</div>';
+            html += '<div class="forward-server"><div class="forward-server-name">' + escapeHtml(srvName) + '</div>';
             for (const ch of channels) {
-                html += '<div class="forward-channel-item" data-server-id="' + server.id + '" data-server-name="' + escapeHtml(server.name || '') + '" data-channel-id="' + ch.id + '" data-channel-name="' + escapeHtml(ch.name || '') + '">' + escapeHtml(ch.name || '(unnamed)') + '</div>';
+                var chName = '(unnamed)';
+                if (ch.encrypted_name && ch.name_nonce) {
+                    try { chName = tryDecryptWithAllKeys(server.id, ch.encrypted_name, ch.name_nonce) || chName; } catch (_) {}
+                }
+                html += '<div class="forward-channel-item" data-server-id="' + server.id + '" data-server-name="' + escapeHtml(srvName || '') + '" data-channel-id="' + ch.id + '" data-channel-name="' + escapeHtml(chName || '') + '">' + escapeHtml(chName || '(unnamed)') + '</div>';
             }
             html += '</div>';
         }
@@ -7801,6 +8026,29 @@ async function executeForward(targetServerId, targetServerName, targetChannelId,
         }
         const sourceChannelId = currentChannelId;
 
+        // Get sender PFP decryption key from caches so recipients can render the picture
+        var senderPicFileKey = '';
+        if (senderId && senderPicFileId) {
+            var ck = senderId + ':' + senderPicFileId;
+            if (profileKeyCache[ck]) {
+                senderPicFileKey = profileKeyCache[ck];
+            } else if (userDisplayNameCache[senderId] && userDisplayNameCache[senderId].profile_picture_file_key) {
+                senderPicFileKey = userDisplayNameCache[senderId].profile_picture_file_key;
+            } else if (senderId === user.id && myProfile && myProfile.profile_picture_file_key) {
+                // Own profile picture — key is in myProfile (identity-key-encrypted).
+                // Decrypt it before including in the payload so recipients can use it.
+                var rawKey = myProfile.profile_picture_file_key;
+                if (rawKey.indexOf(':') > 0) {
+                    var identity = E2ECrypto.getIdentityKeyPair();
+                    if (identity) {
+                        var decryptedKey = E2ECrypto.decodeEncryptedFileKey(rawKey, identity.privateKey);
+                        if (decryptedKey) rawKey = decryptedKey;
+                    }
+                }
+                senderPicFileKey = rawKey;
+            }
+        }
+
         const forwardPayload = {
             type: 'forward',
             source_server_id: currentServerId,
@@ -7811,6 +8059,7 @@ async function executeForward(targetServerId, targetServerName, targetChannelId,
             sender_username: senderUsername,
             sender_id: senderId,
             sender_profile_pic_file_id: senderPicFileId,
+            sender_profile_pic_file_key: senderPicFileKey,
             sender_color: senderColor,
             sender_border_color: senderInfo.senderBorderColor || '',
             timestamp: msgDiv.querySelector('.time')?.textContent || '',
@@ -8517,6 +8766,11 @@ function appendDmMessage(msg, kp, otherPublicKey) {
             // Server-sourced forward: show original sender info with source link
             var fwdFileId = forwardData.sender_profile_pic_file_id || forwardData.sender_profile_pic || '';
             var fwdUserId = forwardData.sender_id || forwardData.source_server_id || '';
+            // Pre-populate profileKeyCache with the key from forward payload so getProfilePicUrl can decrypt
+            if (fwdFileId && fwdUserId && forwardData.sender_profile_pic_file_key) {
+                var ck = fwdUserId + ':' + fwdFileId;
+                if (!profileKeyCache[ck]) profileKeyCache[ck] = forwardData.sender_profile_pic_file_key;
+            }
             var fwdSenderPicUrl = fwdFileId && fwdUserId ? getProfilePicUrl(fwdFileId, fwdUserId) : null;
             var fwdPicHtml = fwdSenderPicUrl ? '<img class="forward-sender-pic" src="' + fwdSenderPicUrl + '" alt="">' : '<span class="forward-sender-initial">' + (forwardData.sender_username ? forwardData.sender_username.charAt(0).toUpperCase() : '?') + '</span>';
             contentHtml += '<div class="forward-label" data-source-server-id="' + escapeAttr(forwardData.source_server_id || '') + '" data-source-channel-id="' + escapeAttr(forwardData.source_channel_id || '') + '" data-source-message-id="' + escapeAttr(forwardData.source_message_id || '') + '">' +
@@ -10133,6 +10387,109 @@ function getDisplayNameTextShadow(hexColor, borderColor) {
     var glowColor = borderColor || getContrastGlowColor(hexColor);
     // Multi-layer shadow for a soft airbrush-like glow
     return '0 0 4px ' + glowColor + ', 0 0 8px ' + glowColor + ', 0 0 16px ' + glowColor;
+}
+
+// ===== Theme Color =====
+// Convert a hex color to HSL components.
+function hexToHsl(hex) {
+    var r = parseInt(hex.slice(1,3), 16) / 255;
+    var g = parseInt(hex.slice(3,5), 16) / 255;
+    var b = parseInt(hex.slice(5,7), 16) / 255;
+    var max = Math.max(r, g, b), min = Math.min(r, g, b);
+    var h, s, l = (max + min) / 2;
+    if (max === min) {
+        h = s = 0;
+    } else {
+        var d = max - min;
+        s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+        switch (max) {
+            case r: h = ((g - b) / d + (g < b ? 6 : 0)) / 6; break;
+            case g: h = ((b - r) / d + 2) / 6; break;
+            case b: h = ((r - g) / d + 4) / 6; break;
+        }
+    }
+    return { h: Math.round(h * 360), s: Math.round(s * 100), l: Math.round(l * 100) };
+}
+
+function hslToCss(h, s, l) {
+    return 'hsl(' + h + ', ' + s + '%, ' + l + '%)';
+}
+
+// Apply accent/text theme colors — active items, highlights, text shades.
+// mode: 'dark' (default) or 'light'
+function applyThemeColor(hexColor, mode) {
+    if (!hexColor || typeof hexColor !== 'string') return;
+    if (!/^#[0-9a-f]{6}$/i.test(hexColor)) return;
+    var hsl = hexToHsl(hexColor);
+    var h = hsl.h, s = hsl.s;
+    if (s < 40) s = 50;
+    var isLight = mode === 'light';
+    var root = document.documentElement;
+    // Light mode: darker accent for contrast against bright backgrounds
+    root.style.setProperty('--accent', isLight ? hslToCss(h, s, 40) : hslToCss(h, s, 64));
+    root.style.setProperty('--accent-hover', isLight ? hslToCss(h, s, 50) : hslToCss(h, s, 55));
+    // Text: dark on light, light on dark
+    root.style.setProperty('--text-primary', isLight ? hslToCss(h, Math.round(s * 0.2), 15) : hslToCss(h, Math.round(s * 0.15), 88));
+    root.style.setProperty('--text-muted', isLight ? hslToCss(h, Math.round(s * 0.15), 40) : hslToCss(h, Math.round(s * 0.1), 53));
+    root.style.setProperty('--text-faint', isLight ? hslToCss(h, Math.round(s * 0.1), 55) : hslToCss(h, Math.round(s * 0.08), 40));
+    // Update the preview swatches if the settings are open
+    var preview = document.getElementById('theme-color-preview');
+    if (preview) {
+        var swatches = preview.querySelectorAll('.theme-swatch');
+        if (swatches.length >= 5) {
+            swatches[0].style.background = isLight ? hslToCss(h, s, 40) : hslToCss(h, s, 64);
+            swatches[1].style.background = isLight ? hslToCss(h, s, 50) : hslToCss(h, s, 55);
+            swatches[2].style.background = isLight ? hslToCss(h, Math.round(s * 0.2), 15) : hslToCss(h, Math.round(s * 0.15), 88);
+            swatches[3].style.background = isLight ? hslToCss(h, Math.round(s * 0.15), 40) : hslToCss(h, Math.round(s * 0.1), 53);
+            swatches[4].style.background = isLight ? hslToCss(h, Math.round(s * 0.1), 55) : hslToCss(h, Math.round(s * 0.08), 40);
+        }
+    }
+}
+
+// Apply background/panel theme colors — panels, sidebars, borders.
+// mode: 'dark' (default) or 'light'
+function applyThemeBgColor(hexColor, mode) {
+    if (!hexColor || typeof hexColor !== 'string') return;
+    if (!/^#[0-9a-f]{6}$/i.test(hexColor)) return;
+    var hsl = hexToHsl(hexColor);
+    var h = hsl.h, s = hsl.s;
+    if (s < 40) s = 50;
+    var isLight = mode === 'light';
+    var root = document.documentElement;
+    // Light mode: light backgrounds, dark mode: dark backgrounds
+    root.style.setProperty('--bg-primary', isLight ? hslToCss(h, Math.round(s * 0.3), 95) : hslToCss(h, Math.round(s * 0.6), 9));
+    root.style.setProperty('--bg-secondary', isLight ? hslToCss(h, Math.round(s * 0.25), 90) : hslToCss(h, Math.round(s * 0.7), 11));
+    root.style.setProperty('--bg-border', isLight ? hslToCss(h, Math.round(s * 0.2), 80) : hslToCss(h, Math.round(s * 0.5), 18));
+    // Update the preview swatches if the settings are open
+    var bgPreview = document.getElementById('theme-bg-preview');
+    if (bgPreview) {
+        var bgSwatches = bgPreview.querySelectorAll('.theme-swatch');
+        if (bgSwatches.length >= 3) {
+            bgSwatches[0].style.background = isLight ? hslToCss(h, Math.round(s * 0.3), 95) : hslToCss(h, Math.round(s * 0.6), 9);
+            bgSwatches[1].style.background = isLight ? hslToCss(h, Math.round(s * 0.25), 90) : hslToCss(h, Math.round(s * 0.7), 11);
+            bgSwatches[2].style.background = isLight ? hslToCss(h, Math.round(s * 0.2), 80) : hslToCss(h, Math.round(s * 0.5), 18);
+        }
+    }
+}
+
+// Apply the theme mode (dark/light) which tells the color functions which brightness range to use.
+function applyThemeMode(mode) {
+    if (mode !== 'light') mode = 'dark';
+    localStorage.setItem('theme_mode', mode);
+    // Re-apply both color schemes with the new mode
+    var accentColor = localStorage.getItem('theme_color') || '#4fc3f7';
+    var bgColor = localStorage.getItem('theme_bg_color') || '#4fc3f7';
+    applyThemeColor(accentColor, mode);
+    applyThemeBgColor(bgColor, mode);
+    // Toggle button active states
+    var darkBtn = document.getElementById('theme-mode-dark');
+    var lightBtn = document.getElementById('theme-mode-light');
+    if (darkBtn && lightBtn) {
+        darkBtn.classList.toggle('active', mode === 'dark');
+        lightBtn.classList.toggle('active', mode === 'light');
+    }
+    // Set a body data attribute for any CSS that needs to target mode specifically
+    document.body.setAttribute('data-theme-mode', mode);
 }
 
 // Update existing message DOM elements (display-name styles and avatars) when a user's
@@ -14016,6 +14373,29 @@ async function executeDmForward(targetUserId, targetUsername, dmChannelId) {
             var senderPicFileId = senderInfo.senderPicFileId;
             const senderColor = senderInfo.senderColor;
 
+            // Get sender PFP key from caches so recipients can render the picture
+            var senderPicFileKey = '';
+            if (senderId && senderPicFileId) {
+                var ck = senderId + ':' + senderPicFileId;
+                if (profileKeyCache[ck]) {
+                    senderPicFileKey = profileKeyCache[ck];
+                } else if (userDisplayNameCache[senderId] && userDisplayNameCache[senderId].profile_picture_file_key) {
+                    senderPicFileKey = userDisplayNameCache[senderId].profile_picture_file_key;
+                } else if (senderId === user.id && myProfile && myProfile.profile_picture_file_key) {
+                    // Own profile picture — key is in myProfile (identity-key-encrypted).
+                    // Decrypt it before including in the payload so recipients can use it.
+                    var rawKey = myProfile.profile_picture_file_key;
+                    if (rawKey.indexOf(':') > 0) {
+                        var identity = E2ECrypto.getIdentityKeyPair();
+                        if (identity) {
+                            var decryptedKey = E2ECrypto.decodeEncryptedFileKey(rawKey, identity.privateKey);
+                            if (decryptedKey) rawKey = decryptedKey;
+                        }
+                    }
+                    senderPicFileKey = rawKey;
+                }
+            }
+
             forwardPayload.source_server_id = currentServerId;
             forwardPayload.source_channel_id = currentChannelId;
             forwardPayload.source_server_name = document.getElementById('server-name')?.textContent || 'Server';
@@ -14023,6 +14403,7 @@ async function executeDmForward(targetUserId, targetUsername, dmChannelId) {
             forwardPayload.sender_username = senderUsername;
             forwardPayload.sender_id = senderId;
             forwardPayload.sender_profile_pic_file_id = senderPicFileId;
+            forwardPayload.sender_profile_pic_file_key = senderPicFileKey;
             forwardPayload.sender_color = senderColor;
             forwardPayload.sender_border_color = senderInfo.senderBorderColor || '';
         }
@@ -14418,6 +14799,55 @@ async function loadMyProfile() {
         // A single call is sufficient — its async callback updates ALL matching DOM elements.
         if (myProfile && myProfile.profile_picture_file_id) {
             getProfilePicUrl(myProfile.profile_picture_file_id, user.id);
+        }
+        
+        // Apply theme colors from decrypted profile data
+        var decryptedThemeColor = null;
+        var decryptedThemeBgColor = null;
+        if (data.encrypted_profile_data && ident) {
+            try {
+                if (data.encrypted_profile_data_key) {
+                    var dk = E2ECrypto.decodeEncryptedFileKey(data.encrypted_profile_data_key, ident.privateKey);
+                    if (dk) {
+                        var keyArr = E2ECrypto.base64ToArrayBuffer(dk);
+                        var pts = data.encrypted_profile_data.split(':');
+                        if (pts.length === 2) {
+                            var dec = E2ECrypto.decryptProfileData(pts[1], pts[0], new Uint8Array(keyArr));
+                            if (dec) {
+                                if (dec.theme_color) decryptedThemeColor = dec.theme_color;
+                                if (dec.theme_bg_color) {
+                                    decryptedThemeBgColor = dec.theme_bg_color;
+                                } else if (dec.theme_color) {
+                                    // Backward compat: profiles saved before bg split only have theme_color
+                                    decryptedThemeBgColor = dec.theme_color;
+                                }
+                                if (dec.theme_mode) {
+                                    localStorage.setItem('theme_mode', dec.theme_mode);
+                                } else {
+                                    // Keep existing localStorage value if not in encrypted data yet
+                                    if (!localStorage.getItem('theme_mode')) {
+                                        localStorage.setItem('theme_mode', 'dark');
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (_) {}
+        }
+        if (decryptedThemeColor) {
+            localStorage.setItem('theme_color', decryptedThemeColor);
+            var mode = localStorage.getItem('theme_mode') || 'dark';
+            applyThemeColor(decryptedThemeColor, mode);
+            var picker = document.getElementById('theme-color-picker');
+            if (picker) picker.value = decryptedThemeColor;
+        }
+        if (decryptedThemeBgColor) {
+            localStorage.setItem('theme_bg_color', decryptedThemeBgColor);
+            var mode = localStorage.getItem('theme_mode') || 'dark';
+            applyThemeBgColor(decryptedThemeBgColor, mode);
+            var bgPicker = document.getElementById('theme-bg-picker');
+            if (bgPicker) bgPicker.value = decryptedThemeBgColor;
         }
         
         // Update settings UI if open
@@ -15801,11 +16231,15 @@ function renderProfileEdit() {
     
     var color = (decrypted && decrypted.username_color) || data.username_color || '#4fc3f7';
     document.getElementById('profile-edit-color').value = color;
-    document.getElementById('profile-edit-color-preview').style.color = color;
+    document.getElementById('profile-edit-color-preview').style.background = color;
+    var colorHex = document.getElementById('profile-edit-color-hex');
+    if (colorHex) colorHex.value = color;
     
     var bgColor = (decrypted && decrypted.profile_background_color) || data.profile_background_color || '#16213e';
     document.getElementById('profile-edit-bg-color').value = bgColor;
     document.getElementById('profile-edit-bg-preview').style.background = bgColor;
+    var bgHex = document.getElementById('profile-edit-bg-color-hex');
+    if (bgHex) bgHex.value = bgColor;
     
     // Glow options
     renderEditGlowOptions(color);
@@ -15981,10 +16415,14 @@ function renderEditGlowOptions(baseColor) {
     // Wire live preview on input change (only once via dataset flag)
     if (!glowInput.dataset.glowInit) {
         glowInput.dataset.glowInit = '1';
+        // Wire glow hex input sync
+        var glowHexInput = document.getElementById('profile-edit-glow-color-hex');
+        if (glowHexInput) glowHexInput.value = currentBorder;
         glowInput.addEventListener('input', function() {
             var val = this.value;
             var gp = document.getElementById('profile-edit-glow-preview');
             if (gp) gp.style.background = val;
+            if (glowHexInput) glowHexInput.value = val;
             var ep = document.getElementById('profile-edit-display-name-preview');
             if (ep) {
                 if (val) {
@@ -15994,6 +16432,21 @@ function renderEditGlowOptions(baseColor) {
                 }
             }
         });
+        // Glow hex input -> picker sync
+        if (glowHexInput) {
+            glowHexInput.addEventListener('input', function() {
+                var val = this.value.trim();
+                if (/^#[0-9a-f]{6}$/i.test(val)) {
+                    glowInput.value = val;
+                    var gp = document.getElementById('profile-edit-glow-preview');
+                    if (gp) gp.style.background = val;
+                    var ep = document.getElementById('profile-edit-display-name-preview');
+                    if (ep) {
+                        ep.style.textShadow = '0 0 8px ' + val + ', 0 0 16px ' + val;
+                    }
+                }
+            });
+        }
     }
 }
 
@@ -16147,6 +16600,12 @@ async function saveProfile() {
         // Build profile data to encrypt
         var toggle = document.getElementById('disable-friend-requests-toggle');
         var isDisabled = toggle ? toggle.checked : false;
+        // Read current theme colors from pickers or localStorage
+        var themePicker = document.getElementById('theme-color-picker');
+        var currentThemeColor = themePicker ? themePicker.value : (localStorage.getItem('theme_color') || '#4fc3f7');
+        var themeBgPicker = document.getElementById('theme-bg-picker');
+        var currentThemeBgColor = themeBgPicker ? themeBgPicker.value : (localStorage.getItem('theme_bg_color') || '#4fc3f7');
+        var currentThemeMode = localStorage.getItem('theme_mode') || 'dark';
         var profileData = {
             display_name: displayName,
             nickname: nickname,
@@ -16154,7 +16613,10 @@ async function saveProfile() {
             username_color: color,
             username_border_color: borderColor,
             profile_background_color: bgColor,
-            friend_requests_disabled: isDisabled
+            friend_requests_disabled: isDisabled,
+            theme_color: currentThemeColor,
+            theme_bg_color: currentThemeBgColor,
+            theme_mode: currentThemeMode
         };
         
         // Generate a dedicated profile data key — this can be shared with friends
@@ -16251,6 +16713,64 @@ async function saveProfile() {
     } catch (e) {
         statusEl.textContent = 'Error saving profile: ' + e.message;
         statusEl.style.color = 'var(--danger)';
+    }
+}
+
+// Save just the theme color to the server (via encrypted_profile_data update)
+async function saveThemeColor(accentHex, bgHex) {
+    if (!user || !user.id) return;
+    try {
+        var identity = E2ECrypto.getIdentityKeyPair();
+        if (!identity) return;
+        // If bgHex wasn't provided, read from localStorage or default
+        if (bgHex === undefined) {
+            bgHex = localStorage.getItem('theme_bg_color') || '#4fc3f7';
+        }
+        // Build profile data from the already-decrypted myProfile fields
+        var profileData = {
+            display_name: (myProfile && (myProfile.decrypted ? myProfile.decrypted.display_name : null)) || myProfile.display_name || user.username,
+            nickname: (myProfile && (myProfile.decrypted ? myProfile.decrypted.nickname : null)) || myProfile.nickname || '',
+            description: (myProfile && (myProfile.decrypted ? myProfile.decrypted.description : null)) || myProfile.description || '',
+            username_color: (myProfile && (myProfile.decrypted ? myProfile.decrypted.username_color : null)) || myProfile.username_color || null,
+            username_border_color: (myProfile && (myProfile.decrypted ? myProfile.decrypted.username_border_color : null)) || myProfile.username_border_color || null,
+            profile_background_color: (myProfile && (myProfile.decrypted ? myProfile.decrypted.profile_background_color : null)) || myProfile.profile_background_color || '#16213e',
+            friend_requests_disabled: (myProfile && (myProfile.decrypted ? myProfile.decrypted.friend_requests_disabled : null)) || false,
+            theme_color: accentHex,
+            theme_bg_color: bgHex,
+            theme_mode: localStorage.getItem('theme_mode') || 'dark'
+        };
+        // Reuse existing profile data key if available, otherwise generate a new one
+        var existingKeyB64 = profileKeyCache[user.id + ':profile_data_key'];
+        var profileDataKey;
+        if (existingKeyB64) {
+            profileDataKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(existingKeyB64));
+        } else {
+            profileDataKey = E2ECrypto.generateProfileDataKey();
+        }
+        var profileDataJson = JSON.stringify(profileData);
+        var encrypted = E2ECrypto.encryptProfileData(profileDataJson, profileDataKey);
+        var profileDataKeyB64 = existingKeyB64 || E2ECrypto.arrayBufferToBase64(profileDataKey);
+        var encryptedProfileDataKey = E2ECrypto.encodeEncryptedFileKey(profileDataKeyB64, identity.privateKey);
+        var encryptedProfileData = encrypted.nonce + ':' + encrypted.ciphertext;
+        var res = await authFetch('/api/profile', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                encrypted_profile_data: encryptedProfileData,
+                encrypted_profile_data_key: encryptedProfileDataKey
+            })
+        });
+        if (res.ok) {
+            if (!myProfile.decrypted) myProfile.decrypted = {};
+            myProfile.decrypted.theme_color = hexColor;
+            // Cache the key for sharing with friends (only on first generation)
+            if (!existingKeyB64 && profileDataKeyB64) {
+                profileKeyCache[user.id + ':profile_data_key'] = profileDataKeyB64;
+                scheduleProfileKeySave();
+            }
+        }
+    } catch (e) {
+        console.warn('Failed to save theme color:', e);
     }
 }
 
