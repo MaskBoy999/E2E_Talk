@@ -161,6 +161,8 @@ pub struct FileRecord {
     pub chunk_count: i32,
     pub upload_complete: bool,
     pub created_at: String,
+    pub encrypted_mime_type: Option<Vec<u8>>,
+    pub mime_nonce: Option<Vec<u8>>,
 }
 
 impl Database {
@@ -987,6 +989,36 @@ impl Database {
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );"
         );
+
+        // Migration 038: encrypted_mime_type for files and user_stickers
+        // Store MIME types encrypted with the file key so the server can't read them.
+        let _ = conn.execute_batch(include_str!("../migrations/038_encrypted_mime_type.sql"));
+
+        // Migration 039: HMAC-hash social graph columns, encrypt notification sound file_name,
+        // and add request_id_hash for friend accept/decline anti-enumeration.
+        let _ = conn.execute_batch(include_str!("../migrations/039_social_graph_hashes.sql"));
+
+        // --- Startup schema verification check ---
+        // Verify that the last migration's expected columns exist.
+        // If any expected migration was skipped, log a warning so the operator knows.
+        if let Ok(cols) = (|| -> Result<Vec<String>, rusqlite::Error> {
+            let mut stmt = conn.prepare(
+                "SELECT name FROM pragma_table_info('files') WHERE name IN ('encrypted_mime_type', 'mime_nonce', 'file_id_hash')"
+            )?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            let mut v = Vec::new();
+            for r in rows { v.push(r?); }
+            Ok(v)
+        })() {
+            let expected = ["encrypted_mime_type", "mime_nonce", "file_id_hash"];
+            for col in &expected {
+                if !cols.contains(&col.to_string()) {
+                    eprintln!("WARN: Migration column '{}' not found on files table — schema may be outdated.", col);
+                }
+            }
+        } else {
+            eprintln!("WARN: Could not verify files table schema — the files table may not exist or is corrupted.");
+        }
 
         Ok(())
     }
@@ -2601,34 +2633,81 @@ impl Database {
 
     // --- Notification Sound Sync ---
 
-    pub fn save_notification_sound(&self, user_id: &str, encrypted_sound: &[u8], nonce: &[u8], sender_public_key: &[u8], file_name: &str) -> Result<(), String> {
+    pub fn save_notification_sound(&self, user_id: &str, encrypted_sound: &[u8], nonce: &[u8], sender_public_key: &[u8], file_name: &str, encrypted_file_name: Option<Vec<u8>>, file_name_nonce: Option<Vec<u8>>) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "INSERT INTO notification_sounds (user_id, encrypted_sound, nonce, sender_public_key, file_name, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, CURRENT_TIMESTAMP)
-             ON CONFLICT(user_id) DO UPDATE SET
-                encrypted_sound = excluded.encrypted_sound,
-                nonce = excluded.nonce,
-                sender_public_key = excluded.sender_public_key,
-                file_name = excluded.file_name,
-                updated_at = CURRENT_TIMESTAMP",
-            params![user_id, encrypted_sound, nonce, sender_public_key, file_name],
-        )
-        .map_err(|e| e.to_string())?;
+        // Check if encrypted_file_name column exists (migration 039)
+        let has_enc_fn_col: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('notification_sounds') WHERE name = 'encrypted_file_name'",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if has_enc_fn_col {
+            conn.execute(
+                "INSERT INTO notification_sounds (user_id, encrypted_sound, nonce, sender_public_key, file_name, updated_at, encrypted_file_name, file_name_nonce)
+                 VALUES (?1, ?2, ?3, ?4, ?5, CURRENT_TIMESTAMP, ?6, ?7)
+                 ON CONFLICT(user_id) DO UPDATE SET
+                    encrypted_sound = excluded.encrypted_sound,
+                    nonce = excluded.nonce,
+                    sender_public_key = excluded.sender_public_key,
+                    file_name = excluded.file_name,
+                    encrypted_file_name = excluded.encrypted_file_name,
+                    file_name_nonce = excluded.file_name_nonce,
+                    updated_at = CURRENT_TIMESTAMP",
+                params![user_id, encrypted_sound, nonce, sender_public_key, file_name, encrypted_file_name, file_name_nonce],
+            )
+            .map_err(|e| e.to_string())?;
+        } else {
+            conn.execute(
+                "INSERT INTO notification_sounds (user_id, encrypted_sound, nonce, sender_public_key, file_name, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, CURRENT_TIMESTAMP)
+                 ON CONFLICT(user_id) DO UPDATE SET
+                    encrypted_sound = excluded.encrypted_sound,
+                    nonce = excluded.nonce,
+                    sender_public_key = excluded.sender_public_key,
+                    file_name = excluded.file_name,
+                    updated_at = CURRENT_TIMESTAMP",
+                params![user_id, encrypted_sound, nonce, sender_public_key, file_name],
+            )
+            .map_err(|e| e.to_string())?;
+        }
         Ok(())
     }
 
-    pub fn get_notification_sound(&self, user_id: &str) -> Result<Option<(Vec<u8>, Vec<u8>, Vec<u8>, String)>, String> {
+    pub fn get_notification_sound(&self, user_id: &str) -> Result<Option<(Vec<u8>, Vec<u8>, Vec<u8>, String, Option<Vec<u8>>, Option<Vec<u8>>)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let result = conn.query_row(
-            "SELECT encrypted_sound, nonce, sender_public_key, file_name FROM notification_sounds WHERE user_id = ?1",
-            params![user_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        );
-        match result {
-            Ok(row) => Ok(Some(row)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e.to_string()),
+        let has_enc_fn_col: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('notification_sounds') WHERE name = 'encrypted_file_name'",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if has_enc_fn_col {
+            let result = conn.query_row(
+                "SELECT encrypted_sound, nonce, sender_public_key, file_name, encrypted_file_name, file_name_nonce FROM notification_sounds WHERE user_id = ?1",
+                params![user_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+            );
+            match result {
+                Ok(row) => Ok(Some(row)),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(e.to_string()),
+            }
+        } else {
+            let result = conn.query_row(
+                "SELECT encrypted_sound, nonce, sender_public_key, file_name, NULL, NULL FROM notification_sounds WHERE user_id = ?1",
+                params![user_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+            );
+            match result {
+                Ok(row) => Ok(Some(row)),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(e.to_string()),
+            }
         }
     }
 
@@ -2905,11 +2984,29 @@ impl Database {
         }
 
         let id = Uuid::new_v4().to_string();
-        conn.execute(
-            "INSERT INTO friend_requests (id, from_user_id, to_user_id, status) VALUES (?1, ?2, ?3, 'pending')",
-            params![id, from_user_id, target.id],
-        )
-        .map_err(|e| e.to_string())?;
+        // Check if request_id_hash column exists (migration 039)
+        let has_hash_col: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('friend_requests') WHERE name = 'request_id_hash'",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if has_hash_col {
+            let req_id_hash = crate::db::sha256_hex(&id);
+            conn.execute(
+                "INSERT INTO friend_requests (id, from_user_id, to_user_id, status, request_id_hash) VALUES (?1, ?2, ?3, 'pending', ?4)",
+                params![id, from_user_id, target.id, req_id_hash],
+            )
+            .map_err(|e| e.to_string())?;
+        } else {
+            conn.execute(
+                "INSERT INTO friend_requests (id, from_user_id, to_user_id, status) VALUES (?1, ?2, ?3, 'pending')",
+                params![id, from_user_id, target.id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
 
         Ok(target)
     }
@@ -2951,20 +3048,46 @@ impl Database {
         accepting_user_id: &str,
     ) -> Result<(String, String), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        // Read first for validation + return value.
-        let row: (String, String) = conn
+        // Check if request_id_hash column exists (migration 039)
+        let has_hash_col: bool = conn
             .query_row(
-                "SELECT from_user_id, to_user_id FROM friend_requests WHERE id = ?1 AND status = 'pending'",
-                params![request_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('friend_requests') WHERE name = 'request_id_hash'",
+                [],
+                |row| row.get::<_, i32>(0),
             )
-            .map_err(|_| "Friend request not found".to_string())?;
-        if row.1 != accepting_user_id {
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        // Try to find by request_id_hash first, fall back to raw request_id
+        // Must return raw UUID id for accept_friend_request_c to work correctly.
+        let (req_raw_id, from_id, to_id): (String, String, String) = if has_hash_col {
+            conn.query_row(
+                "SELECT id, from_user_id, to_user_id FROM friend_requests WHERE request_id_hash = ?1 AND status = 'pending'",
+                params![request_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .or_else(|_| {
+                conn.query_row(
+                    "SELECT id, from_user_id, to_user_id FROM friend_requests WHERE id = ?1 AND status = 'pending'",
+                    params![request_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+            })
+            .map_err(|_| "Friend request not found".to_string())?
+        } else {
+            conn.query_row(
+                "SELECT id, from_user_id, to_user_id FROM friend_requests WHERE id = ?1 AND status = 'pending'",
+                params![request_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(|_| "Friend request not found".to_string())?
+        };
+        if to_id != accepting_user_id {
             return Err("Only the recipient can accept a friend request".to_string());
         }
-        Self::accept_friend_request_c(&conn, request_id, accepting_user_id)
+        // Pass the raw UUID (req_raw_id), not the hash, to accept_friend_request_c
+        Self::accept_friend_request_c(&conn, &req_raw_id, accepting_user_id)
             .map_err(|_| "Friend request not found".to_string())?;
-        Ok(row)
+        Ok((from_id, to_id))
     }
 
     pub fn decline_friend_request(
@@ -2973,11 +3096,28 @@ impl Database {
         declining_user_id: &str,
     ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let count = conn.execute(
-            "DELETE FROM friend_requests
-             WHERE id = ?1 AND to_user_id = ?2 AND status = 'pending'",
-            params![request_id, declining_user_id],
-        ).map_err(|e| e.to_string())?;
+        // Check if request_id_hash column exists (migration 039)
+        let has_hash_col: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('friend_requests') WHERE name = 'request_id_hash'",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        let count = if has_hash_col {
+            conn.execute(
+                "DELETE FROM friend_requests
+                 WHERE (request_id_hash = ?1 OR id = ?1) AND to_user_id = ?2 AND status = 'pending'",
+                params![request_id, declining_user_id],
+            ).map_err(|e| e.to_string())?
+        } else {
+            conn.execute(
+                "DELETE FROM friend_requests
+                 WHERE id = ?1 AND to_user_id = ?2 AND status = 'pending'",
+                params![request_id, declining_user_id],
+            ).map_err(|e| e.to_string())?
+        };
         if count == 0 {
             return Err("Friend request not found".to_string());
         }
@@ -4545,7 +4685,7 @@ impl Database {
 
     // --- Files (Phase 5) ---
 
-    pub fn create_file_record(&self, uploader_id: &str, original_size: i64, mime_type: &str) -> Result<(String, String), String> {
+    pub fn create_file_record(&self, uploader_id: &str, original_size: i64, encrypted_mime: Option<&[u8]>, mime_nonce: Option<&[u8]>) -> Result<(String, String), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let id = Uuid::new_v4().to_string();
         let hash = sha256_hex(&id);
@@ -4558,16 +4698,31 @@ impl Database {
             )
             .map(|c| c > 0)
             .unwrap_or(false);
-        if has_hash_col {
+        // Check if encrypted_mime_type column exists (migration 038)
+        let has_enc_mime_col: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('files') WHERE name = 'encrypted_mime_type'",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if has_enc_mime_col && has_hash_col {
             conn.execute(
-                "INSERT INTO files (id, uploader_id, original_size, mime_type, file_id_hash) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![id, uploader_id, original_size, mime_type, hash],
+                "INSERT INTO files (id, uploader_id, original_size, mime_type, file_id_hash, encrypted_mime_type, mime_nonce) VALUES (?1, ?2, ?3, '', ?4, ?5, ?6)",
+                params![id, uploader_id, original_size, hash, encrypted_mime, mime_nonce],
+            )
+            .map_err(|e| e.to_string())?;
+        } else if has_hash_col {
+            conn.execute(
+                "INSERT INTO files (id, uploader_id, original_size, mime_type, file_id_hash) VALUES (?1, ?2, ?3, '', ?4)",
+                params![id, uploader_id, original_size, hash],
             )
             .map_err(|e| e.to_string())?;
         } else {
             conn.execute(
-                "INSERT INTO files (id, uploader_id, original_size, mime_type) VALUES (?1, ?2, ?3, ?4)",
-                params![id, uploader_id, original_size, mime_type],
+                "INSERT INTO files (id, uploader_id, original_size, mime_type) VALUES (?1, ?2, ?3, '')",
+                params![id, uploader_id, original_size],
             )
             .map_err(|e| e.to_string())?;
         }
@@ -4642,23 +4797,56 @@ impl Database {
 
     pub fn get_file_info(&self, file_id: &str) -> Result<FileRecord, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.query_row(
-            "SELECT id, uploader_id, original_size, mime_type, chunk_count, upload_complete, created_at
-             FROM files WHERE id = ?1",
-            params![file_id],
-            |row| {
-                Ok(FileRecord {
-                    id: row.get(0)?,
-                    uploader_id: row.get(1)?,
-                    original_size: row.get(2)?,
-                    mime_type: row.get(3)?,
-                    chunk_count: row.get(4)?,
-                    upload_complete: row.get::<_, i32>(5)? != 0,
-                    created_at: row.get(6)?,
-                })
-            },
-        )
-        .map_err(|e| e.to_string())
+        // Check if encrypted_mime_type column exists (migration 038)
+        let has_enc_mime_col: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('files') WHERE name = 'encrypted_mime_type'",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if has_enc_mime_col {
+            conn.query_row(
+                "SELECT id, uploader_id, original_size, mime_type, chunk_count, upload_complete, created_at, encrypted_mime_type, mime_nonce
+                 FROM files WHERE id = ?1",
+                params![file_id],
+                |row| {
+                    Ok(FileRecord {
+                        id: row.get(0)?,
+                        uploader_id: row.get(1)?,
+                        original_size: row.get(2)?,
+                        mime_type: row.get(3)?,
+                        chunk_count: row.get(4)?,
+                        upload_complete: row.get::<_, i32>(5)? != 0,
+                        created_at: row.get(6)?,
+                        encrypted_mime_type: row.get(7)?,
+                        mime_nonce: row.get(8)?,
+                    })
+                },
+            )
+            .map_err(|e| e.to_string())
+        } else {
+            conn.query_row(
+                "SELECT id, uploader_id, original_size, mime_type, chunk_count, upload_complete, created_at
+                 FROM files WHERE id = ?1",
+                params![file_id],
+                |row| {
+                    Ok(FileRecord {
+                        id: row.get(0)?,
+                        uploader_id: row.get(1)?,
+                        original_size: row.get(2)?,
+                        mime_type: row.get(3)?,
+                        chunk_count: row.get(4)?,
+                        upload_complete: row.get::<_, i32>(5)? != 0,
+                        created_at: row.get(6)?,
+                        encrypted_mime_type: None,
+                        mime_nonce: None,
+                    })
+                },
+            )
+            .map_err(|e| e.to_string())
+        }
     }
 
     // --- Admin: missing tables ---

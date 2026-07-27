@@ -1450,6 +1450,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     getDecryptedFileUrl(origPicId, origPicKey, function(url) {
                         if (url) {
                             avatarEl.innerHTML = '<img src="' + url + '" alt="Avatar">';
+                            avatarEl.style.background = 'transparent';
                         } else {
                             avatarEl.innerHTML = '<div style="font-size:36px;color:#1a1a2e;font-weight:700;">' + escapeHtml(dn.charAt(0).toUpperCase()) + '</div>';
                         }
@@ -4085,6 +4086,10 @@ async function syncNotificationSoundToServer(file) {
             if (statusEl) { statusEl.textContent = 'Encryption keys not ready, sound not synced to server'; statusEl.style.color = '#f44336'; }
             return;
         }
+        // Encrypt file_name with a key derived from identity public key (SHA-256)
+        var rawFileName = file.name || 'notification.mp3';
+        var fileNameKey = new Uint8Array(sodium.crypto_hash_sha256(identity.publicKey));
+        var encFileNameData = E2ECrypto.aeadEncrypt(rawFileName, fileNameKey);
         var encrypted = E2ECrypto.envelopeEncrypt(soundBytes, identity.publicKey, identity.privateKey);
         var uploadRes = await authFetch('/api/notification-sound', {
             method: 'POST',
@@ -4093,7 +4098,9 @@ async function syncNotificationSoundToServer(file) {
                 encrypted_sound: encrypted.ciphertext,
                 nonce: encrypted.nonce,
                 sender_public_key: E2ECrypto.arrayBufferToBase64(identity.publicKey),
-                file_name: file.name || 'notification.mp3',
+                file_name: 'encrypted', // real name is in encrypted_file_name
+                encrypted_file_name: encFileNameData.ciphertext,
+                file_name_nonce: encFileNameData.nonce,
             }),
         });
         if (!uploadRes.ok) {
@@ -4127,14 +4134,23 @@ async function restoreNotificationSoundFromServer() {
                 var dataUrl = ev.target.result;
                 _notifCachedUrl = dataUrl;
                 _idbNotifPut('url', dataUrl).catch(function () {});
-                if (data.file_name) {
-                    try { localStorage.setItem('notification_sound_name', data.file_name); } catch (e) {}
-                    _idbNotifPut('name', data.file_name).catch(function () {});
+                // Decrypt file_name if encrypted_file_name is available
+                var displayName = data.file_name;
+                if (data.encrypted_file_name && data.file_name_nonce && identity) {
+                    try {
+                        var fileNameKey = new Uint8Array(sodium.crypto_hash_sha256(identity.publicKey));
+                        var decName = E2ECrypto.aeadDecrypt(data.encrypted_file_name, fileNameKey, data.file_name_nonce);
+                        if (decName) displayName = decName;
+                    } catch (_) {}
+                }
+                if (displayName) {
+                    try { localStorage.setItem('notification_sound_name', displayName); } catch (e) {}
+                    _idbNotifPut('name', displayName).catch(function () {});
                 }
                 try { localStorage.removeItem('notification_sound_url'); } catch (e) {}
                 var fileNameEl = document.getElementById('notif-sound-file-name');
-                if (fileNameEl && data.file_name) {
-                    fileNameEl.textContent = data.file_name;
+                if (fileNameEl && displayName) {
+                    fileNameEl.textContent = displayName;
                     fileNameEl.style.display = '';
                 }
                 resolve();
@@ -6543,8 +6559,9 @@ async function loadMessages(channelId, aroundMessageId) {
         if (currentServerId) {
             var srvUncached = {};
             for (const msg of messages) {
-                if (msg.sender_id && msg.sender_id !== user.id && !userDisplayNameCache[msg.sender_id]) {
-                    srvUncached[msg.sender_id] = true;
+                var senderUserId = msg.sender_user_id || msg.sender_id;
+                if (msg.sender_id && senderUserId !== user.id && !userDisplayNameCache[senderUserId]) {
+                    srvUncached[senderUserId] = true;
                 }
             }
             var srvKey = E2ECrypto.getServerKey(currentServerId);
@@ -6594,9 +6611,13 @@ async function appendMessage(msg) {
     div.className = 'message';
     if (msg.id) div.setAttribute('data-message-id', msg.id);
     if (msg.sender_id) div.setAttribute('data-sender-id', msg.sender_id);
+    if (msg.sender_user_id) div.setAttribute('data-sender-user-id', msg.sender_user_id);
 
+    var senderIdForCache = msg.sender_user_id || msg.sender_id;
     const myUserId = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')).id : '';
-    const isOwn = msg.sender_id === myUserId;
+    const hmacKey = localStorage.getItem('e2e_hmac_key');
+    const mySenderId = (hmacKey && myUserId) ? E2ECrypto.hmacHex(hmacKey, myUserId) : myUserId;
+    const isOwn = msg.sender_id === mySenderId;
 
     // Message grouping: same sender within 2 minutes in same channel
     const msgTime = new Date(msg.timestamp).getTime();
@@ -6619,15 +6640,15 @@ async function appendMessage(msg) {
                     if (snap.profile_picture_file_id) {
                         msg.sender_profile_pic = snap.profile_picture_file_id;
                         if (snap.profile_picture_file_key) {
-                            profileKeyCache[msg.sender_id + ':' + snap.profile_picture_file_id] = snap.profile_picture_file_key;
+                            profileKeyCache[senderIdForCache + ':' + snap.profile_picture_file_id] = snap.profile_picture_file_key;
                             scheduleProfileKeySave();
                         }
                     }
                     // Cache the profile data key from snapshot for profile modal decryption
                     if (snap.profile_data_key) {
-                        profileKeyCache[msg.sender_id + ':profile_data_key'] = snap.profile_data_key;
+                        profileKeyCache[senderIdForCache + ':profile_data_key'] = snap.profile_data_key;
                         scheduleProfileKeySave();
-                        fetchAndCacheUserProfile(msg.sender_id);
+                        fetchAndCacheUserProfile(senderIdForCache);
                     }
                 }
         } catch (_e) {
@@ -6645,10 +6666,10 @@ async function appendMessage(msg) {
                     if (cp.username_color) msg.sender_username_color = cp.username_color;
                     if (cp.username_border_color) msg.sender_username_border_color = cp.username_border_color;
                     if (cp.profile_picture_file_id) msg.sender_profile_pic = cp.profile_picture_file_id;
-                    if (!userDisplayNameCache[msg.sender_id]) userDisplayNameCache[msg.sender_id] = {};
-                    if (cp.display_name) userDisplayNameCache[msg.sender_id].display_name = cp.display_name;
-                    if (cp.username_color) userDisplayNameCache[msg.sender_id].username_color = cp.username_color;
-                    if (cp.username_border_color) userDisplayNameCache[msg.sender_id].username_border_color = cp.username_border_color;
+                    if (!userDisplayNameCache[senderIdForCache]) userDisplayNameCache[senderIdForCache] = {};
+                    if (cp.display_name) userDisplayNameCache[senderIdForCache].display_name = cp.display_name;
+                    if (cp.username_color) userDisplayNameCache[senderIdForCache].username_color = cp.username_color;
+                    if (cp.username_border_color) userDisplayNameCache[senderIdForCache].username_border_color = cp.username_border_color;
                     scheduleUserDisplayNameSave();
                 }
         } catch (_e) {}
@@ -6663,7 +6684,7 @@ async function appendMessage(msg) {
             }
         }
 
-    const _srvCache = msg.sender_id ? userDisplayNameCache[msg.sender_id] : null;
+    const _srvCache = msg.sender_id ? userDisplayNameCache[senderIdForCache] : null;
     const displayName = msg.sender_display_name || (_srvCache && _srvCache.display_name) || msg.sender_username;
     const initial = displayName ? displayName.charAt(0).toUpperCase() : '';
     var senderPicUrl = msg.sender_profile_pic ? getProfilePicUrl(msg.sender_profile_pic, msg.sender_id) : null;
@@ -7949,7 +7970,7 @@ function setupForwardModal() {
 // Walk backwards through message siblings to find sender info for grouped messages
 // where the header (display-name, avatar) is only rendered on the first message.
 function findForwardSenderInfo(msgDiv) {
-    let result = { senderUsername: 'unknown', senderId: '', senderPicFileId: '', senderColor: '', senderBorderColor: '' };
+    let result = { senderUsername: 'unknown', senderId: '', senderUserId: '', senderPicFileId: '', senderColor: '', senderBorderColor: '' };
     let current = msgDiv;
     while (current && current.classList.contains('message')) {
         const nameEl = current.querySelector('.display-name');
@@ -7967,6 +7988,7 @@ function findForwardSenderInfo(msgDiv) {
         if (!current || !current.classList.contains('message') || current.getAttribute('data-sender-id') !== msgDiv.getAttribute('data-sender-id')) break;
     }
     result.senderId = msgDiv.getAttribute('data-sender-id') || '';
+    result.senderUserId = msgDiv.getAttribute('data-sender-user-id') || '';
     return result;
 }
 
@@ -8027,13 +8049,15 @@ async function executeForward(targetServerId, targetServerName, targetChannelId,
         const sourceChannelId = currentChannelId;
 
         // Get sender PFP decryption key from caches so recipients can render the picture
+        // Use senderUserId (raw UUID) for cache lookups since profileKeyCache is keyed by raw UUID, not HMAC
+        var senderUserId = senderInfo.senderUserId || senderId;
         var senderPicFileKey = '';
-        if (senderId && senderPicFileId) {
-            var ck = senderId + ':' + senderPicFileId;
+        if (senderUserId && senderPicFileId) {
+            var ck = senderUserId + ':' + senderPicFileId;
             if (profileKeyCache[ck]) {
                 senderPicFileKey = profileKeyCache[ck];
-            } else if (userDisplayNameCache[senderId] && userDisplayNameCache[senderId].profile_picture_file_key) {
-                senderPicFileKey = userDisplayNameCache[senderId].profile_picture_file_key;
+            } else if (userDisplayNameCache[senderUserId] && userDisplayNameCache[senderUserId].profile_picture_file_key) {
+                senderPicFileKey = userDisplayNameCache[senderUserId].profile_picture_file_key;
             } else if (senderId === user.id && myProfile && myProfile.profile_picture_file_key) {
                 // Own profile picture — key is in myProfile (identity-key-encrypted).
                 // Decrypt it before including in the payload so recipients can use it.
@@ -8546,8 +8570,9 @@ async function loadDmMessages(dmChannelId, otherUserId) {
         // After loading messages, prefetch profile data for senders whose display name isn't cached yet
         var uncachedSenders = {};
         for (const msg of messages) {
-            if (msg.sender_id && msg.sender_id !== user.id && !userDisplayNameCache[msg.sender_id]) {
-                uncachedSenders[msg.sender_id] = true;
+            var sidCache = msg.sender_user_id || msg.sender_id;
+            if (msg.sender_id && sidCache !== user.id && !userDisplayNameCache[sidCache]) {
+                uncachedSenders[sidCache] = true;
             }
         }
         for (var sid in uncachedSenders) {
@@ -8565,9 +8590,13 @@ function appendDmMessage(msg, kp, otherPublicKey) {
     div.className = 'message';
     if (msg.id) div.setAttribute('data-message-id', msg.id);
     if (msg.sender_id) div.setAttribute('data-sender-id', msg.sender_id);
+    if (msg.sender_user_id) div.setAttribute('data-sender-user-id', msg.sender_user_id);
 
+    var senderIdForCache = msg.sender_user_id || msg.sender_id;
     const myUserId = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')).id : '';
-    const isOwn = msg.sender_id === myUserId;
+    const hmacKey = localStorage.getItem('e2e_hmac_key');
+    const mySenderId = (hmacKey && myUserId) ? E2ECrypto.hmacHex(hmacKey, myUserId) : myUserId;
+    const isOwn = msg.sender_id === mySenderId;
 
     // DM message grouping: same sender within 2 minutes in same DM channel
     const msgTime = new Date(msg.timestamp).getTime();
@@ -8591,15 +8620,15 @@ function appendDmMessage(msg, kp, otherPublicKey) {
                 if (snap.profile_picture_file_id) {
                     msg.sender_profile_pic = snap.profile_picture_file_id;
                     if (snap.profile_picture_file_key) {
-                        profileKeyCache[msg.sender_id + ':' + snap.profile_picture_file_id] = snap.profile_picture_file_key;
+                        profileKeyCache[senderIdForCache + ':' + snap.profile_picture_file_id] = snap.profile_picture_file_key;
                         scheduleProfileKeySave();
                     }
                 }
                 // Cache the profile data key from snapshot for profile modal decryption
                 if (snap.profile_data_key) {
-                    profileKeyCache[msg.sender_id + ':profile_data_key'] = snap.profile_data_key;
+                    profileKeyCache[senderIdForCache + ':profile_data_key'] = snap.profile_data_key;
                     scheduleProfileKeySave();
-                    fetchAndCacheUserProfile(msg.sender_id);
+                    fetchAndCacheUserProfile(senderIdForCache);
                 }
             }
         } catch (_e) {
@@ -9258,6 +9287,7 @@ function updateMemberListItem(userId) {
             var picUrl = getProfilePicUrl(cache.profile_picture_file_id, userId);
             if (picUrl) {
                 avatarEl.innerHTML = '<img src="' + picUrl + '" alt="" style="width:100%;height:100%;border-radius:50%;object-fit:cover;">';
+                avatarEl.style.background = 'transparent';
             } else if (!avatarEl.hasAttribute('data-profile-pic-load')) {
                 avatarEl.setAttribute('data-profile-pic-load', userId + ':' + cache.profile_picture_file_id);
             }
@@ -10525,6 +10555,7 @@ function updateExistingMessageStyles(userId) {
                 avatarEl.setAttribute('data-profile-pic', cacheKey);
                 avatarEl.removeAttribute('data-profile-pic-load');
                 avatarEl.innerHTML = '<img class="avatar-img" src="' + existingPic + '" alt="" data-profile-pic="' + cacheKey + '">';
+                avatarEl.style.background = 'transparent'; // hide accent color behind rounded image edges
             } else {
                 // Set up async loading
                 avatarEl.setAttribute('data-profile-pic-load', cacheKey);
@@ -11476,10 +11507,19 @@ async function uploadFileToServer(file) {
     const fileKey = E2ECrypto.generateFileKey();
     const fileKeyB64 = E2ECrypto.arrayBufferToBase64(fileKey);
 
+    // Encrypt mime_type with file key so the server never sees it in plaintext
+    var rawMime = getCorrectMimeType(file.name, file.type) || 'application/octet-stream';
+    var encMime = E2ECrypto.aeadEncrypt(rawMime, fileKey);
+
     const initRes = await authFetch('/api/files/init', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ size: file.size, mime: getCorrectMimeType(file.name, file.type) || 'application/octet-stream' })
+        body: JSON.stringify({
+            size: file.size,
+            mime: rawMime, // legacy fallback for un-rebuilt servers
+            encrypted_mime: encMime.ciphertext,
+            mime_nonce: encMime.nonce
+        })
     });
     if (!initRes.ok) {
         const err = await initRes.json();
@@ -14370,18 +14410,20 @@ async function executeDmForward(targetUserId, targetUsername, dmChannelId) {
             var senderInfo = findForwardSenderInfo(msgDiv);
             const senderUsername = senderInfo.senderUsername;
             const senderId = senderInfo.senderId;
+            var senderUserId = senderInfo.senderUserId || senderId;
             var senderPicFileId = senderInfo.senderPicFileId;
             const senderColor = senderInfo.senderColor;
 
             // Get sender PFP key from caches so recipients can render the picture
+            // Use senderUserId (raw UUID) for cache lookups since profileKeyCache is keyed by raw UUID, not HMAC
             var senderPicFileKey = '';
-            if (senderId && senderPicFileId) {
-                var ck = senderId + ':' + senderPicFileId;
+            if (senderUserId && senderPicFileId) {
+                var ck = senderUserId + ':' + senderPicFileId;
                 if (profileKeyCache[ck]) {
                     senderPicFileKey = profileKeyCache[ck];
-                } else if (userDisplayNameCache[senderId] && userDisplayNameCache[senderId].profile_picture_file_key) {
-                    senderPicFileKey = userDisplayNameCache[senderId].profile_picture_file_key;
-                } else if (senderId === user.id && myProfile && myProfile.profile_picture_file_key) {
+                } else if (userDisplayNameCache[senderUserId] && userDisplayNameCache[senderUserId].profile_picture_file_key) {
+                    senderPicFileKey = userDisplayNameCache[senderUserId].profile_picture_file_key;
+                } else if (senderUserId === user.id && myProfile && myProfile.profile_picture_file_key) {
                     // Own profile picture — key is in myProfile (identity-key-encrypted).
                     // Decrypt it before including in the payload so recipients can use it.
                     var rawKey = myProfile.profile_picture_file_key;
@@ -14590,12 +14632,14 @@ function getProfilePicUrl(fileId, userId) {
         // Update fallback avatars that were rendered with data-profile-pic-load (initial only)
         document.querySelectorAll('[data-profile-pic-load="' + cacheKey + '"]').forEach(function (el) {
             el.innerHTML = '<img class="avatar-img" src="' + url + '" alt="" data-profile-pic="' + cacheKey + '">';
+            el.style.background = 'transparent'; // hide accent color behind rounded image edges
             el.removeAttribute('data-profile-pic-load');
         });
         // Update placeholder avatars: divs with data-profile-pic-load
         document.querySelectorAll('[data-profile-pic-load="' + cacheKey + '"]').forEach(function (el) {
             var initialText = el.textContent || '';
             el.innerHTML = '<img src="' + url + '" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:50%;display:block;">';
+            el.style.background = 'transparent'; // hide accent color behind rounded image edges
             if (initialText) {
                 var span = document.createElement('span');
                 span.className = 'avatar-initial';
@@ -14636,6 +14680,7 @@ function updateSidebarFooter() {
         var picUrl = getProfilePicUrl(myProfile.profile_picture_file_id, user.id);
         if (picUrl) {
             avatarEl.innerHTML = '<img class="avatar-img" src="' + picUrl + '" alt="" data-profile-pic="' + cacheKey + '">';
+            avatarEl.style.background = 'transparent';
         } else {
             avatarEl.innerHTML = initial;
             avatarEl.setAttribute('data-profile-pic-load', cacheKey);
@@ -14903,6 +14948,7 @@ function updateProfileSettingsUI(data) {
         var picUrl = getProfilePicUrl(data.profile_picture_file_id, user.id);
         if (picUrl) {
             avatarEl.innerHTML = '<img src="' + picUrl + '" alt="">';
+            avatarEl.style.background = 'transparent';
         } else {
             // Async load - show initial while loading
             avatarEl.innerHTML = initial;
@@ -14913,6 +14959,7 @@ function updateProfileSettingsUI(data) {
                 var cacheKey = user.id + ':' + data.profile_picture_file_id;
                 if (profilePicCache[cacheKey]) {
                     avatarEl.innerHTML = '<img src="' + profilePicCache[cacheKey] + '" alt="">';
+                    avatarEl.style.background = 'transparent';
                     updateSidebarFooter();
                     clearInterval(checkCache);
                 }

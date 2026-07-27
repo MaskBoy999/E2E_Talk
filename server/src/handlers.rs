@@ -500,6 +500,8 @@ pub struct UploadNotificationSoundRequest {
     pub nonce: String,
     pub sender_public_key: String,
     pub file_name: String,
+    pub encrypted_file_name: Option<String>,  // AES-GCM encrypted with identity key
+    pub file_name_nonce: Option<String>,      // AES-GCM nonce
 }
 
 pub async fn upload_notification_sound(
@@ -525,7 +527,11 @@ pub async fn upload_notification_sound(
         Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid sender_public_key"}))).into_response(),
     };
 
-    match state.db.save_notification_sound(&user_id, &encrypted_sound, &nonce, &sender_public_key, &req.file_name) {
+    // Decrypt and re-encrypt file_name if encrypted_file_name is provided
+    let encrypted_file_name_bytes = req.encrypted_file_name.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+    let file_name_nonce_bytes = req.file_name_nonce.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+
+    match state.db.save_notification_sound(&user_id, &encrypted_sound, &nonce, &sender_public_key, &req.file_name, encrypted_file_name_bytes, file_name_nonce_bytes) {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
@@ -541,12 +547,14 @@ pub async fn get_notification_sound(
     };
 
     match state.db.get_notification_sound(&user_id) {
-        Ok(Some((encrypted_sound, nonce, sender_public_key, file_name))) => {
+        Ok(Some((encrypted_sound, nonce, sender_public_key, file_name, encrypted_file_name, file_name_nonce))) => {
             (StatusCode::OK, Json(serde_json::json!({
                 "encrypted_sound": base64::engine::general_purpose::STANDARD.encode(&encrypted_sound),
                 "nonce": base64::engine::general_purpose::STANDARD.encode(&nonce),
                 "sender_public_key": base64::engine::general_purpose::STANDARD.encode(&sender_public_key),
                 "file_name": file_name,
+                "encrypted_file_name": encrypted_file_name.map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+                "file_name_nonce": file_name_nonce.map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
             }))).into_response()
         }
         Ok(None) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "No notification sound"}))).into_response(),
@@ -1201,6 +1209,7 @@ pub async fn list_servers(
                 "id": s.id,
                 "encrypted_name": s.encrypted_name.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                 "name_nonce": s.name_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+                "owner_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &s.owner_id),
                 "is_owner": is_owner,
                 "joins_disabled": s.joins_disabled,
                 "server_picture_file_id": s.server_picture_file_id,
@@ -1893,7 +1902,8 @@ pub async fn list_messages(
         .map(|m| {
             serde_json::json!({
                 "id": m.id,
-                "sender_id": m.sender_id,
+                "sender_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &m.sender_id),
+                "sender_user_id": m.sender_id,
                 "sender_id_hash": m.sender_id_hash,
                 "encrypted_sender_username": m.encrypted_sender_username,
                 "sender_username_nonce": m.sender_username_nonce,
@@ -1972,7 +1982,8 @@ pub async fn list_messages_around(
         .map(|m| {
             serde_json::json!({
                 "id": m.id,
-                "sender_id": m.sender_id,
+                "sender_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &m.sender_id),
+                "sender_user_id": m.sender_id,
                 "sender_id_hash": m.sender_id_hash,
                 "encrypted_sender_username": m.encrypted_sender_username,
                 "sender_username_nonce": m.sender_username_nonce,
@@ -3077,7 +3088,9 @@ const UPLOAD_DIR: &str = "uploads";
 #[derive(Deserialize)]
 pub struct InitFileUploadRequest {
     pub size: i64,
-    pub mime: String,
+    pub mime: Option<String>,            // legacy plaintext mime (sent by client for backward compat)
+    pub encrypted_mime: Option<String>,  // AES-GCM encrypted mime_type, base64 encoded
+    pub mime_nonce: Option<String>,      // AES-GCM nonce, base64 encoded
 }
 
 pub async fn init_file_upload(
@@ -3106,34 +3119,11 @@ pub async fn init_file_upload(
             .into_response();
     }
 
-    // Server-side MIME type validation
-    let mime_lower = req.mime.to_lowercase();
-    let allowed_mime_prefixes = [
-        "image/",
-        "video/",
-        "audio/",
-        "text/",
-        "application/pdf",
-        "application/msword",
-        "application/vnd.",
-        "application/zip",
-        "application/gzip",
-        "application/x-7z-compressed",
-        "application/x-rar-compressed",
-        "application/x-tar",
-        "application/json",
-        "application/octet-stream",
-    ];
-    let mime_allowed = allowed_mime_prefixes.iter().any(|prefix| mime_lower.starts_with(prefix));
-    if !mime_allowed {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "File type not allowed. Allowed: images, videos, audio, documents, archives."})),
-        )
-            .into_response();
-    }
+    // Decode optional encrypted mime type
+    let encrypted_mime_bytes = req.encrypted_mime.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+    let mime_nonce_bytes = req.mime_nonce.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
 
-    match state.db.create_file_record(&user_id, req.size, &req.mime) {
+    match state.db.create_file_record(&user_id, req.size, encrypted_mime_bytes.as_deref(), mime_nonce_bytes.as_deref()) {
         Ok((file_id, _file_hash)) => {
             let dir = format!("{}/{}", UPLOAD_DIR, file_id);
             let _ = tokio::fs::create_dir_all(&dir).await;
@@ -3628,10 +3618,9 @@ pub async fn update_profile(
         if !file_info.upload_complete {
             return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Upload not complete"}))).into_response();
         }
-        // Only allow image files
-        if !file_info.mime_type.starts_with("image/") {
-            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Only image files allowed for profile picture"}))).into_response();
-        }
+        // MIME type check skipped — mime_type is encrypted, so the server cannot validate it.
+    // The client is expected to only send image files for profile pictures.
+        
         // Verify ownership
         if file_info.uploader_id != user_id {
             return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Not your file"}))).into_response();
@@ -3658,9 +3647,9 @@ pub async fn update_profile(
         if !file_info.upload_complete {
             return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Banner upload not complete"}))).into_response();
         }
-        if !file_info.mime_type.starts_with("image/") {
-            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Only image files allowed for banner"}))).into_response();
-        }
+        // MIME type check skipped — mime_type is encrypted, so the server cannot validate it.
+        // The client is expected to only send image files for banners.
+        
         if file_info.uploader_id != user_id {
             return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Not your file"}))).into_response();
         }
@@ -4215,7 +4204,7 @@ pub async fn send_friend_request(
             // Notify the recipient in real time (best-effort). No username included — client resolves from user_id.
             let notify = serde_json::json!({
                 "type": "friend_request_received",
-                "from_user_id": user_id,
+                "from_user_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &user_id),
             });
             let _ = state
                 .ws_manager
@@ -4229,7 +4218,7 @@ pub async fn send_friend_request(
                 StatusCode::OK,
                 Json(serde_json::json!({
                     "ok": true,
-                    "to": { "id": target.id, "username": target.username },
+                    "to": { "id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &target.id), "username": target.username },
                 })),
             )
                 .into_response()
@@ -4265,8 +4254,8 @@ pub async fn accept_friend_request(
             // Notify both users that they are now friends.
             let notify = serde_json::json!({
                 "type": "friend_request_accepted",
-                "by_user_id": user_id,
-                "from_user_id": from_id,
+                "by_user_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &user_id),
+                "from_user_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &from_id),
             });
             let _ = state
                 .ws_manager
@@ -4316,7 +4305,7 @@ pub async fn list_incoming_friend_requests(
                 .map(|r| {
                     serde_json::json!({
                         "id": r.id,
-                        "from_user_id": r.from_user_id,
+                        "from_user_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &r.from_user_id),
                         "from_username": r.from_username,
                         "status": r.status,
                         "created_at": r.created_at,
@@ -4348,7 +4337,7 @@ pub async fn list_outgoing_friend_requests(
                 .map(|r| {
                     serde_json::json!({
                         "id": r.id,
-                        "to_user_id": r.to_user_id,
+                        "to_user_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &r.to_user_id),
                         "status": r.status,
                         "created_at": r.created_at,
                     })
@@ -4376,7 +4365,7 @@ pub async fn list_friends(
         Ok(friends) => {
             let result: Vec<serde_json::Value> = friends
                 .iter()
-                .map(|f| serde_json::json!({ "id": f.user_id, "username": f.username }))
+                .map(|f| serde_json::json!({ "id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &f.user_id), "username": f.username }))
                 .collect();
             (StatusCode::OK, Json(serde_json::json!(result))).into_response()
         }

@@ -181,6 +181,8 @@ struct OutgoingChatMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     dm_channel_id: Option<String>,
     sender_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sender_user_id: Option<String>,
     encrypted_sender_username: Option<String>,
     sender_username_nonce: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -512,7 +514,8 @@ async fn handle_ws_message(
                 server_id: Some(server_id_clone),
                 dm_channel_id: None,
                 message: Some(OutgoingChatMessage {
-                    sender_id: user_id.to_string(),
+                    sender_id: crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), user_id),
+                    sender_user_id: Some(user_id.to_string()),
                     id: message.id,
                     channel_id: message.channel_id,
                     dm_channel_id: None,
@@ -745,7 +748,8 @@ async fn handle_ws_message(
                 server_id: None,
                 dm_channel_id: Some(message.dm_channel_id.clone()),
                 message: Some(OutgoingChatMessage {
-                    sender_id: user_id.to_string(),
+                    sender_id: crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), user_id),
+                    sender_user_id: Some(user_id.to_string()),
                     id: message.id,
                     channel_id: String::new(),
                     dm_channel_id: Some(message.dm_channel_id.clone()),
@@ -879,7 +883,8 @@ async fn handle_ws_message(
                 server_id: Some(server_id.clone()),
                 dm_channel_id: None,
                 message: Some(OutgoingChatMessage {
-                    sender_id: user_id.to_string(),
+                    sender_id: crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), user_id),
+                    sender_user_id: Some(user_id.to_string()),
                     id: message.id,
                     channel_id: message.channel_id,
                     dm_channel_id: None,
@@ -997,7 +1002,8 @@ async fn handle_ws_message(
                 server_id: None,
                 dm_channel_id: Some(message.dm_channel_id.clone()),
                 message: Some(OutgoingChatMessage {
-                    sender_id: user_id.to_string(),
+                    sender_id: crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), user_id),
+                    sender_user_id: Some(user_id.to_string()),
                     id: message.id,
                     channel_id: String::new(),
                     dm_channel_id: Some(message.dm_channel_id.clone()),
