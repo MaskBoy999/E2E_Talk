@@ -62,6 +62,26 @@ static FRIEND_REQUEST_IP_RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(|| 
     attempts: Mutex::new(HashMap::new()),
 });
 
+static REAUTH_RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(|| RateLimiter {
+    attempts: Mutex::new(HashMap::new()),
+});
+
+static REAUTH_IP_RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(|| RateLimiter {
+    attempts: Mutex::new(HashMap::new()),
+});
+
+static AUTH_PARAMS_IP_RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(|| RateLimiter {
+    attempts: Mutex::new(HashMap::new()),
+});
+
+static ADMIN_LOGIN_IP_RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(|| RateLimiter {
+    attempts: Mutex::new(HashMap::new()),
+});
+
+static CREATE_SERVER_RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(|| RateLimiter {
+    attempts: Mutex::new(HashMap::new()),
+});
+
 static ADMIN_TOKENS: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
 
 fn get_admin_tokens() -> std::sync::MutexGuard<'static, Option<HashMap<String, Instant>>> {
@@ -438,9 +458,21 @@ pub async fn login(
 /// pre-hashed password, and submit it to /api/login.
 /// No authentication required (these are already encrypted with the user's password).
 pub async fn get_auth_params(
+    headers: HeaderMap,
     Path(username): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
+    // Per-IP rate limiting: 10 requests per minute
+    let ip = get_client_ip(&headers);
+    let ip_rate_key = format!("auth_params_ip:{}", ip);
+    if !AUTH_PARAMS_IP_RATE_LIMITER.check_and_increment(&ip_rate_key, 10, Duration::from_secs(60)) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "Too many requests. Try again in 1 minute."})),
+        )
+            .into_response();
+    }
+
     match state.db.get_auth_params(&username) {
         Ok((encrypted_hash_key, hash_key_salt, hash_key_nonce)) => {
             (StatusCode::OK, Json(serde_json::json!({
@@ -545,6 +577,27 @@ pub async fn reauth(
     let user_id = match extract_user(&headers, &state) {
         Ok(id) => id,
         Err(e) => return e.into_response(),
+    };
+
+    // Per-IP rate limiting: 10 attempts per 5 minutes
+    let ip = get_client_ip(&headers);
+    let ip_rate_key = format!("reauth_ip:{}", ip);
+    if !REAUTH_IP_RATE_LIMITER.check_and_increment(&ip_rate_key, 10, Duration::from_secs(300)) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "Too many reauth attempts. Try again in 5 minutes."})),
+        )
+            .into_response();
+    }
+
+    // Per-user rate limiting: 10 attempts per 5 minutes
+    let rate_key = format!("reauth:{}", user_id);
+    if !REAUTH_RATE_LIMITER.check_and_increment(&rate_key, 10, Duration::from_secs(300)) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "Too many reauth attempts. Try again in 5 minutes."})),
+        )
+            .into_response();
     };
 
     let user = match state.db.get_user_by_id(&user_id) {
@@ -1082,6 +1135,16 @@ pub async fn create_server(
         Ok(id) => id,
         Err(e) => return e.into_response(),
     };
+
+    // Per-user rate limiting: 5 servers per hour
+    let rate_key = format!("create_server:{}", user_id);
+    if !CREATE_SERVER_RATE_LIMITER.check_and_increment(&rate_key, 5, Duration::from_secs(3600)) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "Too many servers created. Try again in 1 hour."})),
+        )
+            .into_response();
+    }
 
     let encrypted_name_bytes = req.encrypted_name.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
     let name_nonce_bytes = req.name_nonce.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
@@ -2308,9 +2371,21 @@ pub async fn update_channel_name(
 // --- Admin ---
 
 pub async fn admin_login(
+    headers: HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(req): Json<AdminLoginRequest>,
 ) -> impl IntoResponse {
+    // Per-IP rate limiting: 10 attempts per 5 minutes
+    let ip = get_client_ip(&headers);
+    let ip_rate_key = format!("admin_login_ip:{}", ip);
+    if !ADMIN_LOGIN_IP_RATE_LIMITER.check_and_increment(&ip_rate_key, 10, Duration::from_secs(300)) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "Too many admin login attempts. Try again in 5 minutes."})),
+        )
+            .into_response();
+    }
+
     let is_set = state.db.is_admin_password_set().unwrap_or(false);
 
     if !is_set {
@@ -3026,7 +3101,34 @@ pub async fn init_file_upload(
     if req.size > MAX_FILE_SIZE {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
-            Json(serde_json::json!({"error": "File too large (max 50 MB)"})),
+            Json(serde_json::json!({"error": "File too large"})),
+        )
+            .into_response();
+    }
+
+    // Server-side MIME type validation
+    let mime_lower = req.mime.to_lowercase();
+    let allowed_mime_prefixes = [
+        "image/",
+        "video/",
+        "audio/",
+        "text/",
+        "application/pdf",
+        "application/msword",
+        "application/vnd.",
+        "application/zip",
+        "application/gzip",
+        "application/x-7z-compressed",
+        "application/x-rar-compressed",
+        "application/x-tar",
+        "application/json",
+        "application/octet-stream",
+    ];
+    let mime_allowed = allowed_mime_prefixes.iter().any(|prefix| mime_lower.starts_with(prefix));
+    if !mime_allowed {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "File type not allowed. Allowed: images, videos, audio, documents, archives."})),
         )
             .into_response();
     }

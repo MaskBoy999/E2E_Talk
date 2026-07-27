@@ -25,6 +25,28 @@
 | 07-27 | Admin panel JS syntax fix | Broken `loadServerStickers()` stub caused admin page to not load at all. Removed dead function. |
 | 07-27 | Forward channel name decryption | Forward modal showed '(unnamed)' because it used removed plaintext `name` columns. Now decrypts `encrypted_name` with server key. |
 | 07-27 | Theme color feature | Per-user accent color chosen from color wheel, stored encrypted in encrypted_profile_data, synced across devices via WS profile_updated. |
+| 07-27 | Reauth rate limiting | Added `REAUTH_RATE_LIMITER` (per-user) and `REAUTH_IP_RATE_LIMITER` (per-IP) to the reauth handler — 10 attempts per 5 minutes each. Login rate limiting already existed (per-username + per-IP). |
+| 07-27 | Server-side MIME validation | `POST /api/files/init` now validates the `mime` field against an allowed list (image/*, video/*, audio/*, text/*, application/pdf, archives, application/octet-stream). Rejects disallowed file types with 400 status. Fixed misleading error message that said 'max 50 MB' when actual limit is 10 GB. |
+| 07-27 | Security audit — verified existing protections | Login rate limiting (A): ✅ Already exists per-username + per-IP. Message deletion cascade (C): ✅ Already cleans up file chunks in both delete_message and delete_dm_message. Pinned messages (D): ✅ No pinning feature exists. Admin auth (E): ✅ Already uses Argon2 (not SHA-256). WS per-frame validation (G): ✅ User_id sourced from JWT only, never from frame data. Password flow (F): ✅ Already hashed client-side with HMAC-SHA256. |
+| 07-27 | get_auth_params IP rate limiting | Added `AUTH_PARAMS_IP_RATE_LIMITER` — 10 requests per 60s per IP for the unauthenticated auth-params user enumeration endpoint. |
+| 07-27 | admin_login IP rate limiting | Added `ADMIN_LOGIN_IP_RATE_LIMITER` — 10 attempts per 300s per IP for the unauthenticated admin panel login. |
+| 07-27 | create_server per-user rate limiting | Added `CREATE_SERVER_RATE_LIMITER` — 5 servers per 3600s per user to prevent server creation spam. |
+| 07-27 | WebSocket auth rate limiting | Added `WS_AUTH_RATE_LIMITER` in ws.rs — 10 auth attempts per 60s per IP. Covers both "invalid token" and "first message not auth" failure paths. Added `get_client_ip()` helper to ws.rs. |
+
+### Rate Limiting Coverage Summary
+
+| Endpoint | Limiter | Rate | Notes |
+|----------|---------|------|-------|
+| `POST /api/register` | `LOGIN_RATE_LIMITER` | 10/300s per-username | |
+| `POST /api/login` | `LOGIN_RATE_LIMITER` + `LOGIN_IP_RATE_LIMITER` | 10/300s per-username + per-IP | Dual check |
+| `POST /api/reauth` | `REAUTH_RATE_LIMITER` + `REAUTH_IP_RATE_LIMITER` | 10/300s per-user + per-IP | Dual check |
+| `GET /api/auth-params/:username` | `AUTH_PARAMS_IP_RATE_LIMITER` | 10/60s per-IP | Unauthenticated |
+| `POST /api/auth/admin` | `ADMIN_LOGIN_IP_RATE_LIMITER` | 10/300s per-IP | Unauthenticated |
+| `POST /api/servers` (create) | `CREATE_SERVER_RATE_LIMITER` | 5/3600s per-user | Server creation spam |
+| `POST /api/servers/join` | `JOIN_SERVER_RATE_LIMITER` | 10/600s per-user | |
+| `POST /api/friends/request` | `FRIEND_REQUEST_RATE_LIMITER` + `FRIEND_REQUEST_IP_RATE_LIMITER` | 10/600s per-user + per-IP | Dual check |
+| `GET /api/hmac-key` | `HMAC_KEY_RATE_LIMITER` | 6/60s per-user | |
+| WebSocket auth | `WS_AUTH_RATE_LIMITER` | 10/60s per-IP | Both failure paths |
 
 ## 🔍 Plaintext Data Flow Audit: What Still Reaches the Server Unencrypted
 

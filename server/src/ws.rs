@@ -1,11 +1,16 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
+
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         State,
     },
+    http::HeaderMap,
     response::IntoResponse,
 };
 use futures::{SinkExt, StreamExt};
@@ -17,6 +22,48 @@ use crate::auth;
 use crate::AppState;
 
 static CONN_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+struct WsRateLimiter {
+    attempts: Mutex<HashMap<String, (u32, Instant)>>,
+}
+
+impl WsRateLimiter {
+    fn check_and_increment(&self, key: &str, max_attempts: u32, window: Duration) -> bool {
+        let mut map = self.attempts.lock().unwrap();
+        let now = Instant::now();
+        if let Some(&(count, first_attempt)) = map.get(key) {
+            if now.duration_since(first_attempt) > window {
+                map.insert(key.to_string(), (1, now));
+                return true;
+            }
+            if count >= max_attempts {
+                return false;
+            }
+            map.insert(key.to_string(), (count + 1, first_attempt));
+        } else {
+            map.insert(key.to_string(), (1, now));
+        }
+        true
+    }
+}
+
+static WS_AUTH_RATE_LIMITER: LazyLock<WsRateLimiter> = LazyLock::new(|| WsRateLimiter {
+    attempts: Mutex::new(HashMap::new()),
+});
+
+fn get_client_ip(headers: &HeaderMap) -> String {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next().map(|s| s.trim().to_string()))
+        .or_else(|| {
+            headers
+                .get("x-real-ip")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
 
 pub struct WsManager {
     connections: tokio::sync::RwLock<std::collections::HashMap<u64, (String, Option<String>, mpsc::UnboundedSender<String>)>>,
@@ -167,13 +214,15 @@ struct OutgoingChatMessage {
 }
 
 pub async fn ws_handler(
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+    let client_ip = get_client_ip(&headers);
+    ws.on_upgrade(move |socket| handle_socket(socket, state, client_ip))
 }
 
-async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
+async fn handle_socket(socket: WebSocket, state: Arc<AppState>, client_ip: String) {
     let (mut sender, mut receiver) = socket.split();
 
     let (user_id, device_id, last_seen_timestamp) = loop {
@@ -184,6 +233,23 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                         match auth::validate_token(&auth_msg.token, &state.config.jwt_secret) {
                             Ok(claims) => break (claims.sub, auth_msg.device_id, auth_msg.last_seen_timestamp),
                             Err(_) => {
+                                // Rate limit failed auth attempts per IP
+                                if !WS_AUTH_RATE_LIMITER.check_and_increment(&format!("ws_auth:{}", client_ip), 10, Duration::from_secs(60)) {
+                                    let err = OutgoingMessage {
+                                        msg_type: "auth_error".to_string(),
+                                        channel_id: None,
+                                        server_id: None,
+                                        dm_channel_id: None,
+                                        message: None,
+                                        user_id: None,
+                                        username: None,
+                                        error: Some("Too many auth attempts. Try again in 1 minute.".to_string()),
+                                    };
+                                    let _ = sender
+                                        .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                                        .await;
+                                    return;
+                                }
                                 let err = OutgoingMessage {
                                     msg_type: "auth_error".to_string(),
                                     channel_id: None,
@@ -202,6 +268,23 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                         }
                     }
                     _ => {
+                        // Rate limit non-auth first messages per IP
+                        if !WS_AUTH_RATE_LIMITER.check_and_increment(&format!("ws_auth:{}", client_ip), 10, Duration::from_secs(60)) {
+                            let err = OutgoingMessage {
+                                msg_type: "auth_error".to_string(),
+                                channel_id: None,
+                                server_id: None,
+                                dm_channel_id: None,
+                                message: None,
+                                user_id: None,
+                                username: None,
+                                error: Some("Too many auth attempts. Try again in 1 minute.".to_string()),
+                            };
+                            let _ = sender
+                                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                                .await;
+                            return;
+                        }
                         let err = OutgoingMessage {
                             msg_type: "auth_error".to_string(),
                             channel_id: None,
