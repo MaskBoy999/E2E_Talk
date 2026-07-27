@@ -2924,9 +2924,9 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('add-more-file-input').addEventListener('change', (e) => {
         const newFiles = Array.from(e.target.files);
         if (newFiles.length === 0) return;
-        const oversized = newFiles.find(f => f.size > 1024 * 1024 * 1024);
+        const oversized = newFiles.find(f => f.size > 10 * 1024 * 1024 * 1024);
         if (oversized) {
-            alert('File too large: ' + oversized.name + '. Maximum file size is 1 GB.');
+            alert('File too large: ' + oversized.name + '. Maximum file size is 10 GB.');
             e.target.value = '';
             return;
         }
@@ -5142,6 +5142,7 @@ function connectWebSocket(t) {
                             srv.server_picture_key_nonce = null;
                         } else {
                             srv.server_picture_file_id = data.server_picture_file_id || null;
+                            srv.server_picture_file_id_hash = data.server_picture_file_id_hash || null;
                             srv.encrypted_server_picture_key = data.encrypted_server_picture_key || null;
                             srv.server_picture_key_nonce = data.server_picture_key_nonce || null;
                         }
@@ -6614,6 +6615,8 @@ async function appendMessage(msg) {
                 '</div>';
         } else if (forwardData.sticker) {
             contentHtml += '<div class="sticker-message" data-file-id="' + escapeAttr(forwardData.sticker.file_id) + '" data-file-key="' + escapeAttr(forwardData.sticker.file_key) + '" data-mime-type="' + escapeAttr(forwardData.sticker.mime_type) + '"></div>';
+        } else if (forwardData.files && Array.isArray(forwardData.files)) {
+            contentHtml += buildMultiFileCardHtml(forwardData.files);
         } else if (forwardData.file) {
             contentHtml += buildFileCardHtml(forwardData.file);
         }
@@ -7584,6 +7587,32 @@ async function loadAllForwardChannels() {
     }
 }
 
+// Extract file data from a message div for forwarding.
+// Handles single .file-card, .audio-file-card, and multi-file galleries (.msg-gallery .file-card).
+function extractForwardFileData(msgDiv) {
+    var result = null;
+    var cards = msgDiv.querySelectorAll('.file-card, .audio-file-card');
+    if (cards.length > 0) {
+        var files = [];
+        for (var i = 0; i < cards.length; i++) {
+            var card = cards[i];
+            files.push({
+                file_id: card.getAttribute('data-file-id') || '',
+                file_key: card.getAttribute('data-file-key') || '',
+                filename: card.getAttribute('data-file-name') || 'File',
+                file_size: card.getAttribute('data-file-size') || '0',
+                mime_type: card.getAttribute('data-file-mime') || 'application/octet-stream',
+            });
+        }
+        if (files.length === 1) {
+            result = files[0];
+        } else {
+            result = { files: files };
+        }
+    }
+    return result;
+}
+
 // Execute forward from a DM to a server channel (no sender info)
 async function executeDmForwardToChannel(targetServerId, targetChannelId) {
     if (!pendingForward || !ws || ws.readyState !== WebSocket.OPEN) return;
@@ -7597,7 +7626,6 @@ async function executeDmForwardToChannel(targetServerId, targetChannelId) {
     // Extract media data from DOM
     let gifData = null;
     let stickerData = null;
-    let fileData = null;
     const gifMsgEl = msgDiv.querySelector('.gif-message');
     if (gifMsgEl) {
         const img = gifMsgEl.querySelector('img');
@@ -7618,16 +7646,7 @@ async function executeDmForwardToChannel(targetServerId, targetChannelId) {
             };
         }
     }
-    const fileCardEl = msgDiv.querySelector('.file-card');
-    if (fileCardEl) {
-        fileData = {
-            file_id: fileCardEl.getAttribute('data-file-id') || '',
-            file_key: fileCardEl.getAttribute('data-file-key') || '',
-            filename: fileCardEl.getAttribute('data-file-name') || 'File',
-            file_size: fileCardEl.getAttribute('data-file-size') || '0',
-            mime_type: fileCardEl.getAttribute('data-file-mime') || 'application/octet-stream',
-        };
-    }
+    var fileData = extractForwardFileData(msgDiv);
 
     try {
         let previewEncrypted = null;
@@ -7649,7 +7668,13 @@ async function executeDmForwardToChannel(targetServerId, targetChannelId) {
         }
         if (gifData) forwardPayload.gif = gifData;
         if (stickerData) forwardPayload.sticker = stickerData;
-        if (fileData) forwardPayload.file = fileData;
+        if (fileData) {
+            if (fileData.files) {
+                forwardPayload.files = fileData.files;
+            } else {
+                forwardPayload.file = fileData;
+            }
+        }
 
         var targetKey2 = E2ECrypto.getServerKey(targetServerId);
         const encrypted = targetKey2 ? E2ECrypto.encryptMessage(JSON.stringify(forwardPayload), targetKey2) : null;
@@ -7739,7 +7764,6 @@ async function executeForward(targetServerId, targetServerName, targetChannelId,
     // Extract GIF/sticker/file data from the DOM for rich forward previews
     let gifData = null;
     let stickerData = null;
-    let fileData = null;
     const gifMsgEl = msgDiv.querySelector('.gif-message');
     if (gifMsgEl) {
         const img = gifMsgEl.querySelector('img');
@@ -7764,16 +7788,7 @@ async function executeForward(targetServerId, targetServerName, targetChannelId,
             };
         }
     }
-    const fileCardEl = msgDiv.querySelector('.file-card');
-    if (fileCardEl) {
-        fileData = {
-            file_id: fileCardEl.getAttribute('data-file-id') || '',
-            file_key: fileCardEl.getAttribute('data-file-key') || '',
-            filename: fileCardEl.getAttribute('data-file-name') || 'File',
-            file_size: fileCardEl.getAttribute('data-file-size') || '0',
-            mime_type: fileCardEl.getAttribute('data-file-mime') || 'application/octet-stream',
-        };
-    }
+    var fileData = extractForwardFileData(msgDiv);
 
     try {
         // Wrap preview with emoji refs so recipients can render them
@@ -7808,7 +7823,13 @@ async function executeForward(targetServerId, targetServerName, targetChannelId,
         // Include rich media data in the forward payload if present
         if (gifData) forwardPayload.gif = gifData;
         if (stickerData) forwardPayload.sticker = stickerData;
-        if (fileData) forwardPayload.file = fileData;
+        if (fileData) {
+            if (fileData.files) {
+                forwardPayload.files = fileData.files;
+            } else {
+                forwardPayload.file = fileData;
+            }
+        }
 
         var targetKey2 = E2ECrypto.getServerKey(targetServerId);
         const encrypted = targetKey2 ? E2ECrypto.encryptMessage(JSON.stringify(forwardPayload), targetKey2) : null;
@@ -10252,8 +10273,8 @@ async function decodeQrFromFile(file) {
 function formatFileSize(bytes) {
     if (bytes < 1024) return bytes + ' B';
     if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-    if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
-    return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+    if (bytes < 10 * 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    return (bytes / (10 * 1024 * 1024 * 1024)).toFixed(2) + ' GB';
 }
 
 function isCodeFile(filename, mime) {
@@ -10874,9 +10895,9 @@ function setupDragAndDrop() {
         const files = Array.from(e.dataTransfer.files);
         if (files.length === 0) return;
 
-        const oversized = files.find(f => f.size > 1024 * 1024 * 1024);
+        const oversized = files.find(f => f.size > 10 * 1024 * 1024 * 1024);
         if (oversized) {
-            alert('File too large: ' + oversized.name + '. Maximum file size is 1 GB.');
+            alert('File too large: ' + oversized.name + '. Maximum file size is 10 GB.');
             return;
         }
 
@@ -10928,9 +10949,9 @@ function setupModalDragAndDrop() {
         const files = Array.from(e.dataTransfer.files);
         if (files.length === 0) return;
 
-        const oversized = files.find(f => f.size > 1024 * 1024 * 1024);
+        const oversized = files.find(f => f.size > 10 * 1024 * 1024 * 1024);
         if (oversized) {
-            alert('File too large: ' + oversized.name + '. Maximum file size is 1 GB.');
+            alert('File too large: ' + oversized.name + '. Maximum file size is 10 GB.');
             return;
         }
 
@@ -10950,9 +10971,9 @@ function setupModalDragAndDrop() {
 function handleFileSelect(e) {
     const files = Array.from(e.target.files);
     if (files.length === 0) return;
-    const oversized = files.find(f => f.size > 1024 * 1024 * 1024);
+    const oversized = files.find(f => f.size > 10 * 1024 * 1024 * 1024);
     if (oversized) {
-        alert('File too large: ' + oversized.name + '. Maximum file size is 1 GB.');
+        alert('File too large: ' + oversized.name + '. Maximum file size is 10 GB.');
         e.target.value = '';
         return;
     }
@@ -11187,7 +11208,11 @@ async function startFileUpload() {
                 throw new Error('Failed to fetch recipient key');
             }
             const encrypted = E2ECrypto.encryptDm(messagePayload, currentDmChannelId, kp.privateKey, otherPublicKey);
+            // Include file_id so the server can clean up the file record when the message is deleted
             var filePayload = { type: 'dm_send', dm_channel_id: currentDmChannelId, encrypted_content: encrypted.ciphertext, nonce: encrypted.nonce, message_nonce: encrypted.messageNonce || null };
+            if (filePayloads.length === 1 && filePayloads[0].file_id) {
+                filePayload.file_id = filePayloads[0].file_id;
+            }
             try {
                 if (myProfile && myProfile.profile_picture_file_id && myProfile.profile_picture_file_key) {
                     var snapshot = {
@@ -11217,7 +11242,11 @@ async function startFileUpload() {
             var fileMsgKey = E2ECrypto.getServerKey(currentServerId);
             const encrypted = fileMsgKey ? E2ECrypto.encryptMessage(messagePayload, fileMsgKey) : null;
             if (encrypted) {
+                // Include file_id so the server can clean up the file record when the message is deleted
                 var filePayload = { type: 'message_send', channel_id: currentChannelId, encrypted_content: encrypted.ciphertext, nonce: encrypted.nonce, message_nonce: encrypted.messageNonce || null };
+                if (filePayloads.length === 1 && filePayloads[0].file_id) {
+                    filePayload.file_id = filePayloads[0].file_id;
+                }
                 try {
                     if (myProfile && myProfile.profile_picture_file_id && myProfile.profile_picture_file_key) {
                         var snapshot = {
@@ -13935,7 +13964,6 @@ async function executeDmForward(targetUserId, targetUsername, dmChannelId) {
     // Extract GIF/sticker/file data from the DOM for rich forward previews
     let gifData = null;
     let stickerData = null;
-    let fileData = null;
     const gifMsgEl = msgDiv.querySelector('.gif-message');
     if (gifMsgEl) {
         const img = gifMsgEl.querySelector('img');
@@ -13959,16 +13987,7 @@ async function executeDmForward(targetUserId, targetUsername, dmChannelId) {
             };
         }
     }
-    const fileCardEl = msgDiv.querySelector('.file-card');
-    if (fileCardEl) {
-        fileData = {
-            file_id: fileCardEl.getAttribute('data-file-id') || '',
-            file_key: fileCardEl.getAttribute('data-file-key') || '',
-            filename: fileCardEl.getAttribute('data-file-name') || 'File',
-            file_size: fileCardEl.getAttribute('data-file-size') || '0',
-            mime_type: fileCardEl.getAttribute('data-file-mime') || 'application/octet-stream',
-        };
-    }
+    var fileData = extractForwardFileData(msgDiv);
 
     try {
         // Wrap preview with emoji refs so recipients can render them
@@ -14016,7 +14035,13 @@ async function executeDmForward(targetUserId, targetUsername, dmChannelId) {
         // Include rich media data in the forward payload if present
         if (gifData) forwardPayload.gif = gifData;
         if (stickerData) forwardPayload.sticker = stickerData;
-        if (fileData) forwardPayload.file = fileData;
+        if (fileData) {
+            if (fileData.files) {
+                forwardPayload.files = fileData.files;
+            } else {
+                forwardPayload.file = fileData;
+            }
+        }
 
         // Encrypt the entire forward payload with DM E2E encryption and send as a regular dm_send
         const plaintext = JSON.stringify(forwardPayload);
@@ -15156,8 +15181,12 @@ function getServerPictureUrl(fileId, serverId) {
     var cacheKey = serverId + ':' + fileId;
     if (serverPictureCache[cacheKey]) return serverPictureCache[cacheKey];
     
+    // Use hash-based URL when available for privacy (hides raw file_id UUID)
+    var srv = servers.find(function(s) { return s.id === serverId; });
+    var urlPath = srv && srv.server_picture_file_id_hash ? '/api/files/by-hash/' + srv.server_picture_file_id_hash + '/download' : '/api/files/' + fileId + '/download';
+    
     // Fetch encrypted file
-    authFetch('/api/files/' + fileId + '/download').then(async function (res) {
+    authFetch(urlPath).then(async function (res) {
         if (!res.ok) return;
         var encryptedArray = new Uint8Array(await res.arrayBuffer());
         

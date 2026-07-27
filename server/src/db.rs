@@ -3,7 +3,7 @@ use sha2::{Sha256, Digest};
 use std::sync::Mutex;
 use uuid::Uuid;
 
-fn sha256_hex(data: &str) -> String {
+pub fn sha256_hex(data: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data.as_bytes());
     let result = hasher.finalize();
@@ -65,6 +65,7 @@ pub struct Server {
     pub joins_disabled: bool,
     pub created_at: String,
     pub server_picture_file_id: Option<String>,
+    pub server_picture_file_id_hash: Option<String>,
     pub encrypted_server_picture_key: Option<Vec<u8>>,
     pub server_picture_key_nonce: Option<Vec<u8>>,
 }
@@ -104,6 +105,7 @@ pub struct Message {
     pub encrypted_sender_username: Option<String>,
     pub sender_username_nonce: Option<String>,
     pub sender_id_hash: Option<String>,
+    pub file_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -130,6 +132,7 @@ pub struct DmMessage {
     pub encrypted_sender_username: Option<String>,
     pub sender_username_nonce: Option<String>,
     pub sender_id_hash: Option<String>,
+    pub file_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -643,6 +646,130 @@ impl Database {
 
         // Migration 036: drop plaintext profile style columns (username_color, username_border_color, profile_background_color)
         // These are now exclusively stored in encrypted_profile_data
+
+        // Migration 039: add file_id TEXT column to messages and dm_messages tables
+        // This stores the SHA-256 hash of the file_id when a message has an attached file,
+        // so the server can clean up the file record and disk chunks when the message is deleted.
+        for tbl in ["messages", "dm_messages"] {
+            let col_exists: bool = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) > 0 FROM pragma_table_info('{}') WHERE name = 'file_id'", tbl),
+                    [],
+                    |row| row.get::<_, i32>(0),
+                )
+                .map(|c| c > 0)
+                .unwrap_or(false);
+            if !col_exists {
+                if let Err(e) = conn.execute(
+                    &format!("ALTER TABLE {} ADD COLUMN file_id TEXT", tbl),
+                    [],
+                ) {
+                    let _ = e;
+                }
+            }
+        }
+
+        // Migration 041: add file_id_hash to servers and user_stickers tables
+        // server_picture_file_id_hash: allows hash-based serving of server icons
+        for tbl_col in [("servers", "server_picture_file_id_hash"), ("user_stickers", "file_id_hash")] {
+            let (tbl, col) = tbl_col;
+            let col_exists: bool = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) > 0 FROM pragma_table_info('{}') WHERE name = '{}'", tbl, col),
+                    [],
+                    |row| row.get::<_, i32>(0),
+                )
+                .map(|c| c > 0)
+                .unwrap_or(false);
+            if !col_exists {
+                let _ = conn.execute(&format!("ALTER TABLE {} ADD COLUMN {} TEXT", tbl, col), []);
+            }
+        }
+        // Backfill hashes for existing server pictures
+        {
+            let ids: Vec<(String, Option<String>)> = {
+                let mut stmt = conn.prepare(
+                    "SELECT id, server_picture_file_id FROM servers WHERE server_picture_file_id IS NOT NULL AND server_picture_file_id_hash IS NULL"
+                )?;
+                let rows = stmt.query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                })?;
+                let mut v = Vec::new();
+                for r in rows { v.push(r?); }
+                v
+            };
+            for (sid, maybe_fid) in ids {
+                if let Some(fid) = maybe_fid {
+                    let hash = sha256_hex(&fid);
+                    let _ = conn.execute(
+                        "UPDATE servers SET server_picture_file_id_hash = ?1 WHERE id = ?2",
+                        params![hash, sid],
+                    );
+                }
+            }
+        }
+        // Backfill hashes for existing user stickers
+        {
+            let ids: Vec<(String, Option<String>)> = {
+                let mut stmt = conn.prepare(
+                    "SELECT id, file_id FROM user_stickers WHERE file_id IS NOT NULL AND file_id_hash IS NULL"
+                )?;
+                let rows = stmt.query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                })?;
+                let mut v = Vec::new();
+                for r in rows { v.push(r?); }
+                v
+            };
+            for (stid, maybe_fid) in ids {
+                if let Some(fid) = maybe_fid {
+                    let hash = sha256_hex(&fid);
+                    let _ = conn.execute(
+                        "UPDATE user_stickers SET file_id_hash = ?1 WHERE id = ?2",
+                        params![hash, stid],
+                    );
+                }
+            }
+        }
+
+        // Migration 040: add file_id_hash TEXT column to files table
+        // Allows resolving file_id from its SHA-256 hash (used by messages.file_id).
+        let hash_col_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('files') WHERE name = 'file_id_hash'",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if !hash_col_exists {
+            if let Err(e) = conn.execute("ALTER TABLE files ADD COLUMN file_id_hash TEXT", []) {
+                let _ = e;
+            }
+        }
+        // Backfill hashes for existing file records
+        {
+            let ids: Vec<(String,)> = {
+                let mut stmt = conn.prepare(
+                    "SELECT id FROM files WHERE file_id_hash IS NULL"
+                )?;
+                let rows = stmt.query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?,))
+                })?;
+                let mut v = Vec::new();
+                for r in rows { v.push(r?); }
+                v
+            };
+            for (fid,) in ids {
+                let hash = sha256_hex(&fid);
+                if let Err(e) = conn.execute(
+                    "UPDATE files SET file_id_hash = ?1 WHERE id = ?2",
+                    params![hash, fid],
+                ) {
+                    let _ = e;
+                }
+            }
+        }
 
         // Migration 038: add profile_picture_file_id_hash and profile_banner_file_id_hash columns
         // These store SHA-256 hashes of the raw file_ids so the API can return
@@ -1321,6 +1448,7 @@ impl Database {
             joins_disabled: false,
             created_at: String::new(),
             server_picture_file_id: None,
+            server_picture_file_id_hash: None,
             encrypted_server_picture_key: None,
             server_picture_key_nonce: None,
         })
@@ -1338,9 +1466,10 @@ impl Database {
 
     pub fn update_server_picture(&self, server_id: &str, file_id: &str, encrypted_key: &[u8], key_nonce: &[u8]) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let hash = sha256_hex(file_id);
         conn.execute(
-            "UPDATE servers SET server_picture_file_id = ?1, encrypted_server_picture_key = ?2, server_picture_key_nonce = ?3 WHERE id = ?4",
-            params![file_id, encrypted_key, key_nonce, server_id],
+            "UPDATE servers SET server_picture_file_id = ?1, server_picture_file_id_hash = ?2, encrypted_server_picture_key = ?3, server_picture_key_nonce = ?4 WHERE id = ?5",
+            params![file_id, hash, encrypted_key, key_nonce, server_id],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -1349,7 +1478,7 @@ impl Database {
     pub fn remove_server_picture(&self, server_id: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
-            "UPDATE servers SET server_picture_file_id = NULL, encrypted_server_picture_key = NULL, server_picture_key_nonce = NULL WHERE id = ?1",
+            "UPDATE servers SET server_picture_file_id = NULL, server_picture_file_id_hash = NULL, encrypted_server_picture_key = NULL, server_picture_key_nonce = NULL WHERE id = ?1",
             params![server_id],
         )
         .map_err(|e| e.to_string())?;
@@ -1370,7 +1499,7 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT s.id, s.encrypted_name, s.name_nonce, s.owner_id, COALESCE(s.invite_code_hash, ''), COALESCE(s.joins_disabled, 0), s.server_picture_file_id, s.encrypted_server_picture_key, s.server_picture_key_nonce
+                "SELECT s.id, s.encrypted_name, s.name_nonce, s.owner_id, COALESCE(s.invite_code_hash, ''), COALESCE(s.joins_disabled, 0), s.server_picture_file_id, s.server_picture_file_id_hash, s.encrypted_server_picture_key, s.server_picture_key_nonce
                  FROM servers s
                  INNER JOIN server_members sm ON s.id = sm.server_id
                  WHERE sm.user_id = ?1
@@ -1388,8 +1517,9 @@ impl Database {
                     joins_disabled: row.get::<_, i64>(5)? != 0,
                     created_at: String::new(),
                     server_picture_file_id: row.get(6)?,
-                    encrypted_server_picture_key: row.get(7)?,
-                    server_picture_key_nonce: row.get(8)?,
+                    server_picture_file_id_hash: row.get(7)?,
+                    encrypted_server_picture_key: row.get(8)?,
+                    server_picture_key_nonce: row.get(9)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -1448,8 +1578,9 @@ impl Database {
                         joins_disabled: row.get::<_, i64>(5)? != 0,
                         created_at: String::new(),
                         server_picture_file_id: row.get(6)?,
-                        encrypted_server_picture_key: row.get(7)?,
-                        server_picture_key_nonce: row.get(8)?,
+                        server_picture_file_id_hash: row.get(7)?,
+                        encrypted_server_picture_key: row.get(8)?,
+                        server_picture_key_nonce: row.get(9)?,
                     })
                 },
             )
@@ -1868,6 +1999,7 @@ impl Database {
                     encrypted_sender_username: row.get(20)?,
                     sender_username_nonce: row.get(21)?,
                     sender_id_hash: row.get(22).ok().flatten(),
+                    file_id: None,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -1927,6 +2059,7 @@ impl Database {
                     encrypted_sender_username: row.get(20)?,
                     sender_username_nonce: row.get(21)?,
                     sender_id_hash: row.get(22).ok().flatten(),
+                    file_id: None,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -1986,6 +2119,7 @@ impl Database {
                     encrypted_sender_username: row.get(18)?,
                     sender_username_nonce: row.get(19)?,
                     sender_id_hash: row.get(20).ok().flatten(),
+                    file_id: None,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -2035,6 +2169,7 @@ impl Database {
                     encrypted_sender_username: row.get(18)?,
                     sender_username_nonce: row.get(19)?,
                     sender_id_hash: row.get(20).ok().flatten(),
+                    file_id: None,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -2064,6 +2199,7 @@ impl Database {
         file_key_nonce: Option<&[u8]>,
         encrypted_sender_username: Option<&str>,
         sender_username_nonce: Option<&str>,
+        file_id: Option<&str>,
     ) -> Result<Message, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let id = Uuid::new_v4().to_string();
@@ -2078,8 +2214,8 @@ impl Database {
 
         let h = sha256_hex(&format!("{}:{}", sender_id, channel_id));
         conn.execute(
-            "INSERT INTO messages (id, channel_id, sender_id, encrypted_content, nonce, message_nonce, message_signature, encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce, encrypted_sender_username, sender_username_nonce, sender_id_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
-            params![id, channel_id, sender_id, encrypted_content, nonce, message_nonce, message_signature, encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce, encrypted_sender_username, sender_username_nonce, h],
+            "INSERT INTO messages (id, channel_id, sender_id, encrypted_content, nonce, message_nonce, message_signature, encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce, encrypted_sender_username, sender_username_nonce, sender_id_hash, file_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+            params![id, channel_id, sender_id, encrypted_content, nonce, message_nonce, message_signature, encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce, encrypted_sender_username, sender_username_nonce, h, file_id],
         )
         .map_err(|e| e.to_string())?;
 
@@ -2105,6 +2241,7 @@ impl Database {
             encrypted_sender_username: encrypted_sender_username.map(|s| s.to_string()),
             sender_username_nonce: sender_username_nonce.map(|s| s.to_string()),
             sender_id_hash: Some(sha256_hex(&format!("{}:{}", sender_id, channel_id))),
+            file_id: file_id.map(|s| s.to_string()),
         })
     }
 
@@ -3175,6 +3312,7 @@ impl Database {
                 encrypted_sender_username: row.get(20)?,
                 sender_username_nonce: row.get(21)?,
                 sender_id_hash: row.get(22).ok().flatten(),
+                file_id: row.get(23).ok().flatten(),
             })
         })
         .map_err(|e| e.to_string())?;
@@ -3234,6 +3372,7 @@ impl Database {
                 encrypted_sender_username: row.get(20)?,
                 sender_username_nonce: row.get(21)?,
                 sender_id_hash: row.get(22).ok().flatten(),
+                file_id: row.get(23).ok().flatten(),
             })
         }).map_err(|e| e.to_string())?;
         let mut output = Vec::new();
@@ -3262,6 +3401,7 @@ impl Database {
         file_key_nonce: Option<&[u8]>,
         encrypted_sender_username: Option<&str>,
         sender_username_nonce: Option<&str>,
+        file_id: Option<&str>,
     ) -> Result<DmMessage, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let id = Uuid::new_v4().to_string();
@@ -3274,8 +3414,8 @@ impl Database {
             .map_err(|_| "Sender not found".to_string())?;
         let h = sha256_hex(&format!("{}:{}", sender_id, dm_channel_id));
         conn.execute(
-            "INSERT INTO dm_messages (id, dm_channel_id, sender_id, encrypted_content, nonce, message_nonce, message_signature, encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce, encrypted_sender_username, sender_username_nonce, sender_id_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
-            params![id, dm_channel_id, sender_id, encrypted_content, nonce, message_nonce, message_signature, encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce, encrypted_sender_username, sender_username_nonce, h],
+            "INSERT INTO dm_messages (id, dm_channel_id, sender_id, encrypted_content, nonce, message_nonce, message_signature, encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce, encrypted_sender_username, sender_username_nonce, sender_id_hash, file_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+            params![id, dm_channel_id, sender_id, encrypted_content, nonce, message_nonce, message_signature, encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce, encrypted_sender_username, sender_username_nonce, h, file_id],
         )
         .map_err(|e| e.to_string())?;
 
@@ -3301,6 +3441,7 @@ impl Database {
             encrypted_sender_username: encrypted_sender_username.map(|s| s.to_string()),
             sender_username_nonce: sender_username_nonce.map(|s| s.to_string()),
             sender_id_hash: Some(sha256_hex(&format!("{}:{}", sender_id, dm_channel_id))),
+            file_id: file_id.map(|s| s.to_string()),
         })
     }
 
@@ -3370,6 +3511,7 @@ impl Database {
                     encrypted_sender_username: None,
                     sender_username_nonce: None,
                     sender_id_hash: None,
+                    file_id: None,
                     })
                 },
             )
@@ -3379,18 +3521,33 @@ impl Database {
 
     pub fn delete_message(&self, message_id: &str, sender_id: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let existing_sender: String = conn
+        let existing: (String, Option<String>) = conn
             .query_row(
-                "SELECT sender_id FROM messages WHERE id = ?1",
+                "SELECT sender_id, file_id FROM messages WHERE id = ?1",
                 params![message_id],
-                |row| row.get(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
             )
             .map_err(|_| "Message not found".to_string())?;
-        if existing_sender != sender_id {
+        if existing.0 != sender_id {
             return Err("Not authorized to delete this message".to_string());
         }
+        // Save the file_id_hash before deleting the message row
+        let file_id_hash = existing.1.clone();
         conn.execute("DELETE FROM messages WHERE id = ?1", params![message_id])
             .map_err(|e| e.to_string())?;
+        // Clean up associated file if present — resolve hash to actual file_id from files table
+        if let Some(hash) = file_id_hash {
+            if let Ok(fid) = self.get_file_id_by_hash_from_files(&hash) {
+                if let Ok(info) = self.delete_file_record(&fid) {
+                    let dir = format!("{}/{}", "uploads", fid);
+                    for i in 0..info.chunk_count {
+                        let chunk_path = format!("{}/{}.enc", dir, i);
+                        let _ = std::fs::remove_file(&chunk_path);
+                    }
+                    let _ = std::fs::remove_dir(&dir);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -3458,6 +3615,7 @@ impl Database {
                     encrypted_sender_username: None,
                     sender_id_hash: None,
                     sender_username_nonce: None,
+                    file_id: None,
                     })
                 },
             )
@@ -3467,18 +3625,33 @@ impl Database {
 
     pub fn delete_dm_message(&self, message_id: &str, sender_id: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let existing_sender: String = conn
+        let existing: (String, Option<String>) = conn
             .query_row(
-                "SELECT sender_id FROM dm_messages WHERE id = ?1",
+                "SELECT sender_id, file_id FROM dm_messages WHERE id = ?1",
                 params![message_id],
-                |row| row.get(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
             )
             .map_err(|_| "Message not found".to_string())?;
-        if existing_sender != sender_id {
+        if existing.0 != sender_id {
             return Err("Not authorized to delete this message".to_string());
         }
+        // Save the file_id_hash before deleting the message row
+        let file_id_hash = existing.1.clone();
         conn.execute("DELETE FROM dm_messages WHERE id = ?1", params![message_id])
             .map_err(|e| e.to_string())?;
+        // Clean up associated file if present — resolve hash to actual file_id from files table
+        if let Some(hash) = file_id_hash {
+            if let Ok(fid) = self.get_file_id_by_hash_from_files(&hash) {
+                if let Ok(info) = self.delete_file_record(&fid) {
+                    let dir = format!("{}/{}", "uploads", fid);
+                    for i in 0..info.chunk_count {
+                        let chunk_path = format!("{}/{}.enc", dir, i);
+                        let _ = std::fs::remove_file(&chunk_path);
+                    }
+                    let _ = std::fs::remove_dir(&dir);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -3516,9 +3689,10 @@ impl Database {
     ) -> Result<String, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let id = Uuid::new_v4().to_string();
+        let hash = sha256_hex(file_id);
         conn.execute(
-            "INSERT INTO user_stickers (id, user_id, file_id, sticker_name, file_key, mime_type, encrypted_file_key, file_key_nonce) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![id, user_id, file_id, sticker_name, file_key, mime_type, encrypted_file_key, file_key_nonce],
+            "INSERT INTO user_stickers (id, user_id, file_id, file_id_hash, sticker_name, file_key, mime_type, encrypted_file_key, file_key_nonce) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![id, user_id, file_id, hash, sticker_name, file_key, mime_type, encrypted_file_key, file_key_nonce],
         )
         .map_err(|e| e.to_string())?;
         Ok(id)
@@ -3534,11 +3708,11 @@ impl Database {
         Ok(())
     }
 
-    pub fn list_user_stickers(&self, user_id: &str) -> Result<Vec<(String, String, String, String, String, Option<Vec<u8>>, Option<Vec<u8>>)>, String> {
+    pub fn list_user_stickers(&self, user_id: &str) -> Result<Vec<(String, String, String, String, String, Option<String>, Option<Vec<u8>>, Option<Vec<u8>>)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT s.id, s.file_id, s.sticker_name, f.mime_type, s.file_key, s.encrypted_file_key, s.file_key_nonce
+                "SELECT s.id, s.file_id, s.file_id_hash, s.sticker_name, f.mime_type, s.file_key, s.encrypted_file_key, s.file_key_nonce
                  FROM user_stickers s
                  INNER JOIN files f ON s.file_id = f.id
                  WHERE s.user_id = ?1
@@ -3553,8 +3727,9 @@ impl Database {
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
-                    row.get::<_, Option<Vec<u8>>>(5)?,
+                    row.get::<_, Option<String>>(5)?,
                     row.get::<_, Option<Vec<u8>>>(6)?,
+                    row.get::<_, Option<Vec<u8>>>(7)?,
                 ))
             })
             .map_err(|e| e.to_string())?
@@ -3594,6 +3769,7 @@ impl Database {
                     encrypted_file_key: None,
                     file_key_nonce: None,
                     sender_id_hash: None,
+                    file_id: None,
                     encrypted_sender_username: None,
                     sender_username_nonce: None,
                 })
@@ -3819,8 +3995,9 @@ impl Database {
                     joins_disabled: row.get::<_, i64>(3)? != 0,
                     created_at: row.get(4)?,
                     server_picture_file_id: row.get(5)?,
-                    encrypted_server_picture_key: row.get(6)?,
-                    server_picture_key_nonce: row.get(7)?,
+                    server_picture_file_id_hash: row.get(6)?,
+                    encrypted_server_picture_key: row.get(7)?,
+                    server_picture_key_nonce: row.get(8)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -3886,6 +4063,7 @@ impl Database {
                     encrypted_sender_username: row.get(20)?,
                     sender_username_nonce: row.get(21)?,
                     sender_id_hash: None,
+                    file_id: None,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -4367,15 +4545,33 @@ impl Database {
 
     // --- Files (Phase 5) ---
 
-    pub fn create_file_record(&self, uploader_id: &str, original_size: i64, mime_type: &str) -> Result<String, String> {
+    pub fn create_file_record(&self, uploader_id: &str, original_size: i64, mime_type: &str) -> Result<(String, String), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let id = Uuid::new_v4().to_string();
-        conn.execute(
-            "INSERT INTO files (id, uploader_id, original_size, mime_type) VALUES (?1, ?2, ?3, ?4)",
-            params![id, uploader_id, original_size, mime_type],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(id)
+        let hash = sha256_hex(&id);
+        // Check if file_id_hash column exists
+        let has_hash_col: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('files') WHERE name = 'file_id_hash'",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if has_hash_col {
+            conn.execute(
+                "INSERT INTO files (id, uploader_id, original_size, mime_type, file_id_hash) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id, uploader_id, original_size, mime_type, hash],
+            )
+            .map_err(|e| e.to_string())?;
+        } else {
+            conn.execute(
+                "INSERT INTO files (id, uploader_id, original_size, mime_type) VALUES (?1, ?2, ?3, ?4)",
+                params![id, uploader_id, original_size, mime_type],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        Ok((id, hash))
     }
 
     pub fn delete_file_record(&self, file_id: &str) -> Result<FileRecord, String> {
@@ -4405,6 +4601,17 @@ impl Database {
         )
         .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    /// Given a SHA-256 hash of a file_id, look up the actual file_id from the files table.
+    pub fn get_file_id_by_hash_from_files(&self, hash: &str) -> Result<String, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT id FROM files WHERE file_id_hash = ?1 LIMIT 1",
+            params![hash],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|_| "File not found by hash".to_string())
     }
 
     /// Given a SHA-256 hash of a file_id, look up the actual file_id from the users table.

@@ -995,8 +995,8 @@ function renderUserStickers(rows) {
     renderPaginationControls('user-stickers');
 }
 
-// --- Server Stickers ---
-async function loadServerStickers() {
+// --- Server Stickers (removed — table dropped in migration 035) ---
+
 // --- User Key Escrow ---
 async function loadUserKeyEscrow() {
     try {

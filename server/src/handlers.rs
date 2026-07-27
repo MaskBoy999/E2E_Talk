@@ -1141,6 +1141,7 @@ pub async fn list_servers(
                 "is_owner": is_owner,
                 "joins_disabled": s.joins_disabled,
                 "server_picture_file_id": s.server_picture_file_id,
+                "server_picture_file_id_hash": s.server_picture_file_id_hash,
                 "encrypted_server_picture_key": s.encrypted_server_picture_key.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                 "server_picture_key_nonce": s.server_picture_key_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
             })
@@ -2265,6 +2266,7 @@ pub async fn update_server_picture(
         "type": "server_picture_updated",
         "server_id": server_id,
         "server_picture_file_id": req.server_picture_file_id,
+        "server_picture_file_id_hash": crate::db::sha256_hex(&req.server_picture_file_id),
         "encrypted_server_picture_key": req.encrypted_server_picture_key,
         "server_picture_key_nonce": req.server_picture_key_nonce,
         "removed": req.remove.unwrap_or(false),
@@ -2994,7 +2996,7 @@ pub async fn admin_clear_all(
 
 // ===== Phase 5: File Sharing =====
 
-const MAX_FILE_SIZE: i64 = 50 * 1024 * 1024; // 50 MB
+const MAX_FILE_SIZE: i64 = 10 * 1024 * 1024 * 1024; // 10 GB
 const UPLOAD_DIR: &str = "uploads";
 
 #[derive(Deserialize)]
@@ -3030,7 +3032,7 @@ pub async fn init_file_upload(
     }
 
     match state.db.create_file_record(&user_id, req.size, &req.mime) {
-        Ok(file_id) => {
+        Ok((file_id, _file_hash)) => {
             let dir = format!("{}/{}", UPLOAD_DIR, file_id);
             let _ = tokio::fs::create_dir_all(&dir).await;
             (
@@ -3240,15 +3242,19 @@ pub async fn download_file_by_hash(
         Err(e) => return e.into_response(),
     };
 
-    // Look up the file_id by hash from the users table
+    // Look up the file_id by hash from the users table (profile pics/banners),
+    // then fall back to the files table (message attachments, stickers, etc.)
     let file_id = match state.db.get_file_id_by_hash(&hash) {
         Ok(fid) => fid,
-        Err(_) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "File not found by hash"})),
-            )
-                .into_response()
+        Err(_) => match state.db.get_file_id_by_hash_from_files(&hash) {
+            Ok(fid) => fid,
+            Err(_) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": "File not found by hash"})),
+                )
+                    .into_response()
+            }
         }
     };
 
@@ -3344,7 +3350,7 @@ pub async fn list_user_stickers(
         Ok(stickers) => {
             let result: Vec<serde_json::Value> = stickers
                 .iter()
-                .map(|(id, file_id, name, mime, _file_key, ekey, eknounce)| {
+                .map(|(id, file_id, _file_id_hash, name, mime, _file_key, ekey, eknounce)| {
                     serde_json::json!({
                         "id": id,
                         "file_id": file_id,
