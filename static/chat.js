@@ -6829,27 +6829,16 @@ async function appendMessage(msg) {
     const editedHtml = msg.edited_at ? '<span class="edited-label">(edited)</span>' : '';
     if (forwardData) {
         div.classList.add('forwarded');
+        var fwdSourceParts = [];
         if (forwardData.source_is_dm) {
-            // DM-sourced forward: no sender info, just show "Forwarded" label
-            contentHtml += '<div class="forward-label" data-source-is-dm="true">' +
-                '<div class="forward-source-label" style="font-style:italic;color:var(--text-muted)">Forwarded</div></div>';
+            fwdSourceParts.push('Forwarded from DM');
         } else {
-            // Server-sourced forward: show original sender info with source link
-            var fwdFileId = forwardData.sender_profile_pic_file_id || forwardData.sender_profile_pic || '';
-            var fwdUserId = forwardData.sender_id || forwardData.source_server_id || '';
-            var fwdCacheKey = (fwdUserId && fwdFileId) ? (fwdUserId + ':' + fwdFileId) : '';
-            // Pre-populate profileKeyCache with the key from forward payload so getProfilePicUrl can decrypt
-            if (fwdCacheKey && forwardData.sender_profile_pic_file_key) {
-                if (!profileKeyCache[fwdCacheKey]) profileKeyCache[fwdCacheKey] = forwardData.sender_profile_pic_file_key;
-            }
-            var fwdSenderPicUrl = fwdCacheKey ? getProfilePicUrl(fwdFileId, fwdUserId) : null;
-            var fwdPicHtml = fwdSenderPicUrl
-                ? '<img class="forward-sender-pic" src="' + fwdSenderPicUrl + '" alt="" data-profile-pic="' + escapeAttr(fwdCacheKey) + '">'
-                : '<span class="forward-sender-initial"' + (fwdCacheKey ? ' data-fwd-pic-load="' + escapeAttr(fwdCacheKey) + '"' : '') + '>' + (forwardData.sender_username ? forwardData.sender_username.charAt(0).toUpperCase() : '?') + '</span>';
-            contentHtml += '<div class="forward-label" data-source-server-id="' + escapeAttr(forwardData.source_server_id || '') + '" data-source-channel-id="' + escapeAttr(forwardData.source_channel_id || '') + '" data-source-message-id="' + escapeAttr(forwardData.source_message_id || '') + '">' +
-                '<div class="forward-sender-info">' + fwdPicHtml + '<span class="forward-sender-name"' + (forwardData.sender_color ? ' style="color:' + forwardData.sender_color + (forwardData.sender_border_color ? ';text-shadow:' + forwardData.sender_border_color : ';text-shadow:' + getDisplayNameTextShadow(forwardData.sender_color)) + '"' : '') + '>' + escapeHtml(forwardData.sender_username || 'unknown') + '</span></div>' +
-                '<div class="forward-source-label"><span class="forward-channel-badge">#' + escapeHtml(forwardData.source_channel_name || 'unknown') + '</span> <span class="forward-server-badge">' + escapeHtml(forwardData.source_server_name || 'unknown') + '</span></div></div>';
+            if (forwardData.source_channel_name) fwdSourceParts.push('#' + forwardData.source_channel_name);
+            if (forwardData.source_server_name) fwdSourceParts.push(forwardData.source_server_name);
         }
+        var fwdSourceText = fwdSourceParts.length > 0 ? 'Forwarded — ' + fwdSourceParts.join(' · ') : 'Forwarded';
+        contentHtml += '<div class="forward-label" data-source-server-id="' + escapeAttr(forwardData.source_server_id || '') + '" data-source-channel-id="' + escapeAttr(forwardData.source_channel_id || '') + '" data-source-message-id="' + escapeAttr(forwardData.source_message_id || '') + '"' + (forwardData.source_is_dm ? ' data-source-is-dm="true"' : '') + '>' +
+            '<div class="forward-source-label">' + escapeHtml(fwdSourceText) + '</div>';
         // Forward text preview
         if (forwardData.preview_content && forwardData.preview_nonce) {
             try {
@@ -7911,13 +7900,6 @@ async function executeDmForwardToChannel(targetServerId, targetChannelId) {
     const msgDiv = pendingForward.msgDiv;
     const messageId = pendingForward.messageId;
 
-    // Get sender info from the DM message (walks backwards for grouped messages)
-    var senderInfo = findForwardSenderInfo(msgDiv);
-    const senderUsername = senderInfo.senderUsername;
-    const senderId = senderInfo.senderId;
-    var senderPicFileId = senderInfo.senderPicFileId;
-    const senderColor = senderInfo.senderColor;
-
     // Get the original DM message content (already decrypted in DOM)
     const textEl = msgDiv.querySelector('.text');
     const originalText = textEl ? extractRawMessageText(textEl) : '';
@@ -7962,42 +7944,12 @@ async function executeDmForwardToChannel(targetServerId, targetChannelId) {
             previewEncrypted = E2ECrypto.encryptMessage(previewPlaintext, fwdDmTargetKey);
         }
 
-        // Get sender PFP decryption key from caches so recipients can render the picture
-        var senderUserId = senderInfo.senderUserId || senderId;
-        var senderPicFileKey = '';
-        if (senderUserId && senderPicFileId) {
-            var ckRaw = senderUserId + ':' + senderPicFileId;
-            var ckHMAC = senderId + ':' + senderPicFileId;
-            var foundKey = profileKeyCache[ckRaw] || (ckHMAC !== ckRaw && profileKeyCache[ckHMAC]) || null;
-            if (foundKey) {
-                senderPicFileKey = foundKey;
-            } else if (userDisplayNameCache[senderUserId] && userDisplayNameCache[senderUserId].profile_picture_file_key) {
-                senderPicFileKey = userDisplayNameCache[senderUserId].profile_picture_file_key;
-            } else if (senderUserId === user.id && myProfile && myProfile.profile_picture_file_key) {
-                var rawKey2 = myProfile.profile_picture_file_key;
-                if (rawKey2.indexOf(':') > 0) {
-                    var identity = E2ECrypto.getIdentityKeyPair();
-                    if (identity) {
-                        var decryptedKey = E2ECrypto.decodeEncryptedFileKey(rawKey2, identity.privateKey);
-                        if (decryptedKey) rawKey2 = decryptedKey;
-                    }
-                }
-                senderPicFileKey = rawKey2;
-            }
-        }
-
         const forwardPayload = {
             type: 'forward',
-            source_is_dm: false,
+            source_is_dm: true,
             source_message_id: messageId,
             source_channel_name: 'Direct Message',
             source_server_name: pendingForward.dmDisplayName || 'DM',
-            sender_username: senderUsername,
-            sender_id: senderId,
-            sender_profile_pic_file_id: senderPicFileId,
-            sender_profile_pic_file_key: senderPicFileKey,
-            sender_color: senderColor,
-            sender_border_color: senderInfo.senderBorderColor || '',
             timestamp: msgDiv.querySelector('.time')?.textContent || '',
         };
         if (previewEncrypted) {
@@ -8060,43 +8012,13 @@ function setupForwardModal() {
     }
 }
 
-// Walk backwards through message siblings to find sender info for grouped messages
-// where the header (display-name, avatar) is only rendered on the first message.
-function findForwardSenderInfo(msgDiv) {
-    let result = { senderUsername: 'unknown', senderId: '', senderUserId: '', senderPicFileId: '', senderColor: '', senderBorderColor: '' };
-    let current = msgDiv;
-    while (current && current.classList.contains('message')) {
-        const nameEl = current.querySelector('.display-name');
-        const avatarImg = current.querySelector('.avatar img.avatar-img');
-        const avatarEl = current.querySelector('.avatar');
-        if (nameEl && nameEl.textContent) {
-            result.senderUsername = nameEl.textContent;
-            result.senderColor = nameEl.style.color || '';
-            result.senderBorderColor = nameEl.style.textShadow || '';
-            var picAttr = avatarImg?.getAttribute('data-profile-pic') || avatarEl?.getAttribute('data-profile-pic-load') || '';
-            result.senderPicFileId = picAttr ? picAttr.split(':')[1] || '' : '';
-            break;
-        }
-        current = current.previousElementSibling;
-        if (!current || !current.classList.contains('message') || current.getAttribute('data-sender-id') !== msgDiv.getAttribute('data-sender-id')) break;
-    }
-    result.senderId = msgDiv.getAttribute('data-sender-id') || '';
-    result.senderUserId = msgDiv.getAttribute('data-sender-user-id') || '';
-    return result;
-}
+
 
 async function executeForward(targetServerId, targetServerName, targetChannelId, targetChannelName) {
     if (!pendingForward || !ws || ws.readyState !== WebSocket.OPEN) return;
     const msgDiv = pendingForward.msgDiv;
     const messageId = pendingForward.messageId;
 
-    // For grouped messages, the header (display-name, avatar) may not be in the DOM.
-    // Walk backwards through siblings to find the sender info.
-    var senderInfo = findForwardSenderInfo(msgDiv);
-    const senderUsername = senderInfo.senderUsername;
-    const senderId = senderInfo.senderId;
-    var senderPicFileId = senderInfo.senderPicFileId;
-    const senderColor = senderInfo.senderColor;
     const textEl = msgDiv.querySelector('.text');
     const originalText = textEl ? extractRawMessageText(textEl) : '';
 
@@ -8148,34 +8070,6 @@ async function executeForward(targetServerId, targetServerName, targetChannelId,
         }
         const sourceChannelId = currentChannelId;
 
-        // Get sender PFP decryption key from caches so recipients can render the picture
-        var senderUserId = senderInfo.senderUserId || senderId;
-        var myHmacId = (localStorage.getItem('e2e_hmac_key') && user) ? E2ECrypto.hmacHex(localStorage.getItem('e2e_hmac_key'), user.id) : (user ? user.id : '');
-        var senderPicFileKey = '';
-        if (senderUserId && senderPicFileId) {
-            // Check both raw UUID and HMAC'd key formats since profileKeyCache may have either
-            var ckRaw = senderUserId + ':' + senderPicFileId;
-            var ckHMAC = senderId + ':' + senderPicFileId;
-            var foundKey = profileKeyCache[ckRaw] || (ckHMAC !== ckRaw && profileKeyCache[ckHMAC]) || null;
-            if (foundKey) {
-                senderPicFileKey = foundKey;
-            } else if (userDisplayNameCache[senderUserId] && userDisplayNameCache[senderUserId].profile_picture_file_key) {
-                senderPicFileKey = userDisplayNameCache[senderUserId].profile_picture_file_key;
-            } else if ((senderId === myHmacId || senderUserId === user.id) && myProfile && myProfile.profile_picture_file_key) {
-                // Own profile picture — key is in myProfile (identity-key-encrypted).
-                // Decrypt it before including in the payload so recipients can use it.
-                var rawKey = myProfile.profile_picture_file_key;
-                if (rawKey.indexOf(':') > 0) {
-                    var identity = E2ECrypto.getIdentityKeyPair();
-                    if (identity) {
-                        var decryptedKey = E2ECrypto.decodeEncryptedFileKey(rawKey, identity.privateKey);
-                        if (decryptedKey) rawKey = decryptedKey;
-                    }
-                }
-                senderPicFileKey = rawKey;
-            }
-        }
-
         const forwardPayload = {
             type: 'forward',
             source_server_id: currentServerId,
@@ -8183,12 +8077,6 @@ async function executeForward(targetServerId, targetServerName, targetChannelId,
             source_message_id: messageId,
             source_server_name: document.getElementById('server-name')?.textContent || 'Server',
             source_channel_name: document.getElementById('channel-name')?.textContent || 'channel',
-            sender_username: senderUsername,
-            sender_id: senderId,
-            sender_profile_pic_file_id: senderPicFileId,
-            sender_profile_pic_file_key: senderPicFileKey,
-            sender_color: senderColor,
-            sender_border_color: senderInfo.senderBorderColor || '',
             timestamp: msgDiv.querySelector('.time')?.textContent || '',
         };
         if (previewEncrypted) {
@@ -8906,27 +8794,16 @@ function appendDmMessage(msg, kp, otherPublicKey) {
     }
     if (forwardData) {
         div.classList.add('forwarded');
+        var fwdSourceParts = [];
         if (forwardData.source_is_dm) {
-            // DM-sourced forward: no sender info, just show "Forwarded" label
-            contentHtml += '<div class="forward-label" data-source-is-dm="true">' +
-                '<div class="forward-source-label" style="font-style:italic;color:var(--text-muted)">Forwarded</div></div>';
+            fwdSourceParts.push('Forwarded from DM');
         } else {
-            // Server-sourced forward: show original sender info with source link
-            var fwdFileId = forwardData.sender_profile_pic_file_id || forwardData.sender_profile_pic || '';
-            var fwdUserId = forwardData.sender_id || forwardData.source_server_id || '';
-            var fwdCacheKey = (fwdUserId && fwdFileId) ? (fwdUserId + ':' + fwdFileId) : '';
-            // Pre-populate profileKeyCache with the key from forward payload so getProfilePicUrl can decrypt
-            if (fwdCacheKey && forwardData.sender_profile_pic_file_key) {
-                if (!profileKeyCache[fwdCacheKey]) profileKeyCache[fwdCacheKey] = forwardData.sender_profile_pic_file_key;
-            }
-            var fwdSenderPicUrl = fwdCacheKey ? getProfilePicUrl(fwdFileId, fwdUserId) : null;
-            var fwdPicHtml = fwdSenderPicUrl
-                ? '<img class="forward-sender-pic" src="' + fwdSenderPicUrl + '" alt="" data-profile-pic="' + escapeAttr(fwdCacheKey) + '">'
-                : '<span class="forward-sender-initial"' + (fwdCacheKey ? ' data-fwd-pic-load="' + escapeAttr(fwdCacheKey) + '"' : '') + '>' + (forwardData.sender_username ? forwardData.sender_username.charAt(0).toUpperCase() : '?') + '</span>';
-            contentHtml += '<div class="forward-label" data-source-server-id="' + escapeAttr(forwardData.source_server_id || '') + '" data-source-channel-id="' + escapeAttr(forwardData.source_channel_id || '') + '" data-source-message-id="' + escapeAttr(forwardData.source_message_id || '') + '">' +
-                '<div class="forward-sender-info">' + fwdPicHtml + '<span class="forward-sender-name"' + (forwardData.sender_color ? ' style="color:' + forwardData.sender_color + (forwardData.sender_border_color ? ';text-shadow:' + forwardData.sender_border_color : ';text-shadow:' + getDisplayNameTextShadow(forwardData.sender_color)) + '"' : '') + '>' + escapeHtml(forwardData.sender_username || 'unknown') + '</span></div>' +
-                '<div class="forward-source-label"><span class="forward-channel-badge">#' + escapeHtml(forwardData.source_channel_name || 'unknown') + '</span> <span class="forward-server-badge">' + escapeHtml(forwardData.source_server_name || 'unknown') + '</span></div></div>';
+            if (forwardData.source_channel_name) fwdSourceParts.push('#' + forwardData.source_channel_name);
+            if (forwardData.source_server_name) fwdSourceParts.push(forwardData.source_server_name);
         }
+        var fwdSourceText = fwdSourceParts.length > 0 ? 'Forwarded — ' + fwdSourceParts.join(' · ') : 'Forwarded';
+        contentHtml += '<div class="forward-label" data-source-server-id="' + escapeAttr(forwardData.source_server_id || '') + '" data-source-channel-id="' + escapeAttr(forwardData.source_channel_id || '') + '" data-source-message-id="' + escapeAttr(forwardData.source_message_id || '') + '"' + (forwardData.source_is_dm ? ' data-source-is-dm="true"' : '') + '>' +
+            '<div class="forward-source-label">' + escapeHtml(fwdSourceText) + '</div>';
         // Forward text preview (decrypt with DM keys)
         if (forwardData.preview_content && forwardData.preview_nonce && kp && otherPublicKey) {
             try {
@@ -8958,6 +8835,8 @@ function appendDmMessage(msg, kp, otherPublicKey) {
                 '</div>';
         } else if (forwardData.sticker) {
             contentHtml += '<div class="sticker-message" data-file-id="' + escapeAttr(forwardData.sticker.file_id) + '" data-file-key="' + escapeAttr(forwardData.sticker.file_key) + '" data-mime-type="' + escapeAttr(forwardData.sticker.mime_type) + '"></div>';
+        } else if (forwardData.files && Array.isArray(forwardData.files)) {
+            contentHtml += buildMultiFileCardHtml(forwardData.files);
         } else if (forwardData.file) {
             contentHtml += buildFileCardHtml(forwardData.file);
         }
@@ -14547,52 +14426,10 @@ async function executeDmForward(targetUserId, targetUsername, dmChannelId) {
 
         if (!fromDm) {
             // Server-source forward: include sender info
-            // For grouped messages, the header (display-name, avatar) may not be in the DOM.
-            // Walk backwards through siblings to find the sender info.
-            var senderInfo = findForwardSenderInfo(msgDiv);
-            const senderUsername = senderInfo.senderUsername;
-            const senderId = senderInfo.senderId;
-            var senderUserId = senderInfo.senderUserId || senderId;
-            var senderPicFileId = senderInfo.senderPicFileId;
-            const senderColor = senderInfo.senderColor;
-
-            // Get sender PFP key from caches so recipients can render the picture
-            // Check both raw UUID and HMAC'd key formats since profileKeyCache may have either
-            var senderPicFileKey = '';
-            if (senderUserId && senderPicFileId) {
-                var ckRaw = senderUserId + ':' + senderPicFileId;
-                var ckHMAC = senderId + ':' + senderPicFileId;
-                var myHmacId = (localStorage.getItem('e2e_hmac_key') && user) ? E2ECrypto.hmacHex(localStorage.getItem('e2e_hmac_key'), user.id) : (user ? user.id : '');
-                var foundKey = profileKeyCache[ckRaw] || (ckHMAC !== ckRaw && profileKeyCache[ckHMAC]) || null;
-                if (foundKey) {
-                    senderPicFileKey = foundKey;
-                } else if (userDisplayNameCache[senderUserId] && userDisplayNameCache[senderUserId].profile_picture_file_key) {
-                    senderPicFileKey = userDisplayNameCache[senderUserId].profile_picture_file_key;
-                } else if ((senderId === myHmacId || senderUserId === user.id) && myProfile && myProfile.profile_picture_file_key) {
-                    // Own profile picture — key is in myProfile (identity-key-encrypted).
-                    // Decrypt it before including in the payload so recipients can use it.
-                    var rawKey = myProfile.profile_picture_file_key;
-                    if (rawKey.indexOf(':') > 0) {
-                        var identity = E2ECrypto.getIdentityKeyPair();
-                        if (identity) {
-                            var decryptedKey = E2ECrypto.decodeEncryptedFileKey(rawKey, identity.privateKey);
-                            if (decryptedKey) rawKey = decryptedKey;
-                        }
-                    }
-                    senderPicFileKey = rawKey;
-                }
-            }
-
             forwardPayload.source_server_id = currentServerId;
             forwardPayload.source_channel_id = currentChannelId;
             forwardPayload.source_server_name = document.getElementById('server-name')?.textContent || 'Server';
             forwardPayload.source_channel_name = document.getElementById('channel-name')?.textContent || 'channel';
-            forwardPayload.sender_username = senderUsername;
-            forwardPayload.sender_id = senderId;
-            forwardPayload.sender_profile_pic_file_id = senderPicFileId;
-            forwardPayload.sender_profile_pic_file_key = senderPicFileKey;
-            forwardPayload.sender_color = senderColor;
-            forwardPayload.sender_border_color = senderInfo.senderBorderColor || '';
         }
 
         if (previewEncrypted) {
