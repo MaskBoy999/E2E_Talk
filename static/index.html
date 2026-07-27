@@ -571,11 +571,12 @@
 
     <!-- Forward Modal -->
     <div class="modal-overlay" id="forward-modal" style="display:none">
-        <div class="modal-content" style="max-width:400px;max-height:60vh;overflow-y:auto">
+        <div class="modal-content" style="max-width:420px;max-height:60vh;overflow-y:auto">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
                 <h3 style="margin:0;color:#d4d4d4">Forward message to...</h3>
                 <button id="cancel-forward" style="background:none;border:none;color:#aaa;font-size:20px;cursor:pointer">&times;</button>
             </div>
+            <input type="text" id="forward-channel-search" placeholder="Search servers and channels..." style="width:100%;padding:8px 12px;margin-bottom:10px;border-radius:6px;border:1px solid var(--bg-border);background:var(--bg-primary);color:var(--text-primary);font-size:13px;outline:none;box-sizing:border-box;">
             <div id="forward-channel-list"></div>
         </div>
     </div>
@@ -599,8 +600,9 @@
 
     <!-- DM Forward Modal -->
     <div class="modal" id="dm-forward-modal" style="display:none">
-        <div class="modal-content" style="max-width:400px;max-height:60vh;overflow-y:auto">
+        <div class="modal-content" style="max-width:420px;max-height:60vh;overflow-y:auto">
             <h3 style="margin-bottom:12px;color:var(--accent)">Forward to DM</h3>
+            <input type="text" id="dm-forward-search" placeholder="Search users..." style="width:100%;padding:8px 12px;margin-bottom:10px;border-radius:6px;border:1px solid var(--bg-border);background:var(--bg-primary);color:var(--text-primary);font-size:13px;outline:none;box-sizing:border-box;">
             <div id="dm-forward-list" style="max-height:400px;overflow-y:auto"></div>
             <div class="modal-actions">
                 <button class="btn-cancel" id="cancel-dm-forward">Cancel</button>

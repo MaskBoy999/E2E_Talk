@@ -6853,7 +6853,9 @@ async function appendMessage(msg) {
         // Forward text preview
         if (forwardData.preview_content && forwardData.preview_nonce) {
             try {
-                let previewText = forwardData.source_server_id ? tryDecryptWithAllKeys(forwardData.source_server_id, forwardData.preview_content, forwardData.preview_nonce) : null;
+                // Decrypt preview with currentServerId (the server we're viewing) since the preview
+                // was encrypted with the target server key when the forward was sent.
+                let previewText = currentServerId ? tryDecryptWithAllKeys(currentServerId, forwardData.preview_content, forwardData.preview_nonce) : null;
                 let previewEmojis = null;
                 try {
                     const parsed = JSON.parse(previewText);
@@ -7378,7 +7380,7 @@ function handleForwardToDm(messageId, msgDiv) {
 }
 
 function handleDmForwardToChannel(messageId, msgDiv) {
-    pendingForward = { messageId, msgDiv, fromDm: true };
+    pendingForward = { messageId, msgDiv, fromDm: true, dmDisplayName: (currentDmOtherUser && currentDmOtherUser.display_name) || 'DM' };
     showForwardAllModal();
 }
 
@@ -7789,7 +7791,10 @@ function showForwardModal() {
     const modal = document.getElementById('forward-modal');
     if (modal) {
         modal.style.display = 'flex';
-        loadForwardChannels();
+        // Reset search input
+        var searchInput = document.getElementById('forward-channel-search');
+        if (searchInput) { searchInput.value = ''; }
+        loadAllForwardChannels();
     }
 }
 
@@ -7799,40 +7804,6 @@ function showForwardAllModal() {
     if (modal) {
         modal.style.display = 'flex';
         loadAllForwardChannels();
-    }
-}
-
-async function loadForwardChannels() {
-    const list = document.getElementById('forward-channel-list');
-    if (!list) return;
-    list.innerHTML = '<div style="color:#888">Loading...</div>';
-    try {
-        const sourceServerId = pendingForward?.sourceServerId || currentServerId;
-        if (!sourceServerId) {
-            // Try showing all servers/channels instead
-            loadAllForwardChannels();
-            return;
-        }
-        const chRes = await authFetch('/api/servers/' + sourceServerId + '/channels');
-        const channels = await chRes.json();
-        const server = servers.find(s => s.id === sourceServerId);
-        // Decrypt server and channel names with the server key
-        var serverName = 'Server';
-        if (server && server.encrypted_name && server.name_nonce) {
-            try { serverName = tryDecryptWithAllKeys(sourceServerId, server.encrypted_name, server.name_nonce) || serverName; } catch (_) {}
-        }
-        let html = '<div class="forward-server"><div class="forward-server-name">' + escapeHtml(serverName) + '</div>';
-        for (const ch of channels) {
-            var chName = '(unnamed)';
-            if (ch.encrypted_name && ch.name_nonce) {
-                try { chName = tryDecryptWithAllKeys(sourceServerId, ch.encrypted_name, ch.name_nonce) || chName; } catch (_) {}
-            }
-            html += '<div class="forward-channel-item" data-server-id="' + sourceServerId + '" data-server-name="' + escapeHtml(serverName || '') + '" data-channel-id="' + ch.id + '" data-channel-name="' + escapeHtml(chName || '') + '">' + escapeHtml(chName || '(unnamed)') + '</div>';
-        }
-        html += '</div>';
-        list.innerHTML = html || '<div style="color:#888">No channels found</div>';
-    } catch (e) {
-        list.innerHTML = '<div style="color:#888">Failed to load</div>';
     }
 }
 
@@ -7854,19 +7825,57 @@ async function loadAllForwardChannels() {
             const chRes = await authFetch('/api/servers/' + server.id + '/channels');
             if (!chRes.ok) continue;
             const channels = await chRes.json();
-            html += '<div class="forward-server"><div class="forward-server-name">' + escapeHtml(srvName) + '</div>';
+            var serverHtml = '<div class="forward-server"><div class="forward-server-name">' + escapeHtml(srvName) + '</div>';
+            var channelCount = 0;
             for (const ch of channels) {
                 var chName = '(unnamed)';
                 if (ch.encrypted_name && ch.name_nonce) {
                     try { chName = tryDecryptWithAllKeys(server.id, ch.encrypted_name, ch.name_nonce) || chName; } catch (_) {}
                 }
-                html += '<div class="forward-channel-item" data-server-id="' + server.id + '" data-server-name="' + escapeHtml(srvName || '') + '" data-channel-id="' + ch.id + '" data-channel-name="' + escapeHtml(chName || '') + '">' + escapeHtml(chName || '(unnamed)') + '</div>';
+                serverHtml += '<div class="forward-channel-item" data-server-id="' + server.id + '" data-server-name="' + escapeAttr(srvName || '') + '" data-channel-id="' + ch.id + '" data-channel-name="' + escapeAttr(chName || '') + '" data-search-term="' + escapeAttr((chName + ' ' + srvName).toLowerCase()) + '">' + escapeHtml(chName || '(unnamed)') + '</div>';
+                channelCount++;
             }
-            html += '</div>';
+            serverHtml += '</div>';
+            if (channelCount > 0) html += serverHtml;
         }
         list.innerHTML = html || '<div style="color:#888">No channels found</div>';
     } catch (e) {
         list.innerHTML = '<div style="color:#888">Failed to load servers</div>';
+    }
+    // Wire up search
+    var searchInput = document.getElementById('forward-channel-search');
+    if (searchInput && !searchInput._fwdSetup) {
+        searchInput._fwdSetup = true;
+        searchInput.value = '';
+        searchInput.addEventListener('input', function() {
+            var q = this.value.trim().toLowerCase();
+            var serverEls = list.querySelectorAll('.forward-server');
+            var anyMatch = false;
+            serverEls.forEach(function(srvEl) {
+                var items = srvEl.querySelectorAll('.forward-channel-item');
+                var anyVisible = false;
+                items.forEach(function(item) {
+                    var term = item.getAttribute('data-search-term') || '';
+                    var match = !q || term.indexOf(q) !== -1;
+                    item.style.display = match ? '' : 'none';
+                    if (match) { anyVisible = true; anyMatch = true; }
+                });
+                srvEl.style.display = anyVisible ? '' : 'none';
+            });
+            // Show/hide no-results message
+            var noResults = list.querySelector('.forward-no-results');
+            if (q && !anyMatch) {
+                if (!noResults) {
+                    var el = document.createElement('div');
+                    el.className = 'forward-no-results';
+                    el.style.cssText = 'color:#666;padding:12px;font-size:13px;text-align:center;';
+                    el.textContent = 'No matching channels';
+                    list.appendChild(el);
+                }
+            } else if (noResults) {
+                noResults.remove();
+            }
+        });
     }
 }
 
@@ -7896,11 +7905,18 @@ function extractForwardFileData(msgDiv) {
     return result;
 }
 
-// Execute forward from a DM to a server channel (no sender info)
+// Execute forward from a DM to a server channel (includes sender info)
 async function executeDmForwardToChannel(targetServerId, targetChannelId) {
     if (!pendingForward || !ws || ws.readyState !== WebSocket.OPEN) return;
     const msgDiv = pendingForward.msgDiv;
     const messageId = pendingForward.messageId;
+
+    // Get sender info from the DM message (walks backwards for grouped messages)
+    var senderInfo = findForwardSenderInfo(msgDiv);
+    const senderUsername = senderInfo.senderUsername;
+    const senderId = senderInfo.senderId;
+    var senderPicFileId = senderInfo.senderPicFileId;
+    const senderColor = senderInfo.senderColor;
 
     // Get the original DM message content (already decrypted in DOM)
     const textEl = msgDiv.querySelector('.text');
@@ -7932,16 +7948,56 @@ async function executeDmForwardToChannel(targetServerId, targetChannelId) {
     var fileData = extractForwardFileData(msgDiv);
 
     try {
+        // Ensure we have the target server key first
+        var fwdDmTargetKey = E2ECrypto.getServerKey(targetServerId);
+        if (!fwdDmTargetKey) {
+            try {
+                var _dmOk = await fetchAndDecryptServerKey(targetServerId);
+                if (_dmOk) fwdDmTargetKey = E2ECrypto.getServerKey(targetServerId);
+            } catch (_) {}
+        }
         let previewEncrypted = null;
-        if (originalText) {
-            var targetKey = E2ECrypto.getServerKey(targetServerId);
-            previewEncrypted = targetKey ? E2ECrypto.encryptMessage(JSON.stringify({ type: 'text', text: originalText }), targetKey) : null;
+        if (fwdDmTargetKey && originalText) {
+            const previewPlaintext = JSON.stringify({ type: 'text', text: originalText });
+            previewEncrypted = E2ECrypto.encryptMessage(previewPlaintext, fwdDmTargetKey);
+        }
+
+        // Get sender PFP decryption key from caches so recipients can render the picture
+        var senderUserId = senderInfo.senderUserId || senderId;
+        var senderPicFileKey = '';
+        if (senderUserId && senderPicFileId) {
+            var ckRaw = senderUserId + ':' + senderPicFileId;
+            var ckHMAC = senderId + ':' + senderPicFileId;
+            var foundKey = profileKeyCache[ckRaw] || (ckHMAC !== ckRaw && profileKeyCache[ckHMAC]) || null;
+            if (foundKey) {
+                senderPicFileKey = foundKey;
+            } else if (userDisplayNameCache[senderUserId] && userDisplayNameCache[senderUserId].profile_picture_file_key) {
+                senderPicFileKey = userDisplayNameCache[senderUserId].profile_picture_file_key;
+            } else if (senderUserId === user.id && myProfile && myProfile.profile_picture_file_key) {
+                var rawKey2 = myProfile.profile_picture_file_key;
+                if (rawKey2.indexOf(':') > 0) {
+                    var identity = E2ECrypto.getIdentityKeyPair();
+                    if (identity) {
+                        var decryptedKey = E2ECrypto.decodeEncryptedFileKey(rawKey2, identity.privateKey);
+                        if (decryptedKey) rawKey2 = decryptedKey;
+                    }
+                }
+                senderPicFileKey = rawKey2;
+            }
         }
 
         const forwardPayload = {
             type: 'forward',
-            source_is_dm: true,
+            source_is_dm: false,
             source_message_id: messageId,
+            source_channel_name: 'Direct Message',
+            source_server_name: pendingForward.dmDisplayName || 'DM',
+            sender_username: senderUsername,
+            sender_id: senderId,
+            sender_profile_pic_file_id: senderPicFileId,
+            sender_profile_pic_file_key: senderPicFileKey,
+            sender_color: senderColor,
+            sender_border_color: senderInfo.senderBorderColor || '',
             timestamp: msgDiv.querySelector('.time')?.textContent || '',
         };
         if (previewEncrypted) {
@@ -7959,8 +8015,8 @@ async function executeDmForwardToChannel(targetServerId, targetChannelId) {
             }
         }
 
-        var targetKey2 = E2ECrypto.getServerKey(targetServerId);
-        const encrypted = targetKey2 ? E2ECrypto.encryptMessage(JSON.stringify(forwardPayload), targetKey2) : null;
+        // Use the key fetched at the top of this try block
+        const encrypted = fwdDmTargetKey ? E2ECrypto.encryptMessage(JSON.stringify(forwardPayload), fwdDmTargetKey) : null;
         if (encrypted) {
             ws.send(JSON.stringify({
                 type: 'message_send',
@@ -8075,13 +8131,20 @@ async function executeForward(targetServerId, targetServerName, targetChannelId,
     var fileData = extractForwardFileData(msgDiv);
 
     try {
+        // Ensure we have the target server key first (may need to fetch if forwarding to an unvisited server)
+        var fwdTargetKey = E2ECrypto.getServerKey(targetServerId);
+        if (!fwdTargetKey) {
+            try {
+                var _ok = await fetchAndDecryptServerKey(targetServerId);
+                if (_ok) fwdTargetKey = E2ECrypto.getServerKey(targetServerId);
+            } catch (_) {}
+        }
         // Wrap preview with emoji refs so recipients can render them
         const previewEmojiRefs = collectEmojiRefsFromMsgEl(msgDiv, previewText);
         let previewEncrypted = null;
-        if (previewText || previewEmojiRefs.length > 0) {
+        if (fwdTargetKey && (previewText || previewEmojiRefs.length > 0)) {
             const previewPlaintext = JSON.stringify({ type: 'text', text: previewText || '', emojis: previewEmojiRefs });
-            var targetKey = E2ECrypto.getServerKey(targetServerId);
-            previewEncrypted = targetKey ? E2ECrypto.encryptMessage(previewPlaintext, targetKey) : null;
+            previewEncrypted = E2ECrypto.encryptMessage(previewPlaintext, fwdTargetKey);
         }
         const sourceChannelId = currentChannelId;
 
@@ -8144,8 +8207,8 @@ async function executeForward(targetServerId, targetServerName, targetChannelId,
             }
         }
 
-        var targetKey2 = E2ECrypto.getServerKey(targetServerId);
-        const encrypted = targetKey2 ? E2ECrypto.encryptMessage(JSON.stringify(forwardPayload), targetKey2) : null;
+        // Use the key fetched at the top of this try block
+        const encrypted = fwdTargetKey ? E2ECrypto.encryptMessage(JSON.stringify(forwardPayload), fwdTargetKey) : null;
         if (encrypted) {
             ws.send(JSON.stringify({
                 type: 'message_send',
@@ -14294,6 +14357,9 @@ function showDmForwardModal() {
     const modal = document.getElementById('dm-forward-modal');
     if (!modal) return;
     modal.style.display = 'flex';
+    // Reset search input
+    var dmSearchInput = document.getElementById('dm-forward-search');
+    if (dmSearchInput) { dmSearchInput.value = ''; }
     loadDmForwardList();
     // Setup cancel button (if not already set up)
     const cancelBtn = document.getElementById('cancel-dm-forward');
@@ -14329,21 +14395,8 @@ async function loadDmForwardList() {
             list.innerHTML = '<div style="color:#666;padding:12px;font-size:13px;">No friends to forward to.</div>';
             return;
         }
-        // Only show users who are members of the source server
-        let allowedUserIds = null;
-        const sourceServerId = pendingForward?.sourceServerId;
-        if (sourceServerId) {
-            try {
-                const memRes = await authFetch('/api/servers/' + sourceServerId + '/members');
-                const members = await memRes.json();
-                if (Array.isArray(members)) {
-                    allowedUserIds = new Set(members.map(m => m.id));
-                }
-            } catch (_) {}
-        }
         let html = '';
         for (const c of dmConversations) {
-            if (allowedUserIds && !allowedUserIds.has(c.other_user_id)) continue;
             var _fwdCache = userDisplayNameCache[c.other_user_id];
             var fwdDisplayName = (_fwdCache && _fwdCache.display_name) || c.other_display_name || c.other_username || '?';
             const initial = fwdDisplayName.charAt(0).toUpperCase();
@@ -14354,13 +14407,14 @@ async function loadDmForwardList() {
             var fwdColor = (_fwdCache && _fwdCache.username_color) || null;
             var fwdBorderColor = (_fwdCache && _fwdCache.username_border_color) || null;
             var fwdNameStyle = fwdColor ? 'font-size:14px;color:' + fwdColor + ';text-shadow:' + getDisplayNameTextShadow(fwdColor, fwdBorderColor) : 'font-size:14px;color:var(--text-primary)';
-            html += '<div class="dm-forward-item" data-user-id="' + c.other_user_id + '" data-username="' + escapeAttr(c.other_username) + '" data-dm-channel-id="' + escapeAttr(c.dm_channel_id || '') + '" style="display:flex;align-items:center;gap:10px;padding:10px 12px;cursor:pointer;border-radius:6px;border-bottom:1px solid var(--bg-border);transition:background .15s;">' +
+            var usernameHtml = (c.other_username && fwdDisplayName !== c.other_username) ? '<span style="font-size:12px;color:var(--text-muted);margin-left:6px;">@' + escapeHtml(c.other_username) + '</span>' : '';
+            html += '<div class="dm-forward-item" data-user-id="' + c.other_user_id + '" data-username="' + escapeAttr(c.other_username) + '" data-dm-channel-id="' + escapeAttr(c.dm_channel_id || '') + '" data-search-term="' + escapeAttr((fwdDisplayName + ' ' + (c.other_username || '')).toLowerCase()) + '" style="display:flex;align-items:center;gap:10px;padding:10px 12px;cursor:pointer;border-radius:6px;border-bottom:1px solid var(--bg-border);transition:background .15s;">' +
                 avatarHtml +
-                '<span style="' + fwdNameStyle + ';">' + escapeHtml(fwdDisplayName) + '</span>' +
+                '<span style="' + fwdNameStyle + ';">' + escapeHtml(fwdDisplayName) + usernameHtml + '</span>' +
                 '</div>';
         }
         if (!html) {
-            list.innerHTML = '<div style="color:#666;padding:12px;font-size:13px;">No server members to forward to.</div>';
+            list.innerHTML = '<div style="color:#666;padding:12px;font-size:13px;">No friends to forward to.</div>';
             return;
         }
         list.innerHTML = html;
@@ -14378,6 +14432,35 @@ async function loadDmForwardList() {
         });
     } catch (e) {
         list.innerHTML = '<div style="color:#666;padding:12px;">Failed to load friends.</div>';
+    }
+    // Wire up DM search
+    var dmSearchInput = document.getElementById('dm-forward-search');
+    if (dmSearchInput && !dmSearchInput._dmfSetup) {
+        dmSearchInput._dmfSetup = true;
+        dmSearchInput.value = '';
+        dmSearchInput.addEventListener('input', function() {
+            var q = this.value.trim().toLowerCase();
+            var anyMatch = false;
+            list.querySelectorAll('.dm-forward-item').forEach(function(item) {
+                var term = item.getAttribute('data-search-term') || '';
+                var match = !q || term.indexOf(q) !== -1;
+                item.style.display = match ? '' : 'none';
+                if (match) anyMatch = true;
+            });
+            // Show/hide no-results message
+            var noResults = list.querySelector('.dm-forward-no-results');
+            if (q && !anyMatch) {
+                if (!noResults) {
+                    var el = document.createElement('div');
+                    el.className = 'dm-forward-no-results';
+                    el.style.cssText = 'color:#666;padding:12px;font-size:13px;text-align:center;';
+                    el.textContent = 'No matching users';
+                    list.appendChild(el);
+                }
+            } else if (noResults) {
+                noResults.remove();
+            }
+        });
     }
 }
 
