@@ -5796,6 +5796,21 @@ function connectWebSocket(t) {
                     updateExistingMessageStyles(data.user_id);
                     updateMemberListItem(data.user_id);
 
+                    // If we couldn't decrypt the profile update for another user,
+                    // try to fetch via conversation profile API (uses server key or DM key)
+                    if (!decryptedProfileUpdate && data.user_id !== user.id) {
+                        delete userDisplayNameCache[data.user_id];
+                        if (currentServerId) {
+                            var _srvKey = E2ECrypto.getServerKey(currentServerId);
+                            if (_srvKey) {
+                                fetchServerConversationProfile(data.user_id, currentServerId, _srvKey);
+                            }
+                        }
+                        if (viewMode === 'dms' && currentDmChannelId) {
+                            fetchDmConversationProfile(data.user_id, currentDmChannelId);
+                        }
+                    }
+
                     // Invalidate profile pic cache and profile key cache for this user
                     for (var pk in profilePicCache) {
                         if (pk.startsWith(data.user_id + ':')) {
@@ -16741,6 +16756,15 @@ async function saveProfile() {
         setTimeout(function() {
             broadcastProfileKeySyncToAllDms();
         }, 500);
+        
+        // Also broadcast updated display name/colors to all servers we're in
+        setTimeout(function() {
+            servers.forEach(function(srv) {
+                if (srv && srv.id) {
+                    broadcastProfileKeySyncToServer(srv.id);
+                }
+            });
+        }, 600);
         
         setTimeout(function() { statusEl.style.display = 'none'; }, 2000);
     } catch (e) {
