@@ -4818,6 +4818,7 @@ function setupMentionAutocomplete() {
             // PFP or initial
             var initial = (m.username || '?').charAt(0).toUpperCase();
             var picUrl = m.profile_picture_file_id ? getProfilePicUrl(m.profile_picture_file_id, m.id) : null;
+            var mentionPicCacheKey = (m.id && m.profile_picture_file_id) ? (m.id + ':' + m.profile_picture_file_id) : '';
             
             // Online/offline status dot
             var isOnline = onlineUsers.has(m.id);
@@ -4825,7 +4826,7 @@ function setupMentionAutocomplete() {
             
             // Avatar wrapper with status dot
             var avatarHtml = '<span class="mention-item-avatar-wrap">' +
-                (picUrl ? '<img class="mention-item-avatar" src="' + picUrl + '" alt="">' : '<span class="mention-item-avatar">' + initial + '</span>') +
+                (picUrl ? '<img class="mention-item-avatar" src="' + picUrl + '" alt="">' : '<span class="mention-item-avatar"' + (mentionPicCacheKey ? ' data-profile-pic-load="' + escapeAttr(mentionPicCacheKey) + '"' : '') + '>' + initial + '</span>') +
                 statusDot + '</span>';
             
             // Display name with color and glow
@@ -5066,7 +5067,8 @@ function connectWebSocket(t) {
                         var lastMsg = msgList ? msgList.lastElementChild : null;
                         if (lastMsg && lastMsg.classList.contains('mentioned')) {
                             // Skip toast/flash if the sender's DM is muted (cross-mute)
-                            if (!isUserMuted(data.message.sender_id)) {
+                            // Use sender_user_id (raw UUID) since sender_id is now HMAC'd
+                            if (!isUserMuted(data.message.sender_user_id || data.message.sender_id)) {
                                 showMentionToast(data.message.sender_username, data.server_id, data.channel_id, data.message.id);
                                 if (data.server_id) flashServerIcon(data.server_id);
                             }
@@ -5105,7 +5107,9 @@ function connectWebSocket(t) {
                     } else {
                         // Message is for a different DM channel
                         // Don't notify self (e.g. when forwarding a message to own DM)
-                        var isOwnMessage = data.message && data.message.sender_id === user.id;
+                        // Use sender_user_id (raw UUID) for comparison since sender_id is now HMAC'd
+                        var msgSenderUserId = data.message.sender_user_id || data.message.sender_id;
+                        var isOwnMessage = msgSenderUserId === user.id;
                         if (!isDmMuted(data.dm_channel_id) && !isOwnMessage) {
                             // Only track unread + notify if not muted and not own message
                             unreadDms[data.dm_channel_id] = (unreadDms[data.dm_channel_id] || 0) + 1;
@@ -5171,7 +5175,8 @@ function connectWebSocket(t) {
                         // Upload the CURRENT server key for the new member instead of rotating.
                         // Rotating would overwrite the key and break decryption of existing
                         // server/channel names that were encrypted with the old key.
-                        await uploadServerKeyForUser(data.server_id, data.user_id);
+                        // Use raw_user_id (raw UUID) for API calls — user_id is HMAC'd
+                        await uploadServerKeyForUser(data.server_id, data.raw_user_id || data.user_id);
                     } else {
                         // Non-owner: fetch the server key
                         await fetchAndDecryptServerKey(data.server_id);
@@ -5205,7 +5210,9 @@ function connectWebSocket(t) {
                     if (data.server_id === currentServerId) {
                         await loadMembers(data.server_id);
                     }
-                    if (data.user_id === user.id) {
+                    // Use raw_user_id for comparison against user.id (raw UUID) — user_id is HMAC'd
+                    var evUserId = data.raw_user_id || data.user_id;
+                    if (evUserId === user.id) {
                         // This user was kicked/banned/left — remove the server from their sidebar
                         if (data.server_id === currentServerId) {
                             // Currently viewing this server — clear the view
@@ -5456,22 +5463,24 @@ function connectWebSocket(t) {
                 try { await uploadCurrentProfileToConversations(); } catch (_) {}
                 break;
             case 'friend_removed':
+                // Use raw_by_user_id (raw UUID) for comparisons — by_user_id is HMAC'd
+                var frByUserId = data.raw_by_user_id || data.by_user_id;
                 // If WE initiated the unfriend (by_user_id is our own ID),
                 // reload conversations from the server since we don't know
                 // the unfriended user's ID from the payload alone.
-                if (data.by_user_id === user.id) {
+                if (frByUserId === user.id) {
                     await loadDmConversations();
                 } else {
                     // Filter out the DM conversation with the unfriended user
                     dmConversations = dmConversations.filter(function(c) {
-                        return c.other_user_id !== data.by_user_id;
+                        return c.other_user_id !== frByUserId;
                     });
                 }
                 if (viewMode === 'dms') {
                     renderDmSidebar();
                 }
                 // If currently viewing the DM with the unfriended user, clear the view
-                if (data.by_user_id && currentDmOtherUser && data.by_user_id === currentDmOtherUser.id) {
+                if (frByUserId && currentDmOtherUser && frByUserId === currentDmOtherUser.id) {
                     currentDmChannelId = null;
                     currentDmOtherUser = null;
                     document.getElementById('channel-name').textContent = 'Select a conversation';
@@ -5881,8 +5890,8 @@ function connectWebSocket(t) {
                     }
                 }
                 if (decSender) {
-                    if (!isMuted(data.server_id, data.channel_id) && !isUserMuted(data.sender_id)) {
-                        trackUnreadMention(data.server_id, data.channel_id, data.dm_channel_id, data.message_id, decSender, decChannel, decServer, 'mention', data.sender_id, data.sender_profile_pic);
+                    if (!isMuted(data.server_id, data.channel_id) && !isUserMuted(data.sender_user_id || data.sender_id)) {
+                        trackUnreadMention(data.server_id, data.channel_id, data.dm_channel_id, data.message_id, decSender, decChannel, decServer, 'mention', data.sender_user_id || data.sender_id, data.sender_profile_pic);
                         playNotificationSound();
                         var loc = decChannel ? decChannel : (data.dm_channel_id ? 'your DM' : 'a channel');
                         showBrowserNotification('Mentioned by ' + decSender, 'You were mentioned in ' + (decServer ? decServer + ' ' : '') + loc, function () {
@@ -5890,7 +5899,7 @@ function connectWebSocket(t) {
                         });
                         // Show in-app toast + flash server icon if currently viewing this channel
                         if (data.channel_id && data.channel_id === currentChannelId && data.server_id && data.server_id === currentServerId) {
-                            if (!isUserMuted(data.sender_id)) {
+                            if (!isUserMuted(data.sender_user_id || data.sender_id)) {
                                 showMentionToast(decSender, data.server_id, data.channel_id, data.message_id);
                                 flashServerIcon(data.server_id);
                             }
@@ -5937,8 +5946,8 @@ function connectWebSocket(t) {
                     }
                 }
                 if (decSender) {
-                    if (!isMuted(data.server_id, data.channel_id) && !isUserMuted(data.sender_id)) {
-                        trackUnreadMention(data.server_id, data.channel_id, data.dm_channel_id, data.message_id, decSender, decChannel, decServer, 'reply', data.sender_id, data.sender_profile_pic);
+                    if (!isMuted(data.server_id, data.channel_id) && !isUserMuted(data.sender_user_id || data.sender_id)) {
+                        trackUnreadMention(data.server_id, data.channel_id, data.dm_channel_id, data.message_id, decSender, decChannel, decServer, 'reply', data.sender_user_id || data.sender_id, data.sender_profile_pic);
                         playNotificationSound();
                         var loc = decChannel ? decChannel : (data.dm_channel_id ? 'your DM' : 'a channel');
                         showBrowserNotification('Reply from ' + decSender, decSender + ' replied to you in ' + (decServer ? decServer + ' ' : '') + loc, function () {
@@ -6641,6 +6650,10 @@ async function appendMessage(msg) {
                         msg.sender_profile_pic = snap.profile_picture_file_id;
                         if (snap.profile_picture_file_key) {
                             profileKeyCache[senderIdForCache + ':' + snap.profile_picture_file_id] = snap.profile_picture_file_key;
+                            // Also store with HMAC'd sender_id key so getProfilePicUrl can find it when called with HMAC'd ID
+                            if (msg.sender_id && msg.sender_id !== senderIdForCache) {
+                                profileKeyCache[msg.sender_id + ':' + snap.profile_picture_file_id] = snap.profile_picture_file_key;
+                            }
                             scheduleProfileKeySave();
                         }
                     }
@@ -6687,6 +6700,14 @@ async function appendMessage(msg) {
     const _srvCache = msg.sender_id ? userDisplayNameCache[senderIdForCache] : null;
     const displayName = msg.sender_display_name || (_srvCache && _srvCache.display_name) || msg.sender_username;
     const initial = displayName ? displayName.charAt(0).toUpperCase() : '';
+    // Fallback to cached profile pic if snapshot/conv profile didn't provide one
+    if (!msg.sender_profile_pic && _srvCache && _srvCache.profile_picture_file_id) {
+        msg.sender_profile_pic = _srvCache.profile_picture_file_id;
+    }
+    // Fallback to own profile pic for own messages
+    if (!msg.sender_profile_pic && isOwn && myProfile && myProfile.profile_picture_file_id) {
+        msg.sender_profile_pic = myProfile.profile_picture_file_id;
+    }
     var senderPicUrl = msg.sender_profile_pic ? getProfilePicUrl(msg.sender_profile_pic, msg.sender_id) : null;
     let time = '';
     try {
@@ -6713,11 +6734,15 @@ async function appendMessage(msg) {
             // Verify message signature if present
 
             // Decrypt and cache sender's profile picture key from message
-            if (msg.encrypted_profile_key && msg.profile_key_nonce && msg.sender_profile_pic && msg.sender_id && textContent) {
+            if (msg.encrypted_profile_key && msg.profile_key_nonce && msg.sender_profile_pic && msg.sender_id) {
                 try {
                     var decryptedPicKey = tryDecryptWithAllKeys(currentServerId, msg.encrypted_profile_key, msg.profile_key_nonce);
                     if (decryptedPicKey) {
                         profileKeyCache[msg.sender_id + ':' + msg.sender_profile_pic] = decryptedPicKey;
+                        // Also store with raw UUID key so getProfilePicUrl can find it when called with raw UUID
+                        if (msg.sender_user_id) {
+                            profileKeyCache[msg.sender_user_id + ':' + msg.sender_profile_pic] = decryptedPicKey;
+                        }
                         scheduleProfileKeySave();
                     }
                 } catch (_e) {
@@ -6725,13 +6750,17 @@ async function appendMessage(msg) {
                 }
             }
             // Decrypt and cache sender's banner key from message
-            if (msg.encrypted_banner_key && msg.banner_key_nonce && msg.sender_id && textContent) {
+            if (msg.encrypted_banner_key && msg.banner_key_nonce && msg.sender_id) {
                 try {
                     var decryptedBannerKey = tryDecryptWithAllKeys(currentServerId, msg.encrypted_banner_key, msg.banner_key_nonce);
                     if (decryptedBannerKey) {
                         // Cache banner key with ':banner' suffix since the banner file_id
                         // is not included in the WS message (it's fetched from the profile API)
                         profileKeyCache[msg.sender_id + ':banner'] = decryptedBannerKey;
+                        // Also store with raw UUID key for DM header / member list lookups
+                        if (msg.sender_user_id) {
+                            profileKeyCache[msg.sender_user_id + ':banner'] = decryptedBannerKey;
+                        }
                         scheduleProfileKeySave();
                     }
                 } catch (_e) {
@@ -6781,6 +6810,12 @@ async function appendMessage(msg) {
         }
     }
 
+    // Break message grouping for file messages so they have their own header
+    if (fileData || filesData) {
+        div.classList.remove('grouped');
+        lastMessageInfo = { senderId: null, channelId: null, time: 0 };
+    }
+
     let contentHtml = '';
     if (replyTo) {
         var replyPicUrl = replyTo.sender_profile_pic ? getProfilePicUrl(replyTo.sender_profile_pic, replyTo.sender_id) : null;
@@ -6802,13 +6837,15 @@ async function appendMessage(msg) {
             // Server-sourced forward: show original sender info with source link
             var fwdFileId = forwardData.sender_profile_pic_file_id || forwardData.sender_profile_pic || '';
             var fwdUserId = forwardData.sender_id || forwardData.source_server_id || '';
+            var fwdCacheKey = (fwdUserId && fwdFileId) ? (fwdUserId + ':' + fwdFileId) : '';
             // Pre-populate profileKeyCache with the key from forward payload so getProfilePicUrl can decrypt
-            if (fwdFileId && fwdUserId && forwardData.sender_profile_pic_file_key) {
-                var ck = fwdUserId + ':' + fwdFileId;
-                if (!profileKeyCache[ck]) profileKeyCache[ck] = forwardData.sender_profile_pic_file_key;
+            if (fwdCacheKey && forwardData.sender_profile_pic_file_key) {
+                if (!profileKeyCache[fwdCacheKey]) profileKeyCache[fwdCacheKey] = forwardData.sender_profile_pic_file_key;
             }
-            var fwdSenderPicUrl = fwdFileId && fwdUserId ? getProfilePicUrl(fwdFileId, fwdUserId) : null;
-            var fwdPicHtml = fwdSenderPicUrl ? '<img class="forward-sender-pic" src="' + fwdSenderPicUrl + '" alt="">' : '<span class="forward-sender-initial">' + (forwardData.sender_username ? forwardData.sender_username.charAt(0).toUpperCase() : '?') + '</span>';
+            var fwdSenderPicUrl = fwdCacheKey ? getProfilePicUrl(fwdFileId, fwdUserId) : null;
+            var fwdPicHtml = fwdSenderPicUrl
+                ? '<img class="forward-sender-pic" src="' + fwdSenderPicUrl + '" alt="" data-profile-pic="' + escapeAttr(fwdCacheKey) + '">'
+                : '<span class="forward-sender-initial"' + (fwdCacheKey ? ' data-fwd-pic-load="' + escapeAttr(fwdCacheKey) + '"' : '') + '>' + (forwardData.sender_username ? forwardData.sender_username.charAt(0).toUpperCase() : '?') + '</span>';
             contentHtml += '<div class="forward-label" data-source-server-id="' + escapeAttr(forwardData.source_server_id || '') + '" data-source-channel-id="' + escapeAttr(forwardData.source_channel_id || '') + '" data-source-message-id="' + escapeAttr(forwardData.source_message_id || '') + '">' +
                 '<div class="forward-sender-info">' + fwdPicHtml + '<span class="forward-sender-name"' + (forwardData.sender_color ? ' style="color:' + forwardData.sender_color + (forwardData.sender_border_color ? ';text-shadow:' + forwardData.sender_border_color : ';text-shadow:' + getDisplayNameTextShadow(forwardData.sender_color)) + '"' : '') + '>' + escapeHtml(forwardData.sender_username || 'unknown') + '</span></div>' +
                 '<div class="forward-source-label"><span class="forward-channel-badge">#' + escapeHtml(forwardData.source_channel_name || 'unknown') + '</span> <span class="forward-server-badge">' + escapeHtml(forwardData.source_server_name || 'unknown') + '</span></div></div>';
@@ -8049,16 +8086,19 @@ async function executeForward(targetServerId, targetServerName, targetChannelId,
         const sourceChannelId = currentChannelId;
 
         // Get sender PFP decryption key from caches so recipients can render the picture
-        // Use senderUserId (raw UUID) for cache lookups since profileKeyCache is keyed by raw UUID, not HMAC
         var senderUserId = senderInfo.senderUserId || senderId;
+        var myHmacId = (localStorage.getItem('e2e_hmac_key') && user) ? E2ECrypto.hmacHex(localStorage.getItem('e2e_hmac_key'), user.id) : (user ? user.id : '');
         var senderPicFileKey = '';
         if (senderUserId && senderPicFileId) {
-            var ck = senderUserId + ':' + senderPicFileId;
-            if (profileKeyCache[ck]) {
-                senderPicFileKey = profileKeyCache[ck];
+            // Check both raw UUID and HMAC'd key formats since profileKeyCache may have either
+            var ckRaw = senderUserId + ':' + senderPicFileId;
+            var ckHMAC = senderId + ':' + senderPicFileId;
+            var foundKey = profileKeyCache[ckRaw] || (ckHMAC !== ckRaw && profileKeyCache[ckHMAC]) || null;
+            if (foundKey) {
+                senderPicFileKey = foundKey;
             } else if (userDisplayNameCache[senderUserId] && userDisplayNameCache[senderUserId].profile_picture_file_key) {
                 senderPicFileKey = userDisplayNameCache[senderUserId].profile_picture_file_key;
-            } else if (senderId === user.id && myProfile && myProfile.profile_picture_file_key) {
+            } else if ((senderId === myHmacId || senderUserId === user.id) && myProfile && myProfile.profile_picture_file_key) {
                 // Own profile picture — key is in myProfile (identity-key-encrypted).
                 // Decrypt it before including in the payload so recipients can use it.
                 var rawKey = myProfile.profile_picture_file_key;
@@ -8520,6 +8560,12 @@ async function selectDmChannel(dmChannelId, otherUserId, otherUsername, element)
     updateDmStripBadge();
     updateMentionsBadge();
     saveMentionState();
+
+    // Send our profile data to the other user when we open their DM
+    if (conv) {
+        sendProfileKeySync(dmChannelId, conv);
+    }
+
     await loadDmMessages(dmChannelId, otherUserId);
     renderDmSidebar();
 
@@ -8621,6 +8667,10 @@ function appendDmMessage(msg, kp, otherPublicKey) {
                     msg.sender_profile_pic = snap.profile_picture_file_id;
                     if (snap.profile_picture_file_key) {
                         profileKeyCache[senderIdForCache + ':' + snap.profile_picture_file_id] = snap.profile_picture_file_key;
+                        // Also store with HMAC'd sender_id key so getProfilePicUrl can find it when called with HMAC'd ID
+                        if (msg.sender_id && msg.sender_id !== senderIdForCache) {
+                            profileKeyCache[msg.sender_id + ':' + snap.profile_picture_file_id] = snap.profile_picture_file_key;
+                        }
                         scheduleProfileKeySave();
                     }
                 }
@@ -8775,6 +8825,12 @@ function appendDmMessage(msg, kp, otherPublicKey) {
         }
     }
 
+    // Break message grouping for file messages so they have their own header
+    if (fileData || filesData) {
+        div.classList.remove('grouped');
+        lastDmMessageInfo = { senderId: null, dmChannelId: null, time: 0 };
+    }
+
     let contentHtml = '';
     if (replyTo) {
         var replyPicUrl = replyTo.sender_profile_pic ? getProfilePicUrl(replyTo.sender_profile_pic, replyTo.sender_id) : null;
@@ -8795,13 +8851,15 @@ function appendDmMessage(msg, kp, otherPublicKey) {
             // Server-sourced forward: show original sender info with source link
             var fwdFileId = forwardData.sender_profile_pic_file_id || forwardData.sender_profile_pic || '';
             var fwdUserId = forwardData.sender_id || forwardData.source_server_id || '';
+            var fwdCacheKey = (fwdUserId && fwdFileId) ? (fwdUserId + ':' + fwdFileId) : '';
             // Pre-populate profileKeyCache with the key from forward payload so getProfilePicUrl can decrypt
-            if (fwdFileId && fwdUserId && forwardData.sender_profile_pic_file_key) {
-                var ck = fwdUserId + ':' + fwdFileId;
-                if (!profileKeyCache[ck]) profileKeyCache[ck] = forwardData.sender_profile_pic_file_key;
+            if (fwdCacheKey && forwardData.sender_profile_pic_file_key) {
+                if (!profileKeyCache[fwdCacheKey]) profileKeyCache[fwdCacheKey] = forwardData.sender_profile_pic_file_key;
             }
-            var fwdSenderPicUrl = fwdFileId && fwdUserId ? getProfilePicUrl(fwdFileId, fwdUserId) : null;
-            var fwdPicHtml = fwdSenderPicUrl ? '<img class="forward-sender-pic" src="' + fwdSenderPicUrl + '" alt="">' : '<span class="forward-sender-initial">' + (forwardData.sender_username ? forwardData.sender_username.charAt(0).toUpperCase() : '?') + '</span>';
+            var fwdSenderPicUrl = fwdCacheKey ? getProfilePicUrl(fwdFileId, fwdUserId) : null;
+            var fwdPicHtml = fwdSenderPicUrl
+                ? '<img class="forward-sender-pic" src="' + fwdSenderPicUrl + '" alt="" data-profile-pic="' + escapeAttr(fwdCacheKey) + '">'
+                : '<span class="forward-sender-initial"' + (fwdCacheKey ? ' data-fwd-pic-load="' + escapeAttr(fwdCacheKey) + '"' : '') + '>' + (forwardData.sender_username ? forwardData.sender_username.charAt(0).toUpperCase() : '?') + '</span>';
             contentHtml += '<div class="forward-label" data-source-server-id="' + escapeAttr(forwardData.source_server_id || '') + '" data-source-channel-id="' + escapeAttr(forwardData.source_channel_id || '') + '" data-source-message-id="' + escapeAttr(forwardData.source_message_id || '') + '">' +
                 '<div class="forward-sender-info">' + fwdPicHtml + '<span class="forward-sender-name"' + (forwardData.sender_color ? ' style="color:' + forwardData.sender_color + (forwardData.sender_border_color ? ';text-shadow:' + forwardData.sender_border_color : ';text-shadow:' + getDisplayNameTextShadow(forwardData.sender_color)) + '"' : '') + '>' + escapeHtml(forwardData.sender_username || 'unknown') + '</span></div>' +
                 '<div class="forward-source-label"><span class="forward-channel-badge">#' + escapeHtml(forwardData.source_channel_name || 'unknown') + '</span> <span class="forward-server-badge">' + escapeHtml(forwardData.source_server_name || 'unknown') + '</span></div></div>';
@@ -14291,7 +14349,8 @@ async function loadDmForwardList() {
             const initial = fwdDisplayName.charAt(0).toUpperCase();
             var fwdPicFileId = c.other_profile_picture_file_id || (userDisplayNameCache[c.other_user_id] && userDisplayNameCache[c.other_user_id].profile_picture_file_id);
             var fwdPicUrl = fwdPicFileId ? getProfilePicUrl(fwdPicFileId, c.other_user_id) : null;
-            var avatarHtml = fwdPicUrl ? '<img src="' + fwdPicUrl + '" alt="" style="width:32px;height:32px;border-radius:50%;object-fit:cover;flex-shrink:0;">' : '<div style="width:32px;height:32px;border-radius:50%;background:var(--accent);color:var(--bg-primary);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;flex-shrink:0;overflow:hidden;">' + initial + '</div>';
+            var fwdPicCacheKey = (c.other_user_id && fwdPicFileId) ? (c.other_user_id + ':' + fwdPicFileId) : '';
+            var avatarHtml = fwdPicUrl ? '<img src="' + fwdPicUrl + '" alt="" style="width:32px;height:32px;border-radius:50%;object-fit:cover;flex-shrink:0;">' : '<div style="width:32px;height:32px;border-radius:50%;background:var(--accent);color:var(--bg-primary);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;flex-shrink:0;overflow:hidden;"' + (fwdPicCacheKey ? ' data-profile-pic-load="' + escapeAttr(fwdPicCacheKey) + '"' : '') + '>' + initial + '</div>';
             var fwdColor = (_fwdCache && _fwdCache.username_color) || null;
             var fwdBorderColor = (_fwdCache && _fwdCache.username_border_color) || null;
             var fwdNameStyle = fwdColor ? 'font-size:14px;color:' + fwdColor + ';text-shadow:' + getDisplayNameTextShadow(fwdColor, fwdBorderColor) : 'font-size:14px;color:var(--text-primary)';
@@ -14415,15 +14474,18 @@ async function executeDmForward(targetUserId, targetUsername, dmChannelId) {
             const senderColor = senderInfo.senderColor;
 
             // Get sender PFP key from caches so recipients can render the picture
-            // Use senderUserId (raw UUID) for cache lookups since profileKeyCache is keyed by raw UUID, not HMAC
+            // Check both raw UUID and HMAC'd key formats since profileKeyCache may have either
             var senderPicFileKey = '';
             if (senderUserId && senderPicFileId) {
-                var ck = senderUserId + ':' + senderPicFileId;
-                if (profileKeyCache[ck]) {
-                    senderPicFileKey = profileKeyCache[ck];
+                var ckRaw = senderUserId + ':' + senderPicFileId;
+                var ckHMAC = senderId + ':' + senderPicFileId;
+                var myHmacId = (localStorage.getItem('e2e_hmac_key') && user) ? E2ECrypto.hmacHex(localStorage.getItem('e2e_hmac_key'), user.id) : (user ? user.id : '');
+                var foundKey = profileKeyCache[ckRaw] || (ckHMAC !== ckRaw && profileKeyCache[ckHMAC]) || null;
+                if (foundKey) {
+                    senderPicFileKey = foundKey;
                 } else if (userDisplayNameCache[senderUserId] && userDisplayNameCache[senderUserId].profile_picture_file_key) {
                     senderPicFileKey = userDisplayNameCache[senderUserId].profile_picture_file_key;
-                } else if (senderUserId === user.id && myProfile && myProfile.profile_picture_file_key) {
+                } else if ((senderId === myHmacId || senderUserId === user.id) && myProfile && myProfile.profile_picture_file_key) {
                     // Own profile picture — key is in myProfile (identity-key-encrypted).
                     // Decrypt it before including in the payload so recipients can use it.
                     var rawKey = myProfile.profile_picture_file_key;
@@ -14647,6 +14709,10 @@ function getProfilePicUrl(fileId, userId) {
                 span.textContent = initialText;
                 el.appendChild(span);
             }
+        });
+        // Update forward sender initial-letter placeholders (data-fwd-pic-load)
+        document.querySelectorAll('[data-fwd-pic-load="' + cacheKey + '"]').forEach(function (el) {
+            el.outerHTML = '<img class="forward-sender-pic" src="' + url + '" alt="">';
         });
     }).catch(function () {});
     return null; // Will be updated async when fetch completes

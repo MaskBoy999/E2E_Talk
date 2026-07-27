@@ -1470,7 +1470,8 @@ pub async fn join_server(
     let join_msg = serde_json::json!({
         "type": "member_joined",
         "server_id": server.id,
-        "user_id": user_id,
+        "user_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &user_id),
+        "raw_user_id": user_id,
     });
     if let Ok(members) = state.db.get_server_members(&server.id) {
         let _ = state.ws_manager.broadcast_to_users(&members, &join_msg.to_string()).await;
@@ -1533,7 +1534,8 @@ pub async fn kick_member(
             let kick_msg = serde_json::json!({
                 "type": "member_kicked",
                 "server_id": server_id,
-                "user_id": req.user_id,
+                "user_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &req.user_id),
+                "raw_user_id": req.user_id,
             });
             if let Ok(members) = state.db.get_server_members(&server_id) {
                 // Also broadcast to the kicked user so their UI updates without refresh
@@ -1588,9 +1590,10 @@ pub async fn leave_server(
             } else {
                 // Member left: broadcast member_left
                 let leave_msg = serde_json::json!({
-                    "type": "member_left",
-                    "server_id": server_id,
-                    "user_id": user_id,
+                "type": "member_left",
+                "server_id": server_id,
+                "user_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &user_id),
+                "raw_user_id": user_id,
                 });
                 if let Ok(members) = state.db.get_server_members(&server_id) {
                     // Also broadcast to the leaving user so their UI updates in all tabs
@@ -1656,7 +1659,8 @@ pub async fn ban_member(
             let ban_msg = serde_json::json!({
                 "type": "member_banned",
                 "server_id": server_id,
-                "user_id": req.user_id,
+                "user_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &req.user_id),
+                "raw_user_id": req.user_id,
             });
             if let Ok(members) = state.db.get_server_members(&server_id) {
                 // Also broadcast to the banned user so their UI updates without refresh
@@ -4397,7 +4401,8 @@ pub async fn remove_friend(
             // Include both the caller and the other user for multi-tab consistency
             let notify = serde_json::json!({
                 "type": "friend_removed",
-                "by_user_id": user_id,
+                "by_user_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &user_id),
+                "raw_by_user_id": user_id,
             });
             let _ = state
                 .ws_manager

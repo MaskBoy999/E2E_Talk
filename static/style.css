@@ -2886,6 +2886,18 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     100% { background-position: -200% 0; }
 }
 
+/* ===== Profile Picture Loading Skeleton ===== */
+@keyframes pfpLoadingPulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+}
+
+[data-profile-pic-load],
+[data-fwd-pic-load] {
+    animation: pfpLoadingPulse 1.6s ease-in-out;
+    animation-iteration-count: 8;
+}
+
 /* Success glow — added via JS when send completes */
 .sticker-send-progress .progress-bar-fill.success {
     background: var(--success) !important;
