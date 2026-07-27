@@ -559,10 +559,12 @@ async fn handle_ws_message(
             let profile_key_nonce = parsed.get("profile_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
             let profile_key_message_nonce = parsed.get("profile_key_message_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
             let profile_picture_file_id = parsed.get("profile_picture_file_id").and_then(|c| c.as_str()).map(|s| s.to_string());
+            let profile_picture_file_id_hash = parsed.get("profile_picture_file_id_hash").and_then(|c| c.as_str()).map(|s| s.to_string());
             let encrypted_banner_key = parsed.get("encrypted_banner_key").and_then(|c| c.as_str()).map(|s| s.to_string());
             let banner_key_nonce = parsed.get("banner_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
             let banner_key_message_nonce = parsed.get("banner_key_message_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
             let profile_banner_file_id = parsed.get("profile_banner_file_id").and_then(|c| c.as_str()).map(|s| s.to_string());
+            let profile_banner_file_id_hash = parsed.get("profile_banner_file_id_hash").and_then(|c| c.as_str()).map(|s| s.to_string());
             let encrypted_profile_data_key = parsed.get("encrypted_profile_data_key").and_then(|c| c.as_str()).map(|s| s.to_string());
             let profile_data_key_nonce = parsed.get("profile_data_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
 
@@ -571,10 +573,12 @@ async fn handle_ws_message(
                 "user_id": user_id,
                 "dm_channel_id": dm_channel_id,
                 "profile_picture_file_id": profile_picture_file_id,
+                "profile_picture_file_id_hash": profile_picture_file_id_hash,
                 "encrypted_profile_key": encrypted_profile_key,
                 "profile_key_nonce": profile_key_nonce,
                 "profile_key_message_nonce": profile_key_message_nonce,
                 "profile_banner_file_id": profile_banner_file_id,
+                "profile_banner_file_id_hash": profile_banner_file_id_hash,
                 "encrypted_banner_key": encrypted_banner_key,
                 "banner_key_nonce": banner_key_nonce,
                 "banner_key_message_nonce": banner_key_message_nonce,
@@ -988,9 +992,11 @@ async fn handle_ws_message(
             let encrypted_profile_key = parsed.get("encrypted_profile_key").and_then(|c| c.as_str()).map(|s| s.to_string());
             let profile_key_nonce = parsed.get("profile_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
             let profile_picture_file_id = parsed.get("profile_picture_file_id").and_then(|c| c.as_str()).map(|s| s.to_string());
+            let profile_picture_file_id_hash = parsed.get("profile_picture_file_id_hash").and_then(|c| c.as_str()).map(|s| s.to_string());
             let encrypted_banner_key = parsed.get("encrypted_banner_key").and_then(|c| c.as_str()).map(|s| s.to_string());
             let banner_key_nonce = parsed.get("banner_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
             let profile_banner_file_id = parsed.get("profile_banner_file_id").and_then(|c| c.as_str()).map(|s| s.to_string());
+            let profile_banner_file_id_hash = parsed.get("profile_banner_file_id_hash").and_then(|c| c.as_str()).map(|s| s.to_string());
             let encrypted_profile_data_key = parsed.get("encrypted_profile_data_key").and_then(|c| c.as_str()).map(|s| s.to_string());
             let profile_data_key_nonce = parsed.get("profile_data_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
 
@@ -999,9 +1005,11 @@ async fn handle_ws_message(
                 "user_id": user_id,
                 "server_id": server_id,
                 "profile_picture_file_id": profile_picture_file_id,
+                "profile_picture_file_id_hash": profile_picture_file_id_hash,
                 "encrypted_profile_key": encrypted_profile_key,
                 "profile_key_nonce": profile_key_nonce,
                 "profile_banner_file_id": profile_banner_file_id,
+                "profile_banner_file_id_hash": profile_banner_file_id_hash,
                 "encrypted_banner_key": encrypted_banner_key,
                 "banner_key_nonce": banner_key_nonce,
                 "encrypted_profile_data_key": encrypted_profile_data_key,

@@ -290,6 +290,7 @@ async fn main() {
         .route("/api/files/{file_id}/chunk/{index}", post(handlers::upload_file_chunk))
         .route("/api/files/{file_id}/complete", post(handlers::complete_file_upload))
         .route("/api/files/{file_id}/download", get(handlers::download_file))
+        .route("/api/files/by-hash/{hash}/download", get(handlers::download_file_by_hash))
         // Phase 10: Server Stickers
         
         // Phase 12: User Stickers/GIFs

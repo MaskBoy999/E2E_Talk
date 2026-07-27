@@ -11,7 +11,7 @@ fn sha256_hex(data: &str) -> String {
 }
 
 #[allow(dead_code)]
-fn hmac_sha256_hex(key: &[u8], data: &str) -> String {
+pub fn hmac_sha256_hex(key: &[u8], data: &str) -> String {
     const BLOCK_SIZE: usize = 64;
     // Normalize key to 32 bytes: if key is not exactly 32 bytes, hash it.
     // This matches the client behavior in crypto.js where libsodium's one-shot
@@ -643,6 +643,84 @@ impl Database {
 
         // Migration 036: drop plaintext profile style columns (username_color, username_border_color, profile_background_color)
         // These are now exclusively stored in encrypted_profile_data
+
+        // Migration 038: add profile_picture_file_id_hash and profile_banner_file_id_hash columns
+        // These store SHA-256 hashes of the raw file_ids so the API can return
+        // hashes instead of exposing the raw file_id UUIDs on the wire.
+        for col in ["profile_picture_file_id_hash", "profile_banner_file_id_hash"] {
+            let col_exists: bool = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) > 0 FROM pragma_table_info('users') WHERE name = '{}'", col),
+                    [],
+                    |row| row.get::<_, i32>(0),
+                )
+                .map(|c| c > 0)
+                .unwrap_or(false);
+            if !col_exists {
+                let _ = conn.execute(&format!("ALTER TABLE users ADD COLUMN {} TEXT", col), []);
+            }
+        }
+        // Backfill hashes for existing profile pictures
+        {
+            let ids: Vec<(String, Option<String>)> = {
+                let mut stmt = conn.prepare(
+                    "SELECT id, profile_picture_file_id FROM users WHERE profile_picture_file_id IS NOT NULL AND profile_picture_file_id_hash IS NULL"
+                )?;
+                let rows = stmt.query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                })?;
+                let mut v = Vec::new();
+                for r in rows { v.push(r?); }
+                v
+            };
+            for (uid, maybe_fid) in ids {
+                if let Some(fid) = maybe_fid {
+                    let hash = sha256_hex(&fid);
+                    conn.execute(
+                        "UPDATE users SET profile_picture_file_id_hash = ?1 WHERE id = ?2",
+                        params![hash, uid],
+                    )?;
+                }
+            }
+        }
+        // Backfill hashes for existing banners
+        {
+            let ids: Vec<(String, Option<String>)> = {
+                let mut stmt = conn.prepare(
+                    "SELECT id, profile_banner_file_id FROM users WHERE profile_banner_file_id IS NOT NULL AND profile_banner_file_id_hash IS NULL"
+                )?;
+                let rows = stmt.query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                })?;
+                let mut v = Vec::new();
+                for r in rows { v.push(r?); }
+                v
+            };
+            for (uid, maybe_fid) in ids {
+                if let Some(fid) = maybe_fid {
+                    let hash = sha256_hex(&fid);
+                    conn.execute(
+                        "UPDATE users SET profile_banner_file_id_hash = ?1 WHERE id = ?2",
+                        params![hash, uid],
+                    )?;
+                }
+            }
+        }
+
+        // Migration 037: add friend_requests_disabled_hash column
+        // Client sends HMAC(hmac_key, user_id + ":fr_disabled:" + "1"/"0") when toggling.
+        // Server stores the hash and derives the boolean.
+        let fr_hash_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('users') WHERE name = 'friend_requests_disabled_hash'",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if !fr_hash_exists {
+            let _ = conn.execute("ALTER TABLE users ADD COLUMN friend_requests_disabled_hash TEXT", []);
+        }
         for col in ["username_color", "username_border_color", "profile_background_color"] {
             let col_exists: bool = conn
                 .query_row(
@@ -853,7 +931,7 @@ impl Database {
         .map_err(|_| "User not found".to_string())
     }
 
-    pub fn get_user_profile(&self, id: &str) -> Result<(String, String, Option<String>, Option<String>, Option<String>, Option<String>), String> {
+    pub fn get_user_profile(&self, id: &str) -> Result<(String, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
 
         // Check which banner columns exist
@@ -875,12 +953,12 @@ impl Database {
             .unwrap_or(false);
 
         let sql = if has_banner && has_banner_key {
-            "SELECT id, username, profile_picture_file_id, profile_picture_file_key,
-                    profile_banner_file_id, profile_banner_file_key
+            "SELECT id, username, profile_picture_file_id, profile_picture_file_key, profile_picture_file_id_hash,
+                    profile_banner_file_id, profile_banner_file_key, profile_banner_file_id_hash
              FROM users WHERE id = ?1"
         } else {
-            "SELECT id, username, profile_picture_file_id, profile_picture_file_key,
-                    NULL as banner_id, NULL as banner_key
+            "SELECT id, username, profile_picture_file_id, profile_picture_file_key, profile_picture_file_id_hash,
+                    NULL as banner_id, NULL as banner_key, NULL as banner_hash
              FROM users WHERE id = ?1"
         };
 
@@ -892,6 +970,8 @@ impl Database {
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, Option<String>>(4)?,
                 row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
             ))
         })
         .map_err(|_| "User not found".to_string())
@@ -899,9 +979,10 @@ impl Database {
 
     pub fn update_profile_picture(&self, user_id: &str, file_id: Option<&str>, file_key: Option<&str>) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let hash = file_id.map(|fid| sha256_hex(fid));
         conn.execute(
-            "UPDATE users SET profile_picture_file_id = ?1, profile_picture_file_key = ?2 WHERE id = ?3",
-            params![file_id, file_key, user_id],
+            "UPDATE users SET profile_picture_file_id = ?1, profile_picture_file_key = ?2, profile_picture_file_id_hash = ?3 WHERE id = ?4",
+            params![file_id, file_key, hash, user_id],
         )
         .map_err(|e| e.to_string())?;
         conn.execute(
@@ -914,9 +995,10 @@ impl Database {
 
     pub fn update_profile_banner(&self, user_id: &str, file_id: Option<&str>, file_key: Option<&str>) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let hash = file_id.map(|fid| sha256_hex(fid));
         conn.execute(
-            "UPDATE users SET profile_banner_file_id = ?1, profile_banner_file_key = ?2 WHERE id = ?3",
-            params![file_id, file_key, user_id],
+            "UPDATE users SET profile_banner_file_id = ?1, profile_banner_file_key = ?2, profile_banner_file_id_hash = ?3 WHERE id = ?4",
+            params![file_id, file_key, hash, user_id],
         )
         .map_err(|e| e.to_string())?;
         conn.execute(
@@ -2497,6 +2579,8 @@ impl Database {
 
     pub fn get_friend_requests_disabled(&self, user_id: &str) -> Result<bool, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        // Legacy fallback: friend_requests_disabled_hash is the primary source.
+        // The handler derives the boolean from the hash using the HMAC key.
         let disabled: i64 = conn
             .query_row(
                 "SELECT COALESCE(friend_requests_disabled, 0) FROM users WHERE id = ?1",
@@ -2507,14 +2591,24 @@ impl Database {
         Ok(disabled != 0)
     }
 
-    pub fn set_friend_requests_disabled(&self, user_id: &str, disabled: bool) -> Result<(), String> {
+    pub fn set_friend_requests_disabled(&self, user_id: &str, disabled_hash: &str, disabled: bool) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
-            "UPDATE users SET friend_requests_disabled = ?1 WHERE id = ?2",
-            params![disabled as i64, user_id],
+            "UPDATE users SET friend_requests_disabled_hash = ?1, friend_requests_disabled = ?2 WHERE id = ?3",
+            params![disabled_hash, disabled as i64, user_id],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    pub fn get_friend_requests_disabled_hash(&self, user_id: &str) -> Result<Option<String>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT friend_requests_disabled_hash FROM users WHERE id = ?1",
+            params![user_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .map_err(|_| "User not found".to_string())
     }
 
     /// Returns true if a friendship row exists between the two users.
@@ -2601,9 +2695,13 @@ impl Database {
         &self,
         from_user_id: &str,
         to_user_code_hash: &str,
+        recipient_disabled: bool,
     ) -> Result<User, String> {
         if from_user_id.is_empty() {
             return Err("Not authenticated".to_string());
+        }
+        if recipient_disabled {
+            return Err("This user is not accepting friend requests".to_string());
         }
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
 
@@ -2624,18 +2722,6 @@ impl Database {
 
         if target.id == from_user_id {
             return Err("You can't add yourself as a friend".to_string());
-        }
-
-        // Check if recipient has disabled friend requests
-        let recipient_disabled: i64 = conn
-            .query_row(
-                "SELECT COALESCE(friend_requests_disabled, 0) FROM users WHERE id = ?1",
-                params![target.id],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-        if recipient_disabled != 0 {
-            return Err("This user is not accepting friend requests".to_string());
         }
 
         if Self::are_friends_c(&conn, from_user_id, &target.id).map_err(|e| e.to_string())? {
@@ -4319,6 +4405,32 @@ impl Database {
         )
         .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    /// Given a SHA-256 hash of a file_id, look up the actual file_id from the users table.
+    /// Searches both profile_picture_file_id_hash and profile_banner_file_id_hash columns.
+    pub fn get_file_id_by_hash(&self, hash: &str) -> Result<String, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        // Try profile picture hash first
+        let result: Result<String, String> = conn
+            .query_row(
+                "SELECT profile_picture_file_id FROM users WHERE profile_picture_file_id_hash = ?1 AND profile_picture_file_id IS NOT NULL LIMIT 1",
+                params![hash],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|_| "File not found by hash".to_string());
+        match result {
+            Ok(fid) => Ok(fid),
+            Err(_) => {
+                // Try banner hash
+                conn.query_row(
+                    "SELECT profile_banner_file_id FROM users WHERE profile_banner_file_id_hash = ?1 AND profile_banner_file_id IS NOT NULL LIMIT 1",
+                    params![hash],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(|_| "File not found by hash".to_string())
+            }
+        }
     }
 
     pub fn get_file_info(&self, file_id: &str) -> Result<FileRecord, String> {

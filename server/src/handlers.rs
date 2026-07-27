@@ -311,8 +311,8 @@ pub async fn register(
 
     // Fetch profile picture only (display_name and other profile fields are now encrypted-only)
     let profile_pic = match state.db.get_user_profile(&user.id) {
-        Ok((_, _, pp, _fk, _, _)) => pp,
-        Err(_) => None,
+        Ok((_, _, pp, _fk, pph, _, _, bh)) => (pp, pph, bh),
+        Err(_) => (None, None, None),
     };
 
     // First user registration means setup is complete
@@ -325,7 +325,9 @@ pub async fn register(
             "user": {
                 "id": user.id,
                 "username": user.username,
-                "profile_picture_file_id": profile_pic
+                "profile_picture_file_id": profile_pic.0,
+                "profile_picture_file_id_hash": profile_pic.1,
+                "profile_banner_file_id_hash": profile_pic.2
             }
         })),
     )
@@ -413,8 +415,8 @@ pub async fn login(
 
     // Fetch profile picture only (display_name and other profile fields are now encrypted-only)
     let profile_pic = match state.db.get_user_profile(&user.id) {
-        Ok((_, _, pp, _fk, _, _)) => pp,
-        Err(_) => None,
+        Ok((_, _, pp, _fk, pph, _, _, bh)) => (pp, pph, bh),
+        Err(_) => (None, None, None),
     };
 
     (StatusCode::OK, headers, Json(serde_json::json!({
@@ -422,7 +424,9 @@ pub async fn login(
         "user": {
             "id": user.id,
             "username": user.username,
-            "profile_picture_file_id": profile_pic
+            "profile_picture_file_id": profile_pic.0,
+            "profile_picture_file_id_hash": profile_pic.1,
+            "profile_banner_file_id_hash": profile_pic.2
         }
     }))).into_response()
 }
@@ -598,8 +602,8 @@ pub async fn reauth(
 
     // Fetch profile picture only (display_name and other profile fields are now encrypted-only)
     let profile_pic = match state.db.get_user_profile(&user.id) {
-        Ok((_, _, pp, _fk, _, _)) => pp,
-        Err(_) => None,
+        Ok((_, _, pp, _fk, pph, _, _, bh)) => (pp, pph, bh),
+        Err(_) => (None, None, None),
     };
 
     (StatusCode::OK, headers, Json(serde_json::json!({
@@ -607,7 +611,9 @@ pub async fn reauth(
         "user": {
             "id": user.id,
             "username": user.username,
-            "profile_picture_file_id": profile_pic
+            "profile_picture_file_id": profile_pic.0,
+            "profile_picture_file_id_hash": profile_pic.1,
+            "profile_banner_file_id_hash": profile_pic.2
         }
     }))).into_response()
 }
@@ -3221,6 +3227,97 @@ pub async fn download_file(
         .into_response()
 }
 
+/// Download a file by its SHA-256 hash (instead of raw file_id UUID).
+/// This prevents the host from learning which file_id corresponds to which user's
+/// profile picture or banner — only the hashed version is exposed via API responses.
+pub async fn download_file_by_hash(
+    Path(hash): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    // Look up the file_id by hash from the users table
+    let file_id = match state.db.get_file_id_by_hash(&hash) {
+        Ok(fid) => fid,
+        Err(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "File not found by hash"})),
+            )
+                .into_response()
+        }
+    };
+
+    // Now serve the file using the resolved file_id (same logic as download_file)
+    let file_info = match state.db.get_file_info(&file_id) {
+        Ok(f) => f,
+        Err(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "File not found"})),
+            )
+                .into_response()
+        }
+    };
+
+    if !file_info.upload_complete {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Upload not complete"})),
+        )
+            .into_response();
+    }
+
+    // Authorization: user must be the uploader, a member of a shared server, or a friend
+    let is_uploader = file_info.uploader_id == user_id;
+    if !is_uploader {
+        let authorized = state.db.are_friends(&user_id, &file_info.uploader_id)
+            .unwrap_or(false)
+            || state.db.share_server(&user_id, &file_info.uploader_id)
+                .unwrap_or(false);
+        if !authorized {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "Not authorized to access this file"})),
+            )
+                .into_response();
+        }
+    }
+
+    // Read all encrypted chunks and concatenate
+    let mut data = Vec::new();
+    for i in 0..file_info.chunk_count {
+        let chunk_path = format!("{}/{}/{}.enc", UPLOAD_DIR, file_id, i);
+        match std::fs::read(&chunk_path) {
+            Ok(chunk) => data.extend_from_slice(&chunk),
+            Err(_) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": "Missing chunk"})),
+                )
+                    .into_response()
+            }
+        }
+    }
+
+    (
+        StatusCode::OK,
+        [
+            ("content-type", "application/octet-stream"),
+            (
+                "content-disposition",
+                &format!("attachment; filename=\"{}.bin\"", file_id),
+            ),
+        ],
+        data,
+    )
+        .into_response()
+}
+
 // ===== Server Stickers =====
 
 // ===== User Stickers/GIFs =====
@@ -3348,7 +3445,7 @@ pub async fn get_profile(
         || state.db.share_server(&caller_id, &requested_id).unwrap_or(false);
 
     match state.db.get_user_profile(&requested_id) {
-        Ok((id, username, profile_picture_file_id, file_key, banner_id, banner_key)) => {
+        Ok((id, username, profile_picture_file_id, file_key, _pph, banner_id, banner_key, _banner_hash)) => {
             let encrypted = state.db.get_encrypted_profile(&requested_id).ok().flatten();
             (StatusCode::OK, Json(serde_json::json!({
                 "id": id,
@@ -3388,7 +3485,7 @@ pub async fn update_profile(
 
     // Before changing profile picture, delete the old one's file from DB and disk
     let delete_current_pic = || -> Result<(), String> {
-        let (_, _, old_file_id, _, _, _) = state.db.get_user_profile(&user_id)?;
+        let (_, _, old_file_id, _, _, _, _, _) = state.db.get_user_profile(&user_id)?;
         if let Some(old_id) = old_file_id {
             // Delete from DB (checks ownership)
             if let Ok(old_info) = state.db.delete_file_record(&old_id) {
@@ -3475,7 +3572,7 @@ pub async fn update_profile(
 
     // Broadcast profile update to the user, friends, and all server members
     if let Ok(profile) = state.db.get_user_profile(&user_id) {
-        let (_id, username, profile_picture_file_id, profile_picture_file_key, banner_id, banner_file_key) = profile;
+        let (_id, username, profile_picture_file_id, profile_picture_file_key, _pph, banner_id, banner_file_key, _banner_hash) = profile;
         let encrypted = state.db.get_encrypted_profile(&user_id).ok().flatten();
         let profile_updated_at = state.db.get_profile_updated_at(&user_id).ok();
         let profile_msg = serde_json::json!({
@@ -3485,8 +3582,10 @@ pub async fn update_profile(
     // display_name, username_color, username_border_color are
     // no longer sent as plaintext — they're inside encrypted_profile_data.
     "profile_picture_file_id": profile_picture_file_id,
+    "profile_picture_file_id_hash": _pph,
     "profile_picture_file_key": profile_picture_file_key,
     "profile_banner_file_id": banner_id,
+    "profile_banner_file_id_hash": _banner_hash,
     "profile_banner_file_key": banner_file_key,
     "encrypted_profile_data": encrypted.as_ref().map(|e| e.0.as_str()),
     "encrypted_profile_data_key": encrypted.as_ref().and_then(|e| if e.3.is_empty() { None } else { Some(e.3.as_str()) }),
@@ -3886,7 +3985,7 @@ pub struct RegenWithPasswordRequest {
 
 #[derive(Deserialize)]
 pub struct FriendRequestsDisabledRequest {
-    pub disabled: bool,
+    pub disabled_hash: String,
 }
 
 pub async fn get_friend_requests_disabled(
@@ -3898,17 +3997,20 @@ pub async fn get_friend_requests_disabled(
         Err(e) => return e.into_response(),
     };
 
-    match state.db.get_friend_requests_disabled(&user_id) {
-        Ok(disabled) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"friend_requests_disabled": disabled})),
-        )
-            .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
-        )
-            .into_response(),
+    // Fetch the hash and derive the boolean from it
+    match state.db.get_friend_requests_disabled_hash(&user_id) {
+        Ok(Some(h)) if !h.is_empty() => {
+            let disabled_variant = hmac_sha256_hex(state.config.hmac_key.as_bytes(), &format!("{}:fr_disabled:1", user_id));
+            let disabled = h == disabled_variant;
+            (StatusCode::OK, Json(serde_json::json!({"friend_requests_disabled": disabled}))).into_response()
+        }
+        _ => {
+            // Legacy fallback to plaintext column
+            match state.db.get_friend_requests_disabled(&user_id) {
+                Ok(disabled) => (StatusCode::OK, Json(serde_json::json!({"friend_requests_disabled": disabled}))).into_response(),
+                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+            }
+        }
     }
 }
 
@@ -3922,10 +4024,14 @@ pub async fn set_friend_requests_disabled(
         Err(e) => return e.into_response(),
     };
 
-    match state.db.set_friend_requests_disabled(&user_id, req.disabled) {
+    // Derive the boolean from the hash by computing both HMAC variants
+    let disabled_variant = hmac_sha256_hex(state.config.hmac_key.as_bytes(), &format!("{}:fr_disabled:1", user_id));
+    let is_disabled = req.disabled_hash == disabled_variant;
+
+    match state.db.set_friend_requests_disabled(&user_id, &req.disabled_hash, is_disabled) {
         Ok(()) => (
             StatusCode::OK,
-            Json(serde_json::json!({"ok": true, "friend_requests_disabled": req.disabled})),
+            Json(serde_json::json!({"ok": true, "friend_requests_disabled": is_disabled})),
         )
             .into_response(),
         Err(e) => (
@@ -3981,7 +4087,21 @@ pub async fn send_friend_request(
         )
             .into_response();
     }
-    let friend_request_result = state.db.create_friend_request(&user_id, &code_hash);
+    // Derive recipient_disabled from the target user's friend_requests_disabled_hash
+    // First, look up the target user by friend code hash to get their user_id
+    let recipient_disabled = match state.db.get_user_by_friend_code(code_hash) {
+        Ok(target_user) => {
+            match state.db.get_friend_requests_disabled_hash(&target_user.id) {
+                Ok(Some(h)) if !h.is_empty() => {
+                    let disabled_variant = hmac_sha256_hex(state.config.hmac_key.as_bytes(), &format!("{}:fr_disabled:1", target_user.id));
+                    h == disabled_variant
+                }
+                _ => false,  // No hash set = enabled (fallback to plaintext check in create_friend_request)
+            }
+        }
+        Err(_) => false,  // Target not found — create_friend_request will return proper error
+    };
+    let friend_request_result = state.db.create_friend_request(&user_id, &code_hash, recipient_disabled);
     match friend_request_result {
         Ok(target) => {
             // Notify the recipient in real time (best-effort). No username included — client resolves from user_id.

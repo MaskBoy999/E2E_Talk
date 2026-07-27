@@ -536,6 +536,9 @@ async function sendProfileKeySync(dmChannelId, conv) {
             }
             var encPicKey = E2ECrypto.encryptDm(rawPicKey, dmChannelId, identity.privateKey, otherPubKey);
             payload.profile_picture_file_id = myProfile.profile_picture_file_id;
+            // Send hash alongside file_id so recipients can use hash-based URLs
+            // (host sees only the hash, not the raw file_id UUID)
+            payload.profile_picture_file_id_hash = myProfile.profile_picture_file_id_hash || null;
             payload.encrypted_profile_key = encPicKey.ciphertext;
             payload.profile_key_nonce = encPicKey.nonce;
             payload.profile_key_message_nonce = encPicKey.messageNonce;
@@ -550,6 +553,7 @@ async function sendProfileKeySync(dmChannelId, conv) {
             var encBannerKey = E2ECrypto.encryptDm(rawBannerKey, dmChannelId, identity.privateKey, otherPubKey);
             if (encBannerKey) {
                 payload.profile_banner_file_id = myProfile.profile_banner_file_id;
+                payload.profile_banner_file_id_hash = myProfile.profile_banner_file_id_hash || null;
                 payload.encrypted_banner_key = encBannerKey.ciphertext;
                 payload.banner_key_nonce = encBannerKey.nonce;
                 payload.banner_key_message_nonce = encBannerKey.messageNonce;
@@ -628,6 +632,7 @@ async function broadcastProfileKeySyncToServer(serverId) {
             }
             var encPicKey = E2ECrypto.aeadEncrypt(rawPicKey, serverKey);
             payload.profile_picture_file_id = myProfile.profile_picture_file_id;
+            payload.profile_picture_file_id_hash = myProfile.profile_picture_file_id_hash || null;
             payload.encrypted_profile_key = encPicKey.ciphertext;
             payload.profile_key_nonce = encPicKey.nonce;
         }
@@ -642,6 +647,7 @@ async function broadcastProfileKeySyncToServer(serverId) {
             var encBannerKey = E2ECrypto.aeadEncrypt(rawBannerKey, serverKey);
             if (encBannerKey) {
                 payload.profile_banner_file_id = myProfile.profile_banner_file_id;
+                payload.profile_banner_file_id_hash = myProfile.profile_banner_file_id_hash || null;
                 payload.encrypted_banner_key = encBannerKey.ciphertext;
                 payload.banner_key_nonce = encBannerKey.nonce;
             }
@@ -5314,9 +5320,10 @@ function connectWebSocket(t) {
                             try {
                                 var decryptedPicKey = E2ECrypto.decryptDm(data.encrypted_profile_key, data.profile_key_nonce, data.dm_channel_id, kpSync.privateKey, otherPubKeySync, data.profile_key_message_nonce || null);
                                 if (decryptedPicKey) {
-                                    profileKeyCache[data.user_id + ':' + data.profile_picture_file_id] = decryptedPicKey;
+                                    var cacheKeyId = data.profile_picture_file_id_hash || data.profile_picture_file_id;
+                                    profileKeyCache[data.user_id + ':' + cacheKeyId] = decryptedPicKey;
                                     scheduleProfileKeySave();
-                                    getProfilePicUrl(data.profile_picture_file_id, data.user_id);
+                                    getProfilePicUrl(cacheKeyId, data.user_id);
                                 }
                             } catch (e) {
                                 console.warn('Failed to decrypt profile key sync:', e);
@@ -5407,14 +5414,16 @@ function connectWebSocket(t) {
                             if (serverKeyForSync) {
                                 var decryptedPicKey = new TextDecoder().decode(E2ECrypto.aeadDecrypt(data.encrypted_profile_key, serverKeyForSync, data.profile_key_nonce));
                                 if (decryptedPicKey) {
-                                    profileKeyCache[data.user_id + ':' + data.profile_picture_file_id] = decryptedPicKey;
+                                    var picHash = data.profile_picture_file_id_hash || data.profile_picture_file_id;
+                                    profileKeyCache[data.user_id + ':' + picHash] = decryptedPicKey;
                                     scheduleProfileKeySave();
                                 }
                                 // Also decrypt banner key if available
                                 if (data.encrypted_banner_key && data.banner_key_nonce && data.profile_banner_file_id) {
                                     var decryptedBannerKey = new TextDecoder().decode(E2ECrypto.aeadDecrypt(data.encrypted_banner_key, serverKeyForSync, data.banner_key_nonce));
                                     if (decryptedBannerKey) {
-                                        profileKeyCache[data.user_id + ':' + data.profile_banner_file_id] = decryptedBannerKey;
+                                        var bannerHash = data.profile_banner_file_id_hash || data.profile_banner_file_id;
+                                        profileKeyCache[data.user_id + ':' + bannerHash] = decryptedBannerKey;
                                         profileKeyCache[data.user_id + ':banner'] = decryptedBannerKey;
                                         scheduleProfileKeySave();
                                     }
@@ -5536,6 +5545,7 @@ function connectWebSocket(t) {
                         user.profile_picture_file_key = data.profile_picture_file_key || user.profile_picture_file_key;
                         if (myProfile) {
                             myProfile.profile_picture_file_id = data.profile_picture_file_id || myProfile.profile_picture_file_id;
+                            myProfile.profile_picture_file_id_hash = data.profile_picture_file_id_hash || myProfile.profile_picture_file_id_hash;
                             myProfile.profile_picture_file_key = data.profile_picture_file_key || myProfile.profile_picture_file_key;
                         }
                         localStorage.setItem('user', JSON.stringify(user));
@@ -5582,7 +5592,8 @@ function connectWebSocket(t) {
                                     var dk = E2ECrypto.decodeEncryptedFileKey(rawPicKey, identityForUpdate.privateKey);
                                     if (dk) rawPicKey = dk;
                                 }
-                                profileKeyCache[data.user_id + ':' + data.profile_picture_file_id] = rawPicKey;
+                                var picHash = data.profile_picture_file_id_hash || data.profile_picture_file_id;
+                                profileKeyCache[data.user_id + ':' + picHash] = rawPicKey;
                             }
                             // Re-add banner key
                             if (data.profile_banner_file_key && data.profile_banner_file_id) {
@@ -9842,10 +9853,25 @@ async function friendRequestsDisabledToggleChanged() {
     const toggle = document.getElementById('disable-friend-requests-toggle');
     if (!toggle) return;
     try {
+        // Compute HMAC(hmac_key, user_id + ":fr_disabled:" + "1"/"0")
+        var hmacKey = localStorage.getItem('e2e_hmac_key');
+        if (!hmacKey) {
+            alert('HMAC key not available');
+            toggle.checked = !toggle.checked;
+            return;
+        }
+        var uid = user ? user.id : (JSON.parse(localStorage.getItem('user') || '{}').id);
+        if (!uid) {
+            alert('User ID not available');
+            toggle.checked = !toggle.checked;
+            return;
+        }
+        var value = toggle.checked ? '1' : '0';
+        var disabledHash = E2ECrypto.hmacHex(hmacKey, uid + ':fr_disabled:' + value);
         const res = await authFetch('/api/friends/requests/disabled', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ disabled: toggle.checked }),
+            body: JSON.stringify({ disabled_hash: disabledHash }),
         });
         if (!res.ok) {
             const err = await res.json();
@@ -13659,7 +13685,7 @@ async function processAndUploadSticker() {
 
         if (stickerUploadMode === 'emoji') {
             // Emoji: crop the selected square region, then resize to fit within MAX_EMOJI_SIZE (max 420x420)
-            const MAX_EMOJI_SIZE = 420;
+            const MAX_EMOJI_SIZE = 800;
             let ew = cropSize, eh = cropSize;
             if (ew > MAX_EMOJI_SIZE || eh > MAX_EMOJI_SIZE) {
                 const ratio = Math.min(MAX_EMOJI_SIZE / ew, MAX_EMOJI_SIZE / eh);
@@ -14054,8 +14080,13 @@ function getProfilePicUrl(fileId, userId) {
     var cacheKey = userId + ':' + fileId;
     if (profilePicCache[cacheKey]) return profilePicCache[cacheKey];
     
+    // Use hash-based URL if fileId looks like a SHA-256 hex hash (64 hex chars)
+    // Otherwise use the raw file_id URL (for backward compatibility)
+    var isHash = /^[a-f0-9]{64}$/i.test(fileId);
+    var urlPath = isHash ? '/api/files/by-hash/' + fileId + '/download' : '/api/files/' + fileId + '/download';
+    
     // Fetch encrypted file
-    authFetch('/api/files/' + fileId + '/download').then(async function (res) {
+    authFetch(urlPath).then(async function (res) {
         if (!res.ok) return null;
         var encryptedArray = new Uint8Array(await res.arrayBuffer());
         
@@ -16085,13 +16116,16 @@ async function saveProfile() {
     
     try {
         // Build profile data to encrypt
+        var toggle = document.getElementById('disable-friend-requests-toggle');
+        var isDisabled = toggle ? toggle.checked : false;
         var profileData = {
             display_name: displayName,
             nickname: nickname,
             description: description,
             username_color: color,
             username_border_color: borderColor,
-            profile_background_color: bgColor
+            profile_background_color: bgColor,
+            friend_requests_disabled: isDisabled
         };
         
         // Generate a dedicated profile data key — this can be shared with friends
