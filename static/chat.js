@@ -790,7 +790,6 @@ document.addEventListener('DOMContentLoaded', () => {
     settingsBtn.addEventListener('click', () => { 
         settingsModal.style.display = 'flex';
         loadMyProfile();
-        loadDmConversations();
         loadFriendRequestsDisabledSetting();
     });
     document.getElementById('close-settings').addEventListener('click', () => { settingsModal.style.display = 'none'; });
@@ -1328,6 +1327,13 @@ document.addEventListener('DOMContentLoaded', () => {
     setupForwardModal();
     setupStickerPanel();
     loadMutedState();
+    function hideLoadingOverlay() {
+        var overlay = document.getElementById('loading-overlay');
+        if (overlay) {
+            overlay.classList.add('fade-out');
+            setTimeout(function () { overlay.remove(); }, 350);
+        }
+    }
     loadServers().then(function () {
         // Check for saved DM conversation to restore on page refresh
         var savedDmId = null;
@@ -1335,18 +1341,18 @@ document.addEventListener('DOMContentLoaded', () => {
         
         if (savedDmId) {
             // Prefer the saved DM over auto-selecting a server.
-            // enterDmView loads DMs, then .then() restores the saved conversation.
-            enterDmView().then(function () {
+            // Chain the promise so the overlay waits for DM to fully load.
+            return enterDmView().then(function () {
                 var savedConv = dmConversations.find(function(c) { return c.dm_channel_id === savedDmId; });
                 if (savedConv) {
-                    selectDmChannel(savedConv.dm_channel_id, savedConv.other_user_id, savedConv.other_username, null);
+                    return selectDmChannel(savedConv.dm_channel_id, savedConv.other_user_id, savedConv.other_username, null);
                 }
             });
         } else if (!currentServerId) {
             // No saved DM — default to DM view if no server was auto-selected
-            enterDmView();
+            return enterDmView();
         }
-    });
+    }).then(hideLoadingOverlay).catch(hideLoadingOverlay);
     loadFriendRequestBadge();
     loadEmojiCache(); // Load custom emojis
     loadMyProfile(); // Load own profile for sidebar footer
@@ -1360,15 +1366,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }, 500);
     // Restore notification sound from server (syncs across devices)
     restoreNotificationSoundFromServer();
-
-    // Hide loading overlay once initialization is complete
-    setTimeout(function () {
-        var overlay = document.getElementById('loading-overlay');
-        if (overlay) {
-            overlay.classList.add('fade-out');
-            setTimeout(function () { overlay.remove(); }, 350);
-        }
-    }, 800);
 
     // Save unread state + last seen timestamp when page is closing or hidden,
     // so missed notifications are restored on next load.
@@ -4976,10 +4973,9 @@ function refreshAll() {
         loadMembers(currentServerId);
     }
     
-    // 4. Refresh DM conversation list (updates sidebar snippets, display names)
-    if (localStorage.getItem('hb_refresh_dms') !== 'false' && viewMode === 'dms') {
-        loadDmConversations();
-    }
+    // 4. REMOVED: loadDmConversations() from heartbeat — DM data is already live
+    // via WS events (dm_new, friend_request_accepted, etc.). Rebuilding the
+    // entire sidebar on every heartbeat kills the active DM indicator.
     
     // 5. Update existing message DOM styles (text-shadow, colors from refreshed cache)
     if (localStorage.getItem('hb_refresh_messages') !== 'false') {
@@ -5004,10 +5000,24 @@ function restartRefreshHeartbeat() {
     window._refreshHeartbeatInterval = setInterval(refreshAll, intervalMs);
 }
 
+var _wsReconnectTimer = null;
+
 function connectWebSocket(t) {
     const isSecure = window.location.protocol === 'https:';
     if (!isSecure && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
         console.warn('WARNING: WebSocket running over unencrypted ws://. Use HTTPS for secure connections.');
+    }
+    // Clear any pending reconnection timer so we don't cascade reconnects
+    if (_wsReconnectTimer) {
+        clearTimeout(_wsReconnectTimer);
+        _wsReconnectTimer = null;
+    }
+    // Nullify old onclose first so close() doesn't trigger a stale reconnection
+    if (ws) {
+        ws.onclose = null;
+        if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+            try { ws.close(); } catch (_) {}
+        }
     }
     const protocol = isSecure ? 'wss:' : 'ws:';
     ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
@@ -5016,9 +5026,12 @@ function connectWebSocket(t) {
         var devId = localStorage.getItem('e2e_device_key');
         var lastSeen = localStorage.getItem('e2e_last_seen') || undefined;
         ws.send(JSON.stringify({ type: 'auth', token: t, device_id: devId || undefined, last_seen_timestamp: lastSeen }));
-        
         // Start periodic key heartbeat (configurable via security tab)
         restartRefreshHeartbeat();
+    };
+
+    ws.onerror = (e) => {
+        console.warn('WebSocket error — will auto-reconnect:', e);
     };
 
     ws.onmessage = async (event) => {
@@ -5026,9 +5039,8 @@ function connectWebSocket(t) {
 
         switch (data.type) {
             case 'auth_ok':
-                // Load DMs and broadcast profile keys after a short delay
+                // Broadcast profile keys after a short delay (DMs already loaded during init)
                 setTimeout(async function() {
-                    await loadDmConversations();
                     if (myProfile && dmConversations && dmConversations.length > 0) {
                         broadcastProfileKeySyncToAllDms();
                     }
@@ -5041,6 +5053,22 @@ function connectWebSocket(t) {
                             }
                         }
                         try { await uploadCurrentProfileToConversations(); } catch (_) {}
+                    }
+                    // Refresh the currently viewed channel/DM to catch any missed messages,
+                    // but only if the message list is empty (no messages loaded yet).
+                    // If messages are already visible, the WS message_new/dm_new handlers
+                    // will continue to add new messages in real-time — a full reload would
+                    // flash "Loading..." and cause visible jitter for no benefit.
+                    var msgList = document.getElementById('message-list');
+                    var hasMessages = msgList && msgList.querySelector('.message');
+                    if (!hasMessages) {
+                        if (viewMode === 'servers' && currentServerId && currentChannelId) {
+                            await loadMessages(currentChannelId);
+                        } else if (viewMode === 'dms' && currentDmChannelId) {
+                            // Pass otherUserId so loadDmMessages can fetch the identity key
+                            // for message decryption. Without it, all messages show as [encrypted].
+                            await loadDmMessages(currentDmChannelId, currentDmOtherUser ? currentDmOtherUser.id : null);
+                        }
                     }
                 }, 2000);
                 // Fetch initial online users list
@@ -5128,9 +5156,51 @@ function connectWebSocket(t) {
                             showBrowserNotification('New DM', data.message.sender_username + ' sent you a message');
                             playNotificationSound();
                         }
-                        if (viewMode === 'dms') renderDmSidebar();
                     }
-                    if (viewMode === 'dms') await loadDmConversations();
+                    // Only reload DM list for messages in OTHER channels (to update preview/badge).
+                    // For the current channel we already appended the message — reloading would
+                    // rebuild the sidebar DOM and lose the active indicator.
+                    if (viewMode === 'dms' && data.dm_channel_id !== currentDmChannelId) {
+                        // Light update: update preview text and badge without full sidebar rebuild
+                        var _dmItem = document.querySelector('.dm-item[data-dm-id="' + data.dm_channel_id + '"]');
+                        if (_dmItem) {
+                            // Update preview text
+                            var _previewEl = _dmItem.querySelector('.dm-preview');
+                            if (_previewEl) {
+                                try {
+                                    var _kp = E2ECrypto.getIdentityKeyPair();
+                                    var _conv = dmConversations.find(function(c) { return c.dm_channel_id === data.dm_channel_id; });
+                                    var _otherPub = (_conv && _conv.other_public_key) ? new Uint8Array(E2ECrypto.base64ToArrayBuffer(_conv.other_public_key)) : null;
+                                    if (_kp && _otherPub) {
+                                        var _dec = E2ECrypto.decryptDm(data.message.encrypted_content, data.message.nonce, data.dm_channel_id, _kp.privateKey, _otherPub, data.message.message_nonce);
+                                        if (_dec) _previewEl.textContent = _dec.substring(0, 40);
+                                    }
+                                } catch (_) {}
+                            }
+                            // Show badge if not already visible
+                            if (!_dmItem.querySelector('.badge')) {
+                                var _badge = document.createElement('span');
+                                _badge.className = 'badge';
+                                _dmItem.appendChild(_badge);
+                            }
+                        }
+                    } else if (viewMode === 'dms' && data.dm_channel_id === currentDmChannelId) {
+                        // Light update: just refresh the preview text in the existing DM sidebar item
+                        var dmPreviewEl = document.querySelector('.dm-item[data-dm-id="' + data.dm_channel_id + '"] .dm-preview');
+                        if (dmPreviewEl) {
+                            try {
+                                var _kp = E2ECrypto.getIdentityKeyPair();
+                                var _otherPub = (currentDmOtherUser && currentDmOtherUser.id) ? (function() {
+                                    var _cached = profileKeyCache[currentDmOtherUser.id];
+                                    return _cached ? new Uint8Array(E2ECrypto.base64ToArrayBuffer(_cached)) : null;
+                                })() : null;
+                                if (_kp && _otherPub) {
+                                    var _dec = E2ECrypto.decryptDm(data.message.encrypted_content, data.message.nonce, data.dm_channel_id, _kp.privateKey, _otherPub, data.message.message_nonce);
+                                    if (_dec) dmPreviewEl.textContent = _dec.substring(0, 40);
+                                }
+                            } catch (_) {}
+                        }
+                    }
                 }
                 break;
             case 'message_edited':
@@ -5598,7 +5668,8 @@ function connectWebSocket(t) {
                         // Refresh existing messages and DM sidebar with updated display name/colors
                         updateExistingMessageStyles(data.user_id);
                         updateMemberListItem(data.user_id);
-                        if (viewMode === 'dms') renderDmSidebar();
+                        // Light update: just refresh the affected DM item instead of re-rendering entire sidebar
+                        if (viewMode === 'dms') refreshDmSidebarItem(data.user_id);
                         // Re-render profile modal if open for this user
                         if (profileModalUserId === data.user_id) {
                             var profileModal = document.getElementById('profile-modal');
@@ -5867,9 +5938,11 @@ function connectWebSocket(t) {
                         }
                     }
 
-                    // Refresh DM conversations to show updated display name/pic
+                    // Light update: refresh only the affected DM sidebar items instead of
+                    // re-fetching and re-rendering the entire list (which kills the active state)
                     if (viewMode === 'dms') {
-                        await loadDmConversations();
+                        updateExistingMessageStyles(data.user_id);
+                        refreshDmSidebarItem(data.user_id);
                     }
 
                     // Refresh server member list if viewing a server
@@ -5990,7 +6063,14 @@ function connectWebSocket(t) {
     };
 
     ws.onclose = () => {
-        setTimeout(() => connectWebSocket(t), 3000);
+        // Use the reconnection guard to avoid cascading reconnections
+        // when multiple close events fire in quick succession.
+        if (!_wsReconnectTimer) {
+            _wsReconnectTimer = setTimeout(function() {
+                _wsReconnectTimer = null;
+                connectWebSocket(t);
+            }, 1000);
+        }
     };
 }
 
@@ -8410,6 +8490,44 @@ async function loadDmConversations() {
         } else {
             // Otherwise try the DM conversation profile endpoint (decrypts with DM key)
             fetchDmConversationProfile(conv.other_user_id, conv.dm_channel_id);
+        }
+    }
+}
+
+// Light update: refresh just one DM sidebar item by user_id without rebuilding the entire list.
+// Light update: refresh just one DM sidebar item by user_id without rebuilding the entire list.
+// This preserves the active class and avoids the full DOM replacement that kills the active state.
+function refreshDmSidebarItem(userId) {
+    if (!userId) return;
+    // Find the DM conversation for this user
+    var conv = dmConversations.find(function(c) { return c.other_user_id === userId; });
+    if (!conv) return;
+    var dmItem = document.querySelector('.dm-item[data-dm-id="' + conv.dm_channel_id + '"]');
+    if (!dmItem) return;
+    // Update display name from cache
+    var cacheEntry = userDisplayNameCache[userId];
+    var displayName = (cacheEntry && cacheEntry.display_name) || conv.other_display_name || conv.other_username || '?';
+    var nameEl = dmItem.querySelector('.dm-name');
+    if (nameEl) {
+        nameEl.textContent = displayName;
+        var dmColor = (cacheEntry && cacheEntry.username_color) || null;
+        var dmBorderColor = (cacheEntry && cacheEntry.username_border_color) || null;
+        if (dmColor) {
+            nameEl.style.color = dmColor;
+            nameEl.style.textShadow = getDisplayNameTextShadow(dmColor, dmBorderColor);
+            nameEl.classList.add('has-glow');
+        }
+    }
+    // Update profile pic if cached
+    var picFileId = conv.other_profile_picture_file_id || (cacheEntry && cacheEntry.profile_picture_file_id);
+    if (picFileId) {
+        var cacheKey = userId + ':' + picFileId;
+        var picUrl = profilePicCache[cacheKey];
+        if (picUrl) {
+            var avatarEl = dmItem.querySelector('.dm-avatar');
+            if (avatarEl && !avatarEl.querySelector('img')) {
+                avatarEl.innerHTML = '<img class="avatar-img" src="' + picUrl + '" alt="">';
+            }
         }
     }
 }
