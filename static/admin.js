@@ -26,6 +26,34 @@ function setPageSize(size) {
     if (activeTab) filterTab(activeTab.dataset.tab);
 }
 
+let autoRefreshInterval = null;
+function toggleAutoRefresh() {
+    const btn = document.getElementById('auto-refresh-btn');
+    if (autoRefreshInterval) {
+        clearInterval(autoRefreshInterval);
+        autoRefreshInterval = null;
+        btn.textContent = 'Auto-Refresh: OFF';
+        btn.style.background = '#555';
+        btn.style.color = '#aaa';
+        btn.style.borderColor = '#777';
+    } else {
+        autoRefreshInterval = setInterval(function() {
+            loadAllData().then(function() {
+                var activeTab = document.querySelector('.tab-btn.active');
+                if (activeTab) filterTab(activeTab.dataset.tab);
+            });
+        }, 5000);
+        btn.textContent = 'Auto-Refresh: ON';
+        btn.style.background = '#2e7d32';
+        btn.style.color = '#fff';
+        btn.style.borderColor = '#4caf50';
+    }
+}
+document.addEventListener('DOMContentLoaded', () => {
+    const arBtn = document.getElementById('auto-refresh-btn');
+    if (arBtn) arBtn.addEventListener('click', toggleAutoRefresh);
+});
+
 function paginate(data, tab) {
     var pageSize = getPageSize();
     var page = tabPages[tab] || 0;

@@ -27,7 +27,7 @@ fn load_or_generate_key(env_var: &str, prefix: &str) -> String {
             };
             let key_part = &line[..eq_pos];
             let val_part = &line[eq_pos+1..];
-            if key_part == prefix {
+            if key_part.trim() == prefix {
                 let val = val_part.trim().trim_matches('"').trim_matches('\'');
                 if !val.is_empty() {
                     return val.to_string();

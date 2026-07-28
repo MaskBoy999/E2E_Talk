@@ -73,6 +73,9 @@ document.addEventListener('DOMContentLoaded', () => {
             localStorage.removeItem('e2e_identity_private_' + oldUser.id);
             localStorage.removeItem('e2e_identity_public_' + oldUser.id);
         }
+        // Clear theme colors so a new user doesn't inherit the previous account's theme
+        localStorage.removeItem('theme_color');
+        localStorage.removeItem('theme_bg_color');
         loginForm.style.display = 'none';
         registerForm.style.display = 'block';
         errorDiv.style.display = 'none';
