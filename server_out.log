@@ -1,0 +1,64 @@
+warning: unused variable: `username`
+    --> src\db.rs:2287:13
+     |
+2287 |         let username: String = conn
+     |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_username`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `username`
+    --> src\db.rs:3617:13
+     |
+3617 |         let username: String = conn
+     |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_username`
+
+warning: unused variable: `username`
+    --> src\db.rs:3688:13
+     |
+3688 |         let username: String = conn
+     |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_username`
+
+warning: unused variable: `username`
+    --> src\db.rs:3792:13
+     |
+3792 |         let username: String = conn
+     |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_username`
+
+warning: unused variable: `other_display_name`
+    --> src\handlers.rs:4502:51
+     |
+4502 |             for (dm_id, other_id, other_username, other_display_name, _other_profile_pic) in channels {
+     |                                                   ^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_other_display_name`
+
+warning: unused variable: `notif_type`
+   --> src\ws.rs:373:14
+    |
+373 |         for (notif_type, payload) in notifs {
+    |              ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_notif_type`
+
+warning: field `mime` is never read
+    --> src\handlers.rs:3112:9
+     |
+3110 | pub struct InitFileUploadRequest {
+     |            --------------------- field in this struct
+3111 |     pub size: i64,
+3112 |     pub mime: Option<String>,            // legacy plaintext mime (sent by client for backward compat)
+     |         ^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `e2e-chat` (bin "e2e-chat") generated 7 warnings (run `cargo fix --bin "e2e-chat" -p e2e-chat` to apply 6 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.25s
+     Running `target\debug\e2e-chat.exe`
+[2m2026-07-28T00:33:00.305771Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Database setup status: fresh — redirecting to admin setup
+[2m2026-07-28T00:33:00.306048Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Running orphan file cleanup...
+[2m2026-07-28T00:33:00.306653Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Orphan file cleanup complete.
+[2m2026-07-28T00:33:00.308065Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Auto-generated self-signed TLS certificates in certs
+[2m2026-07-28T00:33:00.308088Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m For trusted HTTPS, install mkcert and run:
+[2m2026-07-28T00:33:00.308103Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m   mkcert -install
+[2m2026-07-28T00:33:00.308115Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m   mkcert localhost 127.0.0.1 ::1
+[2m2026-07-28T00:33:00.308129Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Then set TLS_CERT_PATH and TLS_KEY_PATH env vars
+[2m2026-07-28T00:33:00.309047Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Server starting on 0.0.0.0:3000
+[2m2026-07-28T00:33:00.309079Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m HTTPS available on https://localhost:3443
+[2m2026-07-28T00:33:00.309095Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m HTTP available on http://localhost:3000
+error: process didn't exit successfully: `target\debug\e2e-chat.exe` (exit code: 1)

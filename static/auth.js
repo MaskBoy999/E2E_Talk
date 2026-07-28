@@ -352,30 +352,27 @@ document.addEventListener('DOMContentLoaded', () => {
             const keypair = E2ECrypto.x25519GenerateKeyPair();
             const publicKeyB64 = E2ECrypto.arrayBufferToBase64(keypair.publicKey);
 
-            // Generate friend code client-side, encrypt with password, send encrypted + hash
-            const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-            let friendCode = '';
-            for (let i = 0; i < 16; i++) friendCode += ALPHABET[Math.floor(Math.random() * ALPHABET.length)];
-            const friendCodeHash = E2ECrypto.hmacHex(hmacKey, friendCode);
-            const encryptedFC = E2ECrypto.encryptWithPassword(friendCode, password);
-            localStorage.setItem('e2e_friend_code', friendCode);
-
             // Encrypt identity private key for escrow (using Argon2id encryptWithPassword)
             const privB64 = E2ECrypto.arrayBufferToBase64(keypair.privateKey);
             const identityEscrow = E2ECrypto.encryptWithPassword(privB64, password);
+
+            // Generate friend code client-side, encrypt with password, send raw code (server salts & hashes)
+            const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+            let friendCode = '';
+            for (let i = 0; i < 16; i++) friendCode += ALPHABET[Math.floor(Math.random() * ALPHABET.length)];
+            const encryptedFC = E2ECrypto.encryptWithPassword(friendCode, password);
+            localStorage.setItem('e2e_friend_code', friendCode);
 
             const res = await fetch('/api/register', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    // Send the pre-hashed password (server never sees raw password)
                     username, password: hashedPassword,
-                    // Hash_key escrow: encrypted with raw password via Argon2id + AEAD
                     encrypted_hash_key: encryptedHashKey.encrypted_private_key,
                     hash_key_salt: encryptedHashKey.salt,
                     hash_key_nonce: encryptedHashKey.nonce,
                     identity_public_key: publicKeyB64,
-                    friend_code_hash: friendCodeHash,
+                    friend_code: friendCode,
                     encrypted_friend_code: encryptedFC.encrypted_private_key,
                     friend_code_salt: encryptedFC.salt,
                     friend_code_nonce: encryptedFC.nonce,

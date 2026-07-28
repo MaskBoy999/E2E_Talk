@@ -225,7 +225,7 @@ pub struct RegisterRequest {
     pub username: String,
     pub password: String,  // Client-computed hash: HMAC-SHA256(hash_key, raw_password)
     pub identity_public_key: Option<String>,
-    pub friend_code_hash: Option<String>,
+    pub friend_code: Option<String>,
     pub encrypted_friend_code: Option<String>,
     pub friend_code_salt: Option<String>,
     pub friend_code_nonce: Option<String>,
@@ -286,7 +286,18 @@ pub async fn register(
         base64::engine::general_purpose::STANDARD.decode(k).ok()
     });
 
-    let user = match state.db.create_user(&req.username, &password_hash, identity_key_bytes.as_deref(), req.friend_code_hash.as_deref(), req.encrypted_friend_code.as_deref(), req.friend_code_salt.as_deref(), req.friend_code_nonce.as_deref(), req.encrypted_hash_key.as_deref(), req.hash_key_salt.as_deref(), req.hash_key_nonce.as_deref()) {
+    // Compute salted friend code hash if raw friend code provided
+    let (friend_code_hash, friend_code_hash_salt) = if let Some(fc) = &req.friend_code {
+        use rand::Rng;
+        let salt: String = rand::thread_rng().gen::<[u8; 16]>().iter().map(|b| format!("{:02x}", b)).collect();
+        let code_upper = fc.trim().to_uppercase();
+        let hash = crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &format!("{}{}", salt, code_upper));
+        (Some(hash), Some(salt))
+    } else {
+        (None, None)
+    };
+
+    let user = match state.db.create_user(&req.username, &password_hash, identity_key_bytes.as_deref(), friend_code_hash.as_deref(), friend_code_hash_salt.as_deref(), req.encrypted_friend_code.as_deref(), req.friend_code_salt.as_deref(), req.friend_code_nonce.as_deref(), req.encrypted_hash_key.as_deref(), req.hash_key_salt.as_deref(), req.hash_key_nonce.as_deref()) {
         Ok(u) => u,
         Err(e) => {
             return (
@@ -1127,7 +1138,7 @@ pub async fn get_user_key_blob(
 
 #[derive(Deserialize)]
 pub struct CreateServerRequest {
-    pub invite_code_hash: String,
+    pub invite_code: String,
     pub encrypted_name: Option<String>,
     pub name_nonce: Option<String>,
     pub channel_encrypted_name: Option<String>,
@@ -1144,7 +1155,6 @@ pub async fn create_server(
         Err(e) => return e.into_response(),
     };
 
-    // Per-user rate limiting: 5 servers per hour
     let rate_key = format!("create_server:{}", user_id);
     if !CREATE_SERVER_RATE_LIMITER.check_and_increment(&rate_key, 5, Duration::from_secs(3600)) {
         return (
@@ -1154,12 +1164,18 @@ pub async fn create_server(
             .into_response();
     }
 
+    // Generate random salt and compute salted invite code hash
+    use rand::Rng;
+    let salt: String = rand::thread_rng().gen::<[u8; 16]>().iter().map(|b| format!("{:02x}", b)).collect();
+    let code_upper = req.invite_code.trim().to_uppercase();
+    let invite_code_hash = crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &format!("{}{}", salt, code_upper));
+
     let encrypted_name_bytes = req.encrypted_name.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
     let name_nonce_bytes = req.name_nonce.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
     let ch_enc_name_bytes = req.channel_encrypted_name.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
     let ch_name_nonce_bytes = req.channel_name_nonce.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
 
-    let server = match state.db.create_server(&user_id, &req.invite_code_hash, encrypted_name_bytes.as_deref(), name_nonce_bytes.as_deref(), ch_enc_name_bytes.as_deref(), ch_name_nonce_bytes.as_deref()) {
+    let server = match state.db.create_server(&user_id, &invite_code_hash, &salt, encrypted_name_bytes.as_deref(), name_nonce_bytes.as_deref(), ch_enc_name_bytes.as_deref(), ch_name_nonce_bytes.as_deref()) {
         Ok(s) => s,
         Err(e) => {
             return (
@@ -1380,7 +1396,7 @@ pub async fn get_invite(
 
 #[derive(Deserialize)]
 pub struct RegenerateInviteRequest {
-    pub invite_code_hash: String,
+    pub invite_code: String,
 }
 
 pub async fn regenerate_invite(
@@ -1394,7 +1410,12 @@ pub async fn regenerate_invite(
         Err(e) => return e.into_response(),
     };
 
-    match state.db.regenerate_invite(&server_id, &user_id, &req.invite_code_hash) {
+    use rand::Rng;
+    let salt: String = rand::thread_rng().gen::<[u8; 16]>().iter().map(|b| format!("{:02x}", b)).collect();
+    let code_upper = req.invite_code.trim().to_uppercase();
+    let invite_code_hash = crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &format!("{}{}", salt, code_upper));
+
+    match state.db.regenerate_invite(&server_id, &user_id, &invite_code_hash, &salt) {
         Ok(()) => {
             (
                 StatusCode::OK,
@@ -1450,11 +1471,7 @@ pub async fn join_server(
 
     let code = req.code.trim();
 
-    // The client may send a pre-hashed invite code (HMAC-SHA256) for the streamlined flow,
-    // or a plaintext invite code (legacy flow). Try the code as-is as a hash first,
-    // then try HMAC-hashing it, then fall back to legacy SHA-256.
-    // Client already hashed the code, use it directly
-    let server = state.db.join_server_by_invite(code, &user_id);
+    let server = state.db.join_server_by_invite(code, &user_id, state.config.hmac_key.as_bytes());
     let server = match server {
         Ok(s) => s,
         Err(e) => {
@@ -3959,9 +3976,12 @@ pub async fn store_encrypted_friend_code(
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Missing encrypted friend code data"}))).into_response();
     }
 
-    let hash = hmac_sha256_hex(state.config.hmac_key.as_bytes(), &req.friend_code.trim().to_uppercase());
+    use rand::Rng;
+    let hash_salt: String = rand::thread_rng().gen::<[u8; 16]>().iter().map(|b| format!("{:02x}", b)).collect();
+    let code_upper = req.friend_code.trim().to_uppercase();
+    let hash = crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &format!("{}{}", hash_salt, code_upper));
 
-    match state.db.update_encrypted_friend_code(&user_id, &hash, &req.encrypted_friend_code, &req.salt, &req.nonce) {
+    match state.db.update_encrypted_friend_code(&user_id, &hash, &hash_salt, &req.encrypted_friend_code, &req.salt, &req.nonce) {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
@@ -3987,8 +4007,9 @@ pub async fn server_regenerate_friend_code(
         })
         .collect();
 
-    let hash = hmac_sha256_hex(state.config.hmac_key.as_bytes(), &code);
-    match state.db.update_friend_code_hash(&user_id, &hash) {
+    let salt: String = rand::thread_rng().gen::<[u8; 16]>().iter().map(|b| format!("{:02x}", b)).collect();
+    let hash = crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &format!("{}{}", salt, code));
+    match state.db.update_friend_code_hash(&user_id, &hash, &salt) {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true, "friend_code": code}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
@@ -4021,9 +4042,11 @@ pub async fn regen_friend_code_with_password(
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid friend code format"}))).into_response();
     }
 
-    let hash = hmac_sha256_hex(state.config.hmac_key.as_bytes(), &code);
+    use rand::Rng;
+    let hash_salt: String = rand::thread_rng().gen::<[u8; 16]>().iter().map(|b| format!("{:02x}", b)).collect();
+    let hash = crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &format!("{}{}", hash_salt, code));
 
-    match state.db.update_encrypted_friend_code(&user_id, &hash, &req.encrypted_friend_code, &req.salt, &req.nonce) {
+    match state.db.update_encrypted_friend_code(&user_id, &hash, &hash_salt, &req.encrypted_friend_code, &req.salt, &req.nonce) {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
@@ -4145,7 +4168,7 @@ pub async fn set_friend_requests_disabled(
 
 #[derive(Deserialize)]
 pub struct SendFriendRequest {
-    pub friend_code_hash: String,
+    pub friend_code: String,
 }
 
 pub async fn send_friend_request(
@@ -4179,30 +4202,25 @@ pub async fn send_friend_request(
             .into_response();
     }
 
-    // Validate friend_code_hash is a proper 64-char hex string
-    let code_hash = &req.friend_code_hash;
-    if code_hash.len() != 64 || !code_hash.chars().all(|c| c.is_ascii_hexdigit()) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Invalid friend code hash format"})),
-        )
-            .into_response();
-    }
-    // Derive recipient_disabled from the target user's friend_requests_disabled_hash
-    // First, look up the target user by friend code hash to get their user_id
-    let recipient_disabled = match state.db.get_user_by_friend_code(code_hash) {
-        Ok(target_user) => {
-            match state.db.get_friend_requests_disabled_hash(&target_user.id) {
-                Ok(Some(h)) if !h.is_empty() => {
-                    let disabled_variant = hmac_sha256_hex(state.config.hmac_key.as_bytes(), &format!("{}:fr_disabled:1", target_user.id));
-                    h == disabled_variant
-                }
-                _ => false,  // No hash set = enabled (fallback to plaintext check in create_friend_request)
-            }
+    // Look up target user by raw friend code
+    let target_user = match state.db.get_user_by_friend_code(&req.friend_code, state.config.hmac_key.as_bytes()) {
+        Ok(u) => u,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
         }
-        Err(_) => false,  // Target not found — create_friend_request will return proper error
     };
-    let friend_request_result = state.db.create_friend_request(&user_id, &code_hash, recipient_disabled);
+    let recipient_disabled = match state.db.get_friend_requests_disabled_hash(&target_user.id) {
+        Ok(Some(h)) if !h.is_empty() => {
+            let disabled_variant = hmac_sha256_hex(state.config.hmac_key.as_bytes(), &format!("{}:fr_disabled:1", target_user.id));
+            h == disabled_variant
+        }
+        _ => false,
+    };
+    let friend_request_result = state.db.create_friend_request(&user_id, &target_user.id, &target_user.username, recipient_disabled);
     match friend_request_result {
         Ok(target) => {
             // Notify the recipient in real time (best-effort). No username included — client resolves from user_id.

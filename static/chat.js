@@ -6853,7 +6853,7 @@ async function appendMessage(msg) {
         }
         var fwdSourceText = fwdSourceParts.length > 0 ? 'Forwarded — ' + fwdSourceParts.join(' · ') : 'Forwarded';
         contentHtml += '<div class="forward-label" data-source-server-id="' + escapeAttr(forwardData.source_server_id || '') + '" data-source-channel-id="' + escapeAttr(forwardData.source_channel_id || '') + '" data-source-message-id="' + escapeAttr(forwardData.source_message_id || '') + '"' + (forwardData.source_is_dm ? ' data-source-is-dm="true"' : '') + '>' +
-            '<div class="forward-source-label">' + escapeHtml(fwdSourceText) + '</div>';
+            '<div class="forward-source-label">' + escapeHtml(fwdSourceText) + '</div></div>';
         // Forward text preview
         if (forwardData.preview_content && forwardData.preview_nonce) {
             try {
@@ -8818,7 +8818,7 @@ function appendDmMessage(msg, kp, otherPublicKey) {
         }
         var fwdSourceText = fwdSourceParts.length > 0 ? 'Forwarded — ' + fwdSourceParts.join(' · ') : 'Forwarded';
         contentHtml += '<div class="forward-label" data-source-server-id="' + escapeAttr(forwardData.source_server_id || '') + '" data-source-channel-id="' + escapeAttr(forwardData.source_channel_id || '') + '" data-source-message-id="' + escapeAttr(forwardData.source_message_id || '') + '"' + (forwardData.source_is_dm ? ' data-source-is-dm="true"' : '') + '>' +
-            '<div class="forward-source-label">' + escapeHtml(fwdSourceText) + '</div>';
+            '<div class="forward-source-label">' + escapeHtml(fwdSourceText) + '</div></div>';
         // Forward text preview (decrypt with DM keys)
         if (forwardData.preview_content && forwardData.preview_nonce && kp && otherPublicKey) {
             try {
@@ -9562,10 +9562,8 @@ async function createServer() {
         // Encrypt the initial channel name "general" with the same channel key
         const encChName = E2ECrypto.aeadEncrypt('general', channelKey);
 
-        // Generate invite code client-side, send only the hash
+        // Generate invite code client-side, send raw code (server salts & hashes)
         const inviteCode = generateCode(16);
-        var hmacKey = await ensureHmacKey();
-        const inviteCodeHash = hmacKey ? E2ECrypto.hmacHex(hmacKey, inviteCode) : E2ECrypto.sha256Hex(inviteCode);
 
         const res = await authFetch('/api/servers', {
             method: 'POST',
@@ -9576,7 +9574,7 @@ async function createServer() {
                 name_nonce: encName.nonce,
                 channel_encrypted_name: encChName.ciphertext,
                 channel_name_nonce: encChName.nonce,
-                invite_code_hash: inviteCodeHash,
+                invite_code: inviteCode,
             }),
         });
 
@@ -9622,14 +9620,11 @@ async function joinServer() {
     if (!code) return;
 
     try {
-        // Hash the code client-side before sending (HMAC-SHA256 with server's HMAC key)
-        var hmacKey = await ensureHmacKey();
-        var codeHash = hmacKey ? E2ECrypto.hmacHex(hmacKey, code) : code;
-
+        // Send raw code; server salts & hashes before lookup
         const res = await authFetch('/api/invites/join', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ code: codeHash }),
+            body: JSON.stringify({ code: code }),
         });
 
         if (res.ok) {
@@ -9667,12 +9662,10 @@ async function showInviteModal() {
         // Silently generate a new invite code if missing from localStorage
         try {
             const inviteCode = generateCode(16);
-            var hmacKey = await ensureHmacKey();
-            const inviteCodeHash = hmacKey ? E2ECrypto.hmacHex(hmacKey, inviteCode) : E2ECrypto.sha256Hex(inviteCode);
             const res = await authFetch(`/api/servers/${currentServerId}/invite`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ invite_code_hash: inviteCodeHash }),
+                body: JSON.stringify({ invite_code: inviteCode }),
             });
             if (res.ok) {
                 currentInviteCode = inviteCode;
@@ -9773,13 +9766,11 @@ async function regenerateInvite() {
 
     try {
         const inviteCode = generateCode(16);
-        var hmacKey = await ensureHmacKey();
-        const inviteCodeHash = hmacKey ? E2ECrypto.hmacHex(hmacKey, inviteCode) : E2ECrypto.sha256Hex(inviteCode);
 
         const res = await authFetch(`/api/servers/${currentServerId}/invite`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ invite_code_hash: inviteCodeHash }),
+            body: JSON.stringify({ invite_code: inviteCode }),
         });
 
         if (res.ok) {
@@ -10232,13 +10223,10 @@ async function sendFriendRequest() {
     const errDiv = document.getElementById('add-friend-error');
     errDiv.style.display = 'none';
     try {
-        const hmacKey = await ensureHmacKey();
-        if (!hmacKey) { errDiv.textContent = 'Failed to get HMAC key'; errDiv.style.display = 'block'; return; }
-        const codeHash = E2ECrypto.hmacHex(hmacKey, code);
         const res = await authFetch('/api/friends/request', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ friend_code_hash: codeHash }),
+            body: JSON.stringify({ friend_code: code }),
         });
         const data = await res.json();
         if (res.ok) {

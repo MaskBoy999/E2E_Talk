@@ -10,7 +10,7 @@ export default defineConfig({
         ignoreHTTPSErrors: true,
     },
     webServer: {
-        command: 'call scripts\kill-server.bat & cd server && cargo run 2>&1',
+        command: 'cd server && cargo run 2>&1',
         port: 3443,
         reuseExistingServer: true,
         timeout: 120000,

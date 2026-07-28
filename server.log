@@ -1,33 +1,11 @@
-warning: field `sender_id` is never read
-   --> src\ws.rs:113:5
-    |
-107 | struct OutgoingChatMessage {
-    |        ------------------- field in this struct
-...
-113 |     sender_id: String,
-    |     ^^^^^^^^^
-    |
-    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
-warning: `e2e-chat` (bin "e2e-chat") generated 1 warning
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.27s
-     Running `target\debug\e2e-chat.exe`
-[2m2026-07-24T23:50:58.520884Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Database setup status: configured
-[2m2026-07-24T23:50:58.521023Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Running orphan file cleanup...
-[2m2026-07-24T23:50:58.521911Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Orphan file cleanup complete.
-[2m2026-07-24T23:50:58.522973Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Auto-generated self-signed TLS certificates in certs
-[2m2026-07-24T23:50:58.523004Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m For trusted HTTPS, install mkcert and run:
-[2m2026-07-24T23:50:58.523019Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m   mkcert -install
-[2m2026-07-24T23:50:58.523033Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m   mkcert localhost 127.0.0.1 ::1
-[2m2026-07-24T23:50:58.523046Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Then set TLS_CERT_PATH and TLS_KEY_PATH env vars
-[2m2026-07-24T23:50:58.523658Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Server starting on 0.0.0.0:52414
-[2m2026-07-24T23:50:58.523688Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m HTTPS available on https://localhost:3443
-[2m2026-07-24T23:50:58.523715Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m HTTP available on http://localhost:52414
-
-thread 'tokio-rt-worker' (28196) panicked at src\main.rs:349:80:
-called `Result::unwrap()` on an `Err` value: Os { code: 10048, kind: AddrInUse, message: "Only one usage of each socket address (protocol/network address/port) is normally permitted." }
-note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
-
-thread 'main' (18184) panicked at src\main.rs:357:18:
-called `Result::unwrap()` on an `Err` value: Os { code: 10048, kind: AddrInUse, message: "Only one usage of each socket address (protocol/network address/port) is normally permitted." }
-error: process didn't exit successfully: `target\debug\e2e-chat.exe` (exit code: 101)
+[2m2026-07-28T00:13:00.219223Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Database setup status: fresh — redirecting to admin setup
+[2m2026-07-28T00:13:00.219654Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Running orphan file cleanup...
+[2m2026-07-28T00:13:00.220315Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Orphan file cleanup complete.
+[2m2026-07-28T00:13:00.222231Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Auto-generated self-signed TLS certificates in certs
+[2m2026-07-28T00:13:00.222256Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m For trusted HTTPS, install mkcert and run:
+[2m2026-07-28T00:13:00.222274Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m   mkcert -install
+[2m2026-07-28T00:13:00.222288Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m   mkcert localhost 127.0.0.1 ::1
+[2m2026-07-28T00:13:00.222304Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Then set TLS_CERT_PATH and TLS_KEY_PATH env vars
+[2m2026-07-28T00:13:00.223851Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Server starting on 0.0.0.0:3099
+[2m2026-07-28T00:13:00.223889Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m HTTPS available on https://localhost:3443
+[2m2026-07-28T00:13:00.223906Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m HTTP available on http://localhost:3099

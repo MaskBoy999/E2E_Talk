@@ -710,26 +710,36 @@ impl Database {
                 }
             }
         }
-        // Backfill hashes for existing user stickers
+        // Backfill hashes for existing user stickers (only if table exists — it's created later)
         {
-            let ids: Vec<(String, Option<String>)> = {
-                let mut stmt = conn.prepare(
-                    "SELECT id, file_id FROM user_stickers WHERE file_id IS NOT NULL AND file_id_hash IS NULL"
-                )?;
-                let rows = stmt.query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-                })?;
-                let mut v = Vec::new();
-                for r in rows { v.push(r?); }
-                v
-            };
-            for (stid, maybe_fid) in ids {
-                if let Some(fid) = maybe_fid {
-                    let hash = sha256_hex(&fid);
-                    let _ = conn.execute(
-                        "UPDATE user_stickers SET file_id_hash = ?1 WHERE id = ?2",
-                        params![hash, stid],
-                    );
+            let has_table: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM sqlite_master WHERE name = 'user_stickers' AND type = 'table'",
+                    [],
+                    |row| row.get::<_, i32>(0),
+                )
+                .map(|c| c > 0)
+                .unwrap_or(false);
+            if has_table {
+                let ids: Vec<(String, Option<String>)> = {
+                    let mut stmt = conn.prepare(
+                        "SELECT id, file_id FROM user_stickers WHERE file_id IS NOT NULL AND file_id_hash IS NULL"
+                    )?;
+                    let rows = stmt.query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                    })?;
+                    let mut v = Vec::new();
+                    for r in rows { v.push(r?); }
+                    v
+                };
+                for (stid, maybe_fid) in ids {
+                    if let Some(fid) = maybe_fid {
+                        let hash = sha256_hex(&fid);
+                        let _ = conn.execute(
+                            "UPDATE user_stickers SET file_id_hash = ?1 WHERE id = ?2",
+                            params![hash, stid],
+                        );
+                    }
                 }
             }
         }
@@ -998,6 +1008,9 @@ impl Database {
         // and add request_id_hash for friend accept/decline anti-enumeration.
         let _ = conn.execute_batch(include_str!("../migrations/039_social_graph_hashes.sql"));
 
+        // Migration 040: Add invite_code_salt and friend_code_hash_salt columns for salted invite/friend codes
+        let _ = conn.execute_batch(include_str!("../migrations/040_invite_code_salt.sql"));
+
         // --- Startup schema verification check ---
         // Verify that the last migration's expected columns exist.
         // If any expected migration was skipped, log a warning so the operator knows.
@@ -1038,13 +1051,13 @@ impl Database {
 
     // --- Users ---
 
-    pub fn create_user(&self, username: &str, password_hash: &str, identity_public_key: Option<&[u8]>, friend_code_hash: Option<&str>, encrypted_friend_code: Option<&str>, friend_code_salt: Option<&str>, friend_code_nonce: Option<&str>, encrypted_hash_key: Option<&str>, hash_key_salt: Option<&str>, hash_key_nonce: Option<&str>) -> Result<User, String> {
+    pub fn create_user(&self, username: &str, password_hash: &str, identity_public_key: Option<&[u8]>, friend_code_hash: Option<&str>, friend_code_hash_salt: Option<&str>, encrypted_friend_code: Option<&str>, friend_code_salt: Option<&str>, friend_code_nonce: Option<&str>, encrypted_hash_key: Option<&str>, hash_key_salt: Option<&str>, hash_key_nonce: Option<&str>) -> Result<User, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let id = Uuid::new_v4().to_string();
 
         conn.execute(
-            "INSERT INTO users (id, username, password_hash, identity_public_key, friend_code_hash, encrypted_friend_code, friend_code_salt, friend_code_nonce, encrypted_hash_key, hash_key_salt, hash_key_nonce) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![id, username, password_hash, identity_public_key, friend_code_hash, encrypted_friend_code, friend_code_salt, friend_code_nonce, encrypted_hash_key, hash_key_salt, hash_key_nonce],
+            "INSERT INTO users (id, username, password_hash, identity_public_key, friend_code_hash, friend_code_hash_salt, encrypted_friend_code, friend_code_salt, friend_code_nonce, encrypted_hash_key, hash_key_salt, hash_key_nonce) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![id, username, password_hash, identity_public_key, friend_code_hash, friend_code_hash_salt, encrypted_friend_code, friend_code_salt, friend_code_nonce, encrypted_hash_key, hash_key_salt, hash_key_nonce],
         )
         .map_err(|e| {
             if e.to_string().contains("UNIQUE") {
@@ -1405,13 +1418,11 @@ impl Database {
 
     // --- Servers ---
 
-    pub fn create_server(&self, owner_id: &str, invite_code_hash: &str, encrypted_name: Option<&[u8]>, name_nonce: Option<&[u8]>, channel_encrypted_name: Option<&[u8]>, channel_name_nonce: Option<&[u8]>) -> Result<Server, String> {
+    pub fn create_server(&self, owner_id: &str, invite_code_hash: &str, invite_code_salt: &str, encrypted_name: Option<&[u8]>, name_nonce: Option<&[u8]>, channel_encrypted_name: Option<&[u8]>, channel_name_nonce: Option<&[u8]>) -> Result<Server, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let server_id = Uuid::new_v4().to_string();
         let general_id = Uuid::new_v4().to_string();
 
-        // If the legacy 'name' column still exists (e.g., on older SQLite where DROP COLUMN failed),
-        // include a default value to avoid NOT NULL constraint errors.
         let has_name_col: bool = conn
             .query_row(
                 "SELECT COUNT(*) > 0 FROM pragma_table_info('servers') WHERE name = 'name'",
@@ -1422,14 +1433,14 @@ impl Database {
             .unwrap_or(false);
         if has_name_col {
             conn.execute(
-                "INSERT INTO servers (id, owner_id, invite_code_hash, encrypted_name, name_nonce, name) VALUES (?1, ?2, ?3, ?4, ?5, '')",
-                params![server_id, owner_id, invite_code_hash, encrypted_name, name_nonce],
+                "INSERT INTO servers (id, owner_id, invite_code_hash, invite_code_salt, encrypted_name, name_nonce, name) VALUES (?1, ?2, ?3, ?4, ?5, ?6, '')",
+                params![server_id, owner_id, invite_code_hash, invite_code_salt, encrypted_name, name_nonce],
             )
             .map_err(|e| e.to_string())?;
         } else {
             conn.execute(
-                "INSERT INTO servers (id, owner_id, invite_code_hash, encrypted_name, name_nonce) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![server_id, owner_id, invite_code_hash, encrypted_name, name_nonce],
+                "INSERT INTO servers (id, owner_id, invite_code_hash, invite_code_salt, encrypted_name, name_nonce) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![server_id, owner_id, invite_code_hash, invite_code_salt, encrypted_name, name_nonce],
             )
             .map_err(|e| e.to_string())?;
         }
@@ -1592,14 +1603,53 @@ impl Database {
         Ok(count > 0)
     }
 
-    pub fn join_server_by_invite(&self, code_hash: &str, user_id: &str) -> Result<Server, String> {
+    pub fn find_server_by_invite_code(&self, code: &str, hmac_key: &[u8]) -> Result<(String, bool), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let code_upper = code.trim().to_uppercase();
 
+        // Try unsalted lookup first (backward compat)
+        // Old records may have either HMAC-SHA256 (old client registrations) or
+        // plain SHA-256 (migration backfill of legacy data). Try both.
+        let unsalted_hmac = hmac_sha256_hex(hmac_key, &code_upper);
+        if let Ok(server_id) = conn.query_row::<String, _, _>(
+            "SELECT id FROM servers WHERE (invite_code_hash = ?1 OR invite_code_hash = ?2) AND (invite_code_salt IS NULL OR invite_code_salt = '')",
+            params![unsalted_hmac, sha256_hex(&code_upper)],
+            |row| row.get(0),
+        ) {
+            return Ok((server_id, false));
+        }
+
+        // Try salted lookup: iterate servers with a salt
+        let mut stmt = conn.prepare(
+            "SELECT id, invite_code_hash, COALESCE(invite_code_salt, '') FROM servers WHERE invite_code_salt IS NOT NULL AND invite_code_salt != ''"
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        }).map_err(|e| e.to_string())?;
+
+        for row in rows {
+            let (sid, stored_hash, salt) = row.map_err(|e| e.to_string())?;
+            let computed = hmac_sha256_hex(hmac_key, &format!("{}{}", salt, code_upper));
+            if computed == stored_hash {
+                return Ok((sid, true));
+            }
+        }
+
+        Err("Invalid invite code".to_string())
+    }
+
+    pub fn join_server_by_invite(&self, code: &str, user_id: &str, hmac_key: &[u8]) -> Result<Server, String> {
+        let (server_id, _was_salted) = self.find_server_by_invite_code(code, hmac_key)?;
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
 
         let server: Server = conn
             .query_row(
-                "SELECT id, encrypted_name, name_nonce, owner_id, COALESCE(invite_code_hash, ''), COALESCE(joins_disabled, 0), server_picture_file_id, encrypted_server_picture_key, server_picture_key_nonce FROM servers WHERE invite_code_hash = ?1",
-                params![code_hash],
+                "SELECT id, encrypted_name, name_nonce, owner_id, COALESCE(invite_code_hash, ''), COALESCE(joins_disabled, 0), server_picture_file_id, COALESCE(server_picture_file_id_hash, ''), encrypted_server_picture_key, server_picture_key_nonce FROM servers WHERE id = ?1",
+                params![server_id],
                 |row| {
                     Ok(Server {
                         id: row.get(0)?,
@@ -1618,12 +1668,10 @@ impl Database {
             )
             .map_err(|_| "Invalid invite code".to_string())?;
 
-        // Check if joins are disabled
         if server.joins_disabled {
             return Err("This server has disabled invites".to_string());
         }
 
-        // Check if user is banned from this server
         let banned: bool = conn
             .query_row(
                 "SELECT COUNT(*) FROM server_bans WHERE server_id = ?1 AND user_id = ?2",
@@ -1673,7 +1721,7 @@ impl Database {
         Ok(())
     }
 
-    pub fn regenerate_invite(&self, server_id: &str, user_id: &str, new_invite_code_hash: &str) -> Result<(), String> {
+    pub fn regenerate_invite(&self, server_id: &str, user_id: &str, new_invite_code_hash: &str, new_invite_code_salt: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
 
         if !Self::is_server_owner_c(&conn, user_id, server_id).unwrap_or(false) {
@@ -1681,8 +1729,8 @@ impl Database {
         }
 
         conn.execute(
-            "UPDATE servers SET invite_code_hash = ?1 WHERE id = ?2",
-            params![new_invite_code_hash, server_id],
+            "UPDATE servers SET invite_code_hash = ?1, invite_code_salt = ?2 WHERE id = ?3",
+            params![new_invite_code_hash, new_invite_code_salt, server_id],
         )
         .map_err(|e| e.to_string())?;
 
@@ -2754,41 +2802,71 @@ impl Database {
     }
 
     /// Update/regenerate the friend_code hash AND encrypted backup
-    pub fn update_encrypted_friend_code(&self, user_id: &str, new_code_hash: &str, encrypted_friend_code: &str, salt: &str, nonce: &str) -> Result<(), String> {
+    pub fn update_encrypted_friend_code(&self, user_id: &str, new_code_hash: &str, hash_salt: &str, encrypted_friend_code: &str, salt: &str, nonce: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
-            "UPDATE users SET friend_code_hash = ?1, encrypted_friend_code = ?2, friend_code_salt = ?3, friend_code_nonce = ?4 WHERE id = ?5",
-            params![new_code_hash, encrypted_friend_code, salt, nonce, user_id],
+            "UPDATE users SET friend_code_hash = ?1, friend_code_hash_salt = ?2, encrypted_friend_code = ?3, friend_code_salt = ?4, friend_code_nonce = ?5 WHERE id = ?6",
+            params![new_code_hash, hash_salt, encrypted_friend_code, salt, nonce, user_id],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
     }
 
     /// Update only the friend_code_hash (for server-generated codes without encrypted backup)
-    pub fn update_friend_code_hash(&self, user_id: &str, new_code_hash: &str) -> Result<(), String> {
+    pub fn update_friend_code_hash(&self, user_id: &str, new_code_hash: &str, hash_salt: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
-            "UPDATE users SET friend_code_hash = ?1 WHERE id = ?2",
-            params![new_code_hash, user_id],
+            "UPDATE users SET friend_code_hash = ?1, friend_code_hash_salt = ?2 WHERE id = ?3",
+            params![new_code_hash, hash_salt, user_id],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
     }
 
-    pub fn get_user_by_friend_code(&self, code_hash: &str) -> Result<User, String> {
+    pub fn get_user_by_friend_code(&self, code: &str, hmac_key: &[u8]) -> Result<User, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let code_upper = code.trim().to_uppercase();
 
-        conn.query_row(
-            "SELECT id, username FROM users WHERE friend_code_hash = ?1",
-            params![code_hash],
+        // Try unsalted lookup first (backward compat)
+        // Old records may have either HMAC-SHA256 (old client registrations) or
+        // plain SHA-256 (migration backfill of legacy data). Try both in one query.
+        let unsalted_hmac = hmac_sha256_hex(hmac_key, &code_upper);
+        let unsalted_sha256 = sha256_hex(&code_upper);
+        if let Ok(user) = conn.query_row(
+            "SELECT id, username FROM users WHERE (friend_code_hash = ?1 OR friend_code_hash = ?2) AND (friend_code_hash_salt IS NULL OR friend_code_hash_salt = '')",
+            params![unsalted_hmac, unsalted_sha256],
             |row| {
                 Ok(User {
                     id: row.get(0)?,
                     username: row.get(1)?,
                 })
             },
-        )
-        .map_err(|_| "No user with that friend code".to_string())
+        ) {
+            return Ok(user);
+        }
+
+        // Try salted lookup
+        let mut stmt = conn.prepare(
+            "SELECT id, username, friend_code_hash, COALESCE(friend_code_hash_salt, '') FROM users WHERE friend_code_hash IS NOT NULL AND friend_code_hash_salt IS NOT NULL AND friend_code_hash_salt != ''"
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        }).map_err(|e| e.to_string())?;
+
+        for row in rows {
+            let (uid, uname, stored_hash, salt) = row.map_err(|e| e.to_string())?;
+            let computed = hmac_sha256_hex(hmac_key, &format!("{}{}", salt, code_upper));
+            if computed == stored_hash {
+                return Ok(User { id: uid, username: uname });
+            }
+        }
+
+        Err("No user with that friend code".to_string())
     }
 
     // --- Friendships ---
@@ -2910,7 +2988,8 @@ impl Database {
     pub fn create_friend_request(
         &self,
         from_user_id: &str,
-        to_user_code_hash: &str,
+        to_user_id: &str,
+        to_username: &str,
         recipient_disabled: bool,
     ) -> Result<User, String> {
         if from_user_id.is_empty() {
@@ -2921,19 +3000,9 @@ impl Database {
         }
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
 
-        let target: User = {
-            conn
-            .query_row(
-                "SELECT id, username FROM users WHERE friend_code_hash = ?1",
-                params![to_user_code_hash],
-                |row| {
-                    Ok(User {
-                        id: row.get(0)?,
-                        username: row.get(1)?,
-                    })
-                },
-            )
-            .map_err(|_| "No user with that friend code".to_string())?
+        let target = User {
+            id: to_user_id.to_string(),
+            username: to_username.to_string(),
         };
 
         if target.id == from_user_id {
