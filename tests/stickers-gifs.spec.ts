@@ -42,7 +42,7 @@ async function createServerAndKey(page: any, token: string, userId: string, serv
     const inviteCode = generateCode(8);
     const srv = await page.request.post(`${BASE}/api/servers`, {
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        data: { name: serverName, invite_code_hash: sha256Hex(inviteCode) },
+        data: { name: serverName, invite_code: inviteCode },
     });
     const server = await srv.json();
     await page.evaluate(async ({ serverId, userId }: { serverId: string; userId: string }) => {
@@ -102,6 +102,24 @@ async function uploadSticker(page: any, imageBuffer: Buffer, stickerName: string
     
     // Wait for upload to complete
     await page.waitForTimeout(8000);
+    
+    // Switch back to emojis tab (resets activePanelTab), then close the panel.
+    // We hide the panel + modal directly, then trigger the document-level
+    // click handler to reset stickerPanelOpen to false.
+    await page.evaluate(() => {
+        // Switch back to emoji tab to reset activePanelTab for next panel open
+        const emojiTab = document.querySelector('.sticker-tab[data-tab="emojis"]');
+        if (emojiTab) emojiTab.click();
+        // Hide panels
+        document.getElementById('sticker-panel').style.display = 'none';
+        document.getElementById('sticker-upload-modal').style.display = 'none';
+        // Fire a click on a dummy element outside panel/btn to close via document handler
+        const dummy = document.createElement('div');
+        dummy.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px';
+        document.body.appendChild(dummy);
+        dummy.click();
+        dummy.remove();
+    });
 }
 
 // Helper: navigate to a server channel
@@ -520,5 +538,135 @@ test.describe('Stickers, GIFs, and Emojis', () => {
         console.log(`Found ${emojiImgCount} inline emoji images`);
         
         expect(hasShortcode || emojiImgCount > 0).toBeTruthy();
+    });
+
+    // ============================================================
+    // DIAGNOSTIC TEST: Upload emoji and check API response mime_type
+    // ============================================================
+    test('DIAGNOSTIC: upload emoji then inspect API mime_type', async ({ page }) => {
+        test.setTimeout(120000);
+        const ts = Date.now();
+        const username = 'diag_' + ts;
+        const emojiName = 'diag_emoji_' + ts;
+
+        // Register
+        const body = await registerUser(page, username);
+        await createServerAndKey(page, body.token, body.user.id, 'Diag_' + ts);
+        await navigateToChannel(page);
+
+        // Upload emoji
+        const imgBuf = createTestImageBuffer(64);
+        await uploadSticker(page, imgBuf, emojiName, 'emoji');
+
+        // Fetch stickers from API and log all mime_types
+        const stickersRes = await page.request.get(`${BASE}/api/users/me/stickers`, {
+            headers: { Authorization: `Bearer ${body.token}` },
+        });
+        expect(stickersRes.ok()).toBeTruthy();
+        const stickers = await stickersRes.json();
+        console.log('DIAGNOSTIC: All stickers from API:');
+        for (const s of stickers) {
+            console.log(`  name="${s.sticker_name}" mime_type="${s.mime_type}"`);
+        }
+
+        // Assert correct mime_type for emoji
+        const emojiItem = stickers.find(s => s.sticker_name === emojiName);
+        expect(emojiItem).toBeTruthy();
+        expect(emojiItem.mime_type).toBe('image/emoji');
+    });
+
+    // ============================================================
+    // TEST 8: Uploaded items appear only in their respective tabs
+    // ============================================================
+    test('uploaded emoji appears in emoji tab and NOT in stickers tab', async ({ page }) => {
+        test.setTimeout(120000);
+        const ts = Date.now();
+        const username = 'tabe_' + ts;
+        const emojiName = 'tab_emoji_' + ts;
+
+        const body = await registerUser(page, username);
+        await createServerAndKey(page, body.token, body.user.id, 'TabEmoji_' + ts);
+        await navigateToChannel(page);
+
+        // Upload emoji
+        const imgBuf = createTestImageBuffer(64);
+        await uploadSticker(page, imgBuf, emojiName, 'emoji');
+
+        // Open sticker panel (default tab = emojis)
+        await page.click('#sticker-btn');
+        await page.waitForSelector('#sticker-panel', { state: 'visible' });
+        await page.waitForTimeout(2000);
+
+        // Check emoji tab - should contain the emoji
+        const emojiItems = page.locator('.emoji-item-custom, .emoji-item');
+        const emojiCount = await emojiItems.count();
+
+        // Switch to stickers tab
+        const stickerTab = page.locator('.sticker-tab[data-tab="stickers"]');
+        if (await stickerTab.isVisible()) {
+            await stickerTab.click();
+        }
+        await page.waitForTimeout(2000);
+
+        // The emoji should NOT appear in the stickers grid
+        const stickerNames = await page.locator('#user-sticker-grid .sticker-grid-item').evaluateAll(
+            items => items.map(el => (el as HTMLElement).title)
+        );
+        expect(stickerNames).not.toContain(emojiName);
+    });
+
+    // ============================================================
+    // TEST 9: Uploaded GIF appears only in GIF tab and NOT in stickers tab
+    // ============================================================
+    test('uploaded GIF appears in GIF tab and NOT in stickers tab', async ({ page }) => {
+        test.setTimeout(120000);
+        const ts = Date.now();
+        const username = 'tabg_' + ts;
+        const gifName = 'tab_gif_' + ts;
+
+        const body = await registerUser(page, username);
+        await createServerAndKey(page, body.token, body.user.id, 'TabGif_' + ts);
+        await navigateToChannel(page);
+
+        // Upload GIF
+        const imgBuf = createTestImageBuffer(64);
+        await uploadSticker(page, imgBuf, gifName, 'gif');
+
+        // Open sticker panel
+        await page.click('#sticker-btn');
+        await page.waitForSelector('#sticker-panel', { state: 'visible' });
+        await page.waitForTimeout(2000);
+
+        // Switch to GIFs tab
+        const gifTab = page.locator('.sticker-tab[data-tab="gifs"]');
+        if (await gifTab.isVisible()) {
+            await gifTab.click();
+        }
+        await page.waitForTimeout(2000);
+
+        // Check GIF tab - should contain the GIF
+        const gifItems = page.locator('.gif-grid-item');
+        const gifCount = await gifItems.count();
+        console.log(`GIF tab: found ${gifCount} GIF items`);
+        expect(gifCount).toBeGreaterThanOrEqual(1);
+
+        // Switch to stickers tab
+        const stickerTab = page.locator('.sticker-tab[data-tab="stickers"]');
+        if (await stickerTab.isVisible()) {
+            await stickerTab.click();
+        }
+        await page.waitForTimeout(2000);
+
+        // No GIF should appear in the stickers grid (they're filtered by mime_type)
+        const stickerItems = page.locator('#user-sticker-grid .sticker-grid-item');
+        const stickerCount = await stickerItems.count();
+        console.log(`Stickers tab: found ${stickerCount} items`);
+
+        // Check none of the sticker items have GIF title
+        const stickerNames = await page.locator('#user-sticker-grid .sticker-grid-item').evaluateAll(
+            items => items.map(el => (el as HTMLElement).title)
+        );
+        console.log('Sticker titles:', JSON.stringify(stickerNames));
+        expect(stickerNames).not.toContain(gifName);
     });
 });

@@ -3338,7 +3338,8 @@ pub async fn init_file_upload(
     let encrypted_mime_bytes = req.encrypted_mime.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
     let mime_nonce_bytes = req.mime_nonce.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
 
-    match state.db.create_file_record(&user_id, req.size, encrypted_mime_bytes.as_deref(), mime_nonce_bytes.as_deref()) {
+    let plain_mime = req.mime.as_deref().unwrap_or("");
+    match state.db.create_file_record(&user_id, req.size, plain_mime, encrypted_mime_bytes.as_deref(), mime_nonce_bytes.as_deref()) {
         Ok((file_id, _file_hash)) => {
             let dir = format!("{}/{}", UPLOAD_DIR, file_id);
             let _ = tokio::fs::create_dir_all(&dir).await;

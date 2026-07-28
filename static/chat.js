@@ -211,7 +211,7 @@ let lastMessageInfo = { senderId: null, channelId: null, time: 0 };
 let lastDmMessageInfo = { senderId: null, dmChannelId: null, time: 0 };
 
 // Emoji cache: name -> { file_id, file_key, mime_type }
-let emojiCache = null;
+let emojiCache = {};
 let emojiBlobCache = {}; // name -> blob URL
 let currentFileIndex = 0;    // Profile cache: file_id -> blob URL
 let profilePicCache = {};
@@ -1335,21 +1335,8 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
     loadServers().then(function () {
-        // Check for saved DM conversation to restore on page refresh
-        var savedDmId = null;
-        try { savedDmId = localStorage.getItem('last_dm_channel_id'); } catch (_) {}
-        
-        if (savedDmId) {
-            // Prefer the saved DM over auto-selecting a server.
-            // Chain the promise so the overlay waits for DM to fully load.
-            return enterDmView().then(function () {
-                var savedConv = dmConversations.find(function(c) { return c.dm_channel_id === savedDmId; });
-                if (savedConv) {
-                    return selectDmChannel(savedConv.dm_channel_id, savedConv.other_user_id, savedConv.other_username, null);
-                }
-            });
-        } else if (!currentServerId) {
-            // No saved DM — default to DM view if no server was auto-selected
+        if (!currentServerId) {
+            // No server was auto-selected — enter DM view without auto-selecting any conversation
             return enterDmView();
         }
     }).then(hideLoadingOverlay).catch(hideLoadingOverlay);
@@ -12991,10 +12978,13 @@ function setupStickerPanel() {
     const btn = document.getElementById('sticker-btn');
     if (!panel || !btn) return;
 
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', async () => {
         stickerPanelOpen = !stickerPanelOpen;
         panel.style.display = stickerPanelOpen ? 'flex' : 'none';
-        if (stickerPanelOpen) renderPanelTab(activePanelTab);
+        if (stickerPanelOpen) {
+            await loadUserStickers();
+            renderPanelTab(activePanelTab);
+        }
     });
 
     document.addEventListener('click', (e) => {

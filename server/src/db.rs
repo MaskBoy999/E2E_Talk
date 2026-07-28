@@ -3968,9 +3968,9 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT s.id, s.file_id, s.file_id_hash, s.sticker_name, f.mime_type, s.file_key, s.encrypted_file_key, s.file_key_nonce
+                "SELECT s.id, s.file_id, s.file_id_hash, s.sticker_name, COALESCE(s.mime_type, f.mime_type, ''), s.file_key, s.encrypted_file_key, s.file_key_nonce
                  FROM user_stickers s
-                 INNER JOIN files f ON s.file_id = f.id
+                 LEFT JOIN files f ON s.file_id = f.id
                  WHERE s.user_id = ?1
                  ORDER BY s.created_at DESC",
             )
@@ -4807,7 +4807,7 @@ impl Database {
 
     // --- Files (Phase 5) ---
 
-    pub fn create_file_record(&self, uploader_id: &str, original_size: i64, encrypted_mime: Option<&[u8]>, mime_nonce: Option<&[u8]>) -> Result<(String, String), String> {
+    pub fn create_file_record(&self, uploader_id: &str, original_size: i64, mime_type: &str, encrypted_mime: Option<&[u8]>, mime_nonce: Option<&[u8]>) -> Result<(String, String), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let id = Uuid::new_v4().to_string();
         let hash = sha256_hex(&id);
@@ -4829,22 +4829,23 @@ impl Database {
             )
             .map(|c| c > 0)
             .unwrap_or(false);
+        let mime_val = if mime_type.is_empty() { "application/octet-stream" } else { mime_type };
         if has_enc_mime_col && has_hash_col {
             conn.execute(
-                "INSERT INTO files (id, uploader_id, original_size, mime_type, file_id_hash, encrypted_mime_type, mime_nonce) VALUES (?1, ?2, ?3, '', ?4, ?5, ?6)",
-                params![id, uploader_id, original_size, hash, encrypted_mime, mime_nonce],
+                "INSERT INTO files (id, uploader_id, original_size, mime_type, file_id_hash, encrypted_mime_type, mime_nonce) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![id, uploader_id, original_size, mime_val, hash, encrypted_mime, mime_nonce],
             )
             .map_err(|e| e.to_string())?;
         } else if has_hash_col {
             conn.execute(
-                "INSERT INTO files (id, uploader_id, original_size, mime_type, file_id_hash) VALUES (?1, ?2, ?3, '', ?4)",
-                params![id, uploader_id, original_size, hash],
+                "INSERT INTO files (id, uploader_id, original_size, mime_type, file_id_hash) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id, uploader_id, original_size, mime_val, hash],
             )
             .map_err(|e| e.to_string())?;
         } else {
             conn.execute(
-                "INSERT INTO files (id, uploader_id, original_size, mime_type) VALUES (?1, ?2, ?3, '')",
-                params![id, uploader_id, original_size],
+                "INSERT INTO files (id, uploader_id, original_size, mime_type) VALUES (?1, ?2, ?3, ?4)",
+                params![id, uploader_id, original_size, mime_val],
             )
             .map_err(|e| e.to_string())?;
         }
