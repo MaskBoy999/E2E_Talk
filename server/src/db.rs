@@ -1000,10 +1000,14 @@ impl Database {
                 user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
                 sticker_name TEXT NOT NULL,
-                file_key TEXT,
                 mime_type TEXT DEFAULT 'image/png',
                 encrypted_file_key BLOB,
                 file_key_nonce BLOB,
+                encrypted_sticker_name BLOB,
+                sticker_name_nonce BLOB,
+                file_id_hash TEXT,
+                encrypted_mime_type BLOB,
+                mime_nonce BLOB,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );"
         );
@@ -1018,6 +1022,12 @@ impl Database {
 
         // Migration 040: Add invite_code_salt and friend_code_hash_salt columns for salted invite/friend codes
         let _ = conn.execute_batch(include_str!("../migrations/040_invite_code_salt.sql"));
+
+        // Migration 041: encrypted_sticker_name — encrypt sticker/emoji names with identity key
+        let _ = conn.execute_batch(include_str!("../migrations/041_encrypted_sticker_name.sql"));
+
+        // Migration 042: Drop legacy plaintext columns (file_key, friend_code, invite_code)
+        let _ = conn.execute_batch(include_str!("../migrations/042_drop_legacy_plaintext_columns.sql"));
 
         // --- Startup schema verification check ---
         // Verify that the last migration's expected columns exist.
@@ -3938,17 +3948,18 @@ impl Database {
         user_id: &str,
         file_id: &str,
         sticker_name: &str,
-        file_key: &str,
         mime_type: &str,
         encrypted_file_key: Option<&[u8]>,
         file_key_nonce: Option<&[u8]>,
+        encrypted_sticker_name: Option<&[u8]>,
+        sticker_name_nonce: Option<&[u8]>,
     ) -> Result<String, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let id = Uuid::new_v4().to_string();
         let hash = sha256_hex(file_id);
         conn.execute(
-            "INSERT INTO user_stickers (id, user_id, file_id, file_id_hash, sticker_name, file_key, mime_type, encrypted_file_key, file_key_nonce) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![id, user_id, file_id, hash, sticker_name, file_key, mime_type, encrypted_file_key, file_key_nonce],
+            "INSERT INTO user_stickers (id, user_id, file_id, file_id_hash, sticker_name, mime_type, encrypted_file_key, file_key_nonce, encrypted_sticker_name, sticker_name_nonce) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![id, user_id, file_id, hash, sticker_name, mime_type, encrypted_file_key, file_key_nonce, encrypted_sticker_name, sticker_name_nonce],
         )
         .map_err(|e| e.to_string())?;
         Ok(id)
@@ -3964,11 +3975,11 @@ impl Database {
         Ok(())
     }
 
-    pub fn list_user_stickers(&self, user_id: &str) -> Result<Vec<(String, String, String, String, String, Option<String>, Option<Vec<u8>>, Option<Vec<u8>>)>, String> {
+    pub fn list_user_stickers(&self, user_id: &str) -> Result<Vec<(String, String, String, String, String, Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT s.id, s.file_id, s.file_id_hash, s.sticker_name, COALESCE(s.mime_type, f.mime_type, ''), s.file_key, s.encrypted_file_key, s.file_key_nonce
+                "SELECT s.id, s.file_id, s.file_id_hash, s.sticker_name, COALESCE(s.mime_type, f.mime_type, ''), s.encrypted_file_key, s.file_key_nonce, s.encrypted_sticker_name, s.sticker_name_nonce
                  FROM user_stickers s
                  LEFT JOIN files f ON s.file_id = f.id
                  WHERE s.user_id = ?1
@@ -3983,9 +3994,10 @@ impl Database {
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
-                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<Vec<u8>>>(5)?,
                     row.get::<_, Option<Vec<u8>>>(6)?,
                     row.get::<_, Option<Vec<u8>>>(7)?,
+                    row.get::<_, Option<Vec<u8>>>(8)?,
                 ))
             })
             .map_err(|e| e.to_string())?
@@ -4974,11 +4986,11 @@ impl Database {
 
     // --- Admin: missing tables ---
 
-    pub fn list_all_user_stickers_admin(&self) -> Result<Vec<(String, String, String, String, String, String, String, Option<Vec<u8>>, Option<Vec<u8>>, String)>, String> {
+    pub fn list_all_user_stickers_admin(&self) -> Result<Vec<(String, String, String, String, String, String, Option<Vec<u8>>, Option<Vec<u8>>, String, Option<Vec<u8>>, Option<Vec<u8>>)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT us.id, us.user_id, COALESCE(u.username, '?'), us.file_id, us.sticker_name, us.file_key, COALESCE(us.mime_type, ''), us.encrypted_file_key, us.file_key_nonce, COALESCE(us.created_at, '')
+                "SELECT us.id, us.user_id, COALESCE(u.username, '?'), us.file_id, us.sticker_name, COALESCE(us.mime_type, ''), us.encrypted_file_key, us.file_key_nonce, COALESCE(us.created_at, ''), us.encrypted_sticker_name, us.sticker_name_nonce
                  FROM user_stickers us LEFT JOIN users u ON us.user_id = u.id ORDER BY us.created_at DESC",
             )
             .map_err(|e| e.to_string())?;
@@ -4991,10 +5003,11 @@ impl Database {
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
-                    row.get::<_, String>(6)?,
+                    row.get::<_, Option<Vec<u8>>>(6)?,
                     row.get::<_, Option<Vec<u8>>>(7)?,
-                    row.get::<_, Option<Vec<u8>>>(8)?,
-                    row.get::<_, String>(9)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, Option<Vec<u8>>>(9)?,
+                    row.get::<_, Option<Vec<u8>>>(10)?,
                 ))
             })
             .map_err(|e| e.to_string())?

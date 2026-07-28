@@ -2948,15 +2948,16 @@ pub async fn admin_list_user_stickers(
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     };
-    let result: Vec<serde_json::Value> = rows.iter().map(|(id, uid, uname, fid, sname, _fkey, mime, ekey, eknonce, created_at)| {
+    let result: Vec<serde_json::Value> = rows.iter().map(|(id, uid, uname, fid, sname, mime, ekey, eknonce, created_at, enc_name, name_nonce)| {
         serde_json::json!({
             "id": id, "user_id": uid, "username": uname,
             "file_id": fid, "sticker_name": sname,
-            // file_key intentionally omitted — use encrypted_file_key instead
             "mime_type": mime,
             "created_at": created_at,
             "encrypted_file_key": ekey.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
             "file_key_nonce": eknonce.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
+            "encrypted_sticker_name": enc_name.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
+            "sticker_name_nonce": name_nonce.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
         })
     }).collect();
     (StatusCode::OK, Json(serde_json::json!(result))).into_response()
@@ -3640,10 +3641,11 @@ pub async fn download_file_by_hash(
 pub struct AddUserStickerRequest {
     pub file_id: String,
     pub sticker_name: String,
-    pub file_key: Option<String>,
     pub mime_type: String,
     pub encrypted_file_key: Option<String>,
     pub file_key_nonce: Option<String>,
+    pub encrypted_sticker_name: Option<String>,
+    pub sticker_name_nonce: Option<String>,
 }
 
 pub async fn list_user_stickers(
@@ -3658,15 +3660,16 @@ pub async fn list_user_stickers(
         Ok(stickers) => {
             let result: Vec<serde_json::Value> = stickers
                 .iter()
-                .map(|(id, file_id, _file_id_hash, name, mime, _file_key, ekey, eknounce)| {
+                .map(|(id, file_id, _file_id_hash, name, mime, ekey, eknounce, enc_name, name_nonce)| {
                     serde_json::json!({
                         "id": id,
                         "file_id": file_id,
                         "sticker_name": name,
                         "mime_type": mime,
-                        // file_key intentionally omitted — use encrypted_file_key instead
                         "encrypted_file_key": ekey.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
                         "file_key_nonce": eknounce.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
+                        "encrypted_sticker_name": enc_name.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
+                        "sticker_name_nonce": name_nonce.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
                     })
                 })
                 .collect();
@@ -3697,8 +3700,11 @@ pub async fn add_user_sticker(
     // Decode encrypted_file_key and file_key_nonce if provided
     let encrypted_key_bytes = body.encrypted_file_key.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
     let key_nonce_bytes = body.file_key_nonce.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+    // Decode encrypted_sticker_name if provided
+    let enc_name_bytes = body.encrypted_sticker_name.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+    let name_nonce_bytes = body.sticker_name_nonce.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
 
-    match state.db.add_user_sticker(&user_id, &body.file_id, &body.sticker_name, body.file_key.as_deref().unwrap_or(""), &body.mime_type, encrypted_key_bytes.as_deref(), key_nonce_bytes.as_deref()) {
+    match state.db.add_user_sticker(&user_id, &body.file_id, &body.sticker_name, &body.mime_type, encrypted_key_bytes.as_deref(), key_nonce_bytes.as_deref(), enc_name_bytes.as_deref(), name_nonce_bytes.as_deref()) {
         Ok(id) => (StatusCode::OK, Json(serde_json::json!({"id": id}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }

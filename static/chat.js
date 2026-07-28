@@ -13241,6 +13241,17 @@ async function loadUserStickers() {
                     }
                 }
             }
+            // Decrypt encrypted_sticker_name with identity key
+            if (identity && identity.privateKey) {
+                for (const s of userStickersCache) {
+                    if (s.encrypted_sticker_name && s.sticker_name_nonce) {
+                        try {
+                            var decName = E2ECrypto.aeadDecrypt(s.encrypted_sticker_name, identity.privateKey, s.sticker_name_nonce);
+                            if (decName) s.sticker_name = new TextDecoder().decode(decName);
+                        } catch (_) {}
+                    }
+                }
+            }
             // Also refresh emojiCache from the same response so both caches stay in sync.
             // This is needed because the server doesn't broadcast sticker/emoji uploads
             // via WebSocket — the only trigger for re-fetching is opening the sticker/emoji tabs.
@@ -13284,6 +13295,14 @@ async function loadEmojiCache() {
             const identity = E2ECrypto.getIdentityKeyPair();
             const cache = {};
             for (const s of emojis) {
+                // Decrypt encrypted_sticker_name with identity key
+                var nameKey = s.sticker_name;
+                if (s.encrypted_sticker_name && s.sticker_name_nonce && identity && identity.privateKey) {
+                    try {
+                        var decName = E2ECrypto.aeadDecrypt(s.encrypted_sticker_name, identity.privateKey, s.sticker_name_nonce);
+                        if (decName) nameKey = new TextDecoder().decode(decName);
+                    } catch (_) {}
+                }
                 // Prefer encrypted_file_key + file_key_nonce (separate columns) over plaintext file_key.
                 // The server stores nonce and ciphertext in two separate BLOB columns, so we must
                 // combine them back into nonce:ciphertext format for decodeEncryptedFileKey.
@@ -13296,7 +13315,7 @@ async function loadEmojiCache() {
                     var decrypted = E2ECrypto.decodeEncryptedFileKey(s.file_key, identity.privateKey);
                     if (decrypted) fileKey = decrypted;
                 }
-                cache[s.sticker_name] = {
+                cache[nameKey] = {
                     id: s.id,
                     file_id: s.file_id,
                     file_key: fileKey,
@@ -14358,18 +14377,30 @@ async function processAndUploadSticker() {
         if (progressFill) progressFill.style.width = '95%';
         const encryptedFileKeyCombined = E2ECrypto.encodeEncryptedFileKey(shareableFileKeyB64, identity.privateKey);
         const encryptedFileKeyParts = encryptedFileKeyCombined.split(':');
+
+        // Encrypt sticker_name with identity key so the server cannot read it
+        var encName = null;
+        var nameNonce = null;
+        try {
+            var idKey = E2ECrypto.getIdentityKeyPair();
+            if (idKey && idKey.privateKey) {
+                var encResult = E2ECrypto.aeadEncrypt(name, idKey.privateKey, null);
+                encName = encResult.ciphertext;
+                nameNonce = encResult.nonce;
+            }
+        } catch (_) {}
+
         const stickerRes = await authFetch('/api/users/me/stickers', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 file_id: file_id,
                 sticker_name: name,
-                // Encrypt the shareable key with the user's identity key so the server
-                // cannot decrypt sticker/emoji/GIF images.
-                file_key: encryptedFileKeyCombined,
                 mime_type: mimeType,
                 encrypted_file_key: encryptedFileKeyParts[1] || null,
                 file_key_nonce: encryptedFileKeyParts[0] || null,
+                encrypted_sticker_name: encName,
+                sticker_name_nonce: nameNonce,
             }),
         });
         if (!stickerRes.ok) {
