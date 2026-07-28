@@ -1,16 +1,11 @@
-[2m2026-07-25T23:50:18.002789Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Database setup status: configured
-[2m2026-07-25T23:50:18.003202Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Running orphan file cleanup...
-[2m2026-07-25T23:50:18.004444Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Orphan file cleanup complete.
-[2m2026-07-25T23:50:18.006098Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Auto-generated self-signed TLS certificates in certs
-[2m2026-07-25T23:50:18.006126Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m For trusted HTTPS, install mkcert and run:
-[2m2026-07-25T23:50:18.006142Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m   mkcert -install
-[2m2026-07-25T23:50:18.006160Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m   mkcert localhost 127.0.0.1 ::1
-[2m2026-07-25T23:50:18.006175Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Then set TLS_CERT_PATH and TLS_KEY_PATH env vars
-[2m2026-07-25T23:50:18.007657Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Server starting on 0.0.0.0:3000
-[2m2026-07-25T23:50:18.007724Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m HTTPS available on https://localhost:3443
-[2m2026-07-25T23:50:18.007759Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m HTTP available on http://localhost:3000
-[2m2026-07-26T00:50:18.014030Z[0m [32m INFO[0m [2me2e_chat::db[0m[2m:[0m orphan cleanup: removing orphaned file directory: 5d183c7e-fe05-467c-805d-a27defe13d71
-[2m2026-07-26T00:50:18.019021Z[0m [32m INFO[0m [2me2e_chat::db[0m[2m:[0m orphan cleanup: removing orphaned file directory: 684aa493-54e7-448a-b643-f657514f1846
-[2m2026-07-26T00:50:18.025858Z[0m [32m INFO[0m [2me2e_chat::db[0m[2m:[0m orphan cleanup: removing orphaned file directory: 954051b1-a622-47f6-8867-1f8eca2ace80
-[2m2026-07-26T00:50:18.026717Z[0m [32m INFO[0m [2me2e_chat::db[0m[2m:[0m orphan cleanup: removing orphaned file directory: ce60c6cb-14ac-4ca5-b105-82ae92198868
-[2m2026-07-26T00:50:18.027708Z[0m [32m INFO[0m [2me2e_chat::db[0m[2m:[0m orphan cleanup: removing orphaned file directory: d8cbd43a-33e8-4c3a-8796-bf75c2b2efc8
+[2m2026-07-28T15:56:06.723742Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Database setup status: configured
+[2m2026-07-28T15:56:06.723974Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Running orphan file cleanup...
+[2m2026-07-28T15:56:06.724653Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Orphan file cleanup complete.
+[2m2026-07-28T15:56:06.724916Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Auto-generated self-signed TLS certificates in certs
+[2m2026-07-28T15:56:06.724933Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m For trusted HTTPS, install mkcert and run:
+[2m2026-07-28T15:56:06.724941Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m   mkcert -install
+[2m2026-07-28T15:56:06.724947Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m   mkcert localhost 127.0.0.1 ::1
+[2m2026-07-28T15:56:06.724951Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Then set TLS_CERT_PATH and TLS_KEY_PATH env vars
+[2m2026-07-28T15:56:06.725774Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Server starting on 0.0.0.0:3000
+[2m2026-07-28T15:56:06.725804Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m HTTPS available on https://localhost:3443
+[2m2026-07-28T15:56:06.725812Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m HTTP available on http://localhost:3000

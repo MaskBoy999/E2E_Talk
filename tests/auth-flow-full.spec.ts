@@ -25,7 +25,6 @@ async function registerUser(page: any, username: string, password = 'password123
 async function createServerViaApi(page: any, token: string, name: string, uid: string) {
     const hmacKey = await page.evaluate(() => localStorage.getItem('e2e_hmac_key'));
     const code = 'TEST' + uid.slice(-6).toUpperCase();
-    const hash = await page.evaluate(({ hk, cd }) => E2ECrypto.hmacHex(hk, cd), { hk: hmacKey, cd: code });
 
     const keyResult = await page.evaluate(async () => {
         const identityKp = E2ECrypto.getIdentityKeyPair();
@@ -54,7 +53,7 @@ async function createServerViaApi(page: any, token: string, name: string, uid: s
     const res = await page.request.post(`${BASE}/api/servers`, {
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         data: {
-            invite_code_hash: hash,
+            invite_code: code,
             encrypted_name: encName.ciphertext,
             name_nonce: encName.nonce,
             channel_encrypted_name: encChName.ciphertext,

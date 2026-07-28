@@ -84,6 +84,8 @@
             <div class="admin-header">
                 <h1>Admin Panel</h1>
                 <div style="display:flex;gap:8px;align-items:center">
+                    <button id="export-db-btn" class="btn-download" style="font-size:12px;padding:8px 14px;background:#1565c0;color:#fff;border:none;border-radius:4px;cursor:pointer">📥 Export DB</button>
+                    <button id="import-db-btn" class="btn-upload" style="font-size:12px;padding:8px 14px;background:#2e7d32;color:#fff;border:none;border-radius:4px;cursor:pointer">📤 Import DB</button>
                     <button id="clear-all-btn" class="btn-delete" style="font-size:13px;padding:8px 16px">Clear Everything</button>
                     <button id="reset-factory-btn" class="btn-delete" style="font-size:13px;padding:8px 16px;background:#7b1fa2;border-color:#9c27b0">Reset to Factory</button>
                     <a href="index.html" class="back-link">Back to chat</a>
@@ -103,22 +105,22 @@
                 <button class="tab-btn" data-tab="messages">Messages</button>
                 <button class="tab-btn" data-tab="server-keys">Server Keys</button>
                 <button class="tab-btn" data-tab="server-members">Members</button>
-                <button class="tab-btn" data-tab="prekey-bundles">Prekeys</button>
-                <button class="tab-btn" data-tab="sessions">Sessions</button>
                 <button class="tab-btn" data-tab="server-bans">Bans</button>
                 <button class="tab-btn" data-tab="dm-channels">DM Channels</button>
                 <button class="tab-btn" data-tab="dm-members">DM Members</button>
                 <button class="tab-btn" data-tab="dm-messages">DM Messages</button>
-                <button class="tab-btn" data-tab="dm-keys">DM Keys</button>
                 <button class="tab-btn" data-tab="friend-requests">Friend Req</button>
                 <button class="tab-btn" data-tab="friendships">Friends</button>
-                <button class="tab-btn" data-tab="user-public-keys">Pub Keys</button>
                 <button class="tab-btn" data-tab="files">Files</button>
-                <button class="tab-btn" data-tab="user-stickers">User Stickers</button>
-                <button class="tab-btn" data-tab="user-key-escrow">Key Escrow</button>
-                <button class="tab-btn" data-tab="notification-sounds">Notif Sounds</button>
                 <button class="tab-btn" data-tab="admin-config">Config</button>
-                <button class="tab-btn" data-tab="user-device-escrow">Device Escrow</button>
+                <button class="tab-btn" data-tab="pending-events">Pending Events</button>
+                <button class="tab-btn" data-tab="pending-notifications">Pending Notifs</button>
+                <button class="tab-btn" data-tab="voice-sessions">Voice Sessions</button>
+                <button class="tab-btn" data-tab="voice-participants">Voice Participants</button>
+                <button class="tab-btn" data-tab="user-media">User Media</button>
+                <button class="tab-btn" data-tab="user-key-blobs">Key Blobs</button>
+                <button class="tab-btn" data-tab="profile-data-keys">Profile Data Keys</button>
+                <button class="tab-btn" data-tab="shared-profile-data-keys">Shared Profile Keys</button>
             </div>
 
             <!-- Users Tab -->
@@ -126,14 +128,13 @@
                 <div class="table-header">
                     <div class="search-bar">
                         <input type="text" id="search-users" placeholder="Search by username or ID..." oninput="searchTab('users')">
-                        <button class="csv-export-btn" data-tab="users">📥 CSV</button>
                         <span class="record-count" id="users-count"></span>
                     </div>
                 </div>
                 <div class="table-scroll">
                     <table class="data-table">
-                        <thead><tr><th>Username</th><th>User ID</th><th>Created</th><th>Display Name</th><th>Identity Pub Key</th><th>PFP File ID</th><th>PFP File Key</th><th>Banner File ID</th><th>Banner File Key</th><th>Friend Req Disabled</th><th>Profile Data</th><th>FC Hash</th></tr></thead>
-                        <tbody id="user-list"><tr><td colspan="12" class="empty-state">Loading...</td></tr></tbody>
+                        <thead><tr><th>Username</th><th>User ID</th><th>Created</th><th>Identity Pub Key</th><th>PFP File ID</th><th>PFP File Key</th><th>Banner File ID</th><th>Banner File Key</th><th>Friend Req Disabled</th><th>Profile Data</th><th>FC Hash</th><th>Hash Key</th><th>Hash Salt</th><th>Hash Nonce</th></tr></thead>
+                        <tbody id="user-list"><tr><td colspan="14" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
                 <div id="users-pagination" class="pagination-container"></div>
@@ -144,14 +145,13 @@
                 <div class="table-header">
                     <div class="search-bar">
                         <input type="text" id="search-servers" placeholder="Search by name or ID..." oninput="searchTab('servers')">
-                        <button class="csv-export-btn" data-tab="servers">📥 CSV</button>
                         <span class="record-count" id="servers-count"></span>
                     </div>
                 </div>
                 <div class="table-scroll">
                     <table class="data-table">
-                        <thead><tr><th>Name</th><th>Server ID</th><th>Owner ID</th><th>Created</th><th>Invite Code Hash</th><th>Joins Disabled</th></tr></thead>
-                        <tbody id="server-list"><tr><td colspan="6" class="empty-state">Loading...</td></tr></tbody>
+                        <thead><tr><th>Name</th><th>Server ID</th><th>Owner ID</th><th>Created</th><th>Invite Code Hash</th><th>Joins Disabled</th><th>Encrypted Name</th><th>Name Nonce</th><th>PFP File ID</th><th>PFP Hash</th><th>Picture Key</th><th>Picture Nonce</th></tr></thead>
+                        <tbody id="server-list"><tr><td colspan="12" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
                 <div id="servers-pagination" class="pagination-container"></div>
@@ -162,14 +162,13 @@
                 <div class="table-header">
                     <div class="search-bar">
                         <input type="text" id="search-channels" placeholder="Search by name or server ID..." oninput="searchTab('channels')">
-                        <button class="csv-export-btn" data-tab="channels">📥 CSV</button>
                         <span class="record-count" id="channels-count"></span>
                     </div>
                 </div>
                 <div class="table-scroll">
                     <table class="data-table">
-                        <thead><tr><th>Name</th><th>Channel ID</th><th>Server ID</th><th>Type</th><th>Position</th><th>Created</th></tr></thead>
-                        <tbody id="channel-list"><tr><td colspan="6" class="empty-state">Loading...</td></tr></tbody>
+                        <thead><tr><th>Name</th><th>Channel ID</th><th>Server ID</th><th>Type</th><th>Position</th><th>Created</th><th>Encrypted Name</th><th>Name Nonce</th></tr></thead>
+                        <tbody id="channel-list"><tr><td colspan="8" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
                 <div id="channels-pagination" class="pagination-container"></div>
@@ -180,14 +179,13 @@
                 <div class="table-header">
                     <div class="search-bar">
                         <input type="text" id="search-messages" placeholder="Search by sender, channel ID, or timestamp..." oninput="searchTab('messages')">
-                        <button class="csv-export-btn" data-tab="messages">📥 CSV</button>
                         <span class="record-count" id="messages-count"></span>
                     </div>
                 </div>
                 <div class="table-scroll">
                     <table class="data-table">
-                        <thead><tr><th>Sender</th><th>Channel ID</th><th>Encrypted Content (base64)</th><th>Nonce</th><th>Timestamp</th><th>Message ID</th><th>Edited At</th><th>Msg Nonce</th><th>Msg Sig</th><th>Profile Key</th><th>Profile Key Nonce</th><th>Banner Key</th><th>Banner Key Nonce</th></tr></thead>
-                        <tbody id="message-list"><tr><td colspan="13" class="empty-state">Loading...</td></tr></tbody>
+                        <thead><tr><th>Sender</th><th>Channel ID</th><th>Content</th><th>Nonce</th><th>Timestamp</th><th>Message ID</th><th>Edited</th><th>Key Ver</th><th>Sender ID Hash</th><th>Profile Snapshot</th><th>File Key</th><th>File Key Nonce</th></tr></thead>
+                        <tbody id="message-list"><tr><td colspan="12" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
                 <div id="messages-pagination" class="pagination-container"></div>
@@ -198,7 +196,6 @@
                 <div class="table-header">
                     <div class="search-bar">
                         <input type="text" id="search-server-keys" placeholder="Search by server name, user ID, or version..." oninput="searchTab('server-keys')">
-                        <button class="csv-export-btn" data-tab="server-keys">📥 CSV</button>
                         <span class="record-count" id="server-keys-count"></span>
                     </div>
                 </div>
@@ -216,7 +213,6 @@
                 <div class="table-header">
                     <div class="search-bar">
                         <input type="text" id="search-server-members" placeholder="Search by username, user ID, or server name..." oninput="searchTab('server-members')">
-                        <button class="csv-export-btn" data-tab="server-members">📥 CSV</button>
                         <span class="record-count" id="server-members-count"></span>
                     </div>
                 </div>
@@ -229,48 +225,11 @@
                 <div id="server-members-pagination" class="pagination-container"></div>
             </div>
 
-            <!-- Prekey Bundles Tab -->
-            <div class="tab-content" id="tab-prekey-bundles">
-                <div class="table-header">
-                    <div class="search-bar">
-                        <input type="text" id="search-prekey-bundles" placeholder="Search by user ID..." oninput="searchTab('prekey-bundles')">
-                        <button class="csv-export-btn" data-tab="prekey-bundles">📥 CSV</button>
-                        <span class="record-count" id="prekey-bundles-count"></span>
-                    </div>
-                </div>
-                <div class="table-scroll">
-                    <table class="data-table">
-                        <thead><tr><th>User ID</th><th>Identity Key</th><th>Signed Prekey</th><th>Sig</th><th>OT Prekey</th><th>OT ID</th><th>Created</th></tr></thead>
-                        <tbody id="prekey-bundle-list"><tr><td colspan="7" class="empty-state">Loading...</td></tr></tbody>
-                    </table>
-                </div>
-                <div id="prekey-bundles-pagination" class="pagination-container"></div>
-            </div>
-
-            <!-- Sessions Tab -->
-            <div class="tab-content" id="tab-sessions">
-                <div class="table-header">
-                    <div class="search-bar">
-                        <input type="text" id="search-sessions" placeholder="Search by username or user ID..." oninput="searchTab('sessions')">
-                        <button class="csv-export-btn" data-tab="sessions">📥 CSV</button>
-                        <span class="record-count" id="sessions-count"></span>
-                    </div>
-                </div>
-                <div class="table-scroll">
-                    <table class="data-table">
-                        <thead><tr><th>Our User</th><th>Their User</th><th>Session Data</th><th>Ratchet #</th><th>Created</th></tr></thead>
-                        <tbody id="session-list"><tr><td colspan="5" class="empty-state">Loading...</td></tr></tbody>
-                    </table>
-                </div>
-                <div id="sessions-pagination" class="pagination-container"></div>
-            </div>
-
             <!-- Server Bans Tab -->
             <div class="tab-content" id="tab-server-bans">
                 <div class="table-header">
                     <div class="search-bar">
                         <input type="text" id="search-server-bans" placeholder="Search by server name, username, or reason..." oninput="searchTab('server-bans')">
-                        <button class="csv-export-btn" data-tab="server-bans">📥 CSV</button>
                         <span class="record-count" id="server-bans-count"></span>
                     </div>
                 </div>
@@ -288,7 +247,6 @@
                 <div class="table-header">
                     <div class="search-bar">
                         <input type="text" id="search-dm-channels" placeholder="Search by channel ID..." oninput="searchTab('dm-channels')">
-                        <button class="csv-export-btn" data-tab="dm-channels">📥 CSV</button>
                         <span class="record-count" id="dm-channels-count"></span>
                     </div>
                 </div>
@@ -306,7 +264,6 @@
                 <div class="table-header">
                     <div class="search-bar">
                         <input type="text" id="search-dm-members" placeholder="Search by username or DM channel ID..." oninput="searchTab('dm-members')">
-                        <button class="csv-export-btn" data-tab="dm-members">📥 CSV</button>
                         <span class="record-count" id="dm-members-count"></span>
                     </div>
                 </div>
@@ -324,35 +281,16 @@
                 <div class="table-header">
                     <div class="search-bar">
                         <input type="text" id="search-dm-messages" placeholder="Search by sender, DM channel ID, or timestamp..." oninput="searchTab('dm-messages')">
-                        <button class="csv-export-btn" data-tab="dm-messages">📥 CSV</button>
                         <span class="record-count" id="dm-messages-count"></span>
                     </div>
                 </div>
                 <div class="table-scroll">
                     <table class="data-table">
-                        <thead><tr><th>Sender</th><th>DM Channel ID</th><th>Encrypted Content</th><th>Nonce</th><th>Timestamp</th><th>Message ID</th><th>Edited At</th><th>Msg Nonce</th><th>Msg Sig</th><th>Profile Key</th><th>Profile Key Nonce</th><th>Banner Key</th><th>Banner Key Nonce</th></tr></thead>
-                        <tbody id="dm-message-list"><tr><td colspan="13" class="empty-state">Loading...</td></tr></tbody>
+                        <thead><tr><th>Sender</th><th>DM Channel ID</th><th>Content</th><th>Nonce</th><th>Timestamp</th><th>Message ID</th><th>Key Ver</th><th>Sender ID Hash</th><th>Profile Snapshot</th><th>File Key</th><th>File Key Nonce</th></tr></thead>
+                        <tbody id="dm-message-list"><tr><td colspan="11" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
                 <div id="dm-messages-pagination" class="pagination-container"></div>
-            </div>
-
-            <!-- DM Keys Tab -->
-            <div class="tab-content" id="tab-dm-keys">
-                <div class="table-header">
-                    <div class="search-bar">
-                        <input type="text" id="search-dm-keys" placeholder="Search by username or DM channel ID..." oninput="searchTab('dm-keys')">
-                        <button class="csv-export-btn" data-tab="dm-keys">📥 CSV</button>
-                        <span class="record-count" id="dm-keys-count"></span>
-                    </div>
-                </div>
-                <div class="table-scroll">
-                    <table class="data-table">
-                        <thead><tr><th>DM Channel ID</th><th>User ID</th><th>Username</th><th>Encrypted Key</th><th>Sender Pub Key</th><th>Nonce</th><th>Device ID</th><th>Created</th></tr></thead>
-                        <tbody id="dm-key-list"><tr><td colspan="8" class="empty-state">Loading...</td></tr></tbody>
-                    </table>
-                </div>
-                <div id="dm-keys-pagination" class="pagination-container"></div>
             </div>
 
             <!-- Friend Requests Tab -->
@@ -360,7 +298,6 @@
                 <div class="table-header">
                     <div class="search-bar">
                         <input type="text" id="search-friend-requests" placeholder="Search by username or status..." oninput="searchTab('friend-requests')">
-                        <button class="csv-export-btn" data-tab="friend-requests">📥 CSV</button>
                         <span class="record-count" id="friend-requests-count"></span>
                     </div>
                 </div>
@@ -378,7 +315,6 @@
                 <div class="table-header">
                     <div class="search-bar">
                         <input type="text" id="search-friendships" placeholder="Search by username..." oninput="searchTab('friendships')">
-                        <button class="csv-export-btn" data-tab="friendships">📥 CSV</button>
                         <span class="record-count" id="friendships-count"></span>
                     </div>
                 </div>
@@ -391,94 +327,21 @@
                 <div id="friendships-pagination" class="pagination-container"></div>
             </div>
 
-            <!-- User Public Keys Tab -->
-            <div class="tab-content" id="tab-user-public-keys">
-                <div class="table-header">
-                    <div class="search-bar">
-                        <input type="text" id="search-user-public-keys" placeholder="Search by username, user ID, or device ID..." oninput="searchTab('user-public-keys')">
-                        <button class="csv-export-btn" data-tab="user-public-keys">📥 CSV</button>
-                        <span class="record-count" id="user-public-keys-count"></span>
-                    </div>
-                </div>
-                <div class="table-scroll">
-                    <table class="data-table">
-                        <thead><tr><th>Username</th><th>Device ID</th><th>Device Name</th><th>Identity Key</th><th>Signed Prekey</th><th>Signed Prekey Sig</th><th>Last Active</th><th>Created</th></tr></thead>
-                        <tbody id="user-public-key-list"><tr><td colspan="8" class="empty-state">Loading...</td></tr></tbody>
-                    </table>
-                </div>
-                <div id="user-public-keys-pagination" class="pagination-container"></div>
-            </div>
-
             <!-- Files Tab -->
             <div class="tab-content" id="tab-files">
                 <div class="table-header">
                     <div class="search-bar">
                         <input type="text" id="search-files" placeholder="Search by filename, uploader, or MIME type..." oninput="searchTab('files')">
-                        <button class="csv-export-btn" data-tab="files">📥 CSV</button>
                         <span class="record-count" id="files-count"></span>
                     </div>
                 </div>
                 <div class="table-scroll">
                     <table class="data-table">
-                        <thead><tr><th>Filename</th><th>Uploader</th><th>MIME</th><th>Size</th><th>Server</th><th>Channel</th><th>Chunks</th><th>Complete</th><th>Created At</th></tr></thead>
-                        <tbody id="file-list"><tr><td colspan="9" class="empty-state">Loading...</td></tr></tbody>
+                        <thead><tr><th>File ID</th><th>Uploader</th><th>MIME</th><th>Size</th><th>File ID Hash</th><th>Chunks</th><th>Complete</th><th>Created At</th><th>Enc MIME Type</th><th>MIME Nonce</th></tr></thead>
+                        <tbody id="file-list"><tr><td colspan="10" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
                 <div id="files-pagination" class="pagination-container"></div>
-            </div>
-
-            <!-- User Stickers Tab -->
-            <div class="tab-content" id="tab-user-stickers">
-                <div class="table-header">
-                    <div class="search-bar">
-                        <input type="text" id="search-user-stickers" placeholder="Search by username, sticker name..." oninput="searchTab('user-stickers')">
-                        <button class="csv-export-btn" data-tab="user-stickers">📥 CSV</button>
-                        <span class="record-count" id="user-stickers-count"></span>
-                    </div>
-                </div>
-                <div class="table-scroll">
-                    <table class="data-table">
-                        <thead><tr><th>Username</th><th>Sticker Name</th><th>File ID</th><th>MIME</th><th>Created</th><th>Enc File Key</th><th>File Key Nonce</th></tr></thead>
-                        <tbody id="user-sticker-list"><tr><td colspan="7" class="empty-state">Loading...</td></tr></tbody>
-                    </table>
-                </div>
-                <div id="user-stickers-pagination" class="pagination-container"></div>
-            </div>
-
-            <!-- User Key Escrow Tab -->
-            <div class="tab-content" id="tab-user-key-escrow">
-                <div class="table-header">
-                    <div class="search-bar">
-                        <input type="text" id="search-user-key-escrow" placeholder="Search by username or user ID..." oninput="searchTab('user-key-escrow')">
-                        <button class="csv-export-btn" data-tab="user-key-escrow">📥 CSV</button>
-                        <span class="record-count" id="user-key-escrow-count"></span>
-                    </div>
-                </div>
-                <div class="table-scroll">
-                    <table class="data-table">
-                        <thead><tr><th>Username</th><th>User ID</th><th>Created</th><th>Updated</th><th>Has Key</th><th>Encrypted Private Key</th><th>Salt</th><th>Nonce</th></tr></thead>
-                        <tbody id="user-key-escrow-list"><tr><td colspan="8" class="empty-state">Loading...</td></tr></tbody>
-                    </table>
-                </div>
-                <div id="user-key-escrow-pagination" class="pagination-container"></div>
-            </div>
-
-            <!-- Notification Sounds Tab -->
-            <div class="tab-content" id="tab-notification-sounds">
-                <div class="table-header">
-                    <div class="search-bar">
-                        <input type="text" id="search-notification-sounds" placeholder="Search by username or user ID..." oninput="searchTab('notification-sounds')">
-                        <button class="csv-export-btn" data-tab="notification-sounds">📥 CSV</button>
-                        <span class="record-count" id="notification-sounds-count"></span>
-                    </div>
-                </div>
-                <div class="table-scroll">
-                    <table class="data-table">
-                        <thead><tr><th>Username</th><th>User ID</th><th>File Name</th><th>Encrypted Sound</th><th>Nonce</th><th>Sender Pub Key</th><th>Created</th><th>Updated</th></tr></thead>
-                        <tbody id="notification-sound-list"><tr><td colspan="8" class="empty-state">Loading...</td></tr></tbody>
-                    </table>
-                </div>
-                <div id="notification-sounds-pagination" class="pagination-container"></div>
             </div>
 
             <!-- Admin Config Tab -->
@@ -486,7 +349,6 @@
                 <div class="table-header">
                     <div class="search-bar">
                         <input type="text" id="search-admin-config" placeholder="Search by key or value..." oninput="searchTab('admin-config')">
-                        <button class="csv-export-btn" data-tab="admin-config">📥 CSV</button>
                         <span class="record-count" id="admin-config-count"></span>
                     </div>
                 </div>
@@ -499,22 +361,140 @@
                 <div id="admin-config-pagination" class="pagination-container"></div>
             </div>
 
-            <!-- User Device Escrow Tab -->
-            <div class="tab-content" id="tab-user-device-escrow">
+            <!-- Pending Events Tab -->
+            <div class="tab-content" id="tab-pending-events">
                 <div class="table-header">
                     <div class="search-bar">
-                        <input type="text" id="search-user-device-escrow" placeholder="Search by username or device ID..." oninput="searchTab('user-device-escrow')">
-                        <button class="csv-export-btn" data-tab="user-device-escrow">📥 CSV</button>
-                        <span class="record-count" id="user-device-escrow-count"></span>
+                        <input type="text" id="search-pending-events" placeholder="Search by user ID or event type..." oninput="searchTab('pending-events')">
+                        <span class="record-count" id="pending-events-count"></span>
                     </div>
                 </div>
                 <div class="table-scroll">
                     <table class="data-table">
-                        <thead><tr><th>Username</th><th>User ID</th><th>Device ID</th><th>Encrypted Private Key</th><th>Salt</th><th>Nonce</th><th>Created</th><th>Updated</th></tr></thead>
-                        <tbody id="user-device-escrow-list"><tr><td colspan="8" class="empty-state">Loading...</td></tr></tbody>
+                        <thead><tr><th>ID</th><th>User ID</th><th>Server ID</th><th>Event Type</th><th>Affected User ID</th></tr></thead>
+                        <tbody id="pending-event-list"><tr><td colspan="5" class="empty-state">Loading...</td></tr></tbody>
                     </table>
                 </div>
-                <div id="user-device-escrow-pagination" class="pagination-container"></div>
+                <div id="pending-events-pagination" class="pagination-container"></div>
+            </div>
+
+            <!-- Pending Notifications Tab -->
+            <div class="tab-content" id="tab-pending-notifications">
+                <div class="table-header">
+                    <div class="search-bar">
+                        <input type="text" id="search-pending-notifications" placeholder="Search by user ID or notification type..." oninput="searchTab('pending-notifications')">
+                        <span class="record-count" id="pending-notifications-count"></span>
+                    </div>
+                </div>
+                <div class="table-scroll">
+                    <table class="data-table">
+                        <thead><tr><th>ID</th><th>User ID</th><th>Notification Type</th><th>Payload</th></tr></thead>
+                        <tbody id="pending-notification-list"><tr><td colspan="4" class="empty-state">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+                <div id="pending-notifications-pagination" class="pagination-container"></div>
+            </div>
+
+            <!-- Voice Sessions Tab -->
+            <div class="tab-content" id="tab-voice-sessions">
+                <div class="table-header">
+                    <div class="search-bar">
+                        <input type="text" id="search-voice-sessions" placeholder="Search..." oninput="searchTab('voice-sessions')">
+                        <span class="record-count" id="voice-sessions-count"></span>
+                    </div>
+                </div>
+                <div class="table-scroll">
+                    <table class="data-table">
+                        <thead><tr><th>ID</th><th>Channel ID</th><th>Started At</th><th>Ended At</th></tr></thead>
+                        <tbody id="voice-session-list"><tr><td colspan="4" class="empty-state">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+                <div id="voice-sessions-pagination" class="pagination-container"></div>
+            </div>
+
+            <!-- Voice Participants Tab -->
+            <div class="tab-content" id="tab-voice-participants">
+                <div class="table-header">
+                    <div class="search-bar">
+                        <input type="text" id="search-voice-participants" placeholder="Search..." oninput="searchTab('voice-participants')">
+                        <span class="record-count" id="voice-participants-count"></span>
+                    </div>
+                </div>
+                <div class="table-scroll">
+                    <table class="data-table">
+                        <thead><tr><th>Voice Session ID</th><th>User ID</th><th>Joined</th><th>Left</th><th>Muted</th><th>Deaf</th><th>Camera</th><th>Screen Share</th></tr></thead>
+                        <tbody id="voice-participant-list"><tr><td colspan="8" class="empty-state">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+                <div id="voice-participants-pagination" class="pagination-container"></div>
+            </div>
+
+            <!-- User Media Tab -->
+            <div class="tab-content" id="tab-user-media">
+                <div class="table-header">
+                    <div class="search-bar">
+                        <input type="text" id="search-user-media" placeholder="Search..." oninput="searchTab('user-media')">
+                        <span class="record-count" id="user-media-count"></span>
+                    </div>
+                </div>
+                <div class="table-scroll">
+                    <table class="data-table">
+                        <thead><tr><th>ID</th><th>Username</th><th>File ID</th><th>Enc File Key</th><th>Eph Pub</th><th>Nonce</th><th>Type</th><th>Created</th></tr></thead>
+                        <tbody id="user-media-list"><tr><td colspan="8" class="empty-state">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+                <div id="user-media-pagination" class="pagination-container"></div>
+            </div>
+
+            <!-- User Key Blobs Tab -->
+            <div class="tab-content" id="tab-user-key-blobs">
+                <div class="table-header">
+                    <div class="search-bar">
+                        <input type="text" id="search-user-key-blobs" placeholder="Search..." oninput="searchTab('user-key-blobs')">
+                        <span class="record-count" id="user-key-blobs-count"></span>
+                    </div>
+                </div>
+                <div class="table-scroll">
+                    <table class="data-table">
+                        <thead><tr><th>Username</th><th>User ID</th><th>Encrypted Blob</th><th>Salt</th><th>Nonce</th></tr></thead>
+                        <tbody id="user-key-blob-list"><tr><td colspan="5" class="empty-state">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+                <div id="user-key-blobs-pagination" class="pagination-container"></div>
+            </div>
+
+            <!-- Profile Data Keys Tab -->
+            <div class="tab-content" id="tab-profile-data-keys">
+                <div class="table-header">
+                    <div class="search-bar">
+                        <input type="text" id="search-profile-data-keys" placeholder="Search..." oninput="searchTab('profile-data-keys')">
+                        <span class="record-count" id="profile-data-keys-count"></span>
+                    </div>
+                </div>
+                <div class="table-scroll">
+                    <table class="data-table">
+                        <thead><tr><th>Username</th><th>User ID</th><th>Encrypted Key</th><th>Nonce</th></tr></thead>
+                        <tbody id="profile-data-key-list"><tr><td colspan="4" class="empty-state">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+                <div id="profile-data-keys-pagination" class="pagination-container"></div>
+            </div>
+
+            <!-- Shared Profile Data Keys Tab -->
+            <div class="tab-content" id="tab-shared-profile-data-keys">
+                <div class="table-header">
+                    <div class="search-bar">
+                        <input type="text" id="search-shared-profile-data-keys" placeholder="Search..." oninput="searchTab('shared-profile-data-keys')">
+                        <span class="record-count" id="shared-profile-data-keys-count"></span>
+                    </div>
+                </div>
+                <div class="table-scroll">
+                    <table class="data-table">
+                        <thead><tr><th>ID</th><th>Username</th><th>Owner User ID</th><th>Target Type</th><th>Target ID</th><th>Encrypted Key</th></tr></thead>
+                        <tbody id="shared-profile-data-key-list"><tr><td colspan="6" class="empty-state">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+                <div id="shared-profile-data-keys-pagination" class="pagination-container"></div>
             </div>
         </div>
     </div>

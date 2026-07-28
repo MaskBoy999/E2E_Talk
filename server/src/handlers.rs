@@ -2508,7 +2508,7 @@ pub async fn admin_list_users(
 
     let user_infos: Vec<serde_json::Value> = users
         .iter()
-        .map(|(id, username, _pw_hash, created_at, _display_name, identity_public_key, profile_picture_file_id, profile_picture_file_key, friend_requests_disabled, encrypted_friend_code, friend_code_salt, friend_code_nonce, encrypted_profile_data, encrypted_profile_salt, encrypted_profile_nonce, profile_banner_file_id, profile_banner_file_key, _description, _nickname, friend_code_hash)| {
+        .map(|(id, username, _pw_hash, created_at, _display_name, identity_public_key, profile_picture_file_id, profile_picture_file_key, friend_requests_disabled, encrypted_friend_code, friend_code_salt, friend_code_nonce, encrypted_profile_data, encrypted_profile_salt, encrypted_profile_nonce, profile_banner_file_id, profile_banner_file_key, _description, _nickname, friend_code_hash, encrypted_hash_key, hash_key_salt, hash_key_nonce)| {
             serde_json::json!({
                 "id": id,
                 "username": username,
@@ -2525,8 +2525,10 @@ pub async fn admin_list_users(
                 "encrypted_profile_nonce": encrypted_profile_nonce,
                 "profile_banner_file_id": profile_banner_file_id,
                 "profile_banner_file_key": profile_banner_file_key,
-                // display_name, description, nickname (legacy columns) — all now in encrypted_profile_data
                 "friend_code_hash": friend_code_hash,
+                "encrypted_hash_key": encrypted_hash_key,
+                "hash_key_salt": hash_key_salt,
+                "hash_key_nonce": hash_key_nonce,
             })
         })
         .collect();
@@ -2585,6 +2587,12 @@ pub async fn admin_list_servers(
                 "invite_code_hash": s.invite_code_hash,
                 "joins_disabled": s.joins_disabled,
                 "created_at": s.created_at,
+                "encrypted_name": s.encrypted_name.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
+                "name_nonce": s.name_nonce.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
+                "server_picture_file_id": s.server_picture_file_id,
+                "server_picture_file_id_hash": s.server_picture_file_id_hash,
+                "encrypted_server_picture_key": s.encrypted_server_picture_key.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
+                "server_picture_key_nonce": s.server_picture_key_nonce.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
             })
         })
         .collect();
@@ -2614,6 +2622,8 @@ pub async fn admin_list_channels(
                 "type": c.channel_type,
                 "position": c.position,
                 "created_at": c.created_at,
+                "encrypted_name": c.encrypted_name.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
+                "name_nonce": c.name_nonce.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
             })
         })
         .collect();
@@ -2640,16 +2650,23 @@ pub async fn admin_list_messages(
             serde_json::json!({
                 "id": m.id,
                 "channel_id": m.channel_id,
+                "sender_id": m.sender_id,
                 "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
                 "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
                 "timestamp": m.timestamp,
                 "edited_at": m.edited_at,
                 "message_nonce": m.message_nonce,
+                "message_signature": m.message_signature,
                 "encrypted_profile_key": m.encrypted_profile_key,
                 "profile_key_nonce": m.profile_key_nonce,
                 "encrypted_banner_key": m.encrypted_banner_key,
                 "banner_key_nonce": m.banner_key_nonce,
+                "key_version": m.key_version,
                 "sender_id_hash": m.sender_id_hash,
+                "encrypted_profile_snapshot": m.encrypted_profile_snapshot.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
+                "profile_snapshot_nonce": m.profile_snapshot_nonce.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
+                "encrypted_file_key": m.encrypted_file_key.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
+                "file_key_nonce": m.file_key_nonce.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
             })
         })
         .collect();
@@ -2777,14 +2794,19 @@ pub async fn admin_list_dm_messages(
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     };
-    let result: Vec<serde_json::Value> = rows.iter().map(|(id, dm_id, sid, _sname, enc, nonce, ts, _kv, _snap, _snap_nonce, _file_key, _file_key_nonce, _sender_id_hash)| {
+    let result: Vec<serde_json::Value> = rows.iter().map(|(id, dm_id, sid, sname, enc, nonce, ts, kv, snap, snap_nonce, fkey, fkey_nonce, sender_id_hash)| {
         serde_json::json!({
             "id": id, "dm_channel_id": dm_id,
-            "sender_id": sid,
+            "sender_id": sid, "sender_username": sname,
             "encrypted_content": base64::engine::general_purpose::STANDARD.encode(enc),
             "nonce": base64::engine::general_purpose::STANDARD.encode(nonce),
             "timestamp": ts,
-            "sender_id_hash": _sender_id_hash,
+            "key_version": kv,
+            "sender_id_hash": sender_id_hash,
+            "encrypted_profile_snapshot": snap.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
+            "profile_snapshot_nonce": snap_nonce.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
+            "encrypted_file_key": fkey.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
+            "file_key_nonce": fkey_nonce.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
         })
     }).collect();
     (StatusCode::OK, Json(serde_json::json!(result))).into_response()
@@ -2859,12 +2881,14 @@ pub async fn admin_list_files(
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     };
-    let result: Vec<serde_json::Value> = rows.iter().map(|(id, uid, uname, name, mime, size, sid, cid, ts, chunk_count, upload_complete)| {
+    let result: Vec<serde_json::Value> = rows.iter().map(|(id, uid, uname, name, mime, size, file_id_hash, ts, chunk_count, upload_complete, enc_mime, mime_nonce)| {
         serde_json::json!({
             "id": id, "uploader_id": uid, "uploader_username": uname,
             "original_name": name, "mime_type": mime, "file_size": size,
-            "server_id": sid, "channel_id": cid, "created_at": ts,
+            "file_id_hash": file_id_hash, "created_at": ts,
             "chunk_count": chunk_count, "upload_complete": *upload_complete != 0,
+            "encrypted_mime_type": enc_mime.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
+            "mime_nonce": mime_nonce.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
         })
     }).collect();
     (StatusCode::OK, Json(serde_json::json!(result))).into_response()
@@ -3098,6 +3122,176 @@ pub async fn admin_clear_all(
             (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn admin_list_pending_events(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) {
+        return e.into_response();
+    }
+    let rows = match state.db.list_all_pending_events_admin() {
+        Ok(r) => r,
+        Err(e) => { return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(); }
+    };
+    let result: Vec<serde_json::Value> = rows.iter().map(|(id, user_id, server_id, event_type, affected_user_id)| {
+        serde_json::json!({"id": id, "user_id": user_id, "server_id": server_id, "event_type": event_type, "affected_user_id": affected_user_id})
+    }).collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
+pub async fn admin_list_pending_notifications(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) {
+        return e.into_response();
+    }
+    let rows = match state.db.list_all_pending_notifications_admin() {
+        Ok(r) => r,
+        Err(e) => { return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(); }
+    };
+    let result: Vec<serde_json::Value> = rows.iter().map(|(id, user_id, notification_type, payload)| {
+        serde_json::json!({"id": id, "user_id": user_id, "notification_type": notification_type, "payload": payload})
+    }).collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
+pub async fn admin_list_voice_sessions(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
+    let rows = match state.db.list_all_voice_sessions_admin() {
+        Ok(r) => r, Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let result: Vec<serde_json::Value> = rows.iter().map(|(id, channel_id, started_at, ended_at)| {
+        serde_json::json!({"id": id, "channel_id": channel_id, "started_at": started_at, "ended_at": ended_at})
+    }).collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
+pub async fn admin_list_voice_participants(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
+    let rows = match state.db.list_all_voice_participants_admin() {
+        Ok(r) => r, Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let result: Vec<serde_json::Value> = rows.iter().map(|(vsid, uid, joined, left, muted, deaf, cam, sharing)| {
+        serde_json::json!({"voice_session_id": vsid, "user_id": uid, "joined_at": joined, "left_at": left, "is_muted": *muted != 0, "is_deafened": *deaf != 0, "is_camera_on": *cam != 0, "is_screen_sharing": *sharing != 0})
+    }).collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
+pub async fn admin_list_user_media(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
+    let rows = match state.db.list_all_user_media_admin() {
+        Ok(r) => r, Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let result: Vec<serde_json::Value> = rows.iter().map(|(id, uname, fid, ekey, eph, nonce, mtype, created)| {
+        serde_json::json!({"id": id, "username": uname, "file_id": fid, "encrypted_file_key": ekey.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)), "eph_pub": eph.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)), "nonce": nonce.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)), "media_type": mtype, "created_at": created})
+    }).collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
+pub async fn admin_list_user_key_blobs(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
+    let rows = match state.db.list_all_user_key_blobs_admin() {
+        Ok(r) => r, Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let result: Vec<serde_json::Value> = rows.iter().map(|(uname, uid, blob, salt, nonce)| {
+        serde_json::json!({"username": uname, "user_id": uid, "encrypted_blob": blob, "salt": salt, "nonce": nonce})
+    }).collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
+pub async fn admin_list_profile_data_keys(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
+    let rows = match state.db.list_all_profile_data_keys_admin() {
+        Ok(r) => r, Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let result: Vec<serde_json::Value> = rows.iter().map(|(uname, uid, ekey, nonce)| {
+        serde_json::json!({"username": uname, "user_id": uid, "encrypted_key": ekey, "nonce": nonce})
+    }).collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
+pub async fn admin_list_shared_profile_data_keys(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
+    let rows = match state.db.list_all_shared_profile_data_keys_admin() {
+        Ok(r) => r, Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let result: Vec<serde_json::Value> = rows.iter().map(|(id, uname, oid, ttype, tid, ekey)| {
+        serde_json::json!({"id": id, "username": uname, "owner_user_id": oid, "target_type": ttype, "target_id": tid, "encrypted_key": ekey})
+    }).collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
+/// GET /api/admin/export-db — downloads the entire SQLite database file
+pub async fn admin_export_db(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) {
+        return e.into_response();
+    }
+    let db_path = &state.config.database_url;
+    match tokio::fs::read(db_path).await {
+        Ok(data) => {
+            let mut resp_headers = HeaderMap::new();
+            resp_headers.insert("content-type", HeaderValue::from_static("application/x-sqlite3"));
+            resp_headers.insert("content-disposition", HeaderValue::from_str("attachment; filename=\"e2e_chat.db\"").unwrap());
+            (StatusCode::OK, resp_headers, axum::body::Body::from(data)).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": format!("Failed to read database: {}", e)}))).into_response(),
+    }
+}
+
+/// POST /api/admin/import-db — upload a SQLite database file to replace the current one
+pub async fn admin_import_db(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) {
+        return e.into_response();
+    }
+    if body.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Empty database file"}))).into_response();
+    }
+    if body.len() < 16 || &body[..16] != b"SQLite format 3\x00" {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "File does not appear to be a valid SQLite database"}))).into_response();
+    }
+    let db_path = state.config.database_url.clone();
+    match tokio::fs::write(&db_path, &body).await {
+        Ok(()) => {
+            match state.db.reconnect(&db_path) {
+                Ok(()) => {
+                    state.setup_complete.store(true, std::sync::atomic::Ordering::Relaxed);
+                    let mut guard = get_admin_tokens();
+                    *guard = None;
+                    (StatusCode::OK, Json(serde_json::json!({"ok": true, "message": "Database imported. Please re-login."}))).into_response()
+                }
+                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": format!("Written but reconnect failed: {}", e)}))).into_response(),
+            }
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": format!("Failed: {}", e)}))).into_response(),
     }
 }
 

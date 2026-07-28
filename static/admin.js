@@ -1,9 +1,9 @@
 let rawData = {
     users: [], servers: [], channels: [], messages: [], serverKeys: [], serverMembers: [],
-    prekeyBundles: [], sessions: [], serverBans: [], dmChannels: [], dmMembers: [],
-    dmMessages: [], dmKeys: [], friendRequests: [], friendships: [], userPublicKeys: [], files: [],
-    userStickers: [], userKeyEscrow: [], notificationSounds: [],
-    adminConfig: [], userDeviceEscrow: []
+    serverBans: [], dmChannels: [], dmMembers: [],
+    dmMessages: [], friendRequests: [], friendships: [], files: [],
+    adminConfig: [], pendingEvents: [], pendingNotifications: [],
+    voiceSessions: [], voiceParticipants: [], userMedia: [], userKeyBlobs: [], profileDataKeys: [], sharedProfileDataKeys: []
 };
 
 const PAGE_SIZES = [25, 50, 100];
@@ -40,59 +40,6 @@ function paginate(data, tab) {
 
 let tabTotals = {};
 let tabFilteredCache = {};
-
-const csvColumns = {
-    'users': { headers: ['Username', 'User ID', 'Created', 'Display Name', 'Identity Pub Key', 'PFP File ID', 'PFP File Key', 'Banner File ID', 'Banner File Key', 'Friend Req Disabled', 'Profile Data', 'FC Hash'], map: (r) => [r.username, r.id, r.created_at || '', r.display_name || '', r.identity_public_key || '', r.profile_picture_file_id || '', r.profile_picture_file_key || '', r.profile_banner_file_id || '', r.profile_banner_file_key || '', String(r.friend_requests_disabled != null ? r.friend_requests_disabled : ''), r.encrypted_profile_data || '', r.friend_code_hash || ''] },
-    'servers': { headers: ['Encrypted Name', 'Server ID', 'Owner ID', 'Created', 'Invite Code Hash', 'Joins Disabled'], map: (r) => [r.encrypted_name || '(encrypted)', r.id, r.owner_id, r.created_at || '', r.invite_code_hash || '', r.joins_disabled ? 'Yes' : 'No'] },
-    'channels': { headers: ['Encrypted Name', 'Channel ID', 'Server ID', 'Type', 'Position', 'Created'], map: (r) => [r.encrypted_name || '(encrypted)', r.id, r.server_id, r.type, String(r.position != null ? r.position : ''), r.created_at || ''] },
-    'messages': { headers: ['Sender', 'Sender ID', 'Channel ID', 'Encrypted Content', 'Nonce', 'Timestamp', 'Message ID', 'Edited At', 'Msg Nonce', 'Msg Sig', 'Profile Key', 'Profile Key Nonce', 'Banner Key', 'Banner Key Nonce'], map: (r) => [r.sender_username || r.sender_id, r.sender_id || '', r.channel_id, r.encrypted_content, r.nonce, r.timestamp, r.id || '', r.edited_at || '', r.message_nonce || '', r.message_signature || '', r.encrypted_profile_key || '', r.profile_key_nonce || '', r.encrypted_banner_key || '', r.banner_key_nonce || ''] },
-    'server-keys': { headers: ['Server', 'Server ID', 'User ID', 'Encrypted Key', 'Sender Public Key', 'Nonce', 'Version', 'Device ID', 'Created'], map: (r) => [r.server_name, r.server_id || '', r.user_id, r.encrypted_key, r.sender_public_key, r.nonce, String(r.version), r.device_id || '', r.created_at || ''] },
-    'server-members': { headers: ['Username', 'User ID', 'Server', 'Server ID', 'Role', 'Joined At'], map: (r) => [r.username, r.user_id, r.server_name, r.server_id, r.role || '', r.joined_at || ''] },
-    'prekey-bundles': { headers: ['User ID', 'Identity Key', 'Signed Prekey', 'Signature', 'OT Prekey', 'OT ID', 'Created'], map: (r) => [r.user_id, r.identity_key_public, r.signed_prekey_public, r.signed_prekey_signature, r.one_time_prekey_public || '', r.one_time_prekey_id != null ? String(r.one_time_prekey_id) : '', r.created_at || ''] },
-    'sessions': { headers: ['Our User', 'Our User ID', 'Their User', 'Their User ID', 'Session Data', 'Ratchet #', 'Created'], map: (r) => [r.our_username, r.our_user_id, r.their_username, r.their_user_id, r.session_data, String(r.ratchet_counter), r.created_at || ''] },
-    'server-bans': { headers: ['Server', 'Server ID', 'Username', 'User ID', 'Reason', 'Created At'], map: (r) => [r.server_name, r.server_id || '', r.username, r.user_id || '', r.reason || '', r.created_at] },
-    'dm-channels': { headers: ['Channel ID', 'Created At'], map: (r) => [r.id, r.created_at] },
-    'dm-members': { headers: ['DM Channel ID', 'User ID', 'Username', 'Created At'], map: (r) => [r.dm_channel_id, r.user_id, r.username, r.created_at] },
-    'dm-messages': { headers: ['Sender', 'Sender ID', 'DM Channel ID', 'Encrypted Content', 'Nonce', 'Timestamp', 'Message ID', 'Edited At', 'Msg Nonce', 'Msg Sig', 'Profile Key', 'Profile Key Nonce', 'Banner Key', 'Banner Key Nonce'], map: (r) => [r.sender_username || r.sender_id, r.sender_id || '', r.dm_channel_id, r.encrypted_content, r.nonce, r.timestamp, r.id || '', r.edited_at || '', r.message_nonce || '', r.message_signature || '', r.encrypted_profile_key || '', r.profile_key_nonce || '', r.encrypted_banner_key || '', r.banner_key_nonce || ''] },
-    'dm-keys': { headers: ['DM Channel ID', 'User ID', 'Username', 'Encrypted Key', 'Sender Pub Key', 'Nonce', 'Device ID', 'Created'], map: (r) => [r.dm_channel_id, r.user_id, r.username, r.encrypted_key, r.sender_public_key, r.nonce, r.device_id || '', r.created_at || ''] },
-    'friend-requests': { headers: ['From', 'From User ID', 'To', 'To User ID', 'Status', 'Created At', 'Responded At'], map: (r) => [r.from_username, r.from_user_id, r.to_username, r.to_user_id, r.status, r.created_at, r.responded_at || ''] },
-    'friendships': { headers: ['User 1', 'User 1 ID', 'User 2', 'User 2 ID', 'Created At'], map: (r) => [r.username_1, r.user_id_1, r.username_2, r.user_id_2, r.created_at] },
-    'user-public-keys': { headers: ['Username', 'User ID', 'Device ID', 'Device Name', 'Identity Key', 'Signed Prekey', 'Signed Prekey Sig', 'Last Active', 'Created'], map: (r) => [r.username, r.user_id, r.device_id, r.device_name || '', r.identity_key, r.signed_prekey || '', r.signed_prekey_signature || '', r.last_active_at || '', r.created_at || ''] },
-    'files': { headers: ['Filename', 'Uploader', 'Uploader ID', 'MIME Type', 'Size', 'Server ID', 'Channel ID', 'Chunks', 'Complete', 'Created'], map: (r) => [r.original_name, r.uploader_username, r.uploader_id || '', r.mime_type, String(r.file_size), r.server_id || '', r.channel_id || '', String(r.chunk_count != null ? r.chunk_count : ''), r.upload_complete ? 'Yes' : 'No', r.created_at] },
-    'user-stickers': { headers: ['Username', 'Sticker Name', 'File ID', 'MIME', 'Created', 'Enc File Key', 'File Key Nonce'], map: (r) => [r.username, r.sticker_name || '(unnamed)', r.file_id, r.mime_type || '', r.created_at || '', r.encrypted_file_key || '', r.file_key_nonce || ''] },
-    'user-key-escrow': { headers: ['Username', 'User ID', 'Created', 'Updated', 'Has Key', 'Encrypted Private Key', 'Salt', 'Nonce'], map: (r) => [r.username, r.user_id, r.created_at || '', r.updated_at || '', r.has_key ? 'Yes' : 'No', r.encrypted_private_key || '', r.salt || '', r.nonce || ''] },
-    'notification-sounds': { headers: ['Username', 'User ID', 'File Name', 'Encrypted Sound', 'Nonce', 'Sender Public Key', 'Created', 'Updated'], map: (r) => [r.username, r.user_id, r.file_name || '', r.encrypted_sound, r.nonce, r.sender_public_key, r.created_at || '', r.updated_at || ''] },
-    'admin-config': { headers: ['Key', 'Value'], map: (r) => [r.key, r.value] },
-    'user-device-escrow': { headers: ['Username', 'User ID', 'Device ID', 'Encrypted Private Key', 'Salt', 'Nonce', 'Created', 'Updated'], map: (r) => [r.username, r.user_id, r.device_id || '', r.encrypted_private_key || '', r.salt || '', r.nonce || '', r.created_at || '', r.updated_at || ''] },
-};
-
-function csvEscape(val) {
-    var s = String(val == null ? '' : val);
-    if (s.indexOf(',') !== -1 || s.indexOf('"') !== -1 || s.indexOf('\n') !== -1 || s.indexOf('\r') !== -1) {
-        s = '"' + s.replace(/"/g, '""') + '"';
-    }
-    return s;
-}
-
-function exportCSV(tab) {
-    var data = tabFilteredCache[tab] || [];
-    if (data.length === 0) { alert('No data to export'); return; }
-    var colDef = csvColumns[tab];
-    if (!colDef) { alert('No CSV mapping for this tab'); return; }
-    var rows = [colDef.headers.map(csvEscape).join(',')];
-    data.forEach(function (item) {
-        rows.push(colDef.map(item).map(csvEscape).join(','));
-    });
-    var csv = rows.join('\r\n');
-    var blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    var link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = tab + '-' + new Date().toISOString().slice(0, 10) + '.csv';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(link.href);
-}
 
 function searchTab(tab) {
     tabPages[tab] = 0;
@@ -198,12 +145,6 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 
-    // CSV export button clicks (delegated)
-    document.getElementById('admin-panel').addEventListener('click', function (e) {
-        var csvBtn = e.target.closest('.csv-export-btn');
-        if (csvBtn) { exportCSV(csvBtn.dataset.tab); return; }
-    });
-
     // Pagination button clicks (delegated)
     document.getElementById('admin-panel').addEventListener('click', function (e) {
         var btn = e.target.closest('.pag-btn');
@@ -231,6 +172,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('clear-all-btn').addEventListener('click', clearAll);
     document.getElementById('reset-factory-btn').addEventListener('click', resetToFactory);
+    document.getElementById('export-db-btn').addEventListener('click', exportDB);
+    document.getElementById('import-db-btn').addEventListener('click', importDB);
 
     // Decrypt names key input
     var decryptKeyInput = document.getElementById('admin-decrypt-key');
@@ -325,6 +268,17 @@ async function apiFetch(url, method) {
         method: method || 'GET',
         headers: adminToken ? { 'Authorization': 'Bearer ' + adminToken } : {}
     });
+    if (!res.ok) {
+        // Redirect to login if unauthorized (token expired)
+        if (res.status === 401) {
+            sessionStorage.removeItem('admin_auth');
+            sessionStorage.removeItem('admin_token');
+            location.reload();
+            return [];
+        }
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || 'Request failed with status ' + res.status);
+    }
     return res.json();
 }
 
@@ -358,22 +312,33 @@ function filterTab(tab) {
         case 'messages': filtered = rawData.messages.filter(m => !q || (m.sender_username || m.sender_id).toLowerCase().includes(q) || m.channel_id.toLowerCase().includes(q) || (m.timestamp || '').toLowerCase().includes(q)); tabFilteredCache['messages'] = filtered; renderMessages(filtered); break;
         case 'server-keys': filtered = rawData.serverKeys.filter(k => !q || k.server_name.toLowerCase().includes(q) || k.user_id.toLowerCase().includes(q) || String(k.version).includes(q)); tabFilteredCache['server-keys'] = filtered; renderServerKeys(filtered); break;
         case 'server-members': filtered = rawData.serverMembers.filter(m => !q || m.username.toLowerCase().includes(q) || m.user_id.toLowerCase().includes(q) || m.server_name.toLowerCase().includes(q)); tabFilteredCache['server-members'] = filtered; renderServerMembers(filtered); break;
-        case 'prekey-bundles': filtered = rawData.prekeyBundles.filter(k => !q || k.user_id.toLowerCase().includes(q)); tabFilteredCache['prekey-bundles'] = filtered; renderPrekeyBundles(filtered); break;
-        case 'sessions': filtered = rawData.sessions.filter(s => !q || s.our_username.toLowerCase().includes(q) || s.our_user_id.toLowerCase().includes(q) || s.their_username.toLowerCase().includes(q) || s.their_user_id.toLowerCase().includes(q)); tabFilteredCache['sessions'] = filtered; renderSessions(filtered); break;
         case 'server-bans': filtered = rawData.serverBans.filter(b => !q || b.server_name.toLowerCase().includes(q) || b.username.toLowerCase().includes(q) || (b.reason || '').toLowerCase().includes(q)); tabFilteredCache['server-bans'] = filtered; renderServerBans(filtered); break;
         case 'dm-channels': filtered = rawData.dmChannels.filter(c => !q || c.id.toLowerCase().includes(q)); tabFilteredCache['dm-channels'] = filtered; renderDmChannels(filtered); break;
         case 'dm-members': filtered = rawData.dmMembers.filter(m => !q || m.username.toLowerCase().includes(q) || m.user_id.toLowerCase().includes(q) || m.dm_channel_id.toLowerCase().includes(q)); tabFilteredCache['dm-members'] = filtered; renderDmMembers(filtered); break;
         case 'dm-messages': filtered = rawData.dmMessages.filter(m => !q || (m.sender_username || m.sender_id).toLowerCase().includes(q) || m.dm_channel_id.toLowerCase().includes(q) || (m.timestamp || '').toLowerCase().includes(q)); tabFilteredCache['dm-messages'] = filtered; renderDmMessages(filtered); break;
-        case 'dm-keys': filtered = rawData.dmKeys.filter(k => !q || k.username.toLowerCase().includes(q) || k.user_id.toLowerCase().includes(q) || k.dm_channel_id.toLowerCase().includes(q)); tabFilteredCache['dm-keys'] = filtered; renderDmKeys(filtered); break;
         case 'friend-requests': filtered = rawData.friendRequests.filter(r => !q || r.from_username.toLowerCase().includes(q) || r.to_username.toLowerCase().includes(q) || r.status.toLowerCase().includes(q)); tabFilteredCache['friend-requests'] = filtered; renderFriendRequests(filtered); break;
         case 'friendships': filtered = rawData.friendships.filter(f => !q || f.username_1.toLowerCase().includes(q) || f.username_2.toLowerCase().includes(q)); tabFilteredCache['friendships'] = filtered; renderFriendships(filtered); break;
-        case 'user-public-keys': filtered = rawData.userPublicKeys.filter(k => !q || k.username.toLowerCase().includes(q) || k.user_id.toLowerCase().includes(q) || k.device_id.toLowerCase().includes(q) || (k.device_name || '').toLowerCase().includes(q)); tabFilteredCache['user-public-keys'] = filtered; renderUserPublicKeys(filtered); break;
         case 'files': filtered = rawData.files.filter(f => !q || f.original_name.toLowerCase().includes(q) || f.uploader_username.toLowerCase().includes(q) || f.mime_type.toLowerCase().includes(q)); tabFilteredCache['files'] = filtered; renderFiles(filtered); break;
-        case 'user-stickers': filtered = rawData.userStickers.filter(s => !q || s.username.toLowerCase().includes(q) || (s.sticker_name || '').toLowerCase().includes(q)); tabFilteredCache['user-stickers'] = filtered; renderUserStickers(filtered); break;
-        case 'user-key-escrow': filtered = rawData.userKeyEscrow.filter(e => !q || e.username.toLowerCase().includes(q) || e.user_id.toLowerCase().includes(q)); tabFilteredCache['user-key-escrow'] = filtered; renderUserKeyEscrow(filtered); break;
-        case 'notification-sounds': filtered = rawData.notificationSounds.filter(n => !q || n.username.toLowerCase().includes(q) || n.user_id.toLowerCase().includes(q)); tabFilteredCache['notification-sounds'] = filtered; renderNotificationSounds(filtered); break;
         case 'admin-config': filtered = rawData.adminConfig.filter(c => !q || c.key.toLowerCase().includes(q) || c.value.toLowerCase().includes(q)); tabFilteredCache['admin-config'] = filtered; renderAdminConfig(filtered); break;
-        case 'user-device-escrow': filtered = rawData.userDeviceEscrow.filter(e => !q || e.username.toLowerCase().includes(q) || e.user_id.toLowerCase().includes(q) || e.device_id.toLowerCase().includes(q)); tabFilteredCache['user-device-escrow'] = filtered; renderUserDeviceEscrow(filtered); break;
+        case 'pending-events': filtered = rawData.pendingEvents.filter(e => !q || e.user_id.toLowerCase().includes(q) || e.event_type.toLowerCase().includes(q) || e.server_id.toLowerCase().includes(q)); tabFilteredCache['pending-events'] = filtered; renderPendingEvents(filtered); break;
+        case 'pending-notifications': filtered = rawData.pendingNotifications.filter(n => !q || n.user_id.toLowerCase().includes(q) || n.notification_type.toLowerCase().includes(q)); tabFilteredCache['pending-notifications'] = filtered; renderPendingNotifications(filtered); break;
+        case 'voice-sessions': filtered = rawData.voiceSessions.filter(s => !q || s.id.toLowerCase().includes(q) || s.channel_id.toLowerCase().includes(q)); tabFilteredCache['voice-sessions'] = filtered; renderVoiceSessions(filtered); break;
+        case 'voice-participants': filtered = rawData.voiceParticipants.filter(p => !q || p.voice_session_id.toLowerCase().includes(q) || p.user_id.toLowerCase().includes(q)); tabFilteredCache['voice-participants'] = filtered; renderVoiceParticipants(filtered); break;
+        case 'user-media': filtered = rawData.userMedia.filter(m => !q || m.id.toLowerCase().includes(q) || (m.username||'').toLowerCase().includes(q) || (m.media_type||'').toLowerCase().includes(q)); tabFilteredCache['user-media'] = filtered; renderUserMedia(filtered); break;
+        case 'user-key-blobs': filtered = rawData.userKeyBlobs.filter(b => !q || (b.username||'').toLowerCase().includes(q) || b.user_id.toLowerCase().includes(q)); tabFilteredCache['user-key-blobs'] = filtered; renderUserKeyBlobs(filtered); break;
+        case 'profile-data-keys': filtered = rawData.profileDataKeys.filter(k => !q || (k.username||'').toLowerCase().includes(q) || k.user_id.toLowerCase().includes(q)); tabFilteredCache['profile-data-keys'] = filtered; renderProfileDataKeys(filtered); break;
+        case 'shared-profile-data-keys': filtered = rawData.sharedProfileDataKeys.filter(k => !q || k.id.toLowerCase().includes(q) || (k.username||'').toLowerCase().includes(q) || (k.target_type||'').toLowerCase().includes(q) || (k.target_id||'').toLowerCase().includes(q)); tabFilteredCache['shared-profile-data-keys'] = filtered; renderSharedProfileDataKeys(filtered); break;
+    }
+}
+
+async function loadTabData(endpoint, dataKey, renderFn) {
+    try {
+        const rows = await apiFetch(endpoint);
+        rawData[dataKey] = Array.isArray(rows) ? rows : [];
+        renderFn(rawData[dataKey]);
+    } catch (err) {
+        rawData[dataKey] = [];
+        renderFn([]);
     }
 }
 
@@ -385,56 +350,48 @@ async function loadAllData() {
         loadMessages(),
         loadServerKeys(),
         loadServerMembers(),
-        loadPrekeyBundles(),
-        loadSessions(),
         loadServerBans(),
         loadDmChannels(),
         loadDmMembers(),
         loadDmMessages(),
-        loadDmKeys(),
         loadFriendRequests(),
         loadFriendships(),
-        loadUserPublicKeys(),
         loadFiles(),
-        loadUserStickers(),
-        loadUserKeyEscrow(),
-        loadNotificationSounds(),
         loadAdminConfig(),
-        loadUserDeviceEscrow(),
+        loadPendingEvents(),
+        loadPendingNotifications(),
+        loadVoiceSessions(),
+        loadVoiceParticipants(),
+        loadUserMedia(),
+        loadUserKeyBlobs(),
+        loadProfileDataKeys(),
+        loadSharedProfileDataKeys(),
     ]);
 }
 
 // --- Users ---
-async function loadUsers() {
-    try {
-        const users = await apiFetch('/api/admin/users');
-        rawData.users = Array.isArray(users) ? users : [];
-        renderUsers(rawData.users);
-    } catch (err) {
-        rawData.users = [];
-        renderUsers([]);
-    }
-}
+async function loadUsers() { await loadTabData("/api/admin/users", "users", renderUsers); }
 
 function renderUsers(users) {
     tabTotals['users'] = users.length;
     const p = paginate(users, 'users');
     updateCount('users-count', p.total);
-    renderTable('user-list', 17,
+    renderTable('user-list', 14,
         p.items.map(u =>
             '<td>' + escapeHtml(u.username) + '</td>' +
             '<td class="id-cell" title="' + escapeHtml(u.id) + '">' + escapeHtml(truncate(u.id, 12)) + '</td>' +
             '<td class="ts-cell">' + escapeHtml(u.created_at || '') + '</td>' +
-            '<td>' + escapeHtml(u.display_name || '') + '</td>' +
             '<td class="blob-cell">' + escapeHtml(truncate(u.identity_public_key || '', 20)) + '</td>' +
             '<td class="id-cell">' + escapeHtml(truncate(u.profile_picture_file_id || '', 12)) + '</td>' +
             '<td class="blob-cell">' + escapeHtml(truncate(u.profile_picture_file_key || '', 20)) + '</td>' +
             '<td class="id-cell">' + escapeHtml(truncate(u.profile_banner_file_id || '', 12)) + '</td>' +
             '<td class="blob-cell">' + escapeHtml(truncate(u.profile_banner_file_key || '', 20)) + '</td>' +
-            // description, nickname, username_color, username_border_color, profile_background_color removed — all in encrypted_profile_data
             '<td>' + (u.friend_requests_disabled ? 'Yes' : 'No') + '</td>' +
             '<td class="blob-cell">' + escapeHtml(truncate(u.encrypted_profile_data || '', 30)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(u.friend_code_hash || '', 20)) + '</td>'
+            '<td class="blob-cell">' + escapeHtml(truncate(u.friend_code_hash || '', 20)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(u.encrypted_hash_key || '', 20)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(u.hash_key_salt || '', 20)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(u.hash_key_nonce || '', 20)) + '</td>'
         ),
         'No users'
     );
@@ -442,16 +399,7 @@ function renderUsers(users) {
 }
 
 // --- Servers ---
-async function loadServers() {
-    try {
-        const servers = await apiFetch('/api/admin/servers');
-        rawData.servers = Array.isArray(servers) ? servers : [];
-        renderServers(rawData.servers);
-    } catch (err) {
-        rawData.servers = [];
-        renderServers([]);
-    }
-}
+async function loadServers() { await loadTabData("/api/admin/servers", "servers", renderServers); }
 
 function getDecryptKey() {
     return sessionStorage.getItem('admin_decrypt_key') || '';
@@ -462,17 +410,16 @@ function renderServers(servers) {
     const p = paginate(servers, 'servers');
     updateCount('servers-count', p.total);
     var decryptKey = getDecryptKey();
-    renderTable('server-list', 6,
+    renderTable('server-list', 12,
         p.items.map(s => {
             var nameHtml;
             if (decryptKey && s.encrypted_name && s.name_nonce && adminDecryptedNames['svr_' + s.id]) {
                 nameHtml = escapeHtml(adminDecryptedNames['svr_' + s.id]);
             } else if (decryptKey && s.encrypted_name && s.name_nonce) {
-                // Try to decrypt asynchronously; show blob for now
                 adminDecryptName(s.encrypted_name, s.name_nonce, decryptKey).then(function(dec) {
                     if (dec) {
                         adminDecryptedNames['svr_' + s.id] = dec;
-                        filterTab('servers'); // re-render with decrypted name
+                        filterTab('servers');
                     }
                 });
                 nameHtml = '<span class="blob-cell">' + escapeHtml(truncate(s.encrypted_name, 30)) + '</span> <span class="decrypt-spinner" style="color:#888;font-size:10px;">&#8987;</span>';
@@ -486,7 +433,13 @@ function renderServers(servers) {
                 '<td class="id-cell" title="' + escapeHtml(s.owner_id) + '">' + escapeHtml(truncate(s.owner_id, 12)) + '</td>' +
                 '<td class="ts-cell">' + escapeHtml(s.created_at || '') + '</td>' +
                 '<td class="blob-cell">' + escapeHtml(truncate(s.invite_code_hash || '', 20)) + '</td>' +
-                '<td>' + (s.joins_disabled ? 'Yes' : 'No') + '</td>';
+                '<td>' + (s.joins_disabled ? 'Yes' : 'No') + '</td>' +
+                '<td class="blob-cell">' + escapeHtml(truncate(s.encrypted_name || '', 20)) + '</td>' +
+                '<td class="blob-cell">' + escapeHtml(truncate(s.name_nonce || '', 20)) + '</td>' +
+                '<td class="id-cell">' + escapeHtml(truncate(s.server_picture_file_id || '', 12)) + '</td>' +
+                '<td class="blob-cell">' + escapeHtml(truncate(s.server_picture_file_id_hash || '', 20)) + '</td>' +
+                '<td class="blob-cell">' + escapeHtml(truncate(s.encrypted_server_picture_key || '', 20)) + '</td>' +
+                '<td class="blob-cell">' + escapeHtml(truncate(s.server_picture_key_nonce || '', 20)) + '</td>';
         }),
         'No servers'
     );
@@ -494,23 +447,14 @@ function renderServers(servers) {
 }
 
 // --- Channels ---
-async function loadChannels() {
-    try {
-        const channels = await apiFetch('/api/admin/channels');
-        rawData.channels = Array.isArray(channels) ? channels : [];
-        renderChannels(rawData.channels);
-    } catch (err) {
-        rawData.channels = [];
-        renderChannels([]);
-    }
-}
+async function loadChannels() { await loadTabData("/api/admin/channels", "channels", renderChannels); }
 
 function renderChannels(channels) {
     tabTotals['channels'] = channels.length;
     const p = paginate(channels, 'channels');
     updateCount('channels-count', p.total);
     var decryptKey = getDecryptKey();
-    renderTable('channel-list', 6,
+    renderTable('channel-list', 8,
         p.items.map(c => {
             var nameHtml;
             if (decryptKey && c.encrypted_name && c.name_nonce && adminDecryptedNames['ch_' + c.id]) {
@@ -533,7 +477,9 @@ function renderChannels(channels) {
                 '<td class="id-cell" title="' + escapeHtml(c.server_id) + '">' + escapeHtml(truncate(c.server_id, 12)) + '</td>' +
                 '<td>' + escapeHtml(c.type) + '</td>' +
                 '<td>' + (c.position != null ? c.position : '') + '</td>' +
-                '<td class="ts-cell">' + escapeHtml(c.created_at || '') + '</td>';
+                '<td class="ts-cell">' + escapeHtml(c.created_at || '') + '</td>' +
+                '<td class="blob-cell">' + escapeHtml(truncate(c.encrypted_name || '', 20)) + '</td>' +
+                '<td class="blob-cell">' + escapeHtml(truncate(c.name_nonce || '', 20)) + '</td>';
         }),
         'No channels'
     );
@@ -541,22 +487,13 @@ function renderChannels(channels) {
 }
 
 // --- Messages ---
-async function loadMessages() {
-    try {
-        const messages = await apiFetch('/api/admin/messages');
-        rawData.messages = Array.isArray(messages) ? messages : [];
-        renderMessages(rawData.messages);
-    } catch (err) {
-        rawData.messages = [];
-        renderMessages([]);
-    }
-}
+async function loadMessages() { await loadTabData("/api/admin/messages", "messages", renderMessages); }
 
 function renderMessages(messages) {
     tabTotals['messages'] = messages.length;
     const p = paginate(messages, 'messages');
     updateCount('messages-count', p.total, ' records');
-    renderTable('message-list', 13,
+    renderTable('message-list', 12,
         p.items.map(m =>
             '<td>' + escapeHtml(m.sender_username || m.sender_id) + '</td>' +
             '<td class="id-cell" title="' + escapeHtml(m.channel_id) + '">' + escapeHtml(truncate(m.channel_id, 12)) + '</td>' +
@@ -565,12 +502,11 @@ function renderMessages(messages) {
             '<td class="ts-cell">' + escapeHtml(m.timestamp) + '</td>' +
             '<td class="id-cell">' + escapeHtml(truncate(m.id || '', 12)) + '</td>' +
             '<td class="ts-cell">' + escapeHtml(m.edited_at || '') + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(m.message_nonce || '', 20)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(m.message_signature || '', 20)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(m.encrypted_profile_key || '', 20)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(m.profile_key_nonce || '', 20)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(m.encrypted_banner_key || '', 20)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(m.banner_key_nonce || '', 20)) + '</td>'
+            '<td>' + (m.key_version != null ? m.key_version : '') + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(m.sender_id_hash || '', 20)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(m.encrypted_profile_snapshot || '', 30)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(m.encrypted_file_key || '', 30)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(m.file_key_nonce || '', 30)) + '</td>'
         ),
         'No messages'
     );
@@ -578,16 +514,7 @@ function renderMessages(messages) {
 }
 
 // --- Server Keys ---
-async function loadServerKeys() {
-    try {
-        const keys = await apiFetch('/api/admin/server-keys');
-        rawData.serverKeys = Array.isArray(keys) ? keys : [];
-        renderServerKeys(rawData.serverKeys);
-    } catch (err) {
-        rawData.serverKeys = [];
-        renderServerKeys([]);
-    }
-}
+async function loadServerKeys() { await loadTabData("/api/admin/server-keys", "serverKeys", renderServerKeys); }
 
 function renderServerKeys(keys) {
     tabTotals['server-keys'] = keys.length;
@@ -610,16 +537,7 @@ function renderServerKeys(keys) {
 }
 
 // --- Server Members ---
-async function loadServerMembers() {
-    try {
-        const members = await apiFetch('/api/admin/server-members');
-        rawData.serverMembers = Array.isArray(members) ? members : [];
-        renderServerMembers(rawData.serverMembers);
-    } catch (err) {
-        rawData.serverMembers = [];
-        renderServerMembers([]);
-    }
-}
+async function loadServerMembers() { await loadTabData("/api/admin/server-members", "serverMembers", renderServerMembers); }
 
 function renderServerMembers(members) {
     tabTotals['server-members'] = members.length;
@@ -639,75 +557,8 @@ function renderServerMembers(members) {
     renderPaginationControls('server-members');
 }
 
-// --- Prekey Bundles ---
-async function loadPrekeyBundles() {
-    try {
-        const rows = await apiFetch('/api/admin/prekey-bundles');
-        rawData.prekeyBundles = Array.isArray(rows) ? rows : [];
-        renderPrekeyBundles(rawData.prekeyBundles);
-    } catch (err) {
-        rawData.prekeyBundles = [];
-        renderPrekeyBundles([]);
-    }
-}
-function renderPrekeyBundles(rows) {
-    tabTotals['prekey-bundles'] = rows.length;
-    const p = paginate(rows, 'prekey-bundles');
-    updateCount('prekey-bundles-count', p.total);
-    renderTable('prekey-bundle-list', 7,
-        p.items.map(r =>
-            '<td class="id-cell" title="' + escapeHtml(r.user_id) + '">' + escapeHtml(truncate(r.user_id, 12)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(r.identity_key_public, 30)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(r.signed_prekey_public, 30)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(r.signed_prekey_signature, 30)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(r.one_time_prekey_public || '', 30)) + '</td>' +
-            '<td>' + (r.one_time_prekey_id || '') + '</td>' +
-            '<td class="ts-cell">' + escapeHtml(r.created_at || '') + '</td>'
-        ),
-        'No prekey bundles'
-    );
-    renderPaginationControls('prekey-bundles');
-}
-
-// --- Sessions ---
-async function loadSessions() {
-    try {
-        const rows = await apiFetch('/api/admin/sessions');
-        rawData.sessions = Array.isArray(rows) ? rows : [];
-        renderSessions(rawData.sessions);
-    } catch (err) {
-        rawData.sessions = [];
-        renderSessions([]);
-    }
-}
-function renderSessions(rows) {
-    tabTotals['sessions'] = rows.length;
-    const p = paginate(rows, 'sessions');
-    updateCount('sessions-count', p.total);
-    renderTable('session-list', 5,
-        p.items.map(r =>
-            '<td>' + escapeHtml(r.our_username) + ' <span class="id-cell" title="' + escapeHtml(r.our_user_id) + '">(' + escapeHtml(truncate(r.our_user_id, 8)) + ')</span></td>' +
-            '<td>' + escapeHtml(r.their_username) + ' <span class="id-cell" title="' + escapeHtml(r.their_user_id) + '">(' + escapeHtml(truncate(r.their_user_id, 8)) + ')</span></td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(r.session_data, 40)) + '</td>' +
-            '<td>' + r.ratchet_counter + '</td>' +
-            '<td class="ts-cell">' + escapeHtml(r.created_at || '') + '</td>'
-        ),
-        'No sessions'
-    );
-    renderPaginationControls('sessions');
-}
-
 // --- Server Bans ---
-async function loadServerBans() {
-    try {
-        const rows = await apiFetch('/api/admin/server-bans');
-        rawData.serverBans = Array.isArray(rows) ? rows : [];
-        renderServerBans(rawData.serverBans);
-    } catch (err) {
-        rawData.serverBans = [];
-        renderServerBans([]);
-    }
-}
+async function loadServerBans() { await loadTabData("/api/admin/server-bans", "serverBans", renderServerBans); }
 function renderServerBans(rows) {
     tabTotals['server-bans'] = rows.length;
     const p = paginate(rows, 'server-bans');
@@ -727,16 +578,7 @@ function renderServerBans(rows) {
 }
 
 // --- DM Channels ---
-async function loadDmChannels() {
-    try {
-        const rows = await apiFetch('/api/admin/dm-channels');
-        rawData.dmChannels = Array.isArray(rows) ? rows : [];
-        renderDmChannels(rawData.dmChannels);
-    } catch (err) {
-        rawData.dmChannels = [];
-        renderDmChannels([]);
-    }
-}
+async function loadDmChannels() { await loadTabData("/api/admin/dm-channels", "dmChannels", renderDmChannels); }
 function renderDmChannels(rows) {
     tabTotals['dm-channels'] = rows.length;
     const p = paginate(rows, 'dm-channels');
@@ -752,16 +594,7 @@ function renderDmChannels(rows) {
 }
 
 // --- DM Members ---
-async function loadDmMembers() {
-    try {
-        const rows = await apiFetch('/api/admin/dm-members');
-        rawData.dmMembers = Array.isArray(rows) ? rows : [];
-        renderDmMembers(rawData.dmMembers);
-    } catch (err) {
-        rawData.dmMembers = [];
-        renderDmMembers([]);
-    }
-}
+async function loadDmMembers() { await loadTabData("/api/admin/dm-members", "dmMembers", renderDmMembers); }
 function renderDmMembers(rows) {
     tabTotals['dm-members'] = rows.length;
     const p = paginate(rows, 'dm-members');
@@ -779,21 +612,12 @@ function renderDmMembers(rows) {
 }
 
 // --- DM Messages ---
-async function loadDmMessages() {
-    try {
-        const rows = await apiFetch('/api/admin/dm-messages');
-        rawData.dmMessages = Array.isArray(rows) ? rows : [];
-        renderDmMessages(rawData.dmMessages);
-    } catch (err) {
-        rawData.dmMessages = [];
-        renderDmMessages([]);
-    }
-}
+async function loadDmMessages() { await loadTabData("/api/admin/dm-messages", "dmMessages", renderDmMessages); }
 function renderDmMessages(rows) {
     tabTotals['dm-messages'] = rows.length;
     const p = paginate(rows, 'dm-messages');
     updateCount('dm-messages-count', p.total, ' records');
-    renderTable('dm-message-list', 13,
+    renderTable('dm-message-list', 11,
         p.items.map(m =>
             '<td>' + escapeHtml(m.sender_username || m.sender_id) + '</td>' +
             '<td class="id-cell" title="' + escapeHtml(m.dm_channel_id) + '">' + escapeHtml(truncate(m.dm_channel_id, 12)) + '</td>' +
@@ -801,61 +625,19 @@ function renderDmMessages(rows) {
             '<td class="blob-cell">' + escapeHtml(truncate(m.nonce, 30)) + '</td>' +
             '<td class="ts-cell">' + escapeHtml(m.timestamp) + '</td>' +
             '<td class="id-cell">' + escapeHtml(truncate(m.id || '', 12)) + '</td>' +
-            '<td class="ts-cell">' + escapeHtml(m.edited_at || '') + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(m.message_nonce || '', 20)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(m.message_signature || '', 20)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(m.encrypted_profile_key || '', 20)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(m.profile_key_nonce || '', 20)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(m.encrypted_banner_key || '', 20)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(m.banner_key_nonce || '', 20)) + '</td>'
+            '<td>' + (m.key_version != null ? m.key_version : '') + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(m.sender_id_hash || '', 20)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(m.encrypted_profile_snapshot || '', 30)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(m.encrypted_file_key || '', 30)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(m.file_key_nonce || '', 30)) + '</td>'
         ),
         'No DM messages'
     );
     renderPaginationControls('dm-messages');
 }
 
-// --- DM Keys ---
-async function loadDmKeys() {
-    try {
-        const rows = await apiFetch('/api/admin/dm-keys');
-        rawData.dmKeys = Array.isArray(rows) ? rows : [];
-        renderDmKeys(rawData.dmKeys);
-    } catch (err) {
-        rawData.dmKeys = [];
-        renderDmKeys([]);
-    }
-}
-function renderDmKeys(rows) {
-    tabTotals['dm-keys'] = rows.length;
-    const p = paginate(rows, 'dm-keys');
-    updateCount('dm-keys-count', p.total);
-    renderTable('dm-key-list', 8,
-        p.items.map(r =>
-            '<td class="id-cell" title="' + escapeHtml(r.dm_channel_id) + '">' + escapeHtml(truncate(r.dm_channel_id, 12)) + '</td>' +
-            '<td class="id-cell" title="' + escapeHtml(r.user_id) + '">' + escapeHtml(truncate(r.user_id, 12)) + '</td>' +
-            '<td>' + escapeHtml(r.username) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(r.encrypted_key, 40)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(r.sender_public_key, 40)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(r.nonce, 30)) + '</td>' +
-            '<td class="id-cell">' + escapeHtml(truncate(r.device_id || '', 12)) + '</td>' +
-            '<td class="ts-cell">' + escapeHtml(r.created_at || '') + '</td>'
-        ),
-        'No DM keys'
-    );
-    renderPaginationControls('dm-keys');
-}
-
 // --- Friend Requests ---
-async function loadFriendRequests() {
-    try {
-        const rows = await apiFetch('/api/admin/friend-requests');
-        rawData.friendRequests = Array.isArray(rows) ? rows : [];
-        renderFriendRequests(rawData.friendRequests);
-    } catch (err) {
-        rawData.friendRequests = [];
-        renderFriendRequests([]);
-    }
-}
+async function loadFriendRequests() { await loadTabData("/api/admin/friend-requests", "friendRequests", renderFriendRequests); }
 function renderFriendRequests(rows) {
     tabTotals['friend-requests'] = rows.length;
     const p = paginate(rows, 'friend-requests');
@@ -874,16 +656,7 @@ function renderFriendRequests(rows) {
 }
 
 // --- Friendships ---
-async function loadFriendships() {
-    try {
-        const rows = await apiFetch('/api/admin/friendships');
-        rawData.friendships = Array.isArray(rows) ? rows : [];
-        renderFriendships(rawData.friendships);
-    } catch (err) {
-        rawData.friendships = [];
-        renderFriendships([]);
-    }
-}
+async function loadFriendships() { await loadTabData("/api/admin/friendships", "friendships", renderFriendships); }
 function renderFriendships(rows) {
     tabTotals['friendships'] = rows.length;
     const p = paginate(rows, 'friendships');
@@ -899,48 +672,8 @@ function renderFriendships(rows) {
     renderPaginationControls('friendships');
 }
 
-// --- User Public Keys ---
-async function loadUserPublicKeys() {
-    try {
-        const rows = await apiFetch('/api/admin/user-public-keys');
-        rawData.userPublicKeys = Array.isArray(rows) ? rows : [];
-        renderUserPublicKeys(rawData.userPublicKeys);
-    } catch (err) {
-        rawData.userPublicKeys = [];
-        renderUserPublicKeys([]);
-    }
-}
-function renderUserPublicKeys(rows) {
-    tabTotals['user-public-keys'] = rows.length;
-    const p = paginate(rows, 'user-public-keys');
-    updateCount('user-public-keys-count', p.total);
-    renderTable('user-public-key-list', 9,
-        p.items.map(r =>
-            '<td>' + escapeHtml(r.username) + ' <span class="id-cell">(' + escapeHtml(truncate(r.user_id, 8)) + ')</span></td>' +
-            '<td class="id-cell" title="' + escapeHtml(r.device_id) + '">' + escapeHtml(truncate(r.device_id, 12)) + '</td>' +
-            '<td>' + escapeHtml(r.device_name || '') + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(r.identity_key, 30)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(r.signed_prekey || '', 30)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(r.signed_prekey_signature || '', 30)) + '</td>' +
-            '<td class="ts-cell">' + escapeHtml(r.last_active_at || '') + '</td>' +
-            '<td class="ts-cell">' + escapeHtml(r.created_at || '') + '</td>'
-        ),
-        'No user devices'
-    );
-    renderPaginationControls('user-public-keys');
-}
-
 // --- Files ---
-async function loadFiles() {
-    try {
-        const rows = await apiFetch('/api/admin/files');
-        rawData.files = Array.isArray(rows) ? rows : [];
-        renderFiles(rawData.files);
-    } catch (err) {
-        rawData.files = [];
-        renderFiles([]);
-    }
-}
+async function loadFiles() { await loadTabData("/api/admin/files", "files", renderFiles); }
 function renderFiles(rows) {
     tabTotals['files'] = rows.length;
     const p = paginate(rows, 'files');
@@ -949,127 +682,24 @@ function renderFiles(rows) {
         p.items.map(r => {
             const size = r.file_size > 1048576 ? (r.file_size / 1048576).toFixed(1) + ' MB' :
                          r.file_size > 1024 ? (r.file_size / 1024).toFixed(1) + ' KB' : r.file_size + ' B';
-            return '<td>' + escapeHtml(r.original_name) + '</td>' +
+            return '<td class="id-cell">' + escapeHtml(truncate(r.original_name, 16)) + '</td>' +
             '<td>' + escapeHtml(r.uploader_username) + '</td>' +
-            '<td class="id-cell">' + escapeHtml(truncate(r.uploader_id || '', 12)) + '</td>' +
             '<td>' + escapeHtml(r.mime_type) + '</td>' +
             '<td>' + size + '</td>' +
-            '<td class="id-cell">' + escapeHtml(truncate(r.server_id || '-', 10)) + '</td>' +
-            '<td class="id-cell">' + escapeHtml(truncate(r.channel_id || '-', 10)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.file_id_hash || '', 20)) + '</td>' +
             '<td>' + (r.chunk_count != null ? r.chunk_count : '') + '</td>' +
             '<td>' + (r.upload_complete ? 'Yes' : 'No') + '</td>' +
-            '<td class="ts-cell">' + escapeHtml(r.created_at) + '</td>';
+            '<td class="ts-cell">' + escapeHtml(r.created_at) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.encrypted_mime_type || '', 20)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.mime_nonce || '', 20)) + '</td>';
         }),
         'No files'
     );
     renderPaginationControls('files');
 }
 
-// --- User Stickers ---
-async function loadUserStickers() {
-    try {
-        const rows = await apiFetch('/api/admin/user-stickers');
-        rawData.userStickers = Array.isArray(rows) ? rows : [];
-        renderUserStickers(rawData.userStickers);
-    } catch (err) {
-        rawData.userStickers = [];
-        renderUserStickers([]);
-    }
-}
-function renderUserStickers(rows) {
-    tabTotals['user-stickers'] = rows.length;
-    const p = paginate(rows, 'user-stickers');
-    updateCount('user-stickers-count', p.total);
-    renderTable('user-sticker-list', 7,
-        p.items.map(r =>
-            '<td>' + escapeHtml(r.username) + '</td>' +
-            '<td>' + escapeHtml(r.sticker_name || '(unnamed)') + '</td>' +
-            '<td class="id-cell">' + escapeHtml(truncate(r.file_id, 12)) + '</td>' +
-            '<td>' + escapeHtml(r.mime_type || '') + '</td>' +
-            '<td class="ts-cell">' + escapeHtml(r.created_at || '') + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(r.encrypted_file_key || '', 30)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(r.file_key_nonce || '', 30)) + '</td>'
-        ),
-        'No user stickers'
-    );
-    renderPaginationControls('user-stickers');
-}
-
-// --- Server Stickers (removed — table dropped in migration 035) ---
-
-// --- User Key Escrow ---
-async function loadUserKeyEscrow() {
-    try {
-        const rows = await apiFetch('/api/admin/user-key-escrow');
-        rawData.userKeyEscrow = Array.isArray(rows) ? rows : [];
-        renderUserKeyEscrow(rawData.userKeyEscrow);
-    } catch (err) {
-        rawData.userKeyEscrow = [];
-        renderUserKeyEscrow([]);
-    }
-}
-function renderUserKeyEscrow(rows) {
-    tabTotals['user-key-escrow'] = rows.length;
-    const p = paginate(rows, 'user-key-escrow');
-    updateCount('user-key-escrow-count', p.total);
-    renderTable('user-key-escrow-list', 8,
-        p.items.map(r =>
-            '<td>' + escapeHtml(r.username) + '</td>' +
-            '<td class="id-cell">' + escapeHtml(truncate(r.user_id, 12)) + '</td>' +
-            '<td class="ts-cell">' + escapeHtml(r.created_at || '') + '</td>' +
-            '<td class="ts-cell">' + escapeHtml(r.updated_at || '') + '</td>' +
-            '<td>' + (r.has_key ? 'Yes' : 'No') + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(r.encrypted_private_key || '', 30)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(r.salt || '', 30)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(r.nonce || '', 30)) + '</td>'
-        ),
-        'No key escrow records'
-    );
-    renderPaginationControls('user-key-escrow');
-}
-
-// --- Notification Sounds ---
-async function loadNotificationSounds() {
-    try {
-        const rows = await apiFetch('/api/admin/notification-sounds');
-        rawData.notificationSounds = Array.isArray(rows) ? rows : [];
-        renderNotificationSounds(rawData.notificationSounds);
-    } catch (err) {
-        rawData.notificationSounds = [];
-        renderNotificationSounds([]);
-    }
-}
-function renderNotificationSounds(rows) {
-    tabTotals['notification-sounds'] = rows.length;
-    const p = paginate(rows, 'notification-sounds');
-    updateCount('notification-sounds-count', p.total);
-    renderTable('notification-sound-list', 8,
-        p.items.map(r =>
-            '<td>' + escapeHtml(r.username) + '</td>' +
-            '<td class="id-cell">' + escapeHtml(truncate(r.user_id, 12)) + '</td>' +
-            '<td>' + escapeHtml(r.file_name || '') + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(r.encrypted_sound, 40)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(r.nonce, 30)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(r.sender_public_key, 30)) + '</td>' +
-            '<td class="ts-cell">' + escapeHtml(r.created_at || '') + '</td>' +
-            '<td class="ts-cell">' + escapeHtml(r.updated_at || '') + '</td>'
-        ),
-        'No notification sounds'
-    );
-    renderPaginationControls('notification-sounds');
-}
-
 // --- Admin Config ---
-async function loadAdminConfig() {
-    try {
-        const rows = await apiFetch('/api/admin/admin-config');
-        rawData.adminConfig = Array.isArray(rows) ? rows : [];
-        renderAdminConfig(rawData.adminConfig);
-    } catch (err) {
-        rawData.adminConfig = [];
-        renderAdminConfig([]);
-    }
-}
+async function loadAdminConfig() { await loadTabData("/api/admin/admin-config", "adminConfig", renderAdminConfig); }
 function renderAdminConfig(rows) {
     tabTotals['admin-config'] = rows.length;
     const p = paginate(rows, 'admin-config');
@@ -1084,35 +714,160 @@ function renderAdminConfig(rows) {
     renderPaginationControls('admin-config');
 }
 
-// --- User Device Escrow ---
-async function loadUserDeviceEscrow() {
-    try {
-        const rows = await apiFetch('/api/admin/user-device-escrow');
-        rawData.userDeviceEscrow = Array.isArray(rows) ? rows : [];
-        renderUserDeviceEscrow(rawData.userDeviceEscrow);
-    } catch (err) {
-        rawData.userDeviceEscrow = [];
-        renderUserDeviceEscrow([]);
-    }
-}
-function renderUserDeviceEscrow(rows) {
-    tabTotals['user-device-escrow'] = rows.length;
-    const p = paginate(rows, 'user-device-escrow');
-    updateCount('user-device-escrow-count', p.total);
-    renderTable('user-device-escrow-list', 8,
+// --- Pending Events ---
+async function loadPendingEvents() { await loadTabData("/api/admin/pending-events", "pendingEvents", renderPendingEvents); }
+function renderPendingEvents(rows) {
+    tabTotals['pending-events'] = rows.length;
+    const p = paginate(rows, 'pending-events');
+    updateCount('pending-events-count', p.total);
+    renderTable('pending-event-list', 5,
         p.items.map(r =>
-            '<td>' + escapeHtml(r.username) + '</td>' +
+            '<td>' + escapeHtml(r.id) + '</td>' +
             '<td class="id-cell">' + escapeHtml(truncate(r.user_id, 12)) + '</td>' +
-            '<td class="id-cell">' + escapeHtml(truncate(r.device_id || '', 12)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(r.encrypted_private_key || '', 30)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(r.salt || '', 30)) + '</td>' +
-            '<td class="blob-cell">' + escapeHtml(truncate(r.nonce || '', 30)) + '</td>' +
-            '<td class="ts-cell">' + escapeHtml(r.created_at || '') + '</td>' +
-            '<td class="ts-cell">' + escapeHtml(r.updated_at || '') + '</td>'
+            '<td class="id-cell">' + escapeHtml(truncate(r.server_id, 12)) + '</td>' +
+            '<td>' + escapeHtml(r.event_type) + '</td>' +
+            '<td class="id-cell">' + escapeHtml(truncate(r.affected_user_id, 12)) + '</td>'
         ),
-        'No device escrow records'
+        'No pending events'
     );
-    renderPaginationControls('user-device-escrow');
+    renderPaginationControls('pending-events');
+}
+
+// --- Pending Notifications ---
+async function loadPendingNotifications() { await loadTabData("/api/admin/pending-notifications", "pendingNotifications", renderPendingNotifications); }
+function renderPendingNotifications(rows) {
+    tabTotals['pending-notifications'] = rows.length;
+    const p = paginate(rows, 'pending-notifications');
+    updateCount('pending-notifications-count', p.total);
+    renderTable('pending-notification-list', 4,
+        p.items.map(r =>
+            '<td>' + escapeHtml(r.id) + '</td>' +
+            '<td class="id-cell">' + escapeHtml(truncate(r.user_id, 12)) + '</td>' +
+            '<td>' + escapeHtml(r.notification_type) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.payload, 60)) + '</td>'
+        ),
+        'No pending notifications'
+    );
+    renderPaginationControls('pending-notifications');
+}
+
+// --- Voice Sessions ---
+async function loadVoiceSessions() { await loadTabData("/api/admin/voice-sessions", "voiceSessions", renderVoiceSessions); }
+function renderVoiceSessions(rows) {
+    tabTotals['voice-sessions'] = rows.length;
+    const p = paginate(rows, 'voice-sessions');
+    updateCount('voice-sessions-count', p.total);
+    renderTable('voice-session-list', 4,
+        p.items.map(r =>
+            '<td class="id-cell">' + escapeHtml(truncate(r.id, 12)) + '</td>' +
+            '<td class="id-cell">' + escapeHtml(truncate(r.channel_id, 12)) + '</td>' +
+            '<td class="ts-cell">' + escapeHtml(r.started_at || '') + '</td>' +
+            '<td class="ts-cell">' + escapeHtml(r.ended_at || '') + '</td>'
+        ),
+        'No voice sessions'
+    );
+    renderPaginationControls('voice-sessions');
+}
+
+// --- Voice Participants ---
+async function loadVoiceParticipants() { await loadTabData("/api/admin/voice-participants", "voiceParticipants", renderVoiceParticipants); }
+function renderVoiceParticipants(rows) {
+    tabTotals['voice-participants'] = rows.length;
+    const p = paginate(rows, 'voice-participants');
+    updateCount('voice-participants-count', p.total);
+    renderTable('voice-participant-list', 8,
+        p.items.map(r =>
+            '<td class="id-cell">' + escapeHtml(truncate(r.voice_session_id, 12)) + '</td>' +
+            '<td class="id-cell">' + escapeHtml(truncate(r.user_id, 12)) + '</td>' +
+            '<td class="ts-cell">' + escapeHtml(r.joined_at || '') + '</td>' +
+            '<td class="ts-cell">' + escapeHtml(r.left_at || '') + '</td>' +
+            '<td>' + (r.is_muted ? 'Yes' : 'No') + '</td>' +
+            '<td>' + (r.is_deafened ? 'Yes' : 'No') + '</td>' +
+            '<td>' + (r.is_camera_on ? 'Yes' : 'No') + '</td>' +
+            '<td>' + (r.is_screen_sharing ? 'Yes' : 'No') + '</td>'
+        ),
+        'No voice participants'
+    );
+    renderPaginationControls('voice-participants');
+}
+
+// --- User Media ---
+async function loadUserMedia() { await loadTabData("/api/admin/user-media", "userMedia", renderUserMedia); }
+function renderUserMedia(rows) {
+    tabTotals['user-media'] = rows.length;
+    const p = paginate(rows, 'user-media');
+    updateCount('user-media-count', p.total);
+    renderTable('user-media-list', 8,
+        p.items.map(r =>
+            '<td class="id-cell">' + escapeHtml(truncate(r.id, 12)) + '</td>' +
+            '<td>' + escapeHtml(r.username || '') + '</td>' +
+            '<td class="id-cell">' + escapeHtml(truncate(r.file_id, 12)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.encrypted_file_key || '', 20)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.eph_pub || '', 20)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.nonce || '', 20)) + '</td>' +
+            '<td>' + escapeHtml(r.media_type || '') + '</td>' +
+            '<td class="ts-cell">' + escapeHtml(r.created_at || '') + '</td>'
+        ),
+        'No user media'
+    );
+    renderPaginationControls('user-media');
+}
+
+// --- User Key Blobs ---
+async function loadUserKeyBlobs() { await loadTabData("/api/admin/user-key-blobs", "userKeyBlobs", renderUserKeyBlobs); }
+function renderUserKeyBlobs(rows) {
+    tabTotals['user-key-blobs'] = rows.length;
+    const p = paginate(rows, 'user-key-blobs');
+    updateCount('user-key-blobs-count', p.total);
+    renderTable('user-key-blob-list', 5,
+        p.items.map(r =>
+            '<td>' + escapeHtml(r.username || '') + '</td>' +
+            '<td class="id-cell">' + escapeHtml(truncate(r.user_id, 12)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.encrypted_blob, 40)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.salt, 20)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.nonce, 20)) + '</td>'
+        ),
+        'No key blobs'
+    );
+    renderPaginationControls('user-key-blobs');
+}
+
+// --- Profile Data Keys ---
+async function loadProfileDataKeys() { await loadTabData("/api/admin/profile-data-keys", "profileDataKeys", renderProfileDataKeys); }
+function renderProfileDataKeys(rows) {
+    tabTotals['profile-data-keys'] = rows.length;
+    const p = paginate(rows, 'profile-data-keys');
+    updateCount('profile-data-keys-count', p.total);
+    renderTable('profile-data-key-list', 4,
+        p.items.map(r =>
+            '<td>' + escapeHtml(r.username || '') + '</td>' +
+            '<td class="id-cell">' + escapeHtml(truncate(r.user_id, 12)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.encrypted_key, 40)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.nonce, 20)) + '</td>'
+        ),
+        'No profile data keys'
+    );
+    renderPaginationControls('profile-data-keys');
+}
+
+// --- Shared Profile Data Keys ---
+async function loadSharedProfileDataKeys() { await loadTabData("/api/admin/shared-profile-data-keys", "sharedProfileDataKeys", renderSharedProfileDataKeys); }
+function renderSharedProfileDataKeys(rows) {
+    tabTotals['shared-profile-data-keys'] = rows.length;
+    const p = paginate(rows, 'shared-profile-data-keys');
+    updateCount('shared-profile-data-keys-count', p.total);
+    renderTable('shared-profile-data-key-list', 6,
+        p.items.map(r =>
+            '<td class="id-cell">' + escapeHtml(truncate(r.id, 12)) + '</td>' +
+            '<td>' + escapeHtml(r.username || '') + '</td>' +
+            '<td class="id-cell">' + escapeHtml(truncate(r.owner_user_id, 12)) + '</td>' +
+            '<td>' + escapeHtml(r.target_type || '') + '</td>' +
+            '<td class="id-cell">' + escapeHtml(truncate(r.target_id, 12)) + '</td>' +
+            '<td class="blob-cell">' + escapeHtml(truncate(r.encrypted_key, 40)) + '</td>'
+        ),
+        'No shared profile data keys'
+    );
+    renderPaginationControls('shared-profile-data-keys');
 }
 
 async function clearAll() {
@@ -1151,4 +906,129 @@ async function resetToFactory() {
     } catch (err) {
         alert('Reset failed: ' + err.message);
     }
+}
+
+// Derive AES-256-GCM key from password+salt using SHA-256
+async function deriveAESKey(password, salt) {
+    const enc = new TextEncoder();
+    const material = salt ? password + ':' + salt : password;
+    const pwHash = await crypto.subtle.digest('SHA-256', enc.encode(material));
+    return await crypto.subtle.importKey('raw', pwHash, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+}
+
+async function exportDB() {
+    const password = prompt('Enter a password to encrypt the exported database (leave empty for unencrypted):');
+    if (password === null) return;
+    if (password) {
+        const confirmPw = prompt('Confirm password:');
+        if (!confirmPw || password !== confirmPw) {
+            alert('Passwords do not match.');
+            return;
+        }
+    }
+    try {
+        const adminToken = sessionStorage.getItem('admin_token') || '';
+        const res = await fetch('/api/admin/export-db', {
+            headers: adminToken ? { 'Authorization': 'Bearer ' + adminToken } : {}
+        });
+        if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            throw new Error(data.error || 'Export failed');
+        }
+        const blob = await res.blob();
+        const data = await blob.arrayBuffer();
+        let finalBlob;
+        if (password) {
+            // Encrypt with password + random salt
+            const saltBytes = crypto.getRandomValues(new Uint8Array(16));
+            const salt = Array.from(saltBytes).map(b => b.toString(16).padStart(2, '0')).join('');
+            const key = await deriveAESKey(password, salt);
+            const nonce = crypto.getRandomValues(new Uint8Array(12));
+            const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce }, key, data);
+            // Format: magic byte 0x01 + salt (16) + nonce (12) + ciphertext
+            const combined = new Uint8Array(1 + 16 + 12 + encrypted.byteLength);
+            combined[0] = 0x01;
+            combined.set(saltBytes, 1);
+            combined.set(nonce, 17);
+            combined.set(new Uint8Array(encrypted), 29);
+            finalBlob = new Blob([combined], { type: 'application/octet-stream' });
+        } else {
+            // Unencrypted: magic byte 0x00 + raw data
+            const combined = new Uint8Array(1 + data.byteLength);
+            combined[0] = 0x00;
+            combined.set(new Uint8Array(data), 1);
+            finalBlob = new Blob([combined], { type: 'application/octet-stream' });
+        }
+        const url = URL.createObjectURL(finalBlob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'e2e_chat_' + new Date().toISOString().slice(0, 10) + '.dbpack';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    } catch (err) {
+        alert('Export failed: ' + err.message);
+    }
+}
+
+async function importDB() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.dbpack,.db,.sqlite,.sqlite3';
+    input.onchange = async function(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+        if (!confirm('Importing a new database will REPLACE all current data. The server will reconnect. Continue?')) return;
+        try {
+            const buffer = await file.arrayBuffer();
+            if (buffer.byteLength < 1) {
+                alert('Empty file.');
+                return;
+            }
+            const magic = new Uint8Array(buffer, 0, 1)[0];
+            let decrypted;
+            if (magic === 0x01) {
+                // Encrypted: salt(16) + nonce(12) + ciphertext
+                if (buffer.byteLength < 29) {
+                    alert('Corrupted encrypted file.');
+                    return;
+                }
+                const password = prompt('Enter the password to decrypt the database:');
+                if (!password) return;
+                const saltBytes = new Uint8Array(buffer, 1, 16);
+                const salt = Array.from(saltBytes).map(b => b.toString(16).padStart(2, '0')).join('');
+                try {
+                    const key = await deriveAESKey(password, salt);
+                    const nonce = new Uint8Array(buffer, 17, 12);
+                    const ciphertext = new Uint8Array(buffer, 29);
+                    decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: nonce }, key, ciphertext);
+                } catch (decErr) {
+                    alert('Decryption failed: wrong password or corrupted file.');
+                    return;
+                }
+            } else {
+                // Unencrypted
+                decrypted = buffer.slice(1);
+            }
+            const adminToken = sessionStorage.getItem('admin_token') || '';
+            const res = await fetch('/api/admin/import-db', {
+                method: 'POST',
+                headers: {
+                    'Authorization': 'Bearer ' + adminToken,
+                    'Content-Type': 'application/octet-stream'
+                },
+                body: decrypted
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'Import failed');
+            alert('Database imported successfully! You will need to re-login.');
+            sessionStorage.removeItem('admin_auth');
+            sessionStorage.removeItem('admin_token');
+            window.location.reload();
+        } catch (err) {
+            alert('Import failed: ' + err.message);
+        }
+    };
+    input.click();
 }

@@ -57,7 +57,7 @@ test.describe('Step 3: Auth, Escrow & Friend Code Fixes', () => {
         // Verify friend code was generated and stored
         const friendCode = await page.evaluate(() => localStorage.getItem('e2e_friend_code'));
         expect(friendCode).toBeTruthy();
-        expect(friendCode!.length).toBe(8);
+        expect(friendCode!.length).toBe(16);
         // Verify it only contains valid alphabet chars
         for (const c of friendCode!) {
             expect(ALPHABET).toContain(c);
