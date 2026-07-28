@@ -4397,6 +4397,23 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     color: #aaa;
 }
 
+/* Forwarded indicator (subtle notification on original messages) */
+.forwarded-indicator {
+    display: inline-block;
+    font-size: 11px;
+    color: var(--text-muted, #888);
+    opacity: 0.6;
+    margin-left: 8px;
+    font-style: italic;
+    transition: opacity 0.2s;
+    user-select: none;
+    vertical-align: middle;
+}
+
+.forwarded-indicator:hover {
+    opacity: 1;
+}
+
 /* Forward */
 .forward-label {
     font-size: clamp(11px, 1.8vw, 12px);
@@ -5996,4 +6013,38 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     border-color: var(--accent);
     background: var(--accent);
     color: var(--bg-primary);
+}
+
+/* ===== Loading Overlay ===== */
+.loading-overlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: #0b0f1a;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    z-index: 99999;
+    transition: opacity 0.3s ease;
+}
+.loading-overlay.fade-out {
+    opacity: 0;
+    pointer-events: none;
+}
+.loading-spinner {
+    width: 40px;
+    height: 40px;
+    border: 3px solid rgba(79, 195, 247, 0.2);
+    border-top-color: #4fc3f7;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+.loading-text {
+    margin-top: 14px;
+    font-size: 14px;
+    color: #8899aa;
+    letter-spacing: 0.5px;
+}
+@keyframes spin {
+    to { transform: rotate(360deg); }
 }

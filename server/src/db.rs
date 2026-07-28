@@ -3909,6 +3909,28 @@ impl Database {
         .map_err(|_| "Message not found".to_string())
     }
 
+    /// Get the sender_user_id (raw UUID) of a server message.
+    pub fn get_message_sender_user_id(&self, message_id: &str) -> Result<String, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT sender_id FROM messages WHERE id = ?1",
+            params![message_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| "Message not found".to_string())
+    }
+
+    /// Get the sender_user_id (raw UUID) of a DM message.
+    pub fn get_dm_message_sender_user_id(&self, message_id: &str) -> Result<String, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT sender_id FROM dm_messages WHERE id = ?1",
+            params![message_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| "Message not found".to_string())
+    }
+
     // --- User Stickers --- (server_stickers removed in migration 035)
 
     pub fn add_user_sticker(

@@ -30,7 +30,7 @@ let user = null;
 let servers = [];
 let isOwner = false;
 let currentInviteCode = null;
-let viewMode = 'servers';
+let viewMode = 'dms';
 let currentDmChannelId = null;
 let currentDmOtherUser = null;
 let dmConversations = [];
@@ -1360,6 +1360,15 @@ document.addEventListener('DOMContentLoaded', () => {
     }, 500);
     // Restore notification sound from server (syncs across devices)
     restoreNotificationSoundFromServer();
+
+    // Hide loading overlay once initialization is complete
+    setTimeout(function () {
+        var overlay = document.getElementById('loading-overlay');
+        if (overlay) {
+            overlay.classList.add('fade-out');
+            setTimeout(function () { overlay.remove(); }, 350);
+        }
+    }, 800);
 
     // Save unread state + last seen timestamp when page is closing or hidden,
     // so missed notifications are restored on next load.
@@ -5144,6 +5153,11 @@ function connectWebSocket(t) {
                     handleDeletedMessage(data.message_id);
                 }
                 break;
+            case 'message_forwarded':
+                if (data.message_id) {
+                    handleForwardedNotification(data.message_id, data.channel_id, data.dm_channel_id);
+                }
+                break;
             case 'server_key_rotated':
                 if (data.server_id) {
                     // Fetch the new server key (other member rotated it)
@@ -6252,9 +6266,9 @@ async function loadServers() {
         // Re-render server list with decrypted names now that keys are available
         renderServerList();
 
-        if (servers.length > 0 && !currentServerId) {
+        if (servers.length > 0 && !currentServerId && viewMode === 'servers') {
             selectServer(servers[0].id);
-        } else if (servers.length === 0) {
+        } else if (servers.length === 0 && viewMode === 'servers') {
             document.getElementById('server-name').textContent = 'No servers yet';
             document.getElementById('channel-list').innerHTML = '<div class="channel-item" style="color:#666;cursor:default">Create or join a server</div>';
         }
@@ -7791,6 +7805,35 @@ function handleDeletedMessage(messageId) {
     if (existing) existing.remove();
 }
 
+function handleForwardedNotification(messageId, channelId, dmChannelId) {
+    // Only show the indicator if we're viewing the channel/DM where the original message lives
+    if (channelId && channelId !== currentChannelId) return;
+    if (dmChannelId && dmChannelId !== currentDmChannelId) return;
+    // Find the original message in the DOM
+    const list = document.getElementById('message-list');
+    if (!list) return;
+    const msgEl = list.querySelector('[data-message-id="' + messageId + '"]');
+    if (!msgEl) return;
+    // Only show on messages authored by the current user
+    const myUserId = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')).id : '';
+    const senderUserId = msgEl.getAttribute('data-sender-user-id') || '';
+    if (senderUserId !== myUserId) return;
+    // Don't duplicate the indicator if already shown
+    if (msgEl.querySelector('.forwarded-indicator')) return;
+    // Add a subtle forwarded indicator
+    const indicator = document.createElement('span');
+    indicator.className = 'forwarded-indicator';
+    indicator.textContent = '\u2197 Forwarded';
+    indicator.title = 'This message was forwarded';
+    // Insert after the time element or at the end of the message header
+    const timeEl = msgEl.querySelector('.time');
+    if (timeEl) {
+        timeEl.parentNode.insertBefore(indicator, timeEl.nextSibling);
+    } else {
+        msgEl.appendChild(indicator);
+    }
+}
+
 function showForwardModal() {
     const modal = document.getElementById('forward-modal');
     if (modal) {
@@ -7992,6 +8035,10 @@ async function executeDmForwardToChannel(targetServerId, targetChannelId) {
                 nonce: encrypted.nonce,
                 message_nonce: encrypted.messageNonce || null,
             }));
+            // Notify original DM that this message was forwarded
+            try {
+                ws.send(JSON.stringify({ type: 'dm_message_forwarded', message_id: messageId }));
+            } catch (_) {}
         }
     } catch (e) {
         console.error('DM forward to channel failed:', e);
@@ -8120,6 +8167,10 @@ async function executeForward(targetServerId, targetServerName, targetChannelId,
                 nonce: encrypted.nonce,
                 message_nonce: encrypted.messageNonce || null,
             }));
+            // Notify original channel that this message was forwarded (only the author sees it)
+            try {
+                ws.send(JSON.stringify({ type: 'message_forwarded', message_id: messageId, channel_id: sourceChannelId }));
+            } catch (_) {}
         }
     } catch (e) {
         console.error('Forward failed:', e);
@@ -14462,6 +14513,10 @@ async function executeDmForward(targetUserId, targetUsername, dmChannelId) {
             nonce: encrypted.nonce,
             message_nonce: encrypted.messageNonce || null,
         }));
+        // Notify original DM that this message was forwarded
+        try {
+            ws.send(JSON.stringify({ type: 'dm_message_forwarded', message_id: messageId }));
+        } catch (_) {}
     } catch (e) {
         console.error('DM forward encrypt/send failed:', e);
     }

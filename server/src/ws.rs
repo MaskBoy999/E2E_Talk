@@ -1075,6 +1075,82 @@ async fn handle_ws_message(
                 }
             }
         }
+        "message_forwarded" => {
+            // Client notifies us that a message was forwarded by someone.
+            // We do NOT verify the forwarder is the original author — the whole point is
+            // that OTHER users forward YOUR message and you see the indicator.
+            // Privacy is enforced client-side: each client only shows the indicator on
+            // messages where data-sender-user-id matches their own user ID.
+            let message_id = match parsed.get("message_id").and_then(|c| c.as_str()) {
+                Some(m) => m,
+                None => return,
+            };
+            let channel_id = match parsed.get("channel_id").and_then(|c| c.as_str()) {
+                Some(c) => c.to_string(),
+                None => {
+                    match state.db.get_message_channel_id(message_id) {
+                        Ok(cid) => cid,
+                        Err(_) => return,
+                    }
+                }
+            };
+
+            let server_id = match state.db.get_server_id_for_channel(&channel_id) {
+                Ok(id) => id,
+                Err(_) => return,
+            };
+
+            // Broadcast to server members so the original author's client can show the indicator
+            let outgoing = serde_json::json!({
+                "type": "message_forwarded",
+                "channel_id": channel_id,
+                "message_id": message_id,
+                "server_id": server_id,
+            });
+
+            let json = outgoing.to_string();
+            match state.db.get_server_members(&server_id) {
+                Ok(members) => {
+                    state.ws_manager.broadcast_to_users(&members, &json).await;
+                }
+                Err(e) => {
+                    tracing::error!("Failed to get server members for forward notification: {}", e);
+                }
+            }
+        }
+        "dm_message_forwarded" => {
+            // Client notifies us that a DM message was forwarded.
+            // Same privacy model: broadcast to DM members, each client filters locally.
+            let message_id = match parsed.get("message_id").and_then(|c| c.as_str()) {
+                Some(m) => m,
+                None => return,
+            };
+            let dm_channel_id = match parsed.get("dm_channel_id").and_then(|c| c.as_str()) {
+                Some(c) => c.to_string(),
+                None => {
+                    match state.db.get_dm_message_channel_id(message_id) {
+                        Ok(cid) => cid,
+                        Err(_) => return,
+                    }
+                }
+            };
+
+            let outgoing = serde_json::json!({
+                "type": "message_forwarded",
+                "dm_channel_id": dm_channel_id,
+                "message_id": message_id,
+            });
+
+            let json = outgoing.to_string();
+            match state.db.get_dm_members(&dm_channel_id) {
+                Ok(members) => {
+                    state.ws_manager.broadcast_to_users(&members, &json).await;
+                }
+                Err(e) => {
+                    tracing::error!("Failed to get DM members for forward notification: {}", e);
+                }
+            }
+        }
         "profile_key_server_sync" => {
             let server_id = match parsed.get("server_id").and_then(|c| c.as_str()) {
                 Some(c) => c,
