@@ -808,6 +808,67 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    // Streamer mode toggle
+    const streamerToggle = document.getElementById('streamer-mode-toggle');
+    if (streamerToggle) {
+        streamerToggle.checked = localStorage.getItem('streamerMode') === 'true';
+        streamerToggle.addEventListener('change', () => {
+            localStorage.setItem('streamerMode', streamerToggle.checked);
+            applyStreamerMode(streamerToggle.checked);
+        });
+        // Apply on page load
+        applyStreamerMode(streamerToggle.checked);
+    }
+
+    // Keyboard shortcut: Ctrl+Shift+S to toggle streamer mode instantly
+    document.addEventListener('keydown', function (e) {
+        if (e.ctrlKey && e.shiftKey && (e.key === 's' || e.key === 'S')) {
+            e.preventDefault();
+            var st = document.getElementById('streamer-mode-toggle');
+            if (st) {
+                st.checked = !st.checked;
+                localStorage.setItem('streamerMode', st.checked);
+                applyStreamerMode(st.checked);
+                // Brief visual feedback — toast indicator
+                var oldToast = document.querySelector('.streamer-toast');
+                if (oldToast) oldToast.remove();
+                var toast = document.createElement('div');
+                toast.className = 'streamer-toast';
+                toast.textContent = st.checked ? '🔴 Streamer Mode ON' : '✅ Streamer Mode OFF';
+                toast.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:99999;background:rgba(0,0,0,0.85);color:#fff;padding:8px 18px;border-radius:8px;font-size:13px;font-weight:600;pointer-events:none;transition:opacity 0.3s;';
+                document.body.appendChild(toast);
+                setTimeout(function () { toast.style.opacity = '0'; setTimeout(function () { toast.remove(); }, 350); }, 1500);
+            }
+        }
+    });
+
+    // Keyboard shortcut: Ctrl+Shift+M to toggle auto-load media previews
+    document.addEventListener('keydown', function (e) {
+        if (e.ctrlKey && e.shiftKey && (e.key === 'm' || e.key === 'M')) {
+            e.preventDefault();
+            var cb = document.getElementById('auto-load-previews');
+            if (cb) {
+                cb.checked = !cb.checked;
+                localStorage.setItem('autoLoadPreviews', cb.checked);
+                // Re-render current messages to reflect the change
+                if (currentServerId && currentChannelId) {
+                    loadMessages(currentChannelId, currentServerId);
+                } else if (currentDmChannelId) {
+                    loadDmMessages(currentDmChannelId);
+                }
+                // Toast
+                var oldToast = document.querySelector('.streamer-toast');
+                if (oldToast) oldToast.remove();
+                var toast = document.createElement('div');
+                toast.className = 'streamer-toast';
+                toast.textContent = cb.checked ? '✅ Media Previews ON' : '❌ Media Previews OFF';
+                toast.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:99999;background:rgba(0,0,0,0.85);color:#fff;padding:8px 18px;border-radius:8px;font-size:13px;font-weight:600;pointer-events:none;transition:opacity 0.3s;';
+                document.body.appendChild(toast);
+                setTimeout(function () { toast.style.opacity = '0'; setTimeout(function () { toast.remove(); }, 350); }, 1500);
+            }
+        }
+    });
+
     // Theme color pickers
     var themeColorPicker = document.getElementById('theme-color-picker');
     var themeColorReset = document.getElementById('theme-color-reset');
@@ -7193,6 +7254,15 @@ async function appendMessage(msg) {
         }
     }
 
+    var isStreamer = localStorage.getItem('streamerMode') === 'true';
+    var hasContent = contentHtml && contentHtml.length > 0;
+    var wrappedContent = contentHtml;
+    if (isStreamer && hasContent) {
+        wrappedContent = '<div class="streamer-hidden">' + contentHtml + '</div>' +
+            '<button class="streamer-reveal-btn">Reveal</button>';
+        div.dataset.streamerContent = 'true';
+    }
+
     const actionsHtml = '<div class="message-actions">' +
         '<button class="msg-action-btn" data-action="reply" title="Reply">&#x21A9;</button>' +
         '<button class="msg-action-btn" data-action="forward" title="Forward to channel">&#x21AA;</button>' +
@@ -7211,12 +7281,13 @@ async function appendMessage(msg) {
             '<div class="header">' +
                 '<span class="display-name"' + (senderColor ? ' style="color:' + senderColor + ';text-shadow:' + getDisplayNameTextShadow(senderColor, senderBorderColor) + '"' : '') + '>' + escapeHtml(displayName) + '</span>' +
             '</div>' +
-            contentHtml +
+            wrappedContent +
         '</div>' +
         actionsHtml;
 
     // Load media preview if applicable (respect auto-load setting)
-    const autoLoad = localStorage.getItem('autoLoadPreviews') !== 'false';
+    const streamerOn = localStorage.getItem('streamerMode') === 'true';
+    const autoLoad = !streamerOn && localStorage.getItem('autoLoadPreviews') !== 'false';
     if (filesData) {
         div.querySelectorAll('.file-preview').forEach((container) => {
             // Match file by data-file-id attribute to handle cases where some files lack a preview container
@@ -7466,6 +7537,19 @@ function setupMessageActions() {
             handleEdit(messageId, msgDiv);
         } else if (action === 'delete') {
             handleDelete(messageId, msgDiv);
+        }
+    });
+
+    // Streamer mode reveal button delegation
+    document.getElementById('message-list').addEventListener('click', function (e) {
+        var revealBtn = e.target.closest('.streamer-reveal-btn');
+        if (!revealBtn) return;
+        var msgDiv = revealBtn.closest('.message');
+        if (!msgDiv) return;
+        var hiddenContent = msgDiv.querySelector('.streamer-hidden');
+        if (hiddenContent) {
+            hiddenContent.classList.add('revealed');
+            revealBtn.style.display = 'none';
         }
     });
 }
@@ -8782,11 +8866,12 @@ function renderDmSidebar() {
                 preview = '[encrypted]';
             }
         }
+        var streamerMode = localStorage.getItem('streamerMode') === 'true';
         html += '<div class="channel-item dm-item" data-dm-id="' + c.dm_channel_id + '" data-user-id="' + escapeAttr(c.other_user_id) + '" data-username="' + escapeAttr(c.other_username) + '">' +
             '<div class="dm-avatar' + (dmPicCacheKey ? ' profile-pic-target' : '') + '"' + (dmPicCacheKey ? ' data-profile-pic-load="' + dmPicCacheKey + '"' : '') + '>' + dmAvatarHtml + '</div>' +
             '<div class="dm-info">' +
                 '<div class="dm-name' + (dmColor ? ' has-glow' : '') + '"' + (dmColor ? ' style="color:' + dmColor + ';text-shadow:' + getDisplayNameTextShadow(dmColor, dmBorderColor) + '"' : '') + '>' + escapeHtml(displayName) + '</div>' +
-                '<div class="dm-preview">' + escapeHtml(preview) + '</div>' +
+                '<div class="dm-preview' + (streamerMode ? ' streamer-hidden-preview' : '') + '">' + escapeHtml(preview) + '</div>' +
             '</div>' +
             (unreadDms[c.dm_channel_id] ? '<span class="badge"></span>' : '') +
             '</div>';
@@ -9292,6 +9377,15 @@ function appendDmMessage(msg, kp, otherPublicKey) {
         (isOwn ? '<button class="msg-action-btn" data-action="delete" title="Delete">&#x2715;</button>' : '') +
         '</div>';
 
+    var isStreamer = localStorage.getItem('streamerMode') === 'true';
+    var hasContent = contentHtml && contentHtml.length > 0;
+    var wrappedContent = contentHtml;
+    if (isStreamer && hasContent) {
+        wrappedContent = '<div class="streamer-hidden">' + contentHtml + '</div>' +
+            '<button class="streamer-reveal-btn">Reveal</button>';
+        div.dataset.streamerContent = 'true';
+    }
+
     const editedHtml = msg.edited_at ? '<span class="edited-label">(edited)</span>' : '';
     div.innerHTML =
         (senderPicUrl ?
@@ -9303,7 +9397,7 @@ function appendDmMessage(msg, kp, otherPublicKey) {
             '<div class="header">' +
                 '<span class="display-name"' + (senderColor ? ' style="color:' + senderColor + ';text-shadow:' + getDisplayNameTextShadow(senderColor, senderBorderColor) + '"' : '') + '>' + escapeHtml(displayName) + '</span>' +
             '</div>' +
-            contentHtml +
+            wrappedContent +
             editedHtml +
         '</div>' +
         actionsHtml;
@@ -9338,7 +9432,8 @@ function appendDmMessage(msg, kp, otherPublicKey) {
     }
 
     // Load media preview if applicable (respect auto-load setting)
-    const autoLoad = localStorage.getItem('autoLoadPreviews') !== 'false';
+    const streamerOn = localStorage.getItem('streamerMode') === 'true';
+    const autoLoad = !streamerOn && localStorage.getItem('autoLoadPreviews') !== 'false';
     if (stickerData && stickerData.file_id) {
         const stickerContainer = div.querySelector('.sticker-message');
         if (stickerContainer) {
@@ -10888,6 +10983,62 @@ function applyThemeBgColor(hexColor, mode) {
 }
 
 // Apply the theme mode (dark/light) which tells the color functions which brightness range to use.
+function applyStreamerMode(enabled) {
+    var sidebar = document.getElementById('sidebar');
+    if (sidebar) {
+        if (enabled) {
+            sidebar.classList.add('streamer-mode');
+        } else {
+            sidebar.classList.remove('streamer-mode');
+        }
+    }
+    // Also toggle on body so CSS can target ALL name elements across the page
+    if (document.body) {
+        if (enabled) {
+            document.body.classList.add('streamer-mode');
+        } else {
+            document.body.classList.remove('streamer-mode');
+        }
+    }
+    // Toggle 🔴 LIVE badge in sidebar footer
+    var badge = document.getElementById('streamer-badge');
+    if (badge) {
+        badge.style.display = enabled ? 'inline-block' : 'none';
+    }
+    // Hide or show DM previews that are already rendered
+    var dmPreviews = document.querySelectorAll('.dm-preview');
+    for (var i = 0; i < dmPreviews.length; i++) {
+        if (enabled) {
+            dmPreviews[i].classList.add('streamer-hidden-preview');
+        } else {
+            dmPreviews[i].classList.remove('streamer-hidden-preview');
+        }
+    }
+    // Handle already-rendered messages in the DOM
+    var messages = document.querySelectorAll('.message');
+    for (var j = 0; j < messages.length; j++) {
+        var msg = messages[j];
+        var hiddenDiv = msg.querySelector('.streamer-hidden');
+        var revealBtn = msg.querySelector('.streamer-reveal-btn');
+        if (enabled) {
+            // Re-hide messages that weren't revealed yet
+            if (hiddenDiv && !hiddenDiv.classList.contains('revealed')) {
+                // Already hidden — nothing to do
+            }
+        } else {
+            // Unhide everything and remove the wrapper entirely
+            if (hiddenDiv) {
+                hiddenDiv.classList.remove('streamer-hidden', 'revealed');
+            }
+            if (revealBtn) {
+                revealBtn.style.display = 'none';
+            }
+        }
+    }
+    // Re-render DM sidebar to reflect streamer mode changes
+    if (viewMode === 'dms') renderDmSidebar();
+}
+
 function applyThemeMode(mode) {
     if (mode !== 'light') mode = 'dark';
     localStorage.setItem('theme_mode', mode);

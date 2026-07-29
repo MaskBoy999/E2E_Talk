@@ -44,6 +44,7 @@
                     <div class="footer-user-name">
                         <span id="current-user"></span>
                         <span class="username-sub" id="footer-username-sub"></span>
+                        <span id="streamer-badge" class="streamer-live-badge" style="display:none">🔴 LIVE</span>
                     </div>
                 </div>
                 <div class="footer-actions">
@@ -403,6 +404,23 @@
                         <span class="toggle-label">Automatically load media previews (images, video, audio, stickers)</span>
                     </label>
                     <p class="settings-hint">When disabled, you can manually load each preview by clicking a "Load preview" button. Useful for saving bandwidth on slow connections.</p>
+                </div>
+                <div class="settings-group" style="padding-bottom:12px;border-bottom:1px solid var(--bg-border);margin-top:16px">
+                    <h4>Streamer Mode</h4>
+                    <label class="settings-toggle">
+                        <input type="checkbox" id="streamer-mode-toggle">
+                        <span class="toggle-slider"></span>
+                        <span class="toggle-label">Enable Streamer Mode &#128250;</span>
+                    </label>
+                    <p class="settings-hint">Hides all message content behind a "Reveal" button, disables message previews in the DM sidebar, and prevents auto-loading of media. Click any message to reveal its content. Perfect for screensharing or streaming.</p>
+                </div>
+                <div class="settings-group">
+                    <h4>Keyboard Shortcuts</h4>
+                    <div class="shortcuts-list">
+                        <div class="shortcut-row"><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>S</kbd> <span>Toggle Streamer Mode</span></div>
+                        <div class="shortcut-row"><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>M</kbd> <span>Toggle Media Previews</span></div>
+                    </div>
+                </div>
                 </div>
             </div>
 
@@ -847,6 +865,6 @@
     <script src="crypto.js?v=8"></script>
     <script src="qrcode.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
-    <script src="chat.js?v=35"></script>
+    <script src="chat.js?v=37"></script>
 </body>
 </html>

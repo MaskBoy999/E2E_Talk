@@ -1172,6 +1172,7 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
 .message .content {
     flex: 1;
     min-width: 0;
+    position: relative;
 }
 
 .message .header {
@@ -2975,6 +2976,54 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
 
 .sticker-message .load-preview-btn {
     margin: 8px 0;
+}
+
+/* ===== Streamer Mode ===== */
+.streamer-hidden {
+    position: relative;
+    filter: blur(5px);
+    user-select: none;
+    pointer-events: none;
+    transition: filter 0.3s ease;
+}
+.streamer-hidden.revealed {
+    filter: none;
+    user-select: auto;
+    pointer-events: auto;
+}
+.streamer-reveal-btn {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 10;
+    padding: 8px 20px;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+    opacity: 0.9;
+    transition: opacity 0.2s;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+.streamer-reveal-btn:hover {
+    opacity: 1;
+}
+/* DM sidebar preview hidden */
+.dm-preview.streamer-hidden-preview {
+    filter: blur(4px);
+    color: transparent;
+    font-size: 0;
+    user-select: none;
+    pointer-events: none;
+}
+.dm-preview.streamer-hidden-preview::before {
+    content: '🔒';
+    font-size: 12px;
+    color: #888;
 }
 .btn-reauth-confirm {
     background: var(--accent);
@@ -6039,3 +6088,129 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
 @keyframes spin {
     to { transform: rotate(360deg); }
 }
+.streamer-live-badge {
+    display: inline-block;
+    font-size: 9px;
+    font-weight: 800;
+    letter-spacing: 0.5px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: rgba(233, 30, 99, 0.15);
+    color: #e91e63;
+    margin-left: 6px;
+    vertical-align: middle;
+    flex-shrink: 0;
+    animation: streamer-pulse 2s ease-in-out infinite;
+}
+@keyframes streamer-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.55; }
+}
+
+/* ===== Streamer Mode Name Blur ===== */
+body.streamer-mode .display-name,
+body.streamer-mode .dm-name,
+body.streamer-mode .member-name,
+body.streamer-mode #server-name,
+body.streamer-mode #channel-name,
+body.streamer-mode #current-user,
+body.streamer-mode .footer-user-name,
+body.streamer-mode .username-sub,
+body.streamer-mode .mention-item-name,
+body.streamer-mode .mention-item-hint {
+    filter: blur(4px);
+    transition: filter 0.15s ease;
+    user-select: none;
+    cursor: default;
+}
+body.streamer-mode .display-name:hover,
+body.streamer-mode .dm-name:hover,
+body.streamer-mode .member-name:hover,
+body.streamer-mode #server-name:hover,
+body.streamer-mode #channel-name:hover,
+body.streamer-mode #current-user:hover,
+body.streamer-mode .footer-user-name:hover,
+body.streamer-mode .username-sub:hover,
+body.streamer-mode .mention-item-name:hover,
+body.streamer-mode .mention-item-hint:hover {
+    filter: none;
+    user-select: auto;
+}
+/* Channel names in sidebar — plain span inside .channel-item */
+body.streamer-mode .channel-item,
+body.streamer-mode .dm-forward-item {
+    filter: blur(4px);
+    transition: filter 0.15s ease;
+    user-select: none;
+}
+body.streamer-mode .channel-item:hover,
+body.streamer-mode .dm-forward-item:hover {
+    filter: none;
+    user-select: auto;
+}
+/* ===== Keyboard Shortcuts Display ===== */
+.shortcuts-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 8px;
+}
+.shortcut-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--text-primary);
+}
+.shortcut-row kbd {
+    display: inline-block;
+    padding: 2px 6px;
+    font-size: 11px;
+    font-family: inherit;
+    font-weight: 600;
+    background: var(--bg-secondary);
+    border: 1px solid var(--bg-border);
+    border-radius: 4px;
+    color: var(--text-primary);
+    line-height: 1.4;
+}
+.shortcut-row span {
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+/* Also blur the server strip initials/icons text, reveal on hover */
+body.streamer-mode .server-icon {
+    filter: blur(3px);
+    transition: filter 0.15s ease;
+}
+body.streamer-mode .server-icon:hover {
+    filter: none;
+}
+/* Blur all profile pictures in streamer mode */
+body.streamer-mode .avatar img,
+body.streamer-mode .dm-avatar img,
+body.streamer-mode .dm-chat-header-pic,
+body.streamer-mode .member-avatar img,
+body.streamer-mode .footer-user-avatar img,
+body.streamer-mode .settings-profile-avatar img,
+body.streamer-mode .profile-modal-avatar img,
+body.streamer-mode .mention-item-avatar img,
+body.streamer-mode .mention-item-avatar,
+body.streamer-mode .dm-avatar {
+    filter: blur(6px) brightness(0.6);
+    transition: filter 0.15s ease;
+}
+body.streamer-mode .avatar img:hover,
+body.streamer-mode .dm-avatar img:hover,
+body.streamer-mode .dm-chat-header-pic:hover,
+body.streamer-mode .member-avatar img:hover,
+body.streamer-mode .footer-user-avatar img:hover,
+body.streamer-mode .settings-profile-avatar img:hover,
+body.streamer-mode .profile-modal-avatar img:hover,
+body.streamer-mode .mention-item-avatar img:hover,
+body.streamer-mode .mention-item-avatar:hover,
+body.streamer-mode .dm-avatar:hover {
+    filter: none;
+}
+
