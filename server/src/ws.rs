@@ -194,14 +194,6 @@ struct OutgoingChatMessage {
     message_nonce: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     edited_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    encrypted_profile_key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    profile_key_nonce: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    encrypted_banner_key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    banner_key_nonce: Option<String>,
     // Streamlined E2E fields
     #[serde(skip_serializing_if = "Option::is_none")]
     key_version: Option<i32>,
@@ -371,8 +363,22 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, client_ip: Strin
     // Replay pending notifications (DMs, mentions, replies while offline)
     if let Ok(notifs) = state.db.get_and_delete_pending_notifications(&user_id) {
         for (notif_type, payload) in notifs {
-            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&payload) {
-                let _ = sender.send(Message::Text(parsed.to_string().into())).await;
+            // ECDH-encrypted notifications are NOT valid JSON — they look like
+            // "base64epk:base64nonce:base64ciphertext". Wrap them in a JSON envelope
+            // so the client can identify and decrypt them.
+            if payload.starts_with('{') || payload.starts_with('[') {
+                // Plaintext JSON — parse and forward as-is
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&payload) {
+                    let _ = sender.send(Message::Text(parsed.to_string().into())).await;
+                }
+            } else {
+                // Encrypted notification — wrap in JSON for the client to decrypt
+                let wrapper = serde_json::json!({
+                    "type": "encrypted_notification",
+                    "notification_type": notif_type,
+                    "encrypted_payload": payload,
+                });
+                let _ = sender.send(Message::Text(wrapper.to_string().into())).await;
             }
         }
     }
@@ -527,10 +533,6 @@ async fn handle_ws_message(
                     timestamp: message.timestamp,
                     message_nonce: message.message_nonce,
                     edited_at: None,
-                    encrypted_profile_key: encrypted_profile_key.clone(),
-                    profile_key_nonce: profile_key_nonce.clone(),
-                    encrypted_banner_key: encrypted_banner_key.clone(),
-                    banner_key_nonce: banner_key_nonce.clone(),
                     key_version: None,
                     encrypted_profile_snapshot: encrypted_profile_snapshot.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                     profile_snapshot_nonce: profile_snapshot_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
@@ -634,58 +636,6 @@ async fn handle_ws_message(
             };
             // Key bundle upload removed (legacy X3DH)
         }
-        "profile_key_sync" => {
-            let dm_channel_id = match parsed.get("dm_channel_id").and_then(|c| c.as_str()) {
-                Some(c) => c,
-                None => return,
-            };
-
-            // Must be a member of this DM channel.
-            if !state.db.is_dm_member(dm_channel_id, user_id).unwrap_or(false) {
-                return;
-            }
-
-            let encrypted_profile_key = parsed.get("encrypted_profile_key").and_then(|c| c.as_str()).map(|s| s.to_string());
-            let profile_key_nonce = parsed.get("profile_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
-            let profile_key_message_nonce = parsed.get("profile_key_message_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
-            let profile_picture_file_id = parsed.get("profile_picture_file_id").and_then(|c| c.as_str()).map(|s| s.to_string());
-            let profile_picture_file_id_hash = parsed.get("profile_picture_file_id_hash").and_then(|c| c.as_str()).map(|s| s.to_string());
-            let encrypted_banner_key = parsed.get("encrypted_banner_key").and_then(|c| c.as_str()).map(|s| s.to_string());
-            let banner_key_nonce = parsed.get("banner_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
-            let banner_key_message_nonce = parsed.get("banner_key_message_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
-            let profile_banner_file_id = parsed.get("profile_banner_file_id").and_then(|c| c.as_str()).map(|s| s.to_string());
-            let profile_banner_file_id_hash = parsed.get("profile_banner_file_id_hash").and_then(|c| c.as_str()).map(|s| s.to_string());
-            let encrypted_profile_data_key = parsed.get("encrypted_profile_data_key").and_then(|c| c.as_str()).map(|s| s.to_string());
-            let profile_data_key_nonce = parsed.get("profile_data_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
-
-            let sync_msg = serde_json::json!({
-                "type": "profile_key_sync",
-                "user_id": user_id,
-                "dm_channel_id": dm_channel_id,
-                "profile_picture_file_id": profile_picture_file_id,
-                "profile_picture_file_id_hash": profile_picture_file_id_hash,
-                "encrypted_profile_key": encrypted_profile_key,
-                "profile_key_nonce": profile_key_nonce,
-                "profile_key_message_nonce": profile_key_message_nonce,
-                "profile_banner_file_id": profile_banner_file_id,
-                "profile_banner_file_id_hash": profile_banner_file_id_hash,
-                "encrypted_banner_key": encrypted_banner_key,
-                "banner_key_nonce": banner_key_nonce,
-                "banner_key_message_nonce": banner_key_message_nonce,
-                "encrypted_profile_data_key": encrypted_profile_data_key,
-                "profile_data_key_nonce": profile_data_key_nonce,
-            });
-
-            // Broadcast to both DM members
-            match state.db.get_dm_members(dm_channel_id) {
-                Ok(members) => {
-                    state.ws_manager.broadcast_to_users(&members, &sync_msg.to_string()).await;
-                }
-                Err(e) => {
-                    tracing::error!("Failed to get DM members: {}", e);
-                }
-            }
-        }
         "dm_send" => {
             let dm_channel_id = match parsed.get("dm_channel_id").and_then(|c| c.as_str()) {
                 Some(c) => c,
@@ -761,10 +711,6 @@ async fn handle_ws_message(
                     timestamp: message.timestamp,
                     message_nonce: message.message_nonce,
                     edited_at: None,
-                    encrypted_profile_key: encrypted_profile_key.clone(),
-                    profile_key_nonce: profile_key_nonce.clone(),
-                    encrypted_banner_key: encrypted_banner_key.clone(),
-                    banner_key_nonce: banner_key_nonce.clone(),
                     key_version: None,
                     encrypted_profile_snapshot: encrypted_profile_snapshot.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                     profile_snapshot_nonce: profile_snapshot_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
@@ -896,10 +842,6 @@ async fn handle_ws_message(
                     timestamp: message.timestamp,
                     message_nonce: message.message_nonce,
                     edited_at: message.edited_at,
-                    encrypted_profile_key: encrypted_profile_key.clone(),
-                    profile_key_nonce: profile_key_nonce.clone(),
-                    encrypted_banner_key: encrypted_banner_key.clone(),
-                    banner_key_nonce: banner_key_nonce.clone(),
                     key_version: None,
                     encrypted_profile_snapshot: None,
                     profile_snapshot_nonce: None,
@@ -1015,10 +957,6 @@ async fn handle_ws_message(
                     timestamp: message.timestamp,
                     message_nonce: message.message_nonce,
                     edited_at: message.edited_at,
-                    encrypted_profile_key: encrypted_profile_key.clone(),
-                    profile_key_nonce: profile_key_nonce.clone(),
-                    encrypted_banner_key: encrypted_banner_key.clone(),
-                    banner_key_nonce: banner_key_nonce.clone(),
                     key_version: None,
                     encrypted_profile_snapshot: None,
                     profile_snapshot_nonce: None,
@@ -1148,54 +1086,6 @@ async fn handle_ws_message(
                 }
                 Err(e) => {
                     tracing::error!("Failed to get DM members for forward notification: {}", e);
-                }
-            }
-        }
-        "profile_key_server_sync" => {
-            let server_id = match parsed.get("server_id").and_then(|c| c.as_str()) {
-                Some(c) => c,
-                None => return,
-            };
-
-            // Must be a member of this server
-            if !state.db.is_member_of_server(user_id, server_id).unwrap_or(false) {
-                return;
-            }
-
-            let encrypted_profile_key = parsed.get("encrypted_profile_key").and_then(|c| c.as_str()).map(|s| s.to_string());
-            let profile_key_nonce = parsed.get("profile_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
-            let profile_picture_file_id = parsed.get("profile_picture_file_id").and_then(|c| c.as_str()).map(|s| s.to_string());
-            let profile_picture_file_id_hash = parsed.get("profile_picture_file_id_hash").and_then(|c| c.as_str()).map(|s| s.to_string());
-            let encrypted_banner_key = parsed.get("encrypted_banner_key").and_then(|c| c.as_str()).map(|s| s.to_string());
-            let banner_key_nonce = parsed.get("banner_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
-            let profile_banner_file_id = parsed.get("profile_banner_file_id").and_then(|c| c.as_str()).map(|s| s.to_string());
-            let profile_banner_file_id_hash = parsed.get("profile_banner_file_id_hash").and_then(|c| c.as_str()).map(|s| s.to_string());
-            let encrypted_profile_data_key = parsed.get("encrypted_profile_data_key").and_then(|c| c.as_str()).map(|s| s.to_string());
-            let profile_data_key_nonce = parsed.get("profile_data_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
-
-            let sync_msg = serde_json::json!({
-                "type": "profile_key_server_sync",
-                "user_id": user_id,
-                "server_id": server_id,
-                "profile_picture_file_id": profile_picture_file_id,
-                "profile_picture_file_id_hash": profile_picture_file_id_hash,
-                "encrypted_profile_key": encrypted_profile_key,
-                "profile_key_nonce": profile_key_nonce,
-                "profile_banner_file_id": profile_banner_file_id,
-                "profile_banner_file_id_hash": profile_banner_file_id_hash,
-                "encrypted_banner_key": encrypted_banner_key,
-                "banner_key_nonce": banner_key_nonce,
-                "encrypted_profile_data_key": encrypted_profile_data_key,
-                "profile_data_key_nonce": profile_data_key_nonce,
-            });
-
-            // Broadcast to all server members
-            match state.db.get_server_members(server_id) {
-                Ok(members) => {
-                    state.ws_manager.broadcast_to_users(&members, &sync_msg.to_string()).await;
-                }
-                Err(e) => {
-                    tracing::error!("Failed to get server members for key sync: {}", e);
                 }
             }
         }

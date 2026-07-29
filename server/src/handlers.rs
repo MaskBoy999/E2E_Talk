@@ -342,7 +342,7 @@ pub async fn register(
 
     // Fetch profile picture only (display_name and other profile fields are now encrypted-only)
     let profile_pic = match state.db.get_user_profile(&user.id) {
-        Ok((_, _, pp, _fk, pph, _, _, bh)) => (pp, pph, bh),
+        Ok((_, _, pp, pph, _, bh, _, _, _, _)) => (pp, pph, bh),
         Err(_) => (None, None, None),
     };
 
@@ -446,7 +446,7 @@ pub async fn login(
 
     // Fetch profile picture only (display_name and other profile fields are now encrypted-only)
     let profile_pic = match state.db.get_user_profile(&user.id) {
-        Ok((_, _, pp, _fk, pph, _, _, bh)) => (pp, pph, bh),
+        Ok((_, _, pp, pph, _, bh, _, _, _, _)) => (pp, pph, bh),
         Err(_) => (None, None, None),
     };
 
@@ -674,7 +674,7 @@ pub async fn reauth(
 
     // Fetch profile picture only (display_name and other profile fields are now encrypted-only)
     let profile_pic = match state.db.get_user_profile(&user.id) {
-        Ok((_, _, pp, _fk, pph, _, _, bh)) => (pp, pph, bh),
+        Ok((_, _, pp, pph, _, bh, _, _, _, _)) => (pp, pph, bh),
         Err(_) => (None, None, None),
     };
 
@@ -3664,7 +3664,6 @@ pub async fn list_user_stickers(
                     serde_json::json!({
                         "id": id,
                         "file_id": file_id,
-                        "sticker_name": name,
                         "mime_type": mime,
                         "encrypted_file_key": ekey.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
                         "file_key_nonce": eknounce.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
@@ -3731,14 +3730,15 @@ pub async fn remove_user_sticker(
 
 #[derive(Deserialize)]
 pub struct UpdateProfileRequest {
-    pub remove_picture: Option<bool>,  // true = remove profile picture
-    pub profile_picture_file_id: Option<String>,  // Some("file_id") = set picture
-    pub profile_picture_file_key: Option<String>,  // file encryption key (base64)
-    // Profile v2 fields
+    pub remove_picture: Option<bool>,
+    pub profile_picture_file_id: Option<String>,
+    // Encrypted file keys (AES-GCM with identity key) — no plaintext keys accepted
+    pub encrypted_pic_key: Option<String>,
+    pub pic_key_nonce: Option<String>,
     pub profile_banner_file_id: Option<String>,
-    pub profile_banner_file_key: Option<String>,
-    // Encrypted profile — all profile fields (display_name, colors, description, etc.)
-    // are inside this encrypted blob. No plaintext profile data accepted.
+    pub encrypted_banner_key: Option<String>,
+    pub banner_key_nonce: Option<String>,
+    // Encrypted profile — all profile fields inside this encrypted blob
     pub encrypted_profile_data: Option<String>,
     pub encrypted_profile_salt: Option<String>,
     pub encrypted_profile_nonce: Option<String>,
@@ -3765,20 +3765,19 @@ pub async fn get_profile(
         || state.db.share_server(&caller_id, &requested_id).unwrap_or(false);
 
     match state.db.get_user_profile(&requested_id) {
-        Ok((id, username, profile_picture_file_id, file_key, _pph, banner_id, banner_key, _banner_hash)) => {
+        Ok((id, username, profile_picture_file_id, _pph, banner_id, _banner_hash, enc_pic_key, pic_key_nonce, enc_banner_key, banner_key_nonce)) => {
             let encrypted = state.db.get_encrypted_profile(&requested_id).ok().flatten();
             (StatusCode::OK, Json(serde_json::json!({
                 "id": id,
                 "username": username,
-                // display_name, username_color, username_border_color, profile_background_color
-                // are no longer returned as plaintext — all profile data is inside encrypted_profile_data.
                 "profile_picture_file_id": profile_picture_file_id,
-                // Only return file decryption keys to authorized users (friends / server-mates / self)
-                "profile_picture_file_key": if authorized_for_keys { file_key } else { None },
+                // Return encrypted file keys (AES-GCM with user's identity key)
+                "encrypted_pic_key": enc_pic_key.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
+                "pic_key_nonce": pic_key_nonce.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
                 "profile_banner_file_id": banner_id,
-                "profile_banner_file_key": if authorized_for_keys { banner_key } else { None },
-                // description, nickname, display_name, and colors removed from plaintext API.
-                // All profile data is inside encrypted_profile_data.
+                "encrypted_banner_key": enc_banner_key.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
+                "banner_key_nonce": banner_key_nonce.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
+                // All profile metadata inside encrypted_profile_data
                 "encrypted_profile_data": encrypted.as_ref().map(|e| e.0.as_str()),
                 "encrypted_profile_salt": encrypted.as_ref().map(|e| e.1.as_str()),
                 "encrypted_profile_nonce": encrypted.as_ref().map(|e| e.2.as_str()),
@@ -3805,7 +3804,7 @@ pub async fn update_profile(
 
     // Before changing profile picture, delete the old one's file from DB and disk
     let delete_current_pic = || -> Result<(), String> {
-        let (_, _, old_file_id, _, _, _, _, _) = state.db.get_user_profile(&user_id)?;
+        let (_, _, old_file_id, _, _, _, _, _, _, _) = state.db.get_user_profile(&user_id)?;
         if let Some(old_id) = old_file_id {
             // Delete from DB (checks ownership)
             if let Ok(old_info) = state.db.delete_file_record(&old_id) {
@@ -3825,7 +3824,7 @@ pub async fn update_profile(
     // Handle profile picture removal
     if req.remove_picture.unwrap_or(false) {
         let _ = delete_current_pic();
-        if let Err(e) = state.db.update_profile_picture(&user_id, None, None) {
+        if let Err(e) = state.db.update_profile_picture(&user_id, None, None, None) {
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
         }
     }
@@ -3849,8 +3848,9 @@ pub async fn update_profile(
         }
         // Delete old profile pic before setting new one
         let _ = delete_current_pic();
-        let file_key = req.profile_picture_file_key.as_deref();
-        if let Err(e) = state.db.update_profile_picture(&user_id, Some(file_id), file_key) {
+        let enc_key = req.encrypted_pic_key.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+        let key_nonce = req.pic_key_nonce.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+        if let Err(e) = state.db.update_profile_picture(&user_id, Some(file_id), enc_key.as_deref(), key_nonce.as_deref()) {
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
         }
     }
@@ -3875,8 +3875,9 @@ pub async fn update_profile(
         if file_info.uploader_id != user_id {
             return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Not your file"}))).into_response();
         }
-        let banner_key = req.profile_banner_file_key.as_deref();
-        if let Err(e) = state.db.update_profile_banner(&user_id, Some(banner_file_id), banner_key) {
+        let enc_banner_key = req.encrypted_banner_key.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+        let banner_key_nonce = req.banner_key_nonce.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+        if let Err(e) = state.db.update_profile_banner(&user_id, Some(banner_file_id), enc_banner_key.as_deref(), banner_key_nonce.as_deref()) {
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
         }
     }
@@ -3891,23 +3892,23 @@ pub async fn update_profile(
 
     // Broadcast profile update to the user, friends, and all server members
     if let Ok(profile) = state.db.get_user_profile(&user_id) {
-        let (_id, username, profile_picture_file_id, profile_picture_file_key, _pph, banner_id, banner_file_key, _banner_hash) = profile;
+        let (_id, username, profile_picture_file_id, _pph, banner_id, _banner_hash, enc_pic_key, pic_key_nonce, enc_banner_key, banner_key_nonce) = profile;
         let encrypted = state.db.get_encrypted_profile(&user_id).ok().flatten();
         let profile_updated_at = state.db.get_profile_updated_at(&user_id).ok();
         let profile_msg = serde_json::json!({
             "type": "profile_updated",
             "user_id": user_id,
             "username": username,
-    // display_name, username_color, username_border_color are
-    // no longer sent as plaintext — they're inside encrypted_profile_data.
-    "profile_picture_file_id": profile_picture_file_id,
-    "profile_picture_file_id_hash": _pph,
-    "profile_picture_file_key": profile_picture_file_key,
-    "profile_banner_file_id": banner_id,
-    "profile_banner_file_id_hash": _banner_hash,
-    "profile_banner_file_key": banner_file_key,
-    "encrypted_profile_data": encrypted.as_ref().map(|e| e.0.as_str()),
-    "encrypted_profile_data_key": encrypted.as_ref().and_then(|e| if e.3.is_empty() { None } else { Some(e.3.as_str()) }),
+            "profile_picture_file_id": profile_picture_file_id,
+            "profile_picture_file_id_hash": _pph,
+            "encrypted_pic_key": enc_pic_key.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
+            "pic_key_nonce": pic_key_nonce.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
+            "profile_banner_file_id": banner_id,
+            "profile_banner_file_id_hash": _banner_hash,
+            "encrypted_banner_key": enc_banner_key.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
+            "banner_key_nonce": banner_key_nonce.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
+            "encrypted_profile_data": encrypted.as_ref().map(|e| e.0.as_str()),
+            "encrypted_profile_data_key": encrypted.as_ref().and_then(|e| if e.3.is_empty() { None } else { Some(e.3.as_str()) }),
             "profile_updated_at": profile_updated_at,
         });
 
@@ -4787,7 +4788,8 @@ pub async fn list_dm_messages(
                     serde_json::json!({
                         "id": m.id,
                         "dm_channel_id": m.dm_channel_id,
-                        "sender_id": m.sender_id,
+                        "sender_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &m.sender_id),
+                        "sender_user_id": m.sender_id,
                         "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
                         "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
                         "timestamp": m.timestamp,

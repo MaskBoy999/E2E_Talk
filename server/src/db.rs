@@ -1,5 +1,11 @@
 use rusqlite::{params, Connection};
 use sha2::{Sha256, Digest};
+use chacha20poly1305::{
+    aead::{Aead, AeadCore, KeyInit, OsRng, generic_array::GenericArray, generic_array::typenum::U32},
+    XChaCha20Poly1305
+};
+use x25519_dalek::{EphemeralSecret, PublicKey};
+use base64::Engine;
 use std::sync::Mutex;
 use uuid::Uuid;
 
@@ -1029,6 +1035,9 @@ impl Database {
         // Migration 042: Drop legacy plaintext columns (file_key, friend_code, invite_code)
         let _ = conn.execute_batch(include_str!("../migrations/042_drop_legacy_plaintext_columns.sql"));
 
+        // Migration 043: Encrypt profile_picture_file_key and profile_banner_file_key
+        let _ = conn.execute_batch(include_str!("../migrations/043_encrypted_profile_file_keys.sql"));
+
         // --- Startup schema verification check ---
         // Verify that the last migration's expected columns exist.
         // If any expected migration was skipped, log a warning so the operator knows.
@@ -1138,10 +1147,9 @@ impl Database {
         .map_err(|_| "User not found".to_string())
     }
 
-    pub fn get_user_profile(&self, id: &str) -> Result<(String, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>), String> {
+    pub fn get_user_profile(&self, id: &str) -> Result<(String, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
 
-        // Check which banner columns exist
         let has_banner: bool = conn
             .query_row(
                 "SELECT COUNT(*) > 0 FROM pragma_table_info('users') WHERE name = 'profile_banner_file_id'",
@@ -1150,22 +1158,16 @@ impl Database {
             )
             .map(|c| c > 0)
             .unwrap_or(false);
-        let has_banner_key: bool = conn
-            .query_row(
-                "SELECT COUNT(*) > 0 FROM pragma_table_info('users') WHERE name = 'profile_banner_file_key'",
-                [],
-                |row| row.get::<_, i32>(0),
-            )
-            .map(|c| c > 0)
-            .unwrap_or(false);
 
-        let sql = if has_banner && has_banner_key {
-            "SELECT id, username, profile_picture_file_id, profile_picture_file_key, profile_picture_file_id_hash,
-                    profile_banner_file_id, profile_banner_file_key, profile_banner_file_id_hash
+        let sql = if has_banner {
+            "SELECT id, username, profile_picture_file_id, profile_picture_file_id_hash,
+                    profile_banner_file_id, profile_banner_file_id_hash,
+                    encrypted_pic_key, pic_key_nonce, encrypted_banner_key, banner_key_nonce
              FROM users WHERE id = ?1"
         } else {
-            "SELECT id, username, profile_picture_file_id, profile_picture_file_key, profile_picture_file_id_hash,
-                    NULL as banner_id, NULL as banner_key, NULL as banner_hash
+            "SELECT id, username, profile_picture_file_id, profile_picture_file_id_hash,
+                    NULL as banner_id, NULL as banner_hash,
+                    encrypted_pic_key, pic_key_nonce, encrypted_banner_key, banner_key_nonce
              FROM users WHERE id = ?1"
         };
 
@@ -1177,19 +1179,21 @@ impl Database {
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, Option<String>>(4)?,
                 row.get::<_, Option<String>>(5)?,
-                row.get::<_, Option<String>>(6)?,
-                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<Vec<u8>>>(6)?,
+                row.get::<_, Option<Vec<u8>>>(7)?,
+                row.get::<_, Option<Vec<u8>>>(8)?,
+                row.get::<_, Option<Vec<u8>>>(9)?,
             ))
         })
         .map_err(|_| "User not found".to_string())
     }
 
-    pub fn update_profile_picture(&self, user_id: &str, file_id: Option<&str>, file_key: Option<&str>) -> Result<(), String> {
+    pub fn update_profile_picture(&self, user_id: &str, file_id: Option<&str>, encrypted_key: Option<&[u8]>, key_nonce: Option<&[u8]>) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let hash = file_id.map(|fid| sha256_hex(fid));
         conn.execute(
-            "UPDATE users SET profile_picture_file_id = ?1, profile_picture_file_key = ?2, profile_picture_file_id_hash = ?3 WHERE id = ?4",
-            params![file_id, file_key, hash, user_id],
+            "UPDATE users SET profile_picture_file_id = ?1, profile_picture_file_id_hash = ?2, encrypted_pic_key = ?3, pic_key_nonce = ?4 WHERE id = ?5",
+            params![file_id, hash, encrypted_key, key_nonce, user_id],
         )
         .map_err(|e| e.to_string())?;
         conn.execute(
@@ -1200,12 +1204,12 @@ impl Database {
         Ok(())
     }
 
-    pub fn update_profile_banner(&self, user_id: &str, file_id: Option<&str>, file_key: Option<&str>) -> Result<(), String> {
+    pub fn update_profile_banner(&self, user_id: &str, file_id: Option<&str>, encrypted_key: Option<&[u8]>, key_nonce: Option<&[u8]>) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let hash = file_id.map(|fid| sha256_hex(fid));
         conn.execute(
-            "UPDATE users SET profile_banner_file_id = ?1, profile_banner_file_key = ?2, profile_banner_file_id_hash = ?3 WHERE id = ?4",
-            params![file_id, file_key, hash, user_id],
+            "UPDATE users SET profile_banner_file_id = ?1, profile_banner_file_id_hash = ?2, encrypted_banner_key = ?3, banner_key_nonce = ?4 WHERE id = ?5",
+            params![file_id, hash, encrypted_key, key_nonce, user_id],
         )
         .map_err(|e| e.to_string())?;
         conn.execute(
@@ -1408,13 +1412,62 @@ impl Database {
         Ok(events)
     }
 
-    // --- Pending Notifications (expanded offline replay) ---
+    // --- Pending Notifications (ECDH + XChaCha20-Poly1305) ---
+    //
+    // Server encrypts notifications with ECDH(ephemeral_private, user_identity_public)
+    // → shared_secret → SHA-256 → XChaCha20 key, then stores
+    // "ephemeral_pubkey_b64:nonce_b64:ciphertext_b64" in the payload column.
+    // The client decrypts with ECDH(identity_private, ephemeral_public) → same key.
+    // This matches the notification sound pattern: data encrypted with identity key.
+    // The server generates a fresh ephemeral key pair per notification.
+
+    /// Encrypt a notification payload using ECDH + XChaCha20-Poly1305
+    /// Returns "epk_b64:nonce_b64:ciphertext_b64" composite string
+    fn encrypt_notification_payload(payload: &str, identity_pub_key: &[u8]) -> Result<String, String> {
+        // Generate ephemeral X25519 key pair
+        let mut rng = OsRng;
+        let ephemeral_secret = EphemeralSecret::random_from_rng(&mut rng);
+        let ephemeral_pub = PublicKey::from(&ephemeral_secret);
+        
+        // User's identity public key (32 bytes)
+        let user_pub_bytes: [u8; 32] = identity_pub_key.try_into()
+            .map_err(|_| "Identity public key must be 32 bytes".to_string())?;
+        let user_pub = PublicKey::from(user_pub_bytes);
+        
+        // ECDH: shared secret = ephemeral_private * user_public
+        let shared_secret = ephemeral_secret.diffie_hellman(&user_pub);
+        
+        // Derive XChaCha20 key: SHA-256(shared_secret)
+        let chacha_key_bytes = Sha256::digest(shared_secret.as_bytes());
+        let chacha_key = GenericArray::<u8, U32>::from_slice(&chacha_key_bytes);
+        let cipher = XChaCha20Poly1305::new(chacha_key);
+        
+        // Generate random 24-byte nonce (XChaCha20 extended nonce)
+        let nonce_bytes = XChaCha20Poly1305::generate_nonce(&mut rng);
+        
+        // Encrypt payload
+        let ciphertext = cipher
+            .encrypt(&nonce_bytes, payload.as_bytes())
+            .map_err(|e| format!("XChaCha20Poly1305 encrypt failed: {:?}", e))?;
+        
+        // Format: ephemeral_pubkey_b64:nonce_b64:ciphertext_b64
+        let epk_b64 = base64::engine::general_purpose::STANDARD.encode(ephemeral_pub.as_bytes());
+        let nonce_b64 = base64::engine::general_purpose::STANDARD.encode(&nonce_bytes);
+        let ct_b64 = base64::engine::general_purpose::STANDARD.encode(&ciphertext);
+        
+        Ok(format!("{}:{}:{}", epk_b64, nonce_b64, ct_b64))
+    }
 
     pub fn save_pending_notification(&self, user_id: &str, notification_type: &str, payload: &str) -> Result<(), String> {
+        // Fetch user's identity public key from DB
+        let identity_pub = self.get_identity_public_key(user_id)
+            .map_err(|_| "User has no identity public key".to_string())?;
+        
+        let encrypted_payload = Self::encrypt_notification_payload(payload, &identity_pub)?;
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
             "INSERT INTO pending_notifications (user_id, notification_type, payload) VALUES (?1, ?2, ?3)",
-            params![user_id, notification_type, payload],
+            params![user_id, notification_type, encrypted_payload],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -2962,7 +3015,7 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM dm_channels WHERE id = ?1 AND (user_a = ?2 OR user_b = ?2)",
+                "SELECT COUNT(*) FROM dm_members WHERE dm_channel_id = ?1 AND user_id = ?2",
                 params![dm_channel_id, user_id],
                 |row| row.get(0),
             )

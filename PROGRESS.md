@@ -4,6 +4,9 @@
 
 | Date | Feature | Description |
 |------|---------|-------------|
+| 07-29 | userDisplayNameCache JSDoc + banner fix | Added full `@typedef UserDisplayNameEntry` with all 7 documented fields. Banner file_id/key were stored in runtime cache but never persisted to localStorage — fixed in save/load functions. |
+| 07-29 | saveProfile() order swap | Moved `uploadConversationProfiles()` before `PATCH /api/profile` to fix race condition where `profile_updated` WS broadcast arrived before conversation profile data was in the DB. |
+| 07-29 | Unified PFP sharing test | End-to-end test: User A uploads conversation profile encrypted with server key, User B decrypts via API. Verifies NO `profile_key_sync` WS type is received (old mechanism removed). |
 | 07-24 | P3: Sender username encrypted | Removed plaintext sender_username from all API/WS responses. Uses AEAD encrypt with channel key. |
 | 07-24 | Shared profile data keys API | Users can recover profile_data_key without WS roundtrip. Stored pre-encrypted with DM/server key. |
 | 07-24 | Server member key upload | Every server member's shared profile key uploaded on page load, not just owner's. |

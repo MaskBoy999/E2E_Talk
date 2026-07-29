@@ -48,15 +48,9 @@ test.describe('Profile Picture Rendering Across Message Types', () => {
         // ── Make friends ──
         const code2 = await page2.evaluate(() => localStorage.getItem('e2e_friend_code'));
         expect(code2).toBeTruthy();
-        const friendCodeHash = body2.hmacKey
-            ? await page2.evaluate(({ key, code }: any) => {
-                const w = window as any;
-                return w.E2ECrypto.hmacHex(key, code);
-            }, { key: body2.hmacKey, code: code2 })
-            : code2;
         const fr = await page.request.post(`${BASE}/api/friends/request`, {
             headers: { Authorization: `Bearer ${body1.token}`, 'Content-Type': 'application/json' },
-            data: { friend_code_hash: friendCodeHash },
+            data: { friend_code: code2 },
         });
         expect(fr.ok()).toBeTruthy();
         await page.waitForTimeout(500);
@@ -252,20 +246,14 @@ test.describe('Profile Picture Rendering Across Message Types', () => {
             msgs.forEach((m, i) => {
                 const isGrouped = m.classList.contains('grouped');
                 const hasAvatar = !!m.querySelector('.avatar');
-                const avatarImg = !!m.querySelector('.avatar img.avatar-img');
-                const avatarLoad = !!m.querySelector('.avatar[data-profile-pic-load]');
                 const hasDisplayName = !!m.querySelector('.display-name');
                 const hasContent = !!m.querySelector('.content');
                 const hasForwardLabel = !!m.querySelector('.forward-label');
-                const fwdSenderPic = !!m.querySelector('.forward-sender-pic');
-                const fwdPicLoading = !!m.querySelector('[data-fwd-pic-load]');
-                const fwdSenderInitial = !!m.querySelector('.forward-sender-initial');
-                const fwdSenderName = !!m.querySelector('.forward-sender-name');
                 const textEl = m.querySelector('.text');
                 const text = textEl ? textEl.textContent || '' : '';
                 results.push({
-                    idx: i, isGrouped, hasAvatar, avatarImg, avatarLoad, hasDisplayName, hasContent,
-                    hasForwardLabel, fwdSenderPic, fwdPicLoading, fwdSenderInitial, fwdSenderName,
+                    idx: i, isGrouped, hasAvatar, hasDisplayName, hasContent,
+                    hasForwardLabel,
                     textPreview: text.substring(0, 60),
                 });
             });
@@ -298,47 +286,32 @@ test.describe('Profile Picture Rendering Across Message Types', () => {
             expect(msg.textPreview).not.toContain('[encrypted]');
         }
 
-        // Find the forward message and verify its label
+        // Forward label is rendered (sender display name/PFP intentionally removed from forward labels)
         const fwdMsgA = detailsA.find((m: any) => m.hasForwardLabel);
         expect(fwdMsgA).toBeTruthy();
-        expect(fwdMsgA.fwdSenderName).toBe(true);
-        const hasAnyFwdPic = fwdMsgA.fwdSenderPic || fwdMsgA.fwdPicLoading || fwdMsgA.fwdSenderInitial;
-        expect(hasAnyFwdPic).toBe(true);
 
         // ── User B verifies messages ──
-        // Use the same fresh-WS approach to ensure the DM loads properly
+        // Navigate and wait for page's WS to connect and auth
         await page2.goto(`${BASE}/index.html`);
-        await page2.waitForTimeout(1000);
-        await page2.evaluate(async ({ dmChannelId }: any) => {
-            const token = localStorage.getItem('token');
-            if (!token) return;
-            // Create fresh WS to auth and trigger loadDmConversations
-            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const ws = new WebSocket(protocol + '//' + window.location.host + '/ws');
-            await new Promise<void>((resolve, reject) => {
-                const timeout = setTimeout(() => reject('WS_TIMEOUT'), 15000);
-                ws.onopen = () => { clearTimeout(timeout); resolve(); };
-                ws.onerror = () => { clearTimeout(timeout); reject('WS_ERROR'); };
-            });
-            await new Promise<void>((resolve) => {
-                ws.onmessage = (evt: any) => {
-                    try {
-                        const msg = JSON.parse(evt.data);
-                        if (msg.type === 'auth_ok') resolve();
-                    } catch (_) {}
-                };
-                ws.send(JSON.stringify({ type: 'auth', token }));
-            });
-            // Now dmConversations should be populated. Wait and then select the DM.
-            await new Promise(r => setTimeout(r, 3000));
-            const conv = (window as any).dmConversations?.find((c: any) => c.dm_channel_id === dmChannelId);
-            if (conv && typeof (window as any).selectDmChannel === 'function') {
-                await (window as any).selectDmChannel(dmChannelId, conv.other_user_id, conv.other_username, null);
+        await page2.waitForTimeout(2000);
+        // Use a direct evaluate that waits for the page WS, then calls selectDmChannel directly
+        const convFound = await page2.evaluate(async ({ dmChannelId, user1id, user1name }: any) => {
+            // Wait for page's WS
+            for (let i = 0; i < 60; i++) {
+                if ((window as any).ws && (window as any).ws.readyState === WebSocket.OPEN) break;
+                await new Promise(r => setTimeout(r, 200));
             }
+            // Wait a moment for dmConversations to populate
             await new Promise(r => setTimeout(r, 2000));
-            ws.close();
-        }, { dmChannelId });
-        await page2.waitForTimeout(3000);
+            if (typeof (window as any).selectDmChannel === 'function') {
+                await (window as any).selectDmChannel(dmChannelId, user1id, user1name, null);
+                // Wait for messages to load
+                await new Promise(r => setTimeout(r, 4000));
+                return 'selected';
+            }
+            return 'no_selectDmChannel';
+        }, { dmChannelId, user1id: body1.user.id, user1name: user1 });
+        console.log('User B DM result:', convFound);
 
         const detailsB = await page2.evaluate(() => {
             const msgs = document.querySelectorAll('.message');
@@ -349,15 +322,11 @@ test.describe('Profile Picture Rendering Across Message Types', () => {
                 const hasDisplayName = !!m.querySelector('.display-name');
                 const hasContent = !!m.querySelector('.content');
                 const hasForwardLabel = !!m.querySelector('.forward-label');
-                const fwdSenderPic = !!m.querySelector('.forward-sender-pic');
-                const fwdPicLoading = !!m.querySelector('[data-fwd-pic-load]');
-                const fwdSenderInitial = !!m.querySelector('.forward-sender-initial');
-                const fwdSenderName = !!m.querySelector('.forward-sender-name');
                 const textEl = m.querySelector('.text');
                 const text = textEl ? textEl.textContent || '' : '';
                 results.push({
                     idx: i, isGrouped, hasAvatar, hasDisplayName, hasContent,
-                    hasForwardLabel, fwdSenderPic, fwdPicLoading, fwdSenderInitial, fwdSenderName,
+                    hasForwardLabel,
                     textPreview: text.substring(0, 60),
                 });
             });
@@ -382,12 +351,9 @@ test.describe('Profile Picture Rendering Across Message Types', () => {
             expect(msg.textPreview).not.toContain('[encrypted]');
         }
 
-        // Forward message on recipient side
+        // Forward label on recipient side (sender display name/PFP intentionally removed)
         const fwdMsgB = detailsB.find((m: any) => m.hasForwardLabel);
         expect(fwdMsgB).toBeTruthy();
-        expect(fwdMsgB.fwdSenderName).toBe(true);
-        const hasAnyFwdPicB = fwdMsgB.fwdSenderPic || fwdMsgB.fwdPicLoading || fwdMsgB.fwdSenderInitial;
-        expect(hasAnyFwdPicB).toBe(true);
 
         await page2.close();
     });
