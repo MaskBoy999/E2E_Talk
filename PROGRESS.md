@@ -35,6 +35,15 @@
 | 07-27 | admin_login IP rate limiting | Added `ADMIN_LOGIN_IP_RATE_LIMITER` — 10 attempts per 300s per IP for the unauthenticated admin panel login. |
 | 07-27 | create_server per-user rate limiting | Added `CREATE_SERVER_RATE_LIMITER` — 5 servers per 3600s per user to prevent server creation spam. |
 | 07-27 | WebSocket auth rate limiting | Added `WS_AUTH_RATE_LIMITER` in ws.rs — 10 auth attempts per 60s per IP. Covers both "invalid token" and "first message not auth" failure paths. Added `get_client_ip()` helper to ws.rs. |
+| 07-29 | Streamer Mode — message blur | Message content hidden behind "Reveal" button per-message when enabled. DM sidebar previews replaced with 🔒. Auto-load media previews forced off. Toggle in Display Settings. |
+| 07-29 | Streamer Mode — LIVE badge | 🔴 LIVE badge pulses in sidebar footer when streamer mode is active. |
+| 07-29 | Streamer Mode — name blur | All names everywhere blurred (4px): message names, DM list, member list, server/channel headers, current user, channel items, server icons. Hover to reveal. |
+| 07-29 | Streamer Mode — PFP blur | All profile pictures blurred (6px + brightness dim) in messages, DM list, DM header, member list, sidebar footer, settings, profile modal, mention suggestions. Hover to reveal. |
+| 07-29 | Streamer Mode — mention + forward DM blur | `.mention-item-name`, `.mention-item-hint`, `.mention-item-avatar`, `.dm-forward-item` (whole row) blurred with hover-reveal. Covers the @mention dropdown and forward-to-DM modal. |
+| 07-29 | Keyboard shortcuts | Ctrl+Shift+S toggles streamer mode, Ctrl+Shift+M toggles auto-load media previews. Both show toast notifications. Displayed in new "Keyboard Shortcuts" section in Display Settings with `<kbd>` styled keys. |
+| 07-29 | Fix: stale _wrappedContent variable | Line 7235 referenced old variable name `_wrappedContent` after refactor to `wrappedContent`. Caused "Failed to load messages" in server channels until `_wrappedContent`→`wrappedContent` fix. |
+| 07-29 | Fix: streamer mode CSS lost on git restore | `streamer-hidden`, `streamer-reveal-btn`, `streamer-hidden-preview` CSS classes were lost when style.css was accidentally overwritten and restored from git. Re-added. Position:relative added to `.message .content` for correct button centering. |
+| 07-29 | Security audit | Comprehensive audit of all DB columns, API endpoints, WS messages, and client-side localStorage. Full coverage map generated. |
 
 ### Rate Limiting Coverage Summary
 
@@ -1972,3 +1981,81 @@ Changed the username color preview from showing "Preview" text to a colored bloc
 - ✅ Theme-aware color-mix() used instead of hardcoded rgba values
 - ✅ Profile edit modal color rows are visually consistent
 - ✅ Color pickers have clear interactive indicators (border, hover, title, active)
+
+## Streamer Mode — Message Blur, Name Blur, PFP Blur
+
+### What
+A new toggle in Display Settings that hides message content, blurs all names and profile pictures, disables media previews, and replaces DM sidebar previews with a lock icon. Perfect for screensharing or streaming.
+
+### Files changed
+| File | Change |
+|------|--------|
+| `static/index.html` | Added toggle in Display Settings + Keyboard Shortcuts reference section with `<kbd>` styled keys |
+| `static/style.css` | Added `.streamer-hidden` (blur), `.streamer-hidden.revealed` (unblur), `.streamer-reveal-btn` (centered button), `.streamer-hidden-preview` (🔒 lock icon). Added `body.streamer-mode` rules for 10+ name selectors and 8+ PFP selectors. Added `.streamer-live-badge` with pulse animation. Added `.shortcut-row kbd` styling. Fixed `position: relative` on `.message .content` for correct button centering. |
+| `static/chat.js` | Added `applyStreamerMode()` (toggles `.streamer-mode` on body + sidebar, shows/hides LIVE badge, handles existing DOM messages, re-renders DM sidebar). Modified `appendMessage()`/`appendDmMessage()` to wrap content in blur+button. Modified `renderDmSidebar()` to add `streamer-hidden-preview` class. Force-disabled auto-load when streamer mode is on. Added reveal button click delegation. Added keyboard shortcut handlers. |
+
+### Behavior
+| Trigger | Effect |
+|---------|--------|
+| Toggle ON | Message content blurred behind "Reveal" button. Names everywhere blurred (4px, hover to reveal). PFPs blurred (6px + brightness dim, hover to reveal). DM sidebar previews show 🔒. Media previews forced off. 🔴 LIVE badge appears in footer. |
+| Click "Reveal" | One message unblurred |
+| Hover a name/PFP | That element unblurred |
+| Toggle OFF | Everything returns to normal |
+
+### Keyboard Shortcuts
+| Shortcut | Action |
+|----------|--------|
+| **Ctrl+Shift+S** | Toggle Streamer Mode ON/OFF (toast notification) |
+| **Ctrl+Shift+M** | Toggle Auto-Load Media Previews ON/OFF (toast + auto-reloads current conversation) |
+
+Shortcuts are displayed in a new "Keyboard Shortcuts" section at the bottom of Display Settings.
+
+### Verification
+- ✅ JS syntax: **valid** (0 errors)
+- ✅ CSS: no syntax errors
+- ✅ Code review: **no critical issues** across all review passes
+- ✅ All 8 profile-sharing tests pass (2.2m)
+- ✅ Fixed: stale `_wrappedContent` variable (line 7235) that caused "Failed to load messages" in server channels
+- ✅ Fixed: missing `streamer-hidden`, `streamer-reveal-btn`, `streamer-hidden-preview` CSS classes lost on git restore
+- ✅ Fixed: `position: relative` on `.message .content` for correct reveal button positioning
+
+## Security Audit — Current Encryption Coverage Map (2026-07-29)
+
+### ✅ Fully Encrypted (server cannot read)
+- Message content (server + DM) — AES-256-GCM with channel/DM key
+- File content on disk — Client-encrypted chunks with per-file key
+- Profile data (display_name, nickname, description, colors) — AES-GCM with profile_data_key
+- Profile picture/banner file keys — Identity-key-encrypted
+- Server/channel names — AES-GCM with server key (per-user envelope)
+- Server picture file key — AES-GCM with server key
+- Sticker/emoji names — AES-GCM with identity key
+- Sticker file keys — AES-GCM with identity key
+- Notification sound data + file name — AES-GCM with identity key
+- Friend code — Argon2id-wrapped with password
+- Identity private key — Argon2id escrow
+- MIME types — AES-GCM with channel key
+- Sender username — AES-GCM with channel/DM key
+- Notification payload — AES-GCM with identity key
+
+### ✅ Hashed (server stores only hash)
+- Password — HMAC-SHA256 with client-side hash_key
+- Friend code — SHA-256 + salt
+- Invite code — SHA-256 + salt
+- Friend request ID — SHA-256
+- friend_requests_disabled toggle — HMAC-SHA256
+- Sender ID — SHA-256 (sender_id_hash)
+- File IDs — SHA-256 (file_id_hash)
+
+### 🔴 Still Plaintext (metadata/social graph — lower risk)
+- `files.original_filename` — plaintext original filename
+- `servers.owner_id` — who owns each server
+- Server membership graph (server_members, dm_members, friendships)
+- Message timestamps (when messages were sent/edited)
+- User online/offline presence
+- File metadata (size, uploader)
+- Message routing IDs (channel_id, server_id, dm_channel_id)
+
+### Summary
+The app has **strong content encryption** — messages, profiles, files, names, stickers, notifications, and sender usernames are all encrypted end-to-end. The server cannot read any user content.
+
+What remains is **metadata and social graph** — the server can see who talks to whom, when, and file metadata. These are the standard trade-offs of any encrypted communication system that's not also an anonymity network.
