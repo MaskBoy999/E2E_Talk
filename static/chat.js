@@ -8783,7 +8783,7 @@ function renderDmSidebar() {
             }
         }
         html += '<div class="channel-item dm-item" data-dm-id="' + c.dm_channel_id + '" data-user-id="' + escapeAttr(c.other_user_id) + '" data-username="' + escapeAttr(c.other_username) + '">' +
-            '<div class="dm-avatar' + (dmPicCacheKey ? ' profile-pic-target' : '') + '" data-profile-pic-load="' + (dmPicCacheKey || '') + '">' + dmAvatarHtml + '</div>' +
+            '<div class="dm-avatar' + (dmPicCacheKey ? ' profile-pic-target' : '') + '"' + (dmPicCacheKey ? ' data-profile-pic-load="' + dmPicCacheKey + '"' : '') + '>' + dmAvatarHtml + '</div>' +
             '<div class="dm-info">' +
                 '<div class="dm-name' + (dmColor ? ' has-glow' : '') + '"' + (dmColor ? ' style="color:' + dmColor + ';text-shadow:' + getDisplayNameTextShadow(dmColor, dmBorderColor) + '"' : '') + '>' + escapeHtml(displayName) + '</div>' +
                 '<div class="dm-preview">' + escapeHtml(preview) + '</div>' +
@@ -8908,11 +8908,6 @@ async function loadDmMessages(dmChannelId, otherUserId) {
         const messages = await res.json();
         list.innerHTML = '';
 
-        if (!Array.isArray(messages) || messages.length === 0) {
-            list.innerHTML = '<div class="welcome">No messages yet. Say hello!</div>';
-            return;
-        }
-
         const kp = E2ECrypto.getIdentityKeyPair();
 
         // Resolve the other user's identity key so we can decrypt messages.
@@ -8933,10 +8928,29 @@ async function loadDmMessages(dmChannelId, otherUserId) {
 
         // Fetch conversation profile BEFORE rendering messages so display name, colors,
         // and PFP keys are in userDisplayNameCache when appendDmMessage runs.
+        // Do this even if there are no messages — header still needs profile data.
         if (otherUserId !== user.id) {
             // Find the DM conversation object for this channel (needed for fallback fields)
             var dmConv = dmConversations.find(function(c) { return c.dm_channel_id === dmChannelId; });
             await fetchDmConversationProfile(otherUserId, dmChannelId);
+
+            if (!Array.isArray(messages) || messages.length === 0) {
+                list.innerHTML = '<div class="welcome">No messages yet. Say hello!</div>';
+                // Still update the header with profile data even without messages
+                if (dmConv) {
+                    var _cacheEmpty = userDisplayNameCache[otherUserId];
+                    var _dnEmpty = (_cacheEmpty && _cacheEmpty.display_name) || (dmConv && (dmConv.other_display_name || dmConv.other_username)) || '?';
+                    var _colorEmpty = (_cacheEmpty && _cacheEmpty.username_color) || null;
+                    var _borderEmpty = (_cacheEmpty && _cacheEmpty.username_border_color) || null;
+                    var _picIdEmpty = dmConv && (dmConv.other_profile_picture_file_id || (_cacheEmpty && _cacheEmpty.profile_picture_file_id));
+                    var _picUrlEmpty = _picIdEmpty ? getProfilePicUrl(_picIdEmpty, otherUserId) : null;
+                    var _headerPicEmpty = _picUrlEmpty ? '<img class="dm-chat-header-pic" src="' + _picUrlEmpty + '" alt="">' : (_picIdEmpty ? '<div class="dm-chat-header-pic dm-chat-header-pic-load" data-profile-pic-load="' + otherUserId + ':' + _picIdEmpty + '">' + _dnEmpty.charAt(0).toUpperCase() + '</div>' : '');
+                    document.getElementById('channel-name').innerHTML = _headerPicEmpty + '<span' + (_colorEmpty ? ' style="color:' + _colorEmpty + ';text-shadow:' + getDisplayNameTextShadow(_colorEmpty, _borderEmpty) + '"' : '') + '>' + escapeHtml(_dnEmpty) + '</span><button class="btn-unfriend" id="unfriend-btn" title="Unfriend">Unfriend</button>';
+                    document.getElementById('unfriend-btn').addEventListener('click', function() { unfriend(otherUserId, dmConv ? dmConv.other_username : ''); });
+                }
+                return;
+            }
+
             // After profile is fetched, update the DM chat header with fresh display name, colors, and PFP
             var _cache2 = userDisplayNameCache[otherUserId];
             var _dn2 = (_cache2 && _cache2.display_name) || (dmConv && (dmConv.other_display_name || dmConv.other_username)) || '?';
