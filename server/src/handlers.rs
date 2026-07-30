@@ -3565,7 +3565,7 @@ pub async fn list_user_stickers(
         Ok(stickers) => {
             let result: Vec<serde_json::Value> = stickers
                 .iter()
-                .map(|(id, file_id, _file_id_hash, name, mime, ekey, eknounce, enc_name, name_nonce)| {
+                .map(|(id, file_id, _file_id_hash, _name, mime, ekey, eknounce, enc_name, name_nonce)| {
                     serde_json::json!({
                         "id": id,
                         "file_id": file_id,
@@ -3665,7 +3665,7 @@ pub async fn get_profile(
     // - Own profile: always authorized
     // - Friends or share a server: authorized
     let is_own_profile = caller_id == requested_id;
-    let authorized_for_keys = is_own_profile
+    let _authorized_for_keys = is_own_profile
         || state.db.are_friends(&caller_id, &requested_id).unwrap_or(false)
         || state.db.share_server(&caller_id, &requested_id).unwrap_or(false);
 
@@ -4606,7 +4606,7 @@ pub async fn list_dm_conversations(
     match state.db.list_dm_channels_for_user(&user_id) {
         Ok(channels) => {
             let mut result: Vec<serde_json::Value> = Vec::new();
-            for (dm_id, other_id, other_username, other_display_name, _other_profile_pic) in channels {
+            for (dm_id, other_id, other_username, _other_display_name, _other_profile_pic) in channels {
                 let identity_pub = state
                     .db
                     .get_identity_public_key(&other_id)

@@ -97,7 +97,6 @@ pub struct Message {
     pub timestamp: String,
     pub message_nonce: Option<String>,
     pub edited_at: Option<String>,
-    pub message_signature: Option<String>,
     pub encrypted_profile_key: Option<String>,
     pub profile_key_nonce: Option<String>,
     pub encrypted_banner_key: Option<String>,
@@ -124,7 +123,6 @@ pub struct DmMessage {
     pub timestamp: String,
     pub message_nonce: Option<String>,
     pub edited_at: Option<String>,
-    pub message_signature: Option<String>,
     pub encrypted_profile_key: Option<String>,
     pub profile_key_nonce: Option<String>,
     pub encrypted_banner_key: Option<String>,
@@ -201,6 +199,8 @@ impl Database {
         let _ = conn.execute_batch(include_str!("../migrations/004_friends_dms.sql"));
 
         // Migration 019: message_signature columns (must run after both messages and dm_messages exist)
+        // Note: message_signature has been removed in migration 044 - this inline migration
+        // only runs on existing databases that already have the column (no-op if column exists)
         let _ = conn.execute_batch("ALTER TABLE messages ADD COLUMN message_signature TEXT");
         let _ = conn.execute_batch("ALTER TABLE dm_messages ADD COLUMN message_signature TEXT");
 
@@ -993,7 +993,6 @@ impl Database {
                 encrypted_sound BLOB NOT NULL,
                 nonce BLOB NOT NULL,
                 sender_public_key BLOB NOT NULL,
-                file_name TEXT NOT NULL DEFAULT 'notification.mp3',
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );"
@@ -1005,7 +1004,6 @@ impl Database {
                 id TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
-                sticker_name TEXT NOT NULL,
                 mime_type TEXT DEFAULT 'image/png',
                 encrypted_file_key BLOB,
                 file_key_nonce BLOB,
@@ -1037,6 +1035,12 @@ impl Database {
 
         // Migration 043: Encrypt profile_picture_file_key and profile_banner_file_key
         let _ = conn.execute_batch(include_str!("../migrations/043_encrypted_profile_file_keys.sql"));
+
+        // Migration 044: Drop never-populated message_signature column
+        let _ = conn.execute_batch(include_str!("../migrations/044_drop_message_signature.sql"));
+
+        // Migration 045: Drop plaintext sticker_name and file_name columns (encrypted counterparts exist)
+        let _ = conn.execute_batch(include_str!("../migrations/045_drop_plaintext_metadata.sql"));
 
         // --- Startup schema verification check ---
         // Verify that the last migration's expected columns exist.
@@ -2154,7 +2158,6 @@ impl Database {
                     timestamp: row.get(7)?,
                     message_nonce: row.get(8)?,
                     edited_at: row.get(9)?,
-                    message_signature: row.get(10)?,
                     encrypted_profile_key: row.get(11)?,
                     profile_key_nonce: row.get(12)?,
                     encrypted_banner_key: row.get(13)?,
@@ -2214,7 +2217,6 @@ impl Database {
                     timestamp: row.get(7)?,
                     message_nonce: row.get(8)?,
                     edited_at: row.get(9)?,
-                    message_signature: row.get(10)?,
                     encrypted_profile_key: row.get(11)?,
                     profile_key_nonce: row.get(12)?,
                     encrypted_banner_key: row.get(13)?,
@@ -2274,7 +2276,6 @@ impl Database {
                     timestamp: row.get(5)?,
                     message_nonce: row.get(6)?,
                     edited_at: row.get(7)?,
-                    message_signature: row.get(8)?,
                     encrypted_profile_key: row.get(9)?,
                     profile_key_nonce: row.get(10)?,
                     encrypted_banner_key: row.get(11)?,
@@ -2324,7 +2325,6 @@ impl Database {
                     timestamp: row.get(5)?,
                     message_nonce: row.get(6)?,
                     edited_at: row.get(7)?,
-                    message_signature: row.get(8)?,
                     encrypted_profile_key: row.get(9)?,
                     profile_key_nonce: row.get(10)?,
                     encrypted_banner_key: row.get(11)?,
@@ -2396,7 +2396,6 @@ impl Database {
             timestamp: chrono::Utc::now().to_rfc3339(),
             message_nonce: message_nonce.map(|s| s.to_string()),
             edited_at: None,
-            message_signature: message_signature.map(|s| s.to_string()),
             encrypted_profile_key: encrypted_profile_key.map(|s| s.to_string()),
             profile_key_nonce: profile_key_nonce.map(|s| s.to_string()),
             encrypted_banner_key: encrypted_banner_key.map(|s| s.to_string()),
@@ -3596,7 +3595,6 @@ impl Database {
                 timestamp: row.get(7)?,
                 message_nonce: row.get(8)?,
                 edited_at: row.get(9)?,
-                message_signature: row.get(10)?,
                 encrypted_profile_key: row.get(11)?,
                 profile_key_nonce: row.get(12)?,
                 encrypted_banner_key: row.get(13)?,
@@ -3656,7 +3654,6 @@ impl Database {
                 timestamp: row.get(7)?,
                 message_nonce: row.get(8)?,
                 edited_at: row.get(9)?,
-                message_signature: row.get(10)?,
                 encrypted_profile_key: row.get(11)?,
                 profile_key_nonce: row.get(12)?,
                 encrypted_banner_key: row.get(13)?,
@@ -3725,7 +3722,6 @@ impl Database {
             timestamp: chrono::Utc::now().to_rfc3339(),
             message_nonce: message_nonce.map(|s| s.to_string()),
             edited_at: None,
-            message_signature: message_signature.map(|s| s.to_string()),
             encrypted_profile_key: encrypted_profile_key.map(|s| s.to_string()),
             profile_key_nonce: profile_key_nonce.map(|s| s.to_string()),
             encrypted_banner_key: encrypted_banner_key.map(|s| s.to_string()),
@@ -3795,7 +3791,6 @@ impl Database {
                         timestamp: row.get(5)?,
                         message_nonce: row.get(6)?,
                         edited_at: row.get(7)?,
-                        message_signature: row.get(8)?,
                         encrypted_profile_key: row.get(9)?,
                         profile_key_nonce: row.get(10)?,
                         encrypted_banner_key: row.get(11)?,
@@ -3899,7 +3894,6 @@ impl Database {
                         timestamp: row.get(5)?,
                         message_nonce: row.get(6)?,
                         edited_at: row.get(7)?,
-                        message_signature: row.get(8)?,
                         encrypted_profile_key: row.get(9)?,
                         profile_key_nonce: row.get(10)?,
                         encrypted_banner_key: row.get(11)?,
@@ -4079,7 +4073,6 @@ impl Database {
                     timestamp: row.get(7)?,
                     message_nonce: row.get(8)?,
                     edited_at: row.get(9)?,
-                    message_signature: None,
                     encrypted_profile_key: None,
                     profile_key_nonce: None,
                     encrypted_banner_key: None,
@@ -4377,7 +4370,6 @@ impl Database {
                     timestamp: row.get(7)?,
                     message_nonce: row.get(8)?,
                     edited_at: row.get(9)?,
-                    message_signature: row.get(10)?,
                     encrypted_profile_key: row.get(11)?,
                     profile_key_nonce: row.get(12)?,
                     encrypted_banner_key: row.get(13)?,
