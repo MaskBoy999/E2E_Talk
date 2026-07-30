@@ -4776,7 +4776,7 @@ async function navigateToMessage(serverId, channelId, dmChannelId, messageId) {
             var _hdrDn = (_convCache && _convCache.display_name) || conv.other_display_name || conv.other_username || '?';
             var dmPicFileId = conv.other_profile_picture_file_id || (userDisplayNameCache[conv.other_user_id] && userDisplayNameCache[conv.other_user_id].profile_picture_file_id);
             var dmPicUrl = dmPicFileId ? getProfilePicUrl(dmPicFileId, conv.other_user_id) : null;
-            var dmChatHeaderPicHtml = dmPicUrl ? '<img class="dm-chat-header-pic" src="' + dmPicUrl + '" alt="">' : (dmPicFileId ? '<div class="dm-chat-header-pic dm-chat-header-pic-load" data-profile-pic-load="' + conv.other_user_id + ':' + dmPicFileId + '">' + _hdrDn.charAt(0).toUpperCase() + '</div>' : '');
+            var dmChatHeaderPicHtml = dmPicUrl ? '<div class="dm-header-pic-wrap"><img class="dm-chat-header-pic" src="' + dmPicUrl + '" alt=""></div>' : (dmPicFileId ? '<div class="dm-header-pic-wrap"><div class="dm-chat-header-pic dm-chat-header-pic-load" data-profile-pic-load="' + conv.other_user_id + ':' + dmPicFileId + '">' + _hdrDn.charAt(0).toUpperCase() + '</div></div>' : '');
             document.getElementById('channel-name').innerHTML = dmChatHeaderPicHtml + '<span>' + escapeHtml(_hdrDn) + '</span><button class="btn-unfriend" id="unfriend-btn" title="Unfriend">Unfriend</button>';
             document.getElementById('message-input').disabled = false;
             document.getElementById('send-btn').disabled = false;
@@ -5703,6 +5703,12 @@ function connectWebSocket(t) {
                                     var cacheKeyId = data.profile_picture_file_id_hash || data.profile_picture_file_id;
                                     profileKeyCache[data.user_id + ':' + cacheKeyId] = decryptedPicKey;
                                     scheduleProfileKeySave();
+                                    // Also store the key in userDisplayNameCache so updateExistingMessageStyles
+                                    // and getProfilePicUrl (with raw file UUID) can find it without cache key mismatch
+                                    if (!userDisplayNameCache[data.user_id]) userDisplayNameCache[data.user_id] = {};
+                                    if (data.profile_picture_file_id) userDisplayNameCache[data.user_id].profile_picture_file_id = data.profile_picture_file_id;
+                                    userDisplayNameCache[data.user_id].profile_picture_file_key = decryptedPicKey;
+                                    scheduleUserDisplayNameSave();
                                     getProfilePicUrl(cacheKeyId, data.user_id);
                                 }
                             } catch (e) {
@@ -5764,7 +5770,25 @@ function connectWebSocket(t) {
                         updateMemberListItem(data.user_id);
                         // Light update: just refresh the affected DM item instead of re-rendering entire sidebar
                         if (viewMode === 'dms') refreshDmSidebarItem(data.user_id);
-                        // Re-render profile modal if open for this user
+                        // Update DM chat header pic if viewing this user's DM
+                        if (currentDmOtherUser && data.user_id === currentDmOtherUser.id && currentDmChannelId) {
+                            var _hdrConv = dmConversations.find(function(c) { return c.dm_channel_id === currentDmChannelId; });
+                            var _hdrCache = userDisplayNameCache[data.user_id];
+                            var _hdrPicId = (_hdrCache && _hdrCache.profile_picture_file_id) || (_hdrConv && _hdrConv.other_profile_picture_file_id);
+                            if (_hdrPicId) {
+                                var _hdrPicUrl = getProfilePicUrl(_hdrPicId, data.user_id);
+                                if (_hdrPicUrl) {
+                                    var _hdrPicEl = document.querySelector('#channel-name .dm-chat-header-pic');
+                                    if (_hdrPicEl) {
+                                        if (_hdrPicEl.tagName === 'IMG') {
+                                            _hdrPicEl.src = _hdrPicUrl;
+                                        } else {
+                                            _hdrPicEl.outerHTML = '<img class="dm-chat-header-pic" src="' + _hdrPicUrl + '" alt="">';
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         if (profileModalUserId === data.user_id) {
                             var profileModal = document.getElementById('profile-modal');
                             if (profileModal && profileModal.style.display !== 'none') {
@@ -6002,6 +6026,10 @@ function connectWebSocket(t) {
                         }
                         localStorage.setItem('user', JSON.stringify(user));
                         updateSidebarFooter();
+                        // Broadcast updated profile keys to all DM conversations so others can see our new PFP immediately
+                        if (myProfile && myProfile.profile_picture_file_key) {
+                            setTimeout(function() { broadcastProfileKeySyncToAllDms(); }, 100);
+                        }
                     }                        // Update display name cache from decrypted profile data
                     // (display_name, username_color, border_color are no longer sent as plaintext)
                     if (!userDisplayNameCache[data.user_id]) userDisplayNameCache[data.user_id] = {};
@@ -6078,6 +6106,25 @@ function connectWebSocket(t) {
                     if (viewMode === 'dms') {
                         updateExistingMessageStyles(data.user_id);
                         refreshDmSidebarItem(data.user_id);
+                    }
+                    // Update DM chat header pic if viewing this user's DM
+                    if (currentDmOtherUser && data.user_id === currentDmOtherUser.id && currentDmChannelId) {
+                        var _hdrConv2 = dmConversations.find(function(c) { return c.dm_channel_id === currentDmChannelId; });
+                        var _hdrCache2 = userDisplayNameCache[data.user_id];
+                        var _hdrPicId2 = (_hdrCache2 && _hdrCache2.profile_picture_file_id) || (_hdrConv2 && _hdrConv2.other_profile_picture_file_id);
+                        if (_hdrPicId2) {
+                            var _hdrPicUrl2 = getProfilePicUrl(_hdrPicId2, data.user_id);
+                            if (_hdrPicUrl2) {
+                                var _hdrPicEl2 = document.querySelector('#channel-name .dm-chat-header-pic');
+                                if (_hdrPicEl2) {
+                                    if (_hdrPicEl2.tagName === 'IMG') {
+                                        _hdrPicEl2.src = _hdrPicUrl2;
+                                    } else {
+                                        _hdrPicEl2.outerHTML = '<img class="dm-chat-header-pic" src="' + _hdrPicUrl2 + '" alt="">';
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     // Refresh server member list if viewing a server
@@ -6910,6 +6957,16 @@ async function loadMessages(channelId, aroundMessageId) {
         for (const msg of messages) {
             await appendMessage(msg);
         }
+        // Update all message avatars with current profile pictures from cache
+        // (messages use msg.sender_profile_pic which may be stale after PFP update)
+        var _loadedSenders = {};
+        for (const msg of messages) {
+            var _lsid = msg.sender_user_id || msg.sender_id;
+            if (_lsid) _loadedSenders[_lsid] = true;
+        }
+        for (var _lsid2 in _loadedSenders) {
+            updateExistingMessageStyles(_lsid2);
+        }
         // After loading messages, prefetch profile data for senders whose display name isn't cached yet
         if (currentServerId) {
             var srvUncached = {};
@@ -7584,7 +7641,7 @@ async function navigateToMessage(serverId, channelId, messageId) {
         currentDmOtherUser = otherUser;
         var dmPicFileId2 = conv && (conv.other_profile_picture_file_id || (userDisplayNameCache[conv.other_user_id] && userDisplayNameCache[conv.other_user_id].profile_picture_file_id));
         var dmPicUrl2 = dmPicFileId2 ? getProfilePicUrl(dmPicFileId2, conv.other_user_id) : null;
-        var dmChatHeaderPicHtml2 = dmPicUrl2 ? '<img class="dm-chat-header-pic" src="' + dmPicUrl2 + '" alt="">' : (dmPicFileId2 ? '<div class="dm-chat-header-pic dm-chat-header-pic-load" data-profile-pic-load="' + conv.other_user_id + ':' + dmPicFileId2 + '">' + displayName.charAt(0).toUpperCase() + '</div>' : '');
+        var dmChatHeaderPicHtml2 = dmPicUrl2 ? '<div class="dm-header-pic-wrap"><img class="dm-chat-header-pic" src="' + dmPicUrl2 + '" alt=""></div>' : (dmPicFileId2 ? '<div class="dm-header-pic-wrap"><div class="dm-chat-header-pic dm-chat-header-pic-load" data-profile-pic-load="' + conv.other_user_id + ':' + dmPicFileId2 + '">' + displayName.charAt(0).toUpperCase() + '</div></div>' : '');
         document.getElementById('channel-name').innerHTML = dmChatHeaderPicHtml2 + escapeHtml(displayName) + ' <button class="btn-unfriend" id="unfriend-btn" title="Unfriend">Unfriend</button>';
         document.getElementById('message-input').disabled = false;
         document.getElementById('send-btn').disabled = false;
@@ -8776,13 +8833,13 @@ function refreshDmSidebarItem(userId) {
         }
     }
     // Update profile pic if cached
-    var picFileId = conv.other_profile_picture_file_id || (cacheEntry && cacheEntry.profile_picture_file_id);
+    var picFileId = (cacheEntry && cacheEntry.profile_picture_file_id) || conv.other_profile_picture_file_id;
     if (picFileId) {
         var cacheKey = userId + ':' + picFileId;
         var picUrl = profilePicCache[cacheKey];
         if (picUrl) {
             var avatarEl = dmItem.querySelector('.dm-avatar');
-            if (avatarEl && !avatarEl.querySelector('img')) {
+            if (avatarEl) {
                 avatarEl.innerHTML = '<img class="avatar-img" src="' + picUrl + '" alt="">';
             }
         } else {
@@ -9029,7 +9086,7 @@ async function loadDmMessages(dmChannelId, otherUserId) {
                     var _borderEmpty = (_cacheEmpty && _cacheEmpty.username_border_color) || null;
                     var _picIdEmpty = dmConv && (dmConv.other_profile_picture_file_id || (_cacheEmpty && _cacheEmpty.profile_picture_file_id));
                     var _picUrlEmpty = _picIdEmpty ? getProfilePicUrl(_picIdEmpty, otherUserId) : null;
-                    var _headerPicEmpty = _picUrlEmpty ? '<img class="dm-chat-header-pic" src="' + _picUrlEmpty + '" alt="">' : (_picIdEmpty ? '<div class="dm-chat-header-pic dm-chat-header-pic-load" data-profile-pic-load="' + otherUserId + ':' + _picIdEmpty + '">' + _dnEmpty.charAt(0).toUpperCase() + '</div>' : '');
+                    var _headerPicEmpty = _picUrlEmpty ? '<div class="dm-header-pic-wrap"><img class="dm-chat-header-pic" src="' + _picUrlEmpty + '" alt=""></div>' : (_picIdEmpty ? '<div class="dm-header-pic-wrap"><div class="dm-chat-header-pic dm-chat-header-pic-load" data-profile-pic-load="' + otherUserId + ':' + _picIdEmpty + '">' + _dnEmpty.charAt(0).toUpperCase() + '</div></div>' : '');
                     document.getElementById('channel-name').innerHTML = _headerPicEmpty + '<span' + (_colorEmpty ? ' style="color:' + _colorEmpty + ';text-shadow:' + getDisplayNameTextShadow(_colorEmpty, _borderEmpty) + '"' : '') + '>' + escapeHtml(_dnEmpty) + '</span><button class="btn-unfriend" id="unfriend-btn" title="Unfriend">Unfriend</button>';
                     document.getElementById('unfriend-btn').addEventListener('click', function() { unfriend(otherUserId, dmConv ? dmConv.other_username : ''); });
                 }
@@ -9043,7 +9100,7 @@ async function loadDmMessages(dmChannelId, otherUserId) {
             var _border2 = (_cache2 && _cache2.username_border_color) || null;
             var _picId2 = dmConv && (dmConv.other_profile_picture_file_id || (_cache2 && _cache2.profile_picture_file_id));
             var _picUrl2 = _picId2 ? getProfilePicUrl(_picId2, otherUserId) : null;
-            var _headerPicHtml2 = _picUrl2 ? '<img class="dm-chat-header-pic" src="' + _picUrl2 + '" alt="">' : (_picId2 ? '<div class="dm-chat-header-pic dm-chat-header-pic-load" data-profile-pic-load="' + otherUserId + ':' + _picId2 + '">' + _dn2.charAt(0).toUpperCase() + '</div>' : '');
+            var _headerPicHtml2 = _picUrl2 ? '<div class="dm-header-pic-wrap"><img class="dm-chat-header-pic" src="' + _picUrl2 + '" alt=""></div>' : (_picId2 ? '<div class="dm-header-pic-wrap"><div class="dm-chat-header-pic dm-chat-header-pic-load" data-profile-pic-load="' + otherUserId + ':' + _picId2 + '">' + _dn2.charAt(0).toUpperCase() + '</div></div>' : '');
             var _headerHtml2 = _headerPicHtml2 + '<span' + (_color2 ? ' style="color:' + _color2 + ';text-shadow:' + getDisplayNameTextShadow(_color2, _border2) + '"' : '') + '>' + escapeHtml(_dn2) + '</span><button class="btn-unfriend" id="unfriend-btn" title="Unfriend">Unfriend</button>';
             document.getElementById('channel-name').innerHTML = _headerHtml2;
             // Add presence dot to header pic
@@ -9078,6 +9135,13 @@ async function loadDmMessages(dmChannelId, otherUserId) {
 
         for (const msg of messages) {
             await appendDmMessage(msg, kp, otherPublicKey);
+        }
+
+        // Update all message avatars with current profile pictures from cache
+        // (messages use msg.sender_profile_pic which may be stale after PFP update)
+        if (otherUserId) updateExistingMessageStyles(otherUserId);
+        for (var _dosid in otherSenderIds) {
+            if (_dosid) updateExistingMessageStyles(_dosid);
         }
     } catch (err) {
         console.error('Failed to load DM messages:', err);
