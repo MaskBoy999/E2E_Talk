@@ -170,6 +170,16 @@ pub struct FileRecord {
 }
 
 impl Database {
+    /// Checkpoint the WAL to ensure all pending writes are flushed to the main DB file.
+    /// Call this BEFORE overwriting the database file (e.g. before import) to prevent
+    /// stale WAL data from corrupting the new database.
+    pub fn wal_checkpoint(&self) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     /// Reconnect to the database at the given path (used after import)
     pub fn reconnect(&self, path: &str) -> Result<(), String> {
         let mut conn = self.conn.lock().map_err(|e| e.to_string())?;

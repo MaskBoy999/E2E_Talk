@@ -47,6 +47,10 @@
 | 07-30 | Encrypted sticker/emoji/GIF names | Migration 041: `encrypted_sticker_name` + `sticker_name_nonce` in `user_stickers`. Client encrypts with identity key on upload, decrypts on load. Server cannot read sticker/emoji/GIF names. |
 | 07-30 | Encrypted notification sound file_name | Migration 039: `encrypted_file_name` + `file_name_nonce` in `notification_sounds`. Client encrypts with `SHA-256(identity_public_key)` derived key. Server cannot read notification sound file names. |
 | 07-30 | Encrypted MIME types for files + stickers | Migration 038: `encrypted_mime_type` + `mime_nonce` on both `files` and `user_stickers` tables. MIME types encrypted with file key so server cannot read them. |
+| 07-30 | Fix: Reauth password HMAC-SHA256 hashing | Reauth flow in settings now uses `computeHashedPasswordGlobal(password)` to send HMAC-SHA256 hash instead of raw password. Falls back to raw password for legacy accounts. Same fix applied to regen-with-password flow. |
+| 07-30 | Fix: Notification sound file_name display bug | `aeadDecrypt` returns `Uint8Array` but was assigned directly to `displayName` variable, causing `.toString()` to produce comma-separated byte values. Fixed: wrapped with `new TextDecoder().decode(decRaw)`. |
+| 07-30 | Migration 044: Drop `message_signature` column | Column was never populated by the client (always NULL). Removed from structs, SQL queries, and API responses. Safe to drop from `messages` and `dm_messages` tables. |
+| 07-30 | Migration 045: Drop plaintext `sticker_name`, `file_name` | `sticker_name` in `user_stickers` and `file_name` in `notification_sounds` have encrypted counterparts (migrations 041, 039). Plaintext columns are no longer written by the client. |
 
 ### Rate Limiting Coverage Summary
 
@@ -81,7 +85,7 @@ This section audits every piece of data sent to the server that the server can R
 | **Password (login, new users)** | `POST /api/login` | ✅ HMAC-SHA256 hash sent | ✅ **Already fixed** | Client fetches encrypted hash_key, decrypts with password, computes HMAC-SHA256, sends hash. |
 | **Password (login, legacy)** | `POST /api/login` | 🔴 Raw password sent | ⛔ **Cannot fix (legacy)** | Users registered before the hash_key system; their password is Argon2-hashed server-side. Client can't reproduce the Argon2 hash without the server's salt. The legacy fallback only exists until all users re-register or re-auth. |
 | **Username** | `POST /api/register`, `/api/login`, `/api/reauth` | 🔴 Plaintext | ⛔ **Cannot fix** | Server needs the raw username for uniqueness checks, login lookup, and display. Making this opaque would require a complete identity architecture overhaul (e.g., using public-key identities instead of usernames). |
-| **Password (reauth)** | `POST /api/reauth` | 🔴 Raw password sent (BUG: should send HMAC-SHA256 like login does) | 🐛 **BUG: reauth sends raw password even for hash_key users** | Reauth flow in chat.js sends raw password from input field without HMAC-SHA256 hashing. Server expects HMAC-SHA256 hash. This makes reauth broken for all hash_key users. Login flow correctly hashes first. See chat.js reauth event handler (~line 1351). |
+| **Password (reauth)** | `POST /api/reauth` | ✅ HMAC-SHA256 hash sent with legacy fallback | ✅ **Already fixed (07-30)** | Client now calls `computeHashedPasswordGlobal(password)` to HMAC-SHA256 hash before sending. Falls back to raw password for legacy accounts (no hash_key). Same pattern as login flow. |
 
 ### Friend Codes & Invite Codes
 
@@ -143,7 +147,7 @@ This section audits every piece of data sent to the server that the server can R
 | 🟢 **Low** | Remove `display_name`, `username_color`, `username_border_color` from server-side User struct (already NULL in API, clean up dead code) | Low | Defense-in-depth — prevents accidental re-exposure |
 | ✅ **Fixed** | Reauth now sends HMAC-SHA256 hash (done 07-30) | Low (client only) | Reauth flow in settings hashes password with computeHashedPasswordGlobal() before sending. |
 
-**Status:** All 3 high/medium priority fixes are now complete. One bug found: reauth sends raw password. The remaining items are low sensitivity (file metadata, request IDs) and can be addressed as needed.
+**Status:** All high/medium priority fixes complete. Reauth bug fixed (07-30). Remaining items are low sensitivity (request ID hashing, dead struct cleanup).
 
 ---
 
@@ -173,7 +177,7 @@ This section audits every piece of data sent to the server that the server can R
 | `POST /api/login` | `username` | 🔴 Plaintext | token, user id, username | ✅ YES — server sees username |
 | | `password` (new users) | 🟢 HMAC-SHA256(hash_key, raw_password) | — | ❌ NO — server receives HMAC-SHA256 hash; can't reverse |
 | | `password` (legacy users) | 🔴 Raw password sent (TLS only) | — | ✅ YES — legacy users without hash_key system send raw password |
-| `POST /api/reauth` | `password` | 🐛 **BUG**: sends raw password instead of HMAC-SHA256 hash | new token | ✅ YES — server receives raw password (should receive hash like login does) |
+| `POST /api/reauth` | `password` | ✅ HMAC-SHA256 hash sent (with legacy fallback) | new token | ❌ NO — server receives HMAC-SHA256 hash; legacy users still send raw password |
 | `DELETE /api/me` | (auth only) | — | ok/error | — |
 | `GET /api/me` | (auth only) | — | `id`, `username` | ✅ YES — server reads these from DB |
 
@@ -436,7 +440,7 @@ This section audits every piece of data sent to the server that the server can R
 | `timestamp` | 🔴 Plaintext | ✅ YES | **Host knows WHEN messages were sent** |
 | `message_nonce` | 🔴 Plaintext | ✅ YES | Ratchet counter |
 | `edited_at` | 🔴 Plaintext | ✅ YES | **Host knows WHEN edits happened** |
-| `message_signature` | 🔴 Plaintext | ✅ YES | Ed25519 signature from sender |
+| `message_signature` (DROP COLUMN migration 044) | ✅ Dropped — never populated | ❌ NO — column no longer exists | Migration 044: column never written by client, now removed from struct + SQL |
 | `encrypted_profile_key` | 🟢 Ciphertext with server key | ❌ NO |
 | `profile_key_nonce` | 🔴 Plaintext | ✅ YES |
 | `encrypted_banner_key` | 🟢 Ciphertext with server key | ❌ NO |
@@ -509,7 +513,7 @@ All columns are 🔴 Plaintext. Host can see who is friends with whom, all DM ch
 | Column | Encrypted? | Host Can Read? |
 |--------|-----------|---------------|
 | `id`, `user_id`, `file_id`, `file_id_hash`, `created_at` | 🔴 Plaintext | ✅ YES |
-| `sticker_name` (plaintext fallback) | 🔴 Plaintext | ✅ YES |
+| `sticker_name` (DROP COLUMN migration 045) | ✅ Dropped — encrypted counterpart exists | ❌ NO — column no longer exists | Migration 045: `encrypted_sticker_name` + `sticker_name_nonce` (migration 041) fully replaces this |
 | `encrypted_sticker_name`, `sticker_name_nonce` | 🟢 Encrypted with identity key (migration 041) | ❌ NO — can't decrypt without identity private key |
 | `mime_type` (plaintext fallback) | 🔴 Plaintext | ✅ YES |
 | `encrypted_mime_type`, `mime_nonce` | 🟢 Encrypted with file key (migration 038) | ❌ NO |
@@ -546,7 +550,8 @@ All columns are 🔴 Plaintext. Host can see who is friends with whom, all DM ch
 
 | Column | Encrypted? | Host Can Read? |
 |--------|-----------|---------------|
-| `user_id`, `file_name` (plaintext fallback) | 🔴 Plaintext | ✅ YES |
+| `user_id` | 🔴 Plaintext | ✅ YES |
+| `file_name` (DROP COLUMN migration 045) | ✅ Dropped — encrypted counterpart exists | ❌ NO — column no longer exists | `encrypted_file_name` + `file_name_nonce` (migration 039) replaced this |
 | `encrypted_file_name`, `file_name_nonce` | 🟢 Encrypted with SHA-256(identity_public_key) derived key (migration 039) | ❌ NO — can't decrypt without identity private key |
 | `encrypted_sound` | 🟢 With identity key | ❌ NO |
 | `nonce`, `sender_public_key` | 🔴 Plaintext | ✅ YES |

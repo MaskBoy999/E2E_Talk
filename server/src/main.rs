@@ -239,6 +239,7 @@ async fn main() {
         .route("/api/profile/conversation", put(handlers::upsert_conversation_profile))
         .route("/api/profile/{target_user_id}/conversation/{conv_type}/{conv_id}", get(handlers::get_conversation_profile))
         .route("/api/admin/login", post(handlers::admin_login))
+        .route("/api/admin/logout", post(handlers::admin_logout))
         .route("/api/admin/users", get(handlers::admin_list_users))
         .route("/api/admin/users/{user_id}", delete(handlers::admin_delete_user))
         .route("/api/admin/users/{user_id}/stats", get(handlers::admin_user_cascade_stats))

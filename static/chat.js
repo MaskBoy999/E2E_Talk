@@ -1343,6 +1343,27 @@ document.addEventListener('DOMContentLoaded', () => {
         reauthBtn.addEventListener('click', () => {
             reauthSection.style.display = reauthSection.style.display === 'none' ? 'block' : 'none';
             reauthError.style.display = 'none';
+            // Always reset password input to hidden state when opening
+            if (reauthPasswordInput) {
+                reauthPasswordInput.type = 'password';
+                reauthPasswordInput.value = '';
+            }
+            if (reauthToggleBtn) {
+                reauthToggleBtn.innerHTML = '&#128065;';
+                reauthToggleBtn.classList.remove('active');
+            }
+        });
+    }
+
+    // Re-auth password show/hide toggle
+    var reauthToggleBtn = document.getElementById('toggle-reauth-password');
+    var reauthPasswordInput = document.getElementById('reauth-password');
+    if (reauthToggleBtn && reauthPasswordInput) {
+        reauthToggleBtn.addEventListener('click', function () {
+            const visible = reauthPasswordInput.type === 'text';
+            reauthPasswordInput.type = visible ? 'password' : 'text';
+            reauthToggleBtn.innerHTML = visible ? '&#128065;' : '&#128064;';
+            reauthToggleBtn.classList.toggle('active', !visible);
         });
     }
 

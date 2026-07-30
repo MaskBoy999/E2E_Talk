@@ -490,8 +490,13 @@
                         <label class="settings-checkbox-label"><input type="checkbox" id="hb_refresh_messages"> <span>Update message display styles</span></label>
                     </div>
                     <div id="reauth-section" style="display:none;margin-top:12px;">
-                        <input type="password" id="reauth-password" placeholder="Enter your password" class="modal-input" />
-                        <button class="btn-reauth-confirm" id="reauth-confirm-btn">Confirm</button>
+                        <div style="display:flex;align-items:center;gap:8px;">
+                            <div class="auth-input-row" style="flex:1;margin-bottom:0;">
+                                <input type="password" id="reauth-password" placeholder="Enter your password" class="modal-input auth-code-input" />
+                                <button type="button" class="toggle-visibility-btn" id="toggle-reauth-password" title="Show/Hide">&#128065;</button>
+                            </div>
+                            <button class="btn-reauth-confirm" id="reauth-confirm-btn" style="white-space:nowrap;font-size:13px;padding:8px 16px;margin:0;">Confirm</button>
+                        </div>
                         <p id="reauth-error" class="error-text" style="display:none;margin-top:8px;"></p>
                     </div>
                 </div>

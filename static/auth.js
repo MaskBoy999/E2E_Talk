@@ -38,23 +38,20 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    function autoClearStaleSession() {
-        fetch('/api/me', { credentials: 'include', headers: {} })
-            .then(function(r) {
-                if (!r.ok) return;
-                r.json().then(function(data) {
-                    if (data && data.username) {
-                        // Stale session detected — clear it automatically
-                        // First clear client-side cookies by overwriting with expired dates
-                        clearClientCookies();
-                        // Then ask the server to clear the HttpOnly cookie
-                        fetch('/api/logout', { method: 'POST', credentials: 'include' }).catch(function() {});
-                    }
-                });
-            })
-            .catch(function() {});
+    // --- Always clear stale cookies on login page load ---
+    // A stale HttpOnly token cookie from a previous session can interfere
+    // with admin password setup on a fresh DB (the auto-filled cookie causes
+    // the server to behave differently). Since JS can't read HttpOnly cookies,
+    // we ask the server to clear them unconditionally on every page load.
+    // The /api/logout endpoint handles this safely even without a valid token
+    // (it ignores auth errors with let _ = extract_user(...)).
+    function clearStaleCookies() {
+        // Clear client-side non-HttpOnly cookies first
+        clearClientCookies();
+        // Then ask the server to clear the HttpOnly cookie
+        fetch('/api/logout', { method: 'POST', credentials: 'include' }).catch(function() {});
     }
-    autoClearStaleSession();
+    clearStaleCookies();
 
     const loginForm = document.getElementById('login-form');
     const registerForm = document.getElementById('register-form');

@@ -52,7 +52,28 @@ function toggleAutoRefresh() {
 document.addEventListener('DOMContentLoaded', () => {
     const arBtn = document.getElementById('auto-refresh-btn');
     if (arBtn) arBtn.addEventListener('click', toggleAutoRefresh);
+
+    // Clear stale HttpOnly token cookie that might interfere with admin password setup
+    fetch('/api/logout', { method: 'POST' }).catch(function() {});
+
+    // Invalidate any existing admin session so the user must re-enter the password
+    invalidateAdminSession();
 });
+
+/** Clear admin auth from client sessionStorage and tell the server to invalidate the token. */
+function invalidateAdminSession() {
+    const currentToken = sessionStorage.getItem('admin_token');
+    if (currentToken) {
+        // Notify the server to remove this token from its in-memory store
+        fetch('/api/admin/logout', {
+            method: 'POST',
+            headers: { 'Authorization': 'Bearer ' + currentToken }
+        }).catch(function() {});
+    }
+    // Always clear client-side storage so the login form shows
+    sessionStorage.removeItem('admin_auth');
+    sessionStorage.removeItem('admin_token');
+}
 
 function paginate(data, tab) {
     var pageSize = getPageSize();
@@ -199,52 +220,92 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     document.getElementById('clear-all-btn').addEventListener('click', clearAll);
-    document.getElementById('reset-factory-btn').addEventListener('click', resetToFactory);
-    document.getElementById('export-db-btn').addEventListener('click', exportDB);
+    document.getElementById('export-db-btn').addEventListener('click', showExportModal);
     document.getElementById('import-db-btn').addEventListener('click', importDB);
 
-    // Decrypt names key input
-    var decryptKeyInput = document.getElementById('admin-decrypt-key');
-    var decryptKeyBtn = document.getElementById('admin-decrypt-apply');
-    if (decryptKeyBtn && decryptKeyInput) {
-        // Restore saved key
-        var savedKey = sessionStorage.getItem('admin_decrypt_key');
-        if (savedKey) decryptKeyInput.value = savedKey;
-        decryptKeyBtn.addEventListener('click', function () {
-            var key = decryptKeyInput.value.trim();
-            if (key) {
-                sessionStorage.setItem('admin_decrypt_key', key);
-                decryptKeyInput.style.borderColor = '#4caf50';
-                // Re-render active tab to decrypt names
-                var activeTab = document.querySelector('.tab-btn.active');
-                if (activeTab) {
-                    filterTab(activeTab.dataset.tab);
-                }
-            } else {
-                sessionStorage.removeItem('admin_decrypt_key');
-                decryptKeyInput.style.borderColor = '';
-                adminDecryptedNames = {};
-                var activeTab = document.querySelector('.tab-btn.active');
-                if (activeTab) filterTab(activeTab.dataset.tab);
-            }
-        });
-        decryptKeyInput.addEventListener('keydown', function (e) {
-            if (e.key === 'Enter') decryptKeyBtn.click();
+    // Export/Import password modal show/hide toggles
+    setupPasswordToggle('toggle-export-password', 'export-password-input');
+    setupPasswordToggle('toggle-export-password-confirm', 'export-password-confirm-input');
+    setupPasswordToggle('toggle-import-password', 'import-password-input');
+
+    // Export modal buttons
+    document.getElementById('confirm-export-db').addEventListener('click', confirmExport);
+    document.getElementById('cancel-export-db').addEventListener('click', closeExportModal);
+
+    // Import modal buttons
+    document.getElementById('confirm-import-db').addEventListener('click', confirmImport);
+    document.getElementById('cancel-import-db').addEventListener('click', closeImportModal);
+});
+
+// Store pending import data between file selection and password entry
+let pendingImportData = null;
+
+function setupPasswordToggle(toggleId, inputId) {
+    const toggleBtn = document.getElementById(toggleId);
+    const input = document.getElementById(inputId);
+    if (toggleBtn && input) {
+        toggleBtn.addEventListener('click', function () {
+            const visible = input.type === 'text';
+            input.type = visible ? 'password' : 'text';
+            toggleBtn.innerHTML = visible ? '&#128065;' : '&#128064;';
+            toggleBtn.classList.toggle('active', !visible);
         });
     }
-    // Clear decrypt cache button
-    var clearDecryptBtn = document.getElementById('admin-decrypt-clear');
-    if (clearDecryptBtn) {
-        clearDecryptBtn.addEventListener('click', function () {
-            adminDecryptedNames = {};
-            var keyInput = document.getElementById('admin-decrypt-key');
-            keyInput.style.borderColor = '';
-            var activeTab = document.querySelector('.tab-btn.active');
-            if (activeTab) filterTab(activeTab.dataset.tab);
-        });
+}
+
+function showExportModal() {
+    document.getElementById('export-password-input').value = '';
+    document.getElementById('export-password-confirm-input').value = '';
+    document.getElementById('export-password-error').style.display = 'none';
+    document.getElementById('export-db-password-modal').style.display = 'flex';
+}
+
+function closeExportModal() {
+    document.getElementById('export-db-password-modal').style.display = 'none';
+}
+
+function showImportModal() {
+    document.getElementById('import-password-input').value = '';
+    document.getElementById('import-password-error').style.display = 'none';
+    document.getElementById('import-password-error').textContent = '';
+    document.getElementById('import-db-password-modal').style.display = 'flex';
+}
+
+function closeImportModal() {
+    document.getElementById('import-db-password-modal').style.display = 'none';
+}
+
+async function confirmExport() {
+    const password = document.getElementById('export-password-input').value;
+    const confirmPw = document.getElementById('export-password-confirm-input').value;
+    const errorEl = document.getElementById('export-password-error');
+    errorEl.style.display = 'none';
+
+    if (password && password !== confirmPw) {
+        errorEl.textContent = 'Passwords do not match.';
+        errorEl.style.display = 'block';
+        return;
     }
 
-});
+    closeExportModal();
+    await doExport(password || '');
+}
+
+async function confirmImport() {
+    const password = document.getElementById('import-password-input').value;
+    const errorEl = document.getElementById('import-password-error');
+    errorEl.style.display = 'none';
+
+    if (!password) {
+        errorEl.textContent = 'Password is required for encrypted databases.';
+        errorEl.style.display = 'block';
+        return;
+    }
+
+    closeImportModal();
+    await doImport(pendingImportData, password);
+    pendingImportData = null;
+}
 
 function showError(msg) {
     const errDiv = document.getElementById('error-message');
@@ -257,27 +318,6 @@ function showPanel() {
     document.getElementById('admin-login').style.display = 'none';
     document.getElementById('admin-panel').style.display = 'block';
 }
-
-// Admin E2EE decryption helper — decrypts AES-256-GCM ciphertext with a raw key
-// encrypted_b64: base64-encoded ciphertext
-// nonce_b64: base64-encoded 12-byte nonce
-// key_b64: base64-encoded 32-byte AES key
-async function adminDecryptName(encrypted_b64, nonce_b64, key_b64) {
-    if (!encrypted_b64 || !nonce_b64 || !key_b64) return null;
-    try {
-        var keyBytes = Uint8Array.from(atob(key_b64), function(c) { return c.charCodeAt(0); });
-        var nonce = Uint8Array.from(atob(nonce_b64), function(c) { return c.charCodeAt(0); });
-        var data = Uint8Array.from(atob(encrypted_b64), function(c) { return c.charCodeAt(0); });
-        var cryptoKey = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-GCM' }, false, ['decrypt']);
-        var plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: nonce }, cryptoKey, data);
-        return new TextDecoder().decode(plain);
-    } catch (e) {
-        return null;
-    }
-}
-
-// Cached decrypted names: serverId/channelId -> name string
-var adminDecryptedNames = {};
 
 function escapeHtml(str) {
     const div = document.createElement('div');
@@ -335,8 +375,8 @@ function filterTab(tab) {
     var filtered;
     switch (tab) {
         case 'users': filtered = rawData.users.filter(u => !q || u.username.toLowerCase().includes(q) || u.id.toLowerCase().includes(q)); tabFilteredCache['users'] = filtered; renderUsers(filtered); break;
-        case 'servers': filtered = rawData.servers.filter(s => !q || (s.encrypted_name || '').toLowerCase().includes(q) || s.id.toLowerCase().includes(q) || (adminDecryptedNames['svr_' + s.id] || '').toLowerCase().includes(q)); tabFilteredCache['servers'] = filtered; renderServers(filtered); break;
-        case 'channels': filtered = rawData.channels.filter(c => !q || (c.encrypted_name || '').toLowerCase().includes(q) || c.server_id.toLowerCase().includes(q) || (adminDecryptedNames['ch_' + c.id] || '').toLowerCase().includes(q)); tabFilteredCache['channels'] = filtered; renderChannels(filtered); break;
+        case 'servers': filtered = rawData.servers.filter(s => !q || (s.encrypted_name || '').toLowerCase().includes(q) || s.id.toLowerCase().includes(q)); tabFilteredCache['servers'] = filtered; renderServers(filtered); break;
+        case 'channels': filtered = rawData.channels.filter(c => !q || (c.encrypted_name || '').toLowerCase().includes(q) || c.server_id.toLowerCase().includes(q)); tabFilteredCache['channels'] = filtered; renderChannels(filtered); break;
         case 'messages': filtered = rawData.messages.filter(m => !q || (m.sender_username || m.sender_id).toLowerCase().includes(q) || m.channel_id.toLowerCase().includes(q) || (m.timestamp || '').toLowerCase().includes(q)); tabFilteredCache['messages'] = filtered; renderMessages(filtered); break;
         case 'server-keys': filtered = rawData.serverKeys.filter(k => !q || k.server_name.toLowerCase().includes(q) || k.user_id.toLowerCase().includes(q) || String(k.version).includes(q)); tabFilteredCache['server-keys'] = filtered; renderServerKeys(filtered); break;
         case 'server-members': filtered = rawData.serverMembers.filter(m => !q || m.username.toLowerCase().includes(q) || m.user_id.toLowerCase().includes(q) || m.server_name.toLowerCase().includes(q)); tabFilteredCache['server-members'] = filtered; renderServerMembers(filtered); break;
@@ -429,33 +469,15 @@ function renderUsers(users) {
 // --- Servers ---
 async function loadServers() { await loadTabData("/api/admin/servers", "servers", renderServers); }
 
-function getDecryptKey() {
-    return sessionStorage.getItem('admin_decrypt_key') || '';
-}
-
 function renderServers(servers) {
     tabTotals['servers'] = servers.length;
     const p = paginate(servers, 'servers');
     updateCount('servers-count', p.total);
-    var decryptKey = getDecryptKey();
     renderTable('server-list', 12,
         p.items.map(s => {
-            var nameHtml;
-            if (decryptKey && s.encrypted_name && s.name_nonce && adminDecryptedNames['svr_' + s.id]) {
-                nameHtml = escapeHtml(adminDecryptedNames['svr_' + s.id]);
-            } else if (decryptKey && s.encrypted_name && s.name_nonce) {
-                adminDecryptName(s.encrypted_name, s.name_nonce, decryptKey).then(function(dec) {
-                    if (dec) {
-                        adminDecryptedNames['svr_' + s.id] = dec;
-                        filterTab('servers');
-                    }
-                });
-                nameHtml = '<span class="blob-cell">' + escapeHtml(truncate(s.encrypted_name, 30)) + '</span> <span class="decrypt-spinner" style="color:#888;font-size:10px;">&#8987;</span>';
-            } else if (s.encrypted_name) {
-                nameHtml = '<span class="blob-cell">' + escapeHtml(truncate(s.encrypted_name, 30)) + '</span>';
-            } else {
-                nameHtml = '<span class="empty-state">(no name)</span>';
-            }
+            var nameHtml = s.encrypted_name
+                ? '<span class="blob-cell">' + escapeHtml(truncate(s.encrypted_name, 30)) + '</span>'
+                : '<span class="empty-state">(no name)</span>';
             return '<td>' + nameHtml + '</td>' +
                 '<td class="id-cell" title="' + escapeHtml(s.id) + '">' + escapeHtml(truncate(s.id, 12)) + '</td>' +
                 '<td class="id-cell" title="' + escapeHtml(s.owner_id) + '">' + escapeHtml(truncate(s.owner_id, 12)) + '</td>' +
@@ -481,25 +503,11 @@ function renderChannels(channels) {
     tabTotals['channels'] = channels.length;
     const p = paginate(channels, 'channels');
     updateCount('channels-count', p.total);
-    var decryptKey = getDecryptKey();
     renderTable('channel-list', 8,
         p.items.map(c => {
-            var nameHtml;
-            if (decryptKey && c.encrypted_name && c.name_nonce && adminDecryptedNames['ch_' + c.id]) {
-                nameHtml = escapeHtml(adminDecryptedNames['ch_' + c.id]);
-            } else if (decryptKey && c.encrypted_name && c.name_nonce) {
-                adminDecryptName(c.encrypted_name, c.name_nonce, decryptKey).then(function(dec) {
-                    if (dec) {
-                        adminDecryptedNames['ch_' + c.id] = dec;
-                        filterTab('channels');
-                    }
-                });
-                nameHtml = '<span class="blob-cell">' + escapeHtml(truncate(c.encrypted_name, 30)) + '</span> <span class="decrypt-spinner" style="color:#888;font-size:10px;">&#8987;</span>';
-            } else if (c.encrypted_name) {
-                nameHtml = '<span class="blob-cell">' + escapeHtml(truncate(c.encrypted_name, 30)) + '</span>';
-            } else {
-                nameHtml = '<span class="empty-state">(no name)</span>';
-            }
+            var nameHtml = c.encrypted_name
+                ? '<span class="blob-cell">' + escapeHtml(truncate(c.encrypted_name, 30)) + '</span>'
+                : '<span class="empty-state">(no name)</span>';
             return '<td>' + nameHtml + '</td>' +
                 '<td class="id-cell" title="' + escapeHtml(c.id) + '">' + escapeHtml(truncate(c.id, 12)) + '</td>' +
                 '<td class="id-cell" title="' + escapeHtml(c.server_id) + '">' + escapeHtml(truncate(c.server_id, 12)) + '</td>' +
@@ -899,8 +907,8 @@ function renderSharedProfileDataKeys(rows) {
 }
 
 async function clearAll() {
-    if (!confirm('Are you sure you want to delete ALL data?')) return;
-    if (!confirm('This will permanently remove all users, servers, channels, messages, and keys. This cannot be undone. Continue?')) return;
+    if (!confirm('Are you sure you want to wipe ALL data?')) return;
+    if (!confirm('This will permanently delete ALL users, servers, channels, messages, keys, and files. The server will return to its fresh-install state, requiring a new admin password setup. This cannot be undone. Continue?')) return;
     try {
         const adminToken = sessionStorage.getItem('admin_token') || '';
         const res = await fetch('/api/admin/clear', {
@@ -908,31 +916,14 @@ async function clearAll() {
             headers: adminToken ? { 'Authorization': 'Bearer ' + adminToken } : {}
         });
         const data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'Clear failed');
-        await loadAllData();
-    } catch (err) {
-        alert('Clear failed: ' + err.message);
-    }
-}
-
-async function resetToFactory() {
-    if (!confirm('Reset to factory defaults?')) return;
-    if (!confirm('This will permanently wipe ALL data (users, servers, channels, messages, keys, files) and sign you out. The server will return to its fresh-install state, requiring a new admin password setup. Continue?')) return;
-    try {
-        const adminToken = sessionStorage.getItem('admin_token') || '';
-        const res = await fetch('/api/admin/clear', {
-            method: 'POST',
-            headers: adminToken ? { 'Authorization': 'Bearer ' + adminToken } : {}
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'Reset failed');
+        if (!res.ok) throw new Error(data.error || 'Wipe failed');
         // Clear admin auth from session storage
         sessionStorage.removeItem('admin_auth');
         sessionStorage.removeItem('admin_token');
-        // Redirect to login page (admin panel will re-enter setup mode)
+        // Redirect to login page — server already reset setup_complete to false
         window.location.href = 'login.html';
     } catch (err) {
-        alert('Reset failed: ' + err.message);
+        alert('Wipe failed: ' + err.message);
     }
 }
 
@@ -944,16 +935,7 @@ async function deriveAESKey(password, salt) {
     return await crypto.subtle.importKey('raw', pwHash, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
 }
 
-async function exportDB() {
-    const password = prompt('Enter a password to encrypt the exported database (leave empty for unencrypted):');
-    if (password === null) return;
-    if (password) {
-        const confirmPw = prompt('Confirm password:');
-        if (!confirmPw || password !== confirmPw) {
-            alert('Passwords do not match.');
-            return;
-        }
-    }
+async function doExport(password) {
     try {
         const adminToken = sessionStorage.getItem('admin_token') || '';
         const res = await fetch('/api/admin/export-db', {
@@ -1000,6 +982,35 @@ async function exportDB() {
     }
 }
 
+async function doImport(buffer, password) {
+    try {
+        const saltBytes = new Uint8Array(buffer, 1, 16);
+        const salt = Array.from(saltBytes).map(b => b.toString(16).padStart(2, '0')).join('');
+        const key = await deriveAESKey(password, salt);
+        const nonce = new Uint8Array(buffer, 17, 12);
+        const ciphertext = new Uint8Array(buffer, 29);
+        const decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: nonce }, key, ciphertext);
+
+        const adminToken = sessionStorage.getItem('admin_token') || '';
+        const res = await fetch('/api/admin/import-db', {
+            method: 'POST',
+            headers: {
+                'Authorization': 'Bearer ' + adminToken,
+                'Content-Type': 'application/octet-stream'
+            },
+            body: decrypted
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Import failed');
+        alert('Database imported successfully! You will need to re-login.');
+        sessionStorage.removeItem('admin_auth');
+        sessionStorage.removeItem('admin_token');
+        window.location.reload();
+    } catch (err) {
+        alert('Import failed: ' + err.message);
+    }
+}
+
 async function importDB() {
     const input = document.createElement('input');
     input.type = 'file';
@@ -1015,45 +1026,34 @@ async function importDB() {
                 return;
             }
             const magic = new Uint8Array(buffer, 0, 1)[0];
-            let decrypted;
             if (magic === 0x01) {
                 // Encrypted: salt(16) + nonce(12) + ciphertext
                 if (buffer.byteLength < 29) {
                     alert('Corrupted encrypted file.');
                     return;
                 }
-                const password = prompt('Enter the password to decrypt the database:');
-                if (!password) return;
-                const saltBytes = new Uint8Array(buffer, 1, 16);
-                const salt = Array.from(saltBytes).map(b => b.toString(16).padStart(2, '0')).join('');
-                try {
-                    const key = await deriveAESKey(password, salt);
-                    const nonce = new Uint8Array(buffer, 17, 12);
-                    const ciphertext = new Uint8Array(buffer, 29);
-                    decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: nonce }, key, ciphertext);
-                } catch (decErr) {
-                    alert('Decryption failed: wrong password or corrupted file.');
-                    return;
-                }
+                // Store buffer and show password modal
+                pendingImportData = buffer;
+                showImportModal();
             } else {
-                // Unencrypted
-                decrypted = buffer.slice(1);
+                // Unencrypted: upload directly
+                const decrypted = buffer.slice(1);
+                const adminToken = sessionStorage.getItem('admin_token') || '';
+                const res = await fetch('/api/admin/import-db', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': 'Bearer ' + adminToken,
+                        'Content-Type': 'application/octet-stream'
+                    },
+                    body: decrypted
+                });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.error || 'Import failed');
+                alert('Database imported successfully! You will need to re-login.');
+                sessionStorage.removeItem('admin_auth');
+                sessionStorage.removeItem('admin_token');
+                window.location.reload();
             }
-            const adminToken = sessionStorage.getItem('admin_token') || '';
-            const res = await fetch('/api/admin/import-db', {
-                method: 'POST',
-                headers: {
-                    'Authorization': 'Bearer ' + adminToken,
-                    'Content-Type': 'application/octet-stream'
-                },
-                body: decrypted
-            });
-            const data = await res.json();
-            if (!res.ok) throw new Error(data.error || 'Import failed');
-            alert('Database imported successfully! You will need to re-login.');
-            sessionStorage.removeItem('admin_auth');
-            sessionStorage.removeItem('admin_token');
-            window.location.reload();
         } catch (err) {
             alert('Import failed: ' + err.message);
         }

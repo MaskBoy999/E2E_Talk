@@ -86,19 +86,11 @@
                 <div style="display:flex;gap:8px;align-items:center">
                     <button id="export-db-btn" class="btn-download" style="font-size:12px;padding:8px 14px;background:#1565c0;color:#fff;border:none;border-radius:4px;cursor:pointer">📥 Export DB</button>
                     <button id="import-db-btn" class="btn-upload" style="font-size:12px;padding:8px 14px;background:#2e7d32;color:#fff;border:none;border-radius:4px;cursor:pointer">📤 Import DB</button>
-                    <button id="clear-all-btn" class="btn-delete" style="font-size:13px;padding:8px 16px">Clear Everything</button>
-                    <button id="reset-factory-btn" class="btn-delete" style="font-size:13px;padding:8px 16px;background:#7b1fa2;border-color:#9c27b0">Reset to Factory</button>
+                    <button id="clear-all-btn" class="btn-delete" style="font-size:13px;padding:8px 16px;background:#7b1fa2;border-color:#9c27b0">&#9888; Wipe Everything</button>
                     <button id="auto-refresh-btn" class="btn-toggle" style="font-size:12px;padding:8px 14px;background:#555;color:#aaa;border:1px solid #777;border-radius:4px;cursor:pointer">Auto-Refresh: OFF</button>
                     <a href="index.html" class="back-link">Back to chat</a>
                 </div>
             </div>
-            <div style="display:flex;gap:6px;align-items:center;margin-bottom:12px;padding:8px 12px;background:#1a1a2e;border:1px solid #333;border-radius:6px;">
-                <span style="color:#888;font-size:12px;white-space:nowrap;">🔑 Decrypt Names:</span>
-                <input type="password" id="admin-decrypt-key" placeholder="Paste server key (base64)..." style="flex:1;padding:6px 10px;border:1px solid #333;border-radius:4px;background:#0f0f23;color:#e0e0e0;font-size:12px;font-family:monospace;" title="Paste the 32-byte server key (base64) from your browser's IndexedDB">
-                <button id="admin-decrypt-apply" style="background:#1565c0;color:#fff;border:none;padding:6px 12px;border-radius:4px;cursor:pointer;font-size:12px;white-space:nowrap;">Apply</button>
-                <button id="admin-decrypt-clear" style="background:transparent;color:#888;border:1px solid #444;padding:6px 10px;border-radius:4px;cursor:pointer;font-size:12px;white-space:nowrap;">Clear</button>
-            </div>
-
             <div class="tabs">
                 <button class="tab-btn active" data-tab="users">Users</button>
                 <button class="tab-btn" data-tab="servers">Servers</button>
@@ -496,6 +488,57 @@
                     </table>
                 </div>
                 <div id="shared-profile-data-keys-pagination" class="pagination-container"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Export DB Password Modal -->
+    <div class="modal" id="export-db-password-modal" style="display:none">
+        <div class="modal-content" style="max-width:420px">
+            <h3 style="margin-bottom:12px;color:var(--accent)">Encrypt Export</h3>
+            <p style="margin-bottom:16px;color:var(--text-muted);font-size:13px">
+                Encrypt the exported database with a password. Leave empty for unencrypted.
+            </p>
+            <div style="margin-bottom:12px">
+                <label style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">Password</label>
+                <div class="auth-input-row">
+                    <input type="password" id="export-password-input" placeholder="Encryption password" autocomplete="off" class="modal-input auth-code-input" style="flex:1;" />
+                    <button type="button" class="toggle-visibility-btn" id="toggle-export-password" title="Show/Hide">&#128065;</button>
+                </div>
+            </div>
+            <div style="margin-bottom:16px">
+                <label style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">Confirm Password</label>
+                <div class="auth-input-row">
+                    <input type="password" id="export-password-confirm-input" placeholder="Confirm encryption password" autocomplete="off" class="modal-input auth-code-input" style="flex:1;" />
+                    <button type="button" class="toggle-visibility-btn" id="toggle-export-password-confirm" title="Show/Hide">&#128065;</button>
+                </div>
+            </div>
+            <div id="export-password-error" style="color:var(--danger);margin-bottom:12px;display:none;font-size:13px"></div>
+            <div class="modal-actions">
+                <button class="btn-cancel" id="cancel-export-db">Cancel</button>
+                <button class="btn-invite" id="confirm-export-db" style="background:#1565c0;border-color:#1565c0;">&#128190; Export</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Import DB Password Modal -->
+    <div class="modal" id="import-db-password-modal" style="display:none">
+        <div class="modal-content" style="max-width:420px">
+            <h3 style="margin-bottom:12px;color:var(--accent)">Decrypt Import</h3>
+            <p style="margin-bottom:16px;color:var(--text-muted);font-size:13px">
+                Enter the password to decrypt the database file.
+            </p>
+            <div style="margin-bottom:12px">
+                <label style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">Password</label>
+                <div class="auth-input-row">
+                    <input type="password" id="import-password-input" placeholder="Decryption password" autocomplete="off" class="modal-input auth-code-input" style="flex:1;" />
+                    <button type="button" class="toggle-visibility-btn" id="toggle-import-password" title="Show/Hide">&#128065;</button>
+                </div>
+            </div>
+            <div id="import-password-error" style="color:var(--danger);margin-bottom:12px;display:none;font-size:13px"></div>
+            <div class="modal-actions">
+                <button class="btn-cancel" id="cancel-import-db">Cancel</button>
+                <button class="btn-invite" id="confirm-import-db" style="background:#2e7d32;border-color:#2e7d32;">&#128230; Decrypt &amp; Import</button>
             </div>
         </div>
     </div>

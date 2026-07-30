@@ -2308,6 +2308,25 @@ pub async fn update_channel_name(
 
 // --- Admin ---
 
+pub async fn admin_logout(
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    // Extract the admin token from the Authorization header
+    let token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer ").map(|s| s.to_string()));
+
+    if let Some(t) = token {
+        let mut guard = get_admin_tokens();
+        if let Some(map) = guard.as_mut() {
+            map.remove(&t);
+        }
+    }
+
+    (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+}
+
 pub async fn admin_login(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
@@ -3158,6 +3177,11 @@ pub async fn admin_export_db(
         return e.into_response();
     }
     let db_path = &state.config.database_url;
+    // Checkpoint WAL before reading to ensure all pending writes are flushed
+    // to the main database file, so the export includes all data.
+    if let Err(e) = state.db.wal_checkpoint() {
+        tracing::warn!("WAL checkpoint before export failed (non-fatal): {}", e);
+    }
     match tokio::fs::read(db_path).await {
         Ok(data) => {
             let mut resp_headers = HeaderMap::new();
@@ -3185,8 +3209,31 @@ pub async fn admin_import_db(
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "File does not appear to be a valid SQLite database"}))).into_response();
     }
     let db_path = state.config.database_url.clone();
+
+    // Step 1: Checkpoint the old WAL so all pending writes flush to the main DB file.
+    // This prevents stale WAL entries from corrupting the imported database.
+    if let Err(e) = state.db.wal_checkpoint() {
+        tracing::warn!("WAL checkpoint before import failed (non-fatal): {}", e);
+    }
+
+    // Step 2: Write the new database file
     match tokio::fs::write(&db_path, &body).await {
         Ok(()) => {
+            // Step 3: Delete stale WAL and SHM files that belonged to the OLD database.
+            // If we don't delete them, SQLite's WAL replay on the new connection
+            // will roll forward stale data into the freshly imported database.
+            if let Err(e) = tokio::fs::remove_file(format!("{}-wal", db_path)).await {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!("Failed to remove stale -wal file: {}", e);
+                }
+            }
+            if let Err(e) = tokio::fs::remove_file(format!("{}-shm", db_path)).await {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!("Failed to remove stale -shm file: {}", e);
+                }
+            }
+
+            // Step 4: Reconnect to the new database
             match state.db.reconnect(&db_path) {
                 Ok(()) => {
                     state.setup_complete.store(true, std::sync::atomic::Ordering::Relaxed);
