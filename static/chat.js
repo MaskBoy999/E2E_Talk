@@ -4238,8 +4238,8 @@ async function restoreNotificationSoundFromServer() {
                 if (data.encrypted_file_name && data.file_name_nonce && identity) {
                     try {
                         var fileNameKey = new Uint8Array(sodium.crypto_hash_sha256(identity.publicKey));
-                        var decName = E2ECrypto.aeadDecrypt(data.encrypted_file_name, fileNameKey, data.file_name_nonce);
-                        if (decName) displayName = decName;
+                        var decRaw = E2ECrypto.aeadDecrypt(data.encrypted_file_name, fileNameKey, data.file_name_nonce);
+                        if (decRaw) displayName = new TextDecoder().decode(decRaw);
                     } catch (_) {}
                 }
                 if (displayName) {
