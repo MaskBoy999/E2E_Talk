@@ -690,100 +690,6 @@ pub async fn reauth(
     }))).into_response()
 }
 
-// --- Key Escrow ---
-
-#[derive(Deserialize)]
-#[allow(dead_code)]
-pub struct UploadEscrowRequest {
-    pub encrypted_private_key: String,
-    pub salt: String,
-    pub nonce: String,
-    pub device_id: Option<String>,
-}
-
-#[allow(dead_code)]
-pub async fn upload_escrowed_key(
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<UploadEscrowRequest>,
-) -> impl IntoResponse {
-    let user_id = match extract_user(&headers, &state) {
-        Ok(id) => id,
-        Err(e) => return e.into_response(),
-    };
-
-    let encrypted_key = match base64::engine::general_purpose::STANDARD.decode(&req.encrypted_private_key) {
-        Ok(b) => b,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid encrypted_private_key"})),
-            )
-                .into_response();
-        }
-    };
-
-    let salt = match base64::engine::general_purpose::STANDARD.decode(&req.salt) {
-        Ok(b) => b,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid salt"})),
-            )
-                .into_response();
-        }
-    };
-
-    let nonce = match base64::engine::general_purpose::STANDARD.decode(&req.nonce) {
-        Ok(b) => b,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid nonce"})),
-            )
-                .into_response();
-        }
-    };
-
-    match state.db.save_escrowed_key(&user_id, &encrypted_key, &salt, &nonce) {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
-        )
-            .into_response(),
-    }
-}
-
-#[allow(dead_code)]
-pub async fn get_escrowed_key(
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    let user_id = match extract_user(&headers, &state) {
-        Ok(id) => id,
-        Err(e) => return e.into_response(),
-    };
-
-    match state.db.get_escrowed_key(&user_id) {
-        Ok(Some((encrypted_key, salt, nonce))) => {
-            (StatusCode::OK, Json(serde_json::json!({
-                "encrypted_private_key": base64::engine::general_purpose::STANDARD.encode(&encrypted_key),
-                "salt": base64::engine::general_purpose::STANDARD.encode(&salt),
-                "nonce": base64::engine::general_purpose::STANDARD.encode(&nonce),
-            }))).into_response()
-        }
-        Ok(None) => {
-            (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "No escrowed key found"}))).into_response()
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
-        )
-            .into_response(),
-    }
-}
-
 // --- User Key Blob (password-encrypted key bundle for full key recovery) ---
 
 #[derive(Deserialize)]
@@ -2656,7 +2562,6 @@ pub async fn admin_list_messages(
                 "timestamp": m.timestamp,
                 "edited_at": m.edited_at,
                 "message_nonce": m.message_nonce,
-                "message_signature": m.message_signature,
                 "encrypted_profile_key": m.encrypted_profile_key,
                 "profile_key_nonce": m.profile_key_nonce,
                 "encrypted_banner_key": m.encrypted_banner_key,

@@ -1351,13 +1351,20 @@ document.addEventListener('DOMContentLoaded', () => {
             const password = document.getElementById('reauth-password').value;
             if (!password) { reauthError.textContent = 'Enter your password'; reauthError.style.display = 'block'; return; }
             try {
+                // Hash password client-side (HMAC-SHA256) if auth key is available
+                var sendPassword;
+                try {
+                    sendPassword = await computeHashedPasswordGlobal(password);
+                } catch (_) {
+                    sendPassword = password; // Fall back to raw password for legacy accounts
+                }
                 const res = await fetch('/api/reauth', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
                         'Authorization': 'Bearer ' + token()
                     },
-                    body: JSON.stringify({ password })
+                    body: JSON.stringify({ password: sendPassword })
                 });
                 const data = await res.json();
                 if (!res.ok) {
@@ -10639,7 +10646,7 @@ async function handleFriendCodeRegenerate(preverifiedPw) {
             if (!errorEl) { alert('Crypto module not loaded. Please refresh the page.'); }
             return;
         }
-        var encrypted = E2ECrypto.encryptWithPassword(newCode, password);
+        var encrypted = E2ECrypto.encryptWithPassword(newCode, rawPw);
         if (!encrypted || !encrypted.encrypted_private_key || !encrypted.salt || !encrypted.nonce) {
             if (regenStatusEl) { regenStatusEl.textContent = '❌ Encryption failed'; regenStatusEl.style.color = '#f44336'; setTimeout(function() { regenStatusEl.textContent = ''; }, 4000); }
             if (errorEl) { errorEl.textContent = 'Encryption failed. Please try again.'; errorEl.style.display = 'block'; }
@@ -10648,11 +10655,13 @@ async function handleFriendCodeRegenerate(preverifiedPw) {
         }
         if (regenStatusEl) { regenStatusEl.textContent = '⏳ Uploading to server...'; }
         // Send to server with password for verification
+        // Password is already client-hashed (HMAC-SHA256) above — use it directly
+        var regenPassword = password;
         const res = await authFetch('/api/friend-code/regen-with-password', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                password: password,
+                password: regenPassword,
                 friend_code: newCode,
                 encrypted_friend_code: encrypted.encrypted_private_key,
                 salt: encrypted.salt,
@@ -17360,10 +17369,17 @@ async function verifyStoredPassword() {
     var stored = loadDecryptedPassword();
     if (stored) {
         try {
+            // Hash password client-side (HMAC-SHA256) if auth key is available
+            var sendPassword;
+            try {
+                sendPassword = await computeHashedPasswordGlobal(stored);
+            } catch (_) {
+                sendPassword = stored; // Fall back to raw password for legacy accounts
+            }
             var res = await authFetch('/api/reauth', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ password: stored })
+                body: JSON.stringify({ password: sendPassword })
             });
             if (res.ok) {
                 // Update the auth token from the reauth response (extends session)
@@ -17379,10 +17395,17 @@ async function verifyStoredPassword() {
             // Try logging in as a fallback before prompting the user.
             if (user && user.username) {
                 try {
+                    // Hash password client-side (HMAC-SHA256) if auth key is available
+                    var loginPassword;
+                    try {
+                        loginPassword = await computeHashedPasswordGlobal(stored);
+                    } catch (_) {
+                        loginPassword = stored; // Fall back to raw password for legacy accounts
+                    }
                     var loginRes = await fetch('/api/login', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ username: user.username, password: stored })
+                        body: JSON.stringify({ username: user.username, password: loginPassword })
                     });
                     if (loginRes.ok) {
                         var loginData = await loginRes.json();
@@ -17404,10 +17427,17 @@ async function verifyStoredPassword() {
         storeEncryptedPassword(newPassword);
         // Also update the token via reauth with the new password
         try {
+            // Hash password client-side (HMAC-SHA256) if auth key is available
+            var reauthPassword;
+            try {
+                reauthPassword = await computeHashedPasswordGlobal(newPassword);
+            } catch (_) {
+                reauthPassword = newPassword; // Fall back to raw password for legacy accounts
+            }
             var pwRes = await authFetch('/api/reauth', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ password: newPassword })
+                body: JSON.stringify({ password: reauthPassword })
             });
             if (pwRes.ok) {
                 var pwData = await pwRes.json();

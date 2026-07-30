@@ -44,6 +44,9 @@
 | 07-29 | Fix: stale _wrappedContent variable | Line 7235 referenced old variable name `_wrappedContent` after refactor to `wrappedContent`. Caused "Failed to load messages" in server channels until `_wrappedContent`→`wrappedContent` fix. |
 | 07-29 | Fix: streamer mode CSS lost on git restore | `streamer-hidden`, `streamer-reveal-btn`, `streamer-hidden-preview` CSS classes were lost when style.css was accidentally overwritten and restored from git. Re-added. Position:relative added to `.message .content` for correct button centering. |
 | 07-29 | Security audit | Comprehensive audit of all DB columns, API endpoints, WS messages, and client-side localStorage. Full coverage map generated. |
+| 07-30 | Encrypted sticker/emoji/GIF names | Migration 041: `encrypted_sticker_name` + `sticker_name_nonce` in `user_stickers`. Client encrypts with identity key on upload, decrypts on load. Server cannot read sticker/emoji/GIF names. |
+| 07-30 | Encrypted notification sound file_name | Migration 039: `encrypted_file_name` + `file_name_nonce` in `notification_sounds`. Client encrypts with `SHA-256(identity_public_key)` derived key. Server cannot read notification sound file names. |
+| 07-30 | Encrypted MIME types for files + stickers | Migration 038: `encrypted_mime_type` + `mime_nonce` on both `files` and `user_stickers` tables. MIME types encrypted with file key so server cannot read them. |
 
 ### Rate Limiting Coverage Summary
 
@@ -78,14 +81,14 @@ This section audits every piece of data sent to the server that the server can R
 | **Password (login, new users)** | `POST /api/login` | ✅ HMAC-SHA256 hash sent | ✅ **Already fixed** | Client fetches encrypted hash_key, decrypts with password, computes HMAC-SHA256, sends hash. |
 | **Password (login, legacy)** | `POST /api/login` | 🔴 Raw password sent | ⛔ **Cannot fix (legacy)** | Users registered before the hash_key system; their password is Argon2-hashed server-side. Client can't reproduce the Argon2 hash without the server's salt. The legacy fallback only exists until all users re-register or re-auth. |
 | **Username** | `POST /api/register`, `/api/login`, `/api/reauth` | 🔴 Plaintext | ⛔ **Cannot fix** | Server needs the raw username for uniqueness checks, login lookup, and display. Making this opaque would require a complete identity architecture overhaul (e.g., using public-key identities instead of usernames). |
-| **Password (reauth)** | `POST /api/reauth` | ✅ HMAC-SHA256 hash (new users) / 🔴 raw password (legacy) | ⚠️ **Partially fixable** | Same as login — new users send HMAC hash. Legacy users can be migrated by forcing a password reset. |
+| **Password (reauth)** | `POST /api/reauth` | 🔴 Raw password sent (BUG: should send HMAC-SHA256 like login does) | 🐛 **BUG: reauth sends raw password even for hash_key users** | Reauth flow in chat.js sends raw password from input field without HMAC-SHA256 hashing. Server expects HMAC-SHA256 hash. This makes reauth broken for all hash_key users. Login flow correctly hashes first. See chat.js reauth event handler (~line 1351). |
 
 ### Friend Codes & Invite Codes
 
 | Data | Endpoint | Current Protection | Can Improve? | Why / How |
 |------|----------|-------------------|-------------|-----------|
 | **Friend code (send request)** | `POST /api/friends/request` | 🟡 HMAC-SHA256 hash sent | ✅ **Already fixed** | Client computes HMAC-SHA256(friend_code) locally using the cached HMAC key and sends only the hash. Server looks up by hash. Fixed 2026-07-26. |
-| **Friend code (store-encrypted)** | `POST /api/friend-code/store-encrypted` | 🟡 HMAC-SHA256 hash sent + 🟢 encrypted backup | ✅ **Already fixed** | Client computes the hash locally and sends only the hash. The encrypted backup (Argon2id-wrapped) is for cross-device recovery, not for server lookup. Fixed 2026-07-26. |
+| **Friend code (store-encrypted)** | `POST /api/friend-code/store-encrypted` | 🔴 Plaintext friend code sent + 🟢 encrypted backup | ⚠️ **Partially fixed** | Server receives the plaintext friend code and computes the HMAC hash server-side. The encrypted backup (Argon2id-wrapped) is for cross-device recovery. Client could pre-compute and send only the hash instead. |
 | **Friend code (regenerate)** | `POST /api/friend-code/regenerate` | 🔴 Server returns plaintext new code | ⛔ **Cannot improve** | The server generates the code (for non-password users). The client receives it over TLS. The client could re-encrypt/re-hash it after receiving, but the plaintext already left the server. However, the code is meant to be shared (it's a friend code), so this is inherent. |
 | **Invite code (join)** | `POST /api/invites/join` | 🟡 HMAC-SHA256 hash sent | ✅ **Already fixed** | Client computes HMAC-SHA256(invite_code) locally and sends only the hash. Server looks up by hash. Fixed 2026-07-26. |
 | **Invite code (regenerate)** | `POST /api/servers/{id}/invite` | 🟡 Client sends HMAC hash | ✅ **Already hashed** | Client generates the code, HMAC-hashes it locally (via `hmacHex`), and sends only the hash. The server never sees the raw invite code. |
@@ -114,9 +117,9 @@ This section audits every piece of data sent to the server that the server can R
 
 | Data | Endpoint | Current Protection | Can Improve? | Why / How |
 |------|----------|-------------------|-------------|-----------|
-| **File metadata (name, mime, size)** | `POST /api/files/init` | 🔴 Plaintext | ⚠️ **Partially fixable** | File name and MIME type could be encrypted. The server needs the file SIZE to enforce limits and allocate storage, so size cannot be encrypted. The file ID (returned by the server) is also plaintext. **Fix:** Encrypt file name and MIME type with a random key; store decryption key in the message payload (already encrypted with channel key). |
-| **Sticker/emoji name** | Sticker upload | 🔴 Plaintext sticker name | ⚠️ **Low value** | Sticker names are user-visible labels, not secrets. Could encrypt but low sensitivity. |
-| **Notification sound file name** | `POST /api/notification-sound` | 🔴 Plaintext file name | ⚠️ **Low value** | File name is descriptive metadata. Could encrypt but low sensitivity. |
+| **File metadata (mime, size)** | `POST /api/files/init` | 🟢 MIME type encrypted; size is 🔴 plaintext (needed for storage limits) | ✅ **Already fixed (MIME)** | MIME type encrypted with file key (migration 038). File size cannot be encrypted — server needs it for storage enforcement. File name not stored in `files` table (only exists in E2E-encrypted message content). |
+| **Sticker/emoji name** | Sticker upload | 🟢 Encrypted with identity key | ✅ **Already fixed** | Sticker name encrypted with user's identity key via AEAD. Server cannot read. |
+| **Notification sound file name** | `POST /api/notification-sound` | 🟢 Encrypted with identity key | ✅ **Already fixed** | Encrypted with SHA-256(identity_public_key) derived key. Server cannot read. |
 
 ### WebSocket Metadata
 
@@ -135,11 +138,12 @@ This section audits every piece of data sent to the server that the server can R
 | ✅ **Done** | Send `friend_code_hash` instead of raw friend code in `POST /api/friends/request` | Low (client + server) | ✅ Friend code transmission now hashed — prevents passive host from collecting friend codes |
 | ✅ **Done** | Send `invite_code_hash` instead of raw invite code in `POST /api/invites/join` | Low (client + server) | ✅ Invite code transmission now hashed |
 | ✅ **Done** | Send `friend_code_hash` instead of raw friend code in `POST /api/friend-code/store-encrypted` | Low (client + server) | ✅ Second friend code path now hashed |
-| 🟢 **Low** | Encrypt file name and MIME type on upload | Medium (adds new crypto + storage) | File metadata is low sensitivity. |
+| ✅ **Done** | MIME type already encrypted (migration 038) | Medium | MIME type encrypted with file key. File names not stored in `files` table (only in E2E-encrypted message content). |
 | 🟢 **Low** | Hash request_id in friend request accept/decline | Low | Low sensitivity — temporary opaque UUIDs. |
 | 🟢 **Low** | Remove `display_name`, `username_color`, `username_border_color` from server-side User struct (already NULL in API, clean up dead code) | Low | Defense-in-depth — prevents accidental re-exposure |
+| ✅ **Fixed** | Reauth now sends HMAC-SHA256 hash (done 07-30) | Low (client only) | Reauth flow in settings hashes password with computeHashedPasswordGlobal() before sending. |
 
-**Status:** All 3 high/medium priority fixes are now complete. The remaining items are low sensitivity (file metadata, request IDs) and can be addressed as needed.
+**Status:** All 3 high/medium priority fixes are now complete. One bug found: reauth sends raw password. The remaining items are low sensitivity (file metadata, request IDs) and can be addressed as needed.
 
 ---
 
@@ -160,13 +164,16 @@ This section audits every piece of data sent to the server that the server can R
 
 | Endpoint | What Client SENDS | Encrypted Before Send? | What Server RETURNS | Server Can Read? |
 |----------|------------------|----------------------|-------------------|-----------------|
-| `POST /api/register` | `username`, `password` | 🟣 TLS-only (password sent as-is inside HTTPS) | token, user id, username | ✅ YES — server sees password and username |
+| `POST /api/register` | `username` | 🔴 Plaintext | token, user id, username | ✅ YES — server sees username |
+| | `password` | 🟢 HMAC-SHA256(hash_key, raw_password) sent; server never sees raw password | — | ❌ NO — server receives HMAC-SHA256 hash; can't reverse to get password |
 | | `identity_public_key` (X25519 public) | 🟢 Public key by nature (not secret) | — | ✅ YES — it's a public key |
 | | `encrypted_friend_code` + `salt` + `nonce` | 🟢 Argon2id-wrapped with user's password | — | ❌ NO — server stores but cannot decrypt without password |
 | | `encrypted_identity_priv` + `escrow_salt` + `escrow_nonce` | 🟢 Argon2id-wrapped for escrow | — | ❌ NO — can't unwrap without user's password |
 | | `friend_code_hash` | 🟡 HMAC-SHA256 hashed client-side | — | ❌ NO — one-way hash; can verify but not reverse |
-| `POST /api/login` | `username`, `password` | 🟣 TLS-only | token, user id, username | ✅ YES |
-| `POST /api/reauth` | `password` | 🟣 TLS-only | new token | ✅ YES |
+| `POST /api/login` | `username` | 🔴 Plaintext | token, user id, username | ✅ YES — server sees username |
+| | `password` (new users) | 🟢 HMAC-SHA256(hash_key, raw_password) | — | ❌ NO — server receives HMAC-SHA256 hash; can't reverse |
+| | `password` (legacy users) | 🔴 Raw password sent (TLS only) | — | ✅ YES — legacy users without hash_key system send raw password |
+| `POST /api/reauth` | `password` | 🐛 **BUG**: sends raw password instead of HMAC-SHA256 hash | new token | ✅ YES — server receives raw password (should receive hash like login does) |
 | `DELETE /api/me` | (auth only) | — | ok/error | — |
 | `GET /api/me` | (auth only) | — | `id`, `username` | ✅ YES — server reads these from DB |
 
@@ -239,7 +246,7 @@ This section audits every piece of data sent to the server that the server can R
 | | `server_picture_key_nonce` | 🔴 Plaintext (nonce) | — | ❌ NO — useless without the key |
 | | `remove: true` (optional) | 🔴 Plaintext flag | — | ✅ YES — tells server to clear picture fields |
 | `DELETE /api/channels/{channel_id}` | (auth only) | — | ok | ✅ YES |
-| `GET /api/servers/{id}/members` | (auth only) | — | `[{id, username, role, display_name, profile_picture_file_id}]` | ✅ YES — all plaintext from DB |
+| `GET /api/servers/{id}/members` | (auth only) | — | `[{id, username, role}]` — `display_name` and `profile_picture_file_id` are NOT returned (removed for metadata hardening) | ✅ YES — `username` and `role` are plaintext |
 | `POST /api/invites/join` | `code` (may be pre-hashed or plaintext) | 🟣 Plaintext in HTTPS | server id | ✅ YES — server sees the code; re-hashes to look up |
 
 ### Channel Messages
@@ -248,9 +255,9 @@ This section audits every piece of data sent to the server that the server can R
 |----------|------------------|----------------------|-------------------|-----------------|
 | `GET /api/channels/{id}/messages` | (auth only) | — | See below | See below |
 | Return fields: | | | | |
-| • `id`, `channel_id`, `sender_id` | — | — | ✅ YES — all plaintext |
-| • `sender_username` | — | — | ✅ YES — from SQL JOIN with users table |
-| • `sender_profile_pic` | — | — | ✅ YES — plaintext file_id |
+| • `id`, `sender_user_id` (raw UUID) | — | — | ✅ YES — plaintext |
+| • `sender_id` | 🟡 HMAC-SHA256 hashed | — | ❌ NO — can't reverse to get raw user_id |
+| • `sender_id_hash` | 🟡 SHA-256(sender_id + ":" + channel_id) | — | ❌ NO — one-way |
 | • `encrypted_sender_username` + `sender_username_nonce` | 🟢 Encrypted with server key | — | ❌ NO — can't decrypt without server key |
 | • `encrypted_content` + `nonce` + `message_nonce` | 🟢 AES-GCM encrypted with server key | — | ❌ NO — server doesn't have the server key |
 | • `encrypted_profile_key` + `profile_key_nonce` | 🟢 Encrypted with server key | — | ❌ NO |
@@ -260,7 +267,15 @@ This section audits every piece of data sent to the server that the server can R
 | • `encrypted_profile_snapshot` + `nonce` | 🟢 Encrypted with server key | — | ❌ NO |
 | • `timestamp`, `edited_at` | — | — | ✅ YES — plaintext timestamps |
 | • `conversation_profile` (encrypted_profile_data + nonce) | 🟢 Encrypted with server key | — | ❌ NO — per-conversation encrypted blob |
+| **Note:** `sender_username` and `sender_profile_pic` are **NOT** returned in regular API responses. These fields were dropped. `sender_id` is HMAC-hashed. The raw `sender_user_id` (UUID) IS returned but should ideally be removed to prevent tracking. Admin endpoints still include `sender_username`. |
 | `GET /api/channels/{id}/messages/around/{msg_id}` | (auth only) | — | Same fields as `list_messages` | Same analysis |
+
+### Name Update Endpoints
+
+| Endpoint | What Client SENDS | Encrypted Before Send? | What Server RETURNS | Server Can Read? |
+|----------|------------------|----------------------|-------------------|-----------------|
+| `PUT /api/servers/{id}/name` | `encrypted_name` + `name_nonce` | 🟢 Encrypted with server key | ok/error | ❌ NO |
+| `PUT /api/servers/{id}/channels/{cid}/name` | `encrypted_name` + `name_nonce` | 🟢 Encrypted with server key | ok/error | ❌ NO |
 
 ### Identity Key Endpoints
 
@@ -277,11 +292,39 @@ This section audits every piece of data sent to the server that the server can R
 | `GET /api/notification-sound` | (auth only) | — | `encrypted_sound` + `nonce` + `file_name` | ❌ NO — encrypted blob |
 | `DELETE /api/notification-sound` | (auth only) | — | ok | ✅ YES |
 
+### Online Presence
+
+| Endpoint | What Client SENDS | Encrypted Before Send? | What Server RETURNS | Server Can Read? |
+|----------|------------------|----------------------|-------------------|-----------------|
+| `GET /api/online` | (auth only) | — | Array of online user IDs (raw UUIDs) | ✅ YES — server knows who's online |
+
+### User Stickers/GIFs
+
+| Endpoint | What Client SENDS | Encrypted Before Send? | What Server RETURNS | Server Can Read? |
+|----------|------------------|----------------------|-------------------|-----------------|
+| `GET /api/users/me/stickers` | (auth only) | — | `[{id, file_id, file_id_hash, sticker_name, mime_type, encrypted_file_key, file_key_nonce, encrypted_sticker_name, sticker_name_nonce, encrypted_mime_type, mime_nonce}]` | 🟡 `sticker_name` and `mime_type` are plaintext fallbacks; encrypted versions are 🟢 |
+| `POST /api/users/me/stickers` | `file_id`, `sticker_name`, `mime_type`, `encrypted_file_key`, `file_key_nonce`, `encrypted_sticker_name`, `sticker_name_nonce`, `encrypted_mime_type`, `mime_nonce` | 🟢 Encrypted file key, sticker name, and MIME type with identity key / file key | sticker id | ❌ NO — can't unwrap file key or encrypted name |
+| `DELETE /api/users/me/stickers/{id}` | (auth only) | — | ok | ✅ YES |
+
+### Logout
+
+| Endpoint | What Client SENDS | Encrypted Before Send? | What Server RETURNS | Server Can Read? |
+|----------|------------------|----------------------|-------------------|-----------------|
+| `POST /api/logout` | (auth token in header/cookie) | — | ok + clears cookies | ✅ YES |
+| `GET /api/logout` | (none) | — | Redirect to login.html | ✅ YES |
+
+### Shared Profile Data Keys
+
+| Endpoint | What Client SENDS | Encrypted Before Send? | What Server RETURNS | Server Can Read? |
+|----------|------------------|----------------------|-------------------|-----------------|
+| `POST /api/profile/data-key/shared/batch` | `{targets: [{target_type, target_id}, ...]}` | 🔴 Target metadata plaintext | `{"{type}:{id}": [{owner_user_id, encrypted_key, nonce}]}` | ❌ NO — keys encrypted with conversation keys |
+| `DELETE /api/profile/data-key/shared/{type}/{id}` | (auth only) | — | ok | ✅ YES |
+
 ### File Upload/Download
 
 | Endpoint | What Client SENDS | Encrypted Before Send? | What Server RETURNS | Server Can Read? |
 |----------|------------------|----------------------|-------------------|-----------------|
-| `POST /api/files/init` | `file_name`, `mime_type`, `file_size` | 🟣 Plaintext | `file_id` | ✅ YES — file metadata |
+| `POST /api/files/init` | `file_name`, `mime_type`, `file_size` | 🟢 MIME type encrypted with file key; `file_size` is 🔴 plaintext (needed for storage limits); `file_name` is only used during upload (not stored) | `file_id` | ❌ NO — MIME type encrypted with file key; file name only in E2E-encrypted message content |
 | `POST /api/files/{id}/chunk/{index}` | Raw binary chunk | 🟢 Client MUST encrypt with file key before upload | ok | ❌ NO — server stores opaque blob; client encrypted before upload |
 | `POST /api/files/{id}/complete` | (just auth) | — | ok | ✅ YES — but only sees metadata |
 | `GET /api/files/{id}/download` | (auth only) | — | Raw encrypted chunk data | ❌ NO — same encrypted blob as uploaded |
@@ -290,8 +333,8 @@ This section audits every piece of data sent to the server that the server can R
 
 | Endpoint | What Client SENDS | Encrypted Before Send? | What Server RETURNS | Server Can Read? |
 |----------|------------------|----------------------|-------------------|-----------------|
-| `POST /api/identity/escrow` | `encrypted_private_key` + `salt` + `nonce` | 🟢 Argon2id-wrapped with user password | ok | ❌ NO — can't unwrap without password |
-| `GET /api/identity/escrow` | (auth only) | — | Same encrypted blob | ❌ NO |
+| ~~`POST /api/identity/escrow`~~ | ~~`encrypted_private_key` + `salt` + `nonce`~~ | ⚠️ **Dead code** — handler exists with `#[allow(dead_code)]` but route is NOT registered in main.rs. Escrow happens inline during registration. | ❌ N/A — route not registered |
+| ~~`GET /api/identity/escrow`~~ | ~~(auth only)~~ | ⚠️ **Dead code** — same as above; handler exists but route NOT registered | ❌ N/A — route not registered |
 
 ---
 
@@ -318,40 +361,38 @@ This section audits every piece of data sent to the server that the server can R
 | `dm_edit` | `message_id`, same encrypted fields as `dm_send` | 🟢 Re-encrypted with DM key | ❌ NO |
 | `message_delete` | `message_id` | 🔴 Plaintext | ✅ YES |
 | `dm_delete` | `message_id` | 🔴 Plaintext | ✅ YES |
-| `profile_key_sync` | `dm_channel_id` | 🔴 Plaintext | ✅ YES |
-| | `encrypted_profile_key` + `nonce` | 🟢 Encrypted with DM key | ❌ NO |
-| | `encrypted_banner_key` + `nonce` | 🟢 Encrypted with DM key | ❌ NO |
-| | `encrypted_profile_data_key` + `nonce` | 🟢 Encrypted with DM key | ❌ NO |
-| | `encrypted_display_name` + `display_name_nonce` | 🟢 Encrypted with DM key | ❌ NO |
-| | `encrypted_username_color` + `username_color_nonce` | 🟢 Encrypted with DM key | ❌ NO |
-| | `encrypted_username_border_color` + `username_border_color_nonce` | 🟢 Encrypted with DM key | ❌ NO |
-| `profile_key_server_sync` | `server_id` | 🔴 Plaintext | ✅ YES |
-| | Same key fields encrypted with server key | 🟢 Encrypted with server key | ❌ NO |
-| | `encrypted_display_name` + `display_name_nonce` | 🟢 Encrypted with server key | ❌ NO |
-| | `encrypted_username_color` + `username_color_nonce` | 🟢 Encrypted with server key | ❌ NO |
-| | `encrypted_username_border_color` + `username_border_color_nonce` | 🟢 Encrypted with server key | ❌ NO |
+| ~~`profile_key_sync`~~ | ~~`dm_channel_id`~~ | ⚠️ **REMOVED** — old mechanism; shared profile keys now use REST API endpoints | ❌ N/A — no longer handled server-side |
+| ~~`profile_key_server_sync`~~ | ~~`server_id`~~ | ⚠️ **REMOVED** — same as above; old WS-based profile key sharing mechanism removed | ❌ N/A — no longer handled server-side |
 
 ### 2B. Messages Broadcast FROM Server TO Client (via WS)
 
 | WS Type | Fields Broadcast | Encrypted? | Server Can Read Before Broadcast? |
 |---------|-----------------|-----------|-------------------------------|
 | `message_new` | `channel_id`, `server_id` | 🔴 Plaintext | ✅ YES |
-| | `message.id`, `sender_id`, `sender_username`, `sender_profile_pic` | 🔴 Plaintext | ✅ YES — from DB query |
+| | `message.id`, `sender_id` (HMAC-hashed), `sender_user_id` (raw UUID), `sender_id_hash` | 🔴 `sender_user_id` is raw UUID; `sender_id` is HMAC-hashed | ✅ YES — from DB query |
+| | `encrypted_sender_username` + `sender_username_nonce` | 🟢 Ciphertext (encrypted with server key) | ❌ NO |
 | | `message.encrypted_content` + `nonce` | 🟢 Ciphertext (relayed from sender) | ❌ NO — can't decrypt |
-| | Same optional key fields | 🟢 Ciphertext | ❌ NO |
+| | Same optional key fields (profile snapshot, file key, etc.) | 🟢 Ciphertext | ❌ NO |
 | `dm_new` | `dm_channel_id`, same sender metadata | 🔴 Plaintext | ✅ YES |
-| | `message.encrypted_content` | 🟢 Ciphertext | ❌ NO |
-| `message_edited` | `channel_id`, same structure as `message_new` | 🔴 Plaintext metadata; 🟢 encrypted content | ✅ YES metadata; ❌ NO content |
-| `dm_edited` | Same as `dm_new` | Same | Same |
+| | `encrypted_sender_username` + `sender_username_nonce` | 🟢 Ciphertext (encrypted with DM key) | ❌ NO |
+| | `message.encrypted_content` + `nonce` | 🟢 Ciphertext | ❌ NO |
+| `message_edited` | `channel_id`, `server_id` | 🔴 Plaintext | ✅ YES |
+| | `sender_id` (HMAC-hashed), `sender_user_id` (raw UUID), `sender_id_hash` | 🔴 `sender_user_id` is raw UUID; `sender_id` is HMAC-hashed | ✅ YES |
+| | `encrypted_sender_username` + `sender_username_nonce` | 🟢 Ciphertext | ❌ NO |
+| | `encrypted_content` + `nonce` | 🟢 Ciphertext | ❌ NO |
+| `dm_edited` | `dm_channel_id`, same structure as `dm_new` | 🔴 Plaintext | ✅ YES |
+| | `encrypted_sender_username` + `sender_username_nonce` | 🟢 Ciphertext | ❌ NO |
+| | `encrypted_content` + `nonce` | 🟢 Ciphertext | ❌ NO |
 | `message_deleted` / `dm_deleted` | `channel_id` / `dm_channel_id`, `message_id` | 🔴 Plaintext | ✅ YES |
-| `profile_key_sync` | `user_id`, `profile_picture_file_id`, encrypted keys | 🟢 Key fields encrypted; `user_id` is 🔴 plaintext | ❌ NO — all encrypted |
-| `profile_key_server_sync` | `user_id`, same structure | 🟢 Key fields encrypted | ❌ NO |
-| `member_joined` / `member_left` / `member_kicked` / `member_banned` | `server_id`, `user_id` | 🔴 Plaintext | ✅ YES |
+| `member_joined` / `member_left` / `member_kicked` / `member_banned` | `server_id` | 🔴 Plaintext | ✅ YES |
+| | `user_id` | 🟡 HMAC-hashed with HMAC key | ❌ NO — can't reverse hash |
+| | `raw_user_id` (raw UUID) | 🔴 Plaintext | ✅ YES — raw UUID included for routing |
 | `server_key_rotated` | `server_id` | 🔴 Plaintext | ✅ YES |
 | `server_deleted` | `server_id` | 🔴 Plaintext | ✅ YES |
 | `friend_request_received` | `from_user_id`, `from_username` | 🔴 Plaintext | ✅ YES |
 | `friend_request_accepted` | `by_user_id`, `from_user_id` | 🔴 Plaintext | ✅ YES |
 | `channel_created` / `channel_deleted` | `server_id` | 🔴 Plaintext | ✅ YES |
+| `profile_key_sync` / `profile_key_server_sync` | N/A — **REMOVED** | ⚠️ Old WS-based profile key sharing mechanism removed 2026-07-24 | ❌ N/A — shared keys now use REST API endpoints only |
 
 ---
 
@@ -363,7 +404,7 @@ This section audits every piece of data sent to the server that the server can R
 |--------|-----------|-----------|---------------|-------|
 | `id` | TEXT PK | 🔴 Plaintext | ✅ YES | UUID, needed for all relationships |
 | `username` | TEXT UNIQUE | 🔴 Plaintext | ✅ YES | Required for login |
-| `password_hash` | TEXT | 🔴 Plaintext (but BCrypt hashed) | ✅ YES (but can't reverse) | Server needs this for auth |
+| `password_hash` | TEXT | 🔴 Plaintext (client-computed HMAC-SHA256 stored as-is) | ✅ YES (but can't reverse — HMAC-SHA256 is one-way) | HMAC-SHA256(hash_key, raw_password). hash_key is Argon2id-encrypted with raw password. Server never stores raw password for new users. Admin password uses Argon2 server-side. |
 | `identity_public_key` | BLOB | 🔴 Plaintext (public key) | ✅ YES | Purposefully public |
 | `friend_code_hash` | TEXT | 🟡 HMAC-SHA256 hashed | ❌ NO — can't reverse |
 | `encrypted_friend_code` | TEXT | 🟢 Argon2id-wrapped | ❌ NO — needs user password |
@@ -458,16 +499,21 @@ All columns are 🔴 Plaintext. Host can see who is friends with whom, all DM ch
 
 | Column | Encrypted? | Host Can Read? |
 |--------|-----------|---------------|
-| All metadata (file_id, uploader_id, original_size, mime_type, chunk_count) | 🔴 Plaintext | ✅ YES |
-| `upload_complete` | 🔴 Plaintext | ✅ YES |
+| `file_id`, `uploader_id`, `original_size`, `chunk_count`, `upload_complete` | 🔴 Plaintext | ✅ YES |
+| `mime_type` (plaintext fallback) | 🔴 Plaintext | ✅ YES |
+| `encrypted_mime_type`, `mime_nonce` | 🟢 Encrypted with file key (migration 038) | ❌ NO — can't decrypt without file key |
+| `file_id_hash` | 🟡 SHA-256 of file_id | ❌ NO — can't reverse |
 
 ### `server_stickers` / `user_stickers` tables
 
 | Column | Encrypted? | Host Can Read? |
 |--------|-----------|---------------|
-| `id`, `server_id`, `user_id`, `file_id`, `sticker_name`, `mime_type` | 🔴 Plaintext | ✅ YES |
-| `file_key` | 🟢 `nonce:ciphertext` with server/user identity key | ❌ NO |
-| `encrypted_file_key`, `file_key_nonce` | 🟢 Same | ❌ NO |
+| `id`, `user_id`, `file_id`, `file_id_hash`, `created_at` | 🔴 Plaintext | ✅ YES |
+| `sticker_name` (plaintext fallback) | 🔴 Plaintext | ✅ YES |
+| `encrypted_sticker_name`, `sticker_name_nonce` | 🟢 Encrypted with identity key (migration 041) | ❌ NO — can't decrypt without identity private key |
+| `mime_type` (plaintext fallback) | 🔴 Plaintext | ✅ YES |
+| `encrypted_mime_type`, `mime_nonce` | 🟢 Encrypted with file key (migration 038) | ❌ NO |
+| `encrypted_file_key`, `file_key_nonce` | 🟢 Encrypted with identity key | ❌ NO — can't unwrap |
 
 ### `conversation_profile_data` table
 
@@ -500,7 +546,8 @@ All columns are 🔴 Plaintext. Host can see who is friends with whom, all DM ch
 
 | Column | Encrypted? | Host Can Read? |
 |--------|-----------|---------------|
-| `user_id`, `file_name` | 🔴 Plaintext | ✅ YES |
+| `user_id`, `file_name` (plaintext fallback) | 🔴 Plaintext | ✅ YES |
+| `encrypted_file_name`, `file_name_nonce` | 🟢 Encrypted with SHA-256(identity_public_key) derived key (migration 039) | ❌ NO — can't decrypt without identity private key |
 | `encrypted_sound` | 🟢 With identity key | ❌ NO |
 | `nonce`, `sender_public_key` | 🔴 Plaintext | ✅ YES |
 
@@ -523,13 +570,13 @@ The **host** (server admin, DB root, or anyone who compromises the server) has a
 | All usernames | `users.username` | Plaintext column |
 | All user IDs and relationships | All tables | Plaintext foreign keys |
 | Full social graph: friends, server members, DM members | `friendships`, `server_members`, `dm_members` | Plaintext |
-| Who sent which message | `messages.sender_id` + `messages.sender_username` | Plaintext columns |
+| Who sent which message | `messages.sender_id` (raw UUID) | 🔴 Plaintext — `sender_username` column was DROP COLUMN'd (migration 033) |
 | When messages were sent | `messages.timestamp` | Plaintext |
 | When messages were edited | `messages.edited_at` | Plaintext |
 | Which channel a message is in | `messages.channel_id` | Plaintext |
 | Server ownership | `servers.owner_id` | Plaintext |
 | Channel membership | `server_members` | Plaintext |
-| File metadata (names, sizes, types, uploader) | `files` table | Plaintext |
+| File metadata (sizes, types, uploader) | `files` table | Sizes & uploader 🔴 plaintext. MIME types 🟢 encrypted with file key (migration 038). File names not stored in `files` table. |
 | Password reset/escrow salts and nonces | Various columns | These are NOT secret (needed for crypto to work) |
 | HMAC key | Server config | Reads from env/.env file |
 | JWT secret | Server config | Reads from env/.env file |
@@ -599,7 +646,7 @@ The **host** (server admin, DB root, or anyone who compromises the server) has a
 │  ├─🔐 Profile Data Key (32-byte AES, per-user)              │
 │  │   ├─ Stored: encrypted with identity private key           │
 │  │   │  in localStorage (profileKeyCache)                    │
-│  │   ├─ Shared to other users via WS profile_key_sync,       │
+│  │   ├─ Shared to other users via REST API (shared keys),    │
 │  │   │  re-encrypted with DM/server key                     │
 │  │   ├─ Used for: encrypting encrypted_profile_data blob     │
 │  │   └─ Server sees: only the profile_data_key encrypted     │
@@ -691,7 +738,7 @@ Profile data (display_name, username_color, username_border_color, description, 
 2. The profile JSON is encrypted with this key via `E2ECrypto.encryptProfileData(jsonString, key)` using XChaCha20-Poly1305
 3. The encrypted blob is stored in `users.encrypted_profile_data` as `nonce:ciphertext` (both base64)
 4. The `profile_data_key` is encrypted with the user's identity key and cached in `profileKeyCache[userId + ':profile_data_key']`
-5. When the user needs the key on another device, the key is shared via `profile_key_sync` WS messages (re-encrypted with the DM/server key for secure transit)
+5. When the user needs the key on another device, the key is shared via shared_profile_data_keys API endpoints (re-encrypted with the DM/server key for secure transit)
 
 **Multi-device support:** The `profile_data_key` is encrypted with the identity private key before storage in localStorage (`profileKeyCache`). The identity key pair is linked to the account (not the device), so all devices belonging to the same account can decrypt the profile data key.
 
@@ -730,9 +777,9 @@ Profile picture and banner FILE KEYS (used to decrypt the actual image files) ar
 2. This is encrypted with the user's IDENTITY KEY via `E2ECrypto.encodeEncryptedFileKey(fileKey, identityPrivateKey)`
 3. When sharing with another user, the key is decrypted with the identity key and re-encrypted with the DM/server key
 4. Sharing happens via:
-   - `profile_key_sync` WS message (for DMs) — re-encrypted with DM key
-   - `profile_key_server_sync` WS message (for servers) — re-encrypted with server key
-   - `encrypted_profile_key` + `profile_key_nonce` in message payloads
+   - `shared_profile_data_keys` API endpoint (`GET /api/profile/data-key/shared/{type}/{id}`) — pre-encrypted with DM key or server key
+   - `encrypted_profile_key` + `profile_key_nonce` in message payloads (legacy)
+   - **`profile_key_sync` WS messages were REMOVED 2026-07-24**
 
 **Code paths:**
 - `static/crypto.js`: `encodeEncryptedFileKey()`, `decodeEncryptedFileKey()`
@@ -782,10 +829,30 @@ Stickers and file attachments use a separate file-level encryption system:
 ### What's Still Plaintext (Remaining Attack Surface)
 - **Message metadata**: Who sent what, when. All plaintext in the database.
 - **Usernames**: Always plaintext (required for login/identity).
-- **Display name colors/border colors**: Still stored as plaintext columns in the `users` table (host can read them directly from SQLite).
-- **Server/channel names**: Sent both encrypted and plaintext. The plaintext version is stored for display before key decryption.
-- **Friend code at send time**: When adding a friend, the plaintext friend code is sent to the server so it can be hashed and looked up.
-- **Password at login/register**: Sent in plaintext over TLS (standard web practice; protected by TLS/HTTPS).
+- **Usernames**: Always plaintext (required for login/identity).
+- **Message metadata**: Who sent what, when, message sizes. All plaintext in DB.
+- **Social graph**: Friends, server members, DM members. All plaintext in DB.
+- **User IDs / Server IDs / Channel IDs**: Plaintext (needed for routing).
+- **Timestamps**: Plaintext (needed for ordering).
+- **File sizes**: Plaintext (needed for storage enforcement).
+- **Password at login (legacy users)**: Raw password sent if user registered before hash_key system.
+- **Reauth**: Sends raw password (bug) — should hash like login does.
+- **Admin login**: Raw password sent (Argon2-hashed server-side).
+- **Kick/ban user IDs**: Plaintext.
+
+### Now Fully Protected (Updated)
+- **Password at register/login (new users)**: Client-side HMAC-SHA256 hashed. Server never sees raw password.
+- **Friend codes at send time**: HMAC-SHA256 hash sent. Server never sees plaintext.
+- **Invite codes**: HMAC-SHA256 hash sent. Server never sees plaintext.
+- **Server/channel names**: Fully encrypted. Plaintext columns dropped.
+- **Display name colors/border colors**: Dropped from DB (migration 036). Only in encrypted_profile_data.
+- **Notification sound file names**: Encrypted with identity key. Server cannot read.
+- **Sticker/emoji/GIF names**: Encrypted with identity key. Server cannot read.
+- **MIME types**: Encrypted with file key. Server cannot read.
+- **Sender username in messages**: Encrypted with server/DM key. Server cannot read.
+- **Profile data**: Fully encrypted with profile_data_key. Server cannot read.
+- **File names**: Only exist in E2E-encrypted message content.
+- **Profile picture/banner keys**: Encrypted with identity key. Server cannot unwrap.
 - **WebSocket sender metadata**: `sender_display_name`, `sender_username_color`, `sender_profile_pic` broadcast in plaintext to all message recipients.
 
 ---
@@ -1179,8 +1246,8 @@ This logic is actually correct — non-owners can upload keys for themselves onl
 **Fix:** Added `updateMemberListItem(userId)` calls after every `updateExistingMessageStyles(userId)` call:
 - `fetchServerConversationProfile()` (chat.js:393)
 - `fetchDmConversationProfile()` (chat.js:471)
-- `profile_key_sync` WS handler (chat.js:5100)
-- `profile_key_server_sync` WS handler (chat.js:5185)
+- ~~`profile_key_sync` WS handler (chat.js:5100) — REMOVED (old mechanism)~~
+- ~~`profile_key_server_sync` WS handler (chat.js:5185) — REMOVED~~
 - `profile_updated` WS handler (chat.js:5280) — already had `loadMembers()` as backup
 
 ### Key blob coverage extension
@@ -1686,7 +1753,7 @@ Audit performed by examining every:
 
 | Message Type | Direction | Sensitive Fields? 
 | `message_new`/`dm_new` | `sender_id`, `encrypted_content`, keys | 🟢 Content E2EE. `sender_id` is UUID. |
-| `profile_key_sync`/`profile_key_server_sync` | Encrypted profile keys | 🟢 Encrypted with conversation key |
+| ~~`profile_key_sync`/`profile_key_server_sync`~~ | ~~REMOVED 2026-07-24~~ | ⚠️ Old WS-based sharing mechanism removed |
 | `member_*` / `server_*` / `channel_*` | `server_id`, `user_id`, event type | 🟡 Identifiers only |
 | `mention_notification`/`reply_notification` | `channel_name`, `server_name`, `sender_username` | 🔴 **Plaintext server/channel names and sender username** |
 | `presence_update` | `user_id`, `status` | 🟡 Online/offline status |
