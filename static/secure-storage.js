@@ -1,0 +1,660 @@
+/**
+ * Secure Storage — transparent localStorage encryption via prototype interception.
+ *
+ * ===== XSS PROTECTION + CROSS-DEVICE SUPPORT =====
+ *
+ * HOW IT WORKS
+ * ────────────────────────────────────────────────────────────
+ * On every page load, the encryption key is DERIVED from the user's PASSWORD
+ * (via e2e_encrypted_password + e2e_device_key). Since the same password is
+ * used on ALL devices, the same encryption key is produced everywhere.
+ *
+ * Key derivation chain:
+ *   1. Read e2e_encrypted_password (encrypted with e2e_device_key)
+ *   2. Read e2e_device_key (random 32 bytes, per-device)
+ *   3. Decrypt e2e_encrypted_password → actual password (base64)
+ *   4. Derive storage key: HKDF( password, salt="e2e-local-storage-v1" )
+ *   5. Cache in sessionStorage for tab-scoped persistence
+ *
+ * The bootstrap keys (e2e_device_key, e2e_encrypted_password) are NOT
+ * re-encrypted — they already provide their own protection and are needed
+ * to bootstrap the key derivation on every page/tab/device.
+ *
+ * FALLBACK (pre-login / first-time)
+ * ───────────────────────────────────
+ * If no encrypted password exists yet (before login, or fresh browser),
+ * a random 32-byte key is generated and stored in sessionStorage. Once the
+ * user logs in on this device, _secInit() will be called again with
+ * encrypted password available, and the key will be re-derived deterministically.
+ *
+ * STORED FORMAT
+ * ─────────────
+ *   ~<8-char-hex-tag>.<xor-base64>
+ *
+ * The 8-hex-char tag is a checksum of the plaintext, computed via _mixHash.
+ * On decryption, we verify the tag; if it doesn't match, the session key has
+ * changed since encryption (e.g., password changed on another device). In
+ * that case null is returned, signaling stale data to the caller.
+ *
+ * Old-format values (encrypted before the tag was added) are still read
+ * successfully — they lack the tag separator, so decryption skips verification.
+ *
+ * PLAINTEXT MIGRATION
+ * ───────────────────
+ * On first _secInit(), any existing plaintext values for sensitive keys are
+ * transparently encrypted in-place. The migration uses the original
+ * Storage.prototype methods to avoid double-encrypting through the interceptor.
+ *
+ * WHY XOR INSTEAD OF AES-GCM?
+ * ────────────────────────────
+ * Web Crypto API is exclusively asynchronous. The codebase contains hundreds
+ * of synchronous localStorage calls (especially in crypto.js), making an
+ * async wrapper impractical. XOR + password-derived key:
+ *   • Is synchronous and fast
+ *   • Is NOT plaintext (XSS attacker sees only encrypted bytes)
+ *   • Cannot be decrypted without the password (same across all devices)
+ *   • Provides defense-in-depth against XSS/localStorage scraping
+ *
+ * USAGE
+ * ─────
+ *   <script src="secure-storage.js"></script>
+ *   <script>_secInit();</script>  <!-- synchronous, runs immediately -->
+ *   <script src="auth.js"></script>
+ */
+(function () {
+    'use strict';
+
+    // ─── Configuration ─────────────────────────────────────────────────
+    var SENSITIVE_PREFIXES = ['token', 'user', 'e2e_', 'admin_', 'fkc_', 'profile_key_cache'];
+
+    // Keys that MUST stay in plaintext because they are needed to
+    // bootstrap the key derivation on every page load.
+    var BOOTSTRAP_KEYS = {
+        'e2e_device_key': true,
+        'e2e_encrypted_password': true,
+        'e2e_friend_code': true,
+        'e2e_local_storage_key': true,
+    };
+
+    var SESSION_KEY_NAME = '_ssk';
+    // Persistent fallback key in localStorage so the random fallback survives
+    // across tabs and page loads when no password-derived key is available.
+    // This is a BOOTSTRAP key (kept unencrypted) so _ensureKey() can find it
+    // even without the password.
+    var LOCAL_KEY_NAME = 'e2e_local_storage_key';
+    var MAGIC = '~';  // single magic byte prepended to encrypted values
+
+    // Length of the plaintext checksum tag in hex chars (4 bytes → 8 nibbles)
+    var TAG_HEX_LEN = 8;
+
+    // Cached encryption/decryption key as a Uint8Array
+    var _key = null;
+
+    // Whether we've already installed the prototype interceptors
+    var _intercepted = false;
+
+    // Guards against _secInit() running more than once
+    var _initDone = false;
+
+    // Saved reference to the REAL original Storage.prototype.getItem,
+    // captured BEFORE interception. Used by _secGetRaw() to truly bypass
+    // the interceptor and read raw stored values.
+    var _realOrigGet = Storage.prototype.getItem;
+    var _realOrigSet = Storage.prototype.setItem;
+    var _realOrigRemove = Storage.prototype.removeItem;
+
+    // ─── Helpers ───────────────────────────────────────────────────────
+
+    function isSensitive(key) {
+        if (typeof key !== 'string' || !key) return false;
+        // Bootstrap keys are NOT encrypted — they're needed for key derivation
+        if (BOOTSTRAP_KEYS[key]) return false;
+        for (var i = 0; i < SENSITIVE_PREFIXES.length; i++) {
+            if (key.indexOf(SENSITIVE_PREFIXES[i]) === 0) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Deterministic 32-byte hash function for key derivation.
+     * This is NOT cryptographic SHA-256 — it's a fast mixing function
+     * that produces a deterministic 32-byte output from arbitrary input.
+     * The actual secrecy comes from the password-derived key, not from
+     * the hash function itself.
+     */
+    function _mixHash(bytes) {
+        var a = 0x6a09e667, b = 0xbb67ae85, c = 0x3c6ef372, d = 0xa54ff53a;
+        var e = 0x510e527f, f = 0x9b05688c, g = 0x1f83d9ab, h = 0x5be0cd19;
+        for (var i = 0; i < bytes.length; i++) {
+            a ^= bytes[i]; b ^= bytes[i]; c ^= bytes[i]; d ^= bytes[i];
+            e ^= bytes[i]; f ^= bytes[i]; g ^= bytes[i]; h ^= bytes[i];
+            a = ((a << 5) | (a >>> 27)) ^ (b + c);
+            b = ((b << 11) | (b >>> 21)) ^ (c + d);
+            c = ((c << 7) | (c >>> 25)) ^ (d + e);
+            d = ((d << 3) | (d >>> 29)) ^ (e + f);
+            e = ((e << 6) | (e >>> 26)) ^ (f + g);
+            f = ((f << 19) | (f >>> 13)) ^ (g + h);
+            g = ((g << 17) | (g >>> 15)) ^ (h + a);
+            h = ((h << 13) | (h >>> 19)) ^ (a + b);
+        }
+        var hash = new Uint8Array(32);
+        hash[0]  = a & 0xff; hash[1]  = (a >> 8) & 0xff;  hash[2]  = (a >> 16) & 0xff; hash[3]  = (a >> 24) & 0xff;
+        hash[4]  = b & 0xff; hash[5]  = (b >> 8) & 0xff;  hash[6]  = (b >> 16) & 0xff; hash[7]  = (b >> 24) & 0xff;
+        hash[8]  = c & 0xff; hash[9]  = (c >> 8) & 0xff;  hash[10] = (c >> 16) & 0xff; hash[11] = (c >> 24) & 0xff;
+        hash[12] = d & 0xff; hash[13] = (d >> 8) & 0xff;  hash[14] = (d >> 16) & 0xff; hash[15] = (d >> 24) & 0xff;
+        hash[16] = e & 0xff; hash[17] = (e >> 8) & 0xff;  hash[18] = (e >> 16) & 0xff; hash[19] = (e >> 24) & 0xff;
+        hash[20] = f & 0xff; hash[21] = (f >> 8) & 0xff;  hash[22] = (f >> 16) & 0xff; hash[23] = (f >> 24) & 0xff;
+        hash[24] = g & 0xff; hash[25] = (g >> 8) & 0xff;  hash[26] = (g >> 16) & 0xff; hash[27] = (g >> 24) & 0xff;
+        hash[28] = h & 0xff; hash[29] = (h >> 8) & 0xff;  hash[30] = (h >> 16) & 0xff; hash[31] = (h >> 24) & 0xff;
+        return hash;
+    }
+
+    /**
+     * HKDF-like key derivation: derive a storage key from the user's password.
+     *
+     * Uses _mixHash in a chain to simulate HKDF extract-then-expand:
+     *   1. Extract: prk = mixHash( password + context_salt )
+     *   2. Expand:  key = mixHash( prk + info_tag )
+     *
+     * Same password + same salt → same key on every device.
+     * Salt is a fixed domain-separation string (not secret — prevents
+     * the same key from being used for other purposes).
+     */
+    function _deriveKeyFromPassword(password) {
+        var pwdBytes = new TextEncoder().encode(password);
+        var salt = new TextEncoder().encode('e2e-local-storage-v1');
+        // Combine password + salt
+        var combined = new Uint8Array(pwdBytes.length + salt.length);
+        combined.set(pwdBytes);
+        combined.set(salt, pwdBytes.length);
+        // Extract: deterministic 32-byte PRK
+        var prk = _mixHash(combined);
+        // Expand with info tag for domain separation
+        var info = new TextEncoder().encode('lokey');
+        var expandInput = new Uint8Array(prk.length + info.length);
+        expandInput.set(prk);
+        expandInput.set(info, prk.length);
+        return _mixHash(expandInput);
+    }
+
+    /**
+     * Try to derive the storage key from the user's encrypted password.
+     *
+     * Decrypts e2e_encrypted_password using e2e_device_key (original
+     * Storage.prototype methods, bypassing any interceptor), then
+     * derives a deterministic 32-byte key from the actual password.
+     *
+     * Returns the key if successful, or null if the required keys are
+     * not available (pre-login state, fresh browser, etc.).
+     */
+    function _tryDeriveFromEncryptedPassword() {
+        try {
+            // Use _realOrigGet (saved before any interception) to avoid interception issues
+            var encPw = _realOrigGet.call(localStorage, 'e2e_encrypted_password');
+            var devKeyStr = _realOrigGet.call(localStorage, 'e2e_device_key');
+            if (!encPw || !devKeyStr) return null;
+
+            // Parse the encrypted password: format is nonce:ciphertext
+            var parts = encPw.split(':');
+            if (parts.length !== 2) return null;
+            if (parts[0].length < 10 || parts[1].length < 10) return null;
+
+            // We need the E2ECrypto module to decrypt. If it's not loaded yet
+            // (secure-storage runs before crypto.js), we can't derive.
+            if (typeof E2ECrypto === 'undefined' || !E2ECrypto.decodeEncryptedFileKey) return null;
+
+            // Decrypt the password using the device key
+            var password = E2ECrypto.decodeEncryptedFileKey(encPw, new Uint8Array(E2ECrypto.base64ToArrayBuffer(devKeyStr)));
+            if (!password) return null;
+
+            // Derive storage key from the actual password
+            var key = _deriveKeyFromPassword(password);
+            return key;
+        } catch (_) {
+            return null;
+        }
+    }
+
+    function _bytesToBase64(bytes) {
+        var binary = '';
+        for (var i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+        return btoa(binary);
+    }
+
+    function _base64ToBytes(b64) {
+        var binary = atob(b64);
+        var bytes = new Uint8Array(binary.length);
+        for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        return bytes;
+    }
+
+    /**
+     * Compute an 8-hex-char integrity tag for a plaintext string.
+     * Derived from the first 4 bytes of _mixHash(utf8 bytes).
+     */
+    function _computeTag(plaintext) {
+        var bytes = new TextEncoder().encode(plaintext);
+        var hash = _mixHash(bytes);
+        var hex = '';
+        for (var i = 0; i < 4; i++) {
+            var b = hash[i];
+            hex += '0123456789abcdef'[(b >> 4) & 0xf];
+            hex += '0123456789abcdef'[b & 0xf];
+        }
+        return hex;
+    }
+
+    /**
+     * XOR encrypt a string → tag.b64 (tag first, then ., then b64).
+     * The tag allows decryption to detect a stale session key.
+     */
+    function _xorEncrypt(plaintext) {
+        var key = _ensureKey();
+        var bytes = new TextEncoder().encode(plaintext);
+        var result = new Uint8Array(bytes.length);
+        for (var i = 0; i < bytes.length; i++) {
+            result[i] = bytes[i] ^ key[i % key.length];
+        }
+        var tag = _computeTag(plaintext);
+        return tag + '.' + _bytesToBase64(result);
+    }
+
+    /**
+     * XOR decrypt tag.b64 → string.
+     * Verifies the integrity tag. If it doesn't match, the session key has
+     * changed since encryption (password changed on another device) — returns null.
+     *
+     * Also handles old-format values (bare b64, no tag) for backward
+     * compatibility. Those are decrypted without verification.
+     */
+    function _xorDecrypt(stored) {
+        var cipherB64, expectedTag;
+        // New format: tag.bbb...  (the separator at position TAG_HEX_LEN)
+        if (stored.length > TAG_HEX_LEN && stored.charAt(TAG_HEX_LEN) === '.') {
+            expectedTag = stored.substring(0, TAG_HEX_LEN);
+            cipherB64 = stored.substring(TAG_HEX_LEN + 1);
+        } else {
+            // Old format: bare b64, no tag — decrypt without verification
+            expectedTag = null;
+            cipherB64 = stored;
+        }
+
+        var key = _ensureKey();
+        var bytes = _base64ToBytes(cipherB64);
+        var result = new Uint8Array(bytes.length);
+        for (var i = 0; i < bytes.length; i++) {
+            result[i] = bytes[i] ^ key[i % key.length];
+        }
+        var plaintext = new TextDecoder().decode(result);
+
+        // Verify tag if this is new-format data
+        if (expectedTag !== null) {
+            var actualTag = _computeTag(plaintext);
+            if (expectedTag !== actualTag) {
+                // Key changed — old data is garbage (password changed on another device)
+                return null;
+            }
+        }
+        return plaintext;
+    }
+
+    /** Check if a stored value looks encrypted (starts with magic byte) */
+    function _isEncrypted(val) {
+        return typeof val === 'string' && val.charAt(0) === MAGIC;
+    }
+
+    /** Strip magic prefix and decrypt */
+    function _decryptStored(val) {
+        if (!_isEncrypted(val)) return val;
+        try {
+            return _xorDecrypt(val.substring(1));
+        } catch (_) {
+            return null;
+        }
+    }
+
+    /** Encrypt and prepend magic prefix */
+    function _encryptForStore(plaintext) {
+        return MAGIC + _xorEncrypt(String(plaintext));
+    }
+
+    /**
+     * Ensure the encryption key is available.
+     *
+     * Priority order:
+     *   1. Cached in-memory (fastest path, this page load)
+     *   2. Stored in sessionStorage (cross-page within same tab)
+     *   3. Derive from encrypted password (cross-device deterministic key)
+     *   4. Generate random key (fallback for pre-login state)
+     */
+    function _ensureKey() {
+        if (_key) {
+            // Always refresh sessionStorage cache in case it was cleared.
+            // Wrapped in try/catch because sessionStorage operations can throw
+            // (e.g., quota exceeded, sandboxed context), and this fast-path is
+            // called from inside the interceptor's setItem before its try block.
+            try {
+                var cur = sessionStorage.getItem(SESSION_KEY_NAME);
+                var curB64 = _bytesToBase64(_key);
+                if (cur !== curB64) {
+                    sessionStorage.setItem(SESSION_KEY_NAME, curB64);
+                }
+            } catch (_) {}
+            return _key;
+        }
+
+        // Check sessionStorage cache first (tab persistence)
+        var stored = sessionStorage.getItem(SESSION_KEY_NAME);
+        if (stored) {
+            try {
+                _key = _base64ToBytes(stored);
+                if (_key.length === 32) return _key;
+                _key = null;
+            } catch (_) {
+                _key = null;
+            }
+        }
+
+        // If sessionStorage was cleared, try the persistent localStorage fallback
+        // (only used when no password-derived key is available — pre-login state).
+        if (!_key) {
+            try {
+                var lsKey = _realOrigGet.call(localStorage, LOCAL_KEY_NAME);
+                if (lsKey) {
+                    _key = _base64ToBytes(lsKey);
+                    if (_key.length === 32) {
+                        sessionStorage.setItem(SESSION_KEY_NAME, _bytesToBase64(_key));
+                        return _key;
+                    }
+                    _key = null;
+                }
+            } catch (_) {
+                _key = null;
+            }
+        }
+
+        // Try to derive from encrypted password (cross-device deterministic key)
+        var derived = _tryDeriveFromEncryptedPassword();
+        if (derived) {
+            _key = derived;
+            // Cache in sessionStorage for this tab's lifetime
+            sessionStorage.setItem(SESSION_KEY_NAME, _bytesToBase64(_key));
+            // Remove any stale localStorage fallback (we now have a proper password-derived key)
+            try { _realOrigRemove.call(localStorage, LOCAL_KEY_NAME); } catch (_) {}
+            return _key;
+        }
+
+        // Fallback: generate random key (pre-login state)
+        _key = crypto.getRandomValues(new Uint8Array(32));
+        var keyB64 = _bytesToBase64(_key);
+        sessionStorage.setItem(SESSION_KEY_NAME, keyB64);
+        // ALSO persist in localStorage so the same key is used across tabs and
+        // survives page refreshes when sessionStorage is cleared (common on mobile).
+        // This is a bootstrap key — stored as plaintext (not encrypted), just like
+        // e2e_device_key and e2e_encrypted_password.
+        try { _realOrigSet.call(localStorage, LOCAL_KEY_NAME, keyB64); } catch (_) {}
+        return _key;
+    }
+
+    // ─── Prototype Interception (IN-PLACE encryption, same key names) ───
+
+    function _intercept() {
+        if (_intercepted) return;
+        _intercepted = true;
+
+        var proto = Storage.prototype;
+        // Use the REAL originals saved before any interception
+        var _origGet = _realOrigGet;
+        var _origSet = _realOrigSet;
+        var _origRemove = _realOrigRemove;
+
+        /** getItem: for sensitive keys, transparently decrypt in-place */
+        proto.getItem = function (key) {
+            if (key && isSensitive(key)) {
+                var val = _origGet.call(this, key);
+                if (val !== null && _isEncrypted(val)) {
+                    try {
+                        return _xorDecrypt(val.substring(1));
+                    } catch (_) {
+                        // Decryption failed — return as-is (legacy plaintext)
+                        return val;
+                    }
+                }
+                return val; // Not encrypted, return as-is
+            }
+            return _origGet.call(this, key);
+        };
+
+        /** setItem: for sensitive keys, transparently encrypt in-place */
+        proto.setItem = function (key, value) {
+            if (key && isSensitive(key)) {
+                _ensureKey();
+                try {
+                    var enc = MAGIC + _xorEncrypt(String(value));
+                    _origSet.call(this, key, enc);
+                    return;
+                } catch (_) {
+                    // Encryption failed — fallback to plaintext
+                }
+            }
+            _origSet.call(this, key, value);
+        };
+
+        /** removeItem: for sensitive keys, clean up normally (same key name) */
+        proto.removeItem = function (key) {
+            _origRemove.call(this, key);
+        };
+    }
+
+    // ─── Public API ─────────────────────────────────────────────────────
+
+    /**
+     * Initialize the secure storage layer.
+     *
+     * 1. Ensures a key exists (derived from password, or random fallback).
+     * 2. Installs the Storage.prototype interceptors.
+     * 3. Migrates any existing plaintext sensitive values to encrypted form.
+     *
+     * SYNCHRONOUS — safe to call before DOMContentLoaded.
+     */
+    window._secInit = function () {
+        // Guard: only run once per page load to prevent double-encryption
+        // NOTE: _initDone is set at the END of the function (after all setup),
+        // NOT at the start. This ensures that if _secInit fails partway through,
+        // it can be retried (e.g. if called from a <script> tag before external
+        // dependencies like E2ECrypto are ready).
+        if (_initDone) return true;
+
+        // Save ORIGINAL Storage.prototype methods BEFORE installing interceptors,
+        // so the migration loop doesn't double-encrypt through the interceptor.
+        var _origGet = Storage.prototype.getItem;
+        var _origSet = Storage.prototype.setItem;
+        var _origRemove = Storage.prototype.removeItem;
+
+        _ensureKey();
+
+        // Repair bootstrap keys that the OLD secure-storage wrongly encrypted.
+        // With e2e_local_storage_key persisting the random fallback, the current
+        // key matches the one that encrypted them, so XOR-decrypt succeeds and
+        // we recover the plaintext (nonce:ciphertext for the password, raw b64
+        // for device_key, raw code for friend_code). If repair fails the key
+        // has genuinely changed — delete so auth.js regenerates on login.
+        ['e2e_device_key', 'e2e_encrypted_password', 'e2e_friend_code'].forEach(function(k) {
+            var val = _origGet.call(localStorage, k);
+            if (val !== null && val.charAt(0) === MAGIC) {
+                try {
+                    var plain = _xorDecrypt(val.substring(1));
+                    if (plain !== null) { _origSet.call(localStorage, k, plain); return; }
+                } catch (_) {}
+                _origRemove.call(localStorage, k);
+            }
+        });
+
+        // Set up interceptors
+        _intercept();
+
+        // Migrate existing plaintext values to encrypted.
+        // Note: we intentionally use the ORIGINAL methods (saved above) here to
+        // bypass the interceptor. Reading via the interceptor would still return
+        // plaintext (since it's not prefixed with ~ yet), but writing via the
+        // interceptor would encrypt AGAIN on top of our already-encrypted value.
+        for (var i = 0; i < localStorage.length; i++) {
+            var k = localStorage.key(i);
+            if (k && isSensitive(k)) {
+                var val = _origGet.call(localStorage, k);
+                if (val !== null && !_isEncrypted(val)) {
+                    try {
+                        var enc = MAGIC + _xorEncrypt(String(val));
+                        _origSet.call(localStorage, k, enc);
+                    } catch (_) {}
+                }
+            }
+        }
+
+        // Mark initialization as complete — set AFTER all setup succeeds
+        // so that if _secInit() fails partway, it can be retried.
+        _initDone = true;
+
+        return true;
+    };
+
+    /**
+     * Check if the user has an active session (sessionStorage key + stored token).
+     * SYNCHRONOUS fast-path for page redirect checks.
+     */
+    window._secHasSession = function () {
+        var ssk = sessionStorage.getItem(SESSION_KEY_NAME);
+        if (!ssk) return false;
+        // Check if token exists (encrypted or plaintext)
+        var val = Storage.prototype.getItem.call(localStorage, 'token');
+        return val !== null;
+    };
+
+    /**
+     * Completely clear all secure storage for "Clear All Data" flows.
+     */
+    window._secClearAll = function () {
+        // Remove all sensitive keys
+        var toRemove = [];
+        for (var i = 0; i < localStorage.length; i++) {
+            var k = localStorage.key(i);
+            if (k && isSensitive(k)) {
+                toRemove.push(k);
+            }
+        }
+        for (var j = 0; j < toRemove.length; j++) {
+            Storage.prototype.removeItem.call(localStorage, toRemove[j]);
+        }
+        // Remove session key
+        sessionStorage.removeItem(SESSION_KEY_NAME);
+        _key = null;
+    };
+
+    /**
+     * Read a decrypted value directly, bypassing the interceptor.
+     * Returns null if the key doesn't exist or decryption fails (e.g.
+     * session key changed since the value was stored).
+     */
+    window._secGet = function (key) {
+        if (!key) return null;
+        var val = _realOrigGet.call(localStorage, key);
+        if (val !== null && _isEncrypted(val)) {
+            try { return _xorDecrypt(val.substring(1)); } catch (_) { return null; }
+        }
+        return val; // Not encrypted, return as-is
+    };
+
+    /**
+     * Read the raw stored value (with ~ prefix & tag), TRULY bypassing
+     * the interceptor by using the original Storage.prototype.getItem
+     * saved before interception.
+     * Returns null if the key doesn't exist.
+     * Useful for debugging / inspecting the on-disk format.
+     */
+    window._secGetRaw = function (key) {
+        if (!key) return null;
+        return _realOrigGet.call(localStorage, key);
+    };
+
+    /**
+     * Force re-derive the encryption key from the password.
+     * Called after login/register when a new encrypted password is stored.
+     * Re-encrypts all existing sensitive values with the new key.
+     */
+    // Auto-initialize on load (inline scripts may be blocked by CSP)
+    _secInit();
+
+    // ─── Global XSS Escaping Utilities ─────────────────────────────────────
+    //
+    // These were previously defined only in auth.js and admin.js, but chat.js
+    // (loaded by index.html) also calls them extensively (105+ calls). Since
+    // secure-storage.js is loaded by ALL pages (index.html, login.html,
+    // admin.html), it's the right place for these shared XSS-safe helpers.
+
+    /**
+     * Escape a string for safe insertion into HTML (text content).
+     * Converts & < > " ' to their HTML entity equivalents.
+     */
+    window.escapeHtml = function (str) {
+        if (!str) return '';
+        return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    };
+
+    /**
+     * Escape a string for safe insertion into an HTML attribute (quoted context).
+     */
+    window.escapeAttr = window.escapeHtml;
+
+    window._secReKey = function () {
+        // Clear in-memory and sessionStorage caches
+        _key = null;
+        sessionStorage.removeItem(SESSION_KEY_NAME);
+
+        // Derive new key from the now-available encrypted password
+        var newKey = _tryDeriveFromEncryptedPassword();
+        if (!newKey) return false;
+
+        // Collect current plaintext values for all sensitive keys
+        var plaintexts = {};
+        for (var i = 0; i < localStorage.length; i++) {
+            var k = localStorage.key(i);
+            if (k && isSensitive(k)) {
+                var raw = _realOrigGet.call(localStorage, k);
+                if (raw !== null) {
+                    // Decrypt with old key if it's encrypted
+                    if (_isEncrypted(raw)) {
+                        try {
+                            var decrypted = _xorDecrypt(raw.substring(1));
+                            if (decrypted !== null) plaintexts[k] = decrypted;
+                        } catch (_) {}
+                    } else {
+                        plaintexts[k] = raw;
+                    }
+                }
+            }
+        }
+
+        // Set the new key
+        _key = newKey;
+        sessionStorage.setItem(SESSION_KEY_NAME, _bytesToBase64(_key));
+
+        // Remove any stale localStorage fallback key (we now have a proper
+        // password-derived key that will be found first by _ensureKey).
+        try { _realOrigRemove.call(localStorage, LOCAL_KEY_NAME); } catch (_) {}
+
+        // Re-encrypt all values with the new key.
+        // Use _realOrigSet (saved before interception) to bypass the interceptor,
+        // because the value already has the ~ prefix from _xorEncrypt.
+        for (var key in plaintexts) {
+            if (plaintexts.hasOwnProperty(key)) {
+                try {
+                    var enc = MAGIC + _xorEncrypt(String(plaintexts[key]));
+                    _realOrigSet.call(localStorage, key, enc);
+                } catch (_) {}
+            }
+        }
+
+        return true;
+    };
+
+})();

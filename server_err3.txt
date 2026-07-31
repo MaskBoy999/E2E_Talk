@@ -1,0 +1,30 @@
+warning: unused variable: `username`
+    --> src\db.rs:2393:13
+     |
+2393 |         let username: String = conn
+     |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_username`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `username`
+    --> src\db.rs:3724:13
+     |
+3724 |         let username: String = conn
+     |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_username`
+
+warning: unused variable: `username`
+    --> src\db.rs:3795:13
+     |
+3795 |         let username: String = conn
+     |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_username`
+
+warning: unused variable: `username`
+    --> src\db.rs:3897:13
+     |
+3897 |         let username: String = conn
+     |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_username`
+
+warning: `e2e-chat` (bin "e2e-chat") generated 4 warnings (run `cargo fix --bin "e2e-chat" -p e2e-chat` to apply 4 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.28s
+     Running `target\debug\e2e-chat.exe`
+error: process didn't exit successfully: `target\debug\e2e-chat.exe` (exit code: 1)

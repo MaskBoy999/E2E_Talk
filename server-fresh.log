@@ -1,0 +1,11 @@
+[2m2026-07-31T15:47:36.275978Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Database setup status: configured
+[2m2026-07-31T15:47:36.276319Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Running orphan file cleanup...
+[2m2026-07-31T15:47:36.278874Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Orphan file cleanup complete.
+[2m2026-07-31T15:47:36.280170Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Auto-generated self-signed TLS certificates in certs
+[2m2026-07-31T15:47:36.280249Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m For trusted HTTPS, install mkcert and run:
+[2m2026-07-31T15:47:36.280283Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m   mkcert -install
+[2m2026-07-31T15:47:36.280308Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m   mkcert localhost 127.0.0.1 ::1
+[2m2026-07-31T15:47:36.280488Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Then set TLS_CERT_PATH and TLS_KEY_PATH env vars
+[2m2026-07-31T15:47:36.282298Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m Server starting on 0.0.0.0:54463
+[2m2026-07-31T15:47:36.282337Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m HTTPS available on https://localhost:3443
+[2m2026-07-31T15:47:36.282356Z[0m [32m INFO[0m [2me2e_chat[0m[2m:[0m HTTP available on http://localhost:54463

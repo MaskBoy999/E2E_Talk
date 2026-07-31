@@ -7,20 +7,35 @@ function generateCode(len) {
     return code;
 }
 
+// Single-flight guard so concurrent calls (e.g. a burst of renders on a stale
+// session) share one fetch instead of hammering /api/hmac-key.
+let _hmacKeyFetchPromise = null;
 async function ensureHmacKey() {
     var key = localStorage.getItem('e2e_hmac_key');
     if (key) return key;
-    try {
-        var res = await fetch('/api/hmac-key');
-        if (res.ok) {
-            var data = await res.json();
-            if (data.hmac_key) {
-                localStorage.setItem('e2e_hmac_key', data.hmac_key);
-                return data.hmac_key;
+    if (_hmacKeyFetchPromise) return _hmacKeyFetchPromise;
+    _hmacKeyFetchPromise = (async function () {
+        try {
+            var res = await fetch('/api/hmac-key');
+            if (res.ok) {
+                var data = await res.json();
+                if (data.hmac_key) {
+                    localStorage.setItem('e2e_hmac_key', data.hmac_key);
+                    return data.hmac_key;
+                }
             }
-        }
-    } catch (_) {}
-    return null;
+        } catch (_) {}
+        // Keep the residual HMAC isOwn fallback failure observable instead of
+        // silent — the raw-UUID primary check still covers modern messages, but
+        // this warns that the HMAC fallback can't match on this session.
+        console.warn('e2e_hmac_key fetch failed; HMAC isOwn fallback unavailable');
+        return null;
+    })();
+    try {
+        return await _hmacKeyFetchPromise;
+    } finally {
+        _hmacKeyFetchPromise = null;
+    }
 }
 
 let ws = null;
@@ -374,13 +389,14 @@ async function fetchAndCacheUserProfile(userId) {
         if (decrypted.display_name !== undefined) userDisplayNameCache[userId].display_name = decrypted.display_name;
         if (decrypted.username_color !== undefined) userDisplayNameCache[userId].username_color = decrypted.username_color;
         if (decrypted.username_border_color !== undefined) userDisplayNameCache[userId].username_border_color = decrypted.username_border_color;
-        if (data.profile_picture_file_id) userDisplayNameCache[userId].profile_picture_file_id = data.profile_picture_file_id;
+        // Use !== undefined so explicit null from server (field was removed) correctly
+        // clears the cache instead of being silently ignored by a falsy check.
+        if (data.profile_picture_file_id !== undefined) userDisplayNameCache[userId].profile_picture_file_id = data.profile_picture_file_id;
         // Extract raw file keys from decrypted profileData
-        if (decrypted.profile_picture_file_key) userDisplayNameCache[userId].profile_picture_file_key = decrypted.profile_picture_file_key;
-        if (decrypted.profile_banner_file_id) userDisplayNameCache[userId].profile_banner_file_id = decrypted.profile_banner_file_id;
-        if (decrypted.profile_banner_file_key) userDisplayNameCache[userId].profile_banner_file_key = decrypted.profile_banner_file_key;
+        if (decrypted.profile_picture_file_key !== undefined) userDisplayNameCache[userId].profile_picture_file_key = decrypted.profile_picture_file_key;
+        if (decrypted.profile_banner_file_id !== undefined) userDisplayNameCache[userId].profile_banner_file_id = decrypted.profile_banner_file_id;
+        if (decrypted.profile_banner_file_key !== undefined) userDisplayNameCache[userId].profile_banner_file_key = decrypted.profile_banner_file_key;
         scheduleUserDisplayNameSave();
-        // Don't call renderDmSidebar() here — it's handled by loadDmConversations or the caller.
         updateExistingMessageStyles(userId);
         updateMemberListItem(userId);
     } catch (e) {
@@ -406,13 +422,15 @@ async function fetchServerConversationProfile(userId, serverId, serverKey) {
         if (decrypted.display_name) userDisplayNameCache[userId].display_name = decrypted.display_name;
         if (decrypted.username_color) userDisplayNameCache[userId].username_color = decrypted.username_color;
         if (decrypted.username_border_color) userDisplayNameCache[userId].username_border_color = decrypted.username_border_color;
-        if (decrypted.profile_picture_file_id) userDisplayNameCache[userId].profile_picture_file_id = decrypted.profile_picture_file_id;
-        if (decrypted.profile_picture_file_key) userDisplayNameCache[userId].profile_picture_file_key = decrypted.profile_picture_file_key;
-        if (decrypted.profile_banner_file_id) userDisplayNameCache[userId].profile_banner_file_id = decrypted.profile_banner_file_id;
-        if (decrypted.profile_banner_file_key) userDisplayNameCache[userId].profile_banner_file_key = decrypted.profile_banner_file_key;
+        // Use !== undefined so explicit null (field was removed) clears the cache.
+        if (decrypted.profile_picture_file_id !== undefined) userDisplayNameCache[userId].profile_picture_file_id = decrypted.profile_picture_file_id;
+        if (decrypted.profile_picture_file_key !== undefined) userDisplayNameCache[userId].profile_picture_file_key = decrypted.profile_picture_file_key;
+        if (decrypted.profile_banner_file_id !== undefined) userDisplayNameCache[userId].profile_banner_file_id = decrypted.profile_banner_file_id;
+        if (decrypted.profile_banner_file_key !== undefined) userDisplayNameCache[userId].profile_banner_file_key = decrypted.profile_banner_file_key;
         scheduleUserDisplayNameSave();
         updateExistingMessageStyles(userId);
         updateMemberListItem(userId);
+        refreshDmProfileDisplay(userId);
     } catch (e) {}
 }
 
@@ -458,14 +476,15 @@ async function fetchDmConversationProfile(userId, dmChannelId) {
         if (decrypted.display_name) userDisplayNameCache[userId].display_name = decrypted.display_name;
         if (decrypted.username_color) userDisplayNameCache[userId].username_color = decrypted.username_color;
         if (decrypted.username_border_color) userDisplayNameCache[userId].username_border_color = decrypted.username_border_color;
-        if (decrypted.profile_picture_file_id) userDisplayNameCache[userId].profile_picture_file_id = decrypted.profile_picture_file_id;
-        if (decrypted.profile_picture_file_key) userDisplayNameCache[userId].profile_picture_file_key = decrypted.profile_picture_file_key;
-        if (decrypted.profile_banner_file_id) userDisplayNameCache[userId].profile_banner_file_id = decrypted.profile_banner_file_id;
-        if (decrypted.profile_banner_file_key) userDisplayNameCache[userId].profile_banner_file_key = decrypted.profile_banner_file_key;
+        // Use !== undefined so explicit null (field was removed) clears the cache.
+        if (decrypted.profile_picture_file_id !== undefined) userDisplayNameCache[userId].profile_picture_file_id = decrypted.profile_picture_file_id;
+        if (decrypted.profile_picture_file_key !== undefined) userDisplayNameCache[userId].profile_picture_file_key = decrypted.profile_picture_file_key;
+        if (decrypted.profile_banner_file_id !== undefined) userDisplayNameCache[userId].profile_banner_file_id = decrypted.profile_banner_file_id;
+        if (decrypted.profile_banner_file_key !== undefined) userDisplayNameCache[userId].profile_banner_file_key = decrypted.profile_banner_file_key;
         scheduleUserDisplayNameSave();
-        // Don't call renderDmSidebar() here — it's handled by loadDmConversations or the caller.
         updateExistingMessageStyles(userId);
         updateMemberListItem(userId);
+        refreshDmProfileDisplay(userId);
     } catch (e) {}
 }
 
@@ -775,6 +794,12 @@ document.addEventListener('DOMContentLoaded', () => {
     user = JSON.parse(userStr);
     document.getElementById("current-user").textContent = user.username;
     updateSidebarFooter();
+
+    // Auto-recover identity keys if they're missing (e.g. after secure-storage
+    // key migration that orphaned old encrypted values). This runs fire-and-forget;
+    // if recovery succeeds before the user clicks a channel, messages will load
+    // normally. If not, loadMessages/loadDmMessages have their own retry logic.
+    ensureIdentityKeys();
 
     // A missing key means this browser has not been linked to this account.
     // Never generate a replacement on login: doing that makes prior messages
@@ -1445,6 +1470,17 @@ document.addEventListener('DOMContentLoaded', () => {
             setTimeout(function () { overlay.remove(); }, 350);
         }
     }
+
+    // Fallback: if initialization fails for any reason (JS error, secure-storage
+    // migration issue, WebSocket timeout, etc.), hide the loading overlay after
+    // 15 seconds so the user isn't staring at a spinner forever.
+    setTimeout(function() {
+        var overlay = document.getElementById('loading-overlay');
+        if (overlay) {
+            overlay.classList.add('fade-out');
+            setTimeout(function() { overlay.remove(); }, 350);
+        }
+    }, 15000);
     loadServers().then(function () {
         if (!currentServerId) {
             // No server was auto-selected — enter DM view without auto-selecting any conversation
@@ -1515,19 +1551,10 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('profile-banner-remove-btn').addEventListener('click', function () {
             profileBannerFileId = null;
             profileBannerFileKey = null;
-            // Restore original banner from current profile in edit preview
+            _removeBannerFlag = true;
+            // Clear banner preview immediately
             var editBanner = document.getElementById('profile-edit-banner-img');
-            if (editBanner && profileOriginalData) {
-                var origBannerId = profileOriginalData.data.profile_banner_file_id;
-                var origBannerKey = profileOriginalData.data.profile_banner_file_key || null;
-                if (origBannerId) {
-                    getDecryptedFileUrl(origBannerId, origBannerKey, function(url) {
-                        editBanner.style.backgroundImage = url ? 'url(' + url + ')' : '';
-                    });
-                } else {
-                    editBanner.style.backgroundImage = '';
-                }
-            } else if (editBanner) {
+            if (editBanner) {
                 editBanner.style.backgroundImage = '';
             }
             document.getElementById('profile-banner-remove-btn').style.display = 'none';
@@ -1544,27 +1571,12 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('profile-avatar-remove-btn').addEventListener('click', function () {
             profilePfpFileId = null;
             profilePfpFileKey = null;
+            _removePfpFlag = true;
             var avatarEl = document.getElementById('profile-edit-avatar');
-            // Restore original PFP from current profile in edit preview
-            if (profileOriginalData) {
-                var origPicId = profileOriginalData.data.profile_picture_file_id;
-                var origPicKey = profileOriginalData.data.profile_picture_file_key || null;
-                var dn = document.getElementById('profile-edit-display-name').value || 'U';
-                if (origPicId) {
-                    getDecryptedFileUrl(origPicId, origPicKey, function(url) {
-                        if (url) {
-                            avatarEl.innerHTML = '<img src="' + url + '" alt="Avatar">';
-                            avatarEl.style.background = 'transparent';
-                        } else {
-                            avatarEl.innerHTML = '<div style="font-size:36px;color:#1a1a2e;font-weight:700;">' + escapeHtml(dn.charAt(0).toUpperCase()) + '</div>';
-                        }
-                    });
-                } else {
-                    avatarEl.innerHTML = '<div style="font-size:36px;color:#1a1a2e;font-weight:700;">' + escapeHtml(dn.charAt(0).toUpperCase()) + '</div>';
-                }
-            } else {
-                avatarEl.innerHTML = '<div style="font-size:36px;color:#1a1a2e;font-weight:700;">' + escapeHtml((document.getElementById('profile-edit-display-name').value || 'U').charAt(0).toUpperCase()) + '</div>';
-            }
+            // Show initial letter instead of removed PFP
+            var dn = document.getElementById('profile-edit-display-name').value || 'U';
+            avatarEl.innerHTML = '<div style="font-size:36px;color:#1a1a2e;font-weight:700;">' + escapeHtml(dn.charAt(0).toUpperCase()) + '</div>';
+            avatarEl.style.background = document.getElementById('profile-edit-color').value || '#4fc3f7';
             document.getElementById('profile-avatar-remove-btn').style.display = 'none';
         });
         // Banner crop confirm/cancel
@@ -5796,26 +5808,19 @@ function connectWebSocket(t) {
                         // Refresh existing messages and DM sidebar with updated display name/colors
                         updateExistingMessageStyles(data.user_id);
                         updateMemberListItem(data.user_id);
-                        // Light update: just refresh the affected DM item instead of re-rendering entire sidebar
-                        if (viewMode === 'dms') refreshDmSidebarItem(data.user_id);
-                        // Update DM chat header pic if viewing this user's DM
-                        if (currentDmOtherUser && data.user_id === currentDmOtherUser.id && currentDmChannelId) {
-                            var _hdrConv = dmConversations.find(function(c) { return c.dm_channel_id === currentDmChannelId; });
-                            var _hdrCache = userDisplayNameCache[data.user_id];
-                            var _hdrPicId = (_hdrCache && _hdrCache.profile_picture_file_id) || (_hdrConv && _hdrConv.other_profile_picture_file_id);
-                            if (_hdrPicId) {
-                                var _hdrPicUrl = getProfilePicUrl(_hdrPicId, data.user_id);
-                                if (_hdrPicUrl) {
-                                    var _hdrPicEl = document.querySelector('#channel-name .dm-chat-header-pic');
-                                    if (_hdrPicEl) {
-                                        if (_hdrPicEl.tagName === 'IMG') {
-                                            _hdrPicEl.src = _hdrPicUrl;
-                                        } else {
-                                            _hdrPicEl.outerHTML = '<img class="dm-chat-header-pic" src="' + _hdrPicUrl + '" alt="">';
-                                        }
-                                    }
-                                }
+                        // Re-render DM sidebar with updated profile data from cache
+                        if (viewMode === 'dms') {
+                            var _activeDmId = currentDmChannelId;
+                            renderDmSidebar();
+                            // Restore active class on the currently selected DM
+                            if (_activeDmId) {
+                                var _activeEl = document.querySelector('.dm-item[data-dm-id="' + _activeDmId + '"]');
+                                if (_activeEl) _activeEl.classList.add('active');
                             }
+                        }
+                        // Update DM chat header if viewing this user's DM
+                        if (currentDmOtherUser && data.user_id === currentDmOtherUser.id && currentDmChannelId) {
+                            refreshDmProfileDisplay(data.user_id);
                         }
                         if (profileModalUserId === data.user_id) {
                             var profileModal = document.getElementById('profile-modal');
@@ -5998,8 +6003,10 @@ function connectWebSocket(t) {
                                     if (myProfile.decrypted) myProfile.decrypted.theme_bg_color = decryptedProfileUpdate.theme_bg_color;
                                 }
                                 // Extract pic/banner from decrypted profile data
-                                if (decryptedProfileUpdate.profile_picture_file_id) myProfile.profile_picture_file_id = decryptedProfileUpdate.profile_picture_file_id;
-                                if (decryptedProfileUpdate.profile_banner_file_id) myProfile.profile_banner_file_id = decryptedProfileUpdate.profile_banner_file_id;
+                                // Use !== undefined so explicit null (field was removed) clears myProfile.
+                                // The old if(value) check was falsy for null, making removals invisible.
+                                if (decryptedProfileUpdate.profile_picture_file_id !== undefined) myProfile.profile_picture_file_id = decryptedProfileUpdate.profile_picture_file_id;
+                                if (decryptedProfileUpdate.profile_banner_file_id !== undefined) myProfile.profile_banner_file_id = decryptedProfileUpdate.profile_banner_file_id;
                                 if (decryptedProfileUpdate.encrypted_pic_key) {
                                     myProfile.encrypted_pic_key = decryptedProfileUpdate.encrypted_pic_key;
                                     myProfile.pic_key_nonce = decryptedProfileUpdate.pic_key_nonce;
@@ -6045,12 +6052,16 @@ function connectWebSocket(t) {
                         }
                         // Pic/banner keys now come from decrypted encrypted_profile_data,
                         // no longer need separate decryptOwnProfileFileKeys call.
-                        user.profile_picture_file_id = data.profile_picture_file_id || user.profile_picture_file_id;
-                        user.profile_picture_file_key = data.profile_picture_file_key || user.profile_picture_file_key;
+                        // Use !== undefined (not ||) so that an explicit null from the server
+                        // (meaning the field was removed) correctly propagates. The || operator
+                        // treats null as falsy and preserves the old value, making removals stick
+                        // only after a full page refresh.
+                        user.profile_picture_file_id = data.profile_picture_file_id !== undefined ? data.profile_picture_file_id : user.profile_picture_file_id;
+                        user.profile_picture_file_key = data.profile_picture_file_key !== undefined ? data.profile_picture_file_key : user.profile_picture_file_key;
                         if (myProfile) {
-                            myProfile.profile_picture_file_id = data.profile_picture_file_id || myProfile.profile_picture_file_id;
-                            myProfile.profile_picture_file_id_hash = data.profile_picture_file_id_hash || myProfile.profile_picture_file_id_hash;
-                            myProfile.profile_picture_file_key = data.profile_picture_file_key || myProfile.profile_picture_file_key;
+                            myProfile.profile_picture_file_id = data.profile_picture_file_id !== undefined ? data.profile_picture_file_id : myProfile.profile_picture_file_id;
+                            myProfile.profile_picture_file_id_hash = data.profile_picture_file_id_hash !== undefined ? data.profile_picture_file_id_hash : myProfile.profile_picture_file_id_hash;
+                            myProfile.profile_picture_file_key = data.profile_picture_file_key !== undefined ? data.profile_picture_file_key : myProfile.profile_picture_file_key;
                         }
                         localStorage.setItem('user', JSON.stringify(user));
                         updateSidebarFooter();
@@ -6312,6 +6323,75 @@ function connectWebSocket(t) {
 }
 
 // --- E2E Key Management ---
+
+/**
+ * Try to recover identity keys from the server key blob when they're missing.
+ * This handles the case where the secure-storage encryption key changed
+ * (e.g. after the migration that deletes old encrypted bootstrap keys),
+ * leaving the identity keys orphaned and unreadable.
+ *
+ * Steps:
+ *   1. Check if identity keys are already available
+ *   2. Get the stored password from e2e_encrypted_password
+ *   3. Fetch the encrypted key blob from /api/key-blob
+ *   4. Decrypt with the password, restore all keys via restoreKeyBundle
+ *   5. Call _secReKey() to re-encrypt with the password-derived key
+ *
+ * Returns true if keys were successfully recovered.
+ */
+async function ensureIdentityKeys() {
+    // Check if identity keys are already available
+    try {
+        if (E2ECrypto.getIdentityKeyPair(user.id)) return true;
+    } catch (_) {}
+
+    // Try to get the stored password
+    var password = loadDecryptedPassword();
+    if (!password) {
+        // No stored password available — show the password recovery modal
+        // so the user can type their password to recover keys from the server blob.
+        // This covers users who cleared browser data but remember their password.
+        showFriendCodePasswordModal();
+        return false;
+    }
+
+    try {
+        // Ensure e2e_encrypted_password exists so _secReKey() can derive the
+        // password-based key. If the migration deleted it (because it was in
+        // the old encrypted format), recreate it from the decrypted password.
+        // storeEncryptedPassword also creates e2e_device_key if missing internally.
+        if (!localStorage.getItem('e2e_encrypted_password')) {
+            storeEncryptedPassword(password);
+        }
+
+        // Fetch the encrypted key blob from the server
+        const res = await authFetch('/api/key-blob');
+        if (!res.ok) return false;
+
+        const blobData = await res.json();
+        if (!blobData.encrypted_blob || !blobData.salt || !blobData.nonce) return false;
+
+        // Decrypt the bundle with the password
+        const bundle = E2ECrypto.decryptKeyBundle(
+            blobData.encrypted_blob, password, blobData.salt, blobData.nonce
+        );
+        if (!bundle) return false;
+
+        // Restore all keys from the bundle (identity keys, server keys, friend code, etc.)
+        E2ECrypto.restoreKeyBundle(bundle);
+
+        // Re-key secure-storage to use the password-derived key.
+        // This re-encrypts all restored keys with the deterministic password-derived key
+        // (instead of the random fallback key that _secInit() uses when no password is available).
+        if (window._secReKey) {
+            try { window._secReKey(); } catch (_) {}
+        }
+
+        return !!E2ECrypto.getIdentityKeyPair(user.id);
+    } catch (_) {
+        return false;
+    }
+}
 
 async function fetchAndDecryptServerKey(serverId) {
     // Skip key_needed broadcast when the user has disabled the refresh heartbeat
@@ -6952,6 +7032,59 @@ async function selectChannel(channelId, channelName, element) {
 
 // --- Messages ---
 
+// Pagination state per channel — keyed by channelId
+var _messagePagination = {};
+
+// Pagination state per DM — keyed by dmChannelId
+var _dmMessagePagination = {};
+
+// Scroll listener reference so we can clean up when switching channels
+var _messageScrollListener = null;
+
+const PAGE_SIZE = 50;
+
+// Jump-to-bottom floating button reference (single, shared by channels and DMs)
+var _jumpToBottomBtn = null;
+
+/**
+ * Create or re-append the 'Jump to latest' floating button to the message list.
+ * The button uses position: sticky to float at the bottom of the scroll container.
+ */
+function ensureJumpToBottomButton() {
+    var list = document.getElementById('message-list');
+    if (!list) return;
+    if (!_jumpToBottomBtn) {
+        _jumpToBottomBtn = document.createElement('button');
+        _jumpToBottomBtn.className = 'jump-to-bottom';
+        _jumpToBottomBtn.innerHTML = '<span class="arrow">&#9660;</span> Jump to latest';
+        _jumpToBottomBtn.setAttribute('aria-label', 'Jump to latest messages');
+        _jumpToBottomBtn.addEventListener('click', function () {
+            list.scrollTo({ top: list.scrollHeight, behavior: 'smooth' });
+            _jumpToBottomBtn.classList.remove('visible');
+        });
+    }
+    // Re-append if it was removed by innerHTML clearing
+    if (!_jumpToBottomBtn.parentNode || _jumpToBottomBtn.parentNode !== list) {
+        list.appendChild(_jumpToBottomBtn);
+    }
+    // Show/hide based on current scroll position
+    updateJumpToBottomButton(list);
+}
+
+/**
+ * Show or hide the jump-to-bottom button based on scroll position.
+ * Visible when scrolled more than 200px above the bottom.
+ */
+function updateJumpToBottomButton(list) {
+    if (!_jumpToBottomBtn || !list) return;
+    var distanceFromBottom = list.scrollHeight - list.scrollTop - list.clientHeight;
+    if (distanceFromBottom > 200) {
+        _jumpToBottomBtn.classList.add('visible');
+    } else {
+        _jumpToBottomBtn.classList.remove('visible');
+    }
+}
+
 async function loadMessages(channelId, aroundMessageId) {
     // Clean up old blob URLs when switching channels
     revokeBlobUrls();
@@ -6960,6 +7093,11 @@ async function loadMessages(channelId, aroundMessageId) {
 
     // CRITICAL: Ensure the channel key is available before fetching messages
     if (currentServerId && !E2ECrypto.getServerKey(currentServerId)) {
+        // If the server key is missing, the identity keys may be orphaned.
+        // Try recovering them from the server key blob before giving up.
+        if (!E2ECrypto.getIdentityKeyPair(user.id)) {
+            await ensureIdentityKeys();
+        }
         var fetched = await fetchAndDecryptServerKey(currentServerId);
         if (!fetched) {
             list.innerHTML = '<div class="welcome" style="color:#f44336">Cannot load messages: encryption key unavailable</div>';
@@ -6967,8 +7105,16 @@ async function loadMessages(channelId, aroundMessageId) {
         }
     }
 
+    // Reset pagination state for this channel
+    _messagePagination[channelId] = {
+        oldestTimestamp: null,
+        oldestMessageId: null,
+        loading: false,
+        hasMore: true
+    };
+
     try {
-        let url = `/api/channels/${channelId}/messages`;
+        let url = `/api/channels/${channelId}/messages?limit=${PAGE_SIZE}`;
         if (aroundMessageId) {
             url = `/api/channels/${channelId}/messages/around/${aroundMessageId}`;
         }
@@ -6977,9 +7123,22 @@ async function loadMessages(channelId, aroundMessageId) {
 
         list.innerHTML = '';
 
+        // Re-append the jump-to-bottom button after clearing the list
+        ensureJumpToBottomButton();
+
         if (!Array.isArray(messages) || messages.length === 0) {
             list.innerHTML = '<div class="welcome">No messages yet. Say hello!</div>';
+            ensureJumpToBottomButton();
+            _messagePagination[channelId].hasMore = false;
             return;
+        }
+
+        // Track the oldest message timestamp for pagination
+        _messagePagination[channelId].oldestTimestamp = messages[0].timestamp;
+        _messagePagination[channelId].oldestMessageId = messages[0].id;
+        // If we got fewer than PAGE_SIZE, there's nothing more to load
+        if (messages.length < PAGE_SIZE && !aroundMessageId) {
+            _messagePagination[channelId].hasMore = false;
         }
 
         for (const msg of messages) {
@@ -7011,13 +7170,324 @@ async function loadMessages(channelId, aroundMessageId) {
                 }
             }
         }
+
+        // Set up infinite scroll listener
+        setupMessageScrollListener(channelId);
     } catch (err) {
         console.error('Failed to load messages:', err);
         list.innerHTML = '<div class="welcome" style="color:#f44336">Failed to load messages</div>';
     }
 }
 
+/**
+ * Set up scroll-to-top pagination for the message list.
+ * Removes any previous listener first.
+ */
+function setupMessageScrollListener(channelId) {
+    // Clean up BOTH old listeners to prevent cross-contamination between views
+    if (_messageScrollListener) {
+        var oldList = document.getElementById('message-list');
+        if (oldList) oldList.removeEventListener('scroll', _messageScrollListener);
+        _messageScrollListener = null;
+    }
+    if (_dmScrollListener) {
+        var oldDmList = document.getElementById('message-list');
+        if (oldDmList) oldDmList.removeEventListener('scroll', _dmScrollListener);
+        _dmScrollListener = null;
+    }
+
+    var list = document.getElementById('message-list');
+    if (!list) return;
+
+    // Ensure the jump-to-bottom button exists in the DOM
+    ensureJumpToBottomButton();
+
+    _messageScrollListener = function () {
+        var state = _messagePagination[channelId];
+
+        // Update jump-to-bottom button visibility regardless of pagination state
+        updateJumpToBottomButton(list);
+
+        if (!state || !state.hasMore || state.loading) return;
+
+        // When scrolled near the top (within 80px), load more
+        if (list.scrollTop <= 80) {
+            loadMoreMessages(channelId);
+        }
+    };
+
+    list.addEventListener('scroll', _messageScrollListener);
+}
+
+/**
+ * Load older messages and prepend them to the message list.
+ */
+async function loadMoreMessages(channelId) {
+    var state = _messagePagination[channelId];
+    if (!state || !state.hasMore || state.loading || !state.oldestTimestamp) return;
+    state.loading = true;
+
+    var list = document.getElementById('message-list');
+    if (!list) { state.loading = false; return; }
+
+    // Show a loading indicator at the top
+    var spinner = document.createElement('div');
+    spinner.className = 'loading-more';
+    spinner.textContent = 'Loading older messages...';
+    spinner.style.cssText = 'text-align:center;padding:8px;color:#888;font-size:12px;';
+    list.insertBefore(spinner, list.firstChild);
+
+    // Save scroll state before prepending
+    var oldScrollHeight = list.scrollHeight;
+    // We want to stay at the same "visual position" — the top of the old content
+    // will shift down by the height of the prepended content
+
+    try {
+        var url = `/api/channels/${channelId}/messages?limit=${PAGE_SIZE}&before=${encodeURIComponent(state.oldestTimestamp)}&before_id=${encodeURIComponent(state.oldestMessageId || '')}`;
+        var res = await authFetch(url);
+        var olderMessages = await res.json();
+
+        // Remove spinner
+        if (spinner.parentNode) spinner.parentNode.removeChild(spinner);
+
+        if (!Array.isArray(olderMessages) || olderMessages.length === 0) {
+            state.hasMore = false;
+            state.loading = false;
+            return;
+        }
+
+        // Update oldest timestamp + id cursor
+        state.oldestTimestamp = olderMessages[0].timestamp;
+        state.oldestMessageId = olderMessages[0].id;
+        if (olderMessages.length < PAGE_SIZE) {
+            state.hasMore = false;
+        }
+
+        // Render each older message by prepending it (appendMessage with true = prepend)
+        // Save the grouping state so it can be restored after prepending.
+        // CRITICAL: reset it BEFORE prepending — otherwise the first prepended message
+        // (newest of the older batch) is compared against the NEWEST message of the
+        // initial load, a non-adjacent message. A same-sender match within 2 minutes
+        // wrongly adds .grouped, which hides the sender header (CSS: display:none),
+        // so the sender of the first older message never appears.
+        var _savedMsgGroup = lastMessageInfo;
+        lastMessageInfo = { senderId: null, channelId: null, time: 0 };
+        // The batch arrives oldest-first (ASC); prepend newest-first so the list
+        // stays in chronological order (prepending the ASC batch directly reverses it).
+        for (var i = olderMessages.length - 1; i >= 0; i--) {
+            await appendMessage(olderMessages[i], true);
+        }
+        lastMessageInfo = _savedMsgGroup;
+
+        // Maintain scroll position: after prepending, the content we were viewing
+        // has shifted down by (newScrollHeight - oldScrollHeight) pixels.
+        var newScrollHeight = list.scrollHeight;
+        list.scrollTop = newScrollHeight - oldScrollHeight;
+
+        // Update profile styles for loaded senders
+        for (var i = 0; i < olderMessages.length; i++) {
+            var _lsid = olderMessages[i].sender_user_id || olderMessages[i].sender_id;
+            if (_lsid) updateExistingMessageStyles(_lsid);
+        }
+
+        // Prefetch conversation profiles for senders not yet cached so their display
+        // names/colors/PFP render correctly (mirrors the initial-load behavior).
+        if (currentServerId) {
+            var srvKey2 = E2ECrypto.getServerKey(currentServerId);
+            if (srvKey2) {
+                var srvUncached = {};
+                for (var j = 0; j < olderMessages.length; j++) {
+                    var senderUserId = olderMessages[j].sender_user_id || olderMessages[j].sender_id;
+                    if (olderMessages[j].sender_id && senderUserId !== user.id && !userDisplayNameCache[senderUserId]) {
+                        srvUncached[senderUserId] = true;
+                    }
+                }
+                for (var sid in srvUncached) {
+                    fetchServerConversationProfile(sid, currentServerId, srvKey2);
+                }
+            }
+        }
+    } catch (err) {
+        console.error('Failed to load more messages:', err);
+        if (spinner.parentNode) spinner.parentNode.removeChild(spinner);
+    }
+
+    state.loading = false;
+}
+
+/**
+ * Render a message into a given DOM element (used by both appendMessage and prepend).
+ * @param {HTMLElement} div - The container element
+ * @param {Object} msg - The message object from the API
+ * @param {string} channelId - The channel ID
+ * @param {boolean} [isPrepend=false] - If true, the scroll event won't be triggered
+ */
+
+// DM scroll listener reference for cleanup
+var _dmScrollListener = null;
+
+/**
+ * Set up scroll-to-top pagination for DM message list.
+ */
+function setupDmScrollListener(dmChannelId) {
+    // Clean up BOTH old listeners to prevent cross-contamination between views
+    if (_dmScrollListener) {
+        var oldList = document.getElementById('message-list');
+        if (oldList) oldList.removeEventListener('scroll', _dmScrollListener);
+        _dmScrollListener = null;
+    }
+    if (_messageScrollListener) {
+        var oldChList = document.getElementById('message-list');
+        if (oldChList) oldChList.removeEventListener('scroll', _messageScrollListener);
+        _messageScrollListener = null;
+    }
+    
+    var list = document.getElementById('message-list');
+    if (!list) return;
+    
+    // Ensure the jump-to-bottom button exists in the DOM
+    ensureJumpToBottomButton();
+    
+    _dmScrollListener = function () {
+        var state = _dmMessagePagination[dmChannelId];
+
+        // Update jump-to-bottom button visibility regardless of pagination state
+        updateJumpToBottomButton(list);
+
+        if (!state || !state.hasMore || state.loading) return;
+        if (list.scrollTop <= 80) {
+            loadMoreDmMessages(dmChannelId);
+        }
+    };
+    
+    list.addEventListener('scroll', _dmScrollListener);
+}
+
+/**
+ * Load older DM messages and prepend them.
+ */
+async function loadMoreDmMessages(dmChannelId) {
+    var state = _dmMessagePagination[dmChannelId];
+    if (!state || !state.hasMore || state.loading || !state.oldestTimestamp) return;
+    state.loading = true;
+    
+    var list = document.getElementById('message-list');
+    if (!list) { state.loading = false; return; }
+    
+    // Show spinner at top
+    var spinner = document.createElement('div');
+    spinner.textContent = 'Loading older messages...';
+    spinner.style.cssText = 'text-align:center;padding:8px;color:#888;font-size:12px;';
+    list.insertBefore(spinner, list.firstChild);
+    
+    var oldScrollHeight = list.scrollHeight;
+    
+    try {
+        var url = '/api/dm/' + dmChannelId + '/messages?limit=' + PAGE_SIZE + '&before=' + encodeURIComponent(state.oldestTimestamp) + '&before_id=' + encodeURIComponent(state.oldestMessageId || '');
+        var res = await authFetch(url);
+        var olderMessages = await res.json();
+        
+        if (spinner.parentNode) spinner.parentNode.removeChild(spinner);
+        
+        if (!Array.isArray(olderMessages) || olderMessages.length === 0) {
+            state.hasMore = false;
+            state.loading = false;
+            return;
+        }
+        
+        // Prepending requires identity key and other user's public key.
+        // Check BEFORE advancing the pagination cursor so a missing key doesn't
+        // permanently skip the fetched batch (cursor would move past it).
+        var kp = E2ECrypto.getIdentityKeyPair();
+        if (!kp) { state.loading = false; return; }
+        
+        state.oldestTimestamp = olderMessages[0].timestamp;
+        state.oldestMessageId = olderMessages[0].id;
+        if (olderMessages.length < PAGE_SIZE) {
+            state.hasMore = false;
+        }
+        
+        // Get the other user's public key from dmConversations or fetch via API
+        var conv = dmConversations.find(function(c) { return c.dm_channel_id === dmChannelId; });
+        var otherPublicKey = null;
+        if (conv && conv.other_public_key) {
+            otherPublicKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(conv.other_public_key));
+        } else if (conv) {
+            try {
+                var _idRes = await authFetch('/api/identity/' + encodeURIComponent(conv.other_user_id));
+                if (_idRes.ok) {
+                    var _idData = await _idRes.json();
+                    if (_idData.identity_public_key) {
+                        otherPublicKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(_idData.identity_public_key));
+                        conv.other_public_key = _idData.identity_public_key;
+                    }
+                }
+            } catch (_) {}
+        }
+        
+        // Save the grouping state so it can be restored after prepending.
+        // CRITICAL: reset it BEFORE prepending — otherwise the first prepended message
+        // is compared against the NEWEST message of the initial load (non-adjacent).
+        // A same-sender match within 2 minutes wrongly adds .grouped, hiding the
+        // sender header via CSS, so the sender never appears.
+        var _savedDmGroup = lastDmMessageInfo;
+        lastDmMessageInfo = { senderId: null, dmChannelId: null, time: 0 };
+        // Prepend newest-first so the batch keeps chronological order (prepending
+        // the ASC batch directly would reverse it).
+        for (var i = olderMessages.length - 1; i >= 0; i--) {
+            await appendDmMessage(olderMessages[i], kp, otherPublicKey, true);
+        }
+        lastDmMessageInfo = _savedDmGroup;
+        
+        // Maintain scroll position
+        var newScrollHeight = list.scrollHeight;
+        list.scrollTop = newScrollHeight - oldScrollHeight;
+        
+        // Update profile styles
+        for (var i = 0; i < olderMessages.length; i++) {
+            var _lsid = olderMessages[i].sender_user_id || olderMessages[i].sender_id;
+            if (_lsid) updateExistingMessageStyles(_lsid);
+        }
+
+        // Prefetch DM conversation profiles for senders not yet cached so display
+        // names/colors/PFP render correctly (mirrors the initial-load behavior).
+        var dmUncached = {};
+        for (var j = 0; j < olderMessages.length; j++) {
+            var sidCache = olderMessages[j].sender_user_id || olderMessages[j].sender_id;
+            if (olderMessages[j].sender_id && sidCache !== user.id && !userDisplayNameCache[sidCache]) {
+                dmUncached[sidCache] = true;
+            }
+        }
+        for (var sid3 in dmUncached) {
+            (function(_sid) {
+                fetchDmConversationProfile(_sid, dmChannelId).then(function() {
+                    if (_sid) { refreshDmSidebarItem(_sid); updateMemberListItem(_sid); }
+                });
+            })(sid3);
+        }
+    } catch (err) {
+        console.error('Failed to load more DM messages:', err);
+        if (spinner.parentNode) spinner.parentNode.removeChild(spinner);
+    }
+    
+    state.loading = false;
+}
+
 // Try decrypting message content / snapshot / keys with ALL known server key versions
+// Normalize a field that may arrive as a raw byte array (JSON number array from a
+// buggy/older REST response) into a base64 string so decrypt paths never choke.
+// Returns the value unchanged when it's already a string (or null/undefined).
+function normalizeB64Field(v) {
+    if (Array.isArray(v)) {
+        try {
+            return E2ECrypto.arrayBufferToBase64(Uint8Array.from(v));
+        } catch (_) {
+            return null;
+        }
+    }
+    return v;
+}
+
 function tryDecryptWithAllKeys(serverId, ciphertextB64, nonceB64) {
     if (!serverId || !ciphertextB64 || !nonceB64) return null;
     // getAllServerKeys returns [currentKey, ...historicalKeys]
@@ -7055,9 +7525,21 @@ async function appendMessage(msg) {
 
     var senderIdForCache = msg.sender_user_id || msg.sender_id;
     const myUserId = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')).id : '';
-    const hmacKey = localStorage.getItem('e2e_hmac_key');
+    // Self-heal stale sessions: if e2e_hmac_key is missing (cleared storage, or a
+    // session from before the key existed), fetch it now so the HMAC fallback
+    // below can never silently fail. ensureHmacKey() returns instantly when the
+    // key is already present, so this is a no-op in the common path.
+    var hmacKey = localStorage.getItem('e2e_hmac_key');
+    if (!hmacKey && myUserId) {
+        hmacKey = await ensureHmacKey();
+    }
     const mySenderId = (hmacKey && myUserId) ? E2ECrypto.hmacHex(hmacKey, myUserId) : myUserId;
-    const isOwn = msg.sender_id === mySenderId;
+    // Own-message detection. Prefer the raw UUID comparison (sender_user_id === user.id)
+    // because it doesn't depend on the e2e_hmac_key being present/consistent in
+    // localStorage — a missing/stale key previously made every own message render
+    // without edit/delete buttons. Keep the HMAC'd sender_id comparison as fallback
+    // for messages that only carry sender_id.
+    const isOwn = (msg.sender_user_id && msg.sender_user_id === myUserId) || msg.sender_id === mySenderId;
 
     // Message grouping: same sender within 2 minutes in same channel
     const msgTime = new Date(msg.timestamp).getTime();
@@ -7071,6 +7553,13 @@ async function appendMessage(msg) {
     // so the snapshot values override the API response values
     if (msg.encrypted_profile_snapshot && msg.profile_snapshot_nonce && msg.sender_id && currentServerId) {
         try {
+            // Defensive: a stale/buggy REST response may deliver these as raw byte
+            // arrays instead of base64 strings — normalize before decrypting.
+            msg.encrypted_profile_snapshot = normalizeB64Field(msg.encrypted_profile_snapshot);
+            msg.profile_snapshot_nonce = normalizeB64Field(msg.profile_snapshot_nonce);
+            if (!msg.encrypted_profile_snapshot || !msg.profile_snapshot_nonce) {
+                console.warn('Failed to normalize profile snapshot fields:', msg.sender_id);
+            }
             var snapDec = tryDecryptWithAllKeys(currentServerId, msg.encrypted_profile_snapshot, msg.profile_snapshot_nonce);
             if (snapDec) {
                     var snap = JSON.parse(snapDec);
@@ -7466,8 +7955,13 @@ async function appendMessage(msg) {
         });
     }
 
-    list.appendChild(div);
-    list.scrollTop = list.scrollHeight;
+    // If second argument is truthy, prepend at top; otherwise append at bottom and scroll to it
+    if (arguments.length >= 2 && arguments[1]) {
+        list.insertBefore(div, list.firstChild);
+    } else {
+        list.appendChild(div);
+        list.scrollTop = list.scrollHeight;
+    }
 }
 
 async function loadStickerPreview(container, stickerData) {
@@ -9073,12 +9567,41 @@ async function loadDmMessages(dmChannelId, otherUserId) {
     const list = document.getElementById('message-list');
     list.innerHTML = '<div class="welcome">Loading messages...</div>';
 
+    // Reset pagination state for this DM channel
+    _dmMessagePagination[dmChannelId] = {
+        oldestTimestamp: null,
+        oldestMessageId: null,
+        loading: false,
+        hasMore: true
+    };
+
     try {
-        const res = await authFetch('/api/dm/' + dmChannelId + '/messages');
+        const res = await authFetch('/api/dm/' + dmChannelId + '/messages?limit=' + PAGE_SIZE);
         const messages = await res.json();
+        
+        // Track pagination state
+        if (Array.isArray(messages) && messages.length > 0) {
+            _dmMessagePagination[dmChannelId].oldestTimestamp = messages[0].timestamp;
+            _dmMessagePagination[dmChannelId].oldestMessageId = messages[0].id;
+            if (messages.length < PAGE_SIZE) {
+                _dmMessagePagination[dmChannelId].hasMore = false;
+            }
+        } else {
+            _dmMessagePagination[dmChannelId].hasMore = false;
+        }
         list.innerHTML = '';
+        // Re-append the jump-to-bottom button after clearing the list
+        ensureJumpToBottomButton();
 
         const kp = E2ECrypto.getIdentityKeyPair();
+        if (!kp) {
+            // Identity keys are missing — try recovering from the server key blob.
+            // If recovery succeeds, re-run the whole function with restored keys.
+            var recovered = await ensureIdentityKeys();
+            if (recovered) {
+                return loadDmMessages(dmChannelId, otherUserId);
+            }
+        }
 
         // Resolve the other user's identity key so we can decrypt messages.
         // If the fetch fails (e.g. the user has no public key yet),
@@ -9171,13 +9694,16 @@ async function loadDmMessages(dmChannelId, otherUserId) {
         for (var _dosid in otherSenderIds) {
             if (_dosid) updateExistingMessageStyles(_dosid);
         }
+
+        // Set up infinite scroll for DM messages
+        setupDmScrollListener(dmChannelId);
     } catch (err) {
         console.error('Failed to load DM messages:', err);
         list.innerHTML = '<div class="welcome" style="color:#f44336">Failed to load messages</div>';
     }
 }
 
-function appendDmMessage(msg, kp, otherPublicKey) {
+async function appendDmMessage(msg, kp, otherPublicKey) {
     const list = document.getElementById('message-list');
     const div = document.createElement('div');
     div.className = 'message';
@@ -9189,9 +9715,20 @@ function appendDmMessage(msg, kp, otherPublicKey) {
     var senderIdForCache = msg.sender_user_id || msg.sender_id;
     div.setAttribute('data-sender-user-id', senderIdForCache);
     const myUserId = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')).id : '';
-    const hmacKey = localStorage.getItem('e2e_hmac_key');
+    // Self-heal stale sessions: if e2e_hmac_key is missing (cleared storage, or a
+    // session from before the key existed), fetch it now so the HMAC fallback
+    // below can never silently fail. ensureHmacKey() returns instantly when the
+    // key is already present, so this is a no-op in the common path.
+    var hmacKey = localStorage.getItem('e2e_hmac_key');
+    if (!hmacKey && myUserId) {
+        hmacKey = await ensureHmacKey();
+    }
     const mySenderId = (hmacKey && myUserId) ? E2ECrypto.hmacHex(hmacKey, myUserId) : myUserId;
-    const isOwn = msg.sender_id === mySenderId;
+    // Own-message detection. Prefer the raw UUID comparison (sender_user_id === user.id)
+    // because it doesn't depend on e2e_hmac_key being present/consistent in localStorage
+    // — a missing/stale key previously made every own message render without
+    // edit/delete buttons. Keep the HMAC'd sender_id comparison as fallback.
+    const isOwn = (msg.sender_user_id && msg.sender_user_id === myUserId) || msg.sender_id === mySenderId;
 
     // DM message grouping: same sender within 2 minutes in same DM channel
     const msgTime = new Date(msg.timestamp).getTime();
@@ -9205,6 +9742,13 @@ function appendDmMessage(msg, kp, otherPublicKey) {
     // so the snapshot values override the API response values
     if (msg.encrypted_profile_snapshot && msg.profile_snapshot_nonce && msg.sender_id && kp && otherPublicKey) {
         try {
+            // Defensive: a stale/buggy REST response may deliver these as raw byte
+            // arrays instead of base64 strings — normalize before decrypting.
+            msg.encrypted_profile_snapshot = normalizeB64Field(msg.encrypted_profile_snapshot);
+            msg.profile_snapshot_nonce = normalizeB64Field(msg.profile_snapshot_nonce);
+            if (!msg.encrypted_profile_snapshot || !msg.profile_snapshot_nonce) {
+                console.warn('Failed to normalize DM profile snapshot fields:', msg.sender_id);
+            }
             var snapDmId = msg.dm_channel_id || currentDmChannelId;
             var snapDec = E2ECrypto.decryptDm(msg.encrypted_profile_snapshot, msg.profile_snapshot_nonce, snapDmId, kp.privateKey, otherPublicKey, null);
             if (snapDec) {
@@ -9247,10 +9791,10 @@ function appendDmMessage(msg, kp, otherPublicKey) {
                 if (cp.username_color) msg.sender_username_color = cp.username_color;
                 if (cp.username_border_color) msg.sender_username_border_color = cp.username_border_color;
                 if (cp.profile_picture_file_id) msg.sender_profile_pic = cp.profile_picture_file_id;
-                if (!userDisplayNameCache[msg.sender_id]) userDisplayNameCache[msg.sender_id] = {};
-                if (cp.display_name) userDisplayNameCache[msg.sender_id].display_name = cp.display_name;
-                if (cp.username_color) userDisplayNameCache[msg.sender_id].username_color = cp.username_color;
-                if (cp.username_border_color) userDisplayNameCache[msg.sender_id].username_border_color = cp.username_border_color;
+                if (!userDisplayNameCache[senderIdForCache]) userDisplayNameCache[senderIdForCache] = {};
+                if (cp.display_name) userDisplayNameCache[senderIdForCache].display_name = cp.display_name;
+                if (cp.username_color) userDisplayNameCache[senderIdForCache].username_color = cp.username_color;
+                if (cp.username_border_color) userDisplayNameCache[senderIdForCache].username_border_color = cp.username_border_color;
                 scheduleUserDisplayNameSave();
             }
         } catch (_e) {}
@@ -9272,7 +9816,7 @@ function appendDmMessage(msg, kp, otherPublicKey) {
         }
     }
 
-    const _dmCache = msg.sender_id ? userDisplayNameCache[msg.sender_id] : null;
+    const _dmCache = msg.sender_id ? userDisplayNameCache[senderIdForCache] : null;
     const displayName = msg.sender_display_name || (_dmCache && _dmCache.display_name) || msg.sender_username;
     const initial = displayName ? displayName.charAt(0).toUpperCase() : '';
     // Fallback to cached profile pic if snapshot/conv profile didn't provide one
@@ -9312,8 +9856,12 @@ function appendDmMessage(msg, kp, otherPublicKey) {
                     const dmId = msg.dm_channel_id || currentDmChannelId;
                     var decryptedPicKey = E2ECrypto.decryptDm(msg.encrypted_profile_key, msg.profile_key_nonce, dmId, kp.privateKey, otherPublicKey, msg.profile_key_message_nonce || null);
                     if (decryptedPicKey) {
-                        if (!userDisplayNameCache[msg.sender_id]) userDisplayNameCache[msg.sender_id] = {};
-                        userDisplayNameCache[msg.sender_id].profile_picture_file_key = decryptedPicKey;
+                        if (!userDisplayNameCache[senderIdForCache]) userDisplayNameCache[senderIdForCache] = {};
+                        userDisplayNameCache[senderIdForCache].profile_picture_file_key = decryptedPicKey;
+                        if (msg.sender_id && msg.sender_id !== senderIdForCache) {
+                            if (!userDisplayNameCache[msg.sender_id]) userDisplayNameCache[msg.sender_id] = {};
+                            userDisplayNameCache[msg.sender_id].profile_picture_file_key = decryptedPicKey;
+                        }
                         scheduleUserDisplayNameSave();
                     }
                 } catch (_e) {
@@ -9326,8 +9874,12 @@ function appendDmMessage(msg, kp, otherPublicKey) {
                     const dmId = msg.dm_channel_id || currentDmChannelId;
                     var decryptedBannerKey = E2ECrypto.decryptDm(msg.encrypted_banner_key, msg.banner_key_nonce, dmId, kp.privateKey, otherPublicKey, msg.banner_key_message_nonce || null);
                     if (decryptedBannerKey) {
-                        if (!userDisplayNameCache[msg.sender_id]) userDisplayNameCache[msg.sender_id] = {};
-                        userDisplayNameCache[msg.sender_id].profile_banner_file_key = decryptedBannerKey;
+                        if (!userDisplayNameCache[senderIdForCache]) userDisplayNameCache[senderIdForCache] = {};
+                        userDisplayNameCache[senderIdForCache].profile_banner_file_key = decryptedBannerKey;
+                        if (msg.sender_id && msg.sender_id !== senderIdForCache) {
+                            if (!userDisplayNameCache[msg.sender_id]) userDisplayNameCache[msg.sender_id] = {};
+                            userDisplayNameCache[msg.sender_id].profile_banner_file_key = decryptedBannerKey;
+                        }
                         scheduleUserDisplayNameSave();
                     }
                 } catch (_e) {
@@ -9597,8 +10149,13 @@ div.querySelectorAll('.file-preview').forEach((container) => {
         }
     }
 
-    list.appendChild(div);
-    list.scrollTop = list.scrollHeight;
+    // If 4th argument is truthy, prepend at top; otherwise append at bottom
+    if (arguments.length >= 4 && arguments[3]) {
+        list.insertBefore(div, list.firstChild);
+    } else {
+        list.appendChild(div);
+        list.scrollTop = list.scrollHeight;
+    }
 }
 
 async function sendDmMessage() {
@@ -10405,15 +10962,28 @@ async function loadMyFriendCode() {
     try {
         // Try localStorage first
         myFriendCode = localStorage.getItem('e2e_friend_code') || '';
-        // Show loading indicator if we need to fetch from server
+        // If missing locally, try auto-recovery with stored password
         if (!myFriendCode) {
             if (statusEl) { statusEl.textContent = '⏳ Fetching from server...'; statusEl.style.color = '#888'; }
+            // Attempt to recover from server using stored encrypted password
+            try {
+                var pw = loadDecryptedPassword();
+                if (pw) {
+                    await handleFriendCodeRecover(pw);
+                    // If recovery succeeded, myFriendCode is now set
+                    if (myFriendCode) {
+                        if (statusEl) { statusEl.textContent = ''; statusEl.style.color = '#888'; }
+                    }
+                }
+            } catch (_) {}
+            // If still missing after recovery attempt, show the password modal
+            if (!myFriendCode && statusEl) {
+                statusEl.textContent = '🔑 Friend code not available — use password to recover';
+                statusEl.style.color = '#ff9800';
+            }
         } else {
             if (statusEl) { statusEl.textContent = ''; statusEl.style.color = '#888'; }
         }
-        // If missing locally, show unavailable — user can recover via password prompt
-        // (The server no longer stores plaintext friend codes; only encrypted copies
-        // that require the account password to decrypt.)
         const el = document.getElementById('my-friend-code');
         if (el) {
             el.textContent = '••••••••••••••••';
@@ -10516,6 +11086,7 @@ async function loadMyFriendCode() {
 }
 
 // Open the friend code password modal or auto-recover with stored password
+// When identity keys are missing, this also triggers full key recovery from the server blob.
 async function showFriendCodePasswordModal() {
     // Try auto-recovery with stored password (verifies against server)
     var storedPw = localStorage.getItem('e2e_password');
@@ -10529,6 +11100,27 @@ async function showFriendCodePasswordModal() {
     // No valid stored password — show the modal
     const modal = document.getElementById('friend-code-password-modal');
     if (!modal) return;
+    
+    var identityMissing = false;
+    try { identityMissing = !E2ECrypto.getIdentityKeyPair(user.id); } catch (_) { identityMissing = true; }
+    
+    // Update title, description, and buttons based on mode
+    var title = modal.querySelector('h3');
+    var desc = modal.querySelector('p');
+    var regenBtn = document.getElementById('fc-regenerate-btn');
+    var recoverBtn = document.getElementById('fc-recover-btn');
+    if (identityMissing) {
+        if (title) title.textContent = '🔑 Key Recovery';
+        if (desc) desc.innerHTML = 'Your encryption keys need to be recovered. Enter your <strong>account password</strong> to restore them from the server backup.';
+        if (recoverBtn) recoverBtn.innerHTML = '&#128274; Recover Keys';
+        if (regenBtn) regenBtn.style.display = 'none';
+    } else {
+        if (title) title.textContent = '🔒 Friend Code Access';
+        if (desc) desc.innerHTML = 'Your friend code is encrypted. Enter your <strong>account password</strong> to access it.';
+        if (recoverBtn) recoverBtn.innerHTML = '&#128274; Recover Code';
+        if (regenBtn) regenBtn.style.display = '';
+    }
+    
     modal.style.display = 'flex';
     const input = document.getElementById('fc-password-input');
     const errorEl = document.getElementById('fc-password-error');
@@ -10551,6 +11143,32 @@ async function handleFriendCodeRecover(storedPw) {
     }
     if (errorEl) errorEl.style.display = 'none';
     if (successEl) successEl.style.display = 'none';
+    
+    // Check if identity keys are missing — if so, do full key recovery from blob
+    var identityMissing = false;
+    try { identityMissing = !E2ECrypto.getIdentityKeyPair(user.id); } catch (_) { identityMissing = true; }
+    
+    if (identityMissing) {
+        // Full key recovery: fetch the key blob and restore everything
+        // The bundle already includes e2e_friend_code, so if recovery succeeds
+        // we can skip the separate friend-code API call below.
+        var recovered = await _recoverFromBlob(password, errorEl, successEl);
+        if (!recovered) return;
+        // Blob restored friend code too — no need for the separate friend-code API call
+        if (myFriendCode || localStorage.getItem('e2e_friend_code')) {
+            if (successEl) {
+                successEl.textContent = '✅ Keys recovered successfully! You can now use the app normally.';
+                successEl.style.display = 'block';
+            }
+            if (errorEl) errorEl.style.display = 'none';
+            var fcModal = document.getElementById('friend-code-password-modal');
+            if (fcModal && fcModal.style.display !== 'none') {
+                setTimeout(function () { fcModal.style.display = 'none'; }, 2000);
+            }
+            return;
+        }
+    }
+    
     // Show loading state
     var recoverStatusEl = document.getElementById('friend-code-status');
     if (recoverStatusEl) { recoverStatusEl.textContent = '⏳ Fetching friend code from server...'; recoverStatusEl.style.color = '#888'; }
@@ -10603,6 +11221,82 @@ async function handleFriendCodeRecover(storedPw) {
         if (recoverStatusEl) { recoverStatusEl.textContent = '❌ Failed to fetch friend code'; recoverStatusEl.style.color = '#f44336'; setTimeout(function() { recoverStatusEl.textContent = ''; }, 4000); }
         if (errorEl) { errorEl.textContent = 'Network error. Is the server running?'; errorEl.style.display = 'block'; }
         if (!errorEl) { alert('Network error. Is the server running?'); }
+    }
+}
+
+/**
+ * Internal helper: fetch the encrypted key blob from /api/key-blob,
+ * decrypt it with the provided password, restore all keys, and
+ * call _secReKey() to re-encrypt with the password-derived key.
+ * Returns true on success, false on failure (with error displayed in modal).
+ */
+async function _recoverFromBlob(password, errorEl, successEl) {
+    if (!password) return false;
+    try {
+        // Ensure e2e_encrypted_password and e2e_device_key exist so _secReKey() works
+        if (!localStorage.getItem('e2e_encrypted_password')) {
+            storeEncryptedPassword(password);
+        }
+        
+        var statusEl = document.getElementById('friend-code-status');
+        if (statusEl) { statusEl.textContent = '⏳ Fetching key backup from server...'; statusEl.style.color = '#888'; }
+        
+        const res = await authFetch('/api/key-blob');
+        if (!res.ok) {
+            if (statusEl) { statusEl.textContent = '❌ Failed to fetch key backup'; statusEl.style.color = '#f44336'; setTimeout(function() { statusEl.textContent = ''; }, 4000); }
+            if (errorEl) { errorEl.textContent = 'Failed to fetch key backup from server.'; errorEl.style.display = 'block'; }
+            return false;
+        }
+        
+        const blobData = await res.json();
+        if (!blobData.encrypted_blob || !blobData.salt || !blobData.nonce) {
+            if (statusEl) { statusEl.textContent = '❌ No key backup on server'; statusEl.style.color = '#ff9800'; setTimeout(function() { statusEl.textContent = ''; }, 4000); }
+            if (errorEl) { errorEl.textContent = 'No key backup found on the server. You may need to log in again.'; errorEl.style.display = 'block'; }
+            return false;
+        }
+        
+        if (typeof E2ECrypto === 'undefined' || !E2ECrypto.decryptKeyBundle) {
+            if (statusEl) { statusEl.textContent = '❌ Crypto module missing'; statusEl.style.color = '#f44336'; setTimeout(function() { statusEl.textContent = ''; }, 4000); }
+            return false;
+        }
+        
+        if (statusEl) { statusEl.textContent = '⏳ Decrypting key backup...'; }
+        
+        const bundle = E2ECrypto.decryptKeyBundle(blobData.encrypted_blob, password, blobData.salt, blobData.nonce);
+        if (!bundle) {
+            if (statusEl) { statusEl.textContent = '❌ Wrong password'; statusEl.style.color = '#f44336'; setTimeout(function() { statusEl.textContent = ''; }, 4000); }
+            if (errorEl) { errorEl.textContent = 'Wrong password. Cannot decrypt key backup.'; errorEl.style.display = 'block'; }
+            return false;
+        }
+        
+        // Restore all keys from the bundle (identity keys, server keys, friend code, etc.)
+        E2ECrypto.restoreKeyBundle(bundle);
+        
+        // Re-key secure-storage to use the password-derived key
+        if (window._secReKey) {
+            try { window._secReKey(); } catch (_) {}
+        }
+        
+        // Re-store the encrypted password AFTER _secReKey() so it's encrypted with the
+        // password-derived key (not the pre-rekey fallback key). Otherwise
+        // saveKeyBlobToServer() reads it via secure-storage and silently fails.
+        storeEncryptedPassword(password);
+        
+        // Also set myFriendCode if the bundle had one
+        if (bundle['e2e_friend_code']) {
+            myFriendCode = bundle['e2e_friend_code'];
+        }
+        
+        // Save the updated key bundle back to the server so it includes any newer
+        // keys (e.g. server keys for servers joined after the last blob save).
+        saveKeyBlobToServer();
+        
+        if (statusEl) { statusEl.textContent = '✅ Keys recovered!'; statusEl.style.color = '#4caf50'; setTimeout(function() { statusEl.textContent = ''; }, 3000); }
+        
+        return true;
+    } catch (e) {
+        if (errorEl) { errorEl.textContent = 'Network error. Is the server running?'; errorEl.style.display = 'block'; }
+        return false;
     }
 }
 
@@ -11203,6 +11897,39 @@ function updateExistingMessageStyles(userId) {
             avatarEl.innerHTML = initial;
         }
     });
+}
+
+/**
+ * Update the DM chat header when a user's profile data changes.
+ * Called after decrypting profile data from profile_key_sync, fetchServerConversationProfile,
+ * or fetchDmConversationProfile. The sidebar is updated separately via
+ * refreshDmSidebarItem (WS handler) or renderDmSidebar (loadDmConversations).
+ */
+function refreshDmProfileDisplay(userId) {
+    if (!userId) return;
+    // If we're currently viewing this user's DM, update the chat header
+    if (currentDmOtherUser && currentDmOtherUser.id === userId && currentDmChannelId) {
+        var conv = dmConversations.find(function (c) { return c.dm_channel_id === currentDmChannelId; });
+        var _cache = userDisplayNameCache[userId];
+        var displayName = (_cache && _cache.display_name) || (conv ? (conv.other_display_name || conv.other_username) : null) || currentDmOtherUser.username || '?';
+        var dmPicFileId = (_cache && _cache.profile_picture_file_id) || (conv && conv.other_profile_picture_file_id);
+        var dmPicUrl = dmPicFileId ? getProfilePicUrl(dmPicFileId, userId) : null;
+        var dmHeaderPicHtml = dmPicUrl ? '<div class="dm-header-pic-wrap"><img class="dm-chat-header-pic" src="' + dmPicUrl + '" alt=""></div>' : (dmPicFileId ? '<div class="dm-header-pic-wrap"><div class="dm-chat-header-pic dm-chat-header-pic-load" data-profile-pic-load="' + userId + ':' + dmPicFileId + '">' + displayName.charAt(0).toUpperCase() + '</div></div>' : '');
+        document.getElementById('channel-name').innerHTML = dmHeaderPicHtml + '<span>' + escapeHtml(displayName) + '</span>' +
+            ' <button class="btn-unfriend" id="unfriend-btn" title="Unfriend">Unfriend</button>';
+        // Rebind unfriend button since innerHTML replaced it
+        var unfriendBtn = document.getElementById('unfriend-btn');
+        if (unfriendBtn) {
+            unfriendBtn.addEventListener('click', function () { unfriend(userId, currentDmOtherUser.username); });
+        }
+        // Re-add presence dot
+        var headerWrap = document.querySelector('#channel-name .dm-header-pic-wrap');
+        if (headerWrap) {
+            var dot = document.createElement('div');
+            dot.className = 'presence-dot ' + (onlineUsers.has(userId) ? 'online' : 'offline');
+            headerWrap.appendChild(dot);
+        }
+    }
 }
 
 // Generate 10 contrasting border/glow color options based on a base color
@@ -16646,6 +17373,8 @@ let profileBannerFileId = null;
 let profileBannerFileKey = null;
 let profilePfpFileId = null;
 let profilePfpFileKey = null;
+var _removePfpFlag = false;
+var _removeBannerFlag = false;
 let bannerCropState = null;
 let pfpCropState = null;
 let profileOriginalData = null;
@@ -16680,6 +17409,8 @@ async function openProfileModal(userId) {
     profileBannerFileKey = null;
     profilePfpFileId = null;
     profilePfpFileKey = null;
+    _removePfpFlag = false;
+    _removeBannerFlag = false;
     
     var modal = document.getElementById('profile-modal');
     if (!modal) return;
@@ -17516,6 +18247,10 @@ async function saveProfile() {
         var themeBgPicker = document.getElementById('theme-bg-picker');
         var currentThemeBgColor = themeBgPicker ? themeBgPicker.value : (localStorage.getItem('theme_bg_color') || '#4fc3f7');
         var currentThemeMode = localStorage.getItem('theme_mode') || 'dark';
+        // Fallback source for un-changed PFP/banner fields. profileOriginalData.data
+        // is the profile fetched when the modal opened, with raw file keys decrypted
+        // via decryptOwnProfileFileKeys() — more reliable than the myProfile global.
+        var _curProfile = (profileOriginalData && profileOriginalData.data) || myProfile || {};
         var profileData = {
             display_name: displayName,
             nickname: nickname,
@@ -17528,16 +18263,22 @@ async function saveProfile() {
             theme_bg_color: currentThemeBgColor,
             theme_mode: currentThemeMode,
             // PFP/banner fields encrypted alongside other profile data so they're
-            // automatically shared via shared_profile_data_keys mechanism
-            profile_picture_file_id: profilePfpFileId || null,
-            profile_banner_file_id: profileBannerFileId || null,
+            // automatically shared via shared_profile_data_keys mechanism.
+            // IMPORTANT: Fall back to myProfile current values when the editor
+            // globals are null (field was not changed). Otherwise, updating only
+            // the banner would store null for PFP fields, permanently overwriting
+            // them in the encrypted profile data blob.
+            // When _removePfpFlag/_removeBannerFlag is true, explicitly null the
+            // field to signal removal — bypassing the myProfile fallback.
+            profile_picture_file_id: _removePfpFlag ? null : (profilePfpFileId || _curProfile.profile_picture_file_id || null),
+            profile_banner_file_id: _removeBannerFlag ? null : (profileBannerFileId || _curProfile.profile_banner_file_id || null),
             // Store RAW file keys here — not identity-key-encrypted.
             // The entire profileData is encrypted with profileDataKey before storage,
             // and profileDataKey is encrypted with identity key for own retrieval.
             // Other users get profileDataKey via shared_profile_data_keys or conversation
             // profiles, so they can decrypt profileData and get the raw keys directly.
-            profile_picture_file_key: profilePfpFileKey || null,
-            profile_banner_file_key: profileBannerFileKey || null
+            profile_picture_file_key: _removePfpFlag ? null : (profilePfpFileKey || _curProfile.profile_picture_file_key || null),
+            profile_banner_file_key: _removeBannerFlag ? null : (profileBannerFileKey || _curProfile.profile_banner_file_key || null)
         };
         
         var profileDataKey = E2ECrypto.generateProfileDataKey();
@@ -17572,6 +18313,8 @@ async function saveProfile() {
                 body.encrypted_banner_key = bannerParts[1] || null;
                 body.banner_key_nonce = bannerParts[0] || null;
             }
+        } else if (_removeBannerFlag) {
+            body.remove_banner = true;
         }
         if (profilePfpFileId) {
             body.profile_picture_file_id = profilePfpFileId;
@@ -17581,6 +18324,8 @@ async function saveProfile() {
                 body.encrypted_pic_key = pfpParts[1] || null;
                 body.pic_key_nonce = pfpParts[0] || null;
             }
+        } else if (_removePfpFlag) {
+            body.remove_picture = true;
         }
         
         // Upload per-conversation encrypted profile data FIRST so the data is
@@ -17620,6 +18365,9 @@ async function saveProfile() {
         var res2 = await authFetch('/api/profile/' + encodeURIComponent(user.id));
         if (res2.ok) {
             var data2 = await res2.json();
+            // Decrypt identity-key-encrypted file keys so PFP and banner render
+            // correctly in the refreshed view modal after a partial update.
+            if (data2 && data2.id === user.id) decryptOwnProfileFileKeys(data2);
             profileOriginalData = { data: data2, decrypted: profileData };
             renderProfileView(data2, profileData, user.id);
         }
@@ -17990,6 +18738,7 @@ async function processBannerCrop() {
         
         profileBannerFileId = uploadResult.fileId;
         profileBannerFileKey = uploadResult.fileKey;
+        _removeBannerFlag = false;
         // Show remove button for the newly uploaded banner
         document.getElementById('profile-banner-remove-btn').style.display = '';
         document.getElementById('profile-banner-crop-container').style.display = 'none';
@@ -18272,6 +19021,7 @@ async function processPfpCrop() {
         
         profilePfpFileId = uploadResult.fileId;
         profilePfpFileKey = uploadResult.fileKey;
+        _removePfpFlag = false;
         document.getElementById('profile-pfp-crop-container').style.display = 'none';
         if (pfpCropState && pfpCropState._cleanup) pfpCropState._cleanup();
         pfpCropState = null;

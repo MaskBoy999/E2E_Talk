@@ -504,7 +504,7 @@ async fn handle_ws_message(
             // Store SHA-256 hash instead of raw UUID so the host can't map message file_ids
             let file_id_hash = raw_file_id.as_ref().map(|fid| crate::db::sha256_hex(fid));
 
-            let message = match state.db.save_encrypted_message(channel_id, user_id, &encrypted_content, &nonce, message_nonce.as_deref(), None, encrypted_profile_key.as_deref(), profile_key_nonce.as_deref(), encrypted_banner_key.as_deref(), banner_key_nonce.as_deref(), encrypted_profile_snapshot.as_deref(), profile_snapshot_nonce.as_deref(), encrypted_file_key_parsed.as_deref(), file_key_nonce_parsed.as_deref(), encrypted_sender_username.as_deref(), sender_username_nonce.as_deref(), file_id_hash.as_deref()) {
+            let message = match state.db.save_encrypted_message(channel_id, user_id, &encrypted_content, &nonce, message_nonce.as_deref(), encrypted_profile_key.as_deref(), profile_key_nonce.as_deref(), encrypted_banner_key.as_deref(), banner_key_nonce.as_deref(), encrypted_profile_snapshot.as_deref(), profile_snapshot_nonce.as_deref(), encrypted_file_key_parsed.as_deref(), file_key_nonce_parsed.as_deref(), encrypted_sender_username.as_deref(), sender_username_nonce.as_deref(), file_id_hash.as_deref()) {
                 Ok(m) => m,
                 Err(e) => {
                     tracing::error!("Failed to save message: {}", e);
@@ -682,7 +682,7 @@ async fn handle_ws_message(
             // Store SHA-256 hash instead of raw UUID so the host can't map message file_ids
             let file_id_hash = raw_file_id.as_ref().map(|fid| crate::db::sha256_hex(fid));
 
-            let message = match state.db.save_dm_message(dm_channel_id, user_id, &encrypted_content, &nonce, message_nonce.as_deref(), None, encrypted_profile_key.as_deref(), profile_key_nonce.as_deref(), encrypted_banner_key.as_deref(), banner_key_nonce.as_deref(), encrypted_profile_snapshot.as_deref(), profile_snapshot_nonce.as_deref(), encrypted_file_key_parsed.as_deref(),file_key_nonce_parsed.as_deref(), encrypted_sender_username.as_deref(), sender_username_nonce.as_deref(), file_id_hash.as_deref()) {
+            let message = match state.db.save_dm_message(dm_channel_id, user_id, &encrypted_content, &nonce, message_nonce.as_deref(), encrypted_profile_key.as_deref(), profile_key_nonce.as_deref(), encrypted_banner_key.as_deref(), banner_key_nonce.as_deref(), encrypted_profile_snapshot.as_deref(), profile_snapshot_nonce.as_deref(), encrypted_file_key_parsed.as_deref(),file_key_nonce_parsed.as_deref(), encrypted_sender_username.as_deref(), sender_username_nonce.as_deref(), file_id_hash.as_deref()) {
                             Ok(m) => m,
                             Err(e) => {
                                 tracing::error!("Failed to save DM message: {}", e);
@@ -812,7 +812,7 @@ async fn handle_ws_message(
             let encrypted_banner_key = parsed.get("encrypted_banner_key").and_then(|c| c.as_str()).map(|s| s.to_string());
             let banner_key_nonce = parsed.get("banner_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
 
-            let message = match state.db.edit_encrypted_message(message_id, user_id, &encrypted_content, &nonce, message_nonce.as_deref(), None, encrypted_profile_key.as_deref(), profile_key_nonce.as_deref(), encrypted_banner_key.as_deref(), banner_key_nonce.as_deref()) {
+            let message = match state.db.edit_encrypted_message(message_id, user_id, &encrypted_content, &nonce, message_nonce.as_deref(), encrypted_profile_key.as_deref(), profile_key_nonce.as_deref(), encrypted_banner_key.as_deref(), banner_key_nonce.as_deref()) {
                 Ok(m) => m,
                 Err(e) => {
                     tracing::error!("Failed to edit message: {}", e);
@@ -932,7 +932,7 @@ async fn handle_ws_message(
             let encrypted_banner_key = parsed.get("encrypted_banner_key").and_then(|c| c.as_str()).map(|s| s.to_string());
             let banner_key_nonce = parsed.get("banner_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
 
-            let message = match state.db.edit_dm_message(message_id, user_id, &encrypted_content, &nonce, message_nonce.as_deref(), None, encrypted_profile_key.as_deref(), profile_key_nonce.as_deref(), encrypted_banner_key.as_deref(), banner_key_nonce.as_deref()) {
+            let message = match state.db.edit_dm_message(message_id, user_id, &encrypted_content, &nonce, message_nonce.as_deref(), encrypted_profile_key.as_deref(), profile_key_nonce.as_deref(), encrypted_banner_key.as_deref(), banner_key_nonce.as_deref()) {
                 Ok(m) => m,
                 Err(e) => {
                     tracing::error!("Failed to edit DM message: {}", e);

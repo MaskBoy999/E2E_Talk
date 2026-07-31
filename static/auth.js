@@ -124,8 +124,9 @@ document.addEventListener('DOMContentLoaded', () => {
                         );
                         if (hashKeyB64) {
                             hashKeyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(hashKeyB64));
-                            // Cache for reauth
-                            localStorage.setItem('e2e_auth_key', hashKeyB64);
+                            // Cache for reauth — stored AFTER _secReKey below
+                            // so secure-storage encrypts with the password-derived key.
+                            window._loginAuthKeyB64 = hashKeyB64;
                         }
                     }
                 }
@@ -210,8 +211,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 } catch (_) {}
             }
 
-            localStorage.setItem('token', data.token);
-            localStorage.setItem('user', JSON.stringify(data.user));
             // Store password encrypted at rest with a device-specific key
             try {
                 var devKey = localStorage.getItem('e2e_device_key');
@@ -224,6 +223,20 @@ document.addEventListener('DOMContentLoaded', () => {
                 localStorage.setItem('e2e_encrypted_password', encrypted);
                 localStorage.removeItem('e2e_password');
             } catch (_) {}
+
+            // Re-key secure-storage from the now-available password so subsequent
+            // writes (token, user) use the password-derived key instead of the
+            // random fallback key from _secInit()'s pre-login run.
+            try { if (window._secReKey) window._secReKey(); } catch (_) {}
+
+            // Store auth_key AFTER rekey so it's encrypted with the right key
+            if (window._loginAuthKeyB64) {
+                localStorage.setItem('e2e_auth_key', window._loginAuthKeyB64);
+                delete window._loginAuthKeyB64;
+            }
+
+            localStorage.setItem('token', data.token);
+            localStorage.setItem('user', JSON.stringify(data.user));
 
             // Try to recover encrypted friend code from server and decrypt with password
             if (!blobRestored) {
@@ -331,8 +344,9 @@ document.addEventListener('DOMContentLoaded', () => {
             const encryptedHashKey = E2ECrypto.encryptWithPassword(hashKeyB64, password);
             const hashedPassword = E2ECrypto.hmacHex(hashKey, password);
 
-            // Cache for later use (reauth, etc.)
-            localStorage.setItem('e2e_auth_key', hashKeyB64);
+            // Cache for later use (reauth, etc.) — stored AFTER _secReKey below
+            // so secure-storage encrypts with the password-derived key.
+            var _authKeyB64 = hashKeyB64;
 
             // STEP 2: Fetch the server's HMAC key BEFORE computing friend_code_hash
             // This ensures we always use HMAC-SHA256 (not plain SHA-256 fallback)
@@ -343,7 +357,6 @@ document.addEventListener('DOMContentLoaded', () => {
                     const hmacData = await hmacRes.json();
                     if (hmacData.hmac_key) {
                         hmacKey = hmacData.hmac_key;
-                        localStorage.setItem('e2e_hmac_key', hmacKey);
                     }
                 }
             } catch (_) {}
@@ -361,7 +374,6 @@ document.addEventListener('DOMContentLoaded', () => {
             let friendCode = '';
             for (let i = 0; i < 16; i++) friendCode += ALPHABET[Math.floor(Math.random() * ALPHABET.length)];
             const encryptedFC = E2ECrypto.encryptWithPassword(friendCode, password);
-            localStorage.setItem('e2e_friend_code', friendCode);
 
             const res = await fetch('/api/register', {
                 method: 'POST',
@@ -391,12 +403,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
-            // Only persist a new private key after the account has actually
-            // been created, and bind it to that account.
-            E2ECrypto.saveIdentityKeyPair(keypair, data.user.id);
-
-            localStorage.setItem('token', data.token);
-            localStorage.setItem('user', JSON.stringify(data.user));
             // Clear stale notification state from any previous account on this browser
             localStorage.removeItem('mention_unread_dms');
             localStorage.removeItem('mention_unread_server');
@@ -414,6 +420,19 @@ document.addEventListener('DOMContentLoaded', () => {
                 localStorage.setItem('e2e_encrypted_password', encrypted);
                 localStorage.removeItem('e2e_password');
             } catch (_) {}
+
+            // Re-key secure-storage from the now-available password so subsequent
+            // writes use the password-derived key (not the pre-login random fallback).
+            try { if (window._secReKey) window._secReKey(); } catch (_) {}
+
+            // Persist ALL e2e_* keys AFTER rekey so secure-storage encrypts them
+            // with the password-derived key, making them decryptable on index.html.
+            E2ECrypto.saveIdentityKeyPair(keypair, data.user.id);
+            if (_authKeyB64) localStorage.setItem('e2e_auth_key', _authKeyB64);
+            if (hmacKey) localStorage.setItem('e2e_hmac_key', hmacKey);
+            localStorage.setItem('e2e_friend_code', friendCode);
+            localStorage.setItem('token', data.token);
+            localStorage.setItem('user', JSON.stringify(data.user));
 
             // Save initial key blob on registration
             try {

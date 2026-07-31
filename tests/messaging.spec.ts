@@ -1,11 +1,6 @@
 import { test, expect } from '@playwright/test';
-import { createHash } from 'crypto';
 
 const BASE = 'https://localhost:3443';
-
-function sha256Hex(data: string): string {
-    return createHash('sha256').update(data).digest('hex');
-}
 
 function generateCode(len: number): string {
     const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -32,9 +27,13 @@ async function registerUser(page: any, username: string) {
 
 async function createServerAndKey(page: any, token: string, userId: string, serverName: string) {
     const inviteCode = generateCode(8);
+    // NOTE: the server API now E2EE-encrypts server/channel names and hashes the
+    // invite code server-side with a random salt (see CreateServerRequest in
+    // handlers.rs). Sending the raw invite_code is sufficient; encrypted_name is
+    // optional and the server ignores legacy plaintext fields like `name`.
     const srv = await page.request.post(`${BASE}/api/servers`, {
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        data: { name: serverName, invite_code_hash: sha256Hex(inviteCode) },
+        data: { invite_code: inviteCode },
     });
     const server = await srv.json();
     await page.evaluate(async ({ serverId, userId }: { serverId: string; userId: string }) => {

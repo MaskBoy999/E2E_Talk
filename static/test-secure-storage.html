@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Secure Storage Test</title>
+    <style>
+        body { font-family: monospace; background: #111; color: #e0e0e0; padding: 20px; }
+        h1 { color: #4fc3f7; }
+        h2 { color: #88bbdd; margin-top: 24px; font-size: 16px; }
+        .result { margin: 6px 0; padding: 8px 12px; border-radius: 6px; }
+        .pass { background: #1b5e20; color: #a5d6a7; }
+        .fail { background: #b71c1c; color: #ef9a9a; }
+        .info { color: #888; font-size: 13px; }
+        .summary { font-size: 18px; margin-top: 24px; padding: 12px; border-radius: 8px; }
+        .summary.all-pass { background: #1b5e20; color: #a5d6a7; }
+        .summary.has-fail { background: #b71c1c; color: #ef9a9a; }
+        code { background: #222; padding: 2px 6px; border-radius: 3px; }
+        .manual-test { background: #1a1a2e; border: 1px solid #333; border-radius: 8px; padding: 16px; margin: 12px 0; }
+        button { background: #4fc3f7; color: #111; border: none; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 13px; font-family: monospace; }
+        button:hover { background: #29b6f6; }
+        textarea { width: 100%; background: #0a0a14; color: #ccc; border: 1px solid #333; border-radius: 4px; padding: 8px; font-family: monospace; font-size: 12px; margin-top: 6px; resize: vertical; box-sizing: border-box; }
+        label { color: #aaa; font-size: 12px; display: block; margin: 4px 0; }
+        .btn-secondary { background: #333; color: #ccc; }
+        .btn-secondary:hover { background: #444; }
+    </style>
+</head>
+<body>
+    <h1>🔐 Secure Storage Test Suite</h1>
+    <p class="info">Tests that <code>secure-storage.js</code> transparently encrypts/decrypts localStorage values.</p>
+
+    <div id="sec-status" class="info">⏳ Initializing...</div>
+    <div id="results"></div>
+    <div id="summary" class="summary"></div>
+
+    <h2>🧪 Manual XSS-Simulation Test</h2>
+    <div class="manual-test">
+        <p style="color:#aaa;font-size:13px;">
+            Simulate what an XSS attacker would see if they read <code>localStorage</code> directly
+            (bypassing the interceptor). Values starting with <code>~</code> are encrypted.
+        </p>
+        <button id="simulate-xss-btn" class="btn-secondary">Show Raw localStorage (XSS View)</button>
+        <textarea id="xss-output" rows="8" readonly placeholder="Click the button to see what an attacker would see..."></textarea>
+    </div>
+
+    <h2>🔄 Cross-Device Key Check</h2>
+    <div class="manual-test">
+        <p style="color:#aaa;font-size:13px;">
+            Verify the derived storage key is the same across devices.
+            Run this on both devices and compare the fingerprints.
+        </p>
+        <button id="show-key-btn" class="btn-secondary">Show Storage Key Fingerprint</button>
+        <textarea id="key-output" rows="2" readonly placeholder="Click to reveal..."></textarea>
+    </div>
+
+    <script src="libsodium-sumo.js"></script>
+    <script src="libsodium-wrappers.js"></script>
+    <script src="crypto.js?v=8"></script>
+    <script src="secure-storage.js?v=1"></script>
+    <script src="test-secure-runner.js"></script>
+</body>
+</html>

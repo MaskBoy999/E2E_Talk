@@ -1052,6 +1052,15 @@ impl Database {
         // Migration 045: Drop plaintext sticker_name and file_name columns (encrypted counterparts exist)
         let _ = conn.execute_batch(include_str!("../migrations/045_drop_plaintext_metadata.sql"));
 
+        // Data migration: normalize legacy space-separated CURRENT_TIMESTAMP values
+        // ("YYYY-MM-DD HH:MM:SS") to fixed-width RFC3339 ("YYYY-MM-DDTHH:MM:SS.000000Z")
+        // so lexicographic ordering is consistent with newly-inserted messages.
+        // Idempotent: after the first run no length-19 space-separated rows remain.
+        let _ = conn.execute_batch(
+            "UPDATE messages SET timestamp = replace(timestamp, ' ', 'T') || '.000000Z' WHERE instr(timestamp, ' ') > 0 AND length(timestamp) = 19;\n\
+             UPDATE dm_messages SET timestamp = replace(timestamp, ' ', 'T') || '.000000Z' WHERE instr(timestamp, ' ') > 0 AND length(timestamp) = 19;",
+        );
+
         // --- Startup schema verification check ---
         // Verify that the last migration's expected columns exist.
         // If any expected migration was skipped, log a warning so the operator knows.
@@ -2136,25 +2145,25 @@ impl Database {
             .prepare(
                 "SELECT m.id, m.channel_id, m.sender_id, u.username, u.profile_picture_file_id,
                         m.encrypted_content, m.nonce, m.timestamp,
-                        m.message_nonce, m.edited_at, m.message_signature,
+                        m.message_nonce, m.edited_at,
                         m.encrypted_profile_key, m.profile_key_nonce, m.encrypted_banner_key, m.banner_key_nonce,
                         m.key_version, m.encrypted_profile_snapshot, m.profile_snapshot_nonce, m.encrypted_file_key, m.file_key_nonce,
                         m.encrypted_sender_username, m.sender_username_nonce,
                         m.sender_id_hash
                  FROM (
                      SELECT id, channel_id, sender_id, encrypted_content, nonce, timestamp,
-                            message_nonce, edited_at, message_signature,
+                            message_nonce, edited_at,
                             encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce,
                             key_version, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce,
                             encrypted_sender_username, sender_username_nonce,
                             sender_id_hash
                      FROM messages
                      WHERE channel_id = ?1
-                     ORDER BY timestamp DESC
+                     ORDER BY timestamp DESC, id DESC
                      LIMIT ?2
                  ) m
                  INNER JOIN users u ON m.sender_id = u.id
-                 ORDER BY m.timestamp ASC",
+                 ORDER BY m.timestamp ASC, m.id ASC",
             )
             .map_err(|e| e.to_string())?;
         let messages = stmt
@@ -2168,18 +2177,18 @@ impl Database {
                     timestamp: row.get(7)?,
                     message_nonce: row.get(8)?,
                     edited_at: row.get(9)?,
-                    encrypted_profile_key: row.get(11)?,
-                    profile_key_nonce: row.get(12)?,
-                    encrypted_banner_key: row.get(13)?,
-                    banner_key_nonce: row.get(14)?,
-                    key_version: row.get(15)?,
-                    encrypted_profile_snapshot: row.get(16)?,
-                    profile_snapshot_nonce: row.get(17)?,
-                    encrypted_file_key: row.get(18)?,
-                    file_key_nonce: row.get(19)?,
-                    encrypted_sender_username: row.get(20)?,
-                    sender_username_nonce: row.get(21)?,
-                    sender_id_hash: row.get(22).ok().flatten(),
+                    encrypted_profile_key: row.get(10)?,
+                    profile_key_nonce: row.get(11)?,
+                    encrypted_banner_key: row.get(12)?,
+                    banner_key_nonce: row.get(13)?,
+                    key_version: row.get(14)?,
+                    encrypted_profile_snapshot: row.get(15)?,
+                    profile_snapshot_nonce: row.get(16)?,
+                    encrypted_file_key: row.get(17)?,
+                    file_key_nonce: row.get(18)?,
+                    encrypted_sender_username: row.get(19)?,
+                    sender_username_nonce: row.get(20)?,
+                    sender_id_hash: row.get(21).ok().flatten(),
                     file_id: None,
                 })
             })
@@ -2189,35 +2198,35 @@ impl Database {
         Ok(messages)
     }
 
-    pub fn list_messages_before(&self, channel_id: &str, before_timestamp: &str, limit: i64) -> Result<Vec<Message>, String> {
+    pub fn list_messages_before(&self, channel_id: &str, before_timestamp: &str, before_id: Option<&str>, limit: i64) -> Result<Vec<Message>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
                 "SELECT m.id, m.channel_id, m.sender_id, u.username, u.profile_picture_file_id,
                         m.encrypted_content, m.nonce, m.timestamp,
-                        m.message_nonce, m.edited_at, m.message_signature,
+                        m.message_nonce, m.edited_at,
                         m.encrypted_profile_key, m.profile_key_nonce, m.encrypted_banner_key, m.banner_key_nonce,
                         m.key_version, m.encrypted_profile_snapshot, m.profile_snapshot_nonce, m.encrypted_file_key, m.file_key_nonce,
                         m.encrypted_sender_username, m.sender_username_nonce,
                         m.sender_id_hash
                  FROM (
                      SELECT id, channel_id, sender_id, encrypted_content, nonce, timestamp,
-                            message_nonce, edited_at, message_signature,
+                            message_nonce, edited_at,
                             encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce,
                             key_version, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce,
                             encrypted_sender_username, sender_username_nonce,
                             sender_id_hash
                      FROM messages
-                     WHERE channel_id = ?1 AND timestamp < ?3
-                     ORDER BY timestamp DESC
+                     WHERE channel_id = ?1 AND (timestamp < ?3 OR (timestamp = ?3 AND id < ?4))
+                     ORDER BY timestamp DESC, id DESC
                      LIMIT ?2
                  ) m
                  INNER JOIN users u ON m.sender_id = u.id
-                 ORDER BY m.timestamp ASC",
+                 ORDER BY m.timestamp ASC, m.id ASC",
             )
             .map_err(|e| e.to_string())?;
         let messages = stmt
-            .query_map(params![channel_id, limit, before_timestamp], |row| {
+            .query_map(params![channel_id, limit, before_timestamp, before_id.unwrap_or("")], |row| {
                 Ok(Message {
                     id: row.get(0)?,
                     channel_id: row.get(1)?,
@@ -2227,18 +2236,18 @@ impl Database {
                     timestamp: row.get(7)?,
                     message_nonce: row.get(8)?,
                     edited_at: row.get(9)?,
-                    encrypted_profile_key: row.get(11)?,
-                    profile_key_nonce: row.get(12)?,
-                    encrypted_banner_key: row.get(13)?,
-                    banner_key_nonce: row.get(14)?,
-                    key_version: row.get(15)?,
-                    encrypted_profile_snapshot: row.get(16)?,
-                    profile_snapshot_nonce: row.get(17)?,
-                    encrypted_file_key: row.get(18)?,
-                    file_key_nonce: row.get(19)?,
-                    encrypted_sender_username: row.get(20)?,
-                    sender_username_nonce: row.get(21)?,
-                    sender_id_hash: row.get(22).ok().flatten(),
+                    encrypted_profile_key: row.get(10)?,
+                    profile_key_nonce: row.get(11)?,
+                    encrypted_banner_key: row.get(12)?,
+                    banner_key_nonce: row.get(13)?,
+                    key_version: row.get(14)?,
+                    encrypted_profile_snapshot: row.get(15)?,
+                    profile_snapshot_nonce: row.get(16)?,
+                    encrypted_file_key: row.get(17)?,
+                    file_key_nonce: row.get(18)?,
+                    encrypted_sender_username: row.get(19)?,
+                    sender_username_nonce: row.get(20)?,
+                    sender_id_hash: row.get(21).ok().flatten(),
                     file_id: None,
                 })
             })
@@ -2264,14 +2273,14 @@ impl Database {
             .prepare(
                 "SELECT m.id, m.channel_id, m.sender_id,
                         m.encrypted_content, m.nonce, m.timestamp,
-                        m.message_nonce, m.edited_at, m.message_signature,
+                        m.message_nonce, m.edited_at,
                         m.encrypted_profile_key, m.profile_key_nonce, m.encrypted_banner_key, m.banner_key_nonce,
                         m.key_version, m.encrypted_profile_snapshot, m.profile_snapshot_nonce, m.encrypted_file_key, m.file_key_nonce,
                         m.encrypted_sender_username, m.sender_username_nonce,
                         m.sender_id_hash
                  FROM messages m
                  WHERE m.channel_id = ?1 AND m.timestamp <= (SELECT COALESCE(timestamp, '') FROM messages WHERE id = ?2)
-                 ORDER BY m.timestamp DESC
+                 ORDER BY m.timestamp DESC, m.id DESC
                  LIMIT ?3",
             )
             .map_err(|e| e.to_string())?;
@@ -2286,18 +2295,18 @@ impl Database {
                     timestamp: row.get(5)?,
                     message_nonce: row.get(6)?,
                     edited_at: row.get(7)?,
-                    encrypted_profile_key: row.get(9)?,
-                    profile_key_nonce: row.get(10)?,
-                    encrypted_banner_key: row.get(11)?,
-                    banner_key_nonce: row.get(12)?,
-                    key_version: row.get(13)?,
-                    encrypted_profile_snapshot: row.get(14)?,
-                    profile_snapshot_nonce: row.get(15)?,
-                    encrypted_file_key: row.get(16)?,
-                    file_key_nonce: row.get(17)?,
-                    encrypted_sender_username: row.get(18)?,
-                    sender_username_nonce: row.get(19)?,
-                    sender_id_hash: row.get(20).ok().flatten(),
+                    encrypted_profile_key: row.get(8)?,
+                    profile_key_nonce: row.get(9)?,
+                    encrypted_banner_key: row.get(10)?,
+                    banner_key_nonce: row.get(11)?,
+                    key_version: row.get(12)?,
+                    encrypted_profile_snapshot: row.get(13)?,
+                    profile_snapshot_nonce: row.get(14)?,
+                    encrypted_file_key: row.get(15)?,
+                    file_key_nonce: row.get(16)?,
+                    encrypted_sender_username: row.get(17)?,
+                    sender_username_nonce: row.get(18)?,
+                    sender_id_hash: row.get(19).ok().flatten(),
                     file_id: None,
                 })
             })
@@ -2313,14 +2322,14 @@ impl Database {
             .prepare(
                 "SELECT m.id, m.channel_id, m.sender_id,
                         m.encrypted_content, m.nonce, m.timestamp,
-                        m.message_nonce, m.edited_at, m.message_signature,
+                        m.message_nonce, m.edited_at,
                         m.encrypted_profile_key, m.profile_key_nonce, m.encrypted_banner_key, m.banner_key_nonce,
                         m.key_version, m.encrypted_profile_snapshot, m.profile_snapshot_nonce, m.encrypted_file_key, m.file_key_nonce,
                         m.encrypted_sender_username, m.sender_username_nonce,
                         m.sender_id_hash
                  FROM messages m
                  WHERE m.channel_id = ?1 AND m.timestamp > (SELECT COALESCE(timestamp, '') FROM messages WHERE id = ?2)
-                 ORDER BY m.timestamp ASC
+                 ORDER BY m.timestamp ASC, m.id ASC
                  LIMIT ?3",
             )
             .map_err(|e| e.to_string())?;
@@ -2335,18 +2344,18 @@ impl Database {
                     timestamp: row.get(5)?,
                     message_nonce: row.get(6)?,
                     edited_at: row.get(7)?,
-                    encrypted_profile_key: row.get(9)?,
-                    profile_key_nonce: row.get(10)?,
-                    encrypted_banner_key: row.get(11)?,
-                    banner_key_nonce: row.get(12)?,
-                    key_version: row.get(13)?,
-                    encrypted_profile_snapshot: row.get(14)?,
-                    profile_snapshot_nonce: row.get(15)?,
-                    encrypted_file_key: row.get(16)?,
-                    file_key_nonce: row.get(17)?,
-                    encrypted_sender_username: row.get(18)?,
-                    sender_username_nonce: row.get(19)?,
-                    sender_id_hash: row.get(20).ok().flatten(),
+                    encrypted_profile_key: row.get(8)?,
+                    profile_key_nonce: row.get(9)?,
+                    encrypted_banner_key: row.get(10)?,
+                    banner_key_nonce: row.get(11)?,
+                    key_version: row.get(12)?,
+                    encrypted_profile_snapshot: row.get(13)?,
+                    profile_snapshot_nonce: row.get(14)?,
+                    encrypted_file_key: row.get(15)?,
+                    file_key_nonce: row.get(16)?,
+                    encrypted_sender_username: row.get(17)?,
+                    sender_username_nonce: row.get(18)?,
+                    sender_id_hash: row.get(19).ok().flatten(),
                     file_id: None,
                 })
             })
@@ -2365,7 +2374,6 @@ impl Database {
         encrypted_content: &[u8],
         nonce: &[u8],
         message_nonce: Option<&str>,
-        message_signature: Option<&str>,
         encrypted_profile_key: Option<&str>,
         profile_key_nonce: Option<&str>,
         encrypted_banner_key: Option<&str>,
@@ -2391,9 +2399,14 @@ impl Database {
             .map_err(|_| "Sender not found".to_string())?;
 
         let h = sha256_hex(&format!("{}:{}", sender_id, channel_id));
+        // Fixed-width RFC3339 timestamp (UTC, 6-digit fractional seconds) so string
+        // sorting matches chronological order and the WS/REST values are identical.
+        // Avoids the table default (CURRENT_TIMESTAMP) which is second-precision and
+        // space-separated — that breaks ordering and pagination for same-second messages.
+        let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string();
         conn.execute(
-            "INSERT INTO messages (id, channel_id, sender_id, encrypted_content, nonce, message_nonce, message_signature, encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce, encrypted_sender_username, sender_username_nonce, sender_id_hash, file_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
-            params![id, channel_id, sender_id, encrypted_content, nonce, message_nonce, message_signature, encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce, encrypted_sender_username, sender_username_nonce, h, file_id],
+            "INSERT INTO messages (id, channel_id, sender_id, encrypted_content, nonce, timestamp, message_nonce, encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce, encrypted_sender_username, sender_username_nonce, sender_id_hash, file_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+            params![id, channel_id, sender_id, encrypted_content, nonce, ts, message_nonce, encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce, encrypted_sender_username, sender_username_nonce, h, file_id],
         )
         .map_err(|e| e.to_string())?;
 
@@ -2403,7 +2416,7 @@ impl Database {
             sender_id: sender_id.to_string(),
             encrypted_content: encrypted_content.to_vec(),
             nonce: nonce.to_vec(),
-            timestamp: chrono::Utc::now().to_rfc3339(),
+            timestamp: ts,
             message_nonce: message_nonce.map(|s| s.to_string()),
             edited_at: None,
             encrypted_profile_key: encrypted_profile_key.map(|s| s.to_string()),
@@ -3574,25 +3587,25 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT m.id, m.dm_channel_id, m.sender_id, u.username, u.profile_picture_file_id,
                     m.encrypted_content, m.nonce, m.timestamp,
-                    m.message_nonce, m.edited_at, m.message_signature,
+                    m.message_nonce, m.edited_at,
                     m.encrypted_profile_key, m.profile_key_nonce, m.encrypted_banner_key, m.banner_key_nonce,
                     m.key_version, m.encrypted_profile_snapshot, m.profile_snapshot_nonce, m.encrypted_file_key, m.file_key_nonce,
                     m.encrypted_sender_username, m.sender_username_nonce,
                     m.sender_id_hash
              FROM (
                   SELECT id, dm_channel_id, sender_id, encrypted_content, nonce, timestamp,
-                         message_nonce, edited_at, message_signature,
+                         message_nonce, edited_at,
                          encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce,
                          key_version, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce,
                          encrypted_sender_username, sender_username_nonce,
                          sender_id_hash
                   FROM dm_messages
                   WHERE dm_channel_id = ?1
-                  ORDER BY timestamp DESC
+                  ORDER BY timestamp DESC, id DESC
                   LIMIT ?2
               ) m
               INNER JOIN users u ON m.sender_id = u.id
-              ORDER BY m.timestamp ASC",
+              ORDER BY m.timestamp ASC, m.id ASC",
         ).map_err(|e| e.to_string())?;
         let rows = stmt.query_map(params![dm_channel_id, limit], |row| {
             Ok(DmMessage {
@@ -3605,19 +3618,19 @@ impl Database {
                 timestamp: row.get(7)?,
                 message_nonce: row.get(8)?,
                 edited_at: row.get(9)?,
-                encrypted_profile_key: row.get(11)?,
-                profile_key_nonce: row.get(12)?,
-                encrypted_banner_key: row.get(13)?,
-                banner_key_nonce: row.get(14)?,
-                key_version: row.get(15)?,
-                encrypted_profile_snapshot: row.get(16)?,
-                profile_snapshot_nonce: row.get(17)?,
-                encrypted_file_key: row.get(18)?,
-                file_key_nonce: row.get(19)?,
-                encrypted_sender_username: row.get(20)?,
-                sender_username_nonce: row.get(21)?,
-                sender_id_hash: row.get(22).ok().flatten(),
-                file_id: row.get(23).ok().flatten(),
+                encrypted_profile_key: row.get(10)?,
+                profile_key_nonce: row.get(11)?,
+                encrypted_banner_key: row.get(12)?,
+                banner_key_nonce: row.get(13)?,
+                key_version: row.get(14)?,
+                encrypted_profile_snapshot: row.get(15)?,
+                profile_snapshot_nonce: row.get(16)?,
+                encrypted_file_key: row.get(17)?,
+                file_key_nonce: row.get(18)?,
+                encrypted_sender_username: row.get(19)?,
+                sender_username_nonce: row.get(20)?,
+                sender_id_hash: row.get(21).ok().flatten(),
+                file_id: None,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -3628,32 +3641,32 @@ impl Database {
         Ok(out)
     }
 
-    pub fn list_dm_messages_before(&self, dm_channel_id: &str, before_timestamp: &str, limit: i64) -> Result<Vec<DmMessage>, String> {
+    pub fn list_dm_messages_before(&self, dm_channel_id: &str, before_timestamp: &str, before_id: Option<&str>, limit: i64) -> Result<Vec<DmMessage>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn.prepare(
             "SELECT m.id, m.dm_channel_id, m.sender_id, u.username, u.profile_picture_file_id,
                     m.encrypted_content, m.nonce, m.timestamp,
-                    m.message_nonce, m.edited_at, m.message_signature,
+                    m.message_nonce, m.edited_at,
                     m.encrypted_profile_key, m.profile_key_nonce, m.encrypted_banner_key, m.banner_key_nonce,
                     m.key_version, m.encrypted_profile_snapshot, m.profile_snapshot_nonce, m.encrypted_file_key, m.file_key_nonce,
                     m.encrypted_sender_username, m.sender_username_nonce,
                     m.sender_id_hash
              FROM (
                   SELECT id, dm_channel_id, sender_id, encrypted_content, nonce, timestamp,
-                         message_nonce, edited_at, message_signature,
+                         message_nonce, edited_at,
                          encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce,
                          key_version, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce,
                          encrypted_sender_username, sender_username_nonce,
                          sender_id_hash
                   FROM dm_messages
-                  WHERE dm_channel_id = ?1 AND timestamp < ?3
-                  ORDER BY timestamp DESC
+                  WHERE dm_channel_id = ?1 AND (timestamp < ?3 OR (timestamp = ?3 AND id < ?4))
+                  ORDER BY timestamp DESC, id DESC
                   LIMIT ?2
               ) m
               INNER JOIN users u ON m.sender_id = u.id
-              ORDER BY m.timestamp ASC",
+              ORDER BY m.timestamp ASC, m.id ASC",
         ).map_err(|e| e.to_string())?;
-        let rows = stmt.query_map(params![dm_channel_id, limit, before_timestamp], |row| {
+        let rows = stmt.query_map(params![dm_channel_id, limit, before_timestamp, before_id.unwrap_or("")], |row| {
             Ok(DmMessage {
                 id: row.get(0)?,
                 dm_channel_id: row.get(1)?,
@@ -3664,19 +3677,19 @@ impl Database {
                 timestamp: row.get(7)?,
                 message_nonce: row.get(8)?,
                 edited_at: row.get(9)?,
-                encrypted_profile_key: row.get(11)?,
-                profile_key_nonce: row.get(12)?,
-                encrypted_banner_key: row.get(13)?,
-                banner_key_nonce: row.get(14)?,
-                key_version: row.get(15)?,
-                encrypted_profile_snapshot: row.get(16)?,
-                profile_snapshot_nonce: row.get(17)?,
-                encrypted_file_key: row.get(18)?,
-                file_key_nonce: row.get(19)?,
-                encrypted_sender_username: row.get(20)?,
-                sender_username_nonce: row.get(21)?,
-                sender_id_hash: row.get(22).ok().flatten(),
-                file_id: row.get(23).ok().flatten(),
+                encrypted_profile_key: row.get(10)?,
+                profile_key_nonce: row.get(11)?,
+                encrypted_banner_key: row.get(12)?,
+                banner_key_nonce: row.get(13)?,
+                key_version: row.get(14)?,
+                encrypted_profile_snapshot: row.get(15)?,
+                profile_snapshot_nonce: row.get(16)?,
+                encrypted_file_key: row.get(17)?,
+                file_key_nonce: row.get(18)?,
+                encrypted_sender_username: row.get(19)?,
+                sender_username_nonce: row.get(20)?,
+                sender_id_hash: row.get(21).ok().flatten(),
+                file_id: None,
             })
         }).map_err(|e| e.to_string())?;
         let mut output = Vec::new();
@@ -3693,7 +3706,6 @@ impl Database {
         encrypted_content: &[u8],
         nonce: &[u8],
         message_nonce: Option<&str>,
-        message_signature: Option<&str>,
         encrypted_profile_key: Option<&str>,
         profile_key_nonce: Option<&str>,
         encrypted_banner_key: Option<&str>,
@@ -3717,9 +3729,11 @@ impl Database {
             )
             .map_err(|_| "Sender not found".to_string())?;
         let h = sha256_hex(&format!("{}:{}", sender_id, dm_channel_id));
+        // Same fixed-width RFC3339 timestamp as channel messages (see save_message).
+        let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string();
         conn.execute(
-            "INSERT INTO dm_messages (id, dm_channel_id, sender_id, encrypted_content, nonce, message_nonce, message_signature, encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce, encrypted_sender_username, sender_username_nonce, sender_id_hash, file_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
-            params![id, dm_channel_id, sender_id, encrypted_content, nonce, message_nonce, message_signature, encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce, encrypted_sender_username, sender_username_nonce, h, file_id],
+            "INSERT INTO dm_messages (id, dm_channel_id, sender_id, encrypted_content, nonce, timestamp, message_nonce, encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce, encrypted_sender_username, sender_username_nonce, sender_id_hash, file_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+            params![id, dm_channel_id, sender_id, encrypted_content, nonce, ts, message_nonce, encrypted_profile_key, profile_key_nonce, encrypted_banner_key, banner_key_nonce, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_file_key, file_key_nonce, encrypted_sender_username, sender_username_nonce, h, file_id],
         )
         .map_err(|e| e.to_string())?;
 
@@ -3729,7 +3743,7 @@ impl Database {
             sender_id: sender_id.to_string(),
             encrypted_content: encrypted_content.to_vec(),
             nonce: nonce.to_vec(),
-            timestamp: chrono::Utc::now().to_rfc3339(),
+            timestamp: ts,
             message_nonce: message_nonce.map(|s| s.to_string()),
             edited_at: None,
             encrypted_profile_key: encrypted_profile_key.map(|s| s.to_string()),
@@ -3755,7 +3769,6 @@ impl Database {
         new_encrypted_content: &[u8],
         new_nonce: &[u8],
         new_message_nonce: Option<&str>,
-        new_message_signature: Option<&str>,
         new_encrypted_profile_key: Option<&str>,
         new_profile_key_nonce: Option<&str>,
         new_encrypted_banner_key: Option<&str>,
@@ -3774,8 +3787,8 @@ impl Database {
             return Err("Not authorized to edit this message".to_string());
         }
         conn.execute(
-            "UPDATE messages SET encrypted_content = ?1, nonce = ?2, message_nonce = ?3, message_signature = ?5, encrypted_profile_key = ?6, profile_key_nonce = ?7, encrypted_banner_key = ?8, banner_key_nonce = ?9, edited_at = CURRENT_TIMESTAMP WHERE id = ?4",
-            params![new_encrypted_content, new_nonce, new_message_nonce, message_id, new_message_signature, new_encrypted_profile_key, new_profile_key_nonce, new_encrypted_banner_key, new_banner_key_nonce],
+            "UPDATE messages SET encrypted_content = ?, nonce = ?, message_nonce = ?, encrypted_profile_key = ?, profile_key_nonce = ?, encrypted_banner_key = ?, banner_key_nonce = ?, edited_at = CURRENT_TIMESTAMP WHERE id = ?",
+            params![new_encrypted_content, new_nonce, new_message_nonce, message_id, new_encrypted_profile_key, new_profile_key_nonce, new_encrypted_banner_key, new_banner_key_nonce],
         )
         .map_err(|e| e.to_string())?;
         // Return updated message
@@ -3788,7 +3801,7 @@ impl Database {
             .map_err(|e| e.to_string())?;
         let msg = conn
             .query_row(
-                "SELECT m.id, m.channel_id, m.sender_id, m.encrypted_content, m.nonce, m.timestamp, m.message_nonce, m.edited_at, m.message_signature, m.encrypted_profile_key, m.profile_key_nonce, m.encrypted_banner_key, m.banner_key_nonce, m.key_version, m.encrypted_profile_snapshot, m.profile_snapshot_nonce, m.encrypted_file_key, m.file_key_nonce                         FROM messages m WHERE m.id = ?1",
+                "SELECT m.id, m.channel_id, m.sender_id, m.encrypted_content, m.nonce, m.timestamp, m.message_nonce, m.edited_at, m.encrypted_profile_key, m.profile_key_nonce, m.encrypted_banner_key, m.banner_key_nonce, m.key_version, m.encrypted_profile_snapshot, m.profile_snapshot_nonce, m.encrypted_file_key, m.file_key_nonce                         FROM messages m WHERE m.id = ?1",
                 params![message_id],
                 |row| {
                     Ok(Message {
@@ -3801,15 +3814,15 @@ impl Database {
                         timestamp: row.get(5)?,
                         message_nonce: row.get(6)?,
                         edited_at: row.get(7)?,
-                        encrypted_profile_key: row.get(9)?,
-                        profile_key_nonce: row.get(10)?,
-                        encrypted_banner_key: row.get(11)?,
-                        banner_key_nonce: row.get(12)?,
-                        key_version: row.get(13)?,
-                        encrypted_profile_snapshot: row.get(14)?,
-                        profile_snapshot_nonce: row.get(15)?,
-                        encrypted_file_key: row.get(16)?,
-                        file_key_nonce: None,
+                        encrypted_profile_key: row.get(8)?,
+                        profile_key_nonce: row.get(9)?,
+                        encrypted_banner_key: row.get(10)?,
+                        banner_key_nonce: row.get(11)?,
+                        key_version: row.get(12)?,
+                        encrypted_profile_snapshot: row.get(13)?,
+                        profile_snapshot_nonce: row.get(14)?,
+                        encrypted_file_key: row.get(15)?,
+                        file_key_nonce: row.get(16)?,
                     encrypted_sender_username: None,
                     sender_username_nonce: None,
                     sender_id_hash: None,
@@ -3860,7 +3873,6 @@ impl Database {
         new_encrypted_content: &[u8],
         new_nonce: &[u8],
         new_message_nonce: Option<&str>,
-        new_message_signature: Option<&str>,
         new_encrypted_profile_key: Option<&str>,
         new_profile_key_nonce: Option<&str>,
         new_encrypted_banner_key: Option<&str>,
@@ -3878,8 +3890,8 @@ impl Database {
             return Err("Not authorized to edit this message".to_string());
         }
         conn.execute(
-            "UPDATE dm_messages SET encrypted_content = ?1, nonce = ?2, message_nonce = ?3, message_signature = ?5, encrypted_profile_key = ?6, profile_key_nonce = ?7, encrypted_banner_key = ?8, banner_key_nonce = ?9, edited_at = CURRENT_TIMESTAMP WHERE id = ?4",
-            params![new_encrypted_content, new_nonce, new_message_nonce, message_id, new_message_signature, new_encrypted_profile_key, new_profile_key_nonce, new_encrypted_banner_key, new_banner_key_nonce],
+            "UPDATE dm_messages SET encrypted_content = ?, nonce = ?, message_nonce = ?, encrypted_profile_key = ?, profile_key_nonce = ?, encrypted_banner_key = ?, banner_key_nonce = ?, edited_at = CURRENT_TIMESTAMP WHERE id = ?",
+            params![new_encrypted_content, new_nonce, new_message_nonce, message_id, new_encrypted_profile_key, new_profile_key_nonce, new_encrypted_banner_key, new_banner_key_nonce],
         )
         .map_err(|e| e.to_string())?;
         let username: String = conn
@@ -3891,7 +3903,7 @@ impl Database {
             .map_err(|e| e.to_string())?;
         let msg = conn
             .query_row(
-                "SELECT m.id, m.dm_channel_id, m.sender_id, m.encrypted_content, m.nonce, m.timestamp, m.message_nonce, m.edited_at, m.message_signature, m.encrypted_profile_key, m.profile_key_nonce, m.encrypted_banner_key, m.banner_key_nonce, m.key_version, m.encrypted_profile_snapshot, m.profile_snapshot_nonce, m.encrypted_file_key, m.file_key_nonce                         FROM dm_messages m WHERE m.id = ?1",
+                "SELECT m.id, m.dm_channel_id, m.sender_id, m.encrypted_content, m.nonce, m.timestamp, m.message_nonce, m.edited_at, m.encrypted_profile_key, m.profile_key_nonce, m.encrypted_banner_key, m.banner_key_nonce, m.key_version, m.encrypted_profile_snapshot, m.profile_snapshot_nonce, m.encrypted_file_key, m.file_key_nonce                         FROM dm_messages m WHERE m.id = ?1",
                 params![message_id],
                 |row| {
                     Ok(DmMessage {
@@ -3904,15 +3916,15 @@ impl Database {
                         timestamp: row.get(5)?,
                         message_nonce: row.get(6)?,
                         edited_at: row.get(7)?,
-                        encrypted_profile_key: row.get(9)?,
-                        profile_key_nonce: row.get(10)?,
-                        encrypted_banner_key: row.get(11)?,
-                        banner_key_nonce: row.get(12)?,
-                        key_version: row.get(13)?,
-                        encrypted_profile_snapshot: row.get(14)?,
-                        profile_snapshot_nonce: row.get(15)?,
-                        encrypted_file_key: row.get(16)?,
-                        file_key_nonce: None,
+                        encrypted_profile_key: row.get(8)?,
+                        profile_key_nonce: row.get(9)?,
+                        encrypted_banner_key: row.get(10)?,
+                        banner_key_nonce: row.get(11)?,
+                        key_version: row.get(12)?,
+                        encrypted_profile_snapshot: row.get(13)?,
+                        profile_snapshot_nonce: row.get(14)?,
+                        encrypted_file_key: row.get(15)?,
+                        file_key_nonce: row.get(16)?,
                     encrypted_sender_username: None,
                     sender_id_hash: None,
                     sender_username_nonce: None,
@@ -4364,7 +4376,7 @@ impl Database {
         let mut stmt = conn
             .prepare(
                 "SELECT m.id, m.channel_id, m.sender_id, COALESCE(u.username, '?'), u.profile_picture_file_id,
-                        m.encrypted_content, m.nonce, m.timestamp, COALESCE(m.message_nonce, ''), COALESCE(m.edited_at, ''), COALESCE(m.message_signature, ''), COALESCE(m.encrypted_profile_key, ''), COALESCE(m.profile_key_nonce, ''), COALESCE(m.encrypted_banner_key, ''), COALESCE(m.banner_key_nonce, ''), m.key_version, m.encrypted_profile_snapshot, m.profile_snapshot_nonce, m.encrypted_file_key, m.file_key_nonce, COALESCE(m.sender_id_hash, '')
+                        m.encrypted_content, m.nonce, m.timestamp, COALESCE(m.message_nonce, ''), COALESCE(m.edited_at, ''), COALESCE(m.encrypted_profile_key, ''), COALESCE(m.profile_key_nonce, ''), COALESCE(m.encrypted_banner_key, ''), COALESCE(m.banner_key_nonce, ''), m.key_version, m.encrypted_profile_snapshot, m.profile_snapshot_nonce, m.encrypted_file_key, m.file_key_nonce, COALESCE(m.sender_id_hash, '')
                  FROM messages m LEFT JOIN users u ON m.sender_id = u.id ORDER BY m.timestamp DESC LIMIT 500",
             )
             .map_err(|e| e.to_string())?;
@@ -4380,18 +4392,18 @@ impl Database {
                     timestamp: row.get(7)?,
                     message_nonce: row.get(8)?,
                     edited_at: row.get(9)?,
-                    encrypted_profile_key: row.get(11)?,
-                    profile_key_nonce: row.get(12)?,
-                    encrypted_banner_key: row.get(13)?,
-                    banner_key_nonce: row.get(14)?,
-                    key_version: row.get(15)?,
-                    encrypted_profile_snapshot: row.get(16)?,
-                    profile_snapshot_nonce: row.get(17)?,
-                    encrypted_file_key: row.get(18)?,
-                    file_key_nonce: row.get(19)?,
+                    encrypted_profile_key: Some(row.get(10)?),
+                    profile_key_nonce: Some(row.get(11)?),
+                    encrypted_banner_key: Some(row.get(12)?),
+                    banner_key_nonce: Some(row.get(13)?),
+                    key_version: row.get(14)?,
+                    encrypted_profile_snapshot: row.get(15)?,
+                    profile_snapshot_nonce: row.get(16)?,
+                    encrypted_file_key: row.get(17)?,
+                    file_key_nonce: row.get(18)?,
                     encrypted_sender_username: None,
                     sender_username_nonce: None,
-                    sender_id_hash: Some(row.get(20)?),
+                    sender_id_hash: Some(row.get(19)?),
                     file_id: None,
                 })
             })

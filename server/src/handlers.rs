@@ -1796,9 +1796,10 @@ pub async fn list_messages(
 
     let limit: i64 = params.get("limit").and_then(|v| v.parse().ok()).unwrap_or(50);
     let before = params.get("before").map(|s| s.as_str());
+    let before_id = params.get("before_id").map(|s| s.as_str());
 
     let messages = if let Some(ts) = before {
-        match state.db.list_messages_before(&channel_id, ts, limit) {
+        match state.db.list_messages_before(&channel_id, ts, before_id, limit) {
             Ok(m) => m,
             Err(e) => {
                 return (
@@ -3683,6 +3684,7 @@ pub async fn remove_user_sticker(
 #[derive(Deserialize)]
 pub struct UpdateProfileRequest {
     pub remove_picture: Option<bool>,
+    pub remove_banner: Option<bool>,
     pub profile_picture_file_id: Option<String>,
     // Encrypted file keys (AES-GCM with identity key) — no plaintext keys accepted
     pub encrypted_pic_key: Option<String>,
@@ -3810,6 +3812,13 @@ pub async fn update_profile(
     // Description, nickname, display_name, username_color, username_border_color,
     // and profile_background_color are NO LONGER accepted as plaintext fields.
     // All profile data must be inside encrypted_profile_data.
+
+    // Handle profile banner removal
+    if req.remove_banner.unwrap_or(false) {
+        if let Err(e) = state.db.update_profile_banner(&user_id, None, None, None) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
+        }
+    }
 
     // Handle profile banner
     if let Some(ref banner_file_id) = req.profile_banner_file_id {
@@ -4707,9 +4716,10 @@ pub async fn list_dm_messages(
     }
     let limit: i64 = params.get("limit").and_then(|v| v.parse().ok()).unwrap_or(50);
     let before = params.get("before").map(|s| s.as_str());
+    let before_id = params.get("before_id").map(|s| s.as_str());
 
     let msgs = if let Some(ts) = before {
-        match state.db.list_dm_messages_before(&dm_channel_id, ts, limit) {
+        match state.db.list_dm_messages_before(&dm_channel_id, ts, before_id, limit) {
             Ok(m) => m,
             Err(e) => {
                 return (
@@ -4752,10 +4762,10 @@ pub async fn list_dm_messages(
                         "encrypted_banner_key": m.encrypted_banner_key,
                         "banner_key_nonce": m.banner_key_nonce,
                         "key_version": m.key_version,
-                        "encrypted_profile_snapshot": base64::engine::general_purpose::STANDARD.encode(m.encrypted_profile_snapshot.as_deref().unwrap_or(&[])),
-                        "profile_snapshot_nonce": m.profile_snapshot_nonce,
-                        "encrypted_file_key": m.encrypted_file_key,
-                        "file_key_nonce": m.file_key_nonce,
+                        "encrypted_profile_snapshot": m.encrypted_profile_snapshot.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+                        "profile_snapshot_nonce": m.profile_snapshot_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+                        "encrypted_file_key": m.encrypted_file_key.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+                        "file_key_nonce": m.file_key_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                         "sender_id_hash": m.sender_id_hash,
                         "encrypted_sender_username": m.encrypted_sender_username,
                         "sender_username_nonce": m.sender_username_nonce,
