@@ -157,6 +157,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
+            // Clear any friend code left over from a previous account on this
+            // browser so a stale code can never be shown for the logged-in user.
+            // The correct code is re-established below from the server's encrypted
+            // backup (or the key blob bundle), and loadMyFriendCode shows a
+            // 'recover with password' prompt if neither is available.
+            localStorage.removeItem('e2e_friend_code');
+
             // Try to restore full key bundle from server (password-encrypted backup)
             let identityKeyPair = E2ECrypto.getIdentityKeyPair(data.user.id);
             let blobRestored = false;

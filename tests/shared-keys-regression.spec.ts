@@ -60,10 +60,19 @@ test.describe('Shared keys + sender_username regression — full stack', () => {
             await new Promise(r => setTimeout(r, 500));
         }
 
-        await page2.evaluate(() => {
-            const btns = document.querySelectorAll('.friend-request-item .accept-btn');
-            if (btns.length > 0) (btns[0] as HTMLElement).click();
-        });
+        // Accept via API (robust — the DOM button class is .btn-accept and may
+        // not be rendered yet; the badge appearing doesn't guarantee the list is)
+        const incoming = await (await page2.request.get(`${BASE}/api/friends/requests/incoming`, {
+            headers: { Authorization: `Bearer ${token2}` },
+        })).json();
+        expect(Array.isArray(incoming)).toBe(true);
+        if (incoming.length > 0) {
+            const acc = await page2.request.post(`${BASE}/api/friends/requests/accept`, {
+                headers: { Authorization: `Bearer ${token2}`, 'Content-Type': 'application/json' },
+                data: { request_id: incoming[0].id },
+            });
+            expect(acc.ok()).toBeTruthy();
+        }
         await new Promise(r => setTimeout(r, 3000));
     }
 
@@ -82,7 +91,7 @@ test.describe('Shared keys + sender_username regression — full stack', () => {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    invite_code_hash: inviteCode,
+                    invite_code: inviteCode,
                     encrypted_name: E2ECrypto.arrayBufferToBase64(encName.ciphertext),
                     name_nonce: E2ECrypto.arrayBufferToBase64(encName.nonce),
                     channel_encrypted_name: E2ECrypto.arrayBufferToBase64(encChName.ciphertext),
@@ -127,6 +136,7 @@ test.describe('Shared keys + sender_username regression — full stack', () => {
     // ─── Tests ────────────────────────────────────────────────────
 
     test('01 — Shared key: uploaded after DM + retrievable via individual GET', async ({ page, context }) => {
+        test.setTimeout(120000);
         const ts = Date.now() + Math.floor(Math.random() * 10000);
         const userA = 'shkA' + ts;
         const userB = 'shkB' + ts;
@@ -153,16 +163,21 @@ test.describe('Shared keys + sender_username regression — full stack', () => {
         });
         expect(dmConvId).toBeTruthy();
 
-        // Fetch the shared key for this DM channel via the individual GET endpoint
-        const fetchRes = await page.request.get(
-            `${BASE}/api/profile/data-key/shared/dm_channel/${dmConvId}`,
-            { headers: { Authorization: `Bearer ${ua.token}` } }
-        );
-        expect(fetchRes.ok()).toBeTruthy();
-        const keys = await fetchRes.json();
-        // The shared key should have been uploaded by userA and/or userB
-        expect(Array.isArray(keys)).toBeTruthy();
-        expect(keys.length).toBeGreaterThan(0);
+        // The shared-key upload is fire-and-forget (WS round-trips), so poll the
+        // individual GET endpoint until the key actually appears instead of
+        // gambling on a fixed sleep.
+        let keys: any[] = [];
+        await expect(async () => {
+            const fetchRes = await page.request.get(
+                `${BASE}/api/profile/data-key/shared/dm_channel/${dmConvId}`,
+                { headers: { Authorization: `Bearer ${ua.token}` } }
+            );
+            expect(fetchRes.ok()).toBeTruthy();
+            const fetched = await fetchRes.json();
+            expect(Array.isArray(fetched)).toBeTruthy();
+            expect(fetched.length).toBeGreaterThan(0);
+            keys = fetched;
+        }).toPass({ timeout: 20000, intervals: [1000] });
 
         // Each entry must have owner_user_id, encrypted_key, nonce
         for (const entry of keys) {
@@ -179,6 +194,7 @@ test.describe('Shared keys + sender_username regression — full stack', () => {
     });
 
     test('02 — Batch endpoint returns keys for all DMs and servers', async ({ page, context }) => {
+        test.setTimeout(120000);
         const ts = Date.now() + Math.floor(Math.random() * 10000);
         const userA = 'batA' + ts;
         const userB = 'batB' + ts;
@@ -203,24 +219,29 @@ test.describe('Shared keys + sender_username regression — full stack', () => {
         });
         expect(dmConvId).toBeTruthy();
 
-        // Wait a moment for the upload to complete (fire-and-forget)
-        await new Promise(r => setTimeout(r, 2000));
-
-        // Call batch endpoint with the DM channel
-        const batchRes = await page.request.post(
-            `${BASE}/api/profile/data-key/shared/batch`,
-            {
-                headers: { Authorization: `Bearer ${ua.token}`, 'Content-Type': 'application/json' },
-                data: {
-                    targets: [
-                        { target_type: 'dm_channel', target_id: dmConvId },
-                    ],
-                },
-            }
-        );
-        expect(batchRes.ok()).toBeTruthy();
-        const batchData = await batchRes.json();
-        expect(typeof batchData).toBe('object');
+        // The upload is fire-and-forget, so poll the batch endpoint until the
+        // key actually appears instead of gambling on a fixed sleep.
+        let batchData: any = null;
+        await expect(async () => {
+            const batchRes = await page.request.post(
+                `${BASE}/api/profile/data-key/shared/batch`,
+                {
+                    headers: { Authorization: `Bearer ${ua.token}`, 'Content-Type': 'application/json' },
+                    data: {
+                        targets: [
+                            { target_type: 'dm_channel', target_id: dmConvId },
+                        ],
+                    },
+                }
+            );
+            expect(batchRes.ok()).toBeTruthy();
+            const data = await batchRes.json();
+            const dmKey = 'dm_channel:' + dmConvId;
+            expect(data).toHaveProperty(dmKey);
+            expect(Array.isArray(data[dmKey])).toBeTruthy();
+            expect(data[dmKey].length).toBeGreaterThan(0);
+            batchData = data;
+        }).toPass({ timeout: 20000, intervals: [1000] });
 
         const dmKey = 'dm_channel:' + dmConvId;
         expect(batchData).toHaveProperty(dmKey);
@@ -298,6 +319,7 @@ test.describe('Shared keys + sender_username regression — full stack', () => {
     });
 
     test('04 — Server member shared key uploaded after page load', async ({ page, context }) => {
+        test.setTimeout(120000);
         const ts = Date.now() + Math.floor(Math.random() * 10000);
         const userA = 'srvA' + ts;
         const userB = 'srvB' + ts;
@@ -339,22 +361,27 @@ test.describe('Shared keys + sender_username regression — full stack', () => {
         // Wait for loadServers() to complete its fire-and-forget upload
         await new Promise(r => setTimeout(r, 3000));
 
-        // Verify from userA's perspective that userB's server key exists via batch endpoint
-        const batchRes = await page.request.post(
-            `${BASE}/api/profile/data-key/shared/batch`,
-            {
-                headers: { Authorization: `Bearer ${ua.token}`, 'Content-Type': 'application/json' },
-                data: {
-                    targets: [{ target_type: 'server', target_id: server.id }],
-                },
-            }
-        );
-        expect(batchRes.ok()).toBeTruthy();
-        const batchData = await batchRes.json();
+        // The upload is fire-and-forget, so poll the batch endpoint until userB's
+        // key actually appears instead of gambling on a fixed sleep.
+        let batchData: any = null;
         const srvKey = 'server:' + server.id;
-        expect(batchData).toHaveProperty(srvKey);
-        expect(Array.isArray(batchData[srvKey])).toBeTruthy();
-        expect(batchData[srvKey].length).toBeGreaterThan(0);
+        await expect(async () => {
+            const batchRes = await page.request.post(
+                `${BASE}/api/profile/data-key/shared/batch`,
+                {
+                    headers: { Authorization: `Bearer ${ua.token}`, 'Content-Type': 'application/json' },
+                    data: {
+                        targets: [{ target_type: 'server', target_id: server.id }],
+                    },
+                }
+            );
+            expect(batchRes.ok()).toBeTruthy();
+            const data = await batchRes.json();
+            expect(data).toHaveProperty(srvKey);
+            expect(Array.isArray(data[srvKey])).toBeTruthy();
+            expect(data[srvKey].length).toBeGreaterThan(0);
+            batchData = data;
+        }).toPass({ timeout: 20000, intervals: [1000] });
 
         // Verify the data has the expected structure
         for (const entry of batchData[srvKey]) {

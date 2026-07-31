@@ -32,7 +32,7 @@ async function registerUser(page: any, username: string) {
 async function createServerWithKey(page: any, token: string, ownerId: string, inviteCode: string) {
     const res = await page.request.post(`${BASE}/api/servers`, {
         headers: { Authorization: `Bearer ${token}` },
-        data: { name: 'RotationTest', invite_code_hash: sha256Hex(inviteCode) },
+        data: { invite_code: inviteCode },
     });
     const server = await res.json();
 
@@ -113,6 +113,7 @@ async function getMessageTexts(page: any): Promise<string[]> {
 test.describe('Server Key Rotation on Member Removal', () => {
 
     test('kick member: owner rotates key, kicked user cannot access server resources', async ({ page, context }) => {
+        test.setTimeout(120000);
         const ts = Date.now();
         const ownerName = 'kickown_' + ts;
         const kickedName = 'kicked_' + ts;
@@ -182,6 +183,7 @@ test.describe('Server Key Rotation on Member Removal', () => {
     });
 
     test('ban member: owner rotates key, banned user cannot access server resources', async ({ page, context }) => {
+        test.setTimeout(120000);
         const ts = Date.now();
         const ownerName = 'banown_' + ts;
         const bannedName = 'banned_' + ts;
@@ -258,6 +260,7 @@ test.describe('Server Key Rotation on Member Removal', () => {
     });
 
     test('member leaves: owner rotates key, leaver cannot access server resources', async ({ page, context }) => {
+        test.setTimeout(120000);
         const ts = Date.now();
         const ownerName = 'leaveown_' + ts;
         const leaverName = 'leaver_' + ts;

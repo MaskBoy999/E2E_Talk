@@ -4173,7 +4173,14 @@ pub async fn server_regenerate_friend_code(
     let salt: String = rand::thread_rng().gen::<[u8; 16]>().iter().map(|b| format!("{:02x}", b)).collect();
     let hash = crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &format!("{}{}", salt, code));
     match state.db.update_friend_code_hash(&user_id, &hash, &salt) {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true, "friend_code": code}))).into_response(),
+        Ok(()) => {
+            // The server cannot re-encrypt the code without the user's password,
+            // so clear the stale encrypted backup. Otherwise a later login would
+            // restore the OLD code (which no longer matches this hash) and the
+            // displayed code would silently not resolve to the user.
+            let _ = state.db.clear_encrypted_friend_code(&user_id);
+            (StatusCode::OK, Json(serde_json::json!({"ok": true, "friend_code": code}))).into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
 }

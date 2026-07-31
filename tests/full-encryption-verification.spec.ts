@@ -452,7 +452,7 @@ test.describe('Full End-to-End Encryption Verification', () => {
         const inviteCode = generateCode(8);
         const srvRes = await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${body1.token}` },
-            data: { invite_code_hash: sha256Hex(inviteCode) },
+            data: { invite_code: inviteCode },
         });
         expect(srvRes.ok()).toBeTruthy();
         const server = await srvRes.json();
@@ -694,7 +694,7 @@ test.describe('Full End-to-End Encryption Verification', () => {
         const inviteCode = generateCode(8);
         const srvRes = await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${body1.token}` },
-            data: { invite_code_hash: sha256Hex(inviteCode) },
+            data: { invite_code: inviteCode },
         });
         expect(srvRes.ok()).toBeTruthy();
         const server = await srvRes.json();

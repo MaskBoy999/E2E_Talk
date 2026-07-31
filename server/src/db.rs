@@ -2933,6 +2933,23 @@ impl Database {
         Ok(())
     }
 
+    /// Server-side regeneration only stores the hash — the password-encrypted
+    /// backup (encrypted_friend_code + salt + nonce) can no longer be produced
+    /// without the user's password. Clear it so a subsequent login does not
+    /// restore a STALE code that no longer matches the stored hash (which was
+    /// the root cause of "friend code needs to be regenerated" after a
+    /// server-side regen: the client would decrypt the old backup and display
+    /// a code that no longer resolves to this user).
+    pub fn clear_encrypted_friend_code(&self, user_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE users SET encrypted_friend_code = NULL, friend_code_salt = NULL, friend_code_nonce = NULL WHERE id = ?1",
+            params![user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     pub fn get_user_by_friend_code(&self, code: &str, hmac_key: &[u8]) -> Result<User, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let code_upper = code.trim().to_uppercase();
@@ -3787,8 +3804,8 @@ impl Database {
             return Err("Not authorized to edit this message".to_string());
         }
         conn.execute(
-            "UPDATE messages SET encrypted_content = ?, nonce = ?, message_nonce = ?, encrypted_profile_key = ?, profile_key_nonce = ?, encrypted_banner_key = ?, banner_key_nonce = ?, edited_at = CURRENT_TIMESTAMP WHERE id = ?",
-            params![new_encrypted_content, new_nonce, new_message_nonce, message_id, new_encrypted_profile_key, new_profile_key_nonce, new_encrypted_banner_key, new_banner_key_nonce],
+            "UPDATE messages SET encrypted_content = ?, nonce = ?, message_nonce = ?, encrypted_profile_key = COALESCE(?, encrypted_profile_key), profile_key_nonce = COALESCE(?, profile_key_nonce), encrypted_banner_key = COALESCE(?, encrypted_banner_key), banner_key_nonce = COALESCE(?, banner_key_nonce), edited_at = CURRENT_TIMESTAMP WHERE id = ?",
+            params![new_encrypted_content, new_nonce, new_message_nonce, new_encrypted_profile_key, new_profile_key_nonce, new_encrypted_banner_key, new_banner_key_nonce, message_id],
         )
         .map_err(|e| e.to_string())?;
         // Return updated message
@@ -3890,8 +3907,8 @@ impl Database {
             return Err("Not authorized to edit this message".to_string());
         }
         conn.execute(
-            "UPDATE dm_messages SET encrypted_content = ?, nonce = ?, message_nonce = ?, encrypted_profile_key = ?, profile_key_nonce = ?, encrypted_banner_key = ?, banner_key_nonce = ?, edited_at = CURRENT_TIMESTAMP WHERE id = ?",
-            params![new_encrypted_content, new_nonce, new_message_nonce, message_id, new_encrypted_profile_key, new_profile_key_nonce, new_encrypted_banner_key, new_banner_key_nonce],
+            "UPDATE dm_messages SET encrypted_content = ?, nonce = ?, message_nonce = ?, encrypted_profile_key = COALESCE(?, encrypted_profile_key), profile_key_nonce = COALESCE(?, profile_key_nonce), encrypted_banner_key = COALESCE(?, encrypted_banner_key), banner_key_nonce = COALESCE(?, banner_key_nonce), edited_at = CURRENT_TIMESTAMP WHERE id = ?",
+            params![new_encrypted_content, new_nonce, new_message_nonce, new_encrypted_profile_key, new_profile_key_nonce, new_encrypted_banner_key, new_banner_key_nonce, message_id],
         )
         .map_err(|e| e.to_string())?;
         let username: String = conn
