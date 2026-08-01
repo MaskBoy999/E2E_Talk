@@ -583,7 +583,23 @@ test.describe('Stickers, GIFs, and Emojis', () => {
                         if (dec) name = new TextDecoder().decode(dec);
                     } catch (_) {}
                 }
-                if (name === expectedName) return s;
+                if (name === expectedName) {
+                    // Decrypt the mime type with the sticker's file key (migration 046
+                    // dropped the plaintext mime_type column).
+                    let mime = null;
+                    try {
+                        if (kp && s.encrypted_mime_type && s.mime_nonce && s.encrypted_file_key && s.file_key_nonce) {
+                            const combined = s.file_key_nonce + ':' + s.encrypted_file_key;
+                            const rawKeyB64 = window.E2ECrypto.decodeEncryptedFileKey(combined, kp.privateKey);
+                            if (rawKeyB64) {
+                                const keyBytes = new Uint8Array(window.E2ECrypto.base64ToArrayBuffer(rawKeyB64));
+                                const decMime = window.E2ECrypto.aeadDecrypt(s.encrypted_mime_type, keyBytes, s.mime_nonce);
+                                if (decMime) mime = new TextDecoder().decode(decMime);
+                            }
+                        }
+                    } catch (_) {}
+                    return { ...s, mime_type: mime };
+                }
             }
             return null;
         }, { stickerList: stickers, expectedName: emojiName });

@@ -191,8 +191,6 @@ struct OutgoingChatMessage {
     nonce: String,
     timestamp: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    message_nonce: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     edited_at: Option<String>,
     // Streamlined E2E fields
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -201,10 +199,6 @@ struct OutgoingChatMessage {
     encrypted_profile_snapshot: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     profile_snapshot_nonce: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    encrypted_file_key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    file_key_nonce: Option<String>,
 }
 
 pub async fn ws_handler(
@@ -467,7 +461,6 @@ async fn handle_ws_message(
                 Some(c) => c,
                 None => return,
             };
-            let message_nonce = parsed.get("message_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
 
             // Check user is member of the server this channel belongs to
             let server_id = match state.db.get_server_id_for_channel(channel_id) {
@@ -487,14 +480,8 @@ async fn handle_ws_message(
                 Err(_) => return,
             };
 
-            let encrypted_profile_key = parsed.get("encrypted_profile_key").and_then(|c| c.as_str()).map(|s| s.to_string());
-            let profile_key_nonce = parsed.get("profile_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
-            let encrypted_banner_key = parsed.get("encrypted_banner_key").and_then(|c| c.as_str()).map(|s| s.to_string());
-            let banner_key_nonce = parsed.get("banner_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
             let encrypted_profile_snapshot = parsed.get("encrypted_profile_snapshot").and_then(|c| c.as_str()).and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
             let profile_snapshot_nonce = parsed.get("profile_snapshot_nonce").and_then(|c| c.as_str()).and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
-            let encrypted_file_key_parsed = parsed.get("encrypted_file_key").and_then(|c| c.as_str()).and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
-            let file_key_nonce_parsed = parsed.get("file_key_nonce").and_then(|c| c.as_str()).and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
 
             // Parse encrypted sender_username from incoming message
             let encrypted_sender_username = parsed.get("encrypted_sender_username").and_then(|c| c.as_str()).map(|s| s.to_string());
@@ -504,7 +491,7 @@ async fn handle_ws_message(
             // Store SHA-256 hash instead of raw UUID so the host can't map message file_ids
             let file_id_hash = raw_file_id.as_ref().map(|fid| crate::db::sha256_hex(fid));
 
-            let message = match state.db.save_encrypted_message(channel_id, user_id, &encrypted_content, &nonce, message_nonce.as_deref(), encrypted_profile_key.as_deref(), profile_key_nonce.as_deref(), encrypted_banner_key.as_deref(), banner_key_nonce.as_deref(), encrypted_profile_snapshot.as_deref(), profile_snapshot_nonce.as_deref(), encrypted_file_key_parsed.as_deref(), file_key_nonce_parsed.as_deref(), encrypted_sender_username.as_deref(), sender_username_nonce.as_deref(), file_id_hash.as_deref()) {
+            let message = match state.db.save_encrypted_message(channel_id, user_id, &encrypted_content, &nonce, encrypted_profile_snapshot.as_deref(), profile_snapshot_nonce.as_deref(), encrypted_sender_username.as_deref(), sender_username_nonce.as_deref(), file_id_hash.as_deref()) {
                 Ok(m) => m,
                 Err(e) => {
                     tracing::error!("Failed to save message: {}", e);
@@ -531,13 +518,10 @@ async fn handle_ws_message(
                     encrypted_content: encrypted_content_b64.to_string(),
                     nonce: nonce_b64.to_string(),
                     timestamp: message.timestamp,
-                    message_nonce: message.message_nonce,
                     edited_at: None,
                     key_version: None,
                     encrypted_profile_snapshot: encrypted_profile_snapshot.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                     profile_snapshot_nonce: profile_snapshot_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
-                    encrypted_file_key: encrypted_file_key_parsed.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
-                    file_key_nonce: file_key_nonce_parsed.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                 }),
                 user_id: None,
                 username: None,
@@ -649,7 +633,6 @@ async fn handle_ws_message(
                 Some(c) => c,
                 None => return,
             };
-            let message_nonce = parsed.get("message_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
 
             // Must be a member of this DM channel.
             if !state.db.is_dm_member(dm_channel_id, user_id).unwrap_or(false) {
@@ -665,14 +648,8 @@ async fn handle_ws_message(
                 Err(_) => return,
             };
 
-            let encrypted_profile_key = parsed.get("encrypted_profile_key").and_then(|c| c.as_str()).map(|s| s.to_string());
-            let profile_key_nonce = parsed.get("profile_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
-            let encrypted_banner_key = parsed.get("encrypted_banner_key").and_then(|c| c.as_str()).map(|s| s.to_string());
-            let banner_key_nonce = parsed.get("banner_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
             let encrypted_profile_snapshot = parsed.get("encrypted_profile_snapshot").and_then(|c| c.as_str()).and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
             let profile_snapshot_nonce = parsed.get("profile_snapshot_nonce").and_then(|c| c.as_str()).and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
-            let encrypted_file_key_parsed = parsed.get("encrypted_file_key").and_then(|c| c.as_str()).and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
-            let file_key_nonce_parsed = parsed.get("file_key_nonce").and_then(|c| c.as_str()).and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
 
             // Parse encrypted sender_username from incoming dm_send
             let encrypted_sender_username = parsed.get("encrypted_sender_username").and_then(|c| c.as_str()).map(|s| s.to_string());
@@ -682,7 +659,7 @@ async fn handle_ws_message(
             // Store SHA-256 hash instead of raw UUID so the host can't map message file_ids
             let file_id_hash = raw_file_id.as_ref().map(|fid| crate::db::sha256_hex(fid));
 
-            let message = match state.db.save_dm_message(dm_channel_id, user_id, &encrypted_content, &nonce, message_nonce.as_deref(), encrypted_profile_key.as_deref(), profile_key_nonce.as_deref(), encrypted_banner_key.as_deref(), banner_key_nonce.as_deref(), encrypted_profile_snapshot.as_deref(), profile_snapshot_nonce.as_deref(), encrypted_file_key_parsed.as_deref(),file_key_nonce_parsed.as_deref(), encrypted_sender_username.as_deref(), sender_username_nonce.as_deref(), file_id_hash.as_deref()) {
+            let message = match state.db.save_dm_message(dm_channel_id, user_id, &encrypted_content, &nonce, encrypted_profile_snapshot.as_deref(), profile_snapshot_nonce.as_deref(), encrypted_sender_username.as_deref(), sender_username_nonce.as_deref(), file_id_hash.as_deref()) {
                             Ok(m) => m,
                             Err(e) => {
                                 tracing::error!("Failed to save DM message: {}", e);
@@ -709,13 +686,10 @@ async fn handle_ws_message(
                     encrypted_content: encrypted_content_b64.to_string(),
                     nonce: nonce_b64.to_string(),
                     timestamp: message.timestamp,
-                    message_nonce: message.message_nonce,
                     edited_at: None,
                     key_version: None,
                     encrypted_profile_snapshot: encrypted_profile_snapshot.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                     profile_snapshot_nonce: profile_snapshot_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
-                    encrypted_file_key: encrypted_file_key_parsed.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
-                    file_key_nonce: file_key_nonce_parsed.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                 }),
                 user_id: None,
                 username: None,
@@ -796,7 +770,6 @@ async fn handle_ws_message(
                 Some(c) => c,
                 None => return,
             };
-            let message_nonce = parsed.get("message_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
 
             let encrypted_content = match base64::engine::general_purpose::STANDARD.decode(encrypted_content_b64) {
                 Ok(b) => b,
@@ -807,12 +780,8 @@ async fn handle_ws_message(
                 Err(_) => return,
             };
 
-            let encrypted_profile_key = parsed.get("encrypted_profile_key").and_then(|c| c.as_str()).map(|s| s.to_string());
-            let profile_key_nonce = parsed.get("profile_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
-            let encrypted_banner_key = parsed.get("encrypted_banner_key").and_then(|c| c.as_str()).map(|s| s.to_string());
-            let banner_key_nonce = parsed.get("banner_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
 
-            let message = match state.db.edit_encrypted_message(message_id, user_id, &encrypted_content, &nonce, message_nonce.as_deref(), encrypted_profile_key.as_deref(), profile_key_nonce.as_deref(), encrypted_banner_key.as_deref(), banner_key_nonce.as_deref()) {
+            let message = match state.db.edit_encrypted_message(message_id, user_id, &encrypted_content, &nonce) {
                 Ok(m) => m,
                 Err(e) => {
                     tracing::error!("Failed to edit message: {}", e);
@@ -840,13 +809,10 @@ async fn handle_ws_message(
                     encrypted_content: encrypted_content_b64.to_string(),
                     nonce: nonce_b64.to_string(),
                     timestamp: message.timestamp,
-                    message_nonce: message.message_nonce,
                     edited_at: message.edited_at,
                     key_version: None,
                     encrypted_profile_snapshot: None,
                     profile_snapshot_nonce: None,
-                    encrypted_file_key: None,
-                    file_key_nonce: None,
                 }),
                 user_id: None,
                 username: None,
@@ -916,7 +882,6 @@ async fn handle_ws_message(
                 Some(c) => c,
                 None => return,
             };
-            let message_nonce = parsed.get("message_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
 
             let encrypted_content = match base64::engine::general_purpose::STANDARD.decode(encrypted_content_b64) {
                 Ok(b) => b,
@@ -927,12 +892,8 @@ async fn handle_ws_message(
                 Err(_) => return,
             };
 
-            let encrypted_profile_key = parsed.get("encrypted_profile_key").and_then(|c| c.as_str()).map(|s| s.to_string());
-            let profile_key_nonce = parsed.get("profile_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
-            let encrypted_banner_key = parsed.get("encrypted_banner_key").and_then(|c| c.as_str()).map(|s| s.to_string());
-            let banner_key_nonce = parsed.get("banner_key_nonce").and_then(|c| c.as_str()).map(|s| s.to_string());
 
-            let message = match state.db.edit_dm_message(message_id, user_id, &encrypted_content, &nonce, message_nonce.as_deref(), encrypted_profile_key.as_deref(), profile_key_nonce.as_deref(), encrypted_banner_key.as_deref(), banner_key_nonce.as_deref()) {
+            let message = match state.db.edit_dm_message(message_id, user_id, &encrypted_content, &nonce) {
                 Ok(m) => m,
                 Err(e) => {
                     tracing::error!("Failed to edit DM message: {}", e);
@@ -955,13 +916,10 @@ async fn handle_ws_message(
                     encrypted_content: encrypted_content_b64.to_string(),
                     nonce: nonce_b64.to_string(),
                     timestamp: message.timestamp,
-                    message_nonce: message.message_nonce,
                     edited_at: message.edited_at,
                     key_version: None,
                     encrypted_profile_snapshot: None,
                     profile_snapshot_nonce: None,
-                    encrypted_file_key: None,
-                    file_key_nonce: None,
                 }),
                 user_id: None,
                 username: None,

@@ -12930,7 +12930,6 @@ async function uploadFileToServer(file) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
             size: file.size,
-            mime: rawMime, // legacy fallback for un-rebuilt servers
             encrypted_mime: encMime.ciphertext,
             mime_nonce: encMime.nonce
         })
@@ -14507,6 +14506,20 @@ async function loadUserStickers() {
                     }
                 }
             }
+            // Decrypt encrypted_mime_type with the (now-decrypted) file key. The server
+            // never stores mime in plaintext — it's encrypted with the sticker's own
+            // shareable file key, so the emoji/GIF filters below see the real type.
+            if (identity) {
+                for (const s of userStickersCache) {
+                    if (s.encrypted_mime_type && s.mime_nonce && s.file_key) {
+                        try {
+                            var mimeKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(s.file_key));
+                            var decMime = E2ECrypto.aeadDecrypt(s.encrypted_mime_type, mimeKey, s.mime_nonce);
+                            if (decMime) s.mime_type = new TextDecoder().decode(decMime);
+                        } catch (_) {}
+                    }
+                }
+            }
             // Also refresh emojiCache from the same response so both caches stay in sync.
             // This is needed because the server doesn't broadcast sticker/emoji uploads
             // via WebSocket — the only trigger for re-fetching is opening the sticker/emoji tabs.
@@ -14545,9 +14558,27 @@ async function loadEmojiCache() {
         const res = await authFetch('/api/users/me/stickers');
         if (res.ok) {
             const stickers = await res.json();
+            const identity = E2ECrypto.getIdentityKeyPair();
+            // Decrypt file keys + mime types first so the emoji filter sees real values
+            // (mime is never stored plaintext — encrypted with the sticker's file key).
+            for (const s of stickers) {
+                if (s.encrypted_file_key && s.file_key_nonce && identity) {
+                    try {
+                        var preCombined = s.file_key_nonce + ':' + s.encrypted_file_key;
+                        var preDec = E2ECrypto.decodeEncryptedFileKey(preCombined, identity.privateKey);
+                        if (preDec) s.file_key = preDec;
+                    } catch (_) {}
+                }
+                if (s.encrypted_mime_type && s.mime_nonce && s.file_key) {
+                    try {
+                        var mimeKeyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(s.file_key));
+                        var preMime = E2ECrypto.aeadDecrypt(s.encrypted_mime_type, mimeKeyBytes, s.mime_nonce);
+                        if (preMime) s.mime_type = new TextDecoder().decode(preMime);
+                    } catch (_) {}
+                }
+            }
             // Filter for emoji entries (mime_type === 'image/emoji')
             const emojis = stickers.filter(s => s.mime_type === 'image/emoji');
-            const identity = E2ECrypto.getIdentityKeyPair();
             const cache = {};
             for (const s of emojis) {
                 // Decrypt encrypted_sticker_name with identity key
@@ -15016,7 +15047,7 @@ async function sendStickerMessage(sticker) {
             const initRes = await authFetch('/api/files/init', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ size: decrypted.length, mime })
+                body: JSON.stringify({ size: decrypted.length })
             });
             if (!initRes.ok) { console.error('sendStickerMessage: init failed', await initRes.text()); hideStickerProgress(); setStickerSendingCooldown(false); return; }
             const { file_id: newFileId } = await initRes.json();
@@ -15597,7 +15628,7 @@ async function processAndUploadSticker() {
         const initRes = await authFetch('/api/files/init', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ size: blob.size, mime: mimeType })
+            body: JSON.stringify({ size: blob.size })
         });
         if (!initRes.ok) { const errText = await initRes.text(); console.error('Upload init failed:', initRes.status, errText); throw new Error('Failed to initialize upload (HTTP ' + initRes.status + ')'); }
         const { file_id } = await initRes.json();
@@ -15645,13 +15676,24 @@ async function processAndUploadSticker() {
             }
         } catch (_) {}
 
+        // Encrypt mime_type with the shareable file key so the server never stores
+        // it in plaintext (decrypted client-side from the sticker list response).
+        var encMime = null;
+        var encMimeNonce = null;
+        try {
+            var encMimeRes = E2ECrypto.aeadEncrypt(mimeType, shareableFileKey);
+            encMime = encMimeRes.ciphertext;
+            encMimeNonce = encMimeRes.nonce;
+        } catch (_) {}
+
         const stickerRes = await authFetch('/api/users/me/stickers', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 file_id: file_id,
                 sticker_name: name,
-                mime_type: mimeType,
+                encrypted_mime_type: encMime,
+                mime_nonce: encMimeNonce,
                 encrypted_file_key: encryptedFileKeyParts[1] || null,
                 file_key_nonce: encryptedFileKeyParts[0] || null,
                 encrypted_sticker_name: encName,
@@ -16790,7 +16832,7 @@ async function processAndUploadProfilePic() {
         var initRes = await authFetch('/api/files/init', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ size: blob.size, mime: 'image/png' })
+            body: JSON.stringify({ size: blob.size })
         });
         if (!initRes.ok) throw new Error('Upload init failed');
         var initData = await initRes.json();
@@ -16939,7 +16981,7 @@ async function processAndUploadServerPicture() {
         var initRes = await authFetch('/api/files/init', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ size: blob.size, mime: 'image/png' })
+            body: JSON.stringify({ size: blob.size })
         });
         if (!initRes.ok) throw new Error('Upload init failed');
         var initData = await initRes.json();
@@ -19099,7 +19141,7 @@ async function uploadBannerImage(file) {
     var initRes = await authFetch('/api/files/init', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ size: file.size, mime: file.type || 'image/png' })
+        body: JSON.stringify({ size: file.size })
     });
     if (!initRes.ok) throw new Error('Failed to init upload');
     var initData = await initRes.json();

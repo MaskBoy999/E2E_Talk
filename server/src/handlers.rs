@@ -1839,17 +1839,11 @@ pub async fn list_messages(
                 "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
                 "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
                 "timestamp": m.timestamp,
-                "message_nonce": m.message_nonce,
                 "edited_at": m.edited_at,
-                "encrypted_profile_key": m.encrypted_profile_key,
-                "profile_key_nonce": m.profile_key_nonce,
-                "encrypted_banner_key": m.encrypted_banner_key,
-                "banner_key_nonce": m.banner_key_nonce,
                 "key_version": m.key_version,
                 "encrypted_profile_snapshot": m.encrypted_profile_snapshot.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                 "profile_snapshot_nonce": m.profile_snapshot_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
-                "encrypted_file_key": m.encrypted_file_key.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
-                "file_key_nonce": m.file_key_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+
                 "conversation_profile": conv_profiles.get(&m.sender_id).map(|(data, nonce)| serde_json::json!({
                     "encrypted_profile_data": data,
                     "nonce": nonce,
@@ -1919,17 +1913,11 @@ pub async fn list_messages_around(
                 "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
                 "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
                 "timestamp": m.timestamp,
-                "message_nonce": m.message_nonce,
                 "edited_at": m.edited_at,
-                "encrypted_profile_key": m.encrypted_profile_key,
-                "profile_key_nonce": m.profile_key_nonce,
-                "encrypted_banner_key": m.encrypted_banner_key,
-                "banner_key_nonce": m.banner_key_nonce,
                 "key_version": m.key_version,
                 "encrypted_profile_snapshot": m.encrypted_profile_snapshot.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                 "profile_snapshot_nonce": m.profile_snapshot_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
-                "encrypted_file_key": m.encrypted_file_key.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
-                "file_key_nonce": m.file_key_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+
                 "conversation_profile": conv_profiles2.get(&m.sender_id).map(|(data, nonce)| serde_json::json!({
                     "encrypted_profile_data": data,
                     "nonce": nonce,
@@ -2053,7 +2041,7 @@ pub async fn upload_server_key(
         Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid nonce"}))).into_response(),
     };
 
-    match state.db.save_server_key(&server_id, &req.user_id, &encrypted_key, &sender_pub, &nonce, None) {
+    match state.db.save_server_key(&server_id, &req.user_id, &encrypted_key, &sender_pub, &nonce) {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
@@ -2175,7 +2163,7 @@ pub async fn rotate_server_keys(
             Ok(b) => b,
             Err(_) => continue,
         };
-        let _ = state.db.save_server_key(&server_id, &entry.user_id, &encrypted_key, &sender_pub, &nonce, None);
+        let _ = state.db.save_server_key(&server_id, &entry.user_id, &encrypted_key, &sender_pub, &nonce);
     }
 
     // Broadcast key rotation to all server members
@@ -2434,14 +2422,13 @@ pub async fn admin_list_users(
 
     let user_infos: Vec<serde_json::Value> = users
         .iter()
-        .map(|(id, username, _pw_hash, created_at, _display_name, identity_public_key, profile_picture_file_id, profile_picture_file_key, friend_requests_disabled, encrypted_friend_code, friend_code_salt, friend_code_nonce, encrypted_profile_data, encrypted_profile_salt, encrypted_profile_nonce, profile_banner_file_id, profile_banner_file_key, _description, _nickname, friend_code_hash, encrypted_hash_key, hash_key_salt, hash_key_nonce)| {
+        .map(|(id, username, _pw_hash, created_at, _display_name, identity_public_key, profile_picture_file_id, friend_requests_disabled, encrypted_friend_code, friend_code_salt, friend_code_nonce, encrypted_profile_data, encrypted_profile_salt, encrypted_profile_nonce, profile_banner_file_id, _description, _nickname, friend_code_hash, encrypted_hash_key, hash_key_salt, hash_key_nonce)| {
             serde_json::json!({
                 "id": id,
                 "username": username,
                 "created_at": created_at,
                 "identity_public_key": if identity_public_key.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(identity_public_key.clone()) },
                 "profile_picture_file_id": profile_picture_file_id,
-                "profile_picture_file_key": profile_picture_file_key,
                 "friend_requests_disabled": *friend_requests_disabled != 0,
                 "encrypted_friend_code": encrypted_friend_code,
                 "friend_code_salt": friend_code_salt,
@@ -2450,7 +2437,6 @@ pub async fn admin_list_users(
                 "encrypted_profile_salt": encrypted_profile_salt,
                 "encrypted_profile_nonce": encrypted_profile_nonce,
                 "profile_banner_file_id": profile_banner_file_id,
-                "profile_banner_file_key": profile_banner_file_key,
                 "friend_code_hash": friend_code_hash,
                 "encrypted_hash_key": encrypted_hash_key,
                 "hash_key_salt": hash_key_salt,
@@ -2581,17 +2567,10 @@ pub async fn admin_list_messages(
                 "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
                 "timestamp": m.timestamp,
                 "edited_at": m.edited_at,
-                "message_nonce": m.message_nonce,
-                "encrypted_profile_key": m.encrypted_profile_key,
-                "profile_key_nonce": m.profile_key_nonce,
-                "encrypted_banner_key": m.encrypted_banner_key,
-                "banner_key_nonce": m.banner_key_nonce,
                 "key_version": m.key_version,
                 "sender_id_hash": m.sender_id_hash,
                 "encrypted_profile_snapshot": m.encrypted_profile_snapshot.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
                 "profile_snapshot_nonce": m.profile_snapshot_nonce.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
-                "encrypted_file_key": m.encrypted_file_key.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
-                "file_key_nonce": m.file_key_nonce.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
             })
         })
         .collect();
@@ -2614,7 +2593,7 @@ pub async fn admin_list_server_keys(
     };
     let result: Vec<serde_json::Value> = keys
         .iter()
-        .map(|(sid, sname, uid, ek, spk, nonce, ver, did, ts)| {
+        .map(|(sid, sname, uid, ek, spk, nonce, ver, ts)| {
             serde_json::json!({
                 "server_id": sid,
                 "server_name": sname,
@@ -2623,7 +2602,6 @@ pub async fn admin_list_server_keys(
                 "sender_public_key": base64::engine::general_purpose::STANDARD.encode(spk),
                 "nonce": base64::engine::general_purpose::STANDARD.encode(nonce),
                 "version": ver,
-                "device_id": did,
                 "created_at": ts,
             })
         })
@@ -2719,7 +2697,7 @@ pub async fn admin_list_dm_messages(
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     };
-    let result: Vec<serde_json::Value> = rows.iter().map(|(id, dm_id, sid, sname, enc, nonce, ts, kv, snap, snap_nonce, fkey, fkey_nonce, sender_id_hash)| {
+    let result: Vec<serde_json::Value> = rows.iter().map(|(id, dm_id, sid, sname, enc, nonce, ts, kv, snap, snap_nonce, sender_id_hash)| {
         serde_json::json!({
             "id": id, "dm_channel_id": dm_id,
             "sender_id": sid, "sender_username": sname,
@@ -2730,8 +2708,6 @@ pub async fn admin_list_dm_messages(
             "sender_id_hash": sender_id_hash,
             "encrypted_profile_snapshot": snap.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
             "profile_snapshot_nonce": snap_nonce.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
-            "encrypted_file_key": fkey.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
-            "file_key_nonce": fkey_nonce.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
         })
     }).collect();
     (StatusCode::OK, Json(serde_json::json!(result))).into_response()
@@ -2746,13 +2722,12 @@ pub async fn admin_list_dm_keys(
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     };
-    let result: Vec<serde_json::Value> = rows.iter().map(|(dm_id, uid, uname, ek, spk, nonce, device_id, created_at)| {
+    let result: Vec<serde_json::Value> = rows.iter().map(|(dm_id, uid, uname, ek, spk, nonce, created_at)| {
         serde_json::json!({
             "dm_channel_id": dm_id, "user_id": uid, "username": uname,
             "encrypted_key": base64::engine::general_purpose::STANDARD.encode(ek),
             "sender_public_key": base64::engine::general_purpose::STANDARD.encode(spk),
             "nonce": base64::engine::general_purpose::STANDARD.encode(nonce),
-            "device_id": device_id,
             "created_at": created_at,
         })
     }).collect();
@@ -3257,7 +3232,6 @@ const UPLOAD_DIR: &str = "uploads";
 #[derive(Deserialize)]
 pub struct InitFileUploadRequest {
     pub size: i64,
-    pub mime: Option<String>,            // legacy plaintext mime (sent by client for backward compat)
     pub encrypted_mime: Option<String>,  // AES-GCM encrypted mime_type, base64 encoded
     pub mime_nonce: Option<String>,      // AES-GCM nonce, base64 encoded
 }
@@ -3292,8 +3266,7 @@ pub async fn init_file_upload(
     let encrypted_mime_bytes = req.encrypted_mime.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
     let mime_nonce_bytes = req.mime_nonce.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
 
-    let plain_mime = req.mime.as_deref().unwrap_or("");
-    match state.db.create_file_record(&user_id, req.size, plain_mime, encrypted_mime_bytes.as_deref(), mime_nonce_bytes.as_deref()) {
+    match state.db.create_file_record(&user_id, req.size, encrypted_mime_bytes.as_deref(), mime_nonce_bytes.as_deref()) {
         Ok((file_id, _file_hash)) => {
             let dir = format!("{}/{}", UPLOAD_DIR, file_id);
             let _ = tokio::fs::create_dir_all(&dir).await;
@@ -3593,7 +3566,8 @@ pub async fn download_file_by_hash(
 #[derive(Deserialize)]
 pub struct AddUserStickerRequest {
     pub file_id: String,
-    pub mime_type: String,
+    pub encrypted_mime_type: Option<String>, // AES-GCM encrypted with the sticker's file key
+    pub mime_nonce: Option<String>,          // AES-GCM nonce for encrypted_mime_type
     pub encrypted_file_key: Option<String>,
     pub file_key_nonce: Option<String>,
     pub encrypted_sticker_name: Option<String>,
@@ -3612,11 +3586,13 @@ pub async fn list_user_stickers(
         Ok(stickers) => {
             let result: Vec<serde_json::Value> = stickers
                 .iter()
-                .map(|(id, file_id, _file_id_hash, mime, ekey, eknounce, enc_name, name_nonce)| {
+                .map(|(id, file_id, _file_id_hash, mime, enc_mime, mime_nonce, ekey, eknounce, enc_name, name_nonce)| {
                     serde_json::json!({
                         "id": id,
                         "file_id": file_id,
                         "mime_type": mime,
+                        "encrypted_mime_type": enc_mime.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
+                        "mime_nonce": mime_nonce.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
                         "encrypted_file_key": ekey.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
                         "file_key_nonce": eknounce.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
                         "encrypted_sticker_name": enc_name.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
@@ -3648,6 +3624,9 @@ pub async fn add_user_sticker(
         }
         Err(_) => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "File not found"}))).into_response(),
     }
+    // Decode encrypted_mime_type and mime_nonce if provided (mime is never stored plaintext)
+    let enc_mime_bytes = body.encrypted_mime_type.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+    let mime_nonce_bytes = body.mime_nonce.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
     // Decode encrypted_file_key and file_key_nonce if provided
     let encrypted_key_bytes = body.encrypted_file_key.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
     let key_nonce_bytes = body.file_key_nonce.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
@@ -3655,7 +3634,7 @@ pub async fn add_user_sticker(
     let enc_name_bytes = body.encrypted_sticker_name.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
     let name_nonce_bytes = body.sticker_name_nonce.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
 
-    match state.db.add_user_sticker(&user_id, &body.file_id, &body.mime_type, encrypted_key_bytes.as_deref(), key_nonce_bytes.as_deref(), enc_name_bytes.as_deref(), name_nonce_bytes.as_deref()) {
+    match state.db.add_user_sticker(&user_id, &body.file_id, enc_mime_bytes.as_deref(), mime_nonce_bytes.as_deref(), encrypted_key_bytes.as_deref(), key_nonce_bytes.as_deref(), enc_name_bytes.as_deref(), name_nonce_bytes.as_deref()) {
         Ok(id) => (StatusCode::OK, Json(serde_json::json!({"id": id}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
@@ -4680,7 +4659,6 @@ pub async fn list_dm_conversations(
                         "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
                         "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
                         "timestamp": m.timestamp,
-                        "message_nonce": m.message_nonce,
                     }),
                     None => serde_json::Value::Null,
                 };
@@ -4761,17 +4739,10 @@ pub async fn list_dm_messages(
                         "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
                         "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
                         "timestamp": m.timestamp,
-                        "message_nonce": m.message_nonce,
                         "edited_at": m.edited_at,
-                        "encrypted_profile_key": m.encrypted_profile_key,
-                        "profile_key_nonce": m.profile_key_nonce,
-                        "encrypted_banner_key": m.encrypted_banner_key,
-                        "banner_key_nonce": m.banner_key_nonce,
                         "key_version": m.key_version,
                         "encrypted_profile_snapshot": m.encrypted_profile_snapshot.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                         "profile_snapshot_nonce": m.profile_snapshot_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
-                        "encrypted_file_key": m.encrypted_file_key.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
-                        "file_key_nonce": m.file_key_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                         "sender_id_hash": m.sender_id_hash,
                         "encrypted_sender_username": m.encrypted_sender_username,
                         "sender_username_nonce": m.sender_username_nonce,
@@ -4834,7 +4805,7 @@ pub async fn upload_dm_key(
         Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid nonce"}))).into_response(),
     };
 
-    match state.db.save_dm_key(&dm_channel_id, &req.user_id, &encrypted_key, &sender_pub, &nonce, None) {
+    match state.db.save_dm_key(&dm_channel_id, &req.user_id, &encrypted_key, &sender_pub, &nonce) {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }

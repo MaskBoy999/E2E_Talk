@@ -43,7 +43,7 @@ await page.click('#register-form button[type="submit"]');
         return false;
     }
 
-    test('second device recovers identity key from escrow and decrypts server messages', async ({ browser }) => {
+    test('second device recovers identity key from key blob and decrypts server messages', async ({ browser }) => {
         const ts = Date.now();
         const username = 'md_srv_' + ts;
 
@@ -126,16 +126,6 @@ await page.click('#register-form button[type="submit"]');
         }, { channelId, encResult });
         await page1.waitForTimeout(1000);
 
-        // Debug: check if escrow was uploaded by device 1
-        const escrowCheck = await page1.request.get(`${BASE}/api/identity/escrow`, {
-            headers: { Authorization: `Bearer ${token1}` },
-        });
-        console.log('Escrow check status from device 1:', escrowCheck.status());
-        if (escrowCheck.ok()) {
-            const ed = await escrowCheck.json();
-            console.log('Escrow enc key len:', ed.encrypted_private_key?.length, 'salt len:', ed.salt?.length, 'nonce len:', ed.nonce?.length);
-        }
-
         // Debug: verify crypto.js version loaded
         const cryptoVer = await page1.evaluate(() => {
             // Directly test encryption
@@ -179,46 +169,6 @@ await page.click('#register-form button[type="submit"]');
         });
         console.log('Device 2 debug:', JSON.stringify(debugInfo));
 
-        // If no identity, try manual escrow recovery
-        if (!debugInfo.hasIdentity && debugInfo.hasToken) {
-            const manualRecovery = await page2.evaluate(async (password: string) => {
-                try {
-                    const token = localStorage.getItem('token');
-                    const user = JSON.parse(localStorage.getItem('user') || '{}');
-                    const escrowRes = await fetch('/api/identity/escrow', {
-                        headers: { 'Authorization': 'Bearer ' + token }
-                    });
-                    if (!escrowRes.ok) return { step: 'fetch_escrow', status: escrowRes.status };
-                    const escrowData = await escrowRes.json();
-                    const encLen = escrowData.encrypted_private_key.length;
-                    const saltLen = escrowData.salt.length;
-                    const nonceLen = escrowData.nonce.length;
-                    // Try decrypt
-                    const privateKeyB64 = E2ECrypto.decryptKeyFromEscrow(
-                        escrowData.encrypted_private_key,
-                        password,
-                        escrowData.salt,
-                        escrowData.nonce
-                    );
-                    // Also try old format (without tag)
-                    const key2 = E2ECrypto.decryptKeyFromEscrow_old ? E2ECrypto.decryptKeyFromEscrow_old(
-                        escrowData.encrypted_private_key,
-                        password,
-                        escrowData.salt,
-                        escrowData.nonce
-                    ) : null;
-                    return {
-                        step: 'decrypt',
-                        encLen, saltLen, nonceLen,
-                        result: privateKeyB64 ? 'success' : 'null',
-                        escrowDataPreview: escrowData.encrypted_private_key.substring(0, 20) + '...',
-                    };
-                } catch (e) {
-                    return { step: 'error', message: e.message, stack: e.stack };
-                }
-            }, 'password123');
-            console.log('Manual escrow recovery:', JSON.stringify(manualRecovery));
-        }
 
         // Device 2: fetch and decrypt server key
         const serverKeyOk = await page2.evaluate(async ({ serverId, token }: { serverId: string; token: string }) => {

@@ -192,32 +192,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             } catch (_) {}
 
-            // Fallback: legacy escrow recovery (identity key only)
-            if (!identityKeyPair) {
-                try {
-                    const escrowRes = await fetch('/api/identity/escrow', {
-                        headers: { 'Authorization': 'Bearer ' + data.token }
-                    });
-                    if (escrowRes.ok) {
-                        const escrowData = await escrowRes.json();
-                        let privateKeyB64 = E2ECrypto.decryptWithPassword(
-                            escrowData.encrypted_private_key,
-                            password,
-                            escrowData.salt,
-                            escrowData.nonce
-                        );
-                        if (privateKeyB64) {
-                            const privBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(privateKeyB64));
-                            const pubBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(
-                                (await (await fetch('/api/identity/' + data.user.id)).json()).identity_public_key
-                            ));
-                            identityKeyPair = { privateKey: privBytes, publicKey: pubBytes };
-                            E2ECrypto.saveIdentityKeyPair(identityKeyPair, data.user.id);
-                        }
-                    }
-                } catch (_) {}
-            }
-
             // Store password encrypted at rest with a device-specific key
             try {
                 var devKey = localStorage.getItem('e2e_device_key');
