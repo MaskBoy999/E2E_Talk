@@ -12,9 +12,8 @@ server/*.exe
 
 # Test results & debug output
 test-results/
-test-debug*.js
-test-out*.txt
-test-dm*.txt
+test_*
+test-*
 
 # Debug/log files (all)
 *.log
