@@ -2115,16 +2115,6 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     border-color: var(--bg-secondary);
 }
 
-/* Flash highlight for navigating to a mentioned message */
-@keyframes flashHighlight {
-    0% { background: rgba(79, 195, 247, 0.3); border-left-color: #4fc3f7; }
-    100% { background: transparent; border-left-color: transparent; }
-}
-
-.flash-highlight {
-    animation: flashHighlight 1.5s ease-out;
-}
-
 /* ===== Settings Modal ===== */
 
 .settings-gear {
@@ -4641,7 +4631,7 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     margin-left: 6px;
 }
 
-/* Flash highlight for reply scroll */
+/* Flash highlight for navigating to a message (mention/reply redirects) */
 @keyframes flashHighlight {
     0%, 100% { background: transparent; }
     50% { background: rgba(86,156,214,0.15); }

@@ -4798,53 +4798,6 @@ function flashServerIcon(serverId) {
     setTimeout(function () { icon.classList.remove('flash'); }, 700);
 }
 
-async function navigateToMessage(serverId, channelId, dmChannelId, messageId) {
-    window.focus();
-    if (dmChannelId) {
-        enterDmView();
-        await loadDmConversations();
-        var conv = dmConversations.find(function (c) { return c.dm_channel_id === dmChannelId; });
-        if (conv) {
-            currentDmChannelId = dmChannelId;
-            var _convCache = userDisplayNameCache[conv.other_user_id];
-            currentDmOtherUser = { id: conv.other_user_id, username: conv.other_username, display_name: (_convCache && _convCache.display_name) || conv.other_username || conv.other_display_name };
-            currentChannelId = null;
-            currentServerId = null;
-            document.querySelectorAll('.channel-item').forEach(function (el) { el.classList.remove('active'); });
-            var dmEl = document.querySelector('.dm-item[data-dm-id="' + dmChannelId + '"]');
-            if (dmEl) dmEl.classList.add('active');
-            var _hdrDn = (_convCache && _convCache.display_name) || conv.other_display_name || conv.other_username || '?';
-            var dmPicFileId = conv.other_profile_picture_file_id || (userDisplayNameCache[conv.other_user_id] && userDisplayNameCache[conv.other_user_id].profile_picture_file_id);
-            var dmPicUrl = dmPicFileId ? getProfilePicUrl(dmPicFileId, conv.other_user_id) : null;
-            var dmChatHeaderPicHtml = dmPicUrl ? '<div class="dm-header-pic-wrap"><img class="dm-chat-header-pic" src="' + dmPicUrl + '" alt=""></div>' : (dmPicFileId ? '<div class="dm-header-pic-wrap"><div class="dm-chat-header-pic dm-chat-header-pic-load" data-profile-pic-load="' + conv.other_user_id + ':' + dmPicFileId + '">' + _hdrDn.charAt(0).toUpperCase() + '</div></div>' : '');
-            document.getElementById('channel-name').innerHTML = dmChatHeaderPicHtml + '<span>' + escapeHtml(_hdrDn) + '</span><button class="btn-unfriend" id="unfriend-btn" title="Unfriend">Unfriend</button>';
-            document.getElementById('message-input').disabled = false;
-            document.getElementById('send-btn').disabled = false;
-            clearUnreadDmMentions(dmChannelId);
-            await loadDmMessages(dmChannelId, conv.other_user_id);
-            var newDmEl = document.querySelector('.dm-item[data-dm-id="' + dmChannelId + '"]');
-            if (newDmEl) newDmEl.classList.add('active');
-        }
-        setTimeout(function () {
-            var msgEl = document.querySelector('[data-message-id="' + messageId + '"]');
-            if (msgEl) { msgEl.scrollIntoView({ behavior: 'smooth', block: 'center' }); msgEl.classList.add('flash-highlight'); setTimeout(function () { msgEl.classList.remove('flash-highlight'); }, 1500); }
-        }, 1200);
-    } else if (serverId && channelId) {
-        if (serverId !== currentServerId) {
-            await selectServer(serverId);
-        }
-        clearUnreadChannelMentions(channelId);
-        var chEl = document.querySelector('.channel-item[data-id="' + channelId + '"]');
-        if (chEl) {
-            chEl.click();
-            setTimeout(function () {
-                var msgEl = document.querySelector('[data-message-id="' + messageId + '"]');
-                if (msgEl) { msgEl.scrollIntoView({ behavior: 'smooth', block: 'center' }); msgEl.classList.add('flash-highlight'); setTimeout(function () { msgEl.classList.remove('flash-highlight'); }, 1500); }
-            }, 500);
-        }
-    }
-}
-
 // --- Mention Support ---
 
 function findMentionsInText(text, memberList) {
@@ -4863,8 +4816,13 @@ function highlightMentionsInHtml(html) {
     if (!html) return html;
     const currentUsername = user ? user.username : null;
     if (!currentUsername) return html;
-    return html.replace(/@([\w]+)/g, (match, username) => {
-        return '<span class="mention">' + match + '</span>';
+    // Usernames may contain '+', '-', '.', '_' etc. (e.g. "test+1"), so match the
+    // FULL username token instead of stopping at the first word char. Trailing
+    // sentence punctuation is trimmed so "@test+1." still highlights "@test+1".
+    return html.replace(/@[\w][\w+.-]*/g, (match) => {
+        const trimmed = match.replace(/[.,;:!?)]+$/, '');
+        if (trimmed.length <= 1) return match;
+        return '<span class="mention">' + trimmed + '</span>' + match.slice(trimmed.length);
     });
 }
 
@@ -7049,6 +7007,10 @@ var _jumpToBottomBtn = null;
 // Pinned-to-bottom state: while true, images that finish loading re-scroll the
 // list to the latest message (so async media loads never leave the view short).
 var _pinnedToBottom = false;
+// While smooth-scrolling to a target message (notification redirect), suppress
+// scroll-listener pagination so its scrollTop snap can't interrupt the glide.
+var _suppressScrollLoad = false;
+var _suppressScrollTimer = null;
 var _imageRepinAttached = false;
 
 /**
@@ -7246,6 +7208,10 @@ function setupMessageScrollListener(channelId) {
         // Update jump-to-bottom button visibility regardless of pagination state
         updateJumpToBottomButton(list);
 
+        // While a notification-redirect smooth scroll is in flight, don't
+        // trigger pagination — its scrollTop snap would kill the glide.
+        if (_suppressScrollLoad) return;
+
         // If the user scrolls away from the bottom, stop auto-pinning to latest
         if (list.scrollHeight - list.scrollTop - list.clientHeight > 60) {
             _pinnedToBottom = false;
@@ -7396,6 +7362,10 @@ function setupDmScrollListener(dmChannelId) {
 
         // Update jump-to-bottom button visibility regardless of pagination state
         updateJumpToBottomButton(list);
+
+        // While a notification-redirect smooth scroll is in flight, don't
+        // trigger pagination — its scrollTop snap would kill the glide.
+        if (_suppressScrollLoad) return;
 
         // If the user scrolls away from the bottom, stop auto-pinning to latest
         if (list.scrollHeight - list.scrollTop - list.clientHeight > 60) {
@@ -7870,7 +7840,9 @@ async function appendMessage(msg) {
 
     // Check if current user is mentioned in text (for server messages)
     if (textContent && user) {
-        var mentionPat = new RegExp('@' + user.username.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(\\b|$|\\s)');
+        // Lookahead: mention must NOT be followed by another username char, so
+        // "@test+1" doesn't falsely match a user named "test".
+        var mentionPat = new RegExp('@' + user.username.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?![\\w+.-])');
         if (mentionPat.test(textContent)) {
             div.classList.add('mentioned');
         }
@@ -8118,7 +8090,7 @@ function setupMessageActions() {
         const channelId = forwardLabel.dataset.sourceChannelId;
         const messageId = forwardLabel.dataset.sourceMessageId;
         if (channelId) {
-            navigateToMessage(serverId, channelId, messageId);
+            navigateToMessage(serverId, channelId, null, messageId);
         }
     }
     list.addEventListener('click', (e) => {
@@ -8181,16 +8153,12 @@ function setupMessageActions() {
     });
 }
 
-async function navigateToMessage(serverId, channelId, messageId) {
-    // Switch to server view if currently in DMs
-    if (viewMode === 'dms') {
-        const dmStripBtn = document.getElementById('dm-strip-btn');
-        if (dmStripBtn) dmStripBtn.classList.remove('active');
-        viewMode = 'servers';
-    }
-
-    // If this is a DM forward (no serverId), handle it separately
-    if (!serverId) {
+async function navigateToMessage(serverId, channelId, dmChannelId, messageId) {
+    window.focus();
+    // DM jump: dmChannelId is passed explicitly by every call site
+    // (notifications, mentions inbox, toast, forward label).
+    var dmId = dmChannelId;
+    if (dmId) {
         if (viewMode !== 'dms') {
             const dmStripBtn = document.getElementById('dm-strip-btn');
             if (dmStripBtn) dmStripBtn.classList.add('active');
@@ -8201,10 +8169,13 @@ async function navigateToMessage(serverId, channelId, messageId) {
             await loadDmConversations();
         }
         // Switch to the DM channel
-        currentDmChannelId = channelId;
+        currentDmChannelId = dmId;
         currentChannelId = null;
         currentServerId = null;
-        const conv = dmConversations.find(c => c.dm_channel_id === channelId);
+        document.querySelectorAll('.channel-item').forEach(el => el.classList.remove('active'));
+        var dmEl = document.querySelector('.dm-item[data-dm-id="' + dmId + '"]');
+        if (dmEl) dmEl.classList.add('active');
+        const conv = dmConversations.find(c => c.dm_channel_id === dmId);
         var _convCache2 = conv ? userDisplayNameCache[conv.other_user_id] : null;
         var displayName = conv ? ((_convCache2 && _convCache2.display_name) || conv.other_display_name || conv.other_username) : 'DM';
         const otherUser = conv ? { id: conv.other_user_id, username: conv.other_username, display_name: (_convCache2 && _convCache2.display_name) || conv.other_username || conv.other_display_name } : null;
@@ -8215,19 +8186,21 @@ async function navigateToMessage(serverId, channelId, messageId) {
         document.getElementById('channel-name').innerHTML = dmChatHeaderPicHtml2 + escapeHtml(displayName) + ' <button class="btn-unfriend" id="unfriend-btn" title="Unfriend">Unfriend</button>';
         document.getElementById('message-input').disabled = false;
         document.getElementById('send-btn').disabled = false;
-        await loadDmMessages(channelId, otherUser ? otherUser.id : '');
+        clearUnreadDmMentions(dmId);
+        await loadDmMessages(dmId, otherUser ? otherUser.id : '');
         if (window._closeSidebar) window._closeSidebar();
         if (messageId) {
-            // Message jump: unpin from latest so image loads don't yank the view back down
-            _pinnedToBottom = false;
-            const target = await waitForElement('[data-message-id="' + messageId + '"]', 10000);
-            if (target) {
-                target.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                target.classList.add('flash-highlight');
-                setTimeout(() => target.classList.remove('flash-highlight'), 2000);
-            }
+            // Page up through DM history until the target message is found
+            await scrollToMessageWithPagination(messageId, null, dmId);
         }
         return;
+    }
+
+    // --- Channel jump ---
+    if (viewMode === 'dms') {
+        const dmStripBtn = document.getElementById('dm-strip-btn');
+        if (dmStripBtn) dmStripBtn.classList.remove('active');
+        viewMode = 'servers';
     }
 
     // Select the server (this will load channels)
@@ -8256,17 +8229,53 @@ async function navigateToMessage(serverId, channelId, messageId) {
         // Load all messages (no around param), then scroll to target
         await loadMessages(channelId);
         if (window._closeSidebar) window._closeSidebar();
-        // Now wait for the target message to appear, then scroll to it
+        // Page up through channel history until the target message is found,
+        // overriding the default jump-to-latest on channel entry.
         if (messageId) {
-            // Message jump: unpin from latest so image loads don't yank the view back down
-            _pinnedToBottom = false;
-            const target = await waitForElement('[data-message-id="' + messageId + '"]', 10000);
-            if (target) {
-                target.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                target.classList.add('flash-highlight');
-                setTimeout(() => target.classList.remove('flash-highlight'), 2000);
+            await scrollToMessageWithPagination(messageId, channelId, null);
+        }
+    }
+}
+
+/**
+ * Scroll the message list to a specific message, paging up through history
+ * (infinite scroll) until the message is found, then scroll it into view and
+ * flash-highlight it. Overrides the default "jump to latest" behavior.
+ */
+async function scrollToMessageWithPagination(messageId, channelId, dmChannelId) {
+    var list = document.getElementById('message-list');
+    var target = list && list.querySelector('[data-message-id="' + messageId + '"]');
+    var guard = 0;
+    while (!target && guard < 100) {
+        var pag = channelId ? _messagePagination[channelId] : _dmMessagePagination[dmChannelId];
+        if (!pag || !pag.hasMore || !pag.oldestTimestamp) break;
+        if (pag.loading) {
+            // A load is in flight (e.g. triggered by the scroll listener) — wait and re-check
+            await new Promise(function (r) { setTimeout(r, 150); });
+        } else {
+            if (channelId) {
+                await loadMoreMessages(channelId);
+            } else {
+                await loadMoreDmMessages(dmChannelId);
             }
         }
+        guard++;
+        target = list && list.querySelector('[data-message-id="' + messageId + '"]');
+    }
+    if (target) {
+        // Unpin from latest so image loads don't yank the view back down
+        _pinnedToBottom = false;
+        // Suppress scroll-listener pagination during the glide so the smooth
+        // scroll isn't interrupted by a scrollTop snap; re-enable after it settles.
+        if (_suppressScrollTimer) clearTimeout(_suppressScrollTimer);
+        _suppressScrollLoad = true;
+        target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        target.classList.add('flash-highlight');
+        setTimeout(function () { target.classList.remove('flash-highlight'); }, 2000);
+        // Re-enable after the glide settles; stored id so a rapid second
+        // redirect can't have its suppression cleared by the first timer.
+        _suppressScrollTimer = setTimeout(function () { _suppressScrollLoad = false; _suppressScrollTimer = null; }, 800);
+        if (list) updateJumpToBottomButton(list);
     }
 }
 
@@ -8319,7 +8328,10 @@ function handleReply(messageId, msgDiv) {
             preview = 'GIF';
         }
     }
-    const senderId = msgDiv.getAttribute('data-sender-id') || '';
+    // data-sender-id is the HMAC'd sender hash (safe to expose); the server needs
+    // the raw UUID (data-sender-user-id) to route reply notifications to the
+    // correct user, so prefer it for reply_to_user_id.
+    const senderId = msgDiv.getAttribute('data-sender-user-id') || msgDiv.getAttribute('data-sender-id') || '';
     // Extract sender color and border color from inline style on .display-name
     var senderColor = '';
     var senderBorderColor = '';
@@ -10109,7 +10121,9 @@ async function appendDmMessage(msg, kp, otherPublicKey) {
 
     // Check if current user is mentioned in text (for DM messages)
     if (textContent && user) {
-        var dmMentionPat = new RegExp('@' + user.username.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(\\b|$|\\s)');
+        // Lookahead: mention must NOT be followed by another username char, so
+        // "@test+1" doesn't falsely match a user named "test".
+        var dmMentionPat = new RegExp('@' + user.username.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?![\\w+.-])');
         if (dmMentionPat.test(textContent)) {
             div.classList.add('mentioned');
         }
@@ -12085,7 +12099,7 @@ function isCodeFile(filename, mime) {
     if (mime === 'text/html' || mime === 'text/css' || mime === 'text/markdown') return true;
     if (!filename) return false;
     const ext = filename.split('.').pop().toLowerCase();
-    return ['js','ts','jsx','tsx','py','cpp','c','h','hpp','java','rs','go','sh','sql','html','css','json','xml','rb','php','swift','kt','cs','lua','pl','r','m','mm','yaml','yml','toml','ini','cfg','conf','md'].includes(ext);
+    return ['js','ts','jsx','tsx','py','cpp','c','h','hpp','java','rs','go','sh','sql','html','htm','css','json','xml','rb','php','swift','kt','cs','lua','pl','r','m','mm','yaml','yml','toml','ini','cfg','conf','inf','reg','bat','cmd','vbs','ps1','md','log','csv','tsv','ps1xml','reg'].includes(ext);
 }
 
 function isTextFile(filename, mime) {
@@ -12093,7 +12107,7 @@ function isTextFile(filename, mime) {
     if (mime === 'application/json' || mime === 'application/javascript' || mime === 'application/xml') return true;
     if (!filename) return false;
     const ext = filename.split('.').pop().toLowerCase();
-    const textExts = ['txt','js','ts','jsx','tsx','py','cpp','c','h','hpp','java','rs','go','sh','sql','html','css','json','xml','rb','php','swift','kt','cs','lua','pl','r','m','mm','yaml','yml','toml','ini','cfg','conf','md','mdx','csv','log','env','svg','dockerfile','makefile'];
+    const textExts = ['txt','js','ts','jsx','tsx','py','cpp','c','h','hpp','java','rs','go','sh','sql','html','htm','css','json','xml','rb','php','swift','kt','cs','lua','pl','r','m','mm','yaml','yml','toml','ini','cfg','conf','inf','reg','bat','cmd','vbs','ps1','md','mdx','csv','tsv','log','env','svg','dockerfile','makefile'];
     return textExts.includes(ext);
 }
 
@@ -12174,6 +12188,14 @@ function getLangFromExt(ext) {
         'toml': 'toml',
         'md': 'markdown', 'mdx': 'markdown',
         'dockerfile': 'dockerfile',
+        'bat': 'batch', 'cmd': 'batch',
+        'vbs': 'vbscript',
+        'ps1': 'powershell', 'ps1xml': 'xml',
+        'inf': 'ini', 'reg': 'registry',
+        'log': 'log',
+        'csv': 'csv', 'tsv': 'csv',
+        'txt': 'plaintext', 'env': 'plaintext',
+        'htm': 'html',
     };
     return map[ext] || 'generic';
 }
@@ -12206,15 +12228,795 @@ function getLangColors(lang) {
         yaml:       { key: '#e06c75', string: '#98c379', number: '#d19a66', comment: '#5c6370', boolean: '#c678dd', punctuation: '#abb2bf', anchor: '#56b6c2', alias: '#56b6c2', tag: '#e5c07b' },
         toml:       { key: '#e06c75', string: '#98c379', number: '#d19a66', comment: '#5c6370', boolean: '#c678dd', punctuation: '#abb2bf', datetime: '#56b6c2' },
         dockerfile: { keyword: '#c678dd', string: '#98c379', comment: '#5c6370', punctuation: '#abb2bf', instruction: '#e06c75', flag: '#d19a66' },
+        batch:      { keyword: '#c678dd', string: '#98c379', number: '#d19a66', comment: '#5c6370', variable: '#e06c75', label: '#e5c07b', flag: '#d19a66', operator: '#56b6c2', punctuation: '#abb2bf', function: '#61afef' },
+        vbscript:   { keyword: '#c678dd', string: '#98c379', number: '#d19a66', comment: '#5c6370', function: '#61afef', builtin: '#e5c07b', operator: '#56b6c2', punctuation: '#abb2bf', constant: '#d19a66' },
+        powershell: { keyword: '#c678dd', string: '#98c379', number: '#d19a66', comment: '#5c6370', variable: '#e06c75', type: '#e5c07b', function: '#61afef', flag: '#d19a66', operator: '#56b6c2', punctuation: '#abb2bf', constant: '#e5c07b', parameter: '#e06c75' },
+        ini:        { key: '#e06c75', string: '#98c379', number: '#d19a66', comment: '#5c6370', section: '#e5c07b', boolean: '#c678dd', punctuation: '#abb2bf' },
+        registry:   { key: '#e06c75', string: '#98c379', number: '#d19a66', comment: '#5c6370', section: '#e5c07b', type: '#56b6c2', punctuation: '#abb2bf' },
+        log:        { timestamp: '#61afef', level: '#e06c75', string: '#98c379', number: '#d19a66', comment: '#5c6370', ip: '#e5c07b', punctuation: '#abb2bf', keyword: '#c678dd' },
+        csv:        { header: '#e06c75', string: '#98c379', number: '#d19a66', delimiter: '#5c6370', comment: '#5c6370', punctuation: '#abb2bf' },
+        plaintext:  { keyword: '#c678dd', string: '#98c379', number: '#d19a66', comment: '#5c6370', function: '#61afef', punctuation: '#abb2bf', constant: '#d19a66' },
         generic:    { keyword: '#c678dd', string: '#98c379', number: '#d19a66', comment: '#5c6370', function: '#61afef', punctuation: '#abb2bf', constant: '#d19a66' },
     };
     return themes[lang] || themes.generic;
+}
+
+// ── In-depth highlighters for system/script/data formats ─────────────────────
+// All receive text already HTML-escaped (& < > are entities). They color every
+// meaningful token: comments, strings, keywords, variables, flags, types,
+// numbers, operators — nothing left plain except plain identifiers.
+
+function highlightBatch(text, c) {
+    const lines = text.split('\n');
+    const out = [];
+    const KW = /\b(echo|set|setlocal|endlocal|if|else|else if|for|in|do|goto|call|shift|exit|\/b|pause|cls|cd|chdir|mkdir|md|rmdir|rd|copy|move|del|erase|ren|rename|type|find|findstr|more|sort|title|color|mode|prompt|pushd|popd|start|choice|errorlevel|defined|not|exist|equ|neq|lss|leq|gtr|geq|ver|date|time|dir|attrib|fc|comp|xcopy|robocopy|tree)\b/gi;
+    for (const raw of lines) {
+        let line = raw;
+        // rem / :: comments (to end of line)
+        line = line.replace(/^(\s*)(::.*|rem\b.*)$/i, '$1<span style="color:' + c.comment + ';font-style:italic">$2</span>');
+        // labels :name
+        line = line.replace(/^(:[A-Za-z_][\w]*)/, '<span style="color:' + (c.label || c.tag) + ';font-weight:bold">$1</span>');
+        // %var% and !var! variables
+        line = line.replace(/(%[A-Za-z_][\w]*%|![A-Za-z_][\w]*!)/g, '<span style="color:' + (c.variable || c.parameter) + '">$1</span>');
+        // strings
+        line = line.replace(/(&quot;.*?&quot;|".*?")/g, '<span style="color:' + c.string + '">$1</span>');
+        // numbers
+        line = line.replace(/\b(\d+\.?\d*)\b/g, '<span style="color:' + c.number + '">$1</span>');
+        // keywords
+        line = line.replace(KW, '<span style="color:' + c.keyword + ';font-weight:bold">$1</span>');
+        // flags /switches
+        line = line.replace(/(\/[A-Za-z][\w:]*)/g, '<span style="color:' + (c.flag || c.attr) + '">$1</span>');
+        // operators: && || | > >> < ( )
+        line = line.replace(/(&amp;&amp;|\|\||&gt;&gt;|&lt;&lt;|&gt;|&lt;|\||[\(\)])/g, '<span style="color:' + (c.operator || c.punctuation) + '">$1</span>');
+        out.push(line);
+    }
+    return out.join('\n');
+}
+
+function highlightVbScript(text, c) {
+    const lines = text.split('\n');
+    const out = [];
+    const KW = /\b(Option|Explicit|Dim|Set|Const|If|Then|Else|ElseIf|End|For|Each|Next|While|Wend|Do|Loop|Until|Select|Case|Function|Sub|Call|Exit|On|Error|Resume|True|False|Nothing|Null|Empty|And|Or|Not|Mod|Is|With|Class|Property|Get|Let|ByRef|ByVal|Public|Private|Static|ReDim|Preserve)\b/gi;
+    const BUILTIN = /\b(WScript|MsgBox|InputBox|CreateObject|GetObject|Err|Date|Time|Now|Len|Left|Right|Mid|UCase|LCase|Trim|Replace|InStr|InStrRev|Split|Join|Array|IsArray|IsDate|IsEmpty|IsNull|IsNumeric|IsObject|TypeName|CStr|CInt|CLng|CDbl|CBool|CDate|Rnd|Randomize|Abs|Int|Fix|Sgn|Sqr|Round|FormatNumber|FormatDateTime|Hex|Oct|Asc|Chr|FileSystemObject|Scripting|Dictionary)\b/gi;
+    for (const raw of lines) {
+        let line = raw;
+        // ' comments (to end of line)
+        line = line.replace(/(&#39;.*|'.*)$/, '<span style="color:' + c.comment + ';font-style:italic">$1</span>');
+        // strings
+        line = line.replace(/(&quot;.*?&quot;|".*?")/g, '<span style="color:' + c.string + '">$1</span>');
+        // numbers
+        line = line.replace(/\b(\d+\.?\d*)\b/g, '<span style="color:' + c.number + '">$1</span>');
+        // builtins (function-like objects/methods)
+        line = line.replace(BUILTIN, '<span style="color:' + (c.builtin || c.function) + '">$1</span>');
+        // keywords
+        line = line.replace(KW, '<span style="color:' + c.keyword + ';font-weight:bold">$1</span>');
+        // operators
+        line = line.replace(/(&lt;=|&gt;=|&lt;&gt;|&lt;|&gt;|[+\-*/\\^&=])/g, '<span style="color:' + (c.operator || c.punctuation) + '">$1</span>');
+        out.push(line);
+    }
+    return out.join('\n');
+}
+
+function highlightPowershell(text, c) {
+    // Process in one pass so strings/here-strings/comments aren't re-tokenized.
+    let result = text;
+    // Block comments <# ... #>
+    result = result.replace(/(&lt;#[\s\S]*?#&gt;)/g, '<span style="color:' + c.comment + ';font-style:italic">$1</span>');
+    const lines = result.split('\n');
+    const out = [];
+    const KW = /\b(function|param|if|else|elseif|for|foreach|while|do|until|switch|case|default|break|continue|return|try|catch|finally|throw|new|class|enum|in|begin|process|end|filter|workflow|trap|exit|using|module|import|export|from|static|this|base|true|false|null)\b/gi;
+    for (const raw of lines) {
+        let line = raw;
+        // line comments # (only when not inside a string — handled by string pass below)
+        line = line.replace(/(#[^"']*)$/, function (m) {
+            if (/<span/.test(m)) return m;
+            return '<span style="color:' + c.comment + ';font-style:italic">' + m + '</span>';
+        });
+        // here-strings @"..."@ / @'...'@
+        line = line.replace(/(@&quot;[\s\S]*?&quot;@|@"[\s\S]*?"@|@&#39;[\s\S]*?&#39;@|@'[\s\S]*?'@)/g, '<span style="color:' + c.string + '">$1</span>');
+        // strings with backtick escapes
+        line = line.replace(/(`(?:[^`\\]|\\.)*`|&quot;(?:[^&]|&quot;)*?&quot;|"(?:[^"\\]|\\.)*"|'[^']*')/g, '<span style="color:' + c.string + '">$1</span>');
+        // $variables and ${...}
+        line = line.replace(/(\$\{[^}]*\}|\$[A-Za-z_][\w]*(?:::[A-Za-z_][\w]*)?)/g, '<span style="color:' + (c.variable || c.parameter) + '">$1</span>');
+        // [types] and ::static members
+        line = line.replace(/(\[[A-Za-z_][\w.]*\])/g, '<span style="color:' + (c.type || c.tag) + '">$1</span>');
+        // cmdlets Verb-Noun
+        line = line.replace(/\b([A-Z][a-zA-Z]+-[A-Z][a-zA-Z]+)\b/g, '<span style="color:' + (c.function || c.constant) + '">$1</span>');
+        // -flags / -parameters
+        line = line.replace(/(-[A-Za-z][\w]*)/g, '<span style="color:' + (c.flag || c.attr) + '">$1</span>');
+        // numbers
+        line = line.replace(/\b(\d+\.?\d*(?:[eE][+-]?\d+)?)\b/g, '<span style="color:' + c.number + '">$1</span>');
+        // keywords
+        line = line.replace(KW, '<span style="color:' + c.keyword + ';font-weight:bold">$1</span>');
+        // operators & comparison operators
+        line = line.replace(/\b(-eq|-ne|-gt|-lt|-ge|-le|-like|-notlike|-match|-notmatch|-contains|-notcontains|-and|-or|-not|-band|-bor|-bxor|-shl|-shr)\b/gi, '<span style="color:' + (c.operator || c.keyword) + '">$1</span>');
+        line = line.replace(/(&lt;=|&gt;=|&lt;|&gt;|[+\-*/%=!])/g, '<span style="color:' + (c.operator || c.punctuation) + '">$1</span>');
+        out.push(line);
+    }
+    return out.join('\n');
+}
+
+function highlightIni(text, c) {
+    const lines = text.split('\n');
+    const out = [];
+    for (const raw of lines) {
+        let line = raw;
+        // ; and # comments
+        line = line.replace(/^(\s*)([;#].*)$/, '$1<span style="color:' + c.comment + ';font-style:italic">$2</span>');
+        // [sections]
+        line = line.replace(/^(\s*\[[^\]]*\])/, '<span style="color:' + (c.section || c.tag) + ';font-weight:bold">$1</span>');
+        // key = value / key: value
+        line = line.replace(/^([A-Za-z0-9_@%+\-.\/\\]+)(\s*[:=]\s*)/, '<span style="color:' + c.key + '">$1</span>$2');
+        // strings
+        line = line.replace(/(&quot;.*?&quot;|".*?"|'.*?')/g, '<span style="color:' + c.string + '">$1</span>');
+        // numbers
+        line = line.replace(/\b(\d+\.?\d*)\b/g, '<span style="color:' + c.number + '">$1</span>');
+        // booleans
+        line = line.replace(/\b(true|false|yes|no|on|off|enabled|disabled)\b/gi, '<span style="color:' + (c.boolean || c.constant) + '">$1</span>');
+        out.push(line);
+    }
+    return out.join('\n');
+}
+
+function highlightRegistry(text, c) {
+    const lines = text.split('\n');
+    const out = [];
+    for (const raw of lines) {
+        let line = raw;
+        // ; comments
+        line = line.replace(/^(\s*)(;.*)$/, '$1<span style="color:' + c.comment + ';font-style:italic">$2</span>');
+        // [HKEY_...] sections
+        line = line.replace(/^(\s*\[[^\]]*\])/, '<span style="color:' + (c.section || c.tag) + ';font-weight:bold">$1</span>');
+        // "value name" = data
+        line = line.replace(/^("[^"]*")(\s*=)/, '<span style="color:' + c.key + '">$1</span>$2');
+        // data types dword:/hex:/qword:/binary:/sz:
+        line = line.replace(/\b(dword|hex|qword|binary|sz|expand)\s*:/gi, '<span style="color:' + (c.type || c.constant) + ';font-weight:bold">$1</span>:');
+        // hex numbers
+        line = line.replace(/\b(?:0x)?[0-9a-fA-F]{2}(?:,[0-9a-fA-F]{2})*\b/g, '<span style="color:' + c.number + '">$1</span>');
+        // strings
+        line = line.replace(/(&quot;.*?&quot;|".*?")/g, '<span style="color:' + c.string + '">$1</span>');
+        // plain numbers
+        line = line.replace(/\b(\d+)\b/g, '<span style="color:' + c.number + '">$1</span>');
+        out.push(line);
+    }
+    return out.join('\n');
+}
+
+function highlightLog(text, c) {
+    const lines = text.split('\n');
+    const out = [];
+    for (const raw of lines) {
+        let line = raw;
+        // ISO timestamps 2026-07-31T10:34:27Z / with space / date only
+        line = line.replace(/\b(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?|\d{4}-\d{2}-\d{2}|\d{2}:\d{2}:\d{2}(?:\.\d+)?)\b/g, '<span style="color:' + (c.timestamp || c.constant) + '">$1</span>');
+        // log levels
+        line = line.replace(/\b(TRACE|DEBUG|INFO|NOTICE|WARN|WARNING|ERROR|ERR|FATAL|CRITICAL|SEVERE|PANIC)\b/g, function (m, lvl) {
+            var col = (c.level || c.keyword);
+            if (/WARN|WARNING/.test(lvl)) col = '#e5c07b';
+            if (/ERROR|ERR|FATAL|CRITICAL|SEVERE|PANIC/.test(lvl)) col = '#e06c75';
+            if (/DEBUG|TRACE/.test(lvl)) col = '#98c379';
+            return '<span style="color:' + col + ';font-weight:bold">' + lvl + '</span>';
+        });
+        // IP addresses
+        line = line.replace(/\b(\d{1,3}(?:\.\d{1,3}){3})\b/g, '<span style="color:' + (c.ip || c.number) + '">$1</span>');
+        // bracketed [tags]
+        line = line.replace(/(\[[^\]]*\])/g, '<span style="color:' + (c.punctuation || c.comment) + '">$1</span>');
+        // strings
+        line = line.replace(/(&quot;.*?&quot;|".*?")/g, '<span style="color:' + c.string + '">$1</span>');
+        // numbers
+        line = line.replace(/\b(\d+\.?\d*)\b/g, '<span style="color:' + c.number + '">$1</span>');
+        out.push(line);
+    }
+    return out.join('\n');
+}
+
+function highlightCsv(text, c) {
+    const lines = text.split('\n');
+    const delim = text.indexOf('\t') !== -1 ? '\t' : ',';
+    const out = lines.map(function (raw, idx) {
+        let line = raw;
+        // strings
+        line = line.replace(/(&quot;.*?&quot;|".*?")/g, '<span style="color:' + c.string + '">$1</span>');
+        // numbers
+        line = line.replace(/\b(\d+\.?\d*)\b/g, '<span style="color:' + c.number + '">$1</span>');
+        // delimiters
+        const d = delim === '\t' ? '\t' : ',';
+        line = line.split(d).join('<span style="color:' + (c.delimiter || c.punctuation) + '">' + d + '</span>');
+        // header row emphasis
+        if (idx === 0 && line.length > 0) {
+            line = '<span style="color:' + (c.header || c.key) + ';font-weight:bold">' + line + '</span>';
+        }
+        return line;
+    });
+    return out.join('\n');
+}
+
+// ── In-depth programming-language highlighters (js/ts/py/c/cpp/java/cs) ─────
+// Real tokenizers: strings, comments, template literals, preprocessor,
+// annotations and char literals are consumed atomically (never re-tokenized),
+// so keywords can never bleed into string/comment content.
+
+const CFG_JS = {
+    keywords: ['break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'export', 'extends', 'finally', 'for', 'function', 'if', 'import', 'in', 'instanceof', 'let', 'new', 'of', 'return', 'static', 'super', 'switch', 'this', 'throw', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield', 'async', 'await', 'get', 'set', 'from', 'as'],
+    types: ['Array', 'Boolean', 'Date', 'Error', 'Function', 'JSON', 'Math', 'Number', 'Object', 'RegExp', 'String', 'Symbol', 'Map', 'Set', 'WeakMap', 'WeakSet', 'Promise', 'Proxy', 'Reflect', 'Intl', 'ArrayBuffer', 'DataView', 'Uint8Array', 'Int8Array', 'Uint16Array', 'Int16Array', 'Uint32Array', 'Int32Array', 'Float32Array', 'Float64Array', 'Uint8ClampedArray', 'BigInt', 'BigInt64Array', 'BigUint64Array', 'EvalError', 'RangeError', 'ReferenceError', 'SyntaxError', 'TypeError', 'URIError', 'AggregateError', 'DOMException', 'URL', 'URLSearchParams', 'FormData', 'Headers', 'Request', 'Response', 'Blob', 'File', 'FileReader', 'TextEncoder', 'TextDecoder', 'AbortController', 'AbortSignal', 'EventTarget', 'Event', 'CustomEvent', 'Node', 'Element', 'HTMLElement', 'Document', 'Window'],
+    builtins: ['console', 'document', 'window', 'globalThis', 'process', 'Buffer', 'module', 'exports', 'require', 'parseInt', 'parseFloat', 'isNaN', 'isFinite', 'encodeURI', 'decodeURI', 'encodeURIComponent', 'decodeURIComponent', 'escape', 'unescape', 'alert', 'confirm', 'prompt', 'fetch', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'setImmediate', 'queueMicrotask', 'requestAnimationFrame', 'cancelAnimationFrame', 'structuredClone', 'atob', 'btoa'],
+    constants: ['true', 'false', 'null', 'undefined', 'NaN', 'Infinity'],
+    lineComment: '//',
+    blockComment: ['/*', '*/'],
+    templates: true,
+    charLiterals: false,
+};
+
+const CFG_TS = Object.assign({}, CFG_JS, {
+    keywords: CFG_JS.keywords.concat(['type', 'interface', 'enum', 'implements', 'readonly', 'private', 'public', 'protected', 'abstract', 'as', 'keyof', 'never', 'unknown', 'any', 'asserts', 'infer', 'is', 'module', 'declare', 'namespace', 'override', 'satisfies', 'using']),
+    types: CFG_JS.types.concat(['string', 'number', 'boolean', 'object', 'symbol', 'bigint', 'void', 'never', 'unknown', 'any', 'Partial', 'Required', 'Readonly', 'Record', 'Pick', 'Omit', 'Exclude', 'Extract', 'NonNullable', 'Parameters', 'ReturnType', 'InstanceType', 'ThisParameterType']),
+});
+
+const CFG_C = {
+    keywords: ['auto', 'break', 'case', 'char', 'const', 'continue', 'default', 'do', 'double', 'else', 'enum', 'extern', 'float', 'for', 'goto', 'if', 'inline', 'int', 'long', 'register', 'restrict', 'return', 'short', 'signed', 'sizeof', 'static', 'struct', 'switch', 'typedef', 'union', 'unsigned', 'void', 'volatile', 'while', '_Bool', '_Complex', '_Imaginary', 'alignas', 'alignof', 'noreturn', 'static_assert', 'thread_local'],
+    types: ['size_t', 'ssize_t', 'ptrdiff_t', 'int8_t', 'uint8_t', 'int16_t', 'uint16_t', 'int32_t', 'uint32_t', 'int64_t', 'uint64_t', 'intptr_t', 'uintptr_t', 'FILE', 'va_list', 'time_t', 'clock_t', 'pid_t'],
+    builtins: ['printf', 'scanf', 'sprintf', 'snprintf', 'fprintf', 'fscanf', 'sscanf', 'malloc', 'calloc', 'realloc', 'free', 'memcpy', 'memset', 'memmove', 'memcmp', 'strlen', 'strcmp', 'strncmp', 'strcpy', 'strncpy', 'strcat', 'strncat', 'strstr', 'strchr', 'strrchr', 'strtok', 'strtol', 'strtod', 'fopen', 'fclose', 'fread', 'fwrite', 'fgets', 'fputs', 'fseek', 'ftell', 'rewind', 'fflush', 'perror', 'exit', 'abort', 'assert', 'clock', 'time', 'localtime', 'gmtime', 'strftime', 'qsort', 'bsearch', 'rand', 'srand', 'abs', 'labs', 'fabs', 'floor', 'ceil', 'round', 'sqrt', 'pow', 'exp', 'log', 'log10', 'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'atan2', 'signal', 'raise'],
+    constants: ['NULL', 'true', 'false', 'EOF', 'EXIT_SUCCESS', 'EXIT_FAILURE', 'SIGINT', 'SIGTERM'],
+    lineComment: '//',
+    blockComment: ['/*', '*/'],
+    preprocessor: true,
+    charLiterals: true,
+};
+
+const CFG_CPP = Object.assign({}, CFG_C, {
+    keywords: CFG_C.keywords.concat(['class', 'namespace', 'using', 'template', 'typename', 'public', 'private', 'protected', 'virtual', 'override', 'final', 'constexpr', 'consteval', 'constinit', 'noexcept', 'decltype', 'new', 'delete', 'nullptr', 'bool', 'this', 'friend', 'explicit', 'export', 'mutable', 'thread_local', 'static_assert', 'typeid', 'dynamic_cast', 'static_cast', 'const_cast', 'reinterpret_cast', 'concept', 'requires', 'co_await', 'co_return', 'co_yield', 'and', 'or', 'not', 'try', 'catch', 'throw', 'wchar_t', 'char16_t', 'char32_t']),
+    types: CFG_C.types.concat(['string', 'wstring', 'vector', 'map', 'set', 'pair', 'unordered_map', 'unordered_set', 'list', 'deque', 'stack', 'queue', 'priority_queue', 'array', 'tuple', 'optional', 'variant', 'any', 'shared_ptr', 'unique_ptr', 'weak_ptr', 'make_shared', 'make_unique', 'make_pair', 'make_tuple', 'std', 'stringstream', 'istringstream', 'ostringstream', 'istream', 'ostream', 'ifstream', 'ofstream', 'string_view', 'iostream', 'cout', 'cin', 'cerr', 'endl']),
+    builtins: CFG_C.builtins.concat(['sort', 'find', 'count', 'reverse', 'max', 'min', 'swap', 'copy', 'fill', 'replace', 'remove', 'unique', 'binary_search', 'lower_bound', 'upper_bound', 'next_permutation', 'prev_permutation', 'accumulate', 'for_each', 'transform']),
+});
+
+const CFG_JAVA = {
+    keywords: ['abstract', 'assert', 'boolean', 'break', 'byte', 'case', 'catch', 'char', 'class', 'const', 'continue', 'default', 'do', 'double', 'else', 'enum', 'extends', 'final', 'finally', 'float', 'for', 'goto', 'if', 'implements', 'import', 'instanceof', 'int', 'interface', 'long', 'native', 'new', 'package', 'private', 'protected', 'public', 'return', 'short', 'static', 'strictfp', 'super', 'switch', 'synchronized', 'this', 'throw', 'throws', 'transient', 'try', 'void', 'volatile', 'while', 'true', 'false', 'null', 'var', 'record', 'sealed', 'permits', 'yield', 'module', 'requires', 'exports', 'opens', 'uses', 'provides', 'with', 'to'],
+    types: ['String', 'Object', 'Integer', 'Long', 'Double', 'Float', 'Short', 'Byte', 'Boolean', 'Character', 'Math', 'System', 'Arrays', 'Collections', 'List', 'ArrayList', 'LinkedList', 'HashMap', 'HashSet', 'TreeMap', 'TreeSet', 'LinkedHashMap', 'LinkedHashSet', 'Map', 'Set', 'Iterator', 'Iterable', 'Collection', 'Queue', 'Deque', 'ArrayDeque', 'PriorityQueue', 'Stack', 'Vector', 'Hashtable', 'Comparable', 'Comparator', 'Runnable', 'Thread', 'Exception', 'RuntimeException', 'IOException', 'FileNotFoundException', 'NullPointerException', 'IllegalArgumentException', 'IllegalStateException', 'ClassNotFoundException', 'InterruptedException', 'UnsupportedOperationException', 'ArrayIndexOutOfBoundsException', 'ConcurrentModificationException', 'Optional', 'Stream', 'Collectors', 'IntStream', 'LongStream', 'DoubleStream', 'Function', 'Predicate', 'Consumer', 'Supplier', 'BiFunction', 'Path', 'Paths', 'Files', 'File', 'Scanner', 'BufferedReader', 'BufferedWriter', 'PrintWriter', 'StringBuilder', 'StringBuffer', 'InputStream', 'OutputStream', 'Reader', 'Writer', 'Throwable', 'BigInteger', 'BigDecimal'],
+    builtins: ['println', 'print', 'printf', 'format', 'exit', 'gc', 'currentTimeMillis', 'nanoTime', 'arraycopy', 'printStackTrace', 'getMessage', 'getClass', 'hashCode', 'equals', 'toString', 'compareTo', 'length', 'charAt', 'substring', 'indexOf', 'lastIndexOf', 'split', 'join', 'replace', 'toLowerCase', 'toUpperCase', 'trim', 'startsWith', 'endsWith', 'parseInt', 'parseLong', 'parseDouble', 'parseFloat', 'valueOf', 'abs', 'min', 'max', 'random', 'sqrt', 'pow', 'floor', 'ceil', 'round'],
+    constants: ['true', 'false', 'null', 'MAX_VALUE', 'MIN_VALUE', 'PI', 'E'],
+    lineComment: '//',
+    blockComment: ['/*', '*/'],
+    annotations: true,
+    charLiterals: true,
+};
+
+const CFG_CSHARP = {
+    keywords: ['abstract', 'as', 'base', 'bool', 'break', 'byte', 'case', 'catch', 'char', 'checked', 'class', 'const', 'continue', 'decimal', 'default', 'delegate', 'do', 'double', 'else', 'enum', 'event', 'explicit', 'extern', 'false', 'finally', 'fixed', 'float', 'for', 'foreach', 'goto', 'if', 'implicit', 'in', 'int', 'interface', 'internal', 'is', 'lock', 'long', 'namespace', 'new', 'null', 'object', 'operator', 'out', 'override', 'params', 'private', 'protected', 'public', 'readonly', 'ref', 'return', 'sbyte', 'sealed', 'short', 'sizeof', 'stackalloc', 'static', 'string', 'struct', 'switch', 'this', 'throw', 'true', 'try', 'typeof', 'uint', 'ulong', 'unchecked', 'unsafe', 'ushort', 'using', 'var', 'virtual', 'void', 'volatile', 'while', 'async', 'await', 'yield', 'record', 'init', 'required', 'file', 'global', 'scoped', 'partial', 'where', 'get', 'set', 'add', 'remove', 'value'],
+    types: ['String', 'Int32', 'Int64', 'UInt32', 'UInt64', 'Int16', 'UInt16', 'Byte', 'SByte', 'Single', 'Double', 'Boolean', 'Decimal', 'DateTime', 'DateTimeOffset', 'TimeSpan', 'Guid', 'Object', 'Array', 'List', 'Dictionary', 'HashSet', 'SortedSet', 'SortedDictionary', 'Queue', 'Stack', 'LinkedList', 'IEnumerable', 'IEnumerator', 'ICollection', 'IList', 'IDictionary', 'IDisposable', 'IAsyncDisposable', 'Exception', 'ApplicationException', 'ArgumentException', 'ArgumentNullException', 'ArgumentOutOfRangeException', 'InvalidOperationException', 'NotImplementedException', 'NotSupportedException', 'IOException', 'FormatException', 'OverflowException', 'Task', 'Func', 'Action', 'CancellationToken', 'CancellationTokenSource', 'Console', 'Math', 'Convert', 'Random', 'Regex', 'StringBuilder', 'Stream', 'File', 'Directory', 'Path', 'Environment', 'Process', 'Thread', 'Timer', 'Type', 'Attribute', 'Serializable', 'HttpGet', 'HttpPost', 'HttpPut', 'HttpDelete', 'Route', 'FromBody', 'FromQuery', 'JsonSerializer', 'HttpClient', 'Uri'],
+    builtins: ['WriteLine', 'Write', 'ReadLine', 'Read', 'ReadKey', 'WriteError', 'Error', 'Out', 'In', 'Run', 'ToString', 'GetHashCode', 'Equals', 'GetType', 'GetLength', 'GetValue', 'SetValue', 'Parse', 'TryParse', 'TryGetValue', 'Add', 'Remove', 'Clear', 'Contains', 'IndexOf', 'LastIndexOf', 'Substring', 'Split', 'Join', 'Replace', 'Trim', 'TrimStart', 'TrimEnd', 'ToUpper', 'ToLower', 'StartsWith', 'EndsWith', 'PadLeft', 'PadRight', 'Insert', 'Append', 'AppendLine', 'Dispose', 'ToList', 'ToArray', 'ToDictionary', 'Where', 'Select', 'OrderBy', 'OrderByDescending', 'GroupBy', 'First', 'FirstOrDefault', 'Single', 'Last', 'Any', 'All', 'Sum', 'Average', 'Min', 'Max', 'Count', 'Length', 'Sort', 'Reverse', 'CopyTo', 'Clone', 'GetEnumerator', 'MoveNext'],
+    constants: ['true', 'false', 'null', 'default'],
+    lineComment: '//',
+    blockComment: ['/*', '*/'],
+    attributes: true,
+    verbatimStrings: true,
+    interpolatedStrings: true,
+    charLiterals: true,
+};
+
+const TYPE_TRIGGERS = new Set(['class', 'struct', 'enum', 'interface', 'new', 'extends', 'implements', 'namespace', 'package', 'typedef', 'using', 'trait', 'record']);
+
+function highlightCfamily(text, cfg, c) {
+    const kw = new Set(cfg.keywords || []);
+    const tys = new Set(cfg.types || []);
+    const bis = new Set(cfg.builtins || []);
+    const cons = new Set(cfg.constants || []);
+
+    let out = '';
+    let i = 0;
+    const n = text.length;
+    let lastTok = '';
+    let typeTriggerEnd = -1;
+
+    const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const span = (s, color, style) => '<span style="color:' + color + (style ? ';' + style : '') + '">' + esc(s) + '</span>';
+    const isIdStart = (ch) => ch && /[A-Za-z_$]/.test(ch);
+    const isIdChar = (ch) => ch && /[A-Za-z0-9_$]/.test(ch);
+    const isDigit = (ch) => ch !== undefined && ch >= '0' && ch <= '9';
+    const isHex = (ch) => /[0-9a-fA-F]/.test(ch || '');
+
+    function peekNonSpace(j) {
+        while (j < n && /\s/.test(text[j])) j++;
+        return j;
+    }
+
+    function scanStringAt(j, quote) {
+        j = j + 1;
+        while (j < n) {
+            if (text[j] === '\\') { j += 2; continue; }
+            if (text[j] === quote) { j++; break; }
+            j++;
+        }
+        return j;
+    }
+
+    function scanVerbatimAt(j) {
+        j = j + 2;
+        while (j < n) {
+            if (text[j] === '"' && text[j + 1] === '"') { j += 2; continue; }
+            if (text[j] === '"') { j++; break; }
+            j++;
+        }
+        return j;
+    }
+
+    function scanTemplateAt(j) {
+        j = j + 1;
+        let depth = 0; // >0 means inside ${...} interpolation
+        while (j < n) {
+            const tch = text[j];
+            if (tch === '\\') { j += 2; continue; }
+            if (depth === 0) {
+                if (tch === '`') { j++; break; }
+                if (tch === '$' && text[j + 1] === '{') { depth = 1; j += 2; continue; }
+                j++;
+            } else {
+                if (tch === '{') depth++;
+                else if (tch === '}') depth--;
+                j++;
+            }
+        }
+        return j;
+    }
+
+    // Longest-first so >>> wins over >>, === over ==, etc.
+    const OPS = ['===', '!==', '**=', '<<=', '>>=', '&&=', '||=', '??=', '>>>', '=>', '==', '!=', '<=', '>=', '&&', '||', '++', '--', '+=', '-=', '*=', '/=', '%=', '<<', '>>', '...', '?.', '??', '**', '::', '->', '..', ':=', '=~', '!~'];
+    const SINGLE_OPS = '+-*/%=!<>&|^~?:';
+
+    while (i < n) {
+        const ch = text[i];
+
+        if (/\s/.test(ch)) { out += ch; i++; continue; }
+
+        // line comment
+        if (cfg.lineComment && text.startsWith(cfg.lineComment, i)) {
+            let j = text.indexOf('\n', i);
+            if (j === -1) j = n;
+            out += span(text.slice(i, j), c.comment, 'font-style:italic');
+            lastTok = 'comment';
+            i = j;
+            continue;
+        }
+
+        // block comment
+        if (cfg.blockComment && text.startsWith(cfg.blockComment[0], i)) {
+            const e = text.indexOf(cfg.blockComment[1], i + cfg.blockComment[0].length);
+            const j = e === -1 ? n : e + cfg.blockComment[1].length;
+            out += span(text.slice(i, j), c.comment, 'font-style:italic');
+            lastTok = 'comment';
+            i = j;
+            continue;
+        }
+
+        // C/C++ preprocessor directives
+        if (cfg.preprocessor && ch === '#') {
+            let j = i + 1;
+            while (j < n && /[A-Za-z_]/.test(text[j])) j++;
+            out += span(text.slice(i, j), c.preprocessor || c.keyword, 'font-weight:bold');
+            lastTok = 'pre';
+            typeTriggerEnd = -1;
+            i = j;
+            let k = peekNonSpace(i);
+            if (text[k] === '<') {
+                const e = text.indexOf('>', k);
+                if (e !== -1) {
+                    out += text.slice(i, k);
+                    out += span(text.slice(k, e + 1), c.string);
+                    i = e + 1;
+                }
+            } else if (text[k] === '"') {
+                const e = scanStringAt(k, '"');
+                out += text.slice(i, k);
+                out += span(text.slice(k, e), c.string);
+                i = e;
+            }
+            continue;
+        }
+
+        // C# attributes [Foo]
+        if (cfg.attributes && ch === '[') {
+            let k = peekNonSpace(i + 1);
+            if (/[A-Z@]/.test(text[k] || '')) {
+                let j = i + 1;
+                while (j < n && text[j] !== ']' && text[j] !== '\n') j++;
+                if (text[j] === ']') j++;
+                out += span(text.slice(i, j), c.attribute || c.annotation || c.decorator, 'font-style:italic');
+                lastTok = 'attr';
+                typeTriggerEnd = -1;
+                i = j;
+                continue;
+            }
+        }
+
+        // Java annotations @Foo
+        if (cfg.annotations && ch === '@') {
+            let j = i + 1;
+            while (j < n && /[A-Za-z0-9_.]/.test(text[j])) j++;
+            if (j > i + 1) {
+                out += span(text.slice(i, j), c.annotation || c.decorator || c.type, 'font-style:italic');
+                lastTok = 'anno';
+                typeTriggerEnd = -1;
+                i = j;
+                continue;
+            }
+        }
+
+        // C# verbatim / interpolated strings
+        if (cfg.verbatimStrings && ch === '@' && text[i + 1] === '"') {
+            const j = scanVerbatimAt(i);
+            out += span(text.slice(i, j), c.string);
+            lastTok = 'str';
+            typeTriggerEnd = -1;
+            i = j;
+            continue;
+        }
+        if (cfg.interpolatedStrings && ch === '$') {
+            if (text[i + 1] === '"') {
+                const j = scanStringAt(i, '"');
+                out += span(text.slice(i, j), c.string);
+                lastTok = 'str';
+                typeTriggerEnd = -1;
+                i = j;
+                continue;
+            }
+            if (text[i + 1] === '@' && text[i + 2] === '"') {
+                const j = scanVerbatimAt(i + 1);
+                out += span(text.slice(i, j), c.string);
+                lastTok = 'str';
+                typeTriggerEnd = -1;
+                i = j;
+                continue;
+            }
+        }
+
+        // JS/TS template literal with ${...} interpolation (brace-depth aware)
+        if (cfg.templates && ch === '`') {
+            const end = scanTemplateAt(i);
+            const inner = text.slice(i + 1, end - 1);
+            let html = span('`', c.string);
+            let cursor = 0;
+            while (cursor < inner.length) {
+                const idx = inner.indexOf('${', cursor);
+                if (idx === -1) { html += span(inner.slice(cursor), c.string); break; }
+                html += span(inner.slice(cursor, idx), c.string);
+                let d = 1;
+                let k = idx + 2;
+                while (k < inner.length && d > 0) {
+                    if (inner[k] === '{') d++;
+                    else if (inner[k] === '}') d--;
+                    k++;
+                }
+                html += span('${', c.operator || c.punctuation);
+                html += highlightCfamily(inner.slice(idx + 2, k - 1), cfg, c);
+                html += span('}', c.operator || c.punctuation);
+                cursor = k;
+            }
+            html += span('`', c.string);
+            out += html;
+            lastTok = 'str';
+            typeTriggerEnd = -1;
+            i = end;
+            continue;
+        }
+
+        // strings / char literals
+        if (ch === '"' || ch === "'") {
+            const isChar = cfg.charLiterals && ch === "'";
+            const j = scanStringAt(i, ch);
+            out += span(text.slice(i, j), isChar ? (c.character || c.string) : c.string);
+            lastTok = 'str';
+            typeTriggerEnd = -1;
+            i = j;
+            continue;
+        }
+
+        // numbers
+        if (isDigit(ch) || (ch === '.' && isDigit(text[i + 1]))) {
+            let j = i;
+            if (ch === '0' && /[xXbBoO]/.test(text[i + 1] || '')) {
+                j = i + 2;
+                while (j < n && isHex(text[j])) j++;
+            } else {
+                while (j < n && /[0-9_]/.test(text[j])) j++;
+                if (text[j] === '.' && isDigit(text[j + 1])) {
+                    j++;
+                    while (j < n && /[0-9_]/.test(text[j])) j++;
+                }
+                if (/[eE]/.test(text[j] || '')) {
+                    let k = j + 1;
+                    if (/[+-]/.test(text[k] || '')) k++;
+                    if (isDigit(text[k])) {
+                        j = k;
+                        while (j < n && /[0-9_]/.test(text[j])) j++;
+                    }
+                }
+                while (j < n && /[fFlLuU]/.test(text[j])) j++;
+            }
+            out += span(text.slice(i, j), c.number);
+            lastTok = 'num';
+            typeTriggerEnd = -1;
+            i = j;
+            continue;
+        }
+
+        // identifiers
+        if (isIdStart(ch)) {
+            let j = i;
+            while (j < n && isIdChar(text[j])) j++;
+            const id = text.slice(i, j);
+            const nextIdx = peekNonSpace(j);
+
+            // keywords first so `using namespace`, `typedef struct`, `class extends`
+            // never get re-colored as types by a preceding trigger
+            if (kw.has(id)) {
+                typeTriggerEnd = TYPE_TRIGGERS.has(id) ? j : -1;
+                out += span(id, c.keyword, 'font-weight:bold');
+                lastTok = 'ident';
+                i = j;
+                continue;
+            }
+            if (typeTriggerEnd !== -1 && peekNonSpace(typeTriggerEnd) === i) {
+                typeTriggerEnd = -1;
+                out += span(id, c.type);
+                lastTok = 'ident';
+                i = j;
+                continue;
+            }
+            if (tys.has(id)) { typeTriggerEnd = -1; out += span(id, c.type); lastTok = 'ident'; i = j; continue; }
+            if (bis.has(id)) { typeTriggerEnd = -1; out += span(id, c.builtin || c.function); lastTok = 'ident'; i = j; continue; }
+            if (cons.has(id)) { typeTriggerEnd = -1; out += span(id, c.constant); lastTok = 'ident'; i = j; continue; }
+            if (lastTok === '.' && text[nextIdx] !== '(') { out += span(id, c.property || c.attr); lastTok = 'ident'; i = j; continue; }
+            if (text[nextIdx] === '(') { out += span(id, c.function); lastTok = 'ident'; i = j; continue; }
+            if (id.length >= 2 && /^[A-Z][A-Z0-9_]*$/.test(id)) { out += span(id, c.constant); lastTok = 'ident'; i = j; continue; }
+            out += esc(id);
+            lastTok = 'ident';
+            i = j;
+            continue;
+        }
+
+        // operators (longest match first, then single-char operators)
+        let opMatch = null;
+        for (const op of OPS) {
+            if (text.startsWith(op, i)) { opMatch = op; break; }
+        }
+        if (opMatch) {
+            out += span(opMatch, c.operator || c.punctuation);
+            lastTok = 'op';
+            typeTriggerEnd = -1;
+            i += opMatch.length;
+            continue;
+        }
+        if (SINGLE_OPS.indexOf(ch) !== -1) {
+            out += span(ch, c.operator || c.punctuation);
+            lastTok = 'op';
+            typeTriggerEnd = -1;
+            i++;
+            continue;
+        }
+
+        // punctuation
+        out += span(ch, c.punctuation);
+        lastTok = ch === '.' ? '.' : 'punct';
+        typeTriggerEnd = -1;
+        i++;
+    }
+    return out;
+}
+
+function highlightPython(text, c) {
+    const kw = new Set(['False', 'None', 'True', 'and', 'as', 'assert', 'async', 'await', 'break', 'class', 'continue', 'def', 'del', 'elif', 'else', 'except', 'finally', 'for', 'from', 'global', 'if', 'import', 'in', 'is', 'lambda', 'nonlocal', 'not', 'or', 'pass', 'raise', 'return', 'try', 'while', 'with', 'yield', 'match', 'case']);
+    const tys = new Set(['int', 'float', 'complex', 'str', 'bytes', 'bytearray', 'bool', 'list', 'tuple', 'dict', 'set', 'frozenset', 'object', 'type', 'range', 'slice', 'Exception', 'BaseException', 'ArithmeticError', 'AssertionError', 'AttributeError', 'EOFError', 'ImportError', 'IndexError', 'KeyError', 'LookupError', 'MemoryError', 'NameError', 'NotImplementedError', 'OSError', 'OverflowError', 'RecursionError', 'RuntimeError', 'StopIteration', 'SyntaxError', 'TypeError', 'UnboundLocalError', 'ValueError', 'ZeroDivisionError', 'FileNotFoundError', 'PermissionError', 'FileExistsError', 'IsADirectoryError', 'InterruptedError', 'TimeoutError', 'NotImplemented']);
+    const bis = new Set(['print', 'len', 'range', 'enumerate', 'zip', 'map', 'filter', 'sorted', 'reversed', 'sum', 'min', 'max', 'abs', 'all', 'any', 'round', 'pow', 'divmod', 'ord', 'chr', 'hex', 'oct', 'bin', 'format', 'repr', 'input', 'open', 'isinstance', 'issubclass', 'hasattr', 'getattr', 'setattr', 'delattr', 'vars', 'dir', 'id', 'hash', 'iter', 'next', 'super', 'property', 'staticmethod', 'classmethod', 'callable', 'globals', 'locals', 'compile', 'eval', 'exec', '__import__', 'help', 'exit', 'quit', 'breakpoint', 'memoryview']);
+    const selfs = new Set(['self', 'cls']);
+    const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const span = (s, color, style) => '<span style="color:' + color + (style ? ';' + style : '') + '">' + esc(s) + '</span>';
+
+    const lines = text.split('\n');
+    const outLines = [];
+    let inTriple = '';
+
+    for (let li = 0; li < lines.length; li++) {
+        let line = lines[li];
+        let i = 0;
+        const n = line.length;
+        let html = '';
+
+        if (inTriple) {
+            const e = line.indexOf(inTriple);
+            if (e === -1) {
+                html += span(line, c.string);
+                outLines.push(html);
+                continue;
+            }
+            html += span(line.slice(0, e + 3), c.string);
+            i = e + 3;
+            inTriple = '';
+        }
+
+        while (i < n) {
+            const ch = line[i];
+            if (/\s/.test(ch)) { html += ch; i++; continue; }
+            if (ch === '#') { html += span(line.slice(i), c.comment, 'font-style:italic'); break; }
+
+            if (line.startsWith('"""', i) || line.startsWith("'''", i)) {
+                const td = line.startsWith('"""', i) ? '"""' : "'''";
+                const e = line.indexOf(td, i + 3);
+                if (e === -1) {
+                    html += span(line.slice(i), c.string);
+                    inTriple = td;
+                    i = n;
+                    continue;
+                }
+                html += span(line.slice(i, e + 3), c.string);
+                i = e + 3;
+                continue;
+            }
+
+            // prefixed strings: f, r, b, u, fr, rf, br, rb (also f"""...""" triples)
+            const pm = /^(f|r|b|u|fr|rf|br|rb|F|R|B|U|FR|RF|BR|RB)/.exec(line.slice(i, i + 3));
+            if (pm && (line[i + pm[0].length] === '"' || line[i + pm[0].length] === "'")) {
+                const pre = pm[0];
+                const q = line[i + pre.length];
+                const isF = /^f/i.test(pre);
+                let j;
+                const maybeTriple = line.slice(i + pre.length, i + pre.length + 3);
+                if (maybeTriple === q + q + q) {
+                    // prefixed triple-quoted string (r"""...""" / f"""...""" / b'''...''')
+                    const te = line.indexOf(q + q + q, i + pre.length + 3);
+                    const end = te === -1 ? n : te + 3;
+                    html += span(line.slice(i, end), c.string);
+                    i = end;
+                    continue;
+                }
+                j = i + pre.length + 1;
+                while (j < n) {
+                    if (line[j] === '\\') { j += 2; continue; }
+                    if (line[j] === q) break;
+                    j++;
+                }
+                if (isF) {
+                    const inner = line.slice(i + pre.length + 1, j);
+                    let fhtml = span(pre + q, c.string);
+                    // brace-depth aware interpolation; {{ and }} are escaped braces
+                    let cursor = 0;
+                    while (cursor < inner.length) {
+                        const idx = inner.indexOf('{', cursor);
+                        if (idx === -1) { fhtml += span(inner.slice(cursor), c.string); break; }
+                        if (inner[idx + 1] === '{') { fhtml += span(inner.slice(cursor, idx + 2), c.string); cursor = idx + 2; continue; }
+                        fhtml += span(inner.slice(cursor, idx), c.string);
+                        let d = 1;
+                        let k = idx + 1;
+                        while (k < inner.length && d > 0) {
+                            if (inner[k] === '{') d++;
+                            else if (inner[k] === '}') d--;
+                            k++;
+                        }
+                        fhtml += span('{', c.operator || c.punctuation);
+                        fhtml += highlightPython(inner.slice(idx + 1, k - 1), c);
+                        fhtml += span('}', c.operator || c.punctuation);
+                        cursor = k;
+                    }
+                    fhtml += span(q, c.string);
+                    html += fhtml;
+                } else {
+                    html += span(line.slice(i, j + 1), c.string);
+                }
+                i = j + 1;
+                continue;
+            }
+
+            if (ch === '"' || ch === "'") {
+                const q = ch;
+                let j = i + 1;
+                while (j < n) {
+                    if (line[j] === '\\') { j += 2; continue; }
+                    if (line[j] === q) break;
+                    j++;
+                }
+                html += span(line.slice(i, j + 1), c.string);
+                i = j + 1;
+                continue;
+            }
+
+            if (ch === '@') {
+                let j = i + 1;
+                while (j < n && /[A-Za-z0-9_.]/.test(line[j])) j++;
+                if (j > i + 1) { html += span(line.slice(i, j), c.decorator, 'font-style:italic'); i = j; continue; }
+            }
+
+            if (/[0-9]/.test(ch) || (ch === '.' && /[0-9]/.test(line[i + 1] || ''))) {
+                let j = i;
+                if (ch === '0' && /[xXbBoO]/.test(line[i + 1] || '')) {
+                    j = i + 2;
+                    while (j < n && /[0-9a-fA-F_]/.test(line[j])) j++;
+                } else {
+                    if (ch === '.') j = i + 1;
+                    while (j < n && /[0-9_]/.test(line[j])) j++;
+                    if (line[j] === '.' && /[0-9]/.test(line[j + 1] || '')) {
+                        j++;
+                        while (j < n && /[0-9_]/.test(line[j])) j++;
+                    }
+                    if (/[eE]/.test(line[j] || '')) {
+                        let k = j + 1;
+                        if (/[+-]/.test(line[k] || '')) k++;
+                        if (/[0-9]/.test(line[k] || '')) {
+                            j = k;
+                            while (j < n && /[0-9_]/.test(line[j])) j++;
+                        }
+                    }
+                    if (line[j] === 'j') j++;
+                }
+                html += span(line.slice(i, j), c.number);
+                i = j;
+                continue;
+            }
+
+            if (/[A-Za-z_]/.test(ch)) {
+                let j = i;
+                while (j < n && /[A-Za-z0-9_]/.test(line[j])) j++;
+                const id = line.slice(i, j);
+                let color = null, style = null;
+                if (kw.has(id)) { color = c.keyword; style = 'font-weight:bold'; }
+                else if (tys.has(id)) color = c.type;
+                else if (bis.has(id)) color = c.builtin;
+                else if (selfs.has(id)) color = c.self || c.parameter;
+                else if (/^__\w+__$/.test(id)) color = c.magic || c.function;
+                else {
+                    let k = j;
+                    while (k < n && /\s/.test(line[k])) k++;
+                    if (line[k] === '(') color = c.function;
+                    else if (id.length >= 2 && /^[A-Z][A-Z0-9_]*$/.test(id)) color = c.constant;
+                    else if (/^[A-Z][a-zA-Z0-9_]*$/.test(id)) color = c.type;
+                }
+                if (color) html += span(id, color, style);
+                else html += esc(id);
+                i = j;
+                continue;
+            }
+
+            const PY_OPS = ['**=', '//=', '<<=', '>>=', '...', '->', ':=', '**', '//', '<<', '>>', '<=', '>=', '==', '!=', '+=', '-=', '*=', '/=', '%=', '&=', '|=', '^='];
+            let opMatch = null;
+            for (const op of PY_OPS) {
+                if (line.startsWith(op, i)) { opMatch = op; break; }
+            }
+            if (opMatch) {
+                html += span(opMatch, c.operator || c.punctuation);
+                i += opMatch.length;
+                continue;
+            }
+            if ('+-*/%=!<>&|^~?:'.indexOf(ch) !== -1) {
+                html += span(ch, c.operator || c.punctuation);
+                i++;
+                continue;
+            }
+
+            html += span(ch, c.punctuation);
+            i++;
+        }
+        outLines.push(html);
+    }
+    return outLines.join('\n');
 }
 
 function highlightSyntax(text, filename, mime) {
     const ext = filename ? filename.split('.').pop().toLowerCase() : '';
     const lang = getLangFromExt(ext);
     const c = getLangColors(lang);
+
+    if (lang === 'javascript' || lang === 'typescript') {
+        return highlightCfamily(text, lang === 'typescript' ? CFG_TS : CFG_JS, c);
+    }
+    if (lang === 'python') {
+        return highlightPython(text, c);
+    }
+    if (lang === 'c' || lang === 'cpp') {
+        return highlightCfamily(text, lang === 'cpp' ? CFG_CPP : CFG_C, c);
+    }
+    if (lang === 'java') {
+        return highlightCfamily(text, CFG_JAVA, c);
+    }
+    if (lang === 'csharp') {
+        return highlightCfamily(text, CFG_CSHARP, c);
+    }
 
     const escaped = text
         .replace(/&/g, '&amp;')
@@ -12232,6 +13034,30 @@ function highlightSyntax(text, filename, mime) {
     }
     if (lang === 'yaml' || lang === 'toml') {
         return highlightKeyValue(escaped, c);
+    }
+    if (lang === 'batch') {
+        return highlightBatch(escaped, c);
+    }
+    if (lang === 'vbscript') {
+        return highlightVbScript(escaped, c);
+    }
+    if (lang === 'powershell') {
+        return highlightPowershell(escaped, c);
+    }
+    if (lang === 'ini') {
+        return highlightIni(escaped, c);
+    }
+    if (lang === 'registry') {
+        return highlightRegistry(escaped, c);
+    }
+    if (lang === 'log') {
+        return highlightLog(escaped, c);
+    }
+    if (lang === 'csv') {
+        return highlightCsv(escaped, c);
+    }
+    if (lang === 'plaintext') {
+        return escaped;
     }
 
     return highlightGeneric(escaped, lang, c);

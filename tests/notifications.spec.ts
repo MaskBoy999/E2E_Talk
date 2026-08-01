@@ -1,11 +1,6 @@
-import { test, expect, Page } from '@playwright/test';
-import { createHash } from 'crypto';
+import { test, expect } from '@playwright/test';
 
 const BASE = 'https://localhost:3443';
-
-function sha256Hex(data: string): string {
-    return createHash('sha256').update(data).digest('hex');
-}
 
 function generateCode(len: number): string {
     const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -17,6 +12,8 @@ function generateCode(len: number): string {
 test.describe('Notifications', () => {
 
     test('DM, mention, and reply notifications work end-to-end', async ({ page, context }) => {
+        // Long sequential flow (register 2 users, server, mention, reply, DM)
+        test.setTimeout(90000);
         const ts = Date.now();
         const user1Name = 'notif_alice_' + ts;
         const user2Name = 'notif_bob_' + ts;
@@ -79,7 +76,7 @@ await page2.click('#register-form button[type="submit"]');
         const inviteCode = generateCode(8);
         const srvRes = await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${body1.token}` },
-            data: { name: 'Notif Test Server', invite_code_hash: sha256Hex(inviteCode) },
+            data: { name: 'Notif Test Server', invite_code: inviteCode },
         });
         const server = await srvRes.json();
         expect(server.id).toBeTruthy();
@@ -108,7 +105,7 @@ await page2.click('#register-form button[type="submit"]');
         // Set up invite
         const invRes = await page.request.post(`${BASE}/api/servers/${server.id}/invite`, {
             headers: { Authorization: `Bearer ${body1.token}`, 'Content-Type': 'application/json' },
-            data: { invite_code_hash: sha256Hex(inviteCode) },
+            data: { invite_code: inviteCode },
         });
         await invRes.json();
 
