@@ -1616,9 +1616,7 @@ document.addEventListener('DOMContentLoaded', () => {
             var card = document.querySelector('#profile-edit-modal .profile-edit-preview-card');
             if (card) card.style.background = color;
             var editAvatarEl = document.getElementById('profile-edit-avatar');
-            if (editAvatarEl) {
-                editAvatarEl.style.borderColor = color || '#16213e';
-            }
+            if (editAvatarEl) editAvatarEl.style.borderColor = color || '';
             var hexInput = document.getElementById('profile-edit-bg-color-hex');
             if (hexInput) hexInput.value = color;
         });
@@ -18771,10 +18769,12 @@ function renderProfileView(data, decrypted, uid) {
         cardEl.style.background = bgColor || '';
     }
     
-    // Make avatar border match background color
-    var avatarEl = document.getElementById('profile-modal-avatar');
-    if (avatarEl) {
-        avatarEl.style.borderColor = bgColor || '#16213e';
+    // Make the avatar ring match the profile's own background color so it reads
+    // as a separation cut-out against the banner (falls back to the app settings
+    // bg-secondary via CSS when the profile has no custom bg color).
+    var avatarRingEl = document.getElementById('profile-modal-avatar');
+    if (avatarRingEl) {
+        avatarRingEl.style.borderColor = bgColor || '';
     }
     
     // Set display name with color
@@ -19096,11 +19096,9 @@ function updateProfileEditPreview() {
     var bgColor = document.getElementById('profile-edit-bg-color').value || '';
     var card = document.querySelector('#profile-edit-modal .profile-edit-preview-card');
     if (card) card.style.background = bgColor || '';
-    // Make edit avatar border match background color
+    // Sync the preview avatar ring to the same profile bg color
     var editAvatarEl = document.getElementById('profile-edit-avatar');
-    if (editAvatarEl) {
-        editAvatarEl.style.borderColor = bgColor || '#16213e';
-    }
+    if (editAvatarEl) editAvatarEl.style.borderColor = bgColor || '';
     
     // Update banner preview from current profile
     var bannerImg = document.getElementById('profile-edit-banner-img');

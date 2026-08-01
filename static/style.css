@@ -5545,8 +5545,13 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     justify-content: center;
     font-weight: 700;
     font-size: 36px;
+    /* Separation ring between the PFP and the banner behind it. Defaults to the
+       card background color (bg-secondary) so it reads as a clean cut-out;
+       renderProfileModal/updateProfileEditPreview override borderColor with the
+       profile's own background color when one is set, so the ring matches the
+       card. The old accent-colored ring was caused by accent background bleeding
+       through the double-rounded seam — now impossible via :has(img) transparent. */
     border: 4px solid var(--bg-secondary);
-    transition: border-color 0.2s ease;
     overflow: hidden;
     flex-shrink: 0;
     text-overflow: ellipsis;
@@ -5556,7 +5561,14 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     width: 100%;
     height: 100%;
     object-fit: cover;
-    border-radius: 50%;
+    display: block;
+}
+
+/* When a PFP image is present, drop the accent background entirely so it can
+   never peek through as a thin ring around the rounded image edge. The accent
+   circle is kept for the no-image fallback (initial letter). */
+.profile-modal-avatar:has(img) {
+    background: transparent;
 }
 
 .profile-modal-avatar-edit-overlay {
