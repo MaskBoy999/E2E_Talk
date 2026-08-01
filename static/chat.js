@@ -7916,6 +7916,9 @@ async function appendMessage(msg) {
     } else if (stickerData && stickerData.file_id) {
         const stickerContainer = div.querySelector('.sticker-message');
         if (stickerContainer) {
+            // Stash the sticker data on the element so the streamer-mode toggle can
+            // reconstruct a "Load sticker" button for already-loaded previews.
+            stickerContainer._stickerData = stickerData;
             if (autoLoad) {
                 loadStickerPreview(stickerContainer, stickerData);
             } else {
@@ -7929,6 +7932,8 @@ async function appendMessage(msg) {
     } else if (forwardData && forwardData.sticker) {
         const fwdStickerContainer = div.querySelector('.sticker-message');
         if (fwdStickerContainer) {
+            // Stash so the streamer-mode toggle can rebuild a "Load sticker" button.
+            fwdStickerContainer._stickerData = forwardData.sticker;
             if (autoLoad) {
                 loadStickerPreview(fwdStickerContainer, forwardData.sticker);
             } else {
@@ -9301,6 +9306,12 @@ async function enterDmView() {
     viewMode = 'dms';
     currentChannelId = null;
     currentServerId = null;
+    // Clear any stale DM selection so the profile prefetch below (loadDmConversations →
+    // fetchDmConversationProfile → refreshDmProfileDisplay) can't repaint the chat header
+    // with a previously-open conversation's info. Without this, pressing the DM list button
+    // while a conversation was open leaves its header visible over the welcome screen.
+    currentDmChannelId = null;
+    currentDmOtherUser = null;
     // Clear missed-summary badge keys — user is now viewing DMs, so they've "read" them
     delete unreadDms['__missed__'];
     delete unreadMentionsByServer['__missed__'];
@@ -10151,6 +10162,9 @@ async function appendDmMessage(msg, kp, otherPublicKey) {
     if (stickerData && stickerData.file_id) {
         const stickerContainer = div.querySelector('.sticker-message');
         if (stickerContainer) {
+            // Stash the sticker data on the element so the streamer-mode toggle can
+            // reconstruct a "Load sticker" button for already-loaded previews.
+            stickerContainer._stickerData = stickerData;
             if (autoLoad) {
                 loadStickerPreview(stickerContainer, stickerData);
             } else {
@@ -10164,6 +10178,8 @@ async function appendDmMessage(msg, kp, otherPublicKey) {
     } else if (forwardData && forwardData.sticker) {
         const fwdStickerContainer = div.querySelector('.sticker-message');
         if (fwdStickerContainer) {
+            // Stash so the streamer-mode toggle can rebuild a "Load sticker" button.
+            fwdStickerContainer._stickerData = forwardData.sticker;
             if (autoLoad) {
                 loadStickerPreview(fwdStickerContainer, forwardData.sticker);
             } else {
@@ -11872,29 +11888,148 @@ function applyStreamerMode(enabled) {
             dmPreviews[i].classList.remove('streamer-hidden-preview');
         }
     }
-    // Handle already-rendered messages in the DOM
-    var messages = document.querySelectorAll('.message');
-    for (var j = 0; j < messages.length; j++) {
-        var msg = messages[j];
-        var hiddenDiv = msg.querySelector('.streamer-hidden');
-        var revealBtn = msg.querySelector('.streamer-reveal-btn');
-        if (enabled) {
-            // Re-hide messages that weren't revealed yet
-            if (hiddenDiv && !hiddenDiv.classList.contains('revealed')) {
-                // Already hidden — nothing to do
-            }
-        } else {
-            // Unhide everything and remove the wrapper entirely
-            if (hiddenDiv) {
-                hiddenDiv.classList.remove('streamer-hidden', 'revealed');
-            }
-            if (revealBtn) {
-                revealBtn.style.display = 'none';
-            }
-        }
-    }
+    // Wrap/unwrap already-rendered messages so the blur + Reveal treatment
+    // (and Load-preview conversion for auto-loaded media) applies immediately
+    // when toggling, instead of only after a chat reload.
+    applyStreamerToRenderedMessages(enabled);
     // Re-render DM sidebar to reflect streamer mode changes
     if (viewMode === 'dms') renderDmSidebar();
+}
+
+// Wrap/unwrap already-rendered messages when streamer mode is toggled. Messages
+// are normally wrapped at render time in appendMessage/appendDmMessage, so this
+// keeps the DOM in sync when the setting changes while a chat is already open.
+function applyStreamerToRenderedMessages(enabled) {
+    var messages = document.querySelectorAll('#message-list .message');
+    for (var j = 0; j < messages.length; j++) {
+        var msg = messages[j];
+        var contentEl = msg.querySelector('.content');
+        if (!contentEl) continue;
+        if (enabled) {
+            // Already rendered in streamer mode (wrapped) — leave it alone.
+            if (msg.getAttribute('data-streamer-content') === 'true') continue;
+            var headerEl = contentEl.querySelector(':scope > .header');
+            var editedEl = contentEl.querySelector(':scope > .edited-label');
+            var kids = [];
+            for (var k = 0; k < contentEl.children.length; k++) {
+                var kid = contentEl.children[k];
+                if (kid === headerEl || kid === editedEl) continue;
+                if (kid.classList && kid.classList.contains('streamer-reveal-btn')) continue;
+                kids.push(kid);
+            }
+            if (kids.length === 0) continue;
+            var wrap = document.createElement('div');
+            wrap.className = 'streamer-hidden';
+            for (var k2 = 0; k2 < kids.length; k2++) {
+                wrap.appendChild(kids[k2]);
+            }
+            // Insert the wrapper after the header (before the edited label if any),
+            // matching the render-time structure exactly.
+            if (editedEl) {
+                contentEl.insertBefore(wrap, editedEl);
+            } else if (headerEl) {
+                contentEl.insertBefore(wrap, headerEl.nextSibling);
+            } else {
+                contentEl.appendChild(wrap);
+            }
+            var btn = document.createElement('button');
+            btn.className = 'streamer-reveal-btn';
+            btn.textContent = 'Reveal';
+            contentEl.insertBefore(btn, wrap.nextSibling);
+            msg.setAttribute('data-streamer-content', 'true');
+            // Auto-loaded media previews become "Load preview" buttons (the
+            // reveal button delegation on #message-list handles the reveal click).
+            convertLoadedPreviewsToLoadButtons(msg);
+        } else {
+            var hiddenDiv = contentEl.querySelector(':scope > .streamer-hidden');
+            var revealBtn = contentEl.querySelector(':scope > .streamer-reveal-btn');
+            if (hiddenDiv) {
+                var headerEl2 = contentEl.querySelector(':scope > .header');
+                var editedEl2 = contentEl.querySelector(':scope > .edited-label');
+                // Move content children back out of the wrapper.
+                while (hiddenDiv.firstChild) {
+                    var child = hiddenDiv.firstChild;
+                    if (editedEl2) {
+                        contentEl.insertBefore(child, editedEl2);
+                    } else if (headerEl2) {
+                        contentEl.insertBefore(child, headerEl2.nextSibling);
+                    } else {
+                        contentEl.appendChild(child);
+                    }
+                }
+                hiddenDiv.remove();
+            }
+            if (revealBtn) revealBtn.remove();
+            delete msg.dataset.streamerContent;
+        }
+    }
+}
+
+// Replace already-auto-loaded media previews inside a message with "Load preview"
+// buttons, matching the render-time behavior of streamer mode (autoLoad = false).
+// File data is reconstructed from the container's data-* attributes.
+function convertLoadedPreviewsToLoadButtons(scope) {
+    if (!scope) return;
+    // Encrypted file previews
+    var previews = scope.querySelectorAll('.file-preview[data-key]');
+    for (var i = 0; i < previews.length; i++) {
+        var container = previews[i];
+        // Only convert containers whose preview was actually loaded.
+        if (!container.querySelector('img, video, audio, .text-preview')) continue;
+        var fileData = {
+            file_id: container.getAttribute('data-file-id'),
+            file_key: container.getAttribute('data-key'),
+            mime_type: container.getAttribute('data-mime'),
+            filename: container.getAttribute('data-filename'),
+            file_size: parseInt(container.getAttribute('data-size') || '0', 10)
+        };
+        container.innerHTML = '<button class="load-preview-btn">Load preview</button>';
+        (function (cont, data) {
+            cont.querySelector('.load-preview-btn').addEventListener('click', function () {
+                cont.innerHTML = '';
+                loadMediaPreview(cont, data);
+            });
+        })(container, fileData);
+    }
+    // Stickers — rebuild from the data stashed on the container at render time
+    // (_stickerData); forwarded stickers fall back to their data-* attributes.
+    var stickers = scope.querySelectorAll('.sticker-message');
+    for (var s = 0; s < stickers.length; s++) {
+        var sContainer = stickers[s];
+        // Only convert containers whose preview was actually loaded.
+        if (!sContainer.querySelector('img, video')) continue;
+        var sData = sContainer._stickerData;
+        if (!sData) {
+            var sFid = sContainer.getAttribute('data-file-id');
+            var sKey = sContainer.getAttribute('data-file-key');
+            if (sFid && sKey) {
+                sData = { file_id: sFid, file_key: sKey, mime_type: sContainer.getAttribute('data-mime-type') };
+            }
+        }
+        if (!sData) continue;
+        sContainer.innerHTML = '<button class="load-preview-btn">Load sticker</button>';
+        (function (cont, data) {
+            cont.querySelector('.load-preview-btn').addEventListener('click', function () {
+                cont.innerHTML = '';
+                loadStickerPreview(cont, data);
+            });
+        })(sContainer, sData);
+    }
+    // GIFs — direct URLs, so just hide the markup (img + download button) behind
+    // a button and restore the exact markup on click.
+    var gifs = scope.querySelectorAll('.gif-message');
+    for (var g = 0; g < gifs.length; g++) {
+        var gContainer = gifs[g];
+        var gImg = gContainer.querySelector('img');
+        if (!gImg || !gImg.getAttribute('src')) continue;
+        var gifHtml = gContainer.innerHTML;
+        gContainer.innerHTML = '<button class="load-preview-btn">Load GIF</button>';
+        (function (cont, html) {
+            cont.querySelector('.load-preview-btn').addEventListener('click', function () {
+                cont.innerHTML = html;
+            });
+        })(gContainer, gifHtml);
+    }
 }
 
 function applyThemeMode(mode) {

@@ -6153,7 +6153,6 @@ body.streamer-mode .member-name,
 body.streamer-mode #server-name,
 body.streamer-mode #channel-name,
 body.streamer-mode #current-user,
-body.streamer-mode .footer-user-name,
 body.streamer-mode .username-sub,
 body.streamer-mode .mention-item-name,
 body.streamer-mode .mention-item-hint {
@@ -6162,13 +6161,18 @@ body.streamer-mode .mention-item-hint {
     user-select: none;
     cursor: default;
 }
+/* The LIVE indicator inside .footer-user-name must stay sharp while streaming */
+body.streamer-mode .streamer-live-badge {
+    filter: none !important;
+    user-select: auto;
+    cursor: default;
+}
 body.streamer-mode .display-name:hover,
 body.streamer-mode .dm-name:hover,
 body.streamer-mode .member-name:hover,
 body.streamer-mode #server-name:hover,
 body.streamer-mode #channel-name:hover,
 body.streamer-mode #current-user:hover,
-body.streamer-mode .footer-user-name:hover,
 body.streamer-mode .username-sub:hover,
 body.streamer-mode .mention-item-name:hover,
 body.streamer-mode .mention-item-hint:hover {
