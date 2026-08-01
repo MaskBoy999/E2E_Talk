@@ -1,3 +1,0 @@
-    Finished `release` profile [optimized] target(s) in 0.29s
-     Running `target\release\e2e-chat.exe`
-error: process didn't exit successfully: `target\release\e2e-chat.exe` (exit code: 0xffffffff)

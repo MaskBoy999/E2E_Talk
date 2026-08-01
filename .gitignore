@@ -3,37 +3,88 @@ node_modules/
 
 # Server build artifacts
 server/target/
+server/*.exe
 
-# SQLite database (runtime data + schema auto-created by server on startup)
-server/*.db
-server/*.db-shm
-server/*.db-wal
+# SQLite database (runtime data)
+*.db
+*.db-shm
+*.db-wal
 
-# Test results
+# Test results & debug output
 test-results/
+test-debug*.js
+test-out*.txt
+test-dm*.txt
 
-# Debug/log files
-test-debug.txt
-test-out.txt
-server/debug.log
-server/server.log
-server/server_err.log
-server/server_stderr.log
-server/server_stdout.log
-server/stderr.log
-server/stdout.log
-jwt.txt
-migrations_ran.txt
+# Debug/log files (all)
+*.log
+*.err
+*.out
+_NUL
+NUL
+server_out*.txt
+server_err*.txt
 
-# TLS certificates (auto-generated or user-provided)
-server/certs/
+# Server build/debug artifacts
+server/build_out.txt
+server/_NUL
+server/server_out*.txt
+server/server_err*.txt
+
+# TLS certificates (auto-generated)
+certs/
 
 # Environment files
 .env
-server/.env
 
-# File uploads (encrypted chunks stored at runtime)
+# File uploads
 server/uploads/
-NUL
-server/NUL
 .freebuff/
+
+# Backup files
+*.bak
+
+# One-off Python scripts
+fix_chat.py
+insert_db_methods.py
+*.py
+!server/migrations/*.py
+
+# One-off scripts
+scripts/hl_*
+scripts/apply_*
+scripts/add_*
+scripts/cleanup_*
+scripts/dead_*
+scripts/debug_*
+scripts/do_*
+scripts/drop_*
+scripts/extract_*
+scripts/fix_*
+scripts/implement_*
+scripts/p3_*
+scripts/plaintext_*
+scripts/safe_*
+scripts/split_*
+scripts/update_*
+scripts/verify_*
+scripts/test_*
+scripts/split_with_node.js
+
+# One-off JS/HTML test files
+static/test-*
+static/test_*
+
+# Status/analysis docs
+status/
+SCHEMA_ANALYSIS.md
+PLAN.md
+PROGRESS.md
+distribution.md
+e2e-talk-streamlined-architecture.md
+security.md
+
+# Misc
+progress.md.bak
+reg.json
+NUL
