@@ -877,7 +877,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 localStorage.setItem('autoLoadPreviews', cb.checked);
                 // Re-render current messages to reflect the change
                 if (currentServerId && currentChannelId) {
-                    loadMessages(currentChannelId, currentServerId);
+                    loadMessages(currentChannelId);
                 } else if (currentDmChannelId) {
                     loadDmMessages(currentDmChannelId);
                 }
@@ -7046,6 +7046,39 @@ const PAGE_SIZE = 50;
 // Jump-to-bottom floating button reference (single, shared by channels and DMs)
 var _jumpToBottomBtn = null;
 
+// Pinned-to-bottom state: while true, images that finish loading re-scroll the
+// list to the latest message (so async media loads never leave the view short).
+var _pinnedToBottom = false;
+var _imageRepinAttached = false;
+
+/**
+ * Scroll the message list to the latest message and pin it there. Any image/media
+ * that finishes loading afterwards keeps the view on the latest message.
+ */
+function scrollMessageListToBottom() {
+    var list = document.getElementById('message-list');
+    if (!list) return;
+    _pinnedToBottom = true;
+    list.scrollTop = list.scrollHeight;
+    updateJumpToBottomButton(list);
+}
+
+/**
+ * Re-pin to the bottom when images inside the message list finish loading.
+ * Uses the capture phase because 'load' events don't bubble.
+ */
+function setupImageLoadRepin() {
+    if (_imageRepinAttached) return;
+    _imageRepinAttached = true;
+    var list = document.getElementById('message-list');
+    if (!list) return;
+    list.addEventListener('load', function (e) {
+        if (_pinnedToBottom && e.target && e.target.tagName === 'IMG') {
+            list.scrollTop = list.scrollHeight;
+        }
+    }, true);
+}
+
 /**
  * Create or re-append the 'Jump to latest' floating button to the message list.
  * The button uses position: sticky to float at the bottom of the scroll container.
@@ -7059,6 +7092,7 @@ function ensureJumpToBottomButton() {
         _jumpToBottomBtn.innerHTML = '<span class="arrow">&#9660;</span> Jump to latest';
         _jumpToBottomBtn.setAttribute('aria-label', 'Jump to latest messages');
         _jumpToBottomBtn.addEventListener('click', function () {
+            _pinnedToBottom = true;
             list.scrollTo({ top: list.scrollHeight, behavior: 'smooth' });
             _jumpToBottomBtn.classList.remove('visible');
         });
@@ -7173,6 +7207,10 @@ async function loadMessages(channelId, aroundMessageId) {
 
         // Set up infinite scroll listener
         setupMessageScrollListener(channelId);
+
+        // Jump to the latest message on load/reload (unless jumping to a specific message)
+        if (!aroundMessageId) scrollMessageListToBottom();
+        setupImageLoadRepin();
     } catch (err) {
         console.error('Failed to load messages:', err);
         list.innerHTML = '<div class="welcome" style="color:#f44336">Failed to load messages</div>';
@@ -7207,6 +7245,11 @@ function setupMessageScrollListener(channelId) {
 
         // Update jump-to-bottom button visibility regardless of pagination state
         updateJumpToBottomButton(list);
+
+        // If the user scrolls away from the bottom, stop auto-pinning to latest
+        if (list.scrollHeight - list.scrollTop - list.clientHeight > 60) {
+            _pinnedToBottom = false;
+        }
 
         if (!state || !state.hasMore || state.loading) return;
 
@@ -7353,6 +7396,11 @@ function setupDmScrollListener(dmChannelId) {
 
         // Update jump-to-bottom button visibility regardless of pagination state
         updateJumpToBottomButton(list);
+
+        // If the user scrolls away from the bottom, stop auto-pinning to latest
+        if (list.scrollHeight - list.scrollTop - list.clientHeight > 60) {
+            _pinnedToBottom = false;
+        }
 
         if (!state || !state.hasMore || state.loading) return;
         if (list.scrollTop <= 80) {
@@ -8170,6 +8218,8 @@ async function navigateToMessage(serverId, channelId, messageId) {
         await loadDmMessages(channelId, otherUser ? otherUser.id : '');
         if (window._closeSidebar) window._closeSidebar();
         if (messageId) {
+            // Message jump: unpin from latest so image loads don't yank the view back down
+            _pinnedToBottom = false;
             const target = await waitForElement('[data-message-id="' + messageId + '"]', 10000);
             if (target) {
                 target.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -8208,6 +8258,8 @@ async function navigateToMessage(serverId, channelId, messageId) {
         if (window._closeSidebar) window._closeSidebar();
         // Now wait for the target message to appear, then scroll to it
         if (messageId) {
+            // Message jump: unpin from latest so image loads don't yank the view back down
+            _pinnedToBottom = false;
             const target = await waitForElement('[data-message-id="' + messageId + '"]', 10000);
             if (target) {
                 target.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -9697,6 +9749,10 @@ async function loadDmMessages(dmChannelId, otherUserId) {
 
         // Set up infinite scroll for DM messages
         setupDmScrollListener(dmChannelId);
+
+        // Always jump to the latest message on DM load/reload
+        scrollMessageListToBottom();
+        setupImageLoadRepin();
     } catch (err) {
         console.error('Failed to load DM messages:', err);
         list.innerHTML = '<div class="welcome" style="color:#f44336">Failed to load messages</div>';

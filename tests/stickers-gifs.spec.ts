@@ -318,7 +318,7 @@ test.describe('Stickers, GIFs, and Emojis', () => {
     // ============================================================
     // TEST 5: Sticker sent in a DM is rendered 
     // ============================================================
-    test('sticker sent in DM is rendered for both users', async ({ page: user1Page, context }) => {
+    test('sticker sent in DM is rendered for both users', async ({ page: user1Page, browser }) => {
         test.setTimeout(120000);
         const ts = Date.now();
         const user1Name = 'stickdm1_' + ts;
@@ -332,8 +332,10 @@ test.describe('Stickers, GIFs, and Emojis', () => {
         const imgBuf = createTestImageBuffer(64);
         await uploadSticker(user1Page, imgBuf, stickerName, 'sticker');
 
-        // Register user 2 in a new tab (context)
-        const user2Page = await context.newPage();
+        // Register user 2 in a SEPARATE browser context so localStorage
+        // (identity keys, friend code) isn't shared with user1's session.
+        const ctx2 = await browser.newContext();
+        const user2Page = await ctx2.newPage();
         const body2 = await registerUser(user2Page, user2Name);
 
         // Friend user1 -> user2 using friend codes
@@ -345,31 +347,30 @@ test.describe('Stickers, GIFs, and Emojis', () => {
         // Send friend request from user2 -> user1
         await user2Page.goto(`${BASE}/index.html`);
         await user2Page.waitForTimeout(2000);
-        await user2Page.evaluate(() => {
-            // Simulate adding friend via code - navigate to add friend section
-            document.getElementById('add-friend-input').value = '';
-        });
         
         // Use the API directly to send friend request
-        const frRes = await user2Page.request.post(`${BASE}/api/friend-requests/send`, {
+        const frRes = await user2Page.request.post(`${BASE}/api/friends/request`, {
             headers: { Authorization: `Bearer ${body2.token}`, 'Content-Type': 'application/json' },
             data: { friend_code: user1Code },
         });
-        const frData = await frRes.json();
+        const frData = await frRes.json().catch(() => null);
         console.log('Friend request result:', JSON.stringify(frData));
+        // Fail loudly if the friendship didn't form (previously passed vacuously)
+        expect(frRes.ok()).toBeTruthy();
         
         if (frRes.ok()) {
             // Accept friend request on user1's side
             // Get pending friend requests for user1
-            const pendingRes = await user1Page.request.get(`${BASE}/api/friend-requests/pending`, {
+            const pendingRes = await user1Page.request.get(`${BASE}/api/friends/requests/incoming`, {
                 headers: { Authorization: `Bearer ${body1.token}` },
             });
             if (pendingRes.ok()) {
                 const pending = await pendingRes.json();
                 console.log('Pending requests:', JSON.stringify(pending));
                 if (pending.length > 0) {
-                    await user1Page.request.post(`${BASE}/api/friend-requests/${pending[0].id}/accept`, {
-                        headers: { Authorization: `Bearer ${body1.token}` },
+                    await user1Page.request.post(`${BASE}/api/friends/requests/accept`, {
+                        headers: { Authorization: `Bearer ${body1.token}`, 'Content-Type': 'application/json' },
+                        data: { request_id: pending[0].id },
                     });
                 }
             }
@@ -436,6 +437,7 @@ test.describe('Stickers, GIFs, and Emojis', () => {
                 expect(stickerMsgCount2).toBeGreaterThanOrEqual(1);
             }
         }
+        await ctx2.close();
     });
 
     // ============================================================
@@ -566,11 +568,25 @@ test.describe('Stickers, GIFs, and Emojis', () => {
         const stickers = await stickersRes.json();
         console.log('DIAGNOSTIC: All stickers from API:');
         for (const s of stickers) {
-            console.log(`  name="${s.sticker_name}" mime_type="${s.mime_type}"`);
+            console.log(`  mime_type="${s.mime_type}" has_enc_name=${!!s.encrypted_sticker_name} has_nonce=${!!s.sticker_name_nonce}`);
         }
 
-        // Assert correct mime_type for emoji
-        const emojiItem = stickers.find(s => s.sticker_name === emojiName);
+        // Decrypt encrypted_sticker_name with the user's identity key — the server
+        // never stores plaintext names (migration 045 dropped the sticker_name column).
+        const emojiItem = await page.evaluate(({ stickerList, expectedName }) => {
+            const kp = window.E2ECrypto && window.E2ECrypto.getIdentityKeyPair();
+            for (const s of stickerList) {
+                let name = null;
+                if (kp && s.encrypted_sticker_name && s.sticker_name_nonce) {
+                    try {
+                        const dec = window.E2ECrypto.aeadDecrypt(s.encrypted_sticker_name, kp.privateKey, s.sticker_name_nonce);
+                        if (dec) name = new TextDecoder().decode(dec);
+                    } catch (_) {}
+                }
+                if (name === expectedName) return s;
+            }
+            return null;
+        }, { stickerList: stickers, expectedName: emojiName });
         expect(emojiItem).toBeTruthy();
         expect(emojiItem.mime_type).toBe('image/emoji');
     });

@@ -510,7 +510,7 @@ pub struct UploadNotificationSoundRequest {
     pub encrypted_sound: String,
     pub nonce: String,
     pub sender_public_key: String,
-    pub file_name: String,
+    pub file_name: Option<String>,          // legacy placeholder (migration 045 dropped the plaintext column) — display name lives in encrypted_file_name
     pub encrypted_file_name: Option<String>,  // AES-GCM encrypted with identity key
     pub file_name_nonce: Option<String>,      // AES-GCM nonce
 }
@@ -542,7 +542,7 @@ pub async fn upload_notification_sound(
     let encrypted_file_name_bytes = req.encrypted_file_name.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
     let file_name_nonce_bytes = req.file_name_nonce.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
 
-    match state.db.save_notification_sound(&user_id, &encrypted_sound, &nonce, &sender_public_key, &req.file_name, encrypted_file_name_bytes, file_name_nonce_bytes) {
+    match state.db.save_notification_sound(&user_id, &encrypted_sound, &nonce, &sender_public_key, encrypted_file_name_bytes, file_name_nonce_bytes) {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
@@ -2873,10 +2873,10 @@ pub async fn admin_list_user_stickers(
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     };
-    let result: Vec<serde_json::Value> = rows.iter().map(|(id, uid, uname, fid, sname, mime, ekey, eknonce, created_at, enc_name, name_nonce)| {
+    let result: Vec<serde_json::Value> = rows.iter().map(|(id, uid, uname, fid, mime, ekey, eknonce, created_at, enc_name, name_nonce)| {
         serde_json::json!({
             "id": id, "user_id": uid, "username": uname,
-            "file_id": fid, "sticker_name": sname,
+            "file_id": fid,
             "mime_type": mime,
             "created_at": created_at,
             "encrypted_file_key": ekey.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
@@ -3593,7 +3593,6 @@ pub async fn download_file_by_hash(
 #[derive(Deserialize)]
 pub struct AddUserStickerRequest {
     pub file_id: String,
-    pub sticker_name: String,
     pub mime_type: String,
     pub encrypted_file_key: Option<String>,
     pub file_key_nonce: Option<String>,
@@ -3613,7 +3612,7 @@ pub async fn list_user_stickers(
         Ok(stickers) => {
             let result: Vec<serde_json::Value> = stickers
                 .iter()
-                .map(|(id, file_id, _file_id_hash, _name, mime, ekey, eknounce, enc_name, name_nonce)| {
+                .map(|(id, file_id, _file_id_hash, mime, ekey, eknounce, enc_name, name_nonce)| {
                     serde_json::json!({
                         "id": id,
                         "file_id": file_id,
@@ -3656,7 +3655,7 @@ pub async fn add_user_sticker(
     let enc_name_bytes = body.encrypted_sticker_name.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
     let name_nonce_bytes = body.sticker_name_nonce.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
 
-    match state.db.add_user_sticker(&user_id, &body.file_id, &body.sticker_name, &body.mime_type, encrypted_key_bytes.as_deref(), key_nonce_bytes.as_deref(), enc_name_bytes.as_deref(), name_nonce_bytes.as_deref()) {
+    match state.db.add_user_sticker(&user_id, &body.file_id, &body.mime_type, encrypted_key_bytes.as_deref(), key_nonce_bytes.as_deref(), enc_name_bytes.as_deref(), name_nonce_bytes.as_deref()) {
         Ok(id) => (StatusCode::OK, Json(serde_json::json!({"id": id}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }

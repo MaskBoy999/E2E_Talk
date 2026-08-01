@@ -2791,9 +2791,12 @@ impl Database {
 
     // --- Notification Sound Sync ---
 
-    pub fn save_notification_sound(&self, user_id: &str, encrypted_sound: &[u8], nonce: &[u8], sender_public_key: &[u8], file_name: &str, encrypted_file_name: Option<Vec<u8>>, file_name_nonce: Option<Vec<u8>>) -> Result<(), String> {
+    pub fn save_notification_sound(&self, user_id: &str, encrypted_sound: &[u8], nonce: &[u8], sender_public_key: &[u8], encrypted_file_name: Option<Vec<u8>>, file_name_nonce: Option<Vec<u8>>) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        // Check if encrypted_file_name column exists (migration 039)
+        // Migration 045 dropped the plaintext file_name column — the display name
+        // is stored exclusively in encrypted_file_name + file_name_nonce.
+        // The legacy else-branch (pre-039 schema without encrypted_file_name) is kept
+        // only for DBs that haven't run migration 039 yet; it stores no file name at all.
         let has_enc_fn_col: bool = conn
             .query_row(
                 "SELECT COUNT(*) > 0 FROM pragma_table_info('notification_sounds') WHERE name = 'encrypted_file_name'",
@@ -2804,30 +2807,28 @@ impl Database {
             .unwrap_or(false);
         if has_enc_fn_col {
             conn.execute(
-                "INSERT INTO notification_sounds (user_id, encrypted_sound, nonce, sender_public_key, file_name, updated_at, encrypted_file_name, file_name_nonce)
-                 VALUES (?1, ?2, ?3, ?4, ?5, CURRENT_TIMESTAMP, ?6, ?7)
+                "INSERT INTO notification_sounds (user_id, encrypted_sound, nonce, sender_public_key, updated_at, encrypted_file_name, file_name_nonce)
+                 VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP, ?5, ?6)
                  ON CONFLICT(user_id) DO UPDATE SET
                     encrypted_sound = excluded.encrypted_sound,
                     nonce = excluded.nonce,
                     sender_public_key = excluded.sender_public_key,
-                    file_name = excluded.file_name,
                     encrypted_file_name = excluded.encrypted_file_name,
                     file_name_nonce = excluded.file_name_nonce,
                     updated_at = CURRENT_TIMESTAMP",
-                params![user_id, encrypted_sound, nonce, sender_public_key, file_name, encrypted_file_name, file_name_nonce],
+                params![user_id, encrypted_sound, nonce, sender_public_key, encrypted_file_name, file_name_nonce],
             )
             .map_err(|e| e.to_string())?;
         } else {
             conn.execute(
-                "INSERT INTO notification_sounds (user_id, encrypted_sound, nonce, sender_public_key, file_name, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, CURRENT_TIMESTAMP)
+                "INSERT INTO notification_sounds (user_id, encrypted_sound, nonce, sender_public_key, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)
                  ON CONFLICT(user_id) DO UPDATE SET
                     encrypted_sound = excluded.encrypted_sound,
                     nonce = excluded.nonce,
                     sender_public_key = excluded.sender_public_key,
-                    file_name = excluded.file_name,
                     updated_at = CURRENT_TIMESTAMP",
-                params![user_id, encrypted_sound, nonce, sender_public_key, file_name],
+                params![user_id, encrypted_sound, nonce, sender_public_key],
             )
             .map_err(|e| e.to_string())?;
         }
@@ -2846,7 +2847,7 @@ impl Database {
             .unwrap_or(false);
         if has_enc_fn_col {
             let result = conn.query_row(
-                "SELECT encrypted_sound, nonce, sender_public_key, file_name, encrypted_file_name, file_name_nonce FROM notification_sounds WHERE user_id = ?1",
+                "SELECT encrypted_sound, nonce, sender_public_key, '', encrypted_file_name, file_name_nonce FROM notification_sounds WHERE user_id = ?1",
                 params![user_id],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
             );
@@ -2857,7 +2858,7 @@ impl Database {
             }
         } else {
             let result = conn.query_row(
-                "SELECT encrypted_sound, nonce, sender_public_key, file_name, NULL, NULL FROM notification_sounds WHERE user_id = ?1",
+                "SELECT encrypted_sound, nonce, sender_public_key, '', NULL, NULL FROM notification_sounds WHERE user_id = ?1",
                 params![user_id],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
             );
@@ -4033,7 +4034,6 @@ impl Database {
         &self,
         user_id: &str,
         file_id: &str,
-        sticker_name: &str,
         mime_type: &str,
         encrypted_file_key: Option<&[u8]>,
         file_key_nonce: Option<&[u8]>,
@@ -4044,8 +4044,8 @@ impl Database {
         let id = Uuid::new_v4().to_string();
         let hash = sha256_hex(file_id);
         conn.execute(
-            "INSERT INTO user_stickers (id, user_id, file_id, file_id_hash, sticker_name, mime_type, encrypted_file_key, file_key_nonce, encrypted_sticker_name, sticker_name_nonce) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![id, user_id, file_id, hash, sticker_name, mime_type, encrypted_file_key, file_key_nonce, encrypted_sticker_name, sticker_name_nonce],
+            "INSERT INTO user_stickers (id, user_id, file_id, file_id_hash, mime_type, encrypted_file_key, file_key_nonce, encrypted_sticker_name, sticker_name_nonce) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![id, user_id, file_id, hash, mime_type, encrypted_file_key, file_key_nonce, encrypted_sticker_name, sticker_name_nonce],
         )
         .map_err(|e| e.to_string())?;
         Ok(id)
@@ -4061,11 +4061,11 @@ impl Database {
         Ok(())
     }
 
-    pub fn list_user_stickers(&self, user_id: &str) -> Result<Vec<(String, String, String, String, String, Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>)>, String> {
+    pub fn list_user_stickers(&self, user_id: &str) -> Result<Vec<(String, String, String, String, Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT s.id, s.file_id, s.file_id_hash, s.sticker_name, COALESCE(s.mime_type, f.mime_type, ''), s.encrypted_file_key, s.file_key_nonce, s.encrypted_sticker_name, s.sticker_name_nonce
+                "SELECT s.id, s.file_id, s.file_id_hash, COALESCE(s.mime_type, f.mime_type, ''), s.encrypted_file_key, s.file_key_nonce, s.encrypted_sticker_name, s.sticker_name_nonce
                  FROM user_stickers s
                  LEFT JOIN files f ON s.file_id = f.id
                  WHERE s.user_id = ?1
@@ -4079,11 +4079,10 @@ impl Database {
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<Vec<u8>>>(4)?,
                     row.get::<_, Option<Vec<u8>>>(5)?,
                     row.get::<_, Option<Vec<u8>>>(6)?,
                     row.get::<_, Option<Vec<u8>>>(7)?,
-                    row.get::<_, Option<Vec<u8>>>(8)?,
                 ))
             })
             .map_err(|e| e.to_string())?
@@ -5070,11 +5069,11 @@ impl Database {
 
     // --- Admin: missing tables ---
 
-    pub fn list_all_user_stickers_admin(&self) -> Result<Vec<(String, String, String, String, String, String, Option<Vec<u8>>, Option<Vec<u8>>, String, Option<Vec<u8>>, Option<Vec<u8>>)>, String> {
+    pub fn list_all_user_stickers_admin(&self) -> Result<Vec<(String, String, String, String, String, Option<Vec<u8>>, Option<Vec<u8>>, String, Option<Vec<u8>>, Option<Vec<u8>>)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT us.id, us.user_id, COALESCE(u.username, '?'), us.file_id, us.sticker_name, COALESCE(us.mime_type, ''), us.encrypted_file_key, us.file_key_nonce, COALESCE(us.created_at, ''), us.encrypted_sticker_name, us.sticker_name_nonce
+                "SELECT us.id, us.user_id, COALESCE(u.username, '?'), us.file_id, COALESCE(us.mime_type, ''), us.encrypted_file_key, us.file_key_nonce, COALESCE(us.created_at, ''), us.encrypted_sticker_name, us.sticker_name_nonce
                  FROM user_stickers us LEFT JOIN users u ON us.user_id = u.id ORDER BY us.created_at DESC",
             )
             .map_err(|e| e.to_string())?;
@@ -5086,12 +5085,11 @@ impl Database {
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<Vec<u8>>>(5)?,
                     row.get::<_, Option<Vec<u8>>>(6)?,
-                    row.get::<_, Option<Vec<u8>>>(7)?,
-                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<Vec<u8>>>(8)?,
                     row.get::<_, Option<Vec<u8>>>(9)?,
-                    row.get::<_, Option<Vec<u8>>>(10)?,
                 ))
             })
             .map_err(|e| e.to_string())?
