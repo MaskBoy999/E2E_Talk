@@ -7115,7 +7115,11 @@ async function loadMessages(channelId, aroundMessageId) {
             url = `/api/channels/${channelId}/messages/around/${aroundMessageId}`;
         }
         const res = await authFetch(url);
+        // Stale-response guard: if the user switched channels while this fetch
+        // was in flight, abandon the response — it would overwrite the newer view.
+        if (currentChannelId !== channelId) return;
         const messages = await res.json();
+        if (currentChannelId !== channelId) return;
 
         list.innerHTML = '';
 
@@ -7138,6 +7142,8 @@ async function loadMessages(channelId, aroundMessageId) {
         }
 
         for (const msg of messages) {
+            // Stop rendering if the user switched channels mid-loop
+            if (currentChannelId !== channelId) return;
             await appendMessage(msg);
         }
         // Update all message avatars with current profile pictures from cache
@@ -7254,7 +7260,19 @@ async function loadMoreMessages(channelId) {
     try {
         var url = `/api/channels/${channelId}/messages?limit=${PAGE_SIZE}&before=${encodeURIComponent(state.oldestTimestamp)}&before_id=${encodeURIComponent(state.oldestMessageId || '')}`;
         var res = await authFetch(url);
+        // Stale-response guard: don't prepend older messages into a list the
+        // user has since switched away from.
+        if (currentChannelId !== channelId) {
+            state.loading = false;
+            if (spinner.parentNode) spinner.parentNode.removeChild(spinner);
+            return;
+        }
         var olderMessages = await res.json();
+        if (currentChannelId !== channelId) {
+            state.loading = false;
+            if (spinner.parentNode) spinner.parentNode.removeChild(spinner);
+            return;
+        }
 
         // Remove spinner
         if (spinner.parentNode) spinner.parentNode.removeChild(spinner);
@@ -7403,7 +7421,19 @@ async function loadMoreDmMessages(dmChannelId) {
     try {
         var url = '/api/dm/' + dmChannelId + '/messages?limit=' + PAGE_SIZE + '&before=' + encodeURIComponent(state.oldestTimestamp) + '&before_id=' + encodeURIComponent(state.oldestMessageId || '');
         var res = await authFetch(url);
+        // Stale-response guard: don't prepend older messages into a DM the user
+        // has since switched away from.
+        if (currentDmChannelId !== dmChannelId) {
+            state.loading = false;
+            if (spinner.parentNode) spinner.parentNode.removeChild(spinner);
+            return;
+        }
         var olderMessages = await res.json();
+        if (currentDmChannelId !== dmChannelId) {
+            state.loading = false;
+            if (spinner.parentNode) spinner.parentNode.removeChild(spinner);
+            return;
+        }
         
         if (spinner.parentNode) spinner.parentNode.removeChild(spinner);
         
@@ -7533,13 +7563,58 @@ function tryDecryptWithAllKeysRaw(serverId, ciphertextB64, nonceB64) {
     return null;
 }
 
+// Insert a message div into the list in timestamp order (newest at the bottom).
+// When a live WS message resolves while an initial load is still appending
+// older messages, a plain appendChild would leave the newer message above older
+// ones still being appended. Walking from the end and inserting before the first
+// message newer than this one keeps the list strictly chronological.
+function insertMessageChronologically(list, div, msg) {
+    if (!list || !div) return;
+    var ts = msg && msg.timestamp ? new Date(msg.timestamp).getTime() : null;
+    if (ts === null || isNaN(ts)) {
+        list.appendChild(div);
+        return;
+    }
+    // Fast path: the common case is a new message newer than everything shown.
+    var lastMsg = list.lastElementChild;
+    if (!lastMsg || !lastMsg.classList || !lastMsg.classList.contains('message')) {
+        list.appendChild(div);
+        return;
+    }
+    var lastTs = lastMsg.getAttribute && lastMsg.getAttribute('data-ts');
+    if (!lastTs || parseInt(lastTs, 10) <= ts) {
+        list.appendChild(div);
+        return;
+    }
+    // Out-of-order arrival (live WS message racing an in-flight initial load):
+    // walk backwards and insert before the first message newer than this one.
+    var children = list.children;
+    for (var i = children.length - 1; i >= 0; i--) {
+        var el = children[i];
+        if (!el || !el.classList || !el.classList.contains('message')) continue;
+        var elTs = el.getAttribute && el.getAttribute('data-ts');
+        if (elTs && parseInt(elTs, 10) > ts) {
+            list.insertBefore(div, el);
+            return;
+        }
+    }
+    list.appendChild(div);
+}
+
 async function appendMessage(msg) {
     const list = document.getElementById('message-list');
+    // Dedupe: a live WS push can race an in-flight REST load for the same
+    // message, causing it to render twice. Skip if this id is already shown.
+    if (msg && msg.id && list && list.querySelector('.message[data-message-id="' + CSS.escape(msg.id) + '"]')) return;
+    // Capture the view we started rendering for so a channel switch mid-await
+    // can't leave a stale message appended into the wrong conversation.
+    const _chanAtStart = currentChannelId;
     const div = document.createElement('div');
     div.className = 'message';
     if (msg.id) div.setAttribute('data-message-id', msg.id);
     if (msg.sender_id) div.setAttribute('data-sender-id', msg.sender_id);
     if (msg.sender_user_id) div.setAttribute('data-sender-user-id', msg.sender_user_id);
+    if (msg.timestamp) div.setAttribute('data-ts', new Date(msg.timestamp).getTime());
 
     var senderIdForCache = msg.sender_user_id || msg.sender_id;
     const myUserId = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')).id : '';
@@ -7984,7 +8059,13 @@ async function appendMessage(msg) {
     if (arguments.length >= 2 && arguments[1]) {
         list.insertBefore(div, list.firstChild);
     } else {
-        list.appendChild(div);
+        // Stale-view guard: if the user switched channels while this message was
+        // being decrypted/rendered, don't insert it into the new view.
+        if (currentChannelId !== _chanAtStart) return;
+        // Chronological insert: a WS message can resolve while the initial load
+        // is still appending older messages — insert by timestamp so order is
+        // always preserved (newest at the bottom).
+        insertMessageChronologically(list, div, msg);
         list.scrollTop = list.scrollHeight;
     }
 }
@@ -8045,6 +8126,11 @@ async function loadStickerPreview(container, stickerData) {
         }
 
         const blob = await downloadAndDecryptStickerData(stickerData.file_id, fileKeyBytes, stickerData.mime_type || 'image/png');
+        // Stale-container guard: if the message was removed (channel/DM switch)
+        // or the sticker was converted to a "Load sticker" button (streamer-mode
+        // toggle) while the download was in flight, don't append into a detached
+        // or re-purposed container.
+        if (!container.isConnected || container.querySelector('.load-preview-btn')) return;
         const url = URL.createObjectURL(blob);
         blobUrls.push(url);
         const img = document.createElement('img');
@@ -9652,7 +9738,11 @@ async function loadDmMessages(dmChannelId, otherUserId) {
 
     try {
         const res = await authFetch('/api/dm/' + dmChannelId + '/messages?limit=' + PAGE_SIZE);
+        // Stale-response guard: if the user switched DMs while this fetch was in
+        // flight, abandon the response — it would overwrite the newer DM view.
+        if (currentDmChannelId !== dmChannelId) return;
         const messages = await res.json();
+        if (currentDmChannelId !== dmChannelId) return;
         
         // Track pagination state
         if (Array.isArray(messages) && messages.length > 0) {
@@ -9760,6 +9850,8 @@ async function loadDmMessages(dmChannelId, otherUserId) {
         }
 
         for (const msg of messages) {
+            // Stop rendering if the user switched DMs mid-loop
+            if (currentDmChannelId !== dmChannelId) return;
             await appendDmMessage(msg, kp, otherPublicKey);
         }
 
@@ -9784,6 +9876,12 @@ async function loadDmMessages(dmChannelId, otherUserId) {
 
 async function appendDmMessage(msg, kp, otherPublicKey) {
     const list = document.getElementById('message-list');
+    // Dedupe: a live WS push can race an in-flight REST load for the same
+    // message, causing it to render twice. Skip if this id is already shown.
+    if (msg && msg.id && list && list.querySelector('.message[data-message-id="' + CSS.escape(msg.id) + '"]')) return;
+    // Capture the view we started rendering for so a DM switch mid-await can't
+    // leave a stale message appended into the wrong conversation.
+    const _dmAtStart = currentDmChannelId;
     const div = document.createElement('div');
     div.className = 'message';
     if (msg.id) div.setAttribute('data-message-id', msg.id);
@@ -9793,6 +9891,7 @@ async function appendDmMessage(msg, kp, otherPublicKey) {
     // The delegation handler will check if the value is an HMAC hash and fall back to currentDmOtherUser.id.
     var senderIdForCache = msg.sender_user_id || msg.sender_id;
     div.setAttribute('data-sender-user-id', senderIdForCache);
+    if (msg.timestamp) div.setAttribute('data-ts', new Date(msg.timestamp).getTime());
     const myUserId = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')).id : '';
     // Self-heal stale sessions: if e2e_hmac_key is missing (cleared storage, or a
     // session from before the key existed), fetch it now so the HMAC fallback
@@ -10239,7 +10338,11 @@ div.querySelectorAll('.file-preview').forEach((container) => {
     if (arguments.length >= 4 && arguments[3]) {
         list.insertBefore(div, list.firstChild);
     } else {
-        list.appendChild(div);
+        // Stale-view guard: if the user switched DMs while this message was being
+        // decrypted/rendered, don't insert it into the new view.
+        if (currentDmChannelId !== _dmAtStart) return;
+        // Chronological insert (same rationale as appendMessage).
+        insertMessageChronologically(list, div, msg);
         list.scrollTop = list.scrollHeight;
     }
 }
@@ -14222,6 +14325,11 @@ async function loadMediaPreview(container, fileData) {
 
     try {
         const blob = await downloadAndDecryptFile(fileData.file_id, fileData.file_key, fileData.mime_type, fileData.file_size);
+        // Stale-container guard: if the message was removed (channel/DM switch)
+        // or the preview was converted to a "Load preview" button (streamer-mode
+        // toggle) while the download was in flight, don't write into a detached
+        // or re-purposed container.
+        if (!container.isConnected || !container.querySelector('.file-loading')) return;
         const url = URL.createObjectURL(blob);
         blobUrls.push(url);
         container.innerHTML = '';
