@@ -1702,6 +1702,19 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('footer-user-avatar').addEventListener('click', function () {
             if (user) openProfileModal(user.id);
         });
+        // DM chat header PFP click -> open that user's profile.
+        // #channel-name persists while its innerHTML is rebuilt often, so delegate
+        // on the element itself: a click on .dm-header-pic-wrap opens the profile
+        // of the user currently in the DM (currentDmOtherUser.id).
+        var dmHeaderEl = document.getElementById('channel-name');
+        if (dmHeaderEl) {
+            dmHeaderEl.addEventListener('click', function (e) {
+                var picWrap = e.target.closest('.dm-header-pic-wrap');
+                if (picWrap && currentDmOtherUser && currentDmOtherUser.id) {
+                    openProfileModal(currentDmOtherUser.id);
+                }
+            });
+        }
         // Edit profile button — opens the separate edit modal
         document.getElementById('profile-edit-btn').addEventListener('click', function () {
             openProfileEditModal();
@@ -18767,6 +18780,15 @@ function renderProfileView(data, decrypted, uid) {
     var cardEl = document.querySelector('#profile-view .profile-view-card') || document.querySelector('#profile-modal .profile-view-card');
     if (cardEl) {
         cardEl.style.background = bgColor || '';
+    }
+    
+    // Match the modal-content background to the profile bg color so the settings
+    // bg color doesn't peek through around the card's edges (the card is inset
+    // slightly inside the modal-content). Falls back to --bg-secondary via CSS
+    // when the profile has no custom bg color.
+    var modalContentEl = document.querySelector('#profile-modal .profile-modal-content');
+    if (modalContentEl) {
+        modalContentEl.style.background = bgColor || '';
     }
     
     // Make the avatar ring match the profile's own background color so it reads

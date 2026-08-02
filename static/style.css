@@ -2817,6 +2817,7 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
 }
 .dm-header-pic-wrap {
     position: relative;
+    cursor: pointer;
     display: inline-block;
     vertical-align: middle;
     margin-right: 0;
