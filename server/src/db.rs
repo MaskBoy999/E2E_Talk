@@ -1047,6 +1047,9 @@ impl Database {
         // users escrow/eph BLOBs, plaintext pic keys, servers.invite_code, key device_id/eph_pub)
         let _ = conn.execute_batch(include_str!("../migrations/048_drop_legacy_message_and_key_columns.sql"));
 
+        // Migration 049: Voice calls & voice channels (sessions, participants, sanctions)
+        let _ = conn.execute_batch(include_str!("../migrations/049_voice.sql"));
+
         // Data migration: normalize legacy space-separated CURRENT_TIMESTAMP values
         // ("YYYY-MM-DD HH:MM:SS") to fixed-width RFC3339 ("YYYY-MM-DDTHH:MM:SS.000000Z")
         // so lexicographic ordering is consistent with newly-inserted messages.
@@ -2086,9 +2089,10 @@ impl Database {
         Ok(channels)
     }
 
-    pub fn create_channel(&self, server_id: &str, encrypted_name: Option<&[u8]>, name_nonce: Option<&[u8]>) -> Result<Channel, String> {
+    pub fn create_channel(&self, server_id: &str, encrypted_name: Option<&[u8]>, name_nonce: Option<&[u8]>, channel_type: &str) -> Result<Channel, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let id = Uuid::new_v4().to_string();
+        let ctype = if channel_type == "voice" { "voice" } else { "text" };
 
         let max_pos: i32 = conn
             .query_row(
@@ -2109,14 +2113,14 @@ impl Database {
             .unwrap_or(false);
         if has_name_col {
             conn.execute(
-                "INSERT INTO channels (id, server_id, encrypted_name, name_nonce, type, position, name) VALUES (?1, ?2, ?3, ?4, 'text', ?5, '')",
-                params![id, server_id, encrypted_name, name_nonce, max_pos + 1],
+                "INSERT INTO channels (id, server_id, encrypted_name, name_nonce, type, position, name) VALUES (?1, ?2, ?3, ?4, ?5, ?6, '')",
+                params![id, server_id, encrypted_name, name_nonce, ctype, max_pos + 1],
             )
             .map_err(|e| e.to_string())?;
         } else {
             conn.execute(
-                "INSERT INTO channels (id, server_id, encrypted_name, name_nonce, type, position) VALUES (?1, ?2, ?3, ?4, 'text', ?5)",
-                params![id, server_id, encrypted_name, name_nonce, max_pos + 1],
+                "INSERT INTO channels (id, server_id, encrypted_name, name_nonce, type, position) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![id, server_id, encrypted_name, name_nonce, ctype, max_pos + 1],
             )
             .map_err(|e| e.to_string())?;
         }
@@ -2126,10 +2130,125 @@ impl Database {
             server_id: server_id.to_string(),
             encrypted_name: encrypted_name.map(|v| v.to_vec()),
             name_nonce: name_nonce.map(|v| v.to_vec()),
-            channel_type: "text".to_string(),
+            channel_type: ctype.to_string(),
             position: 0,
             created_at: String::new(),
         })
+    }
+
+    /// Returns the channel type ('text' | 'voice') for a channel, or an error if not found.
+    pub fn get_channel_type(&self, channel_id: &str) -> Result<String, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT type FROM channels WHERE id = ?1",
+            params![channel_id],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    // ---- Voice calls: sanctions + sessions ----
+
+    /// Returns (force_muted, force_deafened) for a user in a server.
+    pub fn get_voice_sanction(&self, server_id: &str, user_id: &str) -> Result<(bool, bool), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT force_muted, force_deafened FROM voice_sanctions WHERE server_id = ?1 AND user_id = ?2",
+            params![server_id, user_id],
+            |row| Ok((row.get::<_, i64>(0)? != 0, row.get::<_, i64>(1)? != 0)),
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    /// All sanctions for a server (map user_id -> (force_muted, force_deafened)).
+    pub fn get_all_voice_sanctions(&self, server_id: &str) -> Result<std::collections::HashMap<String, (bool, bool)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT user_id, force_muted, force_deafened FROM voice_sanctions WHERE server_id = ?1")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![server_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)? != 0,
+                    row.get::<_, i64>(2)? != 0,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        let mut out = std::collections::HashMap::new();
+        for r in rows {
+            let (uid, fm, fd) = r.map_err(|e| e.to_string())?;
+            out.insert(uid, (fm, fd));
+        }
+        Ok(out)
+    }
+
+    /// Upsert a voice sanction. `force_muted`/`force_deafened` true enables the flag.
+    pub fn set_voice_sanction(&self, server_id: &str, user_id: &str, force_muted: bool, force_deafened: bool) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO voice_sanctions (server_id, user_id, force_muted, force_deafened) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(server_id, user_id) DO UPDATE SET force_muted = ?3, force_deafened = ?4",
+            params![server_id, user_id, if force_muted { 1 } else { 0 }, if force_deafened { 1 } else { 0 }],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Remove a voice sanction entirely (used when both flags are cleared).
+    pub fn clear_voice_sanction(&self, server_id: &str, user_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM voice_sanctions WHERE server_id = ?1 AND user_id = ?2 AND force_muted = 0 AND force_deafened = 0",
+            params![server_id, user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Create a voice session row, returning its id.
+    pub fn create_voice_session(&self, channel_id: &str) -> Result<String, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let id = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO voice_sessions (id, channel_id) VALUES (?1, ?2)",
+            params![id, channel_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(id)
+    }
+
+    /// Mark a voice session as ended.
+    pub fn end_voice_session(&self, session_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE voice_sessions SET ended_at = CURRENT_TIMESTAMP WHERE id = ?1",
+            params![session_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Record a participant joining a voice session.
+    pub fn add_voice_participant(&self, session_id: &str, user_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT OR IGNORE INTO voice_participants (voice_session_id, user_id) VALUES (?1, ?2)",
+            params![session_id, user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Mark a participant as left a voice session.
+    pub fn remove_voice_participant(&self, session_id: &str, user_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE voice_participants SET left_at = CURRENT_TIMESTAMP WHERE voice_session_id = ?1 AND user_id = ?2",
+            params![session_id, user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     // --- Messages ---

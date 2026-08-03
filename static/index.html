@@ -197,6 +197,10 @@
     <div class="modal" id="create-channel-modal" style="display:none">
         <div class="modal-content">
             <input type="text" id="new-channel-name" placeholder="Channel name" maxlength="50" style="width:100%;padding:10px 14px;margin-bottom:16px;border:1px solid #2a2a4a;border-radius:8px;background:#1a1a2e;color:#e0e0e0;font-size:16px;">
+            <div style="margin-bottom:16px;">
+                <label style="color:var(--text-muted);font-size:13px;margin-right:12px;"><input type="radio" name="new-channel-type" value="text" checked> Text</label>
+                <label style="color:var(--text-muted);font-size:13px;"><input type="radio" name="new-channel-type" value="voice"> Voice</label>
+            </div>
             <div class="modal-actions">
                 <button class="btn-cancel" id="cancel-create-channel">Cancel</button>
                 <button class="btn-invite" id="confirm-create-channel">Create</button>
@@ -315,6 +319,7 @@
                 <button class="settings-tab" data-tab="display-settings">Display</button>
                 <button class="settings-tab" data-tab="notification-settings">Notifications</button>
                 <button class="settings-tab" data-tab="security-settings">Security</button>
+                <button class="settings-tab" data-tab="voice-settings">Voice</button>
             </div>
 
             <!-- User Settings -->
@@ -505,6 +510,37 @@
                     <p class="settings-hint">Permanently delete your account and all associated data. This cannot be undone.</p>
                     <button class="btn-delete-account" id="delete-account-btn">Delete Account</button>
                 </div>
+
+            <!-- Voice Settings -->
+            <div class="settings-panel" id="voice-settings" style="display:none">
+                <div class="settings-group">
+                    <h4>Voice &amp; Video</h4>
+                    <p class="settings-hint">These apply to voice channels and DM calls.</p>
+                </div>
+                <div class="settings-group">
+                    <h4>Microphone Volume</h4>
+                    <div class="settings-slider-row">
+                        <input type="range" id="voice-mic-volume" min="0" max="200" value="100" class="settings-slider">
+                        <span class="settings-slider-value" id="voice-mic-volume-val">100%</span>
+                    </div>
+                </div>
+                <div class="settings-group">
+                    <h4>Speaker Volume</h4>
+                    <div class="settings-slider-row">
+                        <input type="range" id="voice-speaker-volume" min="0" max="200" value="100" class="settings-slider">
+                        <span class="settings-slider-value" id="voice-speaker-volume-val">100%</span>
+                    </div>
+                </div>
+                <div class="settings-group">
+                    <h4>Noise Suppression</h4>
+                    <label class="settings-toggle" style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-top:8px">
+                        <input type="checkbox" id="voice-noise-suppression" checked>
+                        <span class="toggle-slider"></span>
+                        <span class="toggle-label" style="font-size:13px;color:var(--text-primary)">Reduce background noise while speaking</span>
+                    </label>
+                    <p class="settings-hint">Uses the browser's built-in noise suppression. Changes apply the next time your mic starts.</p>
+                </div>
+            </div>
             </div>
 
             <div class="modal-actions">
@@ -868,7 +904,88 @@
     <script src="crypto.js?v=8"></script>
     <script src="qrcode.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+    <!-- ===== Voice UI containers (managed by voice.js) ===== -->
+
+    <!-- Voice bar (bottom-left; hidden while viewing the voice channel itself) -->
+    <div class="voice-bar" id="voice-bar" style="display:none">
+        <div class="voice-bar-top">
+            <span class="voice-bar-name" id="voice-bar-name">Voice Connected</span>
+            <button class="voice-bar-btn" id="voice-bar-popup" title="Show members">&#9776;</button>
+        </div>
+        <div class="voice-bar-controls">
+            <button class="voice-bar-btn" id="voice-bar-mute" title="Mute">&#127908;</button>
+            <button class="voice-bar-btn" id="voice-bar-deafen" title="Deafen">&#128266;</button>
+            <button class="voice-bar-btn" id="voice-bar-camera" title="Camera">&#128247;</button>
+            <button class="voice-bar-btn" id="voice-bar-screen" title="Share screen">&#128424;</button>
+            <button class="voice-bar-btn voice-bar-leave" id="voice-bar-leave" title="Leave">&#128222;</button>
+        </div>
+    </div>
+
+    <!-- Server voice popup (covers the text area; member list + controls) -->
+    <div class="voice-popup" id="voice-popup" style="display:none">
+        <div class="voice-popup-header">
+            <span class="voice-popup-title">&#128266; <span id="voice-popup-name">Voice Channel</span></span>
+            <button class="voice-popup-close" id="voice-popup-close" title="Close">&times;</button>
+        </div>
+        <div class="voice-popup-members" id="voice-popup-members"></div>
+        <div class="voice-popup-controls">
+            <button class="voice-popup-btn" id="voice-popup-mute" title="Mute">&#127908;</button>
+            <button class="voice-popup-btn" id="voice-popup-deafen" title="Deafen">&#128266;</button>
+            <button class="voice-popup-btn" id="voice-popup-camera" title="Camera">&#128247;</button>
+            <button class="voice-popup-btn" id="voice-popup-screen" title="Share screen">&#128424;</button>
+            <button class="voice-popup-btn voice-popup-leave" id="voice-popup-leave" title="Leave">&#128222;</button>
+        </div>
+        <div class="voice-popup-settings">
+            <div class="voice-popup-setting-row">
+                <label>Mic</label>
+                <input type="range" id="voice-popup-mic-volume" min="0" max="200" value="100">
+            </div>
+            <div class="voice-popup-setting-row">
+                <label>Speaker</label>
+                <input type="range" id="voice-popup-speaker-volume" min="0" max="200" value="100">
+            </div>
+            <label class="voice-popup-check"><input type="checkbox" id="voice-popup-noise-suppression" checked> Noise suppression</label>
+        </div>
+    </div>
+
+    <!-- DM call panel (covers bottom half of the text area while in that DM) -->
+    <div class="dm-call-panel" id="dm-call-panel" style="display:none">
+        <div class="dm-call-header">
+            <span>&#128222; In call with <b id="dm-call-name">…</b></span>
+        </div>
+        <div class="dm-call-body" id="dm-call-body"></div>
+        <div class="dm-call-self" id="dm-call-self"></div>
+        <div class="dm-call-controls">
+            <button class="dm-call-btn" id="dm-call-mute" title="Mute">&#127908;</button>
+            <button class="dm-call-btn" id="dm-call-deafen" title="Deafen">&#128266;</button>
+            <button class="dm-call-btn" id="dm-call-camera" title="Camera">&#128247;</button>
+            <button class="dm-call-btn" id="dm-call-screen" title="Share screen">&#128424;</button>
+            <button class="dm-call-btn dm-call-end" id="dm-call-end" title="End call">&#128222;</button>
+        </div>
+    </div>
+
+    <!-- DM mini bar (persists when you switch to another chat) -->
+    <div class="dm-mini-bar" id="dm-mini-bar" style="display:none">
+        <button class="dm-mini-bar-body" id="dm-mini-bar-body">
+            <span class="dm-mini-bar-name" id="dm-mini-bar-name">In call</span>
+        </button>
+        <button class="voice-bar-btn" id="dm-mini-bar-mute" title="Mute">&#127908;</button>
+        <button class="voice-bar-btn" id="dm-mini-bar-deafen" title="Deafen">&#128266;</button>
+        <button class="voice-bar-btn voice-bar-leave" id="dm-mini-bar-end" title="End call">&#128222;</button>
+    </div>
+
+    <!-- Incoming DM call bar -->
+    <div class="incoming-call-bar" id="incoming-call-bar" style="display:none">
+        <span class="incoming-call-name" id="incoming-call-name">Incoming call…</span>
+        <button class="incoming-call-btn accept" id="incoming-call-accept">Accept</button>
+        <button class="incoming-call-btn decline" id="incoming-call-decline">Decline</button>
+    </div>
+
+    <!-- Per-member volume menu (right-click) -->
+    <div class="volume-menu" id="volume-menu" style="display:none"></div>
+
     <script src="secure-storage.js?v=1"></script>
+    <script src="voice.js?v=1"></script>
     <script src="chat.js?v=38"></script>
 </body>
 </html>

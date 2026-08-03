@@ -14,5 +14,13 @@ export default defineConfig({
         port: 3443,
         reuseExistingServer: true,
         timeout: 120000,
+        // TURN servers configured for tests (merged with process.env). The
+        // client should pick these up from /api/voice/turn-config and use them
+        // in RTCPeerConnection iceServers (tests/voice-turn.spec.ts).
+        env: {
+            TURN_URLS: 'turn:turn.example.com:3478,turns:turn.example.com:5349',
+            TURN_USERNAME: 'test-turn-user',
+            TURN_PASSWORD: 'test-turn-pass',
+        },
     },
 });

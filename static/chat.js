@@ -795,6 +795,11 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById("current-user").textContent = user.username;
     updateSidebarFooter();
 
+    // Init voice channels / calls (voice.js loads before chat.js)
+    if (window.VoiceManager) {
+        try { VoiceManager.init(); } catch (err) { console.warn('Voice init failed:', err); }
+    }
+
     // Auto-recover identity keys if they're missing (e.g. after secure-storage
     // key migration that orphaned old encrypted values). This runs fire-and-forget;
     // if recovery succeeds before the user clicks a channel, messages will load
@@ -5132,8 +5137,19 @@ function connectWebSocket(t) {
     ws.onmessage = async (event) => {
         const data = JSON.parse(event.data);
 
+        // Voice calls / voice channels — handled by VoiceManager
+        if (window.VoiceManager && data.type && (
+            data.type.indexOf('voice_') === 0 || data.type.indexOf('dm_call_') === 0
+        )) {
+            if (VoiceManager.onWsMessage(data)) return;
+        }
+
         switch (data.type) {
             case 'auth_ok':
+                // Re-join any voice room we were in before the socket dropped
+                if (window.VoiceManager && VoiceManager.reconnect) {
+                    try { VoiceManager.reconnect(); } catch (_) {}
+                }
                 // Broadcast profile keys after a short delay (DMs already loaded during init)
                 setTimeout(async function() {
                     if (myProfile && dmConversations && dmConversations.length > 0) {
@@ -6915,8 +6931,10 @@ async function loadChannels(serverId) {
 
         channels.forEach(ch => {
             const div = document.createElement('div');
-            div.className = 'channel-item';
+            const isVoice = ch.channel_type === 'voice';
+            div.className = 'channel-item' + (isVoice ? ' channel-item-voice' : '');
             div.dataset.id = ch.id;
+            div.dataset.type = isVoice ? 'voice' : 'text';
                     // Decrypt channel name from encrypted_name (API no longer returns plaintext name)
             var chDisplayName = '';
             if (ch.encrypted_name && ch.name_nonce) {
@@ -6931,9 +6949,18 @@ async function loadChannels(serverId) {
                 } catch (_) {}
             }
             div.dataset.name = chDisplayName;
-            div.addEventListener('click', () => selectChannel(ch.id, chDisplayName, div));
+            if (isVoice) {
+                // Voice channel: click to join (not select as a text channel)
+                div.addEventListener('click', () => {
+                    if (window.VoiceManager) {
+                        VoiceManager.joinServerVoice(serverId, ch.id, chDisplayName);
+                    }
+                });
+            } else {
+                div.addEventListener('click', () => selectChannel(ch.id, chDisplayName, div));
+            }
             const nameSpan = document.createElement('span');
-            nameSpan.textContent = `# ${chDisplayName}`;
+            nameSpan.textContent = (isVoice ? '\ud83d\udd0a ' : '# ') + chDisplayName;
             nameSpan.style.flex = '1';
             div.appendChild(nameSpan);
             if (isOwner) {
@@ -6949,6 +6976,11 @@ async function loadChannels(serverId) {
             }
             list.appendChild(div);
         });
+
+        // Render voice member chips (Discord-style) for voice channels
+        if (window.VoiceManager) {
+            try { VoiceManager.onChannelsRendered && VoiceManager.onChannelsRendered(); } catch (_) {}
+        }
 
         if (isOwner) {
             const btn = document.createElement('button');
@@ -11131,6 +11163,9 @@ async function createChannel() {
         }
         const encName = E2ECrypto.aeadEncrypt(name, serverKey);
 
+        const typeRadio = document.querySelector('input[name="new-channel-type"]:checked');
+        const channel_type = typeRadio ? typeRadio.value : 'text';
+
         const res = await authFetch(`/api/servers/${currentServerId}/channels`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -11138,6 +11173,7 @@ async function createChannel() {
                 name,
                 encrypted_name: encName.ciphertext,
                 name_nonce: encName.nonce,
+                channel_type,
             }),
         });
 

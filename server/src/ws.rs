@@ -65,6 +65,115 @@ fn get_client_ip(headers: &HeaderMap) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+// ========================= Voice calls & voice channels =========================
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct VoiceMember {
+    pub user_id: String,
+    pub username: String,
+    pub muted: bool,
+    pub deafened: bool,
+    pub camera: bool,
+    pub screen: bool,
+    pub speaking: bool,
+    pub force_muted: bool,
+    pub force_deafened: bool,
+    pub is_owner: bool,
+}
+
+pub struct VoiceRoom {
+    pub room_type: String, // "server" | "dm"
+    pub server_id: Option<String>,
+    pub channel_id: Option<String>,
+    pub dm_channel_id: Option<String>,
+    pub session_id: Option<String>,
+    pub members: HashMap<String, VoiceMember>,
+}
+
+fn voice_member_json(m: &VoiceMember) -> serde_json::Value {
+    serde_json::json!({
+        "user_id": m.user_id,
+        "username": m.username,
+        "muted": m.muted,
+        "deafened": m.deafened,
+        "camera": m.camera,
+        "screen": m.screen,
+        "speaking": m.speaking,
+        "force_muted": m.force_muted,
+        "force_deafened": m.force_deafened,
+        "is_owner": m.is_owner,
+    })
+}
+
+/// Simple per-user rate limiter for voice signaling (offers/answers/ICE).
+static VOICE_SIGNAL_LIMITER: LazyLock<WsRateLimiter> = LazyLock::new(|| WsRateLimiter {
+    attempts: Mutex::new(HashMap::new()),
+});
+
+/// Room id used to key the voice_rooms map.
+fn voice_room_id(room_type: &str, channel_id: &str, dm_channel_id: &str) -> String {
+    if room_type == "dm" {
+        format!("dm:{}", dm_channel_id)
+    } else {
+        format!("srv:{}", channel_id)
+    }
+}
+
+/// Send a JSON message to a single user's WS connection(s).
+async fn send_to_user(state: &Arc<AppState>, user_id: &str, json: &serde_json::Value) {
+    state
+        .ws_manager
+        .broadcast_to_users(&[user_id.to_string()], &json.to_string())
+        .await;
+}
+
+/// Broadcast a voice message to every member of a room (via their user ids).
+/// The caller must NOT hold the voice_rooms lock while calling this (it awaits).
+async fn voice_broadcast(state: &Arc<AppState>, room_id: &str, json: &serde_json::Value) {
+    let ids: Vec<String> = match state.voice_rooms.read() {
+        Ok(r) => r.get(room_id).map(|rm| rm.members.keys().cloned().collect()).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+    state.ws_manager.broadcast_to_users(&ids, &json.to_string()).await;
+}
+
+/// Snapshot of every server voice room's members, for a given server.
+/// Used so ANY server member (not just room participants) can render who is in
+/// each voice channel and who is currently speaking (Discord-style presence).
+fn voice_presence_json(state: &Arc<AppState>, server_id: &str) -> serde_json::Value {
+    let channels: Vec<serde_json::Value> = {
+        let rooms = match state.voice_rooms.read() {
+            Ok(r) => r,
+            Err(_) => return serde_json::json!({ "type": "voice_presence", "server_id": server_id, "channels": [] }),
+        };
+        rooms
+            .iter()
+            .filter(|(_, rm)| rm.room_type == "server" && rm.server_id.as_deref() == Some(server_id))
+            .map(|(room_id, rm)| {
+                let members: Vec<serde_json::Value> = rm.members.values().map(voice_member_json).collect();
+                serde_json::json!({
+                    "room_id": room_id,
+                    "channel_id": rm.channel_id,
+                    "members": members,
+                })
+            })
+            .collect()
+    };
+    serde_json::json!({ "type": "voice_presence", "server_id": server_id, "channels": channels })
+}
+
+/// Broadcast the voice presence snapshot to every member of the server.
+/// The caller must NOT hold the voice_rooms lock while calling this (it awaits).
+async fn voice_broadcast_server_presence(state: &Arc<AppState>, server_id: &str) {
+    let msg = voice_presence_json(state, server_id);
+    match state.db.get_server_members(server_id) {
+        Ok(members) => {
+            state.ws_manager.broadcast_to_users(&members, &msg.to_string()).await;
+        }
+        Err(_) => {}
+    }
+}
+
 pub struct WsManager {
     connections: tokio::sync::RwLock<std::collections::HashMap<u64, (String, Option<String>, mpsc::UnboundedSender<String>)>>,
 }
@@ -420,6 +529,9 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, client_ip: Strin
     }
 
     state.ws_manager.remove_connection(conn_id).await;
+
+    // Remove the user from any voice rooms they were in and notify others
+    voice_remove_user_all(&state, &user_id).await;
 
     // Broadcast presence: this user is now offline
     {
@@ -1086,6 +1198,548 @@ async fn handle_ws_message(
                 .broadcast_to_users(&[user_id.to_string()], &pong.to_string())
                 .await;
         }
+        "voice_join" => {
+            handle_voice_join(parsed, state, user_id).await;
+        }
+        "voice_leave" => {
+            handle_voice_leave(parsed, state, user_id).await;
+        }
+        "voice_state" => {
+            handle_voice_state(parsed, state, user_id).await;
+        }
+        "voice_presence_request" => {
+            // Client opened a server's channel list — send it the current voice snapshot
+            let server_id = parsed.get("server_id").and_then(|s| s.as_str()).unwrap_or("").to_string();
+            if !server_id.is_empty()
+                && state.db.is_member_of_server(user_id, &server_id).unwrap_or(false)
+            {
+                let msg = voice_presence_json(state, &server_id);
+                send_to_user(state, user_id, &msg).await;
+            }
+        }
+        "voice_signal" => {
+            handle_voice_signal(parsed, state, user_id).await;
+        }
+        "voice_control" => {
+            handle_voice_control(parsed, state, user_id).await;
+        }
+        "dm_call_ring" => {
+            handle_dm_call_ring(parsed, state, user_id).await;
+        }
+        "dm_call_end" => {
+            handle_dm_call_end(parsed, state, user_id).await;
+        }
         _ => {}
+    }
+}
+
+async fn handle_voice_join(
+    parsed: serde_json::Value,
+    state: &Arc<AppState>,
+    user_id: &str,
+) {
+    let room_type = match parsed.get("room_type").and_then(|t| t.as_str()) {
+        Some(t) if t == "server" || t == "dm" => t.to_string(),
+        _ => return,
+    };
+    let channel_id = parsed.get("channel_id").and_then(|c| c.as_str()).unwrap_or("").to_string();
+    let server_id = parsed.get("server_id").and_then(|c| c.as_str()).unwrap_or("").to_string();
+    let dm_channel_id = parsed.get("dm_channel_id").and_then(|c| c.as_str()).unwrap_or("").to_string();
+
+    // Validate membership / channel type
+    if room_type == "server" {
+        if channel_id.is_empty() || server_id.is_empty() {
+            return;
+        }
+        if !state.db.is_member_of_server(user_id, &server_id).unwrap_or(false) {
+            return;
+        }
+        // Verify the channel belongs to this server and is a voice channel
+        if let Ok(cid) = state.db.get_server_id_for_channel(&channel_id) {
+            if cid != server_id {
+                return;
+            }
+        } else {
+            return;
+        }
+        if let Ok(ctype) = state.db.get_channel_type(&channel_id) {
+            if ctype != "voice" {
+                return;
+            }
+        } else {
+            return;
+        }
+    } else {
+        if dm_channel_id.is_empty() {
+            return;
+        }
+        if !state.db.is_dm_member(&dm_channel_id, user_id).unwrap_or(false) {
+            return;
+        }
+    }
+
+    let room_id = voice_room_id(&room_type, &channel_id, &dm_channel_id);
+    let username = state
+        .db
+        .get_user_by_id(user_id)
+        .map(|u| u.username)
+        .unwrap_or_else(|_| "?".to_string());
+    let is_owner = room_type == "server"
+        && state.db.is_server_owner(user_id, &server_id).unwrap_or(false);
+    let (force_muted, force_deafened) = if room_type == "server" {
+        state.db.get_voice_sanction(&server_id, user_id).unwrap_or((false, false))
+    } else {
+        (false, false)
+    };
+
+    let member = VoiceMember {
+        user_id: user_id.to_string(),
+        username: username.clone(),
+        muted: force_muted || force_deafened,
+        deafened: force_deafened,
+        camera: false,
+        screen: false,
+        speaking: false,
+        force_muted,
+        force_deafened,
+        is_owner,
+    };
+
+    // All room mutation happens inside a scope so the write guard (and its &mut
+    // borrow) drop before any .await below — the guard is not Send.
+    let (members_json, joined) = {
+        let mut rooms = match state.voice_rooms.write() {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+
+        let create_session = !rooms.contains_key(&room_id);
+        let room = rooms.entry(room_id.clone()).or_insert_with(|| VoiceRoom {
+            room_type: room_type.clone(),
+            server_id: if server_id.is_empty() { None } else { Some(server_id.clone()) },
+            channel_id: if channel_id.is_empty() { None } else { Some(channel_id.clone()) },
+            dm_channel_id: if dm_channel_id.is_empty() { None } else { Some(dm_channel_id.clone()) },
+            session_id: None,
+            members: HashMap::new(),
+        });
+        room.members.insert(user_id.to_string(), member);
+        if create_session {
+            if let Ok(sid) = state.db.create_voice_session(&channel_id) {
+                room.session_id = Some(sid);
+            }
+        }
+        if let Some(sid) = room.session_id.clone() {
+            let _ = state.db.add_voice_participant(&sid, user_id);
+        }
+
+        let members_json: Vec<serde_json::Value> = room
+            .members
+            .values()
+            .map(voice_member_json)
+            .collect();
+        let joined = serde_json::json!({
+            "type": "voice_joined",
+            "room_type": room_type,
+            "server_id": if server_id.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(server_id.clone()) },
+            "channel_id": if channel_id.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(channel_id.clone()) },
+            "dm_channel_id": if dm_channel_id.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(dm_channel_id.clone()) },
+            "members": members_json,
+            "is_owner": is_owner,
+            "force_muted": force_muted,
+            "force_deafened": force_deafened,
+        });
+        (members_json, joined)
+    };
+
+    // Notify everyone already in the room about the new member list (including self)
+    let members_vec: Vec<serde_json::Value> = {
+        match state.voice_rooms.read() {
+            Ok(r) => r.get(&room_id).map(|rm| rm.members.values().map(voice_member_json).collect::<Vec<_>>()).unwrap_or_default(),
+            Err(_) => Vec::new(),
+        }
+    };
+    let members_msg = serde_json::json!({
+        "type": "voice_members",
+        "members": members_vec,
+    });
+    // Drop the write lock before awaiting sends (lock guard isn't Send).
+    voice_broadcast(state, &room_id, &members_msg).await;
+
+    send_to_user(state, user_id, &joined).await;
+
+    // Tell every server member who is now in each voice channel (so the channel
+    // list shows members/activity even for users who aren't in the room).
+    if room_type == "server" && !server_id.is_empty() {
+        voice_broadcast_server_presence(state, &server_id).await;
+    }
+}
+
+async fn handle_voice_leave(
+    parsed: serde_json::Value,
+    state: &Arc<AppState>,
+    user_id: &str,
+) {
+    let room_type = parsed.get("room_type").and_then(|t| t.as_str()).unwrap_or("server").to_string();
+    let channel_id = parsed.get("channel_id").and_then(|c| c.as_str()).unwrap_or("").to_string();
+    let dm_channel_id = parsed.get("dm_channel_id").and_then(|c| c.as_str()).unwrap_or("").to_string();
+    let room_id = voice_room_id(&room_type, &channel_id, &dm_channel_id);
+    voice_remove_from_room(state, &room_id, user_id).await;
+}
+
+async fn voice_remove_from_room(state: &Arc<AppState>, room_id: &str, user_id: &str) {
+    let (empty, is_dm, dm_channel_id, server_id, remaining_members) = {
+        let mut rooms = match state.voice_rooms.write() {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        let mut empty = false;
+        let mut is_dm = false;
+        let mut dm_channel_id = String::new();
+        let mut server_id = String::new();
+        let mut remaining_members = Vec::new();
+        if let Some(room) = rooms.get_mut(room_id) {
+            room.members.remove(user_id);
+            if let Some(sid) = room.session_id.clone() {
+                let _ = state.db.remove_voice_participant(&sid, user_id);
+            }
+            is_dm = room.room_type == "dm";
+            dm_channel_id = room.dm_channel_id.clone().unwrap_or_default();
+            server_id = room.server_id.clone().unwrap_or_default();
+            empty = room.members.is_empty();
+            if empty {
+                if let Some(sid) = room.session_id.clone() {
+                    let _ = state.db.end_voice_session(&sid);
+                }
+                rooms.remove(room_id);
+            } else {
+                remaining_members = room.members.values().map(voice_member_json).collect::<Vec<_>>();
+            }
+        }
+        (empty, is_dm, dm_channel_id, server_id, remaining_members)
+    };
+
+    // Channel-list presence must update even when the room empties (member list clears)
+    if !is_dm && !server_id.is_empty() {
+        voice_broadcast_server_presence(state, &server_id).await;
+    }
+
+    if empty {
+        // Room gone — everyone else already left.
+        return;
+    }
+
+    // Broadcast leave + updated member list to remaining members (lock already dropped)
+    let leave_msg = serde_json::json!({
+        "type": "voice_member_leave",
+        "user_id": user_id,
+    });
+    voice_broadcast(state, room_id, &leave_msg).await;
+    let members_msg = serde_json::json!({
+        "type": "voice_members",
+        "members": remaining_members,
+    });
+    voice_broadcast(state, room_id, &members_msg).await;
+    // DM calls: if the room_type is dm and one side leaves, end the call for the other
+    if is_dm {
+        let end_msg = serde_json::json!({
+            "type": "dm_call_end",
+            "dm_channel_id": dm_channel_id,
+            "reason": "left",
+        });
+        voice_broadcast(state, room_id, &end_msg).await;
+    }
+}
+
+async fn handle_voice_state(
+    parsed: serde_json::Value,
+    state: &Arc<AppState>,
+    user_id: &str,
+) {
+    let room_type = parsed.get("room_type").and_then(|t| t.as_str()).unwrap_or("server").to_string();
+    let channel_id = parsed.get("channel_id").and_then(|c| c.as_str()).unwrap_or("").to_string();
+    let dm_channel_id = parsed.get("dm_channel_id").and_then(|c| c.as_str()).unwrap_or("").to_string();
+    let room_id = voice_room_id(&room_type, &channel_id, &dm_channel_id);
+
+    let muted = parsed.get("muted").and_then(|m| m.as_bool()).unwrap_or(false);
+    let deafened = parsed.get("deafened").and_then(|m| m.as_bool()).unwrap_or(false);
+    let camera = parsed.get("camera").and_then(|m| m.as_bool()).unwrap_or(false);
+    let screen = parsed.get("screen").and_then(|m| m.as_bool()).unwrap_or(false);
+    let speaking = parsed.get("speaking").and_then(|m| m.as_bool()).unwrap_or(false);
+
+    let (member, server_id) = {
+        let mut rooms = match state.voice_rooms.write() {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        let room = match rooms.get_mut(&room_id) {
+            Some(r) => r,
+            None => return,
+        };
+        let m = match room.members.get_mut(user_id) {
+            Some(m) => m,
+            None => return,
+        };
+        // Sanctions override local state
+        m.muted = muted || m.force_muted || m.force_deafened;
+        m.deafened = deafened || m.force_deafened;
+        m.camera = camera;
+        m.screen = screen;
+        m.speaking = speaking;
+        let server_id = room.server_id.clone().unwrap_or_default();
+        (m.clone(), server_id)
+    };
+
+    let msg = serde_json::json!({
+        "type": "voice_member_update",
+        "member": voice_member_json(&member),
+    });
+    // Lock dropped before awaiting the broadcast
+    voice_broadcast(state, &room_id, &msg).await;
+
+    // Keep the channel list's member rows + speaking indicator fresh for
+    // every server member, not just the people in the room.
+    if room_type == "server" && !server_id.is_empty() {
+        voice_broadcast_server_presence(state, &server_id).await;
+    }
+}
+
+async fn handle_voice_signal(
+    parsed: serde_json::Value,
+    state: &Arc<AppState>,
+    user_id: &str,
+) {
+    let to_user_id = match parsed.get("to_user_id").and_then(|t| t.as_str()) {
+        Some(t) => t.to_string(),
+        None => return,
+    };
+    let signal = match parsed.get("signal") {
+        Some(s) => s.clone(),
+        None => return,
+    };
+    let room_type = parsed.get("room_type").and_then(|t| t.as_str()).unwrap_or("server").to_string();
+    let channel_id = parsed.get("channel_id").and_then(|c| c.as_str()).unwrap_or("").to_string();
+    let dm_channel_id = parsed.get("dm_channel_id").and_then(|c| c.as_str()).unwrap_or("").to_string();
+    let room_id = voice_room_id(&room_type, &channel_id, &dm_channel_id);
+
+    // Rate limit signaling per user (burst of ICE candidates is normal, cap it)
+    if !VOICE_SIGNAL_LIMITER.check_and_increment(&format!("voice_signal:{}", user_id), 300, Duration::from_secs(10)) {
+        return;
+    }
+
+    // Both users must be in the same room
+    let allowed = {
+        let rooms = match state.voice_rooms.read() {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        match rooms.get(&room_id) {
+            Some(room) => room.members.contains_key(user_id) && room.members.contains_key(&to_user_id),
+            None => false,
+        }
+    };
+    if !allowed {
+        return;
+    }
+
+    let relay = serde_json::json!({
+        "type": "voice_signal",
+        "from_user_id": user_id,
+        "signal": signal,
+        "room_type": room_type,
+        "channel_id": if channel_id.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(channel_id) },
+        "dm_channel_id": if dm_channel_id.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(dm_channel_id) },
+    });
+    send_to_user(state, &to_user_id, &relay).await;
+}
+
+async fn handle_voice_control(
+    parsed: serde_json::Value,
+    state: &Arc<AppState>,
+    user_id: &str,
+) {
+    let room_type = parsed.get("room_type").and_then(|t| t.as_str()).unwrap_or("server").to_string();
+    let channel_id = parsed.get("channel_id").and_then(|c| c.as_str()).unwrap_or("").to_string();
+    let server_id = parsed.get("server_id").and_then(|c| c.as_str()).unwrap_or("").to_string();
+    let dm_channel_id = parsed.get("dm_channel_id").and_then(|c| c.as_str()).unwrap_or("").to_string();
+    let action = parsed.get("action").and_then(|a| a.as_str()).unwrap_or("").to_string();
+    let target_user_id = match parsed.get("target_user_id").and_then(|t| t.as_str()) {
+        Some(t) => t.to_string(),
+        None => return,
+    };
+    let room_id = voice_room_id(&room_type, &channel_id, &dm_channel_id);
+
+    // Only server rooms have forceful controls; only the server owner can use them
+    if room_type != "server" {
+        return;
+    }
+    if server_id.is_empty() || !state.db.is_server_owner(user_id, &server_id).unwrap_or(false) {
+        return;
+    }
+
+    // Update sanctions in DB
+    let (mut fm, mut fd) = state.db.get_voice_sanction(&server_id, &target_user_id).unwrap_or((false, false));
+    match action.as_str() {
+        "mute" => fm = true,
+        "unmute" => fm = false,
+        "deafen" => {
+            fm = true;
+            fd = true;
+        }
+        "undeafen" => {
+            fd = false;
+        }
+        "kick" => {}
+        _ => return,
+    }
+    if action != "kick" {
+        let _ = state.db.set_voice_sanction(&server_id, &target_user_id, fm, fd);
+        if !fm && !fd {
+            let _ = state.db.clear_voice_sanction(&server_id, &target_user_id);
+        }
+    }
+
+    // Confirm the room exists and contains the target (lock dropped before awaits)
+    let target_in_room = {
+        let rooms = match state.voice_rooms.read() {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        match rooms.get(&room_id) {
+            Some(r) => r.members.contains_key(&target_user_id),
+            None => false,
+        }
+    };
+    if !target_in_room {
+        return;
+    }
+
+    if action == "kick" {
+        let kicked = serde_json::json!({
+            "type": "voice_kicked",
+            "channel_id": channel_id,
+        });
+        send_to_user(state, &target_user_id, &kicked).await;
+        voice_remove_from_room(state, &room_id, &target_user_id).await;
+        return;
+    }
+
+    // Update in-memory member + broadcast
+    let member = {
+        let mut rooms_w = match state.voice_rooms.write() {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        let r = match rooms_w.get_mut(&room_id) {
+            Some(r) => r,
+            None => return,
+        };
+        let m = match r.members.get_mut(&target_user_id) {
+            Some(m) => m,
+            None => return,
+        };
+        m.force_muted = fm;
+        m.force_deafened = fd;
+        m.muted = fm || fd;
+        m.deafened = fd;
+        m.clone()
+    };
+
+    let update_msg = serde_json::json!({
+        "type": "voice_member_update",
+        "member": voice_member_json(&member),
+    });
+    // Lock dropped before awaiting the broadcast
+    voice_broadcast(state, &room_id, &update_msg).await;
+
+    let control_received = serde_json::json!({
+        "type": "voice_control_received",
+        "action": action,
+        "muted": fm,
+        "deafened": fd,
+        "by_user": user_id,
+    });
+    send_to_user(state, &target_user_id, &control_received).await;
+
+    // Owner sanctions change what the channel list shows for that member
+    if !server_id.is_empty() {
+        voice_broadcast_server_presence(state, &server_id).await;
+    }
+}
+
+async fn handle_dm_call_ring(
+    parsed: serde_json::Value,
+    state: &Arc<AppState>,
+    user_id: &str,
+) {
+    let dm_channel_id = match parsed.get("dm_channel_id").and_then(|c| c.as_str()) {
+        Some(c) => c.to_string(),
+        None => return,
+    };
+    if !state.db.is_dm_member(&dm_channel_id, user_id).unwrap_or(false) {
+        return;
+    }
+    let members = match state.db.get_dm_members(&dm_channel_id) {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+    let username = state
+        .db
+        .get_user_by_id(user_id)
+        .map(|u| u.username)
+        .unwrap_or_else(|_| "?".to_string());
+    let ring = serde_json::json!({
+        "type": "dm_call_ring",
+        "caller_id": user_id,
+        "caller_username": username,
+        "dm_channel_id": dm_channel_id,
+    });
+    let others: Vec<String> = members.into_iter().filter(|m| m != user_id).collect();
+    state.ws_manager.broadcast_to_users(&others, &ring.to_string()).await;
+}
+
+async fn handle_dm_call_end(
+    parsed: serde_json::Value,
+    state: &Arc<AppState>,
+    user_id: &str,
+) {
+    let dm_channel_id = match parsed.get("dm_channel_id").and_then(|c| c.as_str()) {
+        Some(c) => c.to_string(),
+        None => return,
+    };
+    if !state.db.is_dm_member(&dm_channel_id, user_id).unwrap_or(false) {
+        return;
+    }
+    let members = match state.db.get_dm_members(&dm_channel_id) {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+    let end = serde_json::json!({
+        "type": "dm_call_end",
+        "dm_channel_id": dm_channel_id,
+        "reason": "ended",
+    });
+    let others: Vec<String> = members.into_iter().filter(|m| m != user_id).collect();
+    state.ws_manager.broadcast_to_users(&others, &end.to_string()).await;
+
+    // Also remove both sides from any DM voice room
+    let room_id = voice_room_id("dm", "", &dm_channel_id);
+    voice_remove_from_room(state, &room_id, user_id).await;
+}
+
+/// Remove a user from every voice room (called on WS disconnect).
+pub async fn voice_remove_user_all(state: &Arc<AppState>, user_id: &str) {
+    let room_ids: Vec<String> = {
+        let rooms = match state.voice_rooms.read() {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        rooms
+            .iter()
+            .filter(|(_, r)| r.members.contains_key(user_id))
+            .map(|(id, _)| id.clone())
+            .collect()
+    };
+    for rid in room_ids {
+        voice_remove_from_room(state, &rid, user_id).await;
     }
 }

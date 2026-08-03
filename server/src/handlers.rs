@@ -1183,6 +1183,7 @@ pub async fn list_channels(
                 "id": c.id,
                 "encrypted_name": c.encrypted_name.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                 "name_nonce": c.name_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+                "channel_type": c.channel_type,
             })
         })
         .collect();
@@ -1194,6 +1195,8 @@ pub async fn list_channels(
 pub struct CreateChannelRequest {
     pub encrypted_name: Option<String>,
     pub name_nonce: Option<String>,
+    #[serde(default)]
+    pub channel_type: Option<String>,
 }
 
 pub async fn create_channel(
@@ -1218,7 +1221,8 @@ pub async fn create_channel(
     let encrypted_name_bytes = req.encrypted_name.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
     let name_nonce_bytes = req.name_nonce.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
 
-    let channel = match state.db.create_channel(&server_id, encrypted_name_bytes.as_deref(), name_nonce_bytes.as_deref()) {
+    let ctype = req.channel_type.as_deref().unwrap_or("text");
+    let channel = match state.db.create_channel(&server_id, encrypted_name_bytes.as_deref(), name_nonce_bytes.as_deref(), ctype) {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -1244,6 +1248,7 @@ pub async fn create_channel(
             "id": channel.id,
             "encrypted_name": channel.encrypted_name.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
             "name_nonce": channel.name_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+            "channel_type": channel.channel_type,
         })),
     )
         .into_response()
@@ -1946,6 +1951,33 @@ pub async fn get_user_id(
             Json(serde_json::json!({"error": e})),
         ),
     }
+}
+
+// --- Voice: TURN server config (WebRTC calls behind strict NAT) ---
+
+/// Authenticated endpoint serving the configured TURN servers to logged-in
+/// clients so WebRTC calls can traverse strict NATs (STUN-only fails there).
+/// Returns `{ "urls": [...], "username": ..., "credential": ... }` — or
+/// `{ "urls": [] }` when no TURN is configured (client stays STUN-only).
+pub async fn get_turn_config(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let _user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    let mut body = serde_json::json!({
+        "urls": state.config.turn_urls,
+    });
+    if let Some(u) = &state.config.turn_username {
+        body["username"] = serde_json::Value::String(u.clone());
+    }
+    if let Some(p) = &state.config.turn_password {
+        body["credential"] = serde_json::Value::String(p.clone());
+    }
+    (StatusCode::OK, Json(body)).into_response()
 }
 
 // --- Server Keys (E2EE) ---

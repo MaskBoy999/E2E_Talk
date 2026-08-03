@@ -8,6 +8,38 @@ pub struct Config {
     pub hmac_key: String,
     pub tls_cert_path: Option<String>,
     pub tls_key_path: Option<String>,
+    /// TURN server URLs for WebRTC calls (e.g. "turn:turn.example.com:3478").
+    /// Empty when not configured — the client then falls back to STUN-only.
+    pub turn_urls: Vec<String>,
+    pub turn_username: Option<String>,
+    pub turn_password: Option<String>,
+}
+
+/// Read an optional env var, falling back to the .env file. Returns None when
+/// unset/empty (used for TURN credentials — no generation, unlike keys).
+fn load_optional_env(env_var: &str) -> Option<String> {
+    if let Ok(val) = std::env::var(env_var) {
+        if !val.is_empty() {
+            return Some(val);
+        }
+    }
+    let env_path = Path::new(".env");
+    if let Ok(contents) = std::fs::read_to_string(env_path) {
+        for line in contents.lines() {
+            let line = line.trim();
+            let eq_pos = match line.find('=') {
+                Some(pos) => pos,
+                None => continue,
+            };
+            if line[..eq_pos].trim() == env_var {
+                let val = line[eq_pos + 1..].trim().trim_matches('"').trim_matches('\'');
+                if !val.is_empty() {
+                    return Some(val.to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 fn load_or_generate_key(env_var: &str, prefix: &str) -> String {
@@ -78,6 +110,17 @@ impl Config {
             hmac_key,
             tls_cert_path: std::env::var("TLS_CERT_PATH").ok(),
             tls_key_path: std::env::var("TLS_KEY_PATH").ok(),
+            // TURN: comma-separated URLs (e.g. "turn:a.example.com:3478,turns:b.example.com:5349")
+            turn_urls: load_optional_env("TURN_URLS")
+                .map(|s| {
+                    s.split(',')
+                        .map(|u| u.trim().to_string())
+                        .filter(|u| !u.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            turn_username: load_optional_env("TURN_USERNAME"),
+            turn_password: load_optional_env("TURN_PASSWORD"),
         }
     }
 }

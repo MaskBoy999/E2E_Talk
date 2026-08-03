@@ -20,6 +20,9 @@ pub struct AppState {
     pub db: db::Database,
     pub config: config::Config,
     pub ws_manager: ws::WsManager,
+    /// In-memory voice rooms (server voice channels + DM calls).
+    /// Keyed by room id (channel_id for server rooms, dm_channel_id for DM calls).
+    pub voice_rooms: std::sync::RwLock<std::collections::HashMap<String, ws::VoiceRoom>>,
     /// Whether the database has been set up (admin password set OR users exist).
     /// Starts as false on a fresh DB; set to true once admin password is set
     /// or the first user registers. Used to redirect visitors to admin setup.
@@ -171,6 +174,7 @@ async fn main() {
         db,
         config: config.clone(),
         ws_manager,
+        voice_rooms: std::sync::RwLock::new(std::collections::HashMap::new()),
     });
 
     // Run orphan file cleanup on startup, then periodically every hour
@@ -222,6 +226,8 @@ async fn main() {
         .route("/api/channels/{channel_id}", delete(handlers::delete_channel))
         .route("/api/invites/join", post(handlers::join_server))
         .route("/api/identity/{user_id}", get(handlers::get_identity_key))
+        // Voice: TURN server config for WebRTC calls (strict NAT traversal)
+        .route("/api/voice/turn-config", get(handlers::get_turn_config))
         // Device management routes
         .route("/api/logout", post(handlers::logout).get(handlers::logout_get))
         .route("/api/reauth", post(handlers::reauth))
