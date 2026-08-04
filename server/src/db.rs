@@ -1050,6 +1050,14 @@ impl Database {
         // Migration 049: Voice calls & voice channels (sessions, participants, sanctions)
         let _ = conn.execute_batch(include_str!("../migrations/049_voice.sql"));
 
+        // Migration 050: Ringtone sync — encrypted ringtone for DM call ring,
+        // same client-side-encrypted pattern as notification sounds.
+        let _ = conn.execute_batch(include_str!("../migrations/050_ringtone.sql"));
+
+        // Migration 051: Persistent DM-call waiting state — survives refreshes
+        // so the "waiting for you to join" indicator persists in the DM chat.
+        let _ = conn.execute_batch(include_str!("../migrations/051_dm_call_waiting.sql"));
+
         // Data migration: normalize legacy space-separated CURRENT_TIMESTAMP values
         // ("YYYY-MM-DD HH:MM:SS") to fixed-width RFC3339 ("YYYY-MM-DDTHH:MM:SS.000000Z")
         // so lexicographic ordering is consistent with newly-inserted messages.
@@ -2930,6 +2938,95 @@ impl Database {
         )
         .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    // --- Ringtone Sync (encrypted ringtone for DM call ring) ---
+
+    pub fn save_ringtone(&self, user_id: &str, encrypted_sound: &[u8], nonce: &[u8], sender_public_key: &[u8], encrypted_file_name: Option<Vec<u8>>, file_name_nonce: Option<Vec<u8>>) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO ringtones (user_id, encrypted_sound, nonce, sender_public_key, encrypted_file_name, file_name_nonce, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, CURRENT_TIMESTAMP)
+             ON CONFLICT(user_id) DO UPDATE SET
+                encrypted_sound = excluded.encrypted_sound,
+                nonce = excluded.nonce,
+                sender_public_key = excluded.sender_public_key,
+                encrypted_file_name = excluded.encrypted_file_name,
+                file_name_nonce = excluded.file_name_nonce,
+                updated_at = CURRENT_TIMESTAMP",
+            params![user_id, encrypted_sound, nonce, sender_public_key, encrypted_file_name, file_name_nonce],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn get_ringtone(&self, user_id: &str) -> Result<Option<(Vec<u8>, Vec<u8>, Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let result = conn.query_row(
+            "SELECT encrypted_sound, nonce, sender_public_key, encrypted_file_name, file_name_nonce FROM ringtones WHERE user_id = ?1",
+            params![user_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        );
+        match result {
+            Ok(row) => Ok(Some(row)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    pub fn delete_ringtone(&self, user_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM ringtones WHERE user_id = ?1",
+            params![user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    // --- DM call waiting state ---
+
+    /// Record that `user_id` is waiting in a DM call for this channel (the
+    /// 30s-unanswered caller, or the side left behind when the partner leaves).
+    /// Survives page refreshes so the waiting indicator persists in the DM chat.
+    pub fn set_dm_call_waiting(&self, dm_channel_id: &str, user_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO dm_call_waiting (dm_channel_id, waiting_user_id, created_at)
+             VALUES (?1, ?2, CURRENT_TIMESTAMP)
+             ON CONFLICT(dm_channel_id) DO UPDATE SET
+                waiting_user_id = excluded.waiting_user_id,
+                created_at = CURRENT_TIMESTAMP",
+            params![dm_channel_id, user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Clear the waiting state for a DM channel (call connected or ended).
+    pub fn clear_dm_call_waiting(&self, dm_channel_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM dm_call_waiting WHERE dm_channel_id = ?1",
+            params![dm_channel_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Who is waiting in a DM call for this channel, if anyone.
+    pub fn get_dm_call_waiting(&self, dm_channel_id: &str) -> Result<Option<String>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let result = conn.query_row(
+            "SELECT waiting_user_id FROM dm_call_waiting WHERE dm_channel_id = ?1",
+            params![dm_channel_id],
+            |row| row.get(0),
+        );
+        match result {
+            Ok(uid) => Ok(Some(uid)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
     }
 
     // --- Friend Codes ---

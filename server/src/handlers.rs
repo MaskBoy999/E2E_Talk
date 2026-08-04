@@ -588,6 +588,88 @@ pub async fn delete_notification_sound(
     }
 }
 
+// --- Ringtone Sync (encrypted ringtone for DM call ring) ---
+
+#[derive(Deserialize)]
+pub struct UploadRingtoneRequest {
+    pub encrypted_sound: String,
+    pub nonce: String,
+    pub sender_public_key: String,
+    pub encrypted_file_name: Option<String>,  // AES-GCM encrypted with identity key
+    pub file_name_nonce: Option<String>,      // AES-GCM nonce
+}
+
+pub async fn upload_ringtone(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UploadRingtoneRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    let encrypted_sound = match base64::engine::general_purpose::STANDARD.decode(&req.encrypted_sound) {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid encrypted_sound"}))).into_response(),
+    };
+    let nonce = match base64::engine::general_purpose::STANDARD.decode(&req.nonce) {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid nonce"}))).into_response(),
+    };
+    let sender_public_key = match base64::engine::general_purpose::STANDARD.decode(&req.sender_public_key) {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid sender_public_key"}))).into_response(),
+    };
+
+    let encrypted_file_name_bytes = req.encrypted_file_name.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+    let file_name_nonce_bytes = req.file_name_nonce.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+
+    match state.db.save_ringtone(&user_id, &encrypted_sound, &nonce, &sender_public_key, encrypted_file_name_bytes, file_name_nonce_bytes) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn get_ringtone(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    match state.db.get_ringtone(&user_id) {
+        Ok(Some((encrypted_sound, nonce, sender_public_key, encrypted_file_name, file_name_nonce))) => {
+            (StatusCode::OK, Json(serde_json::json!({
+                "encrypted_sound": base64::engine::general_purpose::STANDARD.encode(&encrypted_sound),
+                "nonce": base64::engine::general_purpose::STANDARD.encode(&nonce),
+                "sender_public_key": base64::engine::general_purpose::STANDARD.encode(&sender_public_key),
+                "encrypted_file_name": encrypted_file_name.map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+                "file_name_nonce": file_name_nonce.map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+            }))).into_response()
+        }
+        Ok(None) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "No ringtone"}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn delete_ringtone(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    match state.db.delete_ringtone(&user_id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
 pub async fn reauth(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
@@ -4694,6 +4776,14 @@ pub async fn list_dm_conversations(
                     }),
                     None => serde_json::Value::Null,
                 };
+                // Who is waiting in a DM call for this channel, if anyone — lets
+                // the client show a persistent "waiting for you to join" banner
+                // in the DM chat that survives page refreshes.
+                let waiting_user_id = state.db.get_dm_call_waiting(&dm_id).unwrap_or(None);
+                let waiting_username = match &waiting_user_id {
+                    Some(uid) => state.db.get_user_by_id(uid).map(|u| u.username).unwrap_or_default(),
+                    None => String::new(),
+                };
                 result.push(serde_json::json!({
                     "dm_channel_id": dm_id,
                     "other_user_id": other_id,
@@ -4701,6 +4791,8 @@ pub async fn list_dm_conversations(
                     // other_display_name removed — now in encrypted profile data
                     "other_public_key": identity_pub,
                     "last_message": last_json,
+                    "waiting_user_id": waiting_user_id,
+                    "waiting_username": if waiting_user_id.is_some() { waiting_username } else { String::new() },
                 }));
             }
             (StatusCode::OK, Json(serde_json::json!(result))).into_response()

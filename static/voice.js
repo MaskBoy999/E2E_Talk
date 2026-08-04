@@ -50,10 +50,13 @@
         deafened: false,
         cameraOn: false,
         screenOn: false,
-        popupOpen: false,        // voice popup covering the text area
+        popupOpen: false,        // voice channel view (top panel in the text area)
         dmPanelOpen: false,      // DM call panel in the DM chat
+        dmCallExpanded: false,   // DM call panel expanded → covers the WHOLE screen
+        voiceFullscreen: false,  // voice channel view expanded → covers the WHOLE screen
         incomingCall: null,      // {callerId, callerUsername, dmChannelId}
         dmCallActive: false,     // we're in a DM call (ringing/connected)
+        dmCallAnswered: false,   // the other DM participant joined the room
         dmCallPartner: null,     // {id, username}
         settings: {
             micVolume: 100,
@@ -64,6 +67,16 @@
         _lastSpeakSent: 0,
         _viewPoll: null,
         _pfpLoading: {},           // picKey -> true (in-flight PFP fetch guard)
+        _dmOtherPubB64: null,      // partner identity pubkey fallback for DM call key derivation
+        callWaiting: false,        // caller waited 30s unanswered — waiting for manual join
+        _ringTimer: null,          // 30s unanswered-ring timeout handle (caller)
+        _calleeRingTimer: null,    // 30s ring timeout safety net (callee)
+        _ringtoneSource: null,     // active ringtone AudioBufferSourceNode (custom ringtone)
+        _ringtoneGain: null,       // ringtone gain node
+        _ringtoneRepeatTimer: null, // default-ringtone repeat scheduler
+        _ringToken: 0,             // generation token — invalidates stale async ringtone loads
+        _testRingTimer: null,      // Test Ringtone auto-stop handle
+        waitingCalls: {},          // dm_channel_id -> {waitingUserId, waitingUsername} (persisted waiting state)
         // Signaling E2EE stats (also used by tests)
         sigSentEncrypted: 0,
         sigSentPlain: 0,
@@ -81,12 +94,17 @@
         init: init,
         onWsMessage: onWsMessage,
         onViewChanged: onViewChanged,
+        navigateToVoiceChannel: navigateToVoiceChannel,
+        exitVoiceChannelView: exitVoiceChannelView,
+        toggleDmExpand: toggleDmExpand,
         joinServerVoice: joinServerVoice,
         leaveVoice: leaveVoice,
         toggleMute: toggleMute,
         toggleDeafen: toggleDeafen,
         toggleCamera: toggleCamera,
         toggleScreen: toggleScreen,
+        toggleServerPopup: toggleServerPopup,
+        toggleVoiceFullscreen: toggleVoiceFullscreen,
         setMicVolume: setMicVolume,
         setSpeakerVolume: setSpeakerVolume,
         setNoiseSuppression: setNoiseSuppression,
@@ -96,6 +114,14 @@
         acceptDmCall: acceptDmCall,
         declineDmCall: declineDmCall,
         endDmCall: endDmCall,
+        joinWaitingCall: joinWaitingCall,
+        syncWaitingCalls: syncWaitingCalls,
+        getWaitingCall: function (dmChannelId) { return S.waitingCalls[dmChannelId] || null; },
+        testRingtone: testRingtone,
+        playRingtone: playRingtone,
+        stopRingtone: stopRingtone,
+        isCallWaiting: function () { return S.callWaiting; },
+        isIncomingWaiting: function () { return !!(S.incomingCall && S.incomingCall.waiting); },
         isConnected: function () { return S.connected; },
         isInDmCall: function () { return S.dmCallActive; },
         getState: function () { return JSON.parse(JSON.stringify(S)); },
@@ -175,6 +201,14 @@
         bindVolumeMenu();
         bindIncomingCallControls();
         ensureAudioCtx();
+        // Keep the fixed overlays aligned to the real text area (the sidebar
+        // can grow past 300px on wide screens, so a calc() alone drifts).
+        syncOverlayBounds();
+        window.addEventListener('resize', syncOverlayBounds);
+        // The floating voice bar / DM mini bar can be dragged anywhere on
+        // screen (position is persisted in localStorage).
+        makeDraggable('voice-bar', 'voice_bar_pos');
+        makeDraggable('dm-mini-bar', 'dm_mini_bar_pos');
         // Watch the current view so the bar/popup visibility stays correct
         S._viewPoll = setInterval(checkView, 400);
         // Re-inject DM header call buttons whenever the header is rebuilt
@@ -193,7 +227,22 @@
             var raw = localStorage.getItem('voice_settings');
             if (raw) S.settings = Object.assign(S.settings, JSON.parse(raw));
         } catch (_) {}
+        // Fullscreen is a per-call UI state only — never persisted. Every join
+        // and leave resets it, so a call always starts NOT fullscreen.
+        resetFullscreenState();
         applySettingsToUI();
+    }
+
+    // Reset both fullscreen states to OFF (DM panel expand + voice view
+    // fullscreen) and re-apply. Called on every join and leave so each call
+    // always starts in the normal (non-fullscreen) layout.
+    function resetFullscreenState() {
+        S.dmCallExpanded = false;
+        S.voiceFullscreen = false;
+        try { localStorage.removeItem('dm_call_expanded'); } catch (_) {}
+        try { localStorage.removeItem('voice_fullscreen'); } catch (_) {}
+        applyDmExpand();
+        applyVoiceFullscreen();
     }
 
     // Fetch the server's TURN servers (if any) so WebRTC calls can traverse
@@ -307,8 +356,11 @@
                         otherPub = new Uint8Array(E2ECrypto.base64ToArrayBuffer(conv.other_public_key));
                     }
                 }
-                if (!otherPub && S.dmCallPartner && S.dmCallPartner.id) {
-                    // Fall back to an async fetch path handled elsewhere
+                // Fallback: ensureDmCallKey() caches the partner's identity key
+                // here when the conversation object doesn't have it yet (e.g. the
+                // async prefetch in loadDmConversations raced the call button).
+                if (!otherPub && S._dmOtherPubB64) {
+                    otherPub = new Uint8Array(E2ECrypto.base64ToArrayBuffer(S._dmOtherPubB64));
                 }
                 if (!otherPub) return null;
                 var dmKey = E2ECrypto.getDmKey(S.dmChannelId, kp.privateKey, otherPub);
@@ -448,6 +500,7 @@
         S.dmChannelId = null;
         S.channelName = channelName || '';
         S.popupOpen = false;
+        resetFullscreenState();
         deriveRoomKey();
         deriveSignalKey();
         send({ type: 'voice_join', room_type: 'server', server_id: serverId, channel_id: channelId });
@@ -460,8 +513,11 @@
         if (S.connected || S.roomType) {
             send({ type: 'voice_leave', room_type: S.roomType || 'server', channel_id: S.channelId || '', dm_channel_id: S.dmChannelId || '' });
             if (wasDm) {
-                // Notify the other side the call ended
-                if (S.dmChannelId) send({ type: 'dm_call_end', dm_channel_id: S.dmChannelId });
+                // Leaving a DM call does NOT close it for the other side — the
+                // server broadcasts dm_call_waiting so they flip to the waiting
+                // state and we can rejoin (Discord-style). Only the explicit
+                // decline/busy paths send dm_call_end.
+                if (S.dmChannelId) send({ type: 'dm_call_waiting', dm_channel_id: S.dmChannelId });
             }
         }
         teardownRoom();
@@ -475,6 +531,9 @@
     }
 
     function teardownRoom() {
+        clearRingTimer();
+        clearCalleeRingTimer();
+        stopRingtone();
         S.connected = false;
         S.roomType = null;
         S.serverId = null;
@@ -487,13 +546,23 @@
         S.members = {};
         S.roomKeyB64 = null;
         S.sigKeyB64 = null;
+        S._dmOtherPubB64 = null;
         S.muted = false;
         S.deafened = false;
         S.cameraOn = false;
         S.screenOn = false;
         S.speaking = false;
         S.dmCallActive = false;
+        S.dmCallAnswered = false;
         S.dmCallPartner = null;
+        S.callWaiting = false;
+        // Always leave the call in the normal layout — fullscreen never
+        // carries over into the next call.
+        resetFullscreenState();
+        if (S.waitingCalls && S.dmChannelId && S.waitingCalls[S.dmChannelId]) {
+            delete S.waitingCalls[S.dmChannelId];
+            notifyWaitingChanged();
+        }
         closeAllPeers();
         stopLocalMedia();
         stopSpeakingDetection();
@@ -934,6 +1003,9 @@
             case 'dm_call_ring':
                 handleDmCallRing(data);
                 break;
+            case 'dm_call_waiting':
+                handleDmCallWaiting(data);
+                break;
             case 'dm_call_end':
                 handleDmCallEnd(data);
                 break;
@@ -957,6 +1029,11 @@
         if (S.roomType === 'dm') {
             S.dmCallActive = true;
             S.incomingCall = null;
+            var selfIdHere = getSelfId();
+            var otherJoined = (data.members || []).some(function (m) { return m.user_id !== selfIdHere; });
+            if (otherJoined) {
+                markDmCallAnswered();
+            }
         }
         deriveRoomKey();
         deriveSignalKey();
@@ -990,6 +1067,27 @@
             startMic();
         }
 
+        // DM safety net: if the room key still couldn't be derived at join
+        // (partner identity key fetch was in flight), re-derive now that the
+        // members list is set — otherwise signaling E2EE drops every offer.
+        if (S.roomType === 'dm' && !S.roomKeyB64) {
+            var _pid = S.dmCallPartner && S.dmCallPartner.id;
+            ensureDmCallKey(_pid).then(function (ok) {
+                if (!ok || !S.connected) return;
+                deriveRoomKey();
+                deriveSignalKey();
+                // Re-apply E2EE to any peers created without the key.
+                Object.keys(S.peers).forEach(function (uid) {
+                    applySendE2EE(S.peers[uid]);
+                });
+                // If we were mid-negotiation, nudge a renegotiation so the
+                // now-encrypted offer/answer cycle completes.
+                if (Object.keys(S.peers).length) {
+                    try { S.peers[Object.keys(S.peers)[0]].onnegotiationneeded(); } catch (_) {}
+                }
+            });
+        }
+
         if (S.roomType === 'server') {
             playSound('join');
             showToast('Connected to ' + (S.channelName || 'voice channel'));
@@ -1004,6 +1102,9 @@
         S.members = newMembers;
 
         var selfId = getSelfId();
+        if (S.roomType === 'dm' && list.some(function (m) { return m.user_id !== selfId; })) {
+            markDmCallAnswered();
+        }
         // Open peers for newcomers
         list.forEach(function (m) {
             if (m.user_id !== selfId && !S.peers[m.user_id]) {
@@ -1030,15 +1131,19 @@
     function handleMemberUpdate(member) {
         if (!S.connected) return;
         var prev = S.members[member.user_id];
-        var speakingOnly = prev &&
-            prev.muted === member.muted &&
-            prev.deafened === member.deafened &&
-            prev.camera === member.camera &&
-            prev.screen === member.screen &&
-            prev.force_muted === member.force_muted &&
-            prev.force_deafened === member.force_deafened &&
-            prev.username === member.username;
+        // Only camera/screen/username changes require a full re-render (the
+        // video tiles appear/disappear). Mute, deafen, force-mute, force-deafen
+        // and speaking changes are just badges + glow — patched in place so the
+        // camera/screen <video> elements are never destroyed and recreated
+        // (that used to restart/refresh the feeds on every mute toggle).
+        var mediaChanged = !prev ||
+            prev.camera !== member.camera ||
+            prev.screen !== member.screen ||
+            prev.username !== member.username;
         S.members[member.user_id] = member;
+        if (S.roomType === 'dm' && member.user_id !== getSelfId()) {
+            markDmCallAnswered();
+        }
         if (member.user_id === getSelfId()) {
             S.forceMuted = !!member.force_muted;
             S.forceDeafened = !!member.force_deafened;
@@ -1046,18 +1151,44 @@
             S.deafened = !!member.deafened;
             updateSelfUI();
         }
-        if (speakingOnly) {
-            // Only the speaking glow changed — toggle classes in place so the
-            // camera/screen <video> elements are NOT destroyed and recreated
-            // (that made the feeds restart/jitter every time the indicator
-            // appeared or disappeared).
-            updateSpeakingUI();
-        } else {
+        if (mediaChanged) {
             renderBar();
             renderPopup();
             renderDmPanel();
+        } else {
+            // Badges (muted/deafened/force) + speaking glow, in place.
+            updateMemberBadgesInPlace(member.user_id);
+            updateSpeakingUI();
         }
         updateChannelChips();
+    }
+
+    // Patch a single member's status badges in place (server popup row + DM
+    // tile) without touching the media area, so video elements stay alive.
+    function updateMemberBadgesInPlace(uid) {
+        var m = S.members[uid];
+        if (!m) return;
+        var isSelf = uid === getSelfId();
+        var local = isSelf ? Object.assign({}, m, {
+            camera: S.cameraOn,
+            screen: S.screenOn,
+            muted: S.muted,
+            deafened: S.deafened,
+            speaking: S.speaking,
+        }) : m;
+        // Server popup rows
+        document.querySelectorAll('.voice-member-row[data-uid="' + uid + '"]').forEach(function (row) {
+            var st = row.querySelector('.voice-member-status');
+            if (st) st.innerHTML = memberBadges(local, 'vm');
+        });
+        // DM tiles
+        document.querySelectorAll('.dm-call-tile[data-uid="' + uid + '"]').forEach(function (tile) {
+            var info = tile.querySelector('.dm-call-tile-info');
+            if (info) {
+                info.querySelectorAll('.vm-badge').forEach(function (b) { b.remove(); });
+                info.insertAdjacentHTML('beforeend', memberBadges(m, 'vm'));
+            }
+        });
     }
 
     // Toggle only the .speaking classes on existing rows/tiles — never rebuild
@@ -1149,8 +1280,8 @@
             }
             updateSelfUI();
             renderBar();
-            renderPopup();
-            renderDmPanel();
+            updateMemberBadgesInPlace(getSelfId());
+            updateSpeakingUI();
             sendVoiceState();
         }
     }
@@ -1158,7 +1289,38 @@
     // ------------------------------------------------------------------
     // DM calls
     // ------------------------------------------------------------------
-    function startDmCall(dmChannelId, partnerId, partnerUsername) {
+
+    // Ensure the partner's identity public key is cached before a DM call
+    // starts. The room key (and its signaling subkey) are derived from it —
+    // if it's missing, deriveRoomKey() returns null, signaling E2EE refuses
+    // to send SDP/ICE, and the call silently never connects. The prefetch in
+    // chat.js's loadDmConversations races the call button, so fetch it here
+    // when the conversation object doesn't have it yet.
+    function ensureDmCallKey(partnerId) {
+        var conv = null;
+        if (window.dmConversations) {
+            conv = dmConversations.find(function (c) { return c.dm_channel_id === S.dmChannelId; });
+        }
+        if (conv && conv.other_public_key) {
+            S._dmOtherPubB64 = conv.other_public_key;
+            return Promise.resolve(true);
+        }
+        if (S._dmOtherPubB64) return Promise.resolve(true);
+        if (!partnerId) return Promise.resolve(false);
+        return authFetch('/api/identity/' + encodeURIComponent(partnerId))
+            .then(function (res) { return res.ok ? res.json() : null; })
+            .then(function (data) {
+                if (data && data.identity_public_key) {
+                    S._dmOtherPubB64 = data.identity_public_key;
+                    if (conv) conv.other_public_key = data.identity_public_key;
+                    return true;
+                }
+                return false;
+            })
+            .catch(function () { return false; });
+    }
+
+    async    function startDmCall(dmChannelId, partnerId, partnerUsername) {
         ensureAudioCtx();
         // If we're already in a server room, leave it first
         if (S.connected && S.roomType === 'server') {
@@ -1170,21 +1332,70 @@
         S.serverId = null;
         S.dmCallPartner = { id: partnerId, username: partnerUsername };
         S.dmCallActive = true;
+        S.dmCallAnswered = false;
         S.popupOpen = false;
+        S.callWaiting = false;
+        // Await the partner's key BEFORE joining — otherwise the signaling E2EE
+        // drops every offer/answer and the call never connects.
+        await ensureDmCallKey(partnerId);
         deriveRoomKey();
         deriveSignalKey();
+        resetFullscreenState();
         send({ type: 'voice_join', room_type: 'dm', dm_channel_id: dmChannelId });
         send({ type: 'dm_call_ring', dm_channel_id: dmChannelId });
         playSound('join');
         showToast('Calling ' + (partnerUsername || '…'));
         updateDmCallUI();
+        // 30s unanswered → stop ringing, wait for a manual join. The callee is
+        // told via dm_call_waiting so their ringtone stops and their incoming
+        // bar flips to the waiting state (they can still join by hand).
+        // Note: the caller is S.connected as soon as their own voice_joined
+        // lands — the timeout keys off dmCallAnswered (did the OTHER side join)
+        // instead of connected, which is always true here.
+        clearRingTimer();
+        S._ringTimer = setTimeout(function () {
+            if (S.dmCallActive && !S.dmCallAnswered && S.dmChannelId === dmChannelId) {
+                S.callWaiting = true;
+                stopRingtone();
+                send({ type: 'dm_call_waiting', dm_channel_id: S.dmChannelId });
+                showToast('Waiting for ' + (partnerUsername || 'them') + ' to join the call…');
+                updateDmCallUI();
+            }
+        }, 30000);
     }
 
-    function acceptDmCall() {
+    function clearRingTimer() {
+        if (S._ringTimer) {
+            clearTimeout(S._ringTimer);
+            S._ringTimer = null;
+        }
+    }
+
+    // The other DM participant joined the room — cancel the waiting state and
+    // any pending 30s ring timeout.
+    function markDmCallAnswered() {
+        if (S.dmCallActive && !S.dmCallAnswered) {
+            S.dmCallAnswered = true;
+            clearRingTimer();
+        }
+        if (S.callWaiting) {
+            S.callWaiting = false;
+            updateDmCallUI();
+        }
+        // The call is live — drop any persisted waiting marker for this channel.
+        if (S.dmChannelId && S.waitingCalls[S.dmChannelId]) {
+            delete S.waitingCalls[S.dmChannelId];
+            notifyWaitingChanged();
+        }
+    }
+
+    async function acceptDmCall() {
         if (!S.incomingCall) return;
         var c = S.incomingCall;
         S.incomingCall = null;
         hideIncomingCall();
+        clearCalleeRingTimer();
+        stopRingtone();
         if (S.connected && S.roomType === 'server') {
             leaveVoice();
         }
@@ -1194,6 +1405,10 @@
         S.serverId = null;
         S.dmCallPartner = { id: c.callerId, username: c.callerUsername };
         S.dmCallActive = true;
+        S.dmCallAnswered = true;
+        S.callWaiting = false;
+        resetFullscreenState();
+        await ensureDmCallKey(c.callerId);
         deriveRoomKey();
         deriveSignalKey();
         send({ type: 'voice_join', room_type: 'dm', dm_channel_id: c.dmChannelId });
@@ -1205,11 +1420,66 @@
         }
     }
 
+    // Rebuild S.waitingCalls from the DM conversation list (which the server
+    // enriches with waiting_user_id / waiting_username from the persisted
+    // dm_call_waiting table). Called after loadDmConversations and on WS
+    // reconnect so the waiting indicator survives page refreshes.
+    function syncWaitingCalls() {
+        if (typeof dmConversations === 'undefined' || !dmConversations) return;
+        S.waitingCalls = {};
+        dmConversations.forEach(function (conv) {
+            if (conv && conv.dm_channel_id && conv.waiting_user_id) {
+                S.waitingCalls[conv.dm_channel_id] = {
+                    waitingUserId: conv.waiting_user_id,
+                    waitingUsername: conv.waiting_username || '',
+                };
+            }
+        });
+        // Let the DM chat re-render any waiting banner.
+        if (typeof document !== 'undefined') {
+            document.dispatchEvent(new CustomEvent('voice-waiting-changed'));
+        }
+    }
+
+    // Join a DM call room WITHOUT ringing the other person (used for the
+    // persisted "waiting" state — the other side may be offline or just
+    // waiting in the room). If they're in the room, the call connects instantly.
+    async function joinWaitingCall(dmChannelId, partnerId, partnerUsername) {
+        ensureAudioCtx();
+        if (S.connected && S.roomType === 'server') {
+            leaveVoice();
+        }
+        S.roomType = 'dm';
+        S.dmChannelId = dmChannelId;
+        S.channelId = null;
+        S.serverId = null;
+        S.dmCallPartner = { id: partnerId, username: partnerUsername };
+        S.dmCallActive = true;
+        S.dmCallAnswered = false;
+        S.popupOpen = false;
+        S.callWaiting = false;
+        resetFullscreenState();
+        await ensureDmCallKey(partnerId);
+        deriveRoomKey();
+        deriveSignalKey();
+        send({ type: 'voice_join', room_type: 'dm', dm_channel_id: dmChannelId });
+        playSound('join');
+        updateDmCallUI();
+        // Clear the persisted waiting marker for this channel now that we're
+        // (re)joining — the call connects if the other side is present.
+        delete S.waitingCalls[dmChannelId];
+        if (typeof document !== 'undefined') {
+            document.dispatchEvent(new CustomEvent('voice-waiting-changed'));
+        }
+    }
+
     function declineDmCall() {
         if (!S.incomingCall) return;
         send({ type: 'dm_call_end', dm_channel_id: S.incomingCall.dmChannelId });
         S.incomingCall = null;
         hideIncomingCall();
+        clearCalleeRingTimer();
+        stopRingtone();
         playSound('leave');
     }
 
@@ -1219,6 +1489,29 @@
     }
 
     function handleDmCallRing(data) {
+        // If we're ALREADY in a DM call for this channel — whether waiting for
+        // the partner to rejoin or already connected — this ring is them coming
+        // back / calling into the room we're in. Don't reject and don't send
+        // dm_call_end (that would kill the call); the voice_join reconnect is
+        // what establishes the peers. Guarded by channel + dmCallActive alone,
+        // NOT callWaiting: by the time the ring arrives, the partner's
+        // voice_join has usually already run markDmCallAnswered() (clearing
+        // callWaiting), so a callWaiting check would wrongly reject the call.
+        if (S.dmCallActive && S.dmChannelId === data.dm_channel_id) {
+            showToast(data.caller_username + ' is rejoining the call…');
+            return;
+        }
+        // Mutual callback: if there's a PERSISTED waiting state for this channel
+        // where I'M the one waiting (I called them, they didn't answer, and now
+        // they're calling me back), auto-join the room so both sides connect —
+        // no ringtone, no accept prompt. Works even after a page refresh because
+        // syncWaitingCalls() restored S.waitingCalls from the conversation list.
+        var pw = S.waitingCalls[data.dm_channel_id];
+        if (pw && pw.waitingUserId === getSelfId() && !S.dmCallActive) {
+            showToast(data.caller_username + ' called you back — connecting…');
+            joinWaitingCall(data.dm_channel_id, data.caller_id, data.caller_username);
+            return;
+        }
         if (S.dmCallActive || S.connected) {
             // Already busy — let the caller know we can't join
             send({ type: 'dm_call_end', dm_channel_id: data.dm_channel_id });
@@ -1226,19 +1519,94 @@
         }
         S.incomingCall = { callerId: data.caller_id, callerUsername: data.caller_username, dmChannelId: data.dm_channel_id };
         showIncomingCall(S.incomingCall);
-        playSound('ring');
+        // Play the user's custom ringtone (loops until answered / 30s timeout).
+        playRingtone(true);
+        // Local safety net: even if the caller's dm_call_waiting is never
+        // delivered (e.g. the caller's tab died), stop ringing after 30s and
+        // flip the incoming bar to the waiting state.
+        clearCalleeRingTimer();
+        S._calleeRingTimer = setTimeout(function () {
+            if (S.incomingCall && S.incomingCall.dmChannelId === data.dm_channel_id && !S.incomingCall.waiting) {
+                handleDmCallWaiting({ dm_channel_id: data.dm_channel_id });
+            }
+        }, 30000);
+    }
+
+    function clearCalleeRingTimer() {
+        if (S._calleeRingTimer) {
+            clearTimeout(S._calleeRingTimer);
+            S._calleeRingTimer = null;
+        }
+    }
+
+    function handleDmCallWaiting(data) {
+        // Case 1: we never joined (incoming bar) — the caller stopped ringing
+        // after 30s unanswered, or left while we were deciding. Keep the bar but
+        // flip it to the waiting state so we can still join the call manually.
+        // NOTE: S.dmChannelId is still null here (we haven't joined yet), so the
+        // channel match must use S.incomingCall — not the early-return guard.
+        if (S.incomingCall && S.incomingCall.dmChannelId === data.dm_channel_id) {
+            S.incomingCall.waiting = true;
+            stopRingtone();
+            var b = el('incoming-call-bar');
+            if (b) b.classList.add('waiting');
+            var name = el('incoming-call-name');
+            if (name) name.textContent = S.incomingCall.callerUsername + ' is waiting for you to join';
+            var acceptBtn = el('incoming-call-accept');
+            if (acceptBtn) acceptBtn.textContent = 'Join';
+            // Persist the waiting marker: the CALLER is the one waiting for us.
+            S.waitingCalls[data.dm_channel_id] = {
+                waitingUserId: data.caller_id,
+                waitingUsername: data.caller_username || S.incomingCall.callerUsername || '',
+            };
+            notifyWaitingChanged();
+            return;
+        }
+        // Case 2: we're in an active DM call and the partner left — the call is
+        // NOT closed. We flip to the waiting state (same UI as the 30s timeout)
+        // so the partner can rejoin whenever they come back. Also persist the
+        // marker so it survives refreshes.
+        if (S.dmCallActive && S.dmChannelId === data.dm_channel_id) {
+            // Race guard: a genuine leave is always preceded by
+            // voice_member_leave + voice_members (server sends them in order
+            // before dm_call_waiting), so by now the partner is gone from
+            // S.members. If they're still listed, this dm_call_waiting is a
+            // stale 30s-timeout message landing right as the partner just
+            // joined — a connected call must NOT be flipped to waiting.
+            var partnerId = S.dmCallPartner && S.dmCallPartner.id;
+            if (partnerId && S.members[partnerId]) return;
+            var wasWaiting = S.callWaiting;
+            S.callWaiting = true;
+            S.dmCallAnswered = false;
+            stopRingtone();
+            // I'm the one left waiting for the partner to come back.
+            S.waitingCalls[data.dm_channel_id] = {
+                waitingUserId: getSelfId(),
+                waitingUsername: '',
+            };
+            notifyWaitingChanged();
+            updateDmCallUI();
+            // Toast only on the transition into waiting (leaveVoice also sends
+            // dm_call_waiting, so a duplicate may arrive — avoid double toasts).
+            if (!wasWaiting) showToast('Call partner left — waiting for them to rejoin…');
+        }
     }
 
     function handleDmCallEnd(data) {
         if (S.incomingCall && S.incomingCall.dmChannelId === data.dm_channel_id) {
             S.incomingCall = null;
             hideIncomingCall();
+            clearCalleeRingTimer();
+            stopRingtone();
             showToast('Call ended.');
             playSound('leave');
         }
         if (S.dmCallActive && S.dmChannelId === data.dm_channel_id) {
             // Other side hung up or the call was cancelled
             var wasConnected = S.connected;
+            clearRingTimer();
+            clearCalleeRingTimer();
+            stopRingtone();
             teardownRoom();
             hideBar();
             hidePopup();
@@ -1246,6 +1614,11 @@
             hideMiniBar();
             if (wasConnected) playSound('leave');
             showToast('Call ended.');
+        }
+        // Remove any persisted waiting marker for this channel.
+        if (S.waitingCalls[data.dm_channel_id]) {
+            delete S.waitingCalls[data.dm_channel_id];
+            notifyWaitingChanged();
         }
     }
 
@@ -1394,6 +1767,14 @@
 
     function el(id) { return document.getElementById(id); }
 
+    // Tell the DM chat layer that the persisted waiting state changed so it can
+    // show/hide the "X is waiting for you to join the call" banner.
+    function notifyWaitingChanged() {
+        if (typeof document !== 'undefined') {
+            document.dispatchEvent(new CustomEvent('voice-waiting-changed'));
+        }
+    }
+
     function showToast(msg) {
         if (typeof window.showToast === 'function') {
             window.showToast(msg);
@@ -1430,36 +1811,178 @@
     }
 
     function onViewChanged() {
+        syncOverlayBounds();
         if (!S.connected) return;
+        // NOTE: the voice channel view is NOT closed here. Closing it on view
+        // changes races with programmatic re-renders (e.g. a late
+        // selectServer/auto-select resetting currentChannelId) which would
+        // yank the popup shut right after the user opened it. Instead the
+        // channel/DM/server CLICK handlers in chat.js close it on genuine
+        // user clicks (event.isTrusted) — instant and race-free.
         updateDmCallUI();
         updateBarVisibility();
     }
 
-    // For server rooms: the small bar is hidden while viewing the voice
-    // channel itself (the popup covers the text area there instead).
+    // Fixed overlays (voice popup, DM panel, bars) must exactly match the
+    // text area, which starts at the right edge of the server strip + sidebar.
+    // Reading .main's rect handles every viewport/sidebar width (including the
+    // 340px ultrawide sidebar) instead of hardcoding a calc().
+    function syncOverlayBounds() {
+        var main = document.querySelector('.main');
+        if (!main) return;
+        var left = main.getBoundingClientRect().left;
+        // The voice channel view + DM panel are their OWN channel view: they
+        // fill the text area between the chat header and the chat input (the
+        // message list's rect), instead of floating over it. The floating
+        // voice bar / DM mini bar only snap when the user hasn't dragged them
+        // (a saved drag position means the user put it where they want it).
+        var body = document.querySelector('.chat-body');
+        var top = 56;
+        var bottom = 0;
+        if (body) {
+            var r = body.getBoundingClientRect();
+            top = r.top;
+            bottom = window.innerHeight - r.bottom;
+        }
+        ['voice-popup', 'dm-call-panel'].forEach(function (id) {
+            var el2 = document.getElementById(id);
+            if (!el2) return;
+            if (id === 'dm-call-panel') {
+                if (S.dmCallExpanded) {
+                    // Expanded: covers the ENTIRE viewport (server strip +
+                    // sidebar + chat header + input) so you see only the call.
+                    el2.style.left = '0';
+                    el2.style.top = '0';
+                    el2.style.bottom = '0';
+                    el2.style.height = 'auto';
+                } else {
+                    // Collapsed: top panel of the text area (measured chat-body
+                    // top, below the chat header); CSS keeps the 52vh height.
+                    el2.style.left = left + 'px';
+                    el2.style.top = top + 'px';
+                    el2.style.bottom = '';
+                    el2.style.height = '';
+                }
+            } else if (S.voiceFullscreen) {
+                // Voice view fullscreen: covers the ENTIRE viewport too.
+                el2.style.left = '0';
+                el2.style.top = '0';
+                el2.style.bottom = '0';
+                el2.style.height = 'auto';
+            } else {
+                // Voice channel view: its own channel view covering the whole
+                // chat column — the channel name header at the top and the
+                // text input space at the bottom are covered too.
+                el2.style.left = left + 'px';
+                el2.style.top = '0';
+                el2.style.bottom = '0';
+                el2.style.height = 'auto'; // override the CSS 52vh so top+bottom win
+            }
+        });
+        ['voice-bar', 'dm-mini-bar'].forEach(function (id) {
+            var el2 = document.getElementById(id);
+            if (!el2) return;
+            var key = id === 'voice-bar' ? 'voice_bar_pos' : 'dm_mini_bar_pos';
+            if (localStorage.getItem(key)) return; // user dragged it — keep position
+            // Snap back to the default corner: clear inline top/bottom so the
+            // stylesheet's top: 12px anchor applies again.
+            el2.style.left = left + 'px';
+            el2.style.top = '';
+            el2.style.bottom = '';
+        });
+    }
+
+    // Drag-to-move a floating overlay (voice bar / DM mini bar). Pointer
+    // events give smooth dragging on mouse + touch; the position is clamped
+    // to the viewport and persisted so it survives reloads and view changes.
+    function makeDraggable(id, storageKey) {
+        var el2 = document.getElementById(id);
+        if (!el2) return;
+        // Restore a previously saved position. The CSS anchors these bars with
+        // top: 12px — if we set bottom but leave top resolved, the browser
+        // STRETCHES the fixed element between the two constraints instead of
+        // moving it (the bar looked glued to the edge and grew on drag).
+        // Override bottom with auto so top/left alone position it.
+        try {
+            var saved = JSON.parse(localStorage.getItem(storageKey) || 'null');
+            if (saved && typeof saved.left === 'number' && typeof saved.top === 'number') {
+                el2.style.left = saved.left + 'px';
+                el2.style.top = saved.top + 'px';
+                el2.style.bottom = 'auto';
+            }
+        } catch (_) {}
+
+        var dragging = false;
+        var startX = 0, startY = 0, origLeft = 0, origTop = 0;
+
+        el2.addEventListener('pointerdown', function (e) {
+            // Don't start a drag from the control buttons (they stay clickable)
+            if (e.target.closest('button')) return;
+            if (e.button !== 0 && e.pointerType === 'mouse') return;
+            var r = el2.getBoundingClientRect();
+            dragging = true;
+            startX = e.clientX;
+            startY = e.clientY;
+            origLeft = r.left;
+            origTop = r.top;
+            // Anchor by top/left only for the whole drag — see restore above.
+            el2.style.bottom = 'auto';
+            el2.classList.add('dragging');
+            try { el2.setPointerCapture(e.pointerId); } catch (_) {}
+            e.preventDefault();
+        });
+
+        el2.addEventListener('pointermove', function (e) {
+            if (!dragging) return;
+            var dx = e.clientX - startX;
+            var dy = e.clientY - startY;
+            var w = el2.offsetWidth;
+            var h = el2.offsetHeight;
+            var maxLeft = Math.max(8, window.innerWidth - w - 8);
+            var maxTop = Math.max(8, window.innerHeight - h - 8);
+            el2.style.left = Math.min(Math.max(8, origLeft + dx), maxLeft) + 'px';
+            el2.style.top = Math.min(Math.max(8, origTop + dy), maxTop) + 'px';
+            e.preventDefault();
+        });
+
+        function endDrag() {
+            if (!dragging) return;
+            dragging = false;
+            el2.classList.remove('dragging');
+            try {
+                var r = el2.getBoundingClientRect();
+                localStorage.setItem(storageKey, JSON.stringify({
+                    left: r.left,
+                    top: r.top,
+                }));
+            } catch (_) {}
+        }
+        el2.addEventListener('pointerup', endDrag);
+        el2.addEventListener('pointercancel', endDrag);
+    }
+
+    // For server rooms: the small bar is the persistent control while
+    // anywhere EXCEPT the voice channel view itself. When the voice channel
+    // view (popup) is open, it replaces the bar — it has its own controls.
     function updateBarVisibility() {
         if (!S.connected) {
             hideBar();
             return;
         }
         if (S.roomType === 'server') {
-            var inVoiceView = typeof currentChannelId !== 'undefined' && S.channelId && currentChannelId === S.channelId;
-            if (inVoiceView) {
-                // Viewing the voice channel itself → popup covers the text area
+            if (S.popupOpen) {
+                // Voice channel view is open → it IS the channel view (it has
+                // its own mute/deafen/camera/screen/leave controls).
                 hideBar();
-                if (S.popupOpen) showPopup(); else hidePopup();
             } else {
                 // Anywhere else → small persistent bar (Discord-style)
                 showBar();
             }
         } else {
-            // DM call: bar shows only when NOT in the DM chat view
-            var inDmView = typeof currentDmChannelId !== 'undefined' && S.dmChannelId && currentDmChannelId === S.dmChannelId;
-            if (inDmView) {
-                hideBar();
-            } else {
-                showBar();
-            }
+            // DM call: never show the server voice-bar. The DM mini bar
+            // (draggable, top-anchored) is the persistent control when NOT in
+            // the DM chat view — updateDmCallUI() handles panel vs mini bar.
+            hideBar();
         }
     }
 
@@ -1481,6 +2004,7 @@
     function showBar() {
         var bar = el('voice-bar');
         if (!bar) return;
+        syncOverlayBounds();
         bar.style.display = 'flex';
         var name = el('voice-bar-name');
         if (name) name.textContent = S.roomType === 'dm' ? ('In call with ' + (S.dmCallPartner ? S.dmCallPartner.username : '…')) : (S.channelName || 'Voice Connected');
@@ -1502,7 +2026,8 @@
         bindClick(bar, 'voice-bar-screen', function () { toggleScreen(); });
         bindClick(bar, 'voice-bar-leave', function () { leaveVoice(); });
         bindClick(bar, 'voice-bar-popup', function () {
-            if (S.roomType === 'server') toggleServerPopup();
+            // The ☰ button redirects us INTO the voice channel view.
+            if (S.roomType === 'server') navigateToVoiceChannel();
         });
     }
 
@@ -1533,7 +2058,7 @@
     }
 
     // ------------------------------------------------------------------
-    // UI: server voice popup (covers the text area)
+    // UI: server voice channel view (top panel of the text area)
     // ------------------------------------------------------------------
     function toggleServerPopup() {
         S.popupOpen = !S.popupOpen;
@@ -1541,9 +2066,25 @@
         updateBarVisibility();
     }
 
+    // Enter the voice channel view (its own channel view at the top of the
+    // text area — NOT an overlay). The ☰ button on the small bar redirects
+    // here, just like clicking the voice channel again while already in it.
+    function navigateToVoiceChannel() {
+        if (S.roomType !== 'server' || !S.channelId || !S.connected) return;
+        showPopup();
+        updateBarVisibility();
+    }
+
+    function exitVoiceChannelView() {
+        hidePopup();
+        updateBarVisibility();
+    }
+
     function showPopup() {
         var pop = el('voice-popup');
         if (!pop) return;
+        applyVoiceFullscreen();
+        syncOverlayBounds();
         S.popupOpen = true;
         pop.style.display = 'flex';
         var name = el('voice-popup-name');
@@ -1561,7 +2102,8 @@
     function bindPopupControls() {
         var pop = el('voice-popup');
         if (!pop) return;
-        bindClick(pop, 'voice-popup-close', function () { S.popupOpen = false; hidePopup(); updateBarVisibility(); });
+        bindClick(pop, 'voice-popup-close', function () { exitVoiceChannelView(); });
+        bindClick(pop, 'voice-popup-fullscreen', function () { toggleVoiceFullscreen(); });
         bindClick(pop, 'voice-popup-mute', function () { toggleMute(); });
         bindClick(pop, 'voice-popup-deafen', function () { toggleDeafen(); });
         bindClick(pop, 'voice-popup-camera', function () { toggleCamera(); });
@@ -1784,17 +2326,68 @@
     }
 
     // ------------------------------------------------------------------
-    // UI: DM call panel (covers bottom half of text area)
+    // UI: DM call panel (top panel of the text area)
     // ------------------------------------------------------------------
     function showDmPanel() {
         var p = el('dm-call-panel');
         if (!p) return;
+        syncOverlayBounds();
         S.dmPanelOpen = true;
         p.style.display = 'flex';
         var name = el('dm-call-name');
-        if (name) name.textContent = S.dmCallPartner ? S.dmCallPartner.username : '…';
+        if (name) {
+            if (S.callWaiting) {
+                name.textContent = 'Waiting for ' + (S.dmCallPartner ? S.dmCallPartner.username : 'answer') + '…';
+            } else {
+                name.textContent = S.dmCallPartner ? S.dmCallPartner.username : '…';
+            }
+        }
+        applyDmExpand();
         renderDmPanel();
         renderSelfPreview();
+    }
+
+    // Expand/collapse the DM call panel: expanded covers the whole text area
+    // (just the call — great for phones, so you see your own camera + screen
+    // AND the other person's at the same time); collapsed is the top panel
+    // with the chat text still visible below. Per-call only — every join/leave
+    // resets it, so a call always starts collapsed.
+    function toggleDmExpand() {
+        S.dmCallExpanded = !S.dmCallExpanded;
+        applyDmExpand();
+        syncOverlayBounds();
+    }
+
+    function applyDmExpand() {
+        var p = el('dm-call-panel');
+        if (!p) return;
+        p.classList.toggle('expanded', !!S.dmCallExpanded);
+        var btn = el('dm-call-expand');
+        if (btn) {
+            btn.textContent = S.dmCallExpanded ? '\u2921' : '\u2922';
+            btn.title = S.dmCallExpanded ? 'Collapse — show chat below' : 'Expand — cover the whole screen';
+        }
+    }
+
+    // Fullscreen the voice channel view: covers the WHOLE screen (server
+    // strip + sidebar included) so you see only the call. The ⤢/⤡ button
+    // lives in the voice view header; fullscreen is per-call only (reset on
+    // join/leave — a call always starts in the normal view).
+    function toggleVoiceFullscreen() {
+        S.voiceFullscreen = !S.voiceFullscreen;
+        applyVoiceFullscreen();
+        syncOverlayBounds();
+    }
+
+    function applyVoiceFullscreen() {
+        var p = el('voice-popup');
+        if (!p) return;
+        p.classList.toggle('fullscreen', !!S.voiceFullscreen);
+        var btn = el('voice-popup-fullscreen');
+        if (btn) {
+            btn.textContent = S.voiceFullscreen ? '\u2921' : '\u2922';
+            btn.title = S.voiceFullscreen ? 'Exit full screen' : 'Full screen';
+        }
     }
 
     function hideDmPanel() {
@@ -1811,6 +2404,7 @@
         bindClick(p, 'dm-call-camera', function () { toggleCamera(); });
         bindClick(p, 'dm-call-screen', function () { toggleScreen(); });
         bindClick(p, 'dm-call-end', function () { endDmCall(); });
+        bindClick(p, 'dm-call-expand', function () { toggleDmExpand(); });
     }
 
     function renderDmPanel() {
@@ -1870,9 +2464,20 @@
     function showMiniBar() {
         var m = el('dm-mini-bar');
         if (!m) return;
+        syncOverlayBounds();
         m.style.display = 'flex';
         var name = el('dm-mini-bar-name');
-        if (name) name.textContent = S.dmCallPartner ? ('In call with ' + S.dmCallPartner.username) : 'In call';
+        if (name) {
+            // callWaiting is set only on the CALLER side when the other
+            // participant hasn't joined within 30s. The caller is already
+            // S.connected (they joined their own room), so the waiting label
+            // keys off callWaiting alone — NOT connected.
+            if (S.callWaiting) {
+                name.textContent = S.dmCallPartner ? ('Waiting for ' + S.dmCallPartner.username + '…') : 'Waiting for answer…';
+            } else {
+                name.textContent = S.dmCallPartner ? ('In call with ' + S.dmCallPartner.username) : 'In call';
+            }
+        }
     }
 
     function hideMiniBar() {
@@ -1899,14 +2504,23 @@
     function showIncomingCall(call) {
         var b = el('incoming-call-bar');
         if (!b) return;
+        b.classList.remove('waiting');
         b.style.display = 'flex';
         var name = el('incoming-call-name');
         if (name) name.textContent = call.callerUsername + ' is calling…';
+        var acceptBtn = el('incoming-call-accept');
+        if (acceptBtn) acceptBtn.textContent = 'Accept';
     }
 
     function hideIncomingCall() {
+        clearCalleeRingTimer();
         var b = el('incoming-call-bar');
-        if (b) b.style.display = 'none';
+        if (b) {
+            b.style.display = 'none';
+            b.classList.remove('waiting');
+        }
+        var acceptBtn = el('incoming-call-accept');
+        if (acceptBtn) acceptBtn.textContent = 'Accept';
     }
 
     function bindIncomingCallControls() {
@@ -2016,7 +2630,26 @@
         voiceBtn.addEventListener('click', function (e) {
             e.preventDefault();
             e.stopPropagation();
-            startDmCall(currentDmChannelId, other.id, other.username || other.display_name || '');
+            var chId = currentDmChannelId;
+            // Already in a call in this DM (possibly waiting) — a click is a
+            // nudge, re-ring the partner without re-joining the room.
+            if (S.dmCallActive && S.dmChannelId === chId) {
+                send({ type: 'dm_call_ring', dm_channel_id: chId });
+                showToast('Ringing ' + (other.username || other.display_name || '…') + '…');
+                return;
+            }
+            // The OTHER person is waiting in this DM's call room (we missed
+            // their call). Joining silently connects both sides instantly —
+            // ringing again would race with the room reconnect.
+            var wc = S.waitingCalls ? S.waitingCalls[chId] : null;
+            if (wc && !S.dmCallActive && wc.waitingUserId !== getSelfId()) {
+                joinWaitingCall(chId, other.id, other.username || other.display_name || '');
+                return;
+            }
+            // Otherwise start a fresh call (or, if I'M the one waiting after a
+            // refresh, ring the other person — the room reconnect happens
+            // through the normal join flow).
+            startDmCall(chId, other.id, other.username || other.display_name || '');
         });
         wrap.appendChild(voiceBtn);
         hdr.appendChild(wrap);
@@ -2051,6 +2684,153 @@
             osc.start(now);
             osc.stop(now + dur);
         } catch (_) {}
+    }
+
+    // ------------------------------------------------------------------
+    // Ringtone (custom, encrypted, syncs across devices — Settings → Voice)
+    // ------------------------------------------------------------------
+    // Plays the user's chosen ringtone when a DM call rings. If the file is
+    // shorter than the ring, it loops. Falls back to a default beep pattern
+    // when no custom ringtone is set.
+    function stopRingtone() {
+        // Bump the token so any in-flight async ringtone load/decode aborts
+        // instead of starting a source after the ring ended.
+        S._ringToken = (S._ringToken || 0) + 1;
+        if (S._testRingTimer) {
+            clearTimeout(S._testRingTimer);
+            S._testRingTimer = null;
+        }
+        if (S._ringtoneSource) {
+            try { S._ringtoneSource.stop(); } catch (_) {}
+            try { S._ringtoneSource.disconnect(); } catch (_) {}
+            S._ringtoneSource = null;
+        }
+        if (S._ringtoneGain) {
+            try { S._ringtoneGain.disconnect(); } catch (_) {}
+            S._ringtoneGain = null;
+        }
+        if (S._ringtoneRepeatTimer) {
+            clearTimeout(S._ringtoneRepeatTimer);
+            S._ringtoneRepeatTimer = null;
+        }
+    }
+
+    // Ringtone volume from the Voice settings slider (0-100%), clamped to 0-1.
+    function getRingtoneVolume() {
+        var v = parseInt(localStorage.getItem('ringtone_volume'), 10);
+        if (isNaN(v)) v = 60;
+        if (v < 0) v = 0;
+        if (v > 100) v = 100;
+        return v / 100;
+    }
+
+    // loop=true → keep playing until stopRingtone() (call ring).
+    // loop=false → play once (Test Ringtone button).
+    function playRingtone(loop) {
+        ensureAudioCtx();
+        if (!S.audioCtx) return;
+        stopRingtone();
+        // Generation token: the custom-ringtone path is fully async (getRingtoneUrl
+        // → FileReader → decodeAudioData). If the call is accepted/declined/ended
+        // while the audio is still loading/decoding, the pending callbacks must NOT
+        // start a source afterwards — otherwise the ringtone plays mid-call.
+        var token = (S._ringToken = (S._ringToken || 0) + 1);
+        var ctx = S.audioCtx;
+        if (ctx.state === 'suspended') ctx.resume().catch(function () {});
+        var urlPromise = (typeof getRingtoneUrl === 'function') ? getRingtoneUrl() : Promise.resolve(null);
+        Promise.resolve(urlPromise).then(function (url) {
+            if (token !== S._ringToken) return;
+            if (!url) { playDefaultRingtone(loop, token); return; }
+            var blob = dataUrlToBlob(url);
+            if (!blob) { playDefaultRingtone(loop, token); return; }
+            var reader = new FileReader();
+            reader.onload = function (e) {
+                if (token !== S._ringToken) return;
+                try {
+                    ctx.decodeAudioData(e.target.result, function (buffer) {
+                        if (token !== S._ringToken) return;
+                        try {
+                            var source = ctx.createBufferSource();
+                            source.buffer = buffer;
+                            source.loop = !!loop;
+                            var gain = ctx.createGain();
+                            gain.gain.value = getRingtoneVolume();
+                            source.connect(gain);
+                            gain.connect(S.masterGain || ctx.destination);
+                            source.start(0);
+                            S._ringtoneSource = source;
+                            S._ringtoneGain = gain;
+                        } catch (err) {
+                            console.warn('Ringtone play failed, using default:', err);
+                            playDefaultRingtone(loop, token);
+                        }
+                    }, function () {
+                        console.warn('Ringtone decode failed, using default');
+                        playDefaultRingtone(loop, token);
+                    });
+                } catch (err) {
+                    console.warn('Ringtone decode error, using default:', err);
+                    playDefaultRingtone(loop, token);
+                }
+            };
+            reader.onerror = function () {
+                console.warn('Ringtone read failed, using default');
+                playDefaultRingtone(loop, token);
+            };
+            reader.readAsArrayBuffer(blob);
+        }).catch(function () {
+            if (token === S._ringToken) playDefaultRingtone(loop, token);
+        });
+    }
+
+    function playDefaultRingtone(loop, token) {
+        ensureAudioCtx();
+        if (!S.audioCtx) return;
+        var ctx = S.audioCtx;
+        var ringOnce = function () {
+            if (!S.audioCtx) return;
+            if (token !== undefined && token !== S._ringToken) return;
+            try {
+                var now = ctx.currentTime;
+                // Disconnect the previous repeat's gain so repeats don't stack.
+                if (S._ringtoneGain) {
+                    try { S._ringtoneGain.disconnect(); } catch (_) {}
+                    S._ringtoneGain = null;
+                }
+                var gain = ctx.createGain();
+                gain.connect(S.masterGain || ctx.destination);
+                gain.gain.setValueAtTime(0, now);
+                gain.gain.linearRampToValueAtTime(0.18, now + 0.02);
+                gain.gain.linearRampToValueAtTime(0, now + 0.5);
+                var osc = ctx.createOscillator();
+                osc.type = 'sine';
+                osc.frequency.value = 880;
+                osc.connect(gain);
+                osc.start(now);
+                osc.stop(now + 0.55);
+                if (loop) {
+                    S._ringtoneRepeatTimer = setTimeout(function () { ringOnce(); }, 1100);
+                }
+                // Keep a ref so stopRingtone can silence mid-ring.
+                S._ringtoneGain = gain;
+            } catch (_) {}
+        };
+        ringOnce();
+    }
+
+    // Exposed for the Test Ringtone button in Settings (plays once).
+    function testRingtone() {
+        // Don't let the settings preview kill a real incoming-call ringtone.
+        if (S.incomingCall || S.dmCallActive) return;
+        playRingtone(false);
+        // Auto-stop after ~4s so a long ringtone doesn't keep playing. Stored in
+        // a handle and cleared by stopRingtone so a real call ringing during the
+        // test window can't be silenced by this stale timeout.
+        if (S._testRingTimer) { clearTimeout(S._testRingTimer); S._testRingTimer = null; }
+        S._testRingTimer = setTimeout(function () {
+            S._testRingTimer = null;
+            stopRingtone();
+        }, 4000);
     }
 
     // ------------------------------------------------------------------
@@ -2195,30 +2975,43 @@
     // ------------------------------------------------------------------
     // Fullscreen helpers
     // ------------------------------------------------------------------
+    // Fullscreen a WRAPPER div, not the <video> element itself — Chrome shows
+    // its native playback controls (play/pause, timeline, volume) on a
+    // fullscreened <video> even without the controls attribute. With a plain
+    // div as the fullscreen element, no controls appear. The wrapper is
+    // removed on exit and the tiles re-render (fresh srcObject re-attached),
+    // which also unfreezes the frame Chrome detaches after fullscreen.
     function toggleFullscreen(el) {
         if (!el) return;
         if (document.fullscreenElement) {
             document.exitFullscreen().catch(function () {});
             return;
         }
-        // Fullscreen a WRAPPER div, not the <video> element itself — Chrome
-        // shows its native playback controls (play/pause, timeline, volume) on
-        // a fullscreened <video> even without the controls attribute. With a
-        // plain div as the fullscreen element, no controls appear.
         var wrap = document.createElement('div');
         wrap.className = 'voice-fs-wrap';
         wrap.appendChild(el);
         document.body.appendChild(wrap);
-        wrap.requestFullscreen().catch(function () {
-            wrap.remove();
-        });
-        document.addEventListener('fullscreenchange', function handler() {
+        // Register BEFORE requestFullscreen: the fullscreenchange event also
+        // fires when ENTERING fullscreen, so the handler must stay attached
+        // until we actually leave (otherwise the exit cleanup never runs and
+        // the black wrapper stays stuck over the app).
+        var done = false;
+        var handler = function () {
+            if (document.fullscreenElement) return; // still entering / active
+            if (done) return;
+            done = true;
             document.removeEventListener('fullscreenchange', handler);
-            if (document.fullscreenElement) return;
-            // Drop the moved element and re-render: fresh tiles get their
-            // srcObject re-attached, which also unfreezes the frame that Chrome
-            // detaches after fullscreen.
-            wrap.remove();
+            if (wrap.parentNode) wrap.remove();
+            renderPopup();
+            renderDmPanel();
+            renderSelfPreview();
+        };
+        document.addEventListener('fullscreenchange', handler);
+        wrap.requestFullscreen().catch(function () {
+            if (done) return;
+            done = true;
+            document.removeEventListener('fullscreenchange', handler);
+            if (wrap.parentNode) wrap.remove();
             renderPopup();
             renderDmPanel();
             renderSelfPreview();

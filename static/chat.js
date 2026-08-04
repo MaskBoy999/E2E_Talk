@@ -800,6 +800,14 @@ document.addEventListener('DOMContentLoaded', () => {
         try { VoiceManager.init(); } catch (err) { console.warn('Voice init failed:', err); }
     }
 
+    // Re-render the DM-call waiting banner + sidebar dots whenever voice.js
+    // changes the persisted waiting state (call starts/connects/ends, partner
+    // left, etc.).
+    document.addEventListener('voice-waiting-changed', function () {
+        updateDmWaitingBanner();
+        if (viewMode === 'dms') renderDmSidebar();
+    });
+
     // Auto-recover identity keys if they're missing (e.g. after secure-storage
     // key migration that orphaned old encrypted values). This runs fire-and-forget;
     // if recovery succeeds before the user clicks a channel, messages will load
@@ -1258,6 +1266,228 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    // --- Ringtone (DM call ring) settings ---
+    var ringtoneInput = document.getElementById('ringtone-input');
+    var ringtoneUploadBtn = document.getElementById('ringtone-upload-btn');
+    var ringtoneResetBtn = document.getElementById('ringtone-reset-btn');
+    var ringtoneTestBtn = document.getElementById('ringtone-test-btn');
+    var ringtoneStatus = document.getElementById('ringtone-status');
+    var ringtoneFileName = document.getElementById('ringtone-file-name');
+
+    if (ringtoneUploadBtn && ringtoneInput) {
+        var savedRingName = localStorage.getItem('ringtone_name') || _ringtoneCachedName;
+        if (savedRingName && ringtoneFileName) {
+            ringtoneFileName.textContent = savedRingName;
+            ringtoneFileName.style.display = '';
+        }
+
+        ringtoneUploadBtn.addEventListener('click', function () {
+            ringtoneInput.click();
+        });
+
+        ringtoneInput.addEventListener('change', function (e) {
+            var file = e.target.files[0];
+            if (!file) return;
+            if (!file.type.startsWith('audio/')) {
+                if (ringtoneStatus) { ringtoneStatus.textContent = 'Please select an audio file (MP3, WAV, etc.)'; ringtoneStatus.style.color = '#f44336'; }
+                return;
+            }
+            if (file.size > 50 * 1024 * 1024) {
+                if (ringtoneStatus) { ringtoneStatus.textContent = 'File too large (max 50 MB). Try a shorter or lower-quality audio file.'; ringtoneStatus.style.color = '#f44336'; }
+                return;
+            }
+            var reader = new FileReader();
+            reader.onload = function (ev) {
+                try {
+                    var dataUrl = ev.target.result;
+                    _ringtoneCachedUrl = dataUrl;
+                    _ringtoneCachedName = file.name;
+                    _idbRingtonePut('url', dataUrl).catch(function () {});
+                    _idbRingtonePut('name', file.name).catch(function () {});
+                    try { localStorage.setItem('ringtone_name', file.name); } catch (_) {}
+                    if (ringtoneFileName) { ringtoneFileName.textContent = file.name; ringtoneFileName.style.display = ''; }
+                    if (ringtoneStatus) { ringtoneStatus.textContent = 'Custom ringtone saved!'; ringtoneStatus.style.color = '#4caf50'; }
+                    setTimeout(function () { if (ringtoneStatus) ringtoneStatus.textContent = ''; }, 3000);
+                    syncRingtoneToServer(file);
+                } catch (err) {
+                    if (ringtoneStatus) { ringtoneStatus.textContent = 'Failed to save ringtone. IndexedDB may be unavailable.'; ringtoneStatus.style.color = '#f44336'; }
+                }
+            };
+            reader.readAsDataURL(file);
+            e.target.value = '';
+        });
+    }
+
+    if (ringtoneResetBtn) {
+        ringtoneResetBtn.addEventListener('click', function () {
+            _ringtoneCachedUrl = null;
+            _ringtoneCachedName = null;
+            _idbRingtoneDel('url').catch(function () {});
+            _idbRingtoneDel('name').catch(function () {});
+            try { localStorage.removeItem('ringtone_name'); } catch (_) {}
+            if (ringtoneFileName) { ringtoneFileName.style.display = 'none'; ringtoneFileName.textContent = ''; }
+            if (ringtoneStatus) { ringtoneStatus.textContent = 'Reset to default ringtone'; ringtoneStatus.style.color = '#4caf50'; }
+            setTimeout(function () { if (ringtoneStatus) ringtoneStatus.textContent = ''; }, 3000);
+            authFetch('/api/ringtone', { method: 'DELETE' }).catch(function () {});
+        });
+    }
+
+    if (ringtoneTestBtn) {
+        ringtoneTestBtn.addEventListener('click', function () {
+            if (ringtoneStatus) { ringtoneStatus.textContent = 'Playing...'; ringtoneStatus.style.color = 'var(--text-muted)'; }
+            // Play the ringtone once (non-looping) via the shared voice helper.
+            var vm = window.VoiceManager;
+            if (vm && typeof vm.testRingtone === 'function') {
+                vm.testRingtone();
+                if (ringtoneStopBtn) ringtoneStopBtn.style.display = '';
+                if (ringtoneTestBtn) ringtoneTestBtn.style.display = 'none';
+                startRingVisualizer(3500);
+            } else {
+                if (ringtoneStatus) { ringtoneStatus.textContent = 'Voice module not ready yet, try again in a moment'; ringtoneStatus.style.color = '#f44336'; }
+            }
+            setTimeout(function () { if (ringtoneStatus && ringtoneStatus.textContent === 'Playing...') ringtoneStatus.textContent = ''; }, 4000);
+        });
+    }
+
+    var ringtoneStopBtn = document.getElementById('ringtone-stop-btn');
+    if (ringtoneStopBtn) {
+        ringtoneStopBtn.addEventListener('click', function () {
+            var vm = window.VoiceManager;
+            if (vm && typeof vm.stopRingtone === 'function') vm.stopRingtone();
+            stopRingVisualizer();
+            if (ringtoneStopBtn) ringtoneStopBtn.style.display = 'none';
+            if (ringtoneTestBtn) ringtoneTestBtn.style.display = '';
+            if (ringtoneStatus) { ringtoneStatus.textContent = 'Stopped'; ringtoneStatus.style.color = '#ff9800'; }
+            setTimeout(function () { if (ringtoneStatus) ringtoneStatus.textContent = ''; }, 2000);
+        });
+    }
+
+    // Record ringtone from the microphone (mirrors notification-sound recording)
+    var ringtoneRecordBtn = document.getElementById('ringtone-record-btn');
+    var ringtoneRecordingDiv = document.getElementById('ringtone-recording');
+    var ringtoneRecordStopBtn = document.getElementById('ringtone-record-stop-btn');
+    var ringtoneRecordCancelBtn = document.getElementById('ringtone-record-cancel-btn');
+    var ringtoneRecordTimer = document.getElementById('ringtone-record-timer');
+
+    function showRingRecording(show) {
+        if (ringtoneRecordBtn) ringtoneRecordBtn.style.display = show ? 'none' : '';
+        if (ringtoneRecordingDiv) ringtoneRecordingDiv.style.display = show ? '' : 'none';
+    }
+
+    function updateRingRecordTimer() {
+        if (!_ringRecordStartTime) return;
+        var elapsed = Math.floor((Date.now() - _ringRecordStartTime) / 1000);
+        var m = Math.floor(elapsed / 60);
+        var s = elapsed % 60;
+        if (ringtoneRecordTimer) ringtoneRecordTimer.textContent = m + ':' + (s < 10 ? '0' : '') + s;
+    }
+
+    function cleanupRingRecording() {
+        if (_ringRecordTimer) { clearInterval(_ringRecordTimer); _ringRecordTimer = null; }
+        if (_ringMediaStream) { _ringMediaStream.getTracks().forEach(function(t) { t.stop(); }); _ringMediaStream = null; }
+        _ringMediaRecorder = null;
+        _ringRecordChunks = [];
+        showRingRecording(false);
+    }
+
+    function saveRingRecordedAudio(blob) {
+        var fileName = 'Ringtone.webm';
+        var file = new File([blob], fileName, { type: 'audio/webm' });
+        var reader = new FileReader();
+        reader.onload = function (ev) {
+            try {
+                _ringtoneCachedUrl = ev.target.result;
+                _ringtoneCachedName = fileName;
+                _idbRingtonePut('url', ev.target.result).catch(function () {});
+                _idbRingtonePut('name', fileName).catch(function () {});
+                try { localStorage.setItem('ringtone_name', fileName); } catch (_) {}
+                if (ringtoneFileName) { ringtoneFileName.textContent = fileName; ringtoneFileName.style.display = ''; }
+                if (ringtoneStatus) { ringtoneStatus.textContent = 'Recording saved as ringtone!'; ringtoneStatus.style.color = '#4caf50'; }
+                setTimeout(function () { if (ringtoneStatus) ringtoneStatus.textContent = ''; }, 3000);
+                syncRingtoneToServer(file);
+            } catch (err) {
+                if (ringtoneStatus) { ringtoneStatus.textContent = 'Failed to save recording.'; ringtoneStatus.style.color = '#f44336'; }
+            }
+        };
+        reader.readAsDataURL(blob);
+    }
+
+    if (ringtoneRecordBtn) {
+        ringtoneRecordBtn.addEventListener('click', function () {
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof MediaRecorder === 'undefined') {
+                if (ringtoneStatus) { ringtoneStatus.textContent = 'Recording not supported in this browser.'; ringtoneStatus.style.color = '#f44336'; }
+                return;
+            }
+            navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+                _ringMediaStream = stream;
+                _ringRecordChunks = [];
+                var mimeType = 'audio/webm;codecs=opus';
+                if (!MediaRecorder.isTypeSupported(mimeType)) {
+                    mimeType = 'audio/webm';
+                    if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = '';
+                }
+                _ringMediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType: mimeType } : {});
+                _ringMediaRecorder.ondataavailable = function (e) {
+                    if (e.data && e.data.size > 0) _ringRecordChunks.push(e.data);
+                };
+                _ringMediaRecorder.onstop = function () {
+                    var blob = new Blob(_ringRecordChunks, { type: 'audio/webm' });
+                    saveRingRecordedAudio(blob);
+                    cleanupRingRecording();
+                };
+                _ringMediaRecorder.onerror = function () {
+                    if (ringtoneStatus) { ringtoneStatus.textContent = 'Recording error occurred.'; ringtoneStatus.style.color = '#f44336'; }
+                    cleanupRingRecording();
+                };
+                _ringMediaRecorder.start();
+                _ringRecordStartTime = Date.now();
+                showRingRecording(true);
+                updateRingRecordTimer();
+                _ringRecordTimer = setInterval(updateRingRecordTimer, 200);
+                if (ringtoneStatus) ringtoneStatus.textContent = '';
+            }).catch(function (err) {
+                if (ringtoneStatus) { ringtoneStatus.textContent = 'Microphone access denied. ' + err.message; ringtoneStatus.style.color = '#f44336'; }
+            });
+        });
+    }
+
+    if (ringtoneRecordStopBtn) {
+        ringtoneRecordStopBtn.addEventListener('click', function () {
+            if (_ringMediaRecorder && _ringMediaRecorder.state !== 'inactive') {
+                _ringMediaRecorder.stop();
+            }
+        });
+    }
+
+    if (ringtoneRecordCancelBtn) {
+        ringtoneRecordCancelBtn.addEventListener('click', function () {
+            if (_ringMediaRecorder && _ringMediaRecorder.state !== 'inactive') {
+                _ringMediaRecorder.ondataavailable = null;
+                _ringMediaRecorder.onstop = null;
+                _ringMediaRecorder.stop();
+            }
+            cleanupRingRecording();
+            if (ringtoneStatus) { ringtoneStatus.textContent = 'Recording cancelled'; ringtoneStatus.style.color = 'var(--text-muted)'; }
+            setTimeout(function () { if (ringtoneStatus) ringtoneStatus.textContent = ''; }, 2000);
+        });
+    }
+
+    // Ringtone volume slider
+    var ringVolumeSlider = document.getElementById('ringtone-volume-slider');
+    var ringVolumeLabel = document.getElementById('ringtone-volume-label');
+    if (ringVolumeSlider && ringVolumeLabel) {
+        var savedRingVol = localStorage.getItem('ringtone_volume');
+        if (savedRingVol !== null) {
+            ringVolumeSlider.value = savedRingVol;
+            ringVolumeLabel.textContent = savedRingVol + '%';
+        }
+        ringVolumeSlider.addEventListener('input', function () {
+            var val = parseInt(ringVolumeSlider.value, 10);
+            ringVolumeLabel.textContent = val + '%';
+            localStorage.setItem('ringtone_volume', val);
+        });
+    }
+
     // Background-only toggle
     var bgCheckbox = document.getElementById('notif-background-only');
     if (bgCheckbox) {
@@ -1505,6 +1735,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }, 500);
     // Restore notification sound from server (syncs across devices)
     restoreNotificationSoundFromServer();
+    // Restore ringtone from server (syncs across devices)
+    restoreRingtoneFromServer();
 
     // Save unread state + last seen timestamp when page is closing or hidden,
     // so missed notifications are restored on next load.
@@ -3807,6 +4039,29 @@ function _idbNotifDel(key) {
 
 var _notifCtx = null;
 
+// --- Ringtone (DM call ring) ---
+// Reuses the same IndexedDB store as notification sounds, keyed separately.
+// The ringtone is a custom audio file the user picks in Settings → Voice;
+// it is encrypted with the identity key and synced to the server just like
+// the notification sound, so it follows the user across devices.
+var _ringtoneCachedUrl = null;
+var _ringtoneCachedName = null;
+
+function _idbRingtonePut(key, val) { return _idbNotifPut('ringtone_' + key, val); }
+function _idbRingtoneGet(key) { return _idbNotifGet('ringtone_' + key); }
+function _idbRingtoneDel(key) { return _idbNotifDel('ringtone_' + key); }
+
+// Global getter used by voice.js to fetch the ringtone data URL for looping
+// playback when a DM call rings. Resolves to a data URL or null.
+async function getRingtoneUrl() {
+    if (_ringtoneCachedUrl) return _ringtoneCachedUrl;
+    try {
+        var v = await _idbRingtoneGet('url');
+        if (v) _ringtoneCachedUrl = v;
+        return v || null;
+    } catch (e) { return null; }
+}
+
 function showNotifPlaying() {
     var stopBtn = document.getElementById('notif-sound-stop-btn');
     if (stopBtn) stopBtn.style.display = '';
@@ -3976,6 +4231,89 @@ var _notifMediaStream = null;
 var _notifRecordChunks = [];
 var _notifRecordTimer = null;
 var _notifRecordStartTime = 0;
+
+// Recording state for ringtone (mirrors notification-sound recording)
+var _ringMediaRecorder = null;
+var _ringMediaStream = null;
+var _ringRecordChunks = [];
+var _ringRecordTimer = null;
+var _ringRecordStartTime = 0;
+
+// Ringtone test visualizer (mirrors the notification-sound visualizer)
+var _ringVisTimer = null;
+var _ringVisCtx = null;
+
+function stopRingVisualizer() {
+    if (_ringVisTimer) { clearTimeout(_ringVisTimer); _ringVisTimer = null; }
+    if (_ringVisCtx) { try { _ringVisCtx.close(); } catch (e) {} _ringVisCtx = null; }
+    var canvas = document.getElementById('ringtone-visualizer');
+    if (canvas) canvas.style.display = 'none';
+    var stopBtn = document.getElementById('ringtone-stop-btn');
+    if (stopBtn) stopBtn.style.display = 'none';
+    var testBtn = document.getElementById('ringtone-test-btn');
+    if (testBtn) testBtn.style.display = '';
+}
+
+function startRingVisualizer(durationMs) {
+    var canvas = document.getElementById('ringtone-visualizer');
+    if (!canvas) return;
+    var ctx2d = canvas.getContext('2d');
+    if (!ctx2d) return;
+    if (_ringVisTimer) { clearTimeout(_ringVisTimer); _ringVisTimer = null; }
+    if (_ringVisCtx) { try { _ringVisCtx.close(); } catch (e) {} _ringVisCtx = null; }
+
+    canvas.style.display = '';
+    canvas.width = canvas.offsetWidth || 280;
+    canvas.height = canvas.offsetHeight || 50;
+
+    var duration = durationMs || 3000;
+    var audioCtx;
+    try {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        _ringVisCtx = audioCtx;
+    } catch (e) { canvas.style.display = 'none'; return; }
+    var analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 64;
+    var bufferLength = analyser.frequencyBinCount;
+    var dataArray = new Uint8Array(bufferLength);
+
+    var osc = audioCtx.createOscillator();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(400, audioCtx.currentTime);
+    osc.frequency.linearRampToValueAtTime(2400, audioCtx.currentTime + duration / 1000);
+    osc.connect(analyser);
+    osc.start();
+    osc.stop(audioCtx.currentTime + duration / 1000 + 0.1);
+
+    var startTime = Date.now();
+    function draw() {
+        var elapsed = Date.now() - startTime;
+        if (elapsed > duration) {
+            audioCtx.close();
+            canvas.style.display = 'none';
+            _ringVisTimer = null;
+            var stopBtn = document.getElementById('ringtone-stop-btn');
+            if (stopBtn) stopBtn.style.display = 'none';
+            var testBtn = document.getElementById('ringtone-test-btn');
+            if (testBtn) testBtn.style.display = '';
+            return;
+        }
+        _ringVisTimer = setTimeout(draw, 50);
+        analyser.getByteFrequencyData(dataArray);
+        ctx2d.clearRect(0, 0, canvas.width, canvas.height);
+        var barWidth = Math.max(2, (canvas.width / bufferLength) - 2);
+        var gap = 2;
+        var fade = Math.min(1, elapsed / 200);
+        for (var i = 0; i < bufferLength; i++) {
+            var pct = dataArray[i] / 255;
+            var barHeight = Math.max(1, pct * canvas.height * fade);
+            var hue = 200 + (1 - pct) * 100;
+            ctx2d.fillStyle = 'hsla(' + hue + ', 80%, 60%, 0.85)';
+            ctx2d.fillRect(i * (barWidth + gap), canvas.height - barHeight, barWidth, barHeight);
+        }
+    }
+    draw();
+}
 
 function getNotifVolume() {
     try {
@@ -4308,6 +4646,92 @@ async function restoreNotificationSoundFromServer() {
         });
     } catch (e) {
         console.warn('Failed to restore notification sound from server:', e);
+    }
+}
+
+// --- Ringtone Server Sync (same encrypted pattern as notification sound) ---
+
+async function syncRingtoneToServer(file) {
+    try {
+        var arrayBuffer = await file.arrayBuffer();
+        var soundBytes = new Uint8Array(arrayBuffer);
+        var identity = E2ECrypto.getIdentityKeyPair();
+        if (!identity) {
+            var statusEl = document.getElementById('ringtone-status');
+            if (statusEl) { statusEl.textContent = 'Encryption keys not ready, ringtone not synced to server'; statusEl.style.color = '#f44336'; }
+            return;
+        }
+        var rawFileName = file.name || 'ringtone.mp3';
+        var fileNameKey = new Uint8Array(sodium.crypto_hash_sha256(identity.publicKey));
+        var encFileNameData = E2ECrypto.aeadEncrypt(rawFileName, fileNameKey);
+        var encrypted = E2ECrypto.envelopeEncrypt(soundBytes, identity.publicKey, identity.privateKey);
+        var uploadRes = await authFetch('/api/ringtone', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                encrypted_sound: encrypted.ciphertext,
+                nonce: encrypted.nonce,
+                sender_public_key: E2ECrypto.arrayBufferToBase64(identity.publicKey),
+                encrypted_file_name: encFileNameData.ciphertext,
+                file_name_nonce: encFileNameData.nonce,
+            }),
+        });
+        if (!uploadRes.ok) {
+            var statusEl = document.getElementById('ringtone-status');
+            if (statusEl) { statusEl.textContent = 'Server sync failed, ringtone may not persist across refresh'; statusEl.style.color = '#f44336'; }
+        }
+    } catch (e) {
+        console.warn('Failed to sync ringtone:', e);
+    }
+}
+
+async function restoreRingtoneFromServer() {
+    try {
+        var res = await authFetch('/api/ringtone');
+        if (!res.ok) return;
+        var data = await res.json();
+        if (!data.encrypted_sound || !data.nonce || !data.sender_public_key) return;
+        var identity = E2ECrypto.getIdentityKeyPair();
+        if (!identity) return;
+        var decryptedBytes = E2ECrypto.envelopeDecrypt(
+            data.encrypted_sound,
+            identity.privateKey,
+            new Uint8Array(E2ECrypto.base64ToArrayBuffer(data.sender_public_key)),
+            data.nonce
+        );
+        if (!decryptedBytes || decryptedBytes.length === 0) return;
+        var blob = new Blob([decryptedBytes]);
+        return new Promise(function (resolve) {
+            var reader = new FileReader();
+            reader.onload = function (ev) {
+                var dataUrl = ev.target.result;
+                _ringtoneCachedUrl = dataUrl;
+                _idbRingtonePut('url', dataUrl).catch(function () {});
+                var displayName = null;
+                if (data.encrypted_file_name && data.file_name_nonce && identity) {
+                    try {
+                        var fileNameKey = new Uint8Array(sodium.crypto_hash_sha256(identity.publicKey));
+                        var decRaw = E2ECrypto.aeadDecrypt(data.encrypted_file_name, fileNameKey, data.file_name_nonce);
+                        if (decRaw) displayName = new TextDecoder().decode(decRaw);
+                    } catch (_) {}
+                }
+                if (displayName) {
+                    _ringtoneCachedName = displayName;
+                    _idbRingtonePut('name', displayName).catch(function () {});
+                    try { localStorage.setItem('ringtone_name', displayName); } catch (_) {}
+                }
+                var fileNameEl = document.getElementById('ringtone-file-name');
+                if (fileNameEl && displayName) {
+                    fileNameEl.textContent = displayName;
+                    fileNameEl.style.display = '';
+                }
+                resolve();
+            };
+            reader.onerror = function () { resolve(); };
+            reader.readAsDataURL(blob);
+        });
+    } catch (e) {
+        console.warn('Failed to restore ringtone from server:', e);
     }
 }
 
@@ -6780,7 +7204,15 @@ function renderServerList() {
         }
         div.title = displayName;
         div.dataset.id = s.id;
-        div.addEventListener('click', () => selectServer(s.id));
+        div.addEventListener('click', (e) => {
+            // A real user click on a server dismisses the voice channel view
+            // overlay immediately (synthetic clicks from list re-renders —
+            // isTrusted false — never close it).
+            if (e.isTrusted && window.VoiceManager && window.VoiceManager.exitVoiceChannelView) {
+                try { window.VoiceManager.exitVoiceChannelView(); } catch (_) {}
+            }
+            selectServer(s.id);
+        });
         div.addEventListener('contextmenu', function (e) {
             e.preventDefault();
             showServerContextMenu(e, s.id, s.name);
@@ -6798,6 +7230,7 @@ async function selectServer(serverId) {
     currentDmOtherUser = null;
     currentServerId = serverId;
     currentChannelId = null;
+    updateDmWaitingBanner();
     document.getElementById('dm-strip-btn').classList.remove('active');
     document.querySelectorAll('.dm-item').forEach(el => el.classList.remove('active'));
 
@@ -6957,7 +7390,16 @@ async function loadChannels(serverId) {
                     }
                 });
             } else {
-                div.addEventListener('click', () => selectChannel(ch.id, chDisplayName, div));
+                div.addEventListener('click', (e) => {
+                    // A real user click on a channel dismisses the voice
+                    // channel view overlay immediately (synthetic clicks from
+                    // list auto-selects — isTrusted false — never close it,
+                    // so popup-close can't race with channel-list renders).
+                    if (e.isTrusted && window.VoiceManager && window.VoiceManager.exitVoiceChannelView) {
+                        try { window.VoiceManager.exitVoiceChannelView(); } catch (_) {}
+                    }
+                    selectChannel(ch.id, chDisplayName, div);
+                });
             }
             const nameSpan = document.createElement('span');
             nameSpan.textContent = (isVoice ? '\ud83d\udd0a ' : '# ') + chDisplayName;
@@ -9492,6 +9934,12 @@ async function loadDmConversations() {
         updateDmStripBadge();
         saveMentionState();
     }
+    // The DM list carries the server-persisted DM-call waiting state — sync it
+    // into VoiceManager so the waiting banner survives page refreshes.
+    if (window.VoiceManager && VoiceManager.syncWaitingCalls) {
+        VoiceManager.syncWaitingCalls();
+    }
+    updateDmWaitingBanner();
     // After DMs are loaded, broadcast our profile keys to all DM conversations
     broadcastProfileKeySyncToAllDms();
     // Pre-fetch identity keys for all conversations that lack them, so fetchDmConversationProfile
@@ -9650,12 +10098,16 @@ function renderDmSidebar() {
             }
         }
         var streamerMode = localStorage.getItem('streamerMode') === 'true';
+        // Show a small waiting indicator on DMs with a persisted waiting call.
+        var _wc = (window.VoiceManager && VoiceManager.getWaitingCall) ? VoiceManager.getWaitingCall(c.dm_channel_id) : null;
+        var waitingBadge = _wc ? '<span class="dm-waiting-dot" title="Call waiting">&#128222;</span>' : '';
         html += '<div class="channel-item dm-item" data-dm-id="' + c.dm_channel_id + '" data-user-id="' + escapeAttr(c.other_user_id) + '" data-username="' + escapeAttr(c.other_username) + '">' +
             '<div class="dm-avatar' + (dmPicCacheKey ? ' profile-pic-target' : '') + '"' + (dmPicCacheKey ? ' data-profile-pic-load="' + dmPicCacheKey + '"' : '') + '>' + dmAvatarHtml + '</div>' +
             '<div class="dm-info">' +
                 '<div class="dm-name' + (dmColor ? ' has-glow' : '') + '"' + (dmColor ? ' style="color:' + dmColor + ';text-shadow:' + getDisplayNameTextShadow(dmColor, dmBorderColor) + '"' : '') + '>' + escapeHtml(displayName) + '</div>' +
                 '<div class="dm-preview' + (streamerMode ? ' streamer-hidden-preview' : '') + '">' + escapeHtml(preview) + '</div>' +
             '</div>' +
+            waitingBadge +
             (unreadDms[c.dm_channel_id] ? '<span class="badge"></span>' : '') +
             '</div>';
     }
@@ -9664,7 +10116,12 @@ function renderDmSidebar() {
 
     // Event delegation for DM items
     document.querySelectorAll('.dm-item[data-dm-id]').forEach(item => {
-        item.addEventListener('click', () => {
+        item.addEventListener('click', (e) => {
+            // A real user click on a DM dismisses the voice channel view
+            // overlay immediately (synthetic re-render clicks never close it).
+            if (e.isTrusted && window.VoiceManager && window.VoiceManager.exitVoiceChannelView) {
+                try { window.VoiceManager.exitVoiceChannelView(); } catch (_) {}
+            }
             selectDmChannel(item.dataset.dmId, item.dataset.userId, item.dataset.username, item);
         });
         // Right-click context menu for mute/unmute
@@ -9762,7 +10219,68 @@ async function selectDmChannel(dmChannelId, otherUserId, otherUsername, element)
     var newDmEl = document.querySelector('.dm-item[data-dm-id="' + dmChannelId + '"]');
     if (newDmEl) newDmEl.classList.add('active');
 
+    updateDmWaitingBanner();
+
     if (window._closeSidebar) window._closeSidebar();
+}
+
+// DMs whose waiting banner the user dismissed this session (they can still
+// rejoin via the header call button or by reloading).
+var _dismissedWaiting = {};
+
+// Persistent DM-call waiting banner: shows in the DM chat when someone is
+// waiting in a call for this conversation. Reads the server-persisted waiting
+// state (survives page refreshes) via VoiceManager.syncWaitingCalls().
+function updateDmWaitingBanner() {
+    var banner = document.getElementById('dm-waiting-banner');
+    if (!banner) return;
+    var vm = window.VoiceManager;
+    if (!vm || !currentDmChannelId || viewMode !== 'dms') {
+        banner.style.display = 'none';
+        return;
+    }
+    var wc = vm.getWaitingCall ? vm.getWaitingCall(currentDmChannelId) : null;
+    if (!wc) {
+        delete _dismissedWaiting[currentDmChannelId];
+        banner.style.display = 'none';
+        return;
+    }
+    // User dismissed this banner for this DM — keep it hidden until the
+    // waiting state actually clears. Keyed by channel + waiting user so a
+    // transition to a different waiting person (e.g. they leave and the record
+    // flips to the remaining side) shows the banner again instead of being
+    // wrongly suppressed by a stale dismissal.
+    var dismissKey = currentDmChannelId + '|' + (wc.waitingUserId || '');
+    if (_dismissedWaiting[dismissKey]) {
+        banner.style.display = 'none';
+        return;
+    }
+    var isMe = wc.waitingUserId && user && wc.waitingUserId === user.id;
+    var otherName = wc.waitingUsername || (currentDmOtherUser && currentDmOtherUser.username) || 'the other person';
+    var text = document.getElementById('dm-waiting-text');
+    var joinBtn = document.getElementById('dm-waiting-join-btn');
+    if (isMe) {
+        if (text) text.textContent = 'Waiting for ' + otherName + ' to join the call…';
+        if (joinBtn) joinBtn.textContent = 'Rejoin Call';
+    } else {
+        if (text) text.textContent = otherName + ' is waiting for you to join the call';
+        if (joinBtn) joinBtn.textContent = 'Join Call';
+    }
+    banner.style.display = 'flex';
+    if (joinBtn) {
+        joinBtn.onclick = function () {
+            if (!vm.joinWaitingCall || !currentDmOtherUser) return;
+            vm.joinWaitingCall(currentDmChannelId, currentDmOtherUser.id, currentDmOtherUser.username || otherName);
+            banner.style.display = 'none';
+        };
+    }
+    var closeBtn = document.getElementById('dm-waiting-close-btn');
+    if (closeBtn) {
+        closeBtn.onclick = function () {
+            _dismissedWaiting[dismissKey] = true;
+            banner.style.display = 'none';
+        };
+    }
 }
 
 async function loadDmMessages(dmChannelId, otherUserId) {

@@ -610,6 +610,84 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     overflow: hidden;
 }
 
+/* Persistent DM-call waiting banner (shows in the DM chat when someone is
+   waiting in a call for you — survives page refreshes). */
+.dm-waiting-banner {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    margin: 10px 14px 0;
+    border-radius: 8px;
+    background: linear-gradient(135deg, rgba(240, 178, 50, 0.14), rgba(240, 178, 50, 0.05));
+    border: 1px solid rgba(240, 178, 50, 0.4);
+    color: var(--text-primary);
+    font-size: 13px;
+    animation: incoming-wait-pulse 2s ease-in-out infinite;
+}
+.dm-waiting-icon {
+    font-size: 16px;
+    flex-shrink: 0;
+}
+.dm-waiting-text {
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.dm-waiting-join {
+    flex-shrink: 0;
+    padding: 5px 14px;
+    border: none;
+    border-radius: 6px;
+    background: #f0b232;
+    color: #1a1a2e;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: filter 0.15s ease, transform 0.1s ease;
+}
+.dm-waiting-join:hover {
+    filter: brightness(1.1);
+}
+.dm-waiting-join:active {
+    transform: scale(0.96);
+}
+.dm-waiting-close {
+    flex-shrink: 0;
+    width: 24px;
+    height: 24px;
+    border: none;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-secondary, #b8b8c8);
+    font-size: 12px;
+    line-height: 1;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s ease, color 0.15s ease, transform 0.1s ease;
+}
+.dm-waiting-close:hover {
+    background: rgba(255, 255, 255, 0.18);
+    color: #fff;
+}
+.dm-waiting-close:active {
+    transform: scale(0.9);
+}
+
+/* Small phone badge on DM sidebar items with a waiting call */
+.dm-waiting-dot {
+    margin-left: auto;
+    align-self: center;
+    font-size: 13px;
+    color: #f0b232;
+    flex-shrink: 0;
+    animation: incoming-wait-pulse 2s ease-in-out infinite;
+}
+
 .members-panel {
     position: absolute;
     top: 0;
@@ -6268,11 +6346,11 @@ body.streamer-mode .dm-avatar:hover {
    Voice channels & DM calls (WebRTC + E2EE)
    ===================================================================== */
 
-/* ---- Voice bar (bottom-left; hidden while viewing the voice channel) ---- */
+/* ---- Voice bar (top-left; hidden while viewing the voice channel) ---- */
 .voice-bar {
     position: fixed;
     left: calc(clamp(48px, 8vw, 72px) + clamp(180px, 22vw, 300px));
-    bottom: 12px;
+    top: 12px;
     z-index: 900;
     display: flex;
     flex-direction: column;
@@ -6285,6 +6363,19 @@ body.streamer-mode .dm-avatar:hover {
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
     font-size: 13px;
     color: var(--text-primary, #e0e0e0);
+    /* Draggable: grab anywhere except the control buttons */
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
+}
+.voice-bar.dragging {
+    cursor: grabbing;
+    opacity: 0.9;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
+}
+.voice-bar button,
+.voice-bar .voice-bar-btn {
+    cursor: pointer;
 }
 .voice-bar-top {
     display: flex;
@@ -6324,19 +6415,23 @@ body.streamer-mode .dm-avatar:hover {
 .voice-bar-btn.voice-bar-leave { background: #3a1622; color: #ff6b6b; }
 .voice-bar-btn.voice-bar-leave:hover { background: #4d1c2c; }
 
-/* ---- Server voice popup (covers the text area) ----
-   The text area starts after the server strip (clamp 48-72px) + the channel
-   sidebar (clamp 180-300px), so mirror that instead of a hardcoded 240px. */
+/* ---- Server voice channel view: its own channel view covering the whole
+   chat column (the channel name header and the text input space included).
+   syncOverlayBounds sets top/bottom inline to stretch it exactly from the
+   top of the column to the bottom; left mirrors the text area start (after
+   the server strip + channel sidebar) instead of a hardcoded 240px. ---- */
 .voice-popup {
     position: fixed;
-    top: 56px;
+    top: 0;
     left: calc(clamp(48px, 8vw, 72px) + clamp(180px, 22vw, 300px));
     right: 0;
     bottom: 0;
+    height: auto;
     z-index: 890;
     flex-direction: column;
-    background: rgba(16, 16, 30, 0.96);
-    border-left: 1px solid var(--bg-border, #2a2a4a);
+    background: var(--bg-primary, #10101e);
+    border-radius: 0;
+    box-shadow: none;
     padding: 16px;
     gap: 12px;
     overflow-y: auto;
@@ -6349,6 +6444,18 @@ body.streamer-mode .dm-avatar:hover {
     border-bottom: 1px solid var(--bg-border, #2a2a4a);
 }
 .voice-popup-title { font-size: 16px; font-weight: 700; color: var(--accent, #4fc3f7); }
+.voice-popup-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+}
+.voice-popup-fullscreen {
+    background: none; border: none; color: var(--text-muted, #888);
+    font-size: 15px; cursor: pointer; line-height: 1; padding: 2px 5px;
+    border-radius: 6px;
+}
+.voice-popup-fullscreen:hover { color: #fff; background: rgba(255, 255, 255, 0.08); }
 .voice-popup-close {
     background: none; border: none; color: var(--text-muted, #888);
     font-size: 22px; cursor: pointer; line-height: 1;
@@ -6382,8 +6489,10 @@ body.streamer-mode .dm-avatar:hover {
     display: flex;
     align-items: center;
     gap: 10px;
+    /* Fixed width so the camera/screen media column starts at the same x for
+       every member row, regardless of display-name length. */
+    flex: 0 0 clamp(140px, 18vw, 190px);
     min-width: 0;
-    flex-shrink: 0;
 }
 .voice-member-avatar {
     width: 40px; height: 40px;
@@ -6508,24 +6617,64 @@ body.streamer-mode .dm-avatar:hover {
     object-fit: contain;
 }
 
-/* ---- DM call panel (covers bottom half of the text area) ---- */
+/* ---- DM call panel (its own view at the TOP of the text area, below the
+   chat header — the chat stays visible underneath; expanded covers the
+   whole chat column including the header) ---- */
 .dm-call-panel {
     position: fixed;
     left: calc(clamp(48px, 8vw, 72px) + clamp(180px, 22vw, 300px));
     right: 0;
-    bottom: 0;
+    top: 56px;
+    bottom: auto;
     height: 52vh;
     z-index: 880;
     flex-direction: column;
     background: var(--bg-secondary, #232338);
-    border-top: 1px solid var(--bg-border, #2a2a4a);
-    box-shadow: 0 -6px 24px rgba(0, 0, 0, 0.4);
+    border-bottom: 1px solid var(--bg-border, #2a2a4a);
+    border-radius: 0 0 14px 14px;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
 }
 .dm-call-header {
     padding: 8px 14px;
     font-size: 14px;
     color: var(--text-primary, #e0e0e0);
     border-bottom: 1px solid var(--bg-border, #2a2a4a);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+.dm-call-header-title {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.dm-call-expand {
+    background: none;
+    border: none;
+    color: var(--text-muted, #888);
+    font-size: 15px;
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 6px;
+    line-height: 1;
+    flex-shrink: 0;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+.dm-call-expand:hover { color: #fff; background: rgba(255, 255, 255, 0.08); }
+/* Expanded DM call + fullscreen voice view: cover the ENTIRE viewport
+   (left/top/bottom are set inline by syncOverlayBounds) so you see only the
+   call — handy on phones to watch your own camera + screen and the other
+   person's at the same time. z-index puts them above the server strip +
+   sidebar (but below settings/incoming-call overlays). */
+.dm-call-panel.expanded,
+.voice-popup.fullscreen {
+    height: auto !important;
+    border-radius: 0;
+    box-shadow: none;
+    border-bottom: none;
+    z-index: 2000;
 }
 .dm-call-body {
     flex: 1;
@@ -6592,7 +6741,10 @@ body.streamer-mode .dm-avatar:hover {
 
 /* Fullscreen media wrapper — a DIV is the fullscreen element (not the
    <video>), so Chrome never overlays its native playback controls
-   (play/pause, timeline, volume) on the live feed. */
+   (play/pause, timeline, volume) on the live feed. The video must fill the
+   wrapper: beat the tile rules below (`.voice-member-media .remote-video-tile`
+   sets width:auto / max-width:46% / max-height caps, which previously kept
+   the feed stuck small in the middle of a black screen). */
 .voice-fs-wrap {
     position: fixed;
     inset: 0;
@@ -6602,9 +6754,13 @@ body.streamer-mode .dm-avatar:hover {
     align-items: center;
     justify-content: center;
 }
-.voice-fs-wrap video {
-    width: 100%;
-    height: 100%;
+.voice-fs-wrap video,
+.voice-fs-wrap video.remote-video-tile,
+.voice-fs-wrap video.voice-self-video {
+    width: 100% !important;
+    height: 100% !important;
+    max-width: none !important;
+    max-height: none !important;
     object-fit: contain;
     background: #000;
     cursor: pointer;
@@ -6644,11 +6800,11 @@ body.streamer-mode .dm-avatar:hover {
 .dm-call-btn.dm-call-end { background: #3a1622; color: #ff6b6b; }
 .dm-call-btn.dm-call-end:hover { background: #4d1c2c; }
 
-/* ---- DM mini bar (persists when switching chats) ---- */
+/* ---- DM mini bar (persists when switching chats; top-anchored, draggable) ---- */
 .dm-mini-bar {
     position: fixed;
     left: calc(clamp(48px, 8vw, 72px) + clamp(180px, 22vw, 300px));
-    bottom: 12px;
+    top: 12px;
     z-index: 900;
     display: flex;
     align-items: center;
@@ -6658,6 +6814,18 @@ body.streamer-mode .dm-avatar:hover {
     border: 1px solid var(--bg-border, #2a2a4a);
     border-radius: 10px;
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    /* Draggable: grab anywhere except the control buttons */
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
+}
+.dm-mini-bar.dragging {
+    cursor: grabbing;
+    opacity: 0.9;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
+}
+.dm-mini-bar button {
+    cursor: pointer;
 }
 .dm-mini-bar-body {
     background: none; border: none; color: var(--accent, #4fc3f7);
@@ -6688,6 +6856,24 @@ body.streamer-mode .dm-avatar:hover {
 }
 .incoming-call-btn.accept { background: #23a55a; color: #fff; }
 .incoming-call-btn.decline { background: #da373c; color: #fff; }
+/* Waiting state: caller rang for 30s without an answer — the bar persists
+   so the callee can still join the call manually. Amber tint + soft pulse. */
+.incoming-call-bar.waiting {
+    border-color: #f0b232;
+    background: var(--bg-secondary, #232338);
+    animation: incoming-wait-pulse 1.6s ease-in-out infinite;
+}
+.incoming-call-bar.waiting .incoming-call-name::before {
+    content: '⏳ ';
+}
+.incoming-call-bar.waiting .incoming-call-btn.accept {
+    background: #f0b232;
+    color: #1a1a2e;
+}
+@keyframes incoming-wait-pulse {
+    0%, 100% { box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5); }
+    50% { box-shadow: 0 6px 24px rgba(240, 178, 50, 0.35); }
+}
 
 /* ---- Per-member volume menu ---- */
 .volume-menu {

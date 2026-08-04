@@ -291,6 +291,7 @@ async fn main() {
         .route("/api/friend-code/regen-with-password", post(handlers::regen_friend_code_with_password))
         .route("/api/friends", get(handlers::list_friends))
         .route("/api/notification-sound", post(handlers::upload_notification_sound).get(handlers::get_notification_sound).delete(handlers::delete_notification_sound))
+        .route("/api/ringtone", post(handlers::upload_ringtone).get(handlers::get_ringtone).delete(handlers::delete_ringtone))
         .route("/api/friends/remove", post(handlers::remove_friend))
         .route("/api/friends/request", post(handlers::send_friend_request))
         .route("/api/friends/requests/disabled", get(handlers::get_friend_requests_disabled).post(handlers::set_friend_requests_disabled))

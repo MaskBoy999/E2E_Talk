@@ -65,6 +65,15 @@
                 <button class="server-settings-btn" id="server-settings-btn" style="display:none" title="Server Settings">&#9881;</button>
                 <button class="members-toggle" id="members-toggle" title="Members">&#9776;</button>
             </div>
+            <!-- Persistent DM-call waiting banner: shows when someone is waiting
+                 in a DM call for this chat. Survives page refreshes (the server
+                 persists the waiting state and it rides along in the DM list). -->
+            <div class="dm-waiting-banner" id="dm-waiting-banner" style="display:none">
+                <span class="dm-waiting-icon">&#128222;</span>
+                <span class="dm-waiting-text" id="dm-waiting-text">Waiting for the other person to join the call…</span>
+                <button class="dm-waiting-join" id="dm-waiting-join-btn">Join Call</button>
+                <button class="dm-waiting-close" id="dm-waiting-close-btn" title="Dismiss">&#10005;</button>
+            </div>
             <div class="chat-body">
                 <div id="message-list" class="message-list">
                     <div class="welcome">Select a server and channel to start chatting</div>
@@ -510,6 +519,7 @@
                     <p class="settings-hint">Permanently delete your account and all associated data. This cannot be undone.</p>
                     <button class="btn-delete-account" id="delete-account-btn">Delete Account</button>
                 </div>
+            </div>
 
             <!-- Voice Settings -->
             <div class="settings-panel" id="voice-settings" style="display:none">
@@ -540,7 +550,32 @@
                     </label>
                     <p class="settings-hint">Uses the browser's built-in noise suppression. Changes apply the next time your mic starts.</p>
                 </div>
-            </div>
+                <div class="settings-group">
+                    <h4>Ringtone</h4>
+                    <p class="settings-hint">Choose the sound played when someone calls you. If it is shorter than the call, it loops until you answer. Encrypted end-to-end like your notification sound, so it syncs across your devices.</p>
+                    <div class="notif-sound-controls">
+                        <input type="file" id="ringtone-input" accept="audio/*" style="display:none">
+                        <button class="btn btn-primary" id="ringtone-upload-btn">Choose Audio File</button>
+                        <button class="btn btn-secondary" id="ringtone-test-btn">Test Ringtone</button>
+                        <button class="btn btn-danger" id="ringtone-stop-btn" style="display:none">Stop</button>
+                        <button class="btn btn-secondary" id="ringtone-record-btn">🎤 Record</button>
+                        <button class="btn btn-danger" id="ringtone-reset-btn">Reset to Default</button>
+                    </div>
+                    <div id="ringtone-recording" style="display:none;margin-top:8px;padding:8px 12px;background:rgba(244,67,54,0.1);border-radius:6px;border:1px solid rgba(244,67,54,0.3);font-size:13px;color:var(--text-primary);">
+                        <span id="ringtone-record-indicator" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#f44336;margin-right:8px;animation:pulse 1s infinite;"></span>
+                        Recording... <span id="ringtone-record-timer">0:00</span>
+                        <button class="btn btn-secondary" id="ringtone-record-stop-btn" style="margin-left:12px;padding:3px 12px;font-size:12px;background:#d32f2f;color:#fff;border:none;border-radius:4px;cursor:pointer;">Stop</button>
+                        <button class="btn-cancel" id="ringtone-record-cancel-btn" style="margin-left:6px;padding:3px 12px;font-size:12px;background:transparent;color:#aaa;border:1px solid #555;border-radius:4px;cursor:pointer;">Cancel</button>
+                    </div>
+                    <p class="notif-sound-file-name" id="ringtone-file-name" style="display:none;margin-top:8px;"></p>
+                    <p class="notif-sound-status" id="ringtone-status" style="margin-top:4px;font-size:13px;"></p>
+                    <div class="notif-volume-row" style="display:flex;align-items:center;gap:10px;margin-top:8px;font-size:13px;color:var(--text-muted)">
+                        <label for="ringtone-volume-slider">Volume:</label>
+                        <input type="range" id="ringtone-volume-slider" min="0" max="100" value="60" class="notif-volume-slider">
+                        <span id="ringtone-volume-label">60%</span>
+                    </div>
+                    <canvas class="notif-visualizer" id="ringtone-visualizer" width="280" height="50" style="display:none;margin-top:8px;border-radius:6px;"></canvas>
+                </div>
             </div>
 
             <div class="modal-actions">
@@ -921,11 +956,14 @@
         </div>
     </div>
 
-    <!-- Server voice popup (covers the text area; member list + controls) -->
+    <!-- Server voice channel view (top panel in the text area; member list + controls) -->
     <div class="voice-popup" id="voice-popup" style="display:none">
         <div class="voice-popup-header">
             <span class="voice-popup-title">&#128266; <span id="voice-popup-name">Voice Channel</span></span>
-            <button class="voice-popup-close" id="voice-popup-close" title="Close">&times;</button>
+            <div class="voice-popup-actions">
+                <button class="voice-popup-fullscreen" id="voice-popup-fullscreen" title="Full screen">&#8645;</button>
+                <button class="voice-popup-close" id="voice-popup-close" title="Close">&times;</button>
+            </div>
         </div>
         <div class="voice-popup-members" id="voice-popup-members"></div>
         <div class="voice-popup-controls">
@@ -948,10 +986,12 @@
         </div>
     </div>
 
-    <!-- DM call panel (covers bottom half of the text area while in that DM) -->
+    <!-- DM call panel (top panel of the text area while in that DM; the
+         &#8645; button expands it to cover the WHOLE screen) -->
     <div class="dm-call-panel" id="dm-call-panel" style="display:none">
         <div class="dm-call-header">
-            <span>&#128222; In call with <b id="dm-call-name">…</b></span>
+            <span class="dm-call-header-title">&#128222; In call with <b id="dm-call-name">…</b></span>
+            <button class="dm-call-expand" id="dm-call-expand" title="Expand to full screen">&#8645;</button>
         </div>
         <div class="dm-call-body" id="dm-call-body"></div>
         <div class="dm-call-self" id="dm-call-self"></div>
