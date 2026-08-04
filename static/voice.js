@@ -2083,6 +2083,9 @@
     function showPopup() {
         var pop = el('voice-popup');
         if (!pop) return;
+        // Always start in non-fullscreen when opening the popup
+        S.voiceFullscreen = false;
+        try { localStorage.removeItem('voice_fullscreen'); } catch (_) {}
         applyVoiceFullscreen();
         syncOverlayBounds();
         S.popupOpen = true;
