@@ -1435,11 +1435,19 @@ async fn voice_remove_from_room(state: &Arc<AppState>, room_id: &str, user_id: &
     }
 
     if empty {
-        // Room gone — everyone else already left. If this was an explicit
-        // leave (not a refresh/disconnect), the call is abandoned — clear any
-        // persisted DM waiting state so no stale banner lingers.
-        if is_dm && clear_waiting_on_empty {
+        // Room gone — everyone left. Always clear persisted DM waiting state
+        // so no stale banner lingers (nobody is waiting if the room is empty).
+        if is_dm {
             let _ = state.db.clear_dm_call_waiting(&dm_channel_id);
+            // Notify any remaining online members that the call ended.
+            if let Ok(members) = state.db.get_dm_members(&dm_channel_id) {
+                let others: Vec<String> = members.into_iter().filter(|m| m != user_id).collect();
+                let msg = serde_json::json!({
+                    "type": "dm_call_end",
+                    "dm_channel_id": dm_channel_id,
+                });
+                state.ws_manager.broadcast_to_users(&others, &msg.to_string()).await;
+            }
         }
         return;
     }
@@ -1779,20 +1787,23 @@ async fn handle_dm_call_end(
         Ok(m) => m,
         Err(_) => return,
     };
+    let reason = parsed.get("reason").and_then(|r| r.as_str()).unwrap_or("ended").to_string();
     let end = serde_json::json!({
         "type": "dm_call_end",
         "dm_channel_id": dm_channel_id,
-        "reason": "ended",
+        "reason": reason,
     });
     let others: Vec<String> = members.into_iter().filter(|m| m != user_id).collect();
     state.ws_manager.broadcast_to_users(&others, &end.to_string()).await;
 
-    // The call is over — clear any persisted waiting state.
-    let _ = state.db.clear_dm_call_waiting(&dm_channel_id);
-
-    // Also remove both sides from any DM voice room
-    let room_id = voice_room_id("dm", "", &dm_channel_id);
-    voice_remove_from_room(state, &room_id, user_id, true).await;
+    // When the callee declines, place the caller in the persisted waiting state
+    // (same as the 30s timeout) so the waiting indicator survives refreshes and
+    // the caller can re-initiate the call.
+    if reason == "declined" {
+        if let Some(caller_id) = others.first() {
+            let _ = state.db.set_dm_call_waiting(&dm_channel_id, caller_id);
+        }
+    }
 }
 
 /// Remove a user from every voice room (called on WS disconnect).
@@ -1809,8 +1820,6 @@ pub async fn voice_remove_user_all(state: &Arc<AppState>, user_id: &str) {
             .collect()
     };
     for rid in room_ids {
-        // Disconnect (page refresh) must NOT clear the persisted waiting state —
-        // the waiting indicator survives refreshes so both sides can rejoin.
         voice_remove_from_room(state, &rid, user_id, false).await;
     }
 }

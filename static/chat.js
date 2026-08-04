@@ -805,7 +805,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // left, etc.).
     document.addEventListener('voice-waiting-changed', function () {
         updateDmWaitingBanner();
-        if (viewMode === 'dms') renderDmSidebar();
+        renderDmSidebar();
     });
 
     // Auto-recover identity keys if they're missing (e.g. after secure-storage
@@ -10286,6 +10286,12 @@ function updateDmWaitingBanner() {
 async function loadDmMessages(dmChannelId, otherUserId) {
     // Clean up old blob URLs when switching DM channels
     revokeBlobUrls();
+    // Re-sync DM-call waiting state from the conversation list so the
+    // waiting banner persists across leave/rejoin and page refreshes.
+    if (window.VoiceManager && VoiceManager.syncWaitingCalls) {
+        VoiceManager.syncWaitingCalls();
+    }
+    updateDmWaitingBanner();
     const list = document.getElementById('message-list');
     list.innerHTML = '<div class="welcome">Loading messages...</div>';
 

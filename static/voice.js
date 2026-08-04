@@ -512,13 +512,6 @@
         var wasDm = S.roomType === 'dm';
         if (S.connected || S.roomType) {
             send({ type: 'voice_leave', room_type: S.roomType || 'server', channel_id: S.channelId || '', dm_channel_id: S.dmChannelId || '' });
-            if (wasDm) {
-                // Leaving a DM call does NOT close it for the other side — the
-                // server broadcasts dm_call_waiting so they flip to the waiting
-                // state and we can rejoin (Discord-style). Only the explicit
-                // decline/busy paths send dm_call_end.
-                if (S.dmChannelId) send({ type: 'dm_call_waiting', dm_channel_id: S.dmChannelId });
-            }
         }
         teardownRoom();
         if (wasDm) playSound('leave');
@@ -1475,7 +1468,7 @@
 
     function declineDmCall() {
         if (!S.incomingCall) return;
-        send({ type: 'dm_call_end', dm_channel_id: S.incomingCall.dmChannelId });
+        send({ type: 'dm_call_end', dm_channel_id: S.incomingCall.dmChannelId, reason: 'declined' });
         S.incomingCall = null;
         hideIncomingCall();
         clearCalleeRingTimer();
@@ -1559,6 +1552,16 @@
                 waitingUserId: data.caller_id,
                 waitingUsername: data.caller_username || S.incomingCall.callerUsername || '',
             };
+            // Keep dmConversations in sync so syncWaitingCalls() doesn't wipe
+            // this state on the next navigation/reconnect.
+            if (typeof dmConversations !== 'undefined' && dmConversations) {
+                dmConversations.forEach(function (c) {
+                    if (c && c.dm_channel_id === data.dm_channel_id) {
+                        c.waiting_user_id = data.caller_id;
+                        c.waiting_username = data.caller_username || S.incomingCall.callerUsername || '';
+                    }
+                });
+            }
             notifyWaitingChanged();
             return;
         }
@@ -1584,41 +1587,97 @@
                 waitingUserId: getSelfId(),
                 waitingUsername: '',
             };
+            // Keep dmConversations in sync so syncWaitingCalls() doesn't wipe
+            // this state on the next navigation/reconnect.
+            if (typeof dmConversations !== 'undefined' && dmConversations) {
+                dmConversations.forEach(function (c) {
+                    if (c && c.dm_channel_id === data.dm_channel_id) {
+                        c.waiting_user_id = getSelfId();
+                        c.waiting_username = '';
+                    }
+                });
+            }
             notifyWaitingChanged();
             updateDmCallUI();
             // Toast only on the transition into waiting (leaveVoice also sends
             // dm_call_waiting, so a duplicate may arrive — avoid double toasts).
             if (!wasWaiting) showToast('Call partner left — waiting for them to rejoin…');
         }
+        // Case 3: neither incoming bar nor active call — we dismissed or
+        // navigated away. Still update dmConversations so the persisted
+        // waiting state is available when we return to this DM.
+        S.waitingCalls[data.dm_channel_id] = {
+            waitingUserId: data.caller_id,
+            waitingUsername: data.caller_username || '',
+        };
+        if (typeof dmConversations !== 'undefined' && dmConversations) {
+            dmConversations.forEach(function (c) {
+                if (c && c.dm_channel_id === data.dm_channel_id) {
+                    c.waiting_user_id = data.caller_id;
+                    c.waiting_username = data.caller_username || '';
+                }
+            });
+        }
+        notifyWaitingChanged();
     }
 
     function handleDmCallEnd(data) {
+        var isDecline = data.reason === 'declined';
         if (S.incomingCall && S.incomingCall.dmChannelId === data.dm_channel_id) {
             S.incomingCall = null;
             hideIncomingCall();
             clearCalleeRingTimer();
             stopRingtone();
-            showToast('Call ended.');
+            showToast(isDecline ? 'Call declined.' : 'Call ended.');
             playSound('leave');
         }
         if (S.dmCallActive && S.dmChannelId === data.dm_channel_id) {
-            // Other side hung up or the call was cancelled
             var wasConnected = S.connected;
             clearRingTimer();
             clearCalleeRingTimer();
             stopRingtone();
-            teardownRoom();
-            hideBar();
-            hidePopup();
-            hideDmPanel();
-            hideMiniBar();
-            if (wasConnected) playSound('leave');
-            showToast('Call ended.');
-        }
-        // Remove any persisted waiting marker for this channel.
-        if (S.waitingCalls[data.dm_channel_id]) {
-            delete S.waitingCalls[data.dm_channel_id];
-            notifyWaitingChanged();
+            if (isDecline) {
+                // Callee declined — place caller in waiting state (same as 30s
+                // timeout) so they can call again. Don't tear down the room.
+                S.callWaiting = true;
+                S.dmCallAnswered = false;
+                S.waitingCalls[data.dm_channel_id] = {
+                    waitingUserId: getSelfId(),
+                    waitingUsername: '',
+                };
+                if (typeof dmConversations !== 'undefined' && dmConversations) {
+                    dmConversations.forEach(function (c) {
+                        if (c && c.dm_channel_id === data.dm_channel_id) {
+                            c.waiting_user_id = getSelfId();
+                            c.waiting_username = '';
+                        }
+                    });
+                }
+                notifyWaitingChanged();
+                updateDmCallUI();
+                showToast('Call declined — waiting for them to join…');
+            } else {
+                teardownRoom();
+                hideBar();
+                hidePopup();
+                hideDmPanel();
+                hideMiniBar();
+                if (wasConnected) playSound('leave');
+                showToast('Call ended.');
+                // Remove any persisted waiting marker for this channel.
+                if (S.waitingCalls[data.dm_channel_id]) {
+                    delete S.waitingCalls[data.dm_channel_id];
+                    if (typeof dmConversations !== 'undefined' && dmConversations) {
+                        dmConversations.forEach(function (c) {
+                            if (c && c.dm_channel_id === data.dm_channel_id) {
+                                c.waiting_user_id = null;
+                                c.waiting_username = '';
+                            }
+                        });
+                    }
+                    notifyWaitingChanged();
+                }
+            }
         }
     }
 

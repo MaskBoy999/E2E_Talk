@@ -3014,6 +3014,21 @@ impl Database {
         Ok(())
     }
 
+    /// Clear waiting entries where a specific user is the one waiting.
+    /// Called on WS disconnect so the other side doesn't see a stale banner.
+    pub fn clear_dm_call_waiting_for_user(&self, user_id: &str) -> Result<Vec<String>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("DELETE FROM dm_call_waiting WHERE waiting_user_id = ?1 RETURNING dm_channel_id")
+            .map_err(|e| e.to_string())?;
+        let channels = stmt
+            .query_map(params![user_id], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(channels)
+    }
+
     /// Who is waiting in a DM call for this channel, if anyone.
     pub fn get_dm_call_waiting(&self, dm_channel_id: &str) -> Result<Option<String>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
