@@ -426,9 +426,8 @@ test.describe('Voice channels & DM calls', () => {
             return v && v.isConnected() && v.isInDmCall();
         }, undefined, { timeout: 15000 });
 
-        // Caller leaves the call → callee does NOT get disconnected; they flip
-        // to the waiting state so the caller can rejoin (Discord-style). Then
-        // the callee leaves to fully tear the call down.
+        // Caller leaves the call → callee enters waiting state (still in a call,
+        // waiting for the caller to rejoin). Then the callee leaves to fully end.
         await page.evaluate(() => window.VoiceManager.endDmCall());
         await page2.waitForFunction(() => {
             const v = window.VoiceManager;

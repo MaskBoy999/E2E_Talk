@@ -1435,9 +1435,11 @@ async fn voice_remove_from_room(state: &Arc<AppState>, room_id: &str, user_id: &
     }
 
     if empty {
-        // Room gone — everyone left. Always clear persisted DM waiting state
-        // so no stale banner lingers (nobody is waiting if the room is empty).
-        if is_dm {
+        // Room gone — everyone left. For an explicit leave (clear_waiting_on_empty
+        // = true) the call is abandoned: clear persisted waiting and notify
+        // remaining members.  For a WS disconnect (false) the user may reconnect
+        // so keep the persisted waiting state alive.
+        if is_dm && clear_waiting_on_empty {
             let _ = state.db.clear_dm_call_waiting(&dm_channel_id);
             // Notify any remaining online members that the call ended.
             if let Ok(members) = state.db.get_dm_members(&dm_channel_id) {
@@ -1797,11 +1799,18 @@ async fn handle_dm_call_end(
     state.ws_manager.broadcast_to_users(&others, &end.to_string()).await;
 
     // When the callee declines, place the caller in the persisted waiting state
-    // (same as the 30s timeout) so the waiting indicator survives refreshes and
-    // the caller can re-initiate the call.
+    // so the waiting indicator survives refreshes and the caller can re-initiate.
+    // Also broadcast dm_call_waiting to the CALLEE so their sidebar shows the
+    // caller is waiting.
     if reason == "declined" {
         if let Some(caller_id) = others.first() {
             let _ = state.db.set_dm_call_waiting(&dm_channel_id, caller_id);
+            let wait_msg = serde_json::json!({
+                "type": "dm_call_waiting",
+                "caller_id": caller_id,
+                "dm_channel_id": dm_channel_id,
+            });
+            send_to_user(state, user_id, &wait_msg).await;
         }
     }
 }

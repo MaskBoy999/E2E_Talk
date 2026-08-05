@@ -51,6 +51,13 @@ let currentDmOtherUser = null;
 var dmConversations = [];
 let unreadDms = {};
 let pendingFriendRequests = 0;
+
+function setDmChannelId(id) {
+    currentDmChannelId = id;
+    if (window.VoiceManager && window.VoiceManager.updateDmCallUI) {
+        window.VoiceManager.updateDmCallUI();
+    }
+}
 let isUploading = false;
 let isSendingSticker = false;
 let selectedFiles = [];
@@ -805,7 +812,12 @@ document.addEventListener('DOMContentLoaded', () => {
     // left, etc.).
     document.addEventListener('voice-waiting-changed', function () {
         updateDmWaitingBanner();
-        renderDmSidebar();
+        // Only rebuild the DM sidebar when actually in DM view. This event also
+        // fires on server voice events (e.g. being kicked from a voice channel →
+        // teardownRoom → notifyWaitingChanged); an unconditional renderDmSidebar()
+        // would overwrite #channel-list with the DM panel and destroy the server
+        // channel items, breaking re-joining the voice channel.
+        if (viewMode === 'dms') renderDmSidebar();
     });
 
     // Auto-recover identity keys if they're missing (e.g. after secure-storage
@@ -7231,6 +7243,10 @@ async function selectServer(serverId) {
     currentServerId = serverId;
     currentChannelId = null;
     updateDmWaitingBanner();
+    // Show mini bar if we're in a DM call (navigated away from DM view).
+    if (window.VoiceManager && window.VoiceManager.updateDmCallUI) {
+        window.VoiceManager.updateDmCallUI();
+    }
     document.getElementById('dm-strip-btn').classList.remove('active');
     document.querySelectorAll('.dm-item').forEach(el => el.classList.remove('active'));
 
@@ -10098,16 +10114,24 @@ function renderDmSidebar() {
             }
         }
         var streamerMode = localStorage.getItem('streamerMode') === 'true';
-        // Show a small waiting indicator on DMs with a persisted waiting call.
-        var _wc = (window.VoiceManager && VoiceManager.getWaitingCall) ? VoiceManager.getWaitingCall(c.dm_channel_id) : null;
-        var waitingBadge = _wc ? '<span class="dm-waiting-dot" title="Call waiting">&#128222;</span>' : '';
+        // Show call state indicator: calling, waiting, or connected.
+        var _callState = (window.VoiceManager && VoiceManager.getCallState) ? VoiceManager.getCallState(c.dm_channel_id) : null;
+        var _wc = (!_callState && window.VoiceManager && VoiceManager.getWaitingCall) ? VoiceManager.getWaitingCall(c.dm_channel_id) : null;
+        var callBadge = '';
+        if (_callState === 'calling') {
+            callBadge = '<span class="dm-calling-dot" title="Calling…">&#128222;</span>';
+        } else if (_callState === 'waiting' || _wc) {
+            callBadge = '<span class="dm-waiting-dot" title="Call waiting">&#128222;</span>';
+        } else if (_callState === 'connected') {
+            callBadge = '<span class="dm-connected-dot" title="In call">&#127908;</span>';
+        }
         html += '<div class="channel-item dm-item" data-dm-id="' + c.dm_channel_id + '" data-user-id="' + escapeAttr(c.other_user_id) + '" data-username="' + escapeAttr(c.other_username) + '">' +
             '<div class="dm-avatar' + (dmPicCacheKey ? ' profile-pic-target' : '') + '"' + (dmPicCacheKey ? ' data-profile-pic-load="' + dmPicCacheKey + '"' : '') + '>' + dmAvatarHtml + '</div>' +
             '<div class="dm-info">' +
                 '<div class="dm-name' + (dmColor ? ' has-glow' : '') + '"' + (dmColor ? ' style="color:' + dmColor + ';text-shadow:' + getDisplayNameTextShadow(dmColor, dmBorderColor) + '"' : '') + '>' + escapeHtml(displayName) + '</div>' +
                 '<div class="dm-preview' + (streamerMode ? ' streamer-hidden-preview' : '') + '">' + escapeHtml(preview) + '</div>' +
             '</div>' +
-            waitingBadge +
+            callBadge +
             (unreadDms[c.dm_channel_id] ? '<span class="badge"></span>' : '') +
             '</div>';
     }
@@ -10221,6 +10245,12 @@ async function selectDmChannel(dmChannelId, otherUserId, otherUsername, element)
 
     updateDmWaitingBanner();
 
+    // If we're in a DM call with this channel, show the call panel.
+    if (window.VoiceManager && window.VoiceManager.getCallState && window.VoiceManager.getCallState(dmChannelId)) {
+        window.VoiceManager.resetDmPanelOpen && window.VoiceManager.resetDmPanelOpen();
+        window.VoiceManager.updateDmCallUI && window.VoiceManager.updateDmCallUI();
+    }
+
     if (window._closeSidebar) window._closeSidebar();
 }
 
@@ -10256,16 +10286,18 @@ function updateDmWaitingBanner() {
         return;
     }
     var isMe = wc.waitingUserId && user && wc.waitingUserId === user.id;
+    if (isMe) {
+        // We are the one waiting — the call panel / mini bar already shows
+        // "Waiting for <name>…", so hide the banner (it's for the OTHER side).
+        banner.style.display = 'none';
+        return;
+    }
+    // The other person is waiting — show a banner inviting us to join.
     var otherName = wc.waitingUsername || (currentDmOtherUser && currentDmOtherUser.username) || 'the other person';
     var text = document.getElementById('dm-waiting-text');
     var joinBtn = document.getElementById('dm-waiting-join-btn');
-    if (isMe) {
-        if (text) text.textContent = 'Waiting for ' + otherName + ' to join the call…';
-        if (joinBtn) joinBtn.textContent = 'Rejoin Call';
-    } else {
-        if (text) text.textContent = otherName + ' is waiting for you to join the call';
-        if (joinBtn) joinBtn.textContent = 'Join Call';
-    }
+    if (text) text.textContent = otherName + ' is waiting for you to join the call';
+    if (joinBtn) joinBtn.textContent = 'Join Call';
     banner.style.display = 'flex';
     if (joinBtn) {
         joinBtn.onclick = function () {

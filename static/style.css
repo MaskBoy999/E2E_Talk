@@ -687,6 +687,21 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     flex-shrink: 0;
     animation: incoming-wait-pulse 2s ease-in-out infinite;
 }
+.dm-calling-dot {
+    margin-left: auto;
+    align-self: center;
+    font-size: 13px;
+    color: #3ba55d;
+    flex-shrink: 0;
+    animation: incoming-wait-pulse 1s ease-in-out infinite;
+}
+.dm-connected-dot {
+    margin-left: auto;
+    align-self: center;
+    font-size: 13px;
+    color: #5865f2;
+    flex-shrink: 0;
+}
 
 .members-panel {
     position: absolute;
@@ -6644,6 +6659,11 @@ body.streamer-mode .dm-avatar:hover {
     justify-content: space-between;
     gap: 8px;
 }
+.dm-call-header-actions {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
+}
 .dm-call-header-title {
     min-width: 0;
     overflow: hidden;
@@ -6663,6 +6683,19 @@ body.streamer-mode .dm-avatar:hover {
     transition: background 0.15s ease, color 0.15s ease;
 }
 .dm-call-expand:hover { color: #fff; background: rgba(255, 255, 255, 0.08); }
+.dm-call-close {
+    background: none;
+    border: none;
+    color: var(--text-muted, #888);
+    font-size: 15px;
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 6px;
+    line-height: 1;
+    flex-shrink: 0;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+.dm-call-close:hover { color: #fff; background: rgba(255, 255, 255, 0.08); }
 /* Expanded DM call + fullscreen voice view: cover the ENTIRE viewport
    (left/top/bottom are set inline by syncOverlayBounds) so you see only the
    call — handy on phones to watch your own camera + screen and the other

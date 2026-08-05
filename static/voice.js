@@ -51,7 +51,7 @@
         cameraOn: false,
         screenOn: false,
         popupOpen: false,        // voice channel view (top panel in the text area)
-        dmPanelOpen: false,      // DM call panel in the DM chat
+        dmPanelOpen: undefined,  // DM call panel in the DM chat
         dmCallExpanded: false,   // DM call panel expanded → covers the WHOLE screen
         voiceFullscreen: false,  // voice channel view expanded → covers the WHOLE screen
         incomingCall: null,      // {callerId, callerUsername, dmChannelId}
@@ -117,6 +117,14 @@
         joinWaitingCall: joinWaitingCall,
         syncWaitingCalls: syncWaitingCalls,
         getWaitingCall: function (dmChannelId) { return S.waitingCalls[dmChannelId] || null; },
+        getCallState: function (dmChannelId) {
+            if (!S.dmCallActive || S.dmChannelId !== dmChannelId) return null;
+            if (S.connected && S.dmCallAnswered) return 'connected';
+            if (S.callWaiting) return 'waiting';
+            return 'calling';
+        },
+        updateDmCallUI: updateDmCallUI,
+        resetDmPanelOpen: function () { S.dmPanelOpen = undefined; },
         testRingtone: testRingtone,
         playRingtone: playRingtone,
         stopRingtone: stopRingtone,
@@ -527,6 +535,7 @@
         clearRingTimer();
         clearCalleeRingTimer();
         stopRingtone();
+        var prevDmChannelId = S.dmChannelId;
         S.connected = false;
         S.roomType = null;
         S.serverId = null;
@@ -552,8 +561,8 @@
         // Always leave the call in the normal layout — fullscreen never
         // carries over into the next call.
         resetFullscreenState();
-        if (S.waitingCalls && S.dmChannelId && S.waitingCalls[S.dmChannelId]) {
-            delete S.waitingCalls[S.dmChannelId];
+        if (S.waitingCalls && prevDmChannelId && S.waitingCalls[prevDmChannelId]) {
+            delete S.waitingCalls[prevDmChannelId];
             notifyWaitingChanged();
         }
         closeAllPeers();
@@ -562,6 +571,7 @@
         renderBar();
         renderPopup();
         renderDmPanel();
+        notifyWaitingChanged();
     }
 
     // Close and rebuild every peer connection. Used when TURN config arrives
@@ -1339,6 +1349,7 @@
         playSound('join');
         showToast('Calling ' + (partnerUsername || '…'));
         updateDmCallUI();
+        notifyWaitingChanged();
         // 30s unanswered → stop ringing, wait for a manual join. The callee is
         // told via dm_call_waiting so their ringtone stops and their incoming
         // bar flips to the waiting state (they can still join by hand).
@@ -1353,6 +1364,7 @@
                 send({ type: 'dm_call_waiting', dm_channel_id: S.dmChannelId });
                 showToast('Waiting for ' + (partnerUsername || 'them') + ' to join the call…');
                 updateDmCallUI();
+                notifyWaitingChanged();
             }
         }, 30000);
     }
@@ -1375,6 +1387,10 @@
             S.callWaiting = false;
             updateDmCallUI();
         }
+        // Update mini bar / panel to reflect the new state (Calling → In call).
+        showMiniBar();
+        showDmPanel();
+        notifyWaitingChanged();
         // The call is live — drop any persisted waiting marker for this channel.
         if (S.dmChannelId && S.waitingCalls[S.dmChannelId]) {
             delete S.waitingCalls[S.dmChannelId];
@@ -1416,7 +1432,8 @@
     // Rebuild S.waitingCalls from the DM conversation list (which the server
     // enriches with waiting_user_id / waiting_username from the persisted
     // dm_call_waiting table). Called after loadDmConversations and on WS
-    // reconnect so the waiting indicator survives page refreshes.
+    // Sync persisted waiting state from dmConversations so the waiting
+    // indicator survives page refreshes.
     function syncWaitingCalls() {
         if (typeof dmConversations === 'undefined' || !dmConversations) return;
         S.waitingCalls = {};
@@ -1478,7 +1495,6 @@
 
     function endDmCall() {
         leaveVoice();
-        showToast('Call ended.');
     }
 
     function handleDmCallRing(data) {
@@ -1664,7 +1680,6 @@
                 hideMiniBar();
                 if (wasConnected) playSound('leave');
                 showToast('Call ended.');
-                // Remove any persisted waiting marker for this channel.
                 if (S.waitingCalls[data.dm_channel_id]) {
                     delete S.waitingCalls[data.dm_channel_id];
                     if (typeof dmConversations !== 'undefined' && dmConversations) {
@@ -2050,7 +2065,7 @@
         var inDmView = typeof currentDmChannelId !== 'undefined' && S.dmChannelId && currentDmChannelId === S.dmChannelId;
         if (inDmView) {
             hideMiniBar();
-            showDmPanel();
+            if (S.dmPanelOpen !== false) showDmPanel();
         } else {
             hideDmPanel();
             showMiniBar();
@@ -2400,6 +2415,8 @@
         if (name) {
             if (S.callWaiting) {
                 name.textContent = 'Waiting for ' + (S.dmCallPartner ? S.dmCallPartner.username : 'answer') + '…';
+            } else if (!S.dmCallAnswered && S.dmCallActive) {
+                name.textContent = 'Calling ' + (S.dmCallPartner ? S.dmCallPartner.username : '…') + '…';
             } else {
                 name.textContent = S.dmCallPartner ? S.dmCallPartner.username : '…';
             }
@@ -2467,6 +2484,7 @@
         bindClick(p, 'dm-call-screen', function () { toggleScreen(); });
         bindClick(p, 'dm-call-end', function () { endDmCall(); });
         bindClick(p, 'dm-call-expand', function () { toggleDmExpand(); });
+        bindClick(p, 'dm-call-close', function () { hideDmPanel(); });
     }
 
     function renderDmPanel() {
@@ -2530,12 +2548,10 @@
         m.style.display = 'flex';
         var name = el('dm-mini-bar-name');
         if (name) {
-            // callWaiting is set only on the CALLER side when the other
-            // participant hasn't joined within 30s. The caller is already
-            // S.connected (they joined their own room), so the waiting label
-            // keys off callWaiting alone — NOT connected.
             if (S.callWaiting) {
                 name.textContent = S.dmCallPartner ? ('Waiting for ' + S.dmCallPartner.username + '…') : 'Waiting for answer…';
+            } else if (!S.dmCallAnswered && S.dmCallActive) {
+                name.textContent = S.dmCallPartner ? ('Calling ' + S.dmCallPartner.username + '…') : 'Calling…';
             } else {
                 name.textContent = S.dmCallPartner ? ('In call with ' + S.dmCallPartner.username) : 'In call';
             }
@@ -3104,6 +3120,9 @@
         } else if (S.roomType === 'dm' && S.dmChannelId) {
             send({ type: 'voice_join', room_type: 'dm', dm_channel_id: S.dmChannelId });
         }
+        // Refresh waiting state from server-persisted data so indicators
+        // survive reconnects.
+        syncWaitingCalls();
         // Refresh the server-wide presence so channel-list member rows recover
         // after a socket drop (without waiting for the next channel-list rebuild).
         var sid = (typeof currentServerId !== 'undefined' && currentServerId) || S.serverId;
