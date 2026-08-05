@@ -311,6 +311,111 @@ test.describe('DM call flow: decline, waiting, indicators, persistence', () => {
         await ctx2.close();
     });
 
+    test('decline from the waiting-state bar after 30s timeout: caller stays in waiting room', async ({ page, context }) => {
+        test.setTimeout(240000);
+        const ts = Date.now();
+        const user1 = 'dwl1_' + ts;
+        const user2 = 'dwl2_' + ts;
+
+        const ctx2 = await context.browser()!.newContext();
+        const page2 = await ctx2.newPage();
+        const body2 = await registerUser(page2, user2);
+        const body1 = await registerUser(page, user1);
+
+        await setupFriends(page, page2, body1, body2);
+        const { userData, dm } = await createDm(page, page2, body1, body2);
+
+        await waitForWs(page);
+        await waitForWs(page2);
+
+        await openDm(page);
+
+        await page.waitForFunction(() => {
+            const v = window.VoiceManager;
+            return v && typeof v.startDmCall === 'function';
+        }, undefined, { timeout: 15000 });
+
+        await page.evaluate(({ dmId, uid, uname }) => {
+            window.VoiceManager.startDmCall(dmId, uid, uname);
+        }, { dmId: dm.id, uid: userData.id, uname: user2 });
+
+        // Callee receives the ring — the bar starts in the ringing state (Accept)
+        await page2.waitForFunction(() => {
+            const v = window.VoiceManager;
+            return v && v._debug.state.incomingCall !== null;
+        }, undefined, { timeout: 15000 });
+        expect(await page2.locator('#incoming-call-bar').isVisible().catch(() => false)).toBeTruthy();
+        expect(await page2.locator('#incoming-call-accept').textContent()).toBe('Accept');
+
+        // Do NOT answer — wait for the 30s ring timeout on the caller side
+        await page.waitForFunction(() => {
+            const v = window.VoiceManager;
+            return v && v.isCallWaiting();
+        }, undefined, { timeout: 45000 });
+
+        // Callee's incoming bar must have flipped to the waiting state (Join)
+        await page2.waitForFunction(() => {
+            const v = window.VoiceManager;
+            return v && v.isIncomingWaiting();
+        }, undefined, { timeout: 15000 });
+        const waitingBar = await page2.evaluate(() => {
+            const b = document.getElementById('incoming-call-bar');
+            const accept = document.getElementById('incoming-call-accept');
+            return {
+                visible: b ? b.style.display !== 'none' : false,
+                waitingClass: b ? b.classList.contains('waiting') : false,
+                acceptText: accept ? accept.textContent : '',
+            };
+        });
+        expect(waitingBar.visible).toBe(true);
+        expect(waitingBar.waitingClass).toBe(true);
+        expect(waitingBar.acceptText).toBe('Join');
+
+        // Callee DECLINES from the waiting-state bar (the real Decline button)
+        await page2.locator('#incoming-call-decline').click();
+
+        // The caller must NOT be torn down — they stay in the waiting room
+        // (room alive, persisted waiting marker) exactly like a normal decline.
+        await page.waitForFunction(() => {
+            const v = window.VoiceManager;
+            const s = v._debug.state;
+            return s.callWaiting && s.dmCallActive;
+        }, undefined, { timeout: 10000 });
+        const callerStillActive = await page.evaluate(() => {
+            const v = window.VoiceManager;
+            return { active: v.isInDmCall(), waiting: v.isCallWaiting() };
+        });
+        expect(callerStillActive.active).toBeTruthy();
+        expect(callerStillActive.waiting).toBeTruthy();
+
+        // Callee's incoming bar closes after declining
+        await page2.waitForTimeout(800);
+        const calleeBarGone = await page2.evaluate(() => {
+            const b = document.getElementById('incoming-call-bar');
+            return b ? b.style.display === 'none' : true;
+        });
+        expect(calleeBarGone).toBeTruthy();
+
+        // The callee can STILL join the call manually afterwards (waiting room
+        // survives the decline — it did not end the whole call).
+        await openDm(page2);
+        const joinBtnVisible = await page2.locator('#dm-waiting-join-btn').isVisible().catch(() => false);
+        expect(joinBtnVisible).toBeTruthy();
+        await page2.locator('#dm-waiting-join-btn').click();
+
+        // Both sides connect after the manual join
+        await page.waitForFunction(() => {
+            const v = window.VoiceManager;
+            return v && v.isConnected() && v.isInDmCall();
+        }, undefined, { timeout: 15000 });
+        await page2.waitForFunction(() => {
+            const v = window.VoiceManager;
+            return v && v.isConnected() && v.isInDmCall();
+        }, undefined, { timeout: 15000 });
+
+        await ctx2.close();
+    });
+
     test('accept and end: both connect, caller ends, callee disconnects', async ({ page, context }) => {
         test.setTimeout(180000);
         const ts = Date.now();

@@ -1204,6 +1204,14 @@ async fn handle_ws_message(
         "voice_leave" => {
             handle_voice_leave(parsed, state, user_id).await;
         }
+        "voice_leave_all" => {
+            // Page-load fallback: a fresh page sends this to make sure the user
+            // is dropped from every voice room (in case the previous connection's
+            // disconnect cleanup never ran — crash, stale socket, server restart).
+            // Uses clear_waiting_on_empty=false so persisted DM waiting state
+            // survives (the waiting room stays joinable across refreshes).
+            voice_remove_user_all(state, user_id).await;
+        }
         "voice_state" => {
             handle_voice_state(parsed, state, user_id).await;
         }

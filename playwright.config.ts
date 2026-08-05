@@ -21,6 +21,10 @@ export default defineConfig({
             TURN_URLS: 'turn:turn.example.com:3478,turns:turn.example.com:5349',
             TURN_USERNAME: 'test-turn-user',
             TURN_PASSWORD: 'test-turn-pass',
+            // The suite creates dozens of users from one IP — raise the
+            // friend-request rate limit so tests never 429 mid-suite.
+            FRIEND_REQUEST_IP_MAX: '100000',
+            FRIEND_REQUEST_USER_MAX: '100000',
         },
     },
 });

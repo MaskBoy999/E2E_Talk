@@ -5586,6 +5586,12 @@ function connectWebSocket(t) {
                 if (window.VoiceManager && VoiceManager.reconnect) {
                     try { VoiceManager.reconnect(); } catch (_) {}
                 }
+                // Page-load fallback: make sure we're not still in any voice
+                // room from a previous session (no-op when reconnect() just
+                // rejoined an active call).
+                if (window.VoiceManager && VoiceManager.leaveAllStaleRooms) {
+                    try { VoiceManager.leaveAllStaleRooms(); } catch (_) {}
+                }
                 // Broadcast profile keys after a short delay (DMs already loaded during init)
                 setTimeout(async function() {
                     if (myProfile && dmConversations && dmConversations.length > 0) {

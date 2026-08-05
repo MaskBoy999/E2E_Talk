@@ -4443,10 +4443,14 @@ pub async fn send_friend_request(
         Err(e) => return e.into_response(),
     };
 
-    // Per-IP rate limiting: 10 friend request attempts per 10 minutes
+    // Per-IP rate limiting: 10 friend request attempts per 10 minutes.
+    // Env-overridable so automated test suites (which hit localhost from one
+    // IP for dozens of users) can raise/disable the budget: set
+    // FRIEND_REQUEST_IP_MAX=0 to disable, or a number to raise it.
+    let ip_max: u32 = std::env::var("FRIEND_REQUEST_IP_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
     let ip = get_client_ip(&headers);
     let ip_rate_key = format!("friend_request_ip:{}", ip);
-    if !FRIEND_REQUEST_IP_RATE_LIMITER.check_and_increment(&ip_rate_key, 10, Duration::from_secs(600)) {
+    if ip_max > 0 && !FRIEND_REQUEST_IP_RATE_LIMITER.check_and_increment(&ip_rate_key, ip_max, Duration::from_secs(600)) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": "Too many friend request attempts. Try again in 10 minutes."})),
@@ -4454,9 +4458,10 @@ pub async fn send_friend_request(
             .into_response();
     }
 
-    // Per-user rate limiting (already existed)
+    // Per-user rate limiting (already existed). Env-overridable for tests.
+    let user_max: u32 = std::env::var("FRIEND_REQUEST_USER_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
     let rate_key = format!("friend_request:{}", user_id);
-    if !FRIEND_REQUEST_RATE_LIMITER.check_and_increment(&rate_key, 10, Duration::from_secs(600)) {
+    if user_max > 0 && !FRIEND_REQUEST_RATE_LIMITER.check_and_increment(&rate_key, user_max, Duration::from_secs(600)) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": "Too many friend request attempts. Try again in 10 minutes."})),

@@ -110,44 +110,50 @@ test.describe('voice UI bug fixes', () => {
         });
         expect(mutedAfterSecond).toBe(false);
 
-        // 2) POPUP: open it, start camera, self row must show exactly ONE video
-        // element and NO duplicate video tile.
+        // 2) POPUP: open it, start camera, the self member row must show the
+        // camera <video> tile (data-self="1") with no duplicates.
         await page.click(`.channel-item[data-id="${srv.channels[0].id}"]`); // second click → popup
         await page.waitForSelector('#voice-popup', { state: 'visible', timeout: 10000 });
-        await page.click('#vp-camera-btn');
+        await page.click('#voice-popup-camera');
         await page.waitForTimeout(2000);
         const selfRowState = await page.evaluate(() => {
             const rows = Array.from(document.querySelectorAll('#voice-popup-members .voice-member-row'));
-            const selfRow = rows.find((r: any) => r.querySelector('.voice-member-you'));
-            if (!selfRow) return { found: false, videos: 0, tiles: 0 };
+            const selfRow = rows.find((r: any) => r.getAttribute('data-self') === '1');
+            if (!selfRow) return { found: false, videos: 0, cameraDisplay: null, screenDisplay: null };
+            // Side-by-side design: each row has TWO <video> slots (camera +
+            // screen); only the active one is displayed.
+            const cam = selfRow.querySelector('video[data-kind="camera"]');
+            const scr = selfRow.querySelector('video[data-kind="screen"]');
             return {
                 found: true,
-                videos: selfRow.querySelectorAll('video').length,
-                tiles: selfRow.querySelectorAll('.voice-video-tile').length,
+                videos: selfRow.querySelectorAll('video.remote-video-tile').length,
+                cameraDisplay: cam ? (cam as any).style.display : null,
+                screenDisplay: scr ? (scr as any).style.display : null,
             };
         });
         expect(selfRowState.found).toBe(true);
-        expect(selfRowState.videos).toBe(1);
-        expect(selfRowState.tiles).toBe(0);
+        expect(selfRowState.videos).toBe(2);
+        expect(selfRowState.cameraDisplay).toBe('block');
+        expect(selfRowState.screenDisplay).toBe('none');
 
         // 3) SELF VIDEO PERSISTS: tag the video element, trigger voice_state
         // churn (mute/deafen toggles broadcast state updates), and verify the
         // SAME element is still attached (re-rendering would recreate it).
         const videoIdBefore = await page.evaluate(() => {
-            const v = document.querySelector('#voice-popup-members .voice-self-video');
+            const v = document.querySelector('#voice-popup-members .voice-member-row[data-self="1"] video.remote-video-tile');
             if (!v) return null;
             (v as any).__debugId = 'VID' + Math.random();
             (window as any).__lastVideoId = (v as any).__debugId;
             return (v as any).__debugId;
         });
         expect(videoIdBefore).toBeTruthy();
-        await page.click('#vp-mute-btn');
-        await page.click('#vp-deafen-btn');
-        await page.click('#vp-deafen-btn');
-        await page.click('#vp-mute-btn');
+        await page.click('#voice-popup-mute');
+        await page.click('#voice-popup-deafen');
+        await page.click('#voice-popup-deafen');
+        await page.click('#voice-popup-mute');
         await page.waitForTimeout(1500);
         const videoPersists = await page.evaluate(() => {
-            const v = document.querySelector('#voice-popup-members .voice-self-video');
+            const v = document.querySelector('#voice-popup-members .voice-member-row[data-self="1"] video.remote-video-tile');
             return !!v && (v as any).__debugId === (window as any).__lastVideoId;
         });
         expect(videoPersists).toBe(true);

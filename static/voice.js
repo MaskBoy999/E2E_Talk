@@ -34,6 +34,7 @@
         localStreams: { mic: null, camera: null, screen: null },
         roomKeyB64: null,
         sigKeyB64: null,        // signaling subkey (SDP/ICE E2EE) derived from the room key
+        _pendingRecvTransforms: [],  // receivers awaiting a decrypt transform until the room key arrives
         iceServers: [
             { urls: 'stun:stun.l.google.com:19302' },
             { urls: 'stun:stun1.l.google.com:19302' },
@@ -42,7 +43,7 @@
         audioCtx: null,
         masterGain: null,
         micGain: null,
-        memberGains: {},         // uid -> GainNode
+        remoteAudioEls: {},      // uid -> [HTMLAudioElement] (stacked for >100% volume)
         analyser: null,
         speakingInterval: null,
         speaking: false,
@@ -377,6 +378,9 @@
             var bytes = hexToBytes(hex);
             var b64 = E2ECrypto.arrayBufferToBase64(bytes.buffer);
             S.roomKeyB64 = b64;
+            // Any remote tracks that arrived before the key was derivable now
+            // get their decrypt transform (otherwise one-sided E2EE = silence).
+            flushPendingRecvTransforms();
             return b64;
         } catch (_) {
             return null;
@@ -548,6 +552,10 @@
         S.members = {};
         S.roomKeyB64 = null;
         S.sigKeyB64 = null;
+        // Drop any receivers still waiting for a decrypt transform — they
+        // belonged to the OLD room and must never receive the NEXT room's key
+        // (stale-key risk when leaving a room with a still-deriving key).
+        S._pendingRecvTransforms = [];
         S._dmOtherPubB64 = null;
         S.muted = false;
         S.deafened = false;
@@ -594,10 +602,9 @@
             try { S.peers[uid].close(); } catch (_) {}
         }
         S.peers = {};
-        for (var uid2 in S.memberGains) {
-            try { S.memberGains[uid2].disconnect(); } catch (_) {}
+        for (var uid2 in S.remoteAudioEls) {
+            removeRemoteAudioEls(uid2);
         }
-        S.memberGains = {};
         S.remoteStreams = {};
         clearRemoteTiles();
     }
@@ -859,15 +866,53 @@
         } catch (_) {}
     }
 
+    // Apply the E2EE decrypt transform to a receiver. Returns true on success.
+    // If the room key isn't ready yet, the receiver is queued and the transform
+    // is applied later by flushPendingRecvTransforms() once the key exists —
+    // otherwise the sender encrypts while we can't decrypt → silence/garbage.
+    function applyRecvE2EE(receiver) {
+        ensureE2eeWorker();
+        if (!window.RTCRtpScriptTransform || !e2eeWorker || !S.roomKeyB64) return false;
+        try {
+            receiver.transform = new RTCRtpScriptTransform(e2eeWorker, { operation: 'decrypt', key: S.roomKeyB64 });
+            return true;
+        } catch (_) {
+            return false;
+        }
+    }
+
+    function queueRecvE2EE(receiver, trackId) {
+        // Only queue when the transform API actually exists — otherwise (e.g.
+        // Firefox, where E2EE is intentionally skipped) every ontrack would
+        // enqueue an entry that can never flush (unbounded growth).
+        if (!window.RTCRtpScriptTransform || !e2eeWorker) return;
+        S._pendingRecvTransforms = S._pendingRecvTransforms || [];
+        // Replace any prior entry for this track (a track's ontrack can fire
+        // again on renegotiation) so the queue never accumulates dead entries.
+        S._pendingRecvTransforms = S._pendingRecvTransforms.filter(function (p) { return p.trackId !== trackId; });
+        S._pendingRecvTransforms.push({ receiver: receiver, trackId: trackId });
+    }
+
+    function flushPendingRecvTransforms() {
+        if (!S._pendingRecvTransforms || !S._pendingRecvTransforms.length || !S.roomKeyB64) return;
+        var remaining = [];
+        S._pendingRecvTransforms.forEach(function (p) {
+            if (!p || !p.receiver) return;
+            if (!applyRecvE2EE(p.receiver)) remaining.push(p);
+        });
+        S._pendingRecvTransforms = remaining;
+    }
+
     function handleRemoteTrack(uid, e) {
         if (e.track.kind === 'audio') {
             S.remoteStreams[uid] = S.remoteStreams[uid] || {};
             S.remoteStreams[uid].audio = new MediaStream([e.track]);
             playRemoteAudio(uid);
-            // E2EE on the receiver
+            // E2EE on the receiver — if the key isn't ready yet, queue it and
+            // apply once the key arrives (one-sided E2EE = permanent silence).
             ensureE2eeWorker();
-            if (window.RTCRtpScriptTransform && e2eeWorker && S.roomKeyB64) {
-                try { e.receiver.transform = new RTCRtpScriptTransform(e2eeWorker, { operation: 'decrypt', key: S.roomKeyB64 }); } catch (_) {}
+            if (!applyRecvE2EE(e.receiver)) {
+                queueRecvE2EE(e.receiver, e.track.id);
             }
         } else if (e.track.kind === 'video') {
             S.remoteStreams[uid] = S.remoteStreams[uid] || {};
@@ -894,8 +939,11 @@
                     renderDmPanel();
                 }
             };
-            if (window.RTCRtpScriptTransform && e2eeWorker && S.roomKeyB64) {
-                try { e.receiver.transform = new RTCRtpScriptTransform(e2eeWorker, { operation: 'decrypt', key: S.roomKeyB64 }); } catch (_) {}
+            // E2EE on the receiver — queue if the key isn't ready yet (see
+            // applyRecvE2EE/flushPendingRecvTransforms).
+            ensureE2eeWorker();
+            if (!applyRecvE2EE(e.receiver)) {
+                queueRecvE2EE(e.receiver, e.track.id);
             }
             renderRemoteTile(uid, key);
             renderPopup();
@@ -903,26 +951,92 @@
         }
     }
 
+    // ------------------------------------------------------------------
+    // Remote audio playback — per-member <audio> elements.
+    //
+    // IMPORTANT (2026-08-05, root cause of "no audio"): remote audio MUST NOT
+    // be routed through the AudioContext node chain (source -> gain ->
+    // masterGain -> destination). Empirically that topology stalls Chrome's
+    // WebRTC audio decoder (the jitter buffer never drains — 0 samples
+    // decoded, while packets flow) on this machine, whereas an <audio>
+    // element sink decodes reliably (validated in repeated vanilla runs,
+    // with AND without E2EE). element.volume is capped at 1.0, so member
+    // volumes above 100% are reached by stacking extra <audio> elements
+    // (each contributes up to 1.0 of gain).
+    // ------------------------------------------------------------------
+    function remoteVolumeFor(uid) {
+        var saved = parseFloat(localStorage.getItem('voice_volume_' + uid) || '100');
+        var member = isNaN(saved) ? 1 : saved / 100;
+        return member * (S.settings.speakerVolume / 100) * (S.deafened ? 0 : 1);
+    }
+
+    function removeRemoteAudioEls(uid) {
+        var els = S.remoteAudioEls[uid];
+        if (els) {
+            els.forEach(function (el) {
+                try { el.pause(); } catch (_) {}
+                try { el.srcObject = null; } catch (_) {}
+                try { el.remove(); } catch (_) {}
+            });
+        }
+        delete S.remoteAudioEls[uid];
+    }
+
+    function applyRemoteVolume(uid) {
+        var els = S.remoteAudioEls[uid];
+        if (!els) return;
+        // Round to 2 decimals so ceil() never mints a negligible extra
+        // element for volumes like 2.0000001.
+        var vol = Math.max(0, Math.min(5, Math.round(remoteVolumeFor(uid) * 100) / 100));
+        var need = Math.max(1, Math.ceil(vol));
+        var stream = S.remoteStreams[uid] && S.remoteStreams[uid].audio;
+        while (els.length < need) {
+            var el = document.createElement('audio');
+            el.autoplay = true;
+            el.muted = false;
+            el.style.display = 'none';
+            if (stream) el.srcObject = stream;
+            el.play().catch(function () {});
+            document.body.appendChild(el);
+            els.push(el);
+        }
+        while (els.length > need) {
+            var old = els.pop();
+            try { old.pause(); } catch (_) {}
+            try { old.remove(); } catch (_) {}
+        }
+        els.forEach(function (el, i) {
+            el.volume = Math.max(0, Math.min(1, vol - i));
+        });
+    }
+
     function playRemoteAudio(uid) {
-        ensureAudioCtx();
-        if (!S.audioCtx || !S.remoteStreams[uid] || !S.remoteStreams[uid].audio) return;
+        if (!S.remoteStreams[uid] || !S.remoteStreams[uid].audio) return;
         try {
-            if (S.memberGains[uid]) { try { S.memberGains[uid].disconnect(); } catch (_) {} S.memberGains[uid] = null; }
-            var src = S.audioCtx.createMediaStreamSource(S.remoteStreams[uid].audio);
-            var gain = S.audioCtx.createGain();
-            var saved = parseFloat(localStorage.getItem('voice_volume_' + uid) || '100');
-            gain.gain.value = (isNaN(saved) ? 1 : saved / 100) * (S.deafened ? 0 : 1);
-            src.connect(gain);
-            gain.connect(S.masterGain);
-            S.memberGains[uid] = gain;
+            removeRemoteAudioEls(uid);
+            S.remoteAudioEls[uid] = [];
+            applyRemoteVolume(uid);
         } catch (_) {}
     }
 
+    // Autoplay safety net: elements are created at ontrack (outside a user
+    // gesture), so a strict autoplay policy can block the initial play().
+    // Retry every paused element on the next real user gesture.
+    function retryRemoteAudioPlay() {
+        Object.keys(S.remoteAudioEls).forEach(function (uid) {
+            (S.remoteAudioEls[uid] || []).forEach(function (el) {
+                if (el.paused && el.srcObject) {
+                    try { el.play().catch(function () {}); } catch (_) {}
+                }
+            });
+        });
+    }
+    document.addEventListener('click', retryRemoteAudioPlay, true);
+    document.addEventListener('keydown', retryRemoteAudioPlay, true);
+
     function setMemberVolume(uid, pct) {
         try { localStorage.setItem('voice_volume_' + uid, String(pct)); } catch (_) {}
-        if (S.memberGains[uid]) {
-            S.memberGains[uid].gain.value = (pct / 100) * (S.deafened ? 0 : 1);
-        }
+        if (S.remoteAudioEls[uid]) applyRemoteVolume(uid);
         var label = document.getElementById('volume-menu-value');
         if (label) label.textContent = pct + '%';
     }
@@ -1119,7 +1233,7 @@
             if (!newMembers[uid]) {
                 try { S.peers[uid].close(); } catch (_) {}
                 delete S.peers[uid];
-                if (S.memberGains[uid]) { try { S.memberGains[uid].disconnect(); } catch (_) {} delete S.memberGains[uid]; }
+                removeRemoteAudioEls(uid);
                 delete S.remoteStreams[uid];
                 removeRemoteTile(uid);
             }
@@ -1228,7 +1342,7 @@
             try { S.peers[uid].close(); } catch (_) {}
             delete S.peers[uid];
         }
-        if (S.memberGains[uid]) { try { S.memberGains[uid].disconnect(); } catch (_) {} delete S.memberGains[uid]; }
+        removeRemoteAudioEls(uid);
         delete S.remoteStreams[uid];
         removeRemoteTile(uid);
         renderBar();
@@ -1271,16 +1385,13 @@
             // Force mute → stop sending audio
             if (S.forceMuted || S.forceDeafened) {
                 stopMic();
-                // Pause remote audio if deafened
-                Object.keys(S.memberGains).forEach(function (uid) {
-                    S.memberGains[uid].gain.value = S.deafened ? 0 : (parseFloat(localStorage.getItem('voice_volume_' + uid) || '100') / 100);
-                });
-            } else {
-                if (!S.muted && !S.deafened) startMic();
-                Object.keys(S.memberGains).forEach(function (uid) {
-                    S.memberGains[uid].gain.value = (parseFloat(localStorage.getItem('voice_volume_' + uid) || '100') / 100) * (S.deafened ? 0 : 1);
-                });
+            } else if (!S.muted && !S.deafened) {
+                startMic();
             }
+            // Pause remote audio if deafened / apply member volumes
+            Object.keys(S.remoteAudioEls).forEach(function (uid) {
+                applyRemoteVolume(uid);
+            });
             updateSelfUI();
             renderBar();
             updateMemberBadgesInPlace(getSelfId());
@@ -1385,11 +1496,12 @@
         }
         if (S.callWaiting) {
             S.callWaiting = false;
-            updateDmCallUI();
         }
-        // Update mini bar / panel to reflect the new state (Calling → In call).
-        showMiniBar();
-        showDmPanel();
+        // Update mini bar / panel to reflect the new state (Calling → In call),
+        // but ONLY for the view we're actually in: panel when the DM chat is
+        // open, floating mini bar everywhere else. (Previously this forced the
+        // DM call panel open over whatever channel the user was viewing.)
+        updateDmCallUI();
         notifyWaitingChanged();
         // The call is live — drop any persisted waiting marker for this channel.
         if (S.dmChannelId && S.waitingCalls[S.dmChannelId]) {
@@ -1405,6 +1517,12 @@
         hideIncomingCall();
         clearCalleeRingTimer();
         stopRingtone();
+        // CRITICAL: create/resume the AudioContext INSIDE this user gesture.
+        // Without this, the callee's AudioContext is first created later from
+        // ontrack (NOT a gesture) → Chrome creates it 'suspended' and refuses
+        // to resume it → the remote audio graph is connected to a suspended
+        // context → total silence on the callee side.
+        ensureAudioCtx();
         if (S.connected && S.roomType === 'server') {
             leaveVoice();
         }
@@ -1731,9 +1849,8 @@
             if (S.connected) startMic();
         }
         // Mute/unmute all remote audio
-        Object.keys(S.memberGains).forEach(function (uid) {
-            var base = parseFloat(localStorage.getItem('voice_volume_' + uid) || '100') / 100;
-            S.memberGains[uid].gain.value = S.deafened ? 0 : base;
+        Object.keys(S.remoteAudioEls).forEach(function (uid) {
+            applyRemoteVolume(uid);
         });
         sendVoiceState();
         updateSelfUI();
@@ -3031,7 +3148,12 @@
     function setSpeakerVolume(v) {
         S.settings.speakerVolume = v;
         saveSettings();
+        // masterGain still feeds the ringtone; remote audio uses <audio>
+        // element stacks whose volume is (re)computed from speakerVolume.
         if (S.masterGain) S.masterGain.gain.value = v / 100;
+        Object.keys(S.remoteAudioEls).forEach(function (uid) {
+            applyRemoteVolume(uid);
+        });
     }
 
     function setNoiseSuppression(on) {
@@ -3061,39 +3183,71 @@
     // which also unfreezes the frame Chrome detaches after fullscreen.
     function toggleFullscreen(el) {
         if (!el) return;
-        if (document.fullscreenElement) {
-            document.exitFullscreen().catch(function () {});
+        var activeWrap = el.closest ? el.closest('.voice-fs-wrap') : null;
+        if (activeWrap) {
+            // Already fullscreened — restore the tile to its original slot.
+            restoreFromFsWrap(activeWrap, el);
+            if (document.fullscreenElement) {
+                document.exitFullscreen().catch(function () {});
+            }
             return;
         }
+        if (document.fullscreenElement && !document.querySelector('.voice-fs-wrap')) {
+            // Something else is fullscreened — leave it alone.
+            return;
+        }
+        // Remember where the element lives so it can be restored exactly — the
+        // old code relied on fullscreenchange alone, which never fires when the
+        // browser declines/stubs the request (embedded contexts, tests), leaving
+        // the <video> stuck in the black wrapper forever.
+        var origParent = el.parentNode;
+        var origNext = el.nextSibling;
         var wrap = document.createElement('div');
         wrap.className = 'voice-fs-wrap';
         wrap.appendChild(el);
         document.body.appendChild(wrap);
-        // Register BEFORE requestFullscreen: the fullscreenchange event also
-        // fires when ENTERING fullscreen, so the handler must stay attached
-        // until we actually leave (otherwise the exit cleanup never runs and
-        // the black wrapper stays stuck over the app).
-        var done = false;
-        var handler = function () {
-            if (document.fullscreenElement) return; // still entering / active
-            if (done) return;
-            done = true;
+        var restored = false;
+        var restore = function () {
+            if (restored) return;
+            restored = true;
             document.removeEventListener('fullscreenchange', handler);
+            if (el.parentNode === wrap) {
+                if (origNext && origNext.parentNode === origParent) {
+                    origParent.insertBefore(el, origNext);
+                } else {
+                    origParent.appendChild(el);
+                }
+            }
             if (wrap.parentNode) wrap.remove();
             renderPopup();
             renderDmPanel();
             renderSelfPreview();
         };
+        // Register BEFORE requestFullscreen: fullscreenchange also fires when
+        // ENTERING fullscreen, so only restore when it is genuinely not active.
+        var handler = function () {
+            if (!document.fullscreenElement) restore();
+        };
         document.addEventListener('fullscreenchange', handler);
-        wrap.requestFullscreen().catch(function () {
-            if (done) return;
-            done = true;
-            document.removeEventListener('fullscreenchange', handler);
-            if (wrap.parentNode) wrap.remove();
-            renderPopup();
-            renderDmPanel();
-            renderSelfPreview();
+        wrap.requestFullscreen().then(function () {
+            // The promise resolved but the browser may still not have entered
+            // fullscreen (denied/stubbed). If so, put the tile back — otherwise
+            // the video stays frozen in the wrapper ("fullscreen stuck" bug).
+            setTimeout(function () {
+                if (!document.fullscreenElement) restore();
+            }, 400);
+        }).catch(function () {
+            restore();
         });
+    }
+
+    // Restore a <video> that lives inside a .voice-fs-wrap back into the
+    // member row / tile slot it was lifted from.
+    function restoreFromFsWrap(wrap, el) {
+        if (wrap.parentNode) wrap.remove();
+        renderPopup();
+        renderDmPanel();
+        renderSelfPreview();
     }
 
     // ------------------------------------------------------------------
@@ -3127,6 +3281,17 @@
         // after a socket drop (without waiting for the next channel-list rebuild).
         var sid = (typeof currentServerId !== 'undefined' && currentServerId) || S.serverId;
         if (sid) requestServerPresence(sid);
+    };
+
+    // Page-load fallback: a freshly loaded page sends voice_leave_all so the
+    // server drops us from every voice room we might still be in (crash, stale
+    // socket, or server restart can skip the disconnect cleanup). Only fires
+    // when we have no active room state — on a mid-session WS reconnect S is
+    // still populated (reconnect() rejoins instead), so live calls are never
+    // kicked by this.
+    VoiceManager.leaveAllStaleRooms = function () {
+        if (S.roomType || S.connected || S.dmCallActive) return;
+        send({ type: 'voice_leave_all' });
     };
 
     // Allow chat.js to inject the DM header call buttons right after it builds a header

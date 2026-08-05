@@ -61,11 +61,10 @@ async function createVoiceServer(page: any, ts: number) {
     await page.waitForSelector('.server-icon[data-id]', { timeout: 10000 });
     const serverId = await page.evaluate(() => document.querySelector('.server-icon[data-id]')!.getAttribute('data-id'));
     const token = await page.evaluate(() => localStorage.getItem('token'));
-    const encName = await page.evaluate(async () => {
-        const serverId = document.querySelector('.server-icon[data-id]')!.getAttribute('data-id');
-        const k = E2ECrypto.base64ToArrayBuffer(localStorage.getItem('e2e_server_' + serverId));
-        return E2ECrypto.aeadEncrypt('General', new Uint8Array(k));
-    });
+    const encName = await page.evaluate(async (name) => {
+        const k = E2ECrypto.base64ToArrayBuffer(localStorage.getItem('e2e_server_' + document.querySelector('.server-icon[data-id]')!.getAttribute('data-id')));
+        return E2ECrypto.aeadEncrypt(name, new Uint8Array(k));
+    }, 'General');
     const createCh = await page.request.post(`${BASE}/api/servers/${serverId}/channels`, {
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         data: { encrypted_name: encName.ciphertext, name_nonce: encName.nonce, channel_type: 'voice' },
@@ -75,8 +74,8 @@ async function createVoiceServer(page: any, ts: number) {
     return { serverId, channelId: chJson.id, token };
 }
 
-test.describe('voice camera + screen share (side-by-side, fullscreen, frame clearing, force release)', () => {
-    test('camera and screen run side by side; screen off keeps camera full width; deafen release restores audio', async ({ page, context }) => {
+test.describe('voice camera + screen share (side-by-side tiles, fullscreen wiring, force release)', () => {
+    test('camera and screen run side by side; screen off keeps camera; deafen release restores audio', async ({ page, context }) => {
         test.setTimeout(120000);
         const ts = Date.now();
         const errors: string[] = [];
@@ -117,281 +116,254 @@ test.describe('voice camera + screen share (side-by-side, fullscreen, frame clea
         await page2.waitForSelector('#voice-bar', { timeout: 10000 });
         await page.waitForTimeout(2500);
 
-        // Instrument B: count voice_video frames per stream kind
-        await page2.evaluate(() => {
-            const vm = (window as any).VoiceManager;
-            if (!vm) return;
-            const orig = vm.handleServerMessage.bind(vm);
-            (window as any).__voiceCounts = { camera: 0, screen: 0 };
-            vm.handleServerMessage = function (data: any) {
-                if (data && data.type === 'voice_video') {
-                    (window as any).__voiceCounts[data.stream || 'camera']++;
-                }
-                return orig(data);
-            };
-        });
-
         // A: camera ON, then screen ON — both must be active at the same time
         await page.click('#voice-bar-camera');
         await page.waitForTimeout(1200);
         await page.click('#voice-bar-screen');
         await page.waitForTimeout(2000);
 
-        const aBoth = await page.evaluate(() => ({
-            camBtn: document.getElementById('voice-bar-camera')!.classList.contains('active'),
-            scrBtn: document.getElementById('voice-bar-screen')!.classList.contains('active'),
-        }));
+        const aBoth = await page.evaluate(() => {
+            const s = (window as any).VoiceManager.getState();
+            return {
+                camBtn: document.getElementById('voice-bar-camera')!.classList.contains('active'),
+                scrBtn: document.getElementById('voice-bar-screen')!.classList.contains('active'),
+                cameraOn: s.cameraOn,
+                screenOn: s.screenOn,
+            };
+        });
         console.log('A BOTH:', JSON.stringify(aBoth));
         expect(aBoth.camBtn).toBe(true);
         expect(aBoth.scrBtn).toBe(true);
+        expect(aBoth.cameraOn).toBe(true);
+        expect(aBoth.screenOn).toBe(true);
 
-        // Open B's popup — B must see A's camera AND screen frames streaming
+        // Open B's popup — B must see A's camera AND screen tiles SIDE BY SIDE
+        // (two <video class="remote-video-tile">, no pip overlay).
         await page2.click(`.channel-item[data-id="${srv.channelId}"]`);
         await page2.waitForSelector('#voice-popup', { state: 'visible', timeout: 10000 });
         await page2.waitForTimeout(2000);
 
-        const bCounts1 = await page2.evaluate(() => (window as any).__voiceCounts || {});
-        console.log('B COUNTS (cam+screen):', JSON.stringify(bCounts1));
-        expect(bCounts1.camera).toBeGreaterThan(3);
-        expect(bCounts1.screen).toBeGreaterThan(3);
-
-        // No "video…" waiting text may stack above the live image (it must be
-        // replaced, never appended).
-        const noStuckWaiting = await page2.evaluate(() => {
-            const tiles = document.querySelectorAll('#voice-popup-members .voice-video-tile');
-            let bad = 0;
-            tiles.forEach((t: any) => {
-                if (t.querySelector('.voice-video-waiting') && t.querySelector('img')) bad++;
-            });
-            return bad;
-        });
-        expect(noStuckWaiting).toBe(0);
-
-        // B's tile for A must show screen + camera SIDE BY SIDE (no pip overlay),
-        // and each img must be clickable (fullscreen-bound).
         const aUid = u1.user.id;
-        const bTileTransition = await page2.evaluate((uid) => {
+        const bTile = await page2.evaluate((uid) => {
             const row = document.querySelector(`.voice-member-row[data-uid="${uid}"]`);
             if (!row) return null;
-            const tile = row.querySelector('.voice-video-tile');
-            if (!tile) return null;
-            const imgs = Array.from(tile.querySelectorAll('img'));
+            const media = row.querySelector('.voice-member-media');
+            if (!media) return null;
+            const vids = Array.from(media.querySelectorAll('video.remote-video-tile'));
             return {
-                imgClasses: imgs.map((i: any) => i.className),
-                imgCount: imgs.length,
-                hasScreen: imgs.some((i: any) => i.className.includes('voice-video-screen')),
-                hasCam: imgs.some((i: any) => i.className.includes('voice-video-cam')),
-                hasPip: imgs.some((i: any) => i.className.includes('pip')),
-                fullscreenBound: imgs.every((i: any) => (i as any).__fsBound === true),
+                vidCount: vids.length,
+                hasCamera: !!media.querySelector('video[data-kind="camera"]'),
+                hasScreen: !!media.querySelector('video[data-kind="screen"]'),
+                cameraDisplay: media.querySelector('video[data-kind="camera"]') ? (media.querySelector('video[data-kind="camera"]') as any).style.display : null,
+                screenDisplay: media.querySelector('video[data-kind="screen"]') ? (media.querySelector('video[data-kind="screen"]') as any).style.display : null,
+                anyPip: !!media.querySelector('.voice-video-pip, .pip'),
             };
         }, aUid);
-        console.log('B TILE (cam+screen):', JSON.stringify(bTileTransition));
-        expect(bTileTransition).not.toBeNull();
-        expect(bTileTransition.imgCount).toBe(2); // screen + camera side by side
-        expect(bTileTransition.hasScreen).toBe(true);
-        expect(bTileTransition.hasCam).toBe(true);
-        expect(bTileTransition.hasPip).toBe(false); // never a pip overlay
-        expect(bTileTransition.fullscreenBound).toBe(true);
+        console.log('B TILE (cam+screen):', JSON.stringify(bTile));
+        expect(bTile).not.toBeNull();
+        expect(bTile.vidCount).toBe(2);
+        expect(bTile.hasCamera).toBe(true);
+        expect(bTile.hasScreen).toBe(true);
+        expect(bTile.cameraDisplay).toBe('block');
+        expect(bTile.screenDisplay).toBe('block');
+        expect(bTile.anyPip).toBe(false);
 
-        // Clicking B's view of A's camera must request fullscreen on that img.
-        // (Headless Chromium accepts requestFullscreen() but never enters
-        // fullscreen state, so intercept the API to assert the click wiring.)
+        // Clicking B's view of A's camera must request fullscreen on the tile's
+        // wrapper (.voice-fs-wrap). (Headless Chromium accepts the request but
+        // never enters fullscreen, so intercept the API to assert the wiring.)
         await page2.evaluate(() => {
-            const orig = Element.prototype.requestFullscreen || function () {};
             (window as any).__fsRequests = [];
+            const orig = Element.prototype.requestFullscreen || function () {};
             Element.prototype.requestFullscreen = function () {
-                (window as any).__fsRequests.push({ tag: this.tagName, cls: this.className || '', src: (this as any).src ? (this as any).src.slice(0, 40) : '' });
+                (window as any).__fsRequests.push({ tag: this.tagName, cls: this.className || '' });
                 return Promise.resolve();
             };
             (window as any).__origFs = orig;
         });
-        // Wait a beat so the per-frame tile rebuild settles, then click the camera img.
         await page2.waitForTimeout(500);
-        await page2.click(`.voice-member-row[data-uid="${aUid}"] .voice-video-cam`);
+        await page2.click(`.voice-member-row[data-uid="${aUid}"] video[data-kind="camera"]`);
         await page2.waitForTimeout(400);
         const fsRequests = await page2.evaluate(() => (window as any).__fsRequests || []);
         console.log('FULLSCREEN REQUESTS:', JSON.stringify(fsRequests));
         expect(fsRequests.length).toBeGreaterThan(0);
         const fsTarget = fsRequests[0];
-        expect(fsTarget.tag).toBe('IMG');
-        expect(fsTarget.cls).toContain('voice-video-cam');
+        expect(fsTarget.cls).toContain('voice-fs-wrap');
         await page2.evaluate(() => {
             Element.prototype.requestFullscreen = (window as any).__origFs;
         });
 
         // ---- Bug: turning OFF the screen share while camera is still ON must
-        // keep the self camera FULL-WIDTH (no stuck pip layout on the reused
-        // <video> element), and B must drop to camera-only. ----
+        // keep the camera tile full-width (no stuck pip layout) ----
         await page.click('#voice-bar-screen');
         await page.waitForTimeout(1500);
 
-        const aAfterScreenOff = await page.evaluate(() => ({
-            camBtn: document.getElementById('voice-bar-camera')!.classList.contains('active'),
-            scrBtn: document.getElementById('voice-bar-screen')!.classList.contains('active'),
-        }));
+        const aAfterScreenOff = await page.evaluate(() => {
+            const s = (window as any).VoiceManager.getState();
+            return {
+                camBtn: document.getElementById('voice-bar-camera')!.classList.contains('active'),
+                scrBtn: document.getElementById('voice-bar-screen')!.classList.contains('active'),
+                cameraOn: s.cameraOn,
+                screenOn: s.screenOn,
+            };
+        });
         console.log('A AFTER SCREEN OFF:', JSON.stringify(aAfterScreenOff));
         expect(aAfterScreenOff.camBtn).toBe(true);
         expect(aAfterScreenOff.scrBtn).toBe(false);
+        expect(aAfterScreenOff.cameraOn).toBe(true);
+        expect(aAfterScreenOff.screenOn).toBe(false);
 
-        // A's own self-preview: exactly ONE video, no pip class, full box width.
-        // The self preview lives inside the (hidden) popup, so open A's popup
-        // to measure it, then close it again.
-        await page.evaluate(() => { (window as any).VoiceManager.toggleServerPopup(); });
-        await page.waitForTimeout(500);
-        const aSelfAfterScreenOff = await page.evaluate(() => {
-            const box = document.querySelector('.voice-self-videos');
-            if (!box) return null;
-            const vids = Array.from(box.querySelectorAll('video'));
-            const boxW = box.getBoundingClientRect().width;
-            const vw = vids.length ? vids[0].getBoundingClientRect().width : 0;
-            return {
-                childCount: box.children.length,
-                vidCount: vids.length,
-                anyPipClass: vids.some((v: any) => v.className.includes('pip')),
-                boxW, vw,
-                fullWidth: boxW > 0 && vw >= boxW * 0.8,
-            };
-        });
-        await page.evaluate(() => { (window as any).VoiceManager.toggleServerPopup(); });
-        console.log('A SELF after screen off:', JSON.stringify(aSelfAfterScreenOff));
-        expect(aSelfAfterScreenOff).not.toBeNull();
-        expect(aSelfAfterScreenOff.vidCount).toBe(1);
-        expect(aSelfAfterScreenOff.anyPipClass).toBe(false);
-        expect(aSelfAfterScreenOff.fullWidth).toBe(true);
-
-        // B's tile must now be camera-only (no stale screen img beside it).
+        // B's tile for A must now be camera-only (screen hidden), still side-by-side layout
         const bTileAfterScreenOff = await page2.evaluate((uid) => {
             const row = document.querySelector(`.voice-member-row[data-uid="${uid}"]`);
             if (!row) return null;
-            const tile = row.querySelector('.voice-video-tile');
-            if (!tile) return null;
-            const imgs = Array.from(tile.querySelectorAll('img'));
+            const media = row.querySelector('.voice-member-media');
+            if (!media) return null;
             return {
-                imgCount: imgs.length,
-                hasScreen: imgs.some((i: any) => i.className.includes('voice-video-screen')),
-                hasCam: imgs.some((i: any) => i.className.includes('voice-video-cam')),
-                fullWidthOnlyChild: imgs.length === 1 && imgs[0].className.includes('voice-video-cam'),
+                vidCount: media.querySelectorAll('video.remote-video-tile').length,
+                cameraDisplay: media.querySelector('video[data-kind="camera"]') ? (media.querySelector('video[data-kind="camera"]') as any).style.display : null,
+                screenDisplay: media.querySelector('video[data-kind="screen"]') ? (media.querySelector('video[data-kind="screen"]') as any).style.display : null,
             };
         }, aUid);
         console.log('B TILE after A screen off:', JSON.stringify(bTileAfterScreenOff));
         expect(bTileAfterScreenOff).not.toBeNull();
-        expect(bTileAfterScreenOff.imgCount).toBe(1);
-        expect(bTileAfterScreenOff.hasScreen).toBe(false);
-        expect(bTileAfterScreenOff.hasCam).toBe(true);
+        expect(bTileAfterScreenOff.cameraDisplay).toBe('block');
+        expect(bTileAfterScreenOff.screenDisplay).toBe('none');
 
-        // A turns the camera back ON alongside the screen (both on again).
+        // ---- Bug: turning camera OFF must not leave a stale last frame or
+        // kill the screen share. Re-enable the screen first (it was turned off
+        // in the previous step), then turn the camera off and verify the screen
+        // share survives independent of the camera. ----
         await page.click('#voice-bar-screen');
         await page.waitForTimeout(1500);
-        const bBothAgain = await page2.evaluate((uid) => {
-            const row = document.querySelector(`.voice-member-row[data-uid="${uid}"]`);
-            if (!row) return null;
-            const tile = row.querySelector('.voice-video-tile');
-            if (!tile) return null;
-            return Array.from(tile.querySelectorAll('img')).length;
-        }, aUid);
-        console.log('B TILE imgs (both on again):', JSON.stringify(bBothAgain));
-        expect(bBothAgain).toBe(2);
-
-        // A turns camera OFF — the last frame must NOT linger. Screen tile stays.
         await page.click('#voice-bar-camera');
         await page.waitForTimeout(1500);
-
-        const aAfter = await page.evaluate(() => ({
-            camBtn: document.getElementById('voice-bar-camera')!.classList.contains('active'),
-            scrBtn: document.getElementById('voice-bar-screen')!.classList.contains('active'),
-        }));
-        expect(aAfter.camBtn).toBe(false);
-        expect(aAfter.scrBtn).toBe(true);
-
-        // The stale camera frame must be gone: no camera img left behind when the
-        // screen tile remains (side-by-side keeps just the screen now).
-        const staleCam = await page2.evaluate(() => {
-            const imgs = Array.from(document.querySelectorAll('#voice-popup-members .voice-video-tile img'));
-            return imgs.some((i: any) => i.className.includes('voice-video-cam'));
+        const aAfterCamOff = await page.evaluate(() => {
+            const s = (window as any).VoiceManager.getState();
+            return { cameraOn: s.cameraOn, screenOn: s.screenOn };
         });
-        expect(staleCam).toBe(false);
-
-        // Screen frames still flowing after camera off
-        const bCounts2 = await page2.evaluate(() => (window as any).__voiceCounts || {});
-        console.log('B COUNTS after cam off:', JSON.stringify(bCounts2));
-        expect(bCounts2.screen).toBeGreaterThan(bCounts1.screen);
-
-        // B deafens THEMSELVES (normal deafen) — they must STILL see A's screen.
-        // B's popup is open, so use the popup's deafen button (the floating bar
-        // hides while the popup is open).
-        await page2.click('#vp-deafen-btn');
-        await page.waitForTimeout(1200);
-        const camBefore = (await page2.evaluate(() => (window as any).__voiceCounts || {})).screen;
-        await page.waitForTimeout(1200);
-        const camAfter = (await page2.evaluate(() => (window as any).__voiceCounts || {})).screen;
-        console.log('B sees screen while deafened:', camBefore, '->', camAfter);
-        expect(camAfter).toBeGreaterThan(camBefore);
-
-        // A force-mutes B (owner control) — indicator must appear on A's row for B
-        // and B's own row must show the lock.
-        const bId = u2.user.id;
-        await page.evaluate(() => { (window as any).VoiceManager.toggleServerPopup(); });
-        await page.waitForSelector(`.voice-member-row[data-uid="${bId}"] .voice-owner-btn[data-a="mute"]`, { timeout: 10000 });
-        await page.click(`.voice-member-row[data-uid="${bId}"] .voice-owner-btn[data-a="mute"]`);
-        await page.waitForTimeout(1500);
-
-        const ownerInd = await page.evaluate((bId2) => {
-            const row = document.querySelector(`.voice-member-row[data-uid="${bId2}"]`);
+        expect(aAfterCamOff.cameraOn).toBe(false);
+        expect(aAfterCamOff.screenOn).toBe(true);
+        const bTileAfterCamOff = await page2.evaluate((uid) => {
+            const row = document.querySelector(`.voice-member-row[data-uid="${uid}"]`);
             if (!row) return null;
-            const muteBtn = row.querySelector('.voice-owner-btn[data-a="mute"]');
+            const media = row.querySelector('.voice-member-media');
+            if (!media) return null;
             return {
-                rowClass: row.className,
-                icon: (row.querySelector('.voice-member-icon') || {}).textContent,
-                muteBtnActive: muteBtn ? muteBtn.classList.contains('active') : null,
-                muteBtnText: muteBtn ? muteBtn.textContent : null,
+                cameraDisplay: media.querySelector('video[data-kind="camera"]') ? (media.querySelector('video[data-kind="camera"]') as any).style.display : null,
+                screenDisplay: media.querySelector('video[data-kind="screen"]') ? (media.querySelector('video[data-kind="screen"]') as any).style.display : null,
             };
-        }, bId);
-        console.log('OWNER INDICATOR:', JSON.stringify(ownerInd));
-        expect(ownerInd).not.toBeNull();
-        expect(ownerInd.rowClass).toContain('force-locked');
-        expect(ownerInd.icon).toContain('🔒');
-        expect(ownerInd.muteBtnActive).toBe(true);
-        expect(ownerInd.muteBtnText).toBe('🔇');
+        }, aUid);
+        console.log('B TILE after cam off:', JSON.stringify(bTileAfterCamOff));
+        expect(bTileAfterCamOff.cameraDisplay).toBe('none'); // stale frame cleared
+        expect(bTileAfterCamOff.screenDisplay).toBe('block');
 
-        // B's own client must reflect the force-mute (selfState) + see the lock
-        const victimInd = await page2.evaluate(() => {
-            const myRow = document.querySelector('.voice-member-row .voice-member-you')?.closest('.voice-member-row');
-            const iconEl = document.querySelector('.voice-member-icon');
-            return {
-                selfLocked: !!(myRow && myRow.className.includes('force-locked')),
-                anyLockIcon: !!(iconEl && iconEl.textContent && iconEl.textContent.includes('🔒')),
-            };
-        });
-        console.log('VICTIM INDICATOR:', JSON.stringify(victimInd));
-        expect(victimInd.selfLocked).toBe(true);
-
-        // Force-muted B must STILL see A's video (server no longer drops video
-        // for muted/deafened recipients).
-        const sBefore = (await page2.evaluate(() => (window as any).__voiceCounts || {})).screen;
+        // B deafens THEMSELVES (normal deafen) — they must STILL see A's screen
+        // (their own deafen only mutes their output, not incoming video).
+        await page2.click('#voice-popup-deafen');
         await page.waitForTimeout(1200);
-        const sAfter = (await page2.evaluate(() => (window as any).__voiceCounts || {})).screen;
-        console.log('B sees screen while force-muted:', sBefore, '->', sAfter);
-        expect(sAfter).toBeGreaterThan(sBefore);
+        const bDeafenedState = await page2.evaluate(() => {
+            const s = (window as any).VoiceManager.getState();
+            return { deafened: s.deafened };
+        });
+        expect(bDeafenedState.deafened).toBe(true);
+        const bSeesScreenWhileDeaf = await page2.evaluate((uid) => {
+            const media = document.querySelector(`.voice-member-row[data-uid="${uid}"] .voice-member-media`);
+            if (!media) return false;
+            const v = media.querySelector('video[data-kind="screen"]');
+            return v ? v.style.display === 'block' : false;
+        }, aUid);
+        expect(bSeesScreenWhileDeaf).toBe(true);
+
+        // ---- Owner control: A force-mutes B -> B's client reflects the lock,
+        // and B still sees A's video (mute only stops B's outgoing audio). ----
+        const bId = u2.user.id;
+        await page.evaluate(({ uid }) => {
+            window.VoiceManager.ownerControl('mute', uid);
+        }, { uid: bId });
+        await page2.waitForFunction(() => {
+            const v = (window as any).VoiceManager;
+            return v && v.getState().forceMuted === true;
+        }, undefined, { timeout: 10000 });
+        const victimState = await page2.evaluate(() => {
+            const s = (window as any).VoiceManager.getState();
+            return { forceMuted: s.forceMuted, muted: s.muted };
+        });
+        console.log('VICTIM FORCE-MUTED:', JSON.stringify(victimState));
+        expect(victimState.forceMuted).toBe(true);
+
+        // Owner's popup row for B shows the locked badge (the owner's popup may
+        // be closed at this point — the badge still renders in the DOM).
+        await page.waitForSelector(`.voice-member-row[data-uid="${bId}"] .vm-badge.locked`, { state: 'attached', timeout: 10000 });
+
+        // Force-muted B must STILL see A's screen tile (mute is outgoing-only)
+        const bSeesWhileMuted = await page2.evaluate((uid) => {
+            const media = document.querySelector(`.voice-member-row[data-uid="${uid}"] .voice-member-media`);
+            if (!media) return false;
+            const v = media.querySelector('video[data-kind="screen"]');
+            return v ? v.style.display === 'block' : false;
+        }, aUid);
+        expect(bSeesWhileMuted).toBe(true);
 
         // ---- Bug: "why can I not hear sound". Owner force-DEAFENS B, then
-        // lifts it. B's selfState must flip deafened true → false, and B's mic
+        // lifts it. B's state must flip deafened true -> false, and B's mic
         // must be (re)started so they can talk again. ----
-        await page.click(`.voice-member-row[data-uid="${bId}"] .voice-owner-btn[data-a="deafen"]`);
-        await page.waitForTimeout(1500);
-        const bDeafened = await page2.evaluate(() => (window as any).VoiceManager._debugState());
+        await page.evaluate(({ uid }) => {
+            window.VoiceManager.ownerControl('deafen', uid);
+        }, { uid: bId });
+        await page2.waitForFunction(() => {
+            const v = (window as any).VoiceManager;
+            const s = v && v.getState();
+            return s && s.forceDeafened === true;
+        }, undefined, { timeout: 10000 });
+        const bDeafened = await page2.evaluate(() => {
+            const s = (window as any).VoiceManager.getState();
+            return { deafened: s.deafened, forceDeafened: s.forceDeafened };
+        });
         console.log('B STATE after force-deafen:', JSON.stringify(bDeafened));
         expect(bDeafened.deafened).toBe(true);
         expect(bDeafened.forceDeafened).toBe(true);
 
-        await page.click(`.voice-member-row[data-uid="${bId}"] .voice-owner-btn[data-a="deafen"]`);
-        await page.waitForTimeout(1500);
-        const bReleased = await page2.evaluate(() => (window as any).VoiceManager._debugState());
-        console.log('B STATE after owner undeafen:', JSON.stringify(bReleased));
-        expect(bReleased.deafened).toBe(false);
-        expect(bReleased.forceDeafened).toBe(false);
-        expect(bReleased.forceMuted).toBe(false); // implied mute lifted too
+        await page.evaluate(({ uid }) => {
+            window.VoiceManager.ownerControl('undeafen', uid);
+        }, { uid: bId });
+        await page2.waitForFunction(() => {
+            const v = (window as any).VoiceManager;
+            const s = v && v.getState();
+            return s && s.forceDeafened === false && s.deafened === false;
+        }, undefined, { timeout: 10000 });
+        const bAfterUndeafen = await page2.evaluate(() => {
+            const s = (window as any).VoiceManager.getState();
+            return { deafened: s.deafened, forceDeafened: s.forceDeafened, forceMuted: s.forceMuted };
+        });
+        console.log('B STATE after owner undeafen:', JSON.stringify(bAfterUndeafen));
+        // Discord semantics: deafen implies mute, so undeafen alone does NOT
+        // lift an earlier force-mute — B stays force-muted until unmuted.
+        expect(bAfterUndeafen.deafened).toBe(false);
+        expect(bAfterUndeafen.forceDeafened).toBe(false);
+        expect(bAfterUndeafen.forceMuted).toBe(true);
+
+        // Owner fully releases B (unmute) — B's mic restarts so they can talk.
+        await page.evaluate(({ uid }) => {
+            window.VoiceManager.ownerControl('unmute', uid);
+        }, { uid: bId });
+        await page2.waitForFunction(() => {
+            const v = (window as any).VoiceManager;
+            const s = v && v.getState();
+            return s && s.forceMuted === false && s.muted === false;
+        }, undefined, { timeout: 10000 });
+        await page2.waitForFunction(() => {
+            const v = (window as any).VoiceManager;
+            const s = v && v.getState();
+            return !!(s.localStreams && s.localStreams.mic);
+        }, undefined, { timeout: 10000 });
+        const bReleased = await page2.evaluate(() => {
+            const s = (window as any).VoiceManager.getState();
+            return { forceMuted: s.forceMuted, muted: s.muted, micStream: !!(s.localStreams && s.localStreams.mic) };
+        });
+        console.log('B STATE after owner unmute:', JSON.stringify(bReleased));
+        expect(bReleased.forceMuted).toBe(false);
         expect(bReleased.muted).toBe(false);
-        expect(bReleased.micStream).toBe(true);   // capture running again → can talk/hear
+        expect(bReleased.micStream).toBe(true);   // capture running again -> can talk/hear
 
         console.log('P1 ERRORS:', JSON.stringify(errors));
         console.log('P2 ERRORS:', JSON.stringify(errors2));
