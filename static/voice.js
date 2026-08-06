@@ -63,6 +63,7 @@
             micVolume: 100,
             speakerVolume: 100,
             noiseSuppressionMode: 'rnnoise', // 'off' | 'browser' | 'rnnoise'
+            echoCancellation: false,          // Chrome's AEC on the mic (default OFF)
         },
         _viewLast: '',
         _lastSpeakSent: 0,
@@ -109,6 +110,7 @@
         setMicVolume: setMicVolume,
         setSpeakerVolume: setSpeakerVolume,
         setNoiseSuppression: setNoiseSuppression,
+        setEchoCancellation: setEchoCancellation,
         setMemberVolume: setMemberVolume,
         ownerControl: ownerControl,
         startDmCall: startDmCall,
@@ -308,6 +310,8 @@
         if (sv) sv.value = S.settings.speakerVolume;
         var ns = document.getElementById('voice-noise-suppression');
         if (ns) ns.value = S.settings.noiseSuppressionMode || 'rnnoise';
+        var ec = document.getElementById('voice-echo-cancellation');
+        if (ec) ec.checked = !!S.settings.echoCancellation;
         updateSettingsLabels();
     }
 
@@ -732,7 +736,7 @@
         var mode = effectiveNsMode();
         var constraints = {
             audio: {
-                echoCancellation: true,
+                echoCancellation: !!S.settings.echoCancellation,
                 noiseSuppression: mode === 'browser', // RNNoise replaces it
                 autoGainControl: true,
             },
@@ -2470,6 +2474,8 @@
         if (ssv) ssv.addEventListener('input', function (e) { setSpeakerVolume(parseInt(e.target.value, 10)); updateSettingsLabels(); });
         var sns = document.getElementById('voice-noise-suppression');
         if (sns) sns.addEventListener('change', function (e) { setNoiseSuppression(e.target.value); });
+        var sec = document.getElementById('voice-echo-cancellation');
+        if (sec) sec.addEventListener('change', function (e) { setEchoCancellation(e.target.checked); });
     }
 
     function updateSettingsLabels() {
@@ -3311,6 +3317,13 @@
 
     function setNoiseSuppression(mode) {
         S.settings.noiseSuppressionMode = mode;
+        saveSettings();
+        updateSettingsLabels();
+        restartMicForSettings();
+    }
+
+    function setEchoCancellation(enabled) {
+        S.settings.echoCancellation = !!enabled;
         saveSettings();
         updateSettingsLabels();
         restartMicForSettings();

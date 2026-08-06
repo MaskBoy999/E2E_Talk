@@ -552,6 +552,14 @@
                     <p class="settings-hint">Uses the browser's built-in noise suppression. Changes apply the next time your mic starts.</p>
                 </div>
                 <div class="settings-group">
+                    <h4>Echo Cancellation</h4>
+                    <label style="display:flex;align-items:center;gap:8px;font-size:14px;color:var(--text-primary);cursor:pointer">
+                        <input type="checkbox" id="voice-echo-cancellation" style="width:16px;height:16px;accent-color:var(--accent,#5865f2)">
+                        Use the browser's echo cancellation on the mic
+                    </label>
+                    <p class="settings-hint">Off by default — Chrome's AEC can gate the mic when it hears the same sound it is also playing (e.g. testing on one device with two windows, or a voice changer/external mixer). Turn it on if the other side hears their own voice echoed back.</p>
+                </div>
+                <div class="settings-group">
                     <h4>Ringtone</h4>
                     <p class="settings-hint">Choose the sound played when someone calls you. If it is shorter than the call, it loops until you answer. Encrypted end-to-end like your notification sound, so it syncs across your devices.</p>
                     <div class="notif-sound-controls">
