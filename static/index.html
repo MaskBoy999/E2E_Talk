@@ -561,7 +561,7 @@
                 </div>
                 <div class="settings-group">
                     <h4>Ringtone</h4>
-                    <p class="settings-hint">Choose the sound played when someone calls you. If it is shorter than the call, it loops until you answer. Encrypted end-to-end like your notification sound, so it syncs across your devices.</p>
+                    <p class="settings-hint">Choose the sound played when someone calls you. It loops until you answer. Ringtones are capped at 30 seconds — longer files let you pick the 1–30s part to keep. Encrypted end-to-end like your notification sound, so it syncs across your devices.</p>
                     <div class="notif-sound-controls">
                         <input type="file" id="ringtone-input" accept="audio/*" style="display:none">
                         <button class="btn btn-primary" id="ringtone-upload-btn">Choose Audio File</button>
@@ -578,6 +578,26 @@
                     </div>
                     <p class="notif-sound-file-name" id="ringtone-file-name" style="display:none;margin-top:8px;"></p>
                     <p class="notif-sound-status" id="ringtone-status" style="margin-top:4px;font-size:13px;"></p>
+                    <div id="ringtone-trim" style="display:none;margin-top:10px;padding:10px 12px;background:rgba(88,101,242,0.08);border-radius:6px;border:1px solid var(--border-color);font-size:13px;color:var(--text-primary);">
+                        <div style="font-weight:600;margin-bottom:4px;">This audio is <span id="ringtone-trim-total">0:00</span> — pick the part to keep (1s–30s):</div>
+                        <canvas id="ringtone-trim-waveform" width="560" height="80" style="display:block;width:100%;height:80px;margin-top:8px;border-radius:6px;background:#0e0e14;cursor:pointer;" title="Click to jump the start time there"></canvas>
+                        <div style="font-size:11px;color:var(--text-muted);margin-top:3px;">Click the waveform to set the start time.</div>
+                        <div style="margin-top:8px;">
+                            <label for="ringtone-trim-start" style="font-size:12px;color:var(--text-secondary);">Start</label>
+                            <input type="range" id="ringtone-trim-start" min="0" max="1" step="1" value="0" style="width:100%;">
+                            <div style="font-size:11px;color:var(--text-muted);" id="ringtone-trim-start-label">0:00</div>
+                        </div>
+                        <div style="margin-top:6px;">
+                            <label for="ringtone-trim-len" style="font-size:12px;color:var(--text-secondary);">Length (seconds)</label>
+                            <input type="range" id="ringtone-trim-len" min="1" max="30" step="1" value="10" style="width:100%;">
+                            <div style="font-size:11px;color:var(--text-muted);" id="ringtone-trim-len-label">10s</div>
+                        </div>
+                        <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
+                            <button class="btn btn-secondary" id="ringtone-trim-preview-btn">▶ Preview</button>
+                            <button class="btn btn-primary" id="ringtone-trim-save-btn">Save This Part</button>
+                            <button class="btn btn-secondary" id="ringtone-trim-cancel-btn">Cancel</button>
+                        </div>
+                    </div>
                     <div class="notif-volume-row" style="display:flex;align-items:center;gap:10px;margin-top:8px;font-size:13px;color:var(--text-muted)">
                         <label for="ringtone-volume-slider">Volume:</label>
                         <input type="range" id="ringtone-volume-slider" min="0" max="100" value="60" class="notif-volume-slider">

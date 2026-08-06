@@ -8,6 +8,7 @@ use axum::{
     routing::{get, post, put, delete, patch},
     Router,
 };
+use axum::extract::DefaultBodyLimit;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 mod auth;
@@ -317,6 +318,11 @@ async fn main() {
         .route("/api/online", get(handlers::list_online_users))
         .route("/ws", get(ws::ws_handler))
         .fallback(get(serve_static))
+        // Encrypted audio blobs (notification sounds, ringtones) are base64 in
+        // JSON bodies — a 30s 48kHz WAV is several MB, far over axum's default
+        // 2MB Json limit. Raise it to 32MB (still way below any DoS concern
+        // since payloads are per-authenticated-user and rate-limited).
+        .layer(DefaultBodyLimit::max(32 * 1024 * 1024))
         .with_state(state);
 
     let addr = format!("0.0.0.0:{}", config.port);

@@ -802,6 +802,29 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById("current-user").textContent = user.username;
     updateSidebarFooter();
 
+    // Scope the ringtone + notification-sound LOCAL caches to the current
+    // user. The audio itself is stored encrypted on the server per-account
+    // (see /api/ringtone + /api/notification-sound), but the per-browser
+    // IndexedDB/localStorage cache is shared across accounts — if a session
+    // expires without "Clear All Data", the next account on this browser
+    // would inherit the previous account's cached ringtone/sound. Store the
+    // cache owner id and clear the local audio caches whenever it changes.
+    try {
+        var cachedOwner = localStorage.getItem('e2e_sound_cache_owner');
+        if (cachedOwner !== user.id) {
+            _ringtoneCachedUrl = null;
+            _ringtoneCachedName = null;
+            _idbRingtoneDel('url').catch(function () {});
+            _idbRingtoneDel('name').catch(function () {});
+            try { localStorage.removeItem('ringtone_name'); } catch (_) {}
+            _notifCachedUrl = null;
+            _idbNotifDel('url').catch(function () {});
+            _idbNotifDel('name').catch(function () {});
+            try { localStorage.removeItem('notification_sound_name'); } catch (_) {}
+            try { localStorage.setItem('e2e_sound_cache_owner', user.id); } catch (_) {}
+        }
+    } catch (_) {}
+
     // Init voice channels / calls (voice.js loads before chat.js)
     if (window.VoiceManager) {
         try { VoiceManager.init(); } catch (err) { console.warn('Voice init failed:', err); }
@@ -837,7 +860,10 @@ document.addEventListener('DOMContentLoaded', () => {
         loadMyProfile();
         loadFriendRequestsDisabledSetting();
     });
-    document.getElementById('close-settings').addEventListener('click', () => { settingsModal.style.display = 'none'; });
+    document.getElementById('close-settings').addEventListener('click', () => {
+        settingsModal.style.display = 'none';
+        if (window._stopRingTrimPreview) window._stopRingTrimPreview();
+    });
 
     // Tab switching
     settingsModal.querySelectorAll('.settings-tab').forEach(tab => {
@@ -846,6 +872,8 @@ document.addEventListener('DOMContentLoaded', () => {
             settingsModal.querySelectorAll('.settings-panel').forEach(p => p.style.display = 'none');
             tab.classList.add('active');
             document.getElementById(tab.dataset.tab).style.display = 'block';
+            // Preview must not keep playing when we leave the Voice tab.
+            if (window._stopRingTrimPreview) window._stopRingTrimPreview();
         });
     });
 
@@ -1297,17 +1325,297 @@ document.addEventListener('DOMContentLoaded', () => {
             ringtoneInput.click();
         });
 
-        ringtoneInput.addEventListener('change', function (e) {
-            var file = e.target.files[0];
-            if (!file) return;
-            if (!file.type.startsWith('audio/')) {
-                if (ringtoneStatus) { ringtoneStatus.textContent = 'Please select an audio file (MP3, WAV, etc.)'; ringtoneStatus.style.color = '#f44336'; }
-                return;
+        // Trim state for the >30s ringtone flow (picked segment preview/save).
+        var ringTrimTotal = document.getElementById('ringtone-trim-total');
+        var ringTrimStart = document.getElementById('ringtone-trim-start');
+        var ringTrimLen = document.getElementById('ringtone-trim-len');
+        var ringTrimStartLabel = document.getElementById('ringtone-trim-start-label');
+        var ringTrimLenLabel = document.getElementById('ringtone-trim-len-label');
+        var ringTrimPreviewBtn = document.getElementById('ringtone-trim-preview-btn');
+        var ringTrimSaveBtn = document.getElementById('ringtone-trim-save-btn');
+        var ringTrimCancelBtn = document.getElementById('ringtone-trim-cancel-btn');
+        var ringTrimWaveform = document.getElementById('ringtone-trim-waveform');
+        var _ringDecodedBuffer = null; // decoded AudioBuffer of the picked file
+        var _ringDecodedName = '';     // original file name (for the trimmed part)
+        var _ringTrimCtx = null;       // AudioContext used to decode + preview
+        var _ringPreviewSource = null; // active preview source (stopped on re-preview)
+        var _ringPreviewToken = 0;     // generation token — a stale onended must not null a newer source
+        var _ringWavePeaks = null;     // downsampled min/max peak pairs for the waveform
+
+        function _ringGetTrimCtx() {
+            if (!_ringTrimCtx) {
+                try { _ringTrimCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (_) {}
             }
-            if (file.size > 50 * 1024 * 1024) {
-                if (ringtoneStatus) { ringtoneStatus.textContent = 'File too large (max 50 MB). Try a shorter or lower-quality audio file.'; ringtoneStatus.style.color = '#f44336'; }
-                return;
+            if (_ringTrimCtx && _ringTrimCtx.state === 'suspended') _ringTrimCtx.resume().catch(function () {});
+            return _ringTrimCtx;
+        }
+
+        function fmtSec(s) {
+            var m = Math.floor(s / 60);
+            var ss = Math.floor(s % 60);
+            return m + ':' + (ss < 10 ? '0' : '') + ss;
+        }
+
+        function hideRingTrim() {
+            var trimEl = document.getElementById('ringtone-trim');
+            if (trimEl) trimEl.style.display = 'none';
+            _ringDecodedBuffer = null;
+        }
+
+        function updateRingTrimLabels() {
+            if (!ringTrimStart || !ringTrimLen) return;
+            var start = parseInt(ringTrimStart.value, 10) || 0;
+            var len = parseInt(ringTrimLen.value, 10) || 1;
+            if (ringTrimStartLabel) ringTrimStartLabel.textContent = fmtSec(start);
+            if (ringTrimLenLabel) ringTrimLenLabel.textContent = len + 's (' + fmtSec(start + len) + ' end)';
+        }
+
+        // Downsample the decoded buffer to one min/max peak pair per pixel
+        // column (cached per buffer + canvas width). Multi-channel audio takes
+        // the loudest sample across channels so quiet pans still show up.
+        function ringComputePeaks() {
+            var buf = _ringDecodedBuffer;
+            if (!buf || !ringTrimWaveform) return;
+            var cssW = ringTrimWaveform.clientWidth || 560;
+            var chans = buf.numberOfChannels;
+            var len = buf.length;
+            var cols = Math.max(1, Math.floor(cssW));
+            var peaks = new Float32Array(cols * 2);
+            // Hoist channel data out of the loops: getChannelData() is a method
+            // call, and calling it per-sample would be millions of calls for a
+            // multi-minute file. One call per channel, plain array indexing after.
+            var chansData = [];
+            for (var ch = 0; ch < chans; ch++) chansData.push(buf.getChannelData(ch));
+            var per = Math.max(1, Math.floor(len / cols));
+            for (var c = 0; c < cols; c++) {
+                var s0 = c * per;
+                var s1 = Math.min(len, s0 + per);
+                var mn = 1.0, mx = -1.0;
+                for (var i = s0; i < s1; i++) {
+                    for (var ch = 0; ch < chans; ch++) {
+                        var v = chansData[ch][i];
+                        if (v < mn) mn = v;
+                        if (v > mx) mx = v;
+                    }
+                }
+                if (mn > 0) mn = 0; // clip to zero line if the column is all-positive
+                if (mx < 0) mx = 0;
+                peaks[c * 2] = mn;
+                peaks[c * 2 + 1] = mx;
             }
+            _ringWavePeaks = peaks;
+        }
+
+        function drawRingTrimWaveform() {
+            var canvas = ringTrimWaveform;
+            var buf = _ringDecodedBuffer;
+            if (!canvas || !buf || !ringTrimStart || !ringTrimLen) return;
+            var dpr = window.devicePixelRatio || 1;
+            var cssW = canvas.clientWidth || 560;
+            var cssH = 80;
+            if (canvas.width !== Math.round(cssW * dpr) || canvas.height !== Math.round(cssH * dpr)) {
+                canvas.width = Math.round(cssW * dpr);
+                canvas.height = Math.round(cssH * dpr);
+            }
+            var ctx = canvas.getContext('2d');
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            ctx.clearRect(0, 0, cssW, cssH);
+
+            // Dark background.
+            ctx.fillStyle = '#0e0e14';
+            ctx.fillRect(0, 0, cssW, cssH);
+
+            var dur = buf.duration || 1;
+            var start = parseInt(ringTrimStart.value, 10) || 0;
+            var len = parseInt(ringTrimLen.value, 10) || 1;
+            var selStartT = start;
+            var selEndT = start + len;
+            var midY = cssH / 2;
+            var amp = (cssH - 12) / 2;
+
+            // Recompute peaks when the width changed since last draw (peaks are
+            // per CSS-pixel column, so only the width matters — not DPR).
+            if (!_ringWavePeaks || _ringWavePeaks.length !== Math.max(1, Math.floor(cssW)) * 2) {
+                ringComputePeaks();
+            }
+            var peaks = _ringWavePeaks;
+            if (!peaks) return;
+
+            // Center line.
+            ctx.fillStyle = 'rgba(255,255,255,0.08)';
+            ctx.fillRect(0, midY - 0.5, cssW, 1);
+
+            var cols = peaks.length / 2;
+            var xStep = cssW / cols;
+            for (var c = 0; c < cols; c++) {
+                var t0 = (c / cols) * dur;
+                var t1 = ((c + 1) / cols) * dur;
+                // Column is inside the selection when it overlaps [start, start+len].
+                var inSel = t1 > selStartT && t0 < selEndT;
+                var mn = peaks[c * 2];
+                var mx = peaks[c * 2 + 1];
+                var y0 = midY - mx * amp;
+                var y1 = midY - mn * amp;
+                var x = c * xStep;
+                ctx.fillStyle = inSel ? 'rgba(88,101,242,0.95)' : 'rgba(148,155,190,0.55)';
+                ctx.fillRect(x, y0, Math.max(1, xStep), Math.max(1, y1 - y0));
+            }
+
+            // Selection boundary markers.
+            var sx = (selStartT / dur) * cssW;
+            var ex = (selEndT / dur) * cssW;
+            ctx.fillStyle = 'rgba(255,255,255,0.85)';
+            ctx.fillRect(sx - 0.5, 0, 1, cssH);
+            ctx.fillRect(ex - 0.5, 0, 1, cssH);
+        }
+
+        // Click the waveform to jump the START slider to that time.
+        if (ringTrimWaveform) {
+            ringTrimWaveform.addEventListener('click', function (ev) {
+                var buf = _ringDecodedBuffer;
+                if (!buf || !ringTrimStart || !ringTrimLen) return;
+                var rect = ringTrimWaveform.getBoundingClientRect();
+                if (!rect.width) return;
+                var frac = (ev.clientX - rect.left) / rect.width;
+                var dur = buf.duration || 1;
+                var t = Math.max(0, Math.min(dur - 1, frac * dur));
+                var newStart = Math.floor(t);
+                ringTrimStart.value = newStart;
+                var maxLen = Math.min(30, Math.floor(dur - newStart));
+                ringTrimLen.max = Math.max(1, maxLen);
+                if (parseInt(ringTrimLen.value, 10) > maxLen) ringTrimLen.value = Math.max(1, maxLen);
+                updateRingTrimLabels();
+                drawRingTrimWaveform();
+            });
+        }
+
+        function showRingTrim(duration) {
+            var trimEl = document.getElementById('ringtone-trim');
+            if (!trimEl || !ringTrimStart || !ringTrimLen) return;
+            var maxStart = Math.max(0, Math.floor(duration) - 1); // leave >= 1s
+            var defLen = Math.min(30, Math.floor(duration));
+            ringTrimStart.max = maxStart;
+            ringTrimStart.value = 0;
+            ringTrimLen.max = Math.min(30, Math.floor(duration));
+            ringTrimLen.value = defLen;
+            if (ringTrimTotal) ringTrimTotal.textContent = fmtSec(duration);
+            updateRingTrimLabels();
+            trimEl.style.display = '';
+            _ringWavePeaks = null; // force recompute for the newly visible width
+            // Draw after layout so clientWidth is real.
+            requestAnimationFrame(drawRingTrimWaveform);
+        }
+
+        function ringRedraw() {
+            updateRingTrimLabels();
+            drawRingTrimWaveform();
+        }
+
+        if (ringTrimStart) ringTrimStart.addEventListener('input', function () {
+            var start = parseInt(ringTrimStart.value, 10) || 0;
+            var maxLen = Math.min(30, Math.floor((_ringDecodedBuffer ? _ringDecodedBuffer.duration : 0) - start));
+            if (ringTrimLen) {
+                ringTrimLen.max = Math.max(1, maxLen);
+                if (parseInt(ringTrimLen.value, 10) > maxLen) ringTrimLen.value = Math.max(1, maxLen);
+            }
+            ringRedraw();
+        });
+        if (ringTrimLen) ringTrimLen.addEventListener('input', function () {
+            var len = parseInt(ringTrimLen.value, 10) || 1;
+            var maxStart = Math.max(0, Math.floor((_ringDecodedBuffer ? _ringDecodedBuffer.duration : 0) - len));
+            if (ringTrimStart) {
+                ringTrimStart.max = maxStart;
+                if (parseInt(ringTrimStart.value, 10) > maxStart) ringTrimStart.value = maxStart;
+            }
+            ringRedraw();
+        });
+        window.addEventListener('resize', function () {
+            if (_ringDecodedBuffer && ringTrimWaveform) {
+                // Only recompute when the canvas width actually changed
+                // (peaks are width-dependent); otherwise skip the work.
+                var colsNow = Math.max(1, Math.floor(ringTrimWaveform.clientWidth || 560));
+                if (!_ringWavePeaks || _ringWavePeaks.length !== colsNow * 2) {
+                    _ringWavePeaks = null;
+                    drawRingTrimWaveform();
+                }
+            }
+        });
+
+        // Stop any active trim preview (also used when the settings modal
+        // closes or the user switches tabs so audio never plays on past UI).
+        function stopRingPreview() {
+            _ringPreviewToken++; // invalidate any in-flight onended
+            if (_ringPreviewSource) {
+                try { _ringPreviewSource.stop(); } catch (_) {}
+                _ringPreviewSource = null;
+            }
+        }
+        // Exposed so the settings-modal close / tab-switch / Escape handlers
+        // (registered elsewhere in this file) can silence the preview.
+        window._stopRingTrimPreview = stopRingPreview;
+
+        if (ringTrimPreviewBtn) ringTrimPreviewBtn.addEventListener('click', function () {
+            var buf = _ringDecodedBuffer;
+            if (!buf || !ringTrimStart || !ringTrimLen) return;
+            var start = parseInt(ringTrimStart.value, 10) || 0;
+            var len = parseInt(ringTrimLen.value, 10) || 1;
+            var ctx = _ringGetTrimCtx();
+            if (!ctx) return;
+            stopRingPreview(); // never overlap a previous preview
+            try {
+                var src = ctx.createBufferSource();
+                src.buffer = buf;
+                src.connect(ctx.destination);
+                src.start(0, start, Math.min(len, Math.max(0, buf.duration - start)));
+                var myToken = _ringPreviewToken;
+                _ringPreviewSource = src;
+                src.onended = function () {
+                    if (_ringPreviewToken === myToken) _ringPreviewSource = null;
+                };
+            } catch (_) {}
+        });
+
+        // Slice the decoded buffer to [start, start+len] and encode as a 16-bit
+        // PCM WAV file so the ringtone is at most 30s (and small enough to sync).
+        function makeTrimmedRingtoneFile(buf, start, len) {
+            var rate = buf.sampleRate;
+            var chans = buf.numberOfChannels;
+            var s0 = Math.floor(start * rate);
+            var s1 = Math.min(buf.length, Math.floor((start + len) * rate));
+            var n = Math.max(1, s1 - s0);
+            // Downmix to MONO (16-bit PCM): ringtones are mono by nature, this
+            // halves the payload so the encrypted sync stays well under the
+            // server body limit and stores 2x less data per user.
+            var blockAlign = 2;
+            var dataSize = n * blockAlign;
+            var ab = new ArrayBuffer(44 + dataSize);
+            var dv = new DataView(ab);
+            function wstr(off, s) { for (var i = 0; i < s.length; i++) dv.setUint8(off + i, s.charCodeAt(i)); }
+            wstr(0, 'RIFF'); dv.setUint32(4, 36 + dataSize, true); wstr(8, 'WAVE');
+            wstr(12, 'fmt '); dv.setUint32(16, 16, true);
+            dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+            dv.setUint32(24, rate, true); dv.setUint32(28, rate * blockAlign, true);
+            dv.setUint16(32, blockAlign, true); dv.setUint16(34, 16, true);
+            wstr(36, 'data'); dv.setUint32(40, dataSize, true);
+            var off = 44;
+            for (var i = s0; i < s1; i++) {
+                // Average the channels into one mono sample.
+                var sum = 0;
+                for (var c = 0; c < chans; c++) sum += buf.getChannelData(c)[i];
+                var v = Math.max(-1, Math.min(1, sum / chans));
+                dv.setInt16(off, v < 0 ? v * 0x8000 : v * 0x7FFF, true);
+                off += 2;
+            }
+            var base = (_ringDecodedName || 'ringtone').replace(/\.[^.]+$/, '') || 'ringtone';
+            return new File([ab], base + '-' + len + 's.wav', { type: 'audio/wav' });
+        }
+
+        if (ringTrimSaveBtn) ringTrimSaveBtn.addEventListener('click', function () {
+            var buf = _ringDecodedBuffer;
+            if (!buf || !ringTrimStart || !ringTrimLen) return;
+            var start = parseInt(ringTrimStart.value, 10) || 0;
+            var len = parseInt(ringTrimLen.value, 10) || 1;
+            var file = makeTrimmedRingtoneFile(buf, start, len);
             var reader = new FileReader();
             reader.onload = function (ev) {
                 try {
@@ -1318,15 +1626,98 @@ document.addEventListener('DOMContentLoaded', () => {
                     _idbRingtonePut('name', file.name).catch(function () {});
                     try { localStorage.setItem('ringtone_name', file.name); } catch (_) {}
                     if (ringtoneFileName) { ringtoneFileName.textContent = file.name; ringtoneFileName.style.display = ''; }
-                    if (ringtoneStatus) { ringtoneStatus.textContent = 'Custom ringtone saved!'; ringtoneStatus.style.color = '#4caf50'; }
+                    if (ringtoneStatus) { ringtoneStatus.textContent = 'Ringtone saved (' + len + 's)!'; ringtoneStatus.style.color = '#4caf50'; }
                     setTimeout(function () { if (ringtoneStatus) ringtoneStatus.textContent = ''; }, 3000);
                     syncRingtoneToServer(file);
+                    hideRingTrim();
                 } catch (err) {
-                    if (ringtoneStatus) { ringtoneStatus.textContent = 'Failed to save ringtone. IndexedDB may be unavailable.'; ringtoneStatus.style.color = '#f44336'; }
+                    if (ringtoneStatus) { ringtoneStatus.textContent = 'Failed to save ringtone.'; ringtoneStatus.style.color = '#f44336'; }
                 }
             };
             reader.readAsDataURL(file);
+        });
+
+        if (ringTrimCancelBtn) ringTrimCancelBtn.addEventListener('click', function () {
+            hideRingTrim();
+            if (ringtoneStatus) { ringtoneStatus.textContent = 'Cancelled'; ringtoneStatus.style.color = 'var(--text-muted)'; }
+            setTimeout(function () { if (ringtoneStatus) ringtoneStatus.textContent = ''; }, 2000);
+        });
+
+        ringtoneInput.addEventListener('change', function (e) {
+            var file = e.target.files[0];
+            if (!file) return;
+            if (!file.type.startsWith('audio/')) {
+                if (ringtoneStatus) { ringtoneStatus.textContent = 'Please select an audio file (MP3, WAV, etc.)'; ringtoneStatus.style.color = '#f44336'; }
+                return;
+            }
+            // Ringtones are capped at 30s. Large source files are allowed (they
+            // get trimmed to a 30s WAV before storing), so only reject absurd
+            // files that would be unwieldy to decode client-side.
+            if (file.size > 200 * 1024 * 1024) {
+                if (ringtoneStatus) { ringtoneStatus.textContent = 'File too large (max 200 MB). Try a shorter or lower-quality audio file.'; ringtoneStatus.style.color = '#f44336'; }
+                return;
+            }
             e.target.value = '';
+            file.arrayBuffer().then(function (ab) {
+                var ctx = _ringGetTrimCtx();
+                if (!ctx) { throw new Error('no audio ctx'); }
+                return new Promise(function (resolve, reject) {
+                    ctx.decodeAudioData(ab.slice(0), function (buf) {
+                        _ringDecodedBuffer = buf;
+                        _ringDecodedName = file.name;
+                        resolve(buf);
+                    }, function (err) { reject(err || new Error('decode failed')); });
+                });
+            }).then(function (buf) {
+                if (buf.duration <= 30 + 0.05) {
+                    // Within the length cap — but if the ORIGINAL file is still
+                    // huge (e.g. a 30MB WAV that happens to be 25s), reject
+                    // rather than store 30MB+ (its base64 body would exceed the
+                    // server's 32MB JSON body limit and the sync would fail);
+                    // the >30s flow trims to a small mono WAV so big files are
+                    // fine there. 20MB raw ≈ 27MB base64, safely under the
+                    // limit.
+                    if (file.size > 20 * 1024 * 1024) {
+                        if (ringtoneStatus) {
+                            ringtoneStatus.textContent = 'File is under 30s but too large to store (max 20 MB). Use a compressed format (MP3) or a shorter clip.';
+                            ringtoneStatus.style.color = '#f44336';
+                        }
+                        setTimeout(function () { if (ringtoneStatus && ringtoneStatus.textContent.indexOf('under 30s') === 0) ringtoneStatus.textContent = ''; }, 6000);
+                        return;
+                    }
+                    // Save the original file as-is.
+                    var reader = new FileReader();
+                    reader.onload = function (ev) {
+                        try {
+                            var dataUrl = ev.target.result;
+                            _ringtoneCachedUrl = dataUrl;
+                            _ringtoneCachedName = file.name;
+                            _idbRingtonePut('url', dataUrl).catch(function () {});
+                            _idbRingtonePut('name', file.name).catch(function () {});
+                            try { localStorage.setItem('ringtone_name', file.name); } catch (_) {}
+                            if (ringtoneFileName) { ringtoneFileName.textContent = file.name; ringtoneFileName.style.display = ''; }
+                            if (ringtoneStatus) { ringtoneStatus.textContent = 'Custom ringtone saved!'; ringtoneStatus.style.color = '#4caf50'; }
+                            setTimeout(function () { if (ringtoneStatus) ringtoneStatus.textContent = ''; }, 3000);
+                            syncRingtoneToServer(file);
+                        } catch (err) {
+                            if (ringtoneStatus) { ringtoneStatus.textContent = 'Failed to save ringtone. IndexedDB may be unavailable.'; ringtoneStatus.style.color = '#f44336'; }
+                        }
+                    };
+                    reader.readAsDataURL(file);
+                } else {
+                    showRingTrim(buf.duration);
+                    if (ringtoneStatus) {
+                        ringtoneStatus.textContent = 'This audio is ' + fmtSec(buf.duration) + ' — pick the 1–30s part to keep.';
+                        ringtoneStatus.style.color = '#ff9800';
+                    }
+                }
+            }).catch(function (err) {
+                if (ringtoneStatus) {
+                    ringtoneStatus.textContent = 'Could not read that audio file: ' + (err && err.message ? err.message : 'decode failed');
+                    ringtoneStatus.style.color = '#f44336';
+                }
+                setTimeout(function () { if (ringtoneStatus && ringtoneStatus.textContent.indexOf('Could not') === 0) ringtoneStatus.textContent = ''; }, 5000);
+            });
         });
     }
 
@@ -1392,6 +1783,14 @@ document.addEventListener('DOMContentLoaded', () => {
         var m = Math.floor(elapsed / 60);
         var s = elapsed % 60;
         if (ringtoneRecordTimer) ringtoneRecordTimer.textContent = m + ':' + (s < 10 ? '0' : '') + s;
+        // Ringtones are capped at 30s — auto-stop the recording at the cap.
+        if (elapsed >= 30 && _ringMediaRecorder && _ringMediaRecorder.state !== 'inactive') {
+            _ringMediaRecorder.stop();
+            if (ringtoneStatus) {
+                ringtoneStatus.textContent = 'Recording stopped at the 30s max';
+                ringtoneStatus.style.color = '#ff9800';
+            }
+        }
     }
 
     function cleanupRingRecording() {
@@ -1518,6 +1917,10 @@ document.addEventListener('DOMContentLoaded', () => {
         document.cookie.split(';').forEach(function(c) {
             document.cookie = c.replace(/^ +/, '').replace(/=.*/, '=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/');
         });
+        // The ringtone + notification-sound audio lives in IndexedDB
+        // (localStorage quota is too small for audio) — wipe it too, otherwise
+        // "Clear All Data" leaves the previous account's audio behind.
+        try { indexedDB.deleteDatabase('e2e_notif_sound'); } catch (_) {}
     }
 
     // Call the server-side logout endpoint to clear the HttpOnly cookie
@@ -3644,6 +4047,15 @@ document.addEventListener('DOMContentLoaded', () => {
      'add-friend-modal', 'server-settings-modal', 'friend-requests-modal',
      'sticker-upload-modal', 'profile-crop-modal', 'upload-modal',
      'friend-code-password-modal'].forEach(setupModalClickOff);
+    // Closing the settings modal (click-off) must silence any trim preview.
+    var _settingsModalEl = document.getElementById('settings-modal');
+    if (_settingsModalEl) {
+        _settingsModalEl.addEventListener('click', function (e) {
+            if (e.target === _settingsModalEl && window._stopRingTrimPreview) {
+                window._stopRingTrimPreview();
+            }
+        });
+    }
     // Global Escape key closes the topmost visible modal
     document.addEventListener('keydown', function (e) {
         if (e.key !== 'Escape') return;
@@ -3655,6 +4067,9 @@ document.addEventListener('DOMContentLoaded', () => {
             var el = document.getElementById(modals[i]);
             if (el && el.style.display !== 'none' && el.style.display !== '') {
                 el.style.display = 'none';
+                if (el.id === 'settings-modal' && window._stopRingTrimPreview) {
+                    window._stopRingTrimPreview();
+                }
                 break;
             }
         }

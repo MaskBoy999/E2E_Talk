@@ -2271,6 +2271,37 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     background: #b71c1c;
 }
 
+/* Ringtone trim panel buttons — same visual language as the notification
+   sound controls, but #ringtone-trim sits outside .notif-sound-controls, so
+   the scoped .btn-primary/.btn-secondary rules don't apply there. */
+#ringtone-trim .btn {
+    padding: 8px 16px;
+    border-radius: 6px;
+    border: none;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    transition: background 0.15s, transform 0.1s;
+}
+#ringtone-trim .btn:active {
+    transform: scale(0.97);
+}
+#ringtone-trim .btn-primary {
+    background: var(--accent);
+    color: #fff;
+}
+#ringtone-trim .btn-primary:hover {
+    background: #5b6abf;
+}
+#ringtone-trim .btn-secondary {
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+}
+#ringtone-trim .btn-secondary:hover {
+    background: var(--hover-bg);
+}
+
 .notif-sound-file-name {
     font-size: 13px;
     color: var(--text-muted);
