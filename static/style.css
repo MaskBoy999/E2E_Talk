@@ -6543,7 +6543,7 @@ body.streamer-mode .dm-avatar:hover {
 .vm-badge.locked { color: #ef5350; }
 .voice-member-empty { color: var(--text-muted, #888); padding: 12px; text-align: center; }
 
-/* Per-member media: camera + screen share side by side (Discord-style row).
+/* Per-member media: camera + screen share side by side.
    Tiles fit the HEIGHT of the bubble and scale width proportionally (the
    video element keeps its aspect ratio via width:auto), capped by max-width
    so two tiles never overflow the row. */

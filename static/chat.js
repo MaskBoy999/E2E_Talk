@@ -7441,7 +7441,7 @@ async function loadChannels(serverId) {
             list.appendChild(div);
         });
 
-        // Render voice member chips (Discord-style) for voice channels
+        // Render voice member chips for voice channels
         if (window.VoiceManager) {
             try { VoiceManager.onChannelsRendered && VoiceManager.onChannelsRendered(); } catch (_) {}
         }

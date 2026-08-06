@@ -336,7 +336,7 @@ test.describe('voice camera + screen share (side-by-side tiles, fullscreen wirin
             return { deafened: s.deafened, forceDeafened: s.forceDeafened, forceMuted: s.forceMuted };
         });
         console.log('B STATE after owner undeafen:', JSON.stringify(bAfterUndeafen));
-        // Discord semantics: deafen implies mute, so undeafen alone does NOT
+        // Deafen semantics: deafen implies mute, so undeafen alone does NOT
         // lift an earlier force-mute — B stays force-muted until unmuted.
         expect(bAfterUndeafen.deafened).toBe(false);
         expect(bAfterUndeafen.forceDeafened).toBe(false);

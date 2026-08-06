@@ -543,11 +543,12 @@
                 </div>
                 <div class="settings-group">
                     <h4>Noise Suppression</h4>
-                    <label class="settings-toggle" style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-top:8px">
-                        <input type="checkbox" id="voice-noise-suppression" checked>
-                        <span class="toggle-slider"></span>
-                        <span class="toggle-label" style="font-size:13px;color:var(--text-primary)">Reduce background noise while speaking</span>
-                    </label>
+                    <select id="voice-noise-suppression" class="settings-slider" style="margin-top:8px;padding:7px 9px;border-radius:6px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-color)">
+                        <option value="rnnoise">RNNoise (neural)</option>
+                        <option value="browser">Browser built-in</option>
+                        <option value="off">Off</option>
+                    </select>
+                    <div style="font-size:12px;color:var(--text-secondary);margin-top:6px">RNNoise suppresses keyboard, fan &amp; background noise on-device, right in your browser.</div>
                     <p class="settings-hint">Uses the browser's built-in noise suppression. Changes apply the next time your mic starts.</p>
                 </div>
                 <div class="settings-group">
@@ -982,7 +983,13 @@
                 <label>Speaker</label>
                 <input type="range" id="voice-popup-speaker-volume" min="0" max="200" value="100">
             </div>
-            <label class="voice-popup-check"><input type="checkbox" id="voice-popup-noise-suppression" checked> Noise suppression</label>
+            <label class="voice-popup-check" style="display:flex;align-items:center;gap:8px">
+                <select id="voice-popup-noise-suppression" style="padding:4px 6px;border-radius:6px;font-size:12px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-color)">
+                    <option value="rnnoise">NS: RNNoise</option>
+                    <option value="browser">NS: Browser</option>
+                    <option value="off">NS: Off</option>
+                </select>
+            </label>
         </div>
     </div>
 

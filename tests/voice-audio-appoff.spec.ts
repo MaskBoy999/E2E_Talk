@@ -126,11 +126,23 @@ async function appDump(page: any) {
             out.micTrack = S.localStreams && S.localStreams.mic
                 ? S.localStreams.mic.getTracks().map((t: any) => ({ kind: t.kind, state: t.readyState, muted: t.muted, enabled: t.enabled }))
                 : [];
+            out.nsMode = (S.settings && S.settings.noiseSuppressionMode) || 'unknown';
+            out.processedMic = !!(S.localStreams && S.localStreams.processedMic && S.localStreams.processedMic.getAudioTracks().length);
             try {
                 const report = await pc.getStats();
                 report.forEach((s: any) => {
                     if (s.type === 'inbound-rtp' && s.kind === 'audio') {
-                        out.stats.audio = { packets: s.packetsReceived, samples: s.totalSamplesReceived, energy: s.totalAudioEnergy, jitterEmitted: s.jitterBufferEmittedCount };
+                        out.stats.audio = {
+                            packets: s.packetsReceived,
+                            samples: s.totalSamplesReceived,
+                            energy: s.totalAudioEnergy,
+                            jitterEmitted: s.jitterBufferEmittedCount,
+                            concealed: s.concealedSamples,
+                            packetsLost: s.packetsLost,
+                            jitterDelay: s.jitterBufferDelay,
+                            jitterTarget: s.jitterBufferTargetDelay,
+                            totalSamplesDuration: s.totalSamplesDuration,
+                        };
                     }
                     if (s.type === 'outbound-rtp' && s.kind === 'audio') {
                         out.stats.outAudio = { packets: s.packetsSent, bytes: s.bytesSent, samplesSent: s.totalSamplesSent, energy: s.totalAudioEnergy };

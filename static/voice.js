@@ -5,7 +5,7 @@
 // participant. The Rust server only relays signaling (SDP/ICE) over the
 // existing WebSocket and tracks room membership + owner sanctions.
 // WebRTC audio keeps playing in background tabs (unlike WebSocket +
-// AudioContext PCM which browsers suspend) — this is how Discord works.
+// AudioContext PCM which browsers suspend).
 //
 // E2EE: Insertable Streams (RTCRtpScriptTransform + e2ee-worker.js).
 // Audio AND video/screen frames are AES-256-GCM encrypted before leaving
@@ -62,7 +62,7 @@
         settings: {
             micVolume: 100,
             speakerVolume: 100,
-            noiseSuppression: true,
+            noiseSuppressionMode: 'rnnoise', // 'off' | 'browser' | 'rnnoise'
         },
         _viewLast: '',
         _lastSpeakSent: 0,
@@ -236,6 +236,13 @@
             var raw = localStorage.getItem('voice_settings');
             if (raw) S.settings = Object.assign(S.settings, JSON.parse(raw));
         } catch (_) {}
+        // Migrate the old boolean noiseSuppression setting to the new tri-state
+        // mode (old on -> RNNoise, old off -> off).
+        if (S.settings.noiseSuppressionMode === undefined && typeof S.settings.noiseSuppression === 'boolean') {
+            S.settings.noiseSuppressionMode = S.settings.noiseSuppression ? 'rnnoise' : 'off';
+            delete S.settings.noiseSuppression;
+            saveSettings();
+        }
         // Fullscreen is a per-call UI state only — never persisted. Every join
         // and leave resets it, so a call always starts NOT fullscreen.
         resetFullscreenState();
@@ -300,7 +307,7 @@
         var sv = document.getElementById('voice-speaker-volume');
         if (sv) sv.value = S.settings.speakerVolume;
         var ns = document.getElementById('voice-noise-suppression');
-        if (ns) ns.checked = S.settings.noiseSuppression;
+        if (ns) ns.value = S.settings.noiseSuppressionMode || 'rnnoise';
         updateSettingsLabels();
     }
 
@@ -623,12 +630,110 @@
     // ------------------------------------------------------------------
     // Mic / camera / screen capture
     // ------------------------------------------------------------------
+    function effectiveNsMode() {
+        var mode = S.settings.noiseSuppressionMode || 'rnnoise';
+        if (mode === 'rnnoise' && !(window.AudioWorkletNode && window.AudioContext)) {
+            // No AudioWorklet support — fall back to the browser's built-in NS.
+            return 'browser';
+        }
+        if (mode === 'rnnoise' && _nsFailedSession) {
+            // The RNNoise pipeline failed earlier this session — use the
+            // browser's built-in NS instead (keeps the saved preference for
+            // the next page load, where RNNoise is tried again).
+            return 'browser';
+        }
+        return mode;
+    }
+
+    // Build the RNNoise pipeline: mic -> AudioWorklet ->
+    // MediaStreamAudioDestination -> processed track, which replaces the raw
+    // mic track in addLocalTracks(). Runs entirely in the browser, frame by
+    // frame, on-device.
+    //
+    // The worklet (static/rnnoise/sapphi-worklet.js + sapphi-rnnoise.wasm)
+    // is the production RNNoise build with the real trained model — earlier
+    // vendored shiguredo wasm builds embedded an INERT model (processFrame
+    // returned the input unchanged, VAD always 0 → noise suppression did
+    // nothing while still adding latency).
+    // Sentinel returned by setupMicPipeline when the RNNoise pipeline can't
+    // be built — startMic() then falls back to the browser's built-in NS by
+    // re-acquiring the mic (the original mic was grabbed with
+    // noiseSuppression:false, so it must be re-requested).
+    var NS_FALLBACK = {};
+    var _nsWasmBinary = null; // cached RNNoise wasm (fetched once per page)
+    // Set once when the RNNoise pipeline can't be built (wasm fetch failed,
+    // addModule failed, or 48 kHz unavailable). While set, effectiveNsMode()
+    // reports 'browser' so the mic is re-acquired with the browser's built-in
+    // NS — WITHOUT rewriting the saved setting: a transient failure (network
+    // blip, server briefly down) must not permanently strip the user's
+    // RNNoise preference. The flag lives per-session; every page load retries
+    // RNNoise once before falling back.
+    var _nsFailedSession = false;
+
+    function setupMicPipeline(mode) {
+        teardownMicPipeline(); // never leak a previous 48 kHz context
+        S.localStreams.processedMic = null;
+        if (mode !== 'rnnoise' || !S.localStreams.mic || !window.AudioWorkletNode) return Promise.resolve(null);
+        return Promise.resolve().then(function () {
+            var ctx = new AudioContext({ sampleRate: 48000 });
+            if (Math.abs(ctx.sampleRate - 48000) > 1) {
+                // RNNoise is fixed at 48 kHz; fall back instead of resampling.
+                try { ctx.close(); } catch (_) {}
+                return NS_FALLBACK;
+            }
+            var binPromise = _nsWasmBinary ? Promise.resolve(_nsWasmBinary) :
+                fetch('/rnnoise/sapphi-rnnoise.wasm').then(function (r) { return r.ok ? r.arrayBuffer() : null; });
+            return binPromise.then(function (wasmBinary) {
+                if (!wasmBinary) {
+                    try { ctx.close(); } catch (_) {}
+                    console.warn('RNNoise wasm fetch failed.');
+                    return NS_FALLBACK;
+                }
+                _nsWasmBinary = wasmBinary;
+                return ctx.audioWorklet.addModule('/rnnoise/sapphi-worklet.js').then(function () {
+                    var src = ctx.createMediaStreamSource(S.localStreams.mic);
+                    var worklet = new AudioWorkletNode(ctx, '@sapphi-red/web-noise-suppressor/rnnoise', {
+                        numberOfInputs: 1,
+                        numberOfOutputs: 1,
+                        channelCount: 1,
+                        channelCountMode: 'explicit',
+                        outputChannelCount: [1],
+                        processorOptions: { wasmBinary: wasmBinary, maxChannels: 1 },
+                    });
+                    var dest = ctx.createMediaStreamDestination();
+                    src.connect(worklet);
+                    worklet.connect(dest);
+                    S.nsCtx = ctx;
+                    S.localStreams.processedMic = dest.stream;
+                    return dest.stream.getAudioTracks()[0];
+                });
+            })
+            .catch(function (err) {
+                console.warn('RNNoise setup failed:', err);
+                try { ctx.close(); } catch (_) {}
+                return NS_FALLBACK;
+            });
+        });
+    }
+
+    function teardownMicPipeline() {
+        if (S.localStreams && S.localStreams.processedMic) {
+            S.localStreams.processedMic.getTracks().forEach(function (t) { try { t.stop(); } catch (_) {} });
+            S.localStreams.processedMic = null;
+        }
+        if (S.nsCtx) {
+            try { S.nsCtx.close(); } catch (_) {}
+            S.nsCtx = null;
+        }
+    }
+
     function startMic() {
         if (S.localStreams.mic || S.deafened) return Promise.resolve();
+        var mode = effectiveNsMode();
         var constraints = {
             audio: {
                 echoCancellation: true,
-                noiseSuppression: S.settings.noiseSuppression,
+                noiseSuppression: mode === 'browser', // RNNoise replaces it
                 autoGainControl: true,
             },
             video: false,
@@ -642,8 +747,28 @@
                 S.micGain.gain.value = S.settings.micVolume / 100;
             }
             startSpeakingDetection();
-            addLocalTracksToAllPeers();
-            return stream;
+            // Build the RNNoise pipeline first so the PROCESSED track is what
+            // gets added to the peer connections.
+            return setupMicPipeline(mode).then(function (result) {
+                if (result === NS_FALLBACK) {
+                    // RNNoise couldn't be built (wasm/worklet unavailable). Fall
+                    // back to the browser's built-in NS: the mic was acquired
+                    // with noiseSuppression:false, so stop it and re-acquire
+                    // with the browser NS constraint. Bounded: _nsFailedSession
+                    // now forces effectiveNsMode() to 'browser', so the
+                    // re-acquired mic uses browser NS and setupMicPipeline
+                    // won't be attempted again this session. The saved setting
+                    // is untouched — a transient failure must not permanently
+                    // remove the user's RNNoise preference (next page load
+                    // retries it).
+                    stopMic();
+                    _nsFailedSession = true;
+                    showToast('RNNoise unavailable — using browser noise suppression.');
+                    return startMic();
+                }
+                addLocalTracksToAllPeers();
+                return stream;
+            });
         }).catch(function (err) {
             // Transient "device busy" failures (e.g. re-acquiring the mic right
             // after stopping it) shouldn't flip the user back to muted — that
@@ -667,6 +792,7 @@
     }
 
     function stopMic() {
+        teardownMicPipeline();
         if (S.localStreams.mic) {
             S.localStreams.mic.getTracks().forEach(function (t) { try { t.stop(); } catch (_) {} });
             S.localStreams.mic = null;
@@ -805,7 +931,9 @@
         // order instead (see handleRemoteTrack). Only the stream object matters
         // here; addTrack associates the track with it for the msid.
         if (S.localStreams.mic && !S.muted && !S.deafened) {
-            var at = S.localStreams.mic.getAudioTracks()[0];
+            // Prefer the RNNoise-processed track when active; otherwise the
+            // raw mic track.
+            var at = (S.localStreams.processedMic && S.localStreams.processedMic.getAudioTracks()[0]) || S.localStreams.mic.getAudioTracks()[0];
             if (at && !pc.getSenders().find(function (s) { return s.track && s.track.kind === 'audio'; })) {
                 pc.addTrack(at, new MediaStream([at]));
             }
@@ -905,15 +1033,22 @@
 
     function handleRemoteTrack(uid, e) {
         if (e.track.kind === 'audio') {
-            S.remoteStreams[uid] = S.remoteStreams[uid] || {};
-            S.remoteStreams[uid].audio = new MediaStream([e.track]);
-            playRemoteAudio(uid);
             // E2EE on the receiver — if the key isn't ready yet, queue it and
             // apply once the key arrives (one-sided E2EE = permanent silence).
             ensureE2eeWorker();
             if (!applyRecvE2EE(e.receiver)) {
                 queueRecvE2EE(e.receiver, e.track.id);
             }
+            // Renegotiation (ICE restart, media add/remove) re-fires ontrack
+            // with the SAME track object. Rebuilding the stream + refreshing
+            // srcObject would RESTART the <audio> element playback → an
+            // audible volume drop "for no reason". Keep playing if it's the
+            // same track.
+            var prev = S.remoteStreams[uid] && S.remoteStreams[uid].audio;
+            if (prev && prev.getAudioTracks()[0] === e.track) return;
+            S.remoteStreams[uid] = S.remoteStreams[uid] || {};
+            S.remoteStreams[uid].audio = new MediaStream([e.track]);
+            playRemoteAudio(uid);
         } else if (e.track.kind === 'video') {
             S.remoteStreams[uid] = S.remoteStreams[uid] || {};
             // MediaStream.id is read-only, so stream ids can never carry a
@@ -1013,8 +1148,26 @@
     function playRemoteAudio(uid) {
         if (!S.remoteStreams[uid] || !S.remoteStreams[uid].audio) return;
         try {
-            removeRemoteAudioEls(uid);
-            S.remoteAudioEls[uid] = [];
+            var stream = S.remoteStreams[uid].audio;
+            var els = S.remoteAudioEls[uid];
+            if (!els) {
+                removeRemoteAudioEls(uid);
+                S.remoteAudioEls[uid] = [];
+                els = S.remoteAudioEls[uid];
+            }
+            // Refresh srcObject IN PLACE only when the track actually changed
+            // (renegotiation re-fires ontrack with the same track) — setting a
+            // new srcObject restarts element playback and causes a volume dip.
+            var track = stream.getAudioTracks()[0];
+            if (!track) return;
+            els.forEach(function (el) {
+                var cur = null;
+                try { cur = el.srcObject; } catch (_) {}
+                var curTrack = cur && cur.getAudioTracks ? cur.getAudioTracks()[0] : null;
+                if (curTrack !== track) {
+                    try { el.srcObject = stream; } catch (_) {}
+                }
+            });
             applyRemoteVolume(uid);
         } catch (_) {}
     }
@@ -1353,7 +1506,7 @@
 
     // A server-wide voice presence snapshot (who is in each voice channel and
     // who is speaking). Sent to ALL server members — participants and
-    // non-participants — so the channel list stays live like Discord.
+    // non-participants — so the channel list stays live.
     function handleVoicePresence(data) {
         if (!data || !data.server_id) return;
         S.serverPresence[data.server_id] = data;
@@ -2166,7 +2319,7 @@
                 // its own mute/deafen/camera/screen/leave controls).
                 hideBar();
             } else {
-                // Anywhere else → small persistent bar (Discord-style)
+                // Anywhere else → small persistent bar
                 showBar();
             }
         } else {
@@ -2308,7 +2461,7 @@
         var psv = pop.querySelector('#voice-popup-speaker-volume');
         if (psv) psv.addEventListener('input', function (e) { setSpeakerVolume(parseInt(e.target.value, 10)); });
         var pns = pop.querySelector('#voice-popup-noise-suppression');
-        if (pns) pns.addEventListener('change', function (e) { setNoiseSuppression(e.target.checked); });
+        if (pns) pns.addEventListener('change', function (e) { setNoiseSuppression(e.target.value); });
 
         // Settings-modal sliders (same bindings)
         var smv = document.getElementById('voice-mic-volume');
@@ -2316,7 +2469,7 @@
         var ssv = document.getElementById('voice-speaker-volume');
         if (ssv) ssv.addEventListener('input', function (e) { setSpeakerVolume(parseInt(e.target.value, 10)); updateSettingsLabels(); });
         var sns = document.getElementById('voice-noise-suppression');
-        if (sns) sns.addEventListener('change', function (e) { setNoiseSuppression(e.target.checked); });
+        if (sns) sns.addEventListener('change', function (e) { setNoiseSuppression(e.target.value); });
     }
 
     function updateSettingsLabels() {
@@ -2329,7 +2482,7 @@
         var psv = document.getElementById('voice-popup-speaker-volume');
         if (psv) psv.value = S.settings.speakerVolume;
         var pns = document.getElementById('voice-popup-noise-suppression');
-        if (pns) pns.checked = S.settings.noiseSuppression;
+        if (pns) pns.value = S.settings.noiseSuppressionMode || 'rnnoise';
     }
 
     // Display name from the decrypted profile cache, falling back to username.
@@ -2430,7 +2583,7 @@
         if (!list) return;
         var selfId = getSelfId();
         var html = '';
-        // Self first (Discord-style), then everyone else
+        // Self first, then everyone else
         var uids = Object.keys(S.members).sort(function (a, b) {
             var sa = a === selfId ? 0 : 1;
             var sb = b === selfId ? 0 : 1;
@@ -3059,7 +3212,7 @@
     }
 
     // ------------------------------------------------------------------
-    // Channel-list members (who is in each voice channel, Discord-style)
+    // Channel-list members (who is in each voice channel)
     // Renders from the server-wide voice_presence snapshot so even members
     // who are NOT in the room see who is connected + speaking.
     // ------------------------------------------------------------------
@@ -3156,9 +3309,10 @@
         });
     }
 
-    function setNoiseSuppression(on) {
-        S.settings.noiseSuppression = on;
+    function setNoiseSuppression(mode) {
+        S.settings.noiseSuppressionMode = mode;
         saveSettings();
+        updateSettingsLabels();
         restartMicForSettings();
     }
 
