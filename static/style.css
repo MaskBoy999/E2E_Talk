@@ -1286,9 +1286,11 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     color: var(--text-faint);
 }
 
-/* Message timestamps render at the END of each message and are only visible
-   when the Settings → Message Timestamps toggle is on (body.show-msg-times).
-   Always `display:none` otherwise — never a hover-push layout shift. */
+/* Message timestamps render at the END of each message. Three modes via
+   Settings → Message Timestamps: always-on (body.show-msg-times-always),
+   hover-only (body.show-msg-times-hover), or off. The hover mode never shifts
+   layout: the span is absolutely positioned at the end of the message line so
+   revealing it does not push text around. */
 .message .time-hover {
     display: none;
     font-size: clamp(10px, 1.8vw, 11px);
@@ -1296,10 +1298,14 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     margin-left: 8px;
     white-space: nowrap;
 }
-body.show-msg-times .message .text .time-hover,
-body.show-msg-times .message .gif-message .time-hover,
-body.show-msg-times .message .sticker-message .time-hover,
-body.show-msg-times .message .file-card .time-hover {
+body.show-msg-times-always .message .text .time-hover,
+body.show-msg-times-always .message .gif-message .time-hover,
+body.show-msg-times-always .message .sticker-message .time-hover,
+body.show-msg-times-always .message .file-card .time-hover,
+body.show-msg-times-hover .message:hover .text .time-hover,
+body.show-msg-times-hover .message:hover .gif-message .time-hover,
+body.show-msg-times-hover .message:hover .sticker-message .time-hover,
+body.show-msg-times-hover .message:hover .file-card .time-hover {
     display: inline;
 }
 

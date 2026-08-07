@@ -1033,17 +1033,28 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // Show-message-timestamps setting (default ON). Controls a body class that
-    // makes the .time-hover spans (rendered at the END of each message) visible.
-    function applyShowMsgTimes() {
-        var show = localStorage.getItem('show_msg_times') !== 'false';
-        document.body.classList.toggle('show-msg-times', show);
+    // Show-message-timestamps setting: 'always' | 'hover' | 'off' (default
+    // 'always', matching the original on-by-default behavior). Controls body
+    // classes that reveal the .time-hover spans (rendered at the END of each
+    // message) either always, only on message hover, or never.
+    function getMsgTimesMode() {
+        var stored = localStorage.getItem('show_msg_times');
+        // Backwards-compat: the old checkbox stored 'true'/'false'.
+        var mode = stored === 'true' ? 'always' : (stored === 'false' ? 'off' : (stored || 'always'));
+        if (['always', 'hover', 'off'].indexOf(mode) === -1) mode = 'always';
+        return mode;
     }
-    const showMsgTimesCheckbox = document.getElementById('show-msg-times');
-    if (showMsgTimesCheckbox) {
-        showMsgTimesCheckbox.checked = localStorage.getItem('show_msg_times') !== 'false';
-        showMsgTimesCheckbox.addEventListener('change', () => {
-            localStorage.setItem('show_msg_times', showMsgTimesCheckbox.checked ? 'true' : 'false');
+    function applyShowMsgTimes() {
+        var mode = getMsgTimesMode();
+        document.body.classList.toggle('show-msg-times-always', mode === 'always');
+        document.body.classList.toggle('show-msg-times-hover', mode === 'hover');
+        document.body.classList.remove('show-msg-times');
+    }
+    const showMsgTimesSelect = document.getElementById('show-msg-times');
+    if (showMsgTimesSelect) {
+        showMsgTimesSelect.value = getMsgTimesMode();
+        showMsgTimesSelect.addEventListener('change', () => {
+            localStorage.setItem('show_msg_times', showMsgTimesSelect.value);
             applyShowMsgTimes();
         });
     }
@@ -19333,8 +19344,8 @@ function updateProfileSettingsUI(data) {
         colorPreview.style.textShadow = getDisplayNameTextShadow(userColor);
     }
     
-    // Render border glow options
-    renderBorderGlowOptions(userColor, data && data.username_border_color);
+    // The glow/border color now has its own dedicated color picker (see
+    // renderEditGlowOptions) — the old preset swatch grid was removed.
     
     if (data && data.profile_picture_file_id) {
         var picUrl = getProfilePicUrl(data.profile_picture_file_id, user.id);

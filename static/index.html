@@ -421,12 +421,12 @@
                 </div>
                 <div class="settings-group">
                     <h4>Message Timestamps</h4>
-                    <label class="settings-toggle">
-                        <input type="checkbox" id="show-msg-times">
-                        <span class="toggle-slider"></span>
-                        <span class="toggle-label">Show the time on each message</span>
-                    </label>
-                    <p class="settings-hint">When enabled, each message shows its send time at the end of the message. When disabled, no timestamps are shown.</p>
+                    <select id="show-msg-times" class="settings-select" style="max-width:260px">
+                        <option value="always">Always on</option>
+                        <option value="hover">Show on hover</option>
+                        <option value="off">Off</option>
+                    </select>
+                    <p class="settings-hint">“Always on” shows each message's send time at the end of the message. “Show on hover” only reveals it when you hover over a message (no layout shift). “Off” hides timestamps entirely.</p>
                 </div>
                 <div class="settings-group" style="padding-bottom:12px;border-bottom:1px solid var(--bg-border);margin-top:16px">
                     <h4>Streamer Mode</h4>
@@ -1002,7 +1002,6 @@
                             <input type="text" id="profile-edit-glow-color-hex" class="theme-hex-input profile-hex-input" placeholder="#ffffff" maxlength="7">
                             <span class="profile-color-preview" id="profile-edit-glow-preview" style="width:32px;height:32px;border-radius:6px;background:#ffffff;"></span>
                         </div>
-                        <div id="border-glow-options" class="glow-options-container" style="margin-top:8px;"></div>
                     </div>
                     <div class="profile-edit-actions">
                         <button class="btn-cancel" id="profile-edit-cancel-btn">Cancel</button>

@@ -1695,15 +1695,21 @@
     function handleMemberUpdate(member) {
         if (!S.connected) return;
         var prev = S.members[member.user_id];
+        var isSelf = member.user_id === getSelfId();
         // Only camera/screen/username changes require a full re-render (the
         // video tiles appear/disappear). Mute, deafen, force-mute, force-deafen
         // and speaking changes are just badges + glow — patched in place so the
         // camera/screen <video> elements are never destroyed and recreated
         // (that used to restart/refresh the feeds on every mute toggle).
+        // SELF camera/screen are driven by LOCAL state (S.cameraOn/S.screenOn)
+        // and the self row always renders from those — so a server echo with a
+        // stale camera/screen (e.g. camera started BEFORE joining, or the
+        // speaking broadcast) must never count as mediaChanged: that previously
+        // rebuilt the self row and recreated the self <video> on the first
+        // speaking toggle after joining with a pre-started camera.
         var mediaChanged = !prev ||
-            prev.camera !== member.camera ||
-            prev.screen !== member.screen ||
-            prev.username !== member.username;
+            prev.username !== member.username ||
+            (!isSelf && (prev.camera !== member.camera || prev.screen !== member.screen));
         S.members[member.user_id] = member;
         if (S.roomType === 'dm' && member.user_id !== getSelfId()) {
             markDmCallAnswered();
@@ -1937,13 +1943,21 @@
     // The other DM participant joined the room — cancel the waiting state and
     // any pending 30s ring timeout.
     function markDmCallAnswered() {
+        var changed = false;
         if (S.dmCallActive && !S.dmCallAnswered) {
             S.dmCallAnswered = true;
             clearRingTimer();
+            changed = true;
         }
         if (S.callWaiting) {
             S.callWaiting = false;
+            changed = true;
         }
+        // Nothing actually changed (e.g. a speaking toggle broadcast) — do NOT
+        // touch the UI. Previously this called updateDmCallUI() on EVERY
+        // voice_member_update, which re-rendered the whole DM call panel and
+        // recreated every <video> (black-flash refresh on every green bubble).
+        if (!changed) return;
         // Update mini bar / panel to reflect the new state (Calling → In call),
         // but ONLY for the view we're actually in: panel when the DM chat is
         // open, floating mini bar everywhere else. (Previously this forced the
@@ -3077,7 +3091,20 @@
             video.addEventListener('click', function () { toggleFullscreen(video); });
             video.addEventListener('contextmenu', function (e) {
                 e.preventDefault();
+                e.stopPropagation();
                 openVolumeMenu(e, uid);
+            });
+        });
+        // Right-click ANYWHERE on a DM call tile (avatar, name, placeholder —
+        // not just the video) opens the per-member volume slider, matching the
+        // voice-channel member rows. Both handlers stopPropagation so the menu
+        // never opens twice for the same right-click.
+        body.querySelectorAll('.dm-call-tile').forEach(function (tile) {
+            tile.addEventListener('contextmenu', function (e) {
+                e.preventDefault();
+                e.stopPropagation();
+                var uid = tile.getAttribute('data-uid');
+                if (uid) openVolumeMenu(e, uid);
             });
         });
         updateSelfUI();
