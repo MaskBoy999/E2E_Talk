@@ -4805,10 +4805,11 @@ body.show-msg-times .forward-preview .time-hover {
 
 /* Flash highlight for navigating to a message (mention/reply redirects) */
 @keyframes flashHighlight {
-    0%, 100% { background: transparent; }
-    50% { background: rgba(86,156,214,0.15); }
+    0%, 100% { background: transparent; box-shadow: none; }
+    25% { background: rgba(255, 213, 79, 0.28); box-shadow: inset 0 0 0 2px rgba(255, 213, 79, 0.6); }
+    75% { background: rgba(255, 213, 79, 0.18); box-shadow: inset 0 0 0 2px rgba(255, 213, 79, 0.4); }
 }
-.flash-highlight { animation: flashHighlight 1.5s ease; border-radius: 4px; }
+.flash-highlight { animation: flashHighlight 1.6s ease 2; border-radius: 6px; }
 
 /* GIF message */
 .gif-message { margin: 4px 0; }

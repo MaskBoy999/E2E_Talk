@@ -8720,7 +8720,7 @@ function updateJumpToBottomButton(list) {
     }
 }
 
-async function loadMessages(channelId, aroundMessageId) {
+async function loadMessages(channelId, aroundMessageId, skipBottomScroll) {
     // Clean up old blob URLs when switching channels
     revokeBlobUrls();
     const list = document.getElementById('message-list');
@@ -8815,8 +8815,10 @@ async function loadMessages(channelId, aroundMessageId) {
         // Set up infinite scroll listener
         setupMessageScrollListener(channelId);
 
-        // Jump to the latest message on load/reload (unless jumping to a specific message)
-        if (!aroundMessageId) scrollMessageListToBottom();
+        // Jump to the latest message on load/reload (unless jumping to a specific
+        // message or a redirect will scroll to a target: skipBottomScroll — a
+        // redirect must go straight to the target, never flash the bottom first).
+        if (!aroundMessageId && !skipBottomScroll) scrollMessageListToBottom();
         setupImageLoadRepin();
     } catch (err) {
         console.error('Failed to load messages:', err);
@@ -9942,7 +9944,9 @@ async function navigateToMessage(serverId, channelId, dmChannelId, messageId) {
         document.getElementById('message-input').disabled = false;
         document.getElementById('send-btn').disabled = false;
         clearUnreadDmMentions(dmId);
-        await loadDmMessages(dmId, otherUser ? otherUser.id : '');
+        // Redirect: skip the load-time scroll-to-bottom so we never flash the
+        // bottom before jumping to the target message.
+        await loadDmMessages(dmId, otherUser ? otherUser.id : '', !!messageId);
         if (window._closeSidebar) window._closeSidebar();
         if (messageId) {
             // Page up through DM history until the target message is found
@@ -9981,8 +9985,10 @@ async function navigateToMessage(serverId, channelId, dmChannelId, messageId) {
         document.getElementById('channel-name').textContent = '# ' + channelName;
         document.getElementById('message-input').disabled = false;
         document.getElementById('send-btn').disabled = false;
-        // Load all messages (no around param), then scroll to target
-        await loadMessages(channelId);
+        // Load all messages (no around param), then scroll to target. Redirect:
+        // skip the load-time scroll-to-bottom so we never flash the bottom
+        // before jumping to the target message.
+        await loadMessages(channelId, null, !!messageId);
         if (window._closeSidebar) window._closeSidebar();
         // Page up through channel history until the target message is found,
         // overriding the default jump-to-latest on channel entry.
@@ -10026,7 +10032,9 @@ async function scrollToMessageWithPagination(messageId, channelId, dmChannelId) 
         _suppressScrollLoad = true;
         target.scrollIntoView({ behavior: 'smooth', block: 'center' });
         target.classList.add('flash-highlight');
-        setTimeout(function () { target.classList.remove('flash-highlight'); }, 2000);
+        // Keep the gold highlight visible long enough to identify the target,
+        // even when it sits at the bottom edge (last message, nothing below).
+        setTimeout(function () { target.classList.remove('flash-highlight'); }, 3800);
         // Re-enable after the glide settles; stored id so a rapid second
         // redirect can't have its suppression cleared by the first timer.
         _suppressScrollTimer = setTimeout(function () { _suppressScrollLoad = false; _suppressScrollTimer = null; }, 800);
@@ -11506,7 +11514,7 @@ function updateDmWaitingBanner() {
     }
 }
 
-async function loadDmMessages(dmChannelId, otherUserId) {
+async function loadDmMessages(dmChannelId, otherUserId, skipBottomScroll) {
     // Clean up old blob URLs when switching DM channels
     revokeBlobUrls();
     // Re-sync DM-call waiting state from the conversation list so the
@@ -11554,7 +11562,7 @@ async function loadDmMessages(dmChannelId, otherUserId) {
             // If recovery succeeds, re-run the whole function with restored keys.
             var recovered = await ensureIdentityKeys();
             if (recovered) {
-                return loadDmMessages(dmChannelId, otherUserId);
+                return loadDmMessages(dmChannelId, otherUserId, skipBottomScroll);
             }
         }
 
@@ -11655,8 +11663,10 @@ async function loadDmMessages(dmChannelId, otherUserId) {
         // Set up infinite scroll for DM messages
         setupDmScrollListener(dmChannelId);
 
-        // Always jump to the latest message on DM load/reload
-        scrollMessageListToBottom();
+        // Jump to the latest message on DM load/reload — unless a redirect will
+        // scroll to a target (skipBottomScroll: go straight to the target, never
+        // flash the bottom first).
+        if (!skipBottomScroll) scrollMessageListToBottom();
         setupImageLoadRepin();
     } catch (err) {
         console.error('Failed to load DM messages:', err);
