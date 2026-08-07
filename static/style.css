@@ -1286,16 +1286,20 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     color: var(--text-faint);
 }
 
+/* Message timestamps render at the END of each message and are only visible
+   when the Settings → Message Timestamps toggle is on (body.show-msg-times).
+   Always `display:none` otherwise — never a hover-push layout shift. */
 .message .time-hover {
     display: none;
     font-size: clamp(10px, 1.8vw, 11px);
     color: var(--text-faint);
-    margin-right: 8px;
+    margin-left: 8px;
+    white-space: nowrap;
 }
-.message .text:hover .time-hover,
-.message .gif-message:hover .time-hover,
-.message .sticker-message:hover .time-hover,
-.message .file-card:hover .time-hover {
+body.show-msg-times .message .text .time-hover,
+body.show-msg-times .message .gif-message .time-hover,
+body.show-msg-times .message .sticker-message .time-hover,
+body.show-msg-times .message .file-card .time-hover {
     display: inline;
 }
 
@@ -4770,7 +4774,12 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
 .forward-preview .time-hover {
     font-size: clamp(9px, 1.4vw, 10px);
     color: var(--text-faint);
-    margin-right: 6px;
+    margin-left: 6px;
+    white-space: nowrap;
+    display: none;
+}
+body.show-msg-times .forward-preview .time-hover {
+    display: inline;
 }
 
 .forward-unavailable {

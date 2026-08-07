@@ -61,9 +61,11 @@ addEventListener('rtctransform', (event) => {
                     out.set(nonce, 0);
                     out.set(ciphertext, 12);
                     encodedFrame.data = out.buffer;
+                    controller.enqueue(encodedFrame);
                 } else {
                     if (data.length < 13) {
-                        controller.enqueue(encodedFrame);
+                        // Not our frame format — drop it rather than forwarding
+                        // unencrypted bytes to the decoder.
                         return;
                     }
                     const nonce = data.slice(0, 12);
@@ -72,11 +74,17 @@ addEventListener('rtctransform', (event) => {
                         { name: 'AES-GCM', iv: nonce }, myKey, ciphertext
                     ));
                     encodedFrame.data = plain.buffer;
+                    controller.enqueue(encodedFrame);
                 }
             } catch (_) {
-                // Drop undecryptable frames silently (e.g. a key that doesn't match)
+                // IMPORTANT: never forward a frame we failed to process.
+                //  - Decrypt failure: forwarding the ENCRYPTED bytes to the
+                //    decoder yields garbage / decode artifacts until the next
+                //    keyframe (this was the 'lots of artifacts' bug).
+                //  - Encrypt failure: forwarding the PLAINTEXT bytes would leak
+                //    the frame in the clear to the server/peers.
+                // Dropping the frame is correct in both cases.
             }
-            controller.enqueue(encodedFrame);
         },
     });
 

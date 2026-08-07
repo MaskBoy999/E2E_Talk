@@ -818,7 +818,7 @@
 
     function startCamera() {
         if (S.localStreams.camera) return Promise.resolve();
-        return navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' }, audio: false })
+        return navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 }, facingMode: 'user' }, audio: false })
             .then(function (stream) {
                 S.localStreams.camera = stream;
                 S.cameraOn = true;
@@ -851,7 +851,19 @@
 
     function startScreen() {
         if (S.localStreams.screen) return Promise.resolve();
-        return navigator.mediaDevices.getDisplayMedia({ video: { cursor: 'always' }, audio: false })
+        // Cap capture so the mesh doesn't flood: screen shares are mostly
+        // static content — 1080p @ 30fps is plenty, and every frame is AES-GCM
+        // encrypted per-peer, so huge native-res/fps captures starve the
+        // pipeline and produce decoder artifacts.
+        return navigator.mediaDevices.getDisplayMedia({
+            video: {
+                cursor: 'always',
+                width: { max: 1920 },
+                height: { max: 1080 },
+                frameRate: { ideal: 30, max: 30 },
+            },
+            audio: false,
+        })
             .then(function (stream) {
                 S.localStreams.screen = stream;
                 S.screenOn = true;
@@ -906,7 +918,11 @@
             });
         };
         pc.onconnectionstatechange = function () {
-            if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+            if (pc.connectionState === 'connected') {
+                // Senders are fully wired after connection; cap their bitrate now
+                // (reapplying is a no-op if already tuned).
+                tuneVideoSenders(pc);
+            } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
                 // Attempt a restart so calls recover from transient network blips
                 if (S.connected && pc.signalingState !== 'closed') {
                     try { pc.restartIce(); } catch (_) {}
@@ -1017,6 +1033,7 @@
                     to_user_id: uid,
                     signal: { type: 'offer', sdp: pc.localDescription.sdp },
                 });
+                tuneVideoSenders(pc);
             }).catch(function (err) {
                 console.warn('Offer failed:', err);
             }).finally(function () {
@@ -1078,7 +1095,35 @@
         for (var uid in S.peers) {
             addLocalTracks(S.peers[uid]);
             applySendE2EE(S.peers[uid]);
+            tuneVideoSenders(S.peers[uid]);
         }
+    }
+
+    // Cap video send bitrate so screen shares / cameras don't saturate the
+    // mesh. Unbounded encoders at high resolution + fps generate far more
+    // RTP than the connection can carry → packet loss → decoder artifacts.
+    // Screen: 2.5 Mbps (static content, plenty). Camera: 1.2 Mbps. Prefer
+    // maintaining resolution so text in shares stays readable when bandwidth
+    // dips (degradationPreference is a sender parameter, not a capture one).
+    function tuneVideoSenders(pc) {
+        if (!pc || !pc.getSenders) return;
+        try {
+            pc.getSenders().forEach(function (s) {
+                if (!s.track || s.track.kind !== 'video') return;
+                var isScreen = S.localStreams.screen && S.localStreams.screen.getVideoTracks().indexOf(s.track) !== -1;
+                var maxBitrate = isScreen ? 2500000 : 1200000;
+                try {
+                    var params = s.getParameters();
+                    if (!params.encodings || params.encodings.length === 0) return;
+                    params.encodings.forEach(function (enc) {
+                        enc.maxBitrate = maxBitrate;
+                        enc.maxFramerate = 30;
+                    });
+                    params.degradationPreference = isScreen ? 'maintain-resolution' : 'balanced';
+                    s.setParameters(params).catch(function () {});
+                } catch (_) {}
+            });
+        } catch (_) {}
     }
 
     function removeTrackFromAllPeers(kind) {
@@ -1374,6 +1419,7 @@
                         flushPendingIce(pc);
                         return pc.createAnswer();
                     }).then(function (answer) {
+                        tuneVideoSenders(pc);
                         return pc.setLocalDescription(answer);
                     }).then(function () {
                         send({
@@ -1404,6 +1450,7 @@
             answerOffer();
         } else if (signal.type === 'answer') {
             pc.setRemoteDescription({ type: 'answer', sdp: sdp }).then(function () {
+                tuneVideoSenders(pc);
                 flushPendingIce(pc);
             }).catch(function (err) {
                 console.warn('setRemote( answer ) failed:', err);

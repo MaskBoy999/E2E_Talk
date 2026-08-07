@@ -1033,6 +1033,22 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    // Show-message-timestamps setting (default ON). Controls a body class that
+    // makes the .time-hover spans (rendered at the END of each message) visible.
+    function applyShowMsgTimes() {
+        var show = localStorage.getItem('show_msg_times') !== 'false';
+        document.body.classList.toggle('show-msg-times', show);
+    }
+    const showMsgTimesCheckbox = document.getElementById('show-msg-times');
+    if (showMsgTimesCheckbox) {
+        showMsgTimesCheckbox.checked = localStorage.getItem('show_msg_times') !== 'false';
+        showMsgTimesCheckbox.addEventListener('change', () => {
+            localStorage.setItem('show_msg_times', showMsgTimesCheckbox.checked ? 'true' : 'false');
+            applyShowMsgTimes();
+        });
+    }
+    applyShowMsgTimes();
+
     // Streamer mode toggle
     const streamerToggle = document.getElementById('streamer-mode-toggle');
     if (streamerToggle) {
@@ -9460,7 +9476,7 @@ async function appendMessage(msg) {
                     }
                 } catch (_) {}
                 // Forward preview should not show (edited) - it's a new message
-                contentHtml += '<div class="forward-preview"><div class="text"><span class="time-hover">' + time + '</span>' + renderEmojiText(previewText, previewEmojis) + '</div></div>';
+                contentHtml += '<div class="forward-preview"><div class="text">' + renderEmojiText(previewText, previewEmojis) + '<span class="time-hover">' + time + '</span></div></div>';
             } catch (_) {
                 contentHtml += '<div class="forward-preview forward-unavailable">Preview unavailable</div>';
             }
@@ -9478,20 +9494,20 @@ async function appendMessage(msg) {
             contentHtml += buildFileCardHtml(forwardData.file);
         }
     } else if (gifData) {
-        if (gifData.text) contentHtml += '<div class="text"><span class="time-hover">' + time + '</span>' + renderEmojiText(gifData.text) + editedHtml + '</div>';
+        if (gifData.text) contentHtml += '<div class="text">' + renderEmojiText(gifData.text) + editedHtml + '<span class="time-hover">' + time + '</span></div>';
         contentHtml += '<div class="gif-message">' +
             '<img src="' + escapeHtml(gifData.url) + '" alt="' + escapeHtml(gifData.alt || 'GIF') + '" loading="lazy" style="max-width:300px;max-height:300px;border-radius:8px;cursor:pointer">' +
             '<button class="media-download-btn" title="Download" data-url="' + escapeHtml(gifData.url) + '" data-filename="sticker.gif">⬇</button>' +
             '</div>';
     } else if (stickerData) {
-        if (stickerData.text) contentHtml += '<div class="text"><span class="time-hover">' + time + '</span>' + renderEmojiText(stickerData.text) + editedHtml + '</div>';
+        if (stickerData.text) contentHtml += '<div class="text">' + renderEmojiText(stickerData.text) + editedHtml + '<span class="time-hover">' + time + '</span></div>';
         contentHtml += '<div class="sticker-message"></div>';
     } else if (filesData) {
         contentHtml += buildMultiFileCardHtml(filesData);
     } else if (fileData) {
         contentHtml += buildFileCardHtml(fileData);
     } else if (textContent) {
-        contentHtml += '<div class="text"><span class="time-hover">' + time + '</span>' + highlightMentionsInHtml(renderEmojiText(textContent, extraEmojis)) + editedHtml + '</div>';
+        contentHtml += '<div class="text">' + highlightMentionsInHtml(renderEmojiText(textContent, extraEmojis)) + editedHtml + '<span class="time-hover">' + time + '</span></div>';
     }
 
     // Check if current user is mentioned in text (for server messages)
@@ -10233,9 +10249,11 @@ function handleEdit(messageId, msgDiv) {
                 console.error('DM edit encrypt failed:', e);
             }
         } else {
-        // Show the new text immediately (don't wait for WS echo)
+        // Show the new text immediately (don't wait for WS echo). Preserve the
+        // timestamp text so editing doesn't wipe the visible time.
         if (oldText) {
-            oldText.innerHTML = '<span class="time-hover"></span>' + escapeHtml(newText);
+            var prevTime = (oldText.querySelector('.time-hover') || {}).textContent || '';
+            oldText.innerHTML = escapeHtml(newText) + (prevTime ? '<span class="time-hover">' + prevTime + '</span>' : '');
             oldText.style.display = '';
         }
         if (oldReply) oldReply.style.display = '';
@@ -10281,9 +10299,11 @@ function handleEdit(messageId, msgDiv) {
                 console.error('Edit encrypt failed:', e);
             }
         }
-        // Show the new text immediately (don't wait for WS echo)
+        // Show the new text immediately (don't wait for WS echo). Preserve the
+        // timestamp text so editing doesn't wipe the visible time.
         if (oldText) {
-            oldText.innerHTML = '<span class="time-hover"></span>' + escapeHtml(newText);
+            var prevTime2 = (oldText.querySelector('.time-hover') || {}).textContent || '';
+            oldText.innerHTML = escapeHtml(newText) + (prevTime2 ? '<span class="time-hover">' + prevTime2 + '</span>' : '');
             oldText.style.display = '';
         }
         if (oldReply) oldReply.style.display = '';
@@ -10295,7 +10315,7 @@ function handleEdit(messageId, msgDiv) {
         if (oldText) {
             var timeSpan = oldText.querySelector('.time-hover');
             var timeHtml = timeSpan ? timeSpan.outerHTML : '';
-            oldText.innerHTML = timeHtml + renderEmojiText(newText);
+            oldText.innerHTML = renderEmojiText(newText) + timeHtml;
             oldText.style.display = '';
         }
         // Add (edited) label locally
@@ -10406,14 +10426,14 @@ async function handleEditedMessage(msg, mode) {
             }
         } catch (_) {}
 
-        // Preserve the time-hover span and render emoji text
+        // Preserve the time-hover span and render emoji text (span at the END)
         const timeEl = existing.querySelector('.text .time-hover') || existing.querySelector('.time-hover');
         const timeHtml = timeEl ? timeEl.outerHTML : '';
 
         // Update or create the text element
         let textEl = existing.querySelector('.text');
         if (textEl) {
-            textEl.innerHTML = timeHtml + renderEmojiText(renderText, extraEmojis);
+            textEl.innerHTML = renderEmojiText(renderText, extraEmojis) + timeHtml;
             textEl.style.display = '';
         } else if (renderText) {
             // If no text element exists but the edit added text, create one.
@@ -10423,7 +10443,7 @@ async function handleEditedMessage(msg, mode) {
                 var firstMedia = contentEl.querySelector('.gif-message, .sticker-message, .file-preview, .file-card');
                 var newTextDiv = document.createElement('div');
                 newTextDiv.className = 'text';
-                newTextDiv.innerHTML = timeHtml + renderEmojiText(renderText, extraEmojis);
+                newTextDiv.innerHTML = renderEmojiText(renderText, extraEmojis) + timeHtml;
                 if (firstMedia) {
                     contentEl.insertBefore(newTextDiv, firstMedia);
                 } else {
@@ -11882,7 +11902,7 @@ async function appendDmMessage(msg, kp, otherPublicKey) {
                         }
                     }
                 } catch (_) {}
-                contentHtml += '<div class="forward-preview"><div class="text"><span class="time-hover">' + time + '</span>' + renderEmojiText(previewText, previewEmojis) + '</div></div>';
+                contentHtml += '<div class="forward-preview"><div class="text">' + renderEmojiText(previewText, previewEmojis) + '<span class="time-hover">' + time + '</span></div></div>';
             } catch (_) {
                 contentHtml += '<div class="forward-preview forward-unavailable">Preview unavailable</div>';
             }
@@ -11900,20 +11920,20 @@ async function appendDmMessage(msg, kp, otherPublicKey) {
             contentHtml += buildFileCardHtml(forwardData.file);
         }
     } else if (gifData) {
-        if (gifData.text) contentHtml += '<div class="text"><span class="time-hover">' + time + '</span>' + renderEmojiText(gifData.text) + '</div>';
+        if (gifData.text) contentHtml += '<div class="text">' + renderEmojiText(gifData.text) + '<span class="time-hover">' + time + '</span></div>';
         contentHtml += '<div class="gif-message">' +
             '<img src="' + escapeHtml(gifData.url) + '" alt="' + escapeHtml(gifData.alt || 'GIF') + '" loading="lazy" style="max-width:300px;max-height:300px;border-radius:8px;cursor:pointer">' +
             '<button class="media-download-btn" title="Download" data-url="' + escapeHtml(gifData.url) + '" data-filename="sticker.gif">⬇</button>' +
             '</div>';
     } else if (stickerData) {
-        if (stickerData.text) contentHtml += '<div class="text"><span class="time-hover">' + time + '</span>' + renderEmojiText(stickerData.text) + '</div>';
+        if (stickerData.text) contentHtml += '<div class="text">' + renderEmojiText(stickerData.text) + '<span class="time-hover">' + time + '</span></div>';
         contentHtml += '<div class="sticker-message"></div>';
     } else if (filesData) {
         contentHtml += buildMultiFileCardHtml(filesData);
     } else if (fileData) {
         contentHtml += buildFileCardHtml(fileData);
     } else if (textContent) {
-        contentHtml += '<div class="text"><span class="time-hover">' + time + '</span>' + highlightMentionsInHtml(renderEmojiText(textContent, extraEmojis)) + '</div>';
+        contentHtml += '<div class="text">' + highlightMentionsInHtml(renderEmojiText(textContent, extraEmojis)) + '<span class="time-hover">' + time + '</span></div>';
     } else if (msg.encrypted_content && !otherPublicKey) {
         const label = isOwn ? '[message sent]' : '[encrypted]';
         contentHtml += '<div class="text" style="color:#888;font-style:italic">' + label + '</div>';
