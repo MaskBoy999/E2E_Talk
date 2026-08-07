@@ -2771,11 +2771,22 @@
         var pns = pop.querySelector('#voice-popup-noise-suppression');
         if (pns) pns.addEventListener('change', function (e) { setNoiseSuppression(e.target.value); });
 
+        // Reset buttons — restore mic/speaker to 100% (voice channel view popup)
+        var pmvReset = pop.querySelector('#voice-popup-mic-reset');
+        if (pmvReset) pmvReset.addEventListener('click', function () { setMicVolume(100); applySettingsToUI(); });
+        var psvReset = pop.querySelector('#voice-popup-speaker-reset');
+        if (psvReset) psvReset.addEventListener('click', function () { setSpeakerVolume(100); applySettingsToUI(); });
+
         // Settings-modal sliders (same bindings)
         var smv = document.getElementById('voice-mic-volume');
         if (smv) smv.addEventListener('input', function (e) { setMicVolume(parseInt(e.target.value, 10)); updateSettingsLabels(); });
         var ssv = document.getElementById('voice-speaker-volume');
         if (ssv) ssv.addEventListener('input', function (e) { setSpeakerVolume(parseInt(e.target.value, 10)); updateSettingsLabels(); });
+        // Reset buttons — restore mic/speaker to 100% (settings modal)
+        var smvReset = document.getElementById('voice-mic-reset');
+        if (smvReset) smvReset.addEventListener('click', function () { setMicVolume(100); applySettingsToUI(); });
+        var ssvReset = document.getElementById('voice-speaker-reset');
+        if (ssvReset) ssvReset.addEventListener('click', function () { setSpeakerVolume(100); applySettingsToUI(); });
         var sns = document.getElementById('voice-noise-suppression');
         if (sns) sns.addEventListener('change', function (e) { setNoiseSuppression(e.target.value); });
         var sec = document.getElementById('voice-echo-cancellation');
@@ -3235,6 +3246,18 @@
         sliderRow.appendChild(slider);
         sliderRow.appendChild(val);
         menu.appendChild(sliderRow);
+
+        // Reset this member's volume back to 100% (clears the per-user override)
+        var resetBtn = document.createElement('button');
+        resetBtn.className = 'volume-menu-btn';
+        resetBtn.textContent = '↺ Reset volume (100%)';
+        resetBtn.addEventListener('click', function () {
+            setMemberVolume(uid, 100);
+            var s = menu.querySelector('.volume-menu-slider');
+            if (s) s.value = '100';
+            closeVolumeMenu();
+        });
+        menu.appendChild(resetBtn);
 
         // Owner controls — only for the server owner, server rooms, other members
         if (S.roomType === 'server' && S.isOwner && uid !== selfId) {

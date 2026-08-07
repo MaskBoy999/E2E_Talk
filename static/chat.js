@@ -1040,8 +1040,9 @@ document.addEventListener('DOMContentLoaded', () => {
     function getMsgTimesMode() {
         var stored = localStorage.getItem('show_msg_times');
         // Backwards-compat: the old checkbox stored 'true'/'false'.
-        var mode = stored === 'true' ? 'always' : (stored === 'false' ? 'off' : (stored || 'always'));
-        if (['always', 'hover', 'off'].indexOf(mode) === -1) mode = 'always';
+        // Default is 'hover' (show on hover only).
+        var mode = stored === 'true' ? 'always' : (stored === 'false' ? 'off' : (stored || 'hover'));
+        if (['always', 'hover', 'off'].indexOf(mode) === -1) mode = 'hover';
         return mode;
     }
     function applyShowMsgTimes() {

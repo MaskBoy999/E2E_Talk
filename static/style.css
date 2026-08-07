@@ -6679,6 +6679,21 @@ body.streamer-mode .dm-avatar:hover {
 }
 .voice-popup-setting-row label { min-width: 60px; }
 .voice-popup-setting-row input[type="range"] { flex: 1; }
+.voice-popup-reset-btn, .settings-reset-btn {
+    border: 1px solid var(--bg-border, #2a2a4a);
+    background: var(--bg-tertiary, #23233c);
+    color: var(--text-muted, #aaa);
+    border-radius: 6px;
+    width: 28px; height: 28px;
+    font-size: 14px; line-height: 1;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background 0.15s, color 0.15s;
+}
+.voice-popup-reset-btn:hover, .settings-reset-btn:hover {
+    background: var(--bg-border, #2a2a4a);
+    color: var(--text-primary, #fff);
+}
 .voice-popup-check { font-size: 13px; color: var(--text-muted, #aaa); display: flex; gap: 6px; align-items: center; }
 .voice-self-preview-wrap {
     display: flex; gap: 10px; flex-wrap: wrap;
@@ -7084,3 +7099,4 @@ body.streamer-mode .dm-avatar:hover {
 }
 .settings-slider { flex: 1; }
 .settings-slider-value { font-size: 13px; color: var(--text-muted, #aaa); min-width: 44px; text-align: right; }
+.settings-slider-row .settings-reset-btn { margin-left: 2px; }

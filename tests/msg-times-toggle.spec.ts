@@ -20,7 +20,7 @@ test.describe('Message timestamps 3-state toggle + placement', () => {
         return page;
     }
 
-    test('default: always-on mode is applied and the select exists', async ({ browser }) => {
+    test('default: hover mode is applied and the select exists', async ({ browser }) => {
         const ts = Date.now();
         const page = await loginUser(browser, 'times_toggle_' + ts);
         await page.waitForTimeout(1500);
@@ -36,11 +36,11 @@ test.describe('Message timestamps 3-state toggle + placement', () => {
                 stored: localStorage.getItem('show_msg_times'),
             };
         });
-        expect(state.bodyAlways).toBe(true); // default always-on
-        expect(state.bodyHover).toBe(false);
+        expect(state.bodyAlways).toBe(false);
+        expect(state.bodyHover).toBe(true); // default hover-only
         expect(state.bodyLegacy).toBe(false);
         expect(state.isSelect).toBe(true);
-        expect(state.value).toBe('always');
+        expect(state.value).toBe('hover');
     });
 
     test('hover mode shows the time on hover only (no layout shift)', async ({ browser }) => {

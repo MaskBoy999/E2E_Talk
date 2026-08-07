@@ -153,5 +153,45 @@ test.describe('DM call per-member volume slider', () => {
         });
         const stored = await page.evaluate((uid) => localStorage.getItem('voice_volume_' + uid), userData.id);
         expect(stored).toBe('250');
+
+        // Reset button restores the member volume to 100%
+        await page.click('.volume-menu-btn:has-text("Reset volume")');
+        const storedAfterReset = await page.evaluate((uid) => localStorage.getItem('voice_volume_' + uid), userData.id);
+        expect(storedAfterReset).toBe('100');
+    });
+
+    test('settings modal mic/speaker reset buttons restore 100%', async ({ page, context }) => {
+        test.setTimeout(120000);
+        const ts = Date.now();
+        await mockMedia(page);
+        await registerUser(page, 'volr1_' + ts);
+        await page.waitForTimeout(1500);
+
+        // Open settings → Voice tab, move the sliders, then reset each one.
+        await page.click('#settings-btn');
+        await page.waitForSelector('#settings-modal:visible', { timeout: 10000 }).catch(() => {});
+        await page.click('.settings-tab[data-tab="voice-settings"]');
+        await page.waitForSelector('#voice-settings:visible', { timeout: 10000 }).catch(() => {});
+        await page.evaluate(() => {
+            const mic = document.getElementById('voice-mic-volume') as HTMLInputElement;
+            if (mic) { mic.value = '150'; mic.dispatchEvent(new Event('input', { bubbles: true })); }
+            const spk = document.getElementById('voice-speaker-volume') as HTMLInputElement;
+            if (spk) { spk.value = '60'; spk.dispatchEvent(new Event('input', { bubbles: true })); }
+        });
+        let settings = JSON.parse((await page.evaluate(() => localStorage.getItem('voice_settings'))) || '{}');
+        expect(settings.micVolume).toBe(150);
+        expect(settings.speakerVolume).toBe(60);
+
+        await page.click('#voice-mic-reset');
+        settings = JSON.parse((await page.evaluate(() => localStorage.getItem('voice_settings'))) || '{}');
+        expect(settings.micVolume).toBe(100);
+        const micVal = await page.evaluate(() => (document.getElementById('voice-mic-volume') as HTMLInputElement).value);
+        expect(micVal).toBe('100');
+
+        await page.click('#voice-speaker-reset');
+        settings = JSON.parse((await page.evaluate(() => localStorage.getItem('voice_settings'))) || '{}');
+        expect(settings.speakerVolume).toBe(100);
+        const spkVal = await page.evaluate(() => (document.getElementById('voice-speaker-volume') as HTMLInputElement).value);
+        expect(spkVal).toBe('100');
     });
 });
