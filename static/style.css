@@ -7019,6 +7019,26 @@ body.streamer-mode .dm-avatar:hover {
 .volume-menu-slider-row { display: flex; align-items: center; gap: 8px; }
 .volume-menu-slider { flex: 1; }
 .volume-menu-value { font-size: 12px; color: var(--text-muted, #aaa); min-width: 42px; text-align: right; }
+.volume-menu-input-row {
+    display: flex; align-items: center; gap: 6px;
+    margin-top: 6px;
+}
+.volume-menu-custom-input {
+    width: 86px;
+    padding: 5px 7px;
+    border-radius: 6px;
+    border: 1px solid var(--bg-border, #2a2a4a);
+    background: var(--bg-tertiary, #23233c);
+    color: var(--text-primary, #e0e0e0);
+    font-size: 13px;
+}
+.volume-menu-custom-pct { font-size: 12px; color: var(--text-muted, #aaa); }
+.volume-menu-input-row::before {
+    content: "Custom %";
+    font-size: 11px;
+    color: var(--text-faint, #777);
+    margin-right: 2px;
+}
 .volume-menu-btn {
     background: var(--bg-primary, #1a1a2e);
     border: none; border-radius: 8px;

@@ -130,12 +130,16 @@ test.describe('DM call per-member volume slider', () => {
         const menuState = await page.evaluate(() => {
             const menu = document.getElementById('volume-menu') as HTMLElement;
             const slider = menu?.querySelector('.volume-menu-slider') as HTMLInputElement;
+            const custom = menu?.querySelector('.volume-menu-custom-input') as HTMLInputElement;
             return {
                 visible: !!menu && menu.style.display !== 'none',
                 hasSlider: !!slider,
                 min: slider ? slider.min : null,
                 max: slider ? slider.max : null,
                 value: slider ? slider.value : null,
+                hasCustomInput: !!custom,
+                customMax: custom ? custom.max : null,
+                customValue: custom ? custom.value : null,
                 header: menu?.querySelector('.volume-menu-header')?.textContent || '',
             };
         });
@@ -143,7 +147,39 @@ test.describe('DM call per-member volume slider', () => {
         expect(menuState.hasSlider).toBe(true);
         expect(menuState.min).toBe('0');
         expect(menuState.max).toBe('500');
+        expect(menuState.hasCustomInput).toBe(true);
+        expect(menuState.customMax).toBe('100000');
+        expect(menuState.customValue).toBe('100');
         expect(menuState.header).toBe(u2.user.username);
+
+        // Clicking INSIDE the menu must NOT dismiss it (slider/input usable)
+        await page.click('.volume-menu-custom-input');
+        await page.waitForTimeout(300);
+        const stillOpenAfterInsideClick = await page.evaluate(() => {
+            const menu = document.getElementById('volume-menu') as HTMLElement;
+            return !!menu && menu.style.display !== 'none';
+        });
+        expect(stillOpenAfterInsideClick).toBe(true);
+        await page.click('.volume-menu-slider');
+        await page.waitForTimeout(300);
+        const stillOpenAfterSliderClick = await page.evaluate(() => {
+            const menu = document.getElementById('volume-menu') as HTMLElement;
+            return !!menu && menu.style.display !== 'none';
+        });
+        expect(stillOpenAfterSliderClick).toBe(true);
+
+        // Clicking OUTSIDE the menu closes it
+        await page.click('#dm-call-panel');
+        await page.waitForTimeout(300);
+        const closedAfterOutsideClick = await page.evaluate(() => {
+            const menu = document.getElementById('volume-menu') as HTMLElement;
+            return !menu || menu.style.display === 'none';
+        });
+        expect(closedAfterOutsideClick).toBe(true);
+
+        // Re-open for the volume-adjustment assertions below
+        await page.click('.dm-call-tile', { button: 'right', position: { x: 10, y: 10 } });
+        await page.waitForSelector('#volume-menu:visible', { timeout: 5000 });
 
         // Adjusting the slider persists per-member and applies the gain
         await page.evaluate(() => {
@@ -154,7 +190,34 @@ test.describe('DM call per-member volume slider', () => {
         const stored = await page.evaluate((uid) => localStorage.getItem('voice_volume_' + uid), userData.id);
         expect(stored).toBe('250');
 
-        // Reset button restores the member volume to 100%
+        // Custom % input allows boosting beyond the slider (up to 100000%)
+        const boost = await page.evaluate(() => {
+            const custom = document.querySelector('.volume-menu-custom-input') as HTMLInputElement;
+            custom.value = '100000';
+            custom.dispatchEvent(new Event('input', { bubbles: true }));
+            const slider = document.querySelector('.volume-menu-slider') as HTMLInputElement;
+            const valueSpan = document.getElementById('volume-menu-value');
+            return {
+                sliderValue: slider.value,
+                spanText: valueSpan ? valueSpan.textContent : '',
+            };
+        });
+        // Slider clamps at 500 but the applied % is 100000
+        expect(boost.sliderValue).toBe('500');
+        expect(boost.spanText).toBe('100000%');
+        const storedBoost = await page.evaluate((uid) => localStorage.getItem('voice_volume_' + uid), userData.id);
+        expect(storedBoost).toBe('100000');
+
+        // Over-typed values clamp to 100000
+        const clamped = await page.evaluate(() => {
+            const custom = document.querySelector('.volume-menu-custom-input') as HTMLInputElement;
+            custom.value = '999999';
+            custom.dispatchEvent(new Event('change', { bubbles: true }));
+            return { value: custom.value };
+        });
+        expect(clamped.value).toBe('100000');
+
+        // Reset button restores the member volume to 100% (slider + input)
         await page.click('.volume-menu-btn:has-text("Reset volume")');
         const storedAfterReset = await page.evaluate((uid) => localStorage.getItem('voice_volume_' + uid), userData.id);
         expect(storedAfterReset).toBe('100');

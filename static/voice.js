@@ -1288,8 +1288,10 @@
         var els = S.remoteAudioEls[uid];
         if (!els) return;
         // Round to 2 decimals so ceil() never mints a negligible extra
-        // element for volumes like 2.0000001.
-        var vol = Math.max(0, Math.min(5, Math.round(remoteVolumeFor(uid) * 100) / 100));
+        // element for volumes like 2.0000001. Cap at 1000 (100000%) — the
+        // per-member volume menu allows up to 100000% for boosting quiet
+        // users via the custom % input.
+        var vol = Math.max(0, Math.min(1000, Math.round(remoteVolumeFor(uid) * 100) / 100));
         var need = Math.max(1, Math.ceil(vol));
         var stream = S.remoteStreams[uid] && S.remoteStreams[uid].audio;
         while (els.length < need) {
@@ -3228,24 +3230,59 @@
         header.textContent = name;
         menu.appendChild(header);
 
+        var savedVol = parseInt(localStorage.getItem('voice_volume_' + uid) || '100', 10);
+        if (isNaN(savedVol)) savedVol = 100;
         var sliderRow = document.createElement('div');
         sliderRow.className = 'volume-menu-slider-row';
         var slider = document.createElement('input');
         slider.type = 'range';
         slider.min = 0;
         slider.max = 500;
-        slider.value = localStorage.getItem('voice_volume_' + uid) || '100';
+        // The slider covers the 0–500% fine-tuning range; the custom % input
+        // below goes up to 10000% for boosting quiet users.
+        slider.value = String(Math.min(savedVol, 500));
         slider.className = 'volume-menu-slider';
         var val = document.createElement('span');
         val.id = 'volume-menu-value';
         val.className = 'volume-menu-value';
-        val.textContent = slider.value + '%';
+        val.textContent = savedVol + '%';
         slider.addEventListener('input', function () {
-            setMemberVolume(uid, parseInt(slider.value, 10));
+            var pct = parseInt(slider.value, 10);
+            setMemberVolume(uid, pct);
+            var inp = menu.querySelector('.volume-menu-custom-input');
+            if (inp) inp.value = String(pct);
         });
         sliderRow.appendChild(slider);
         sliderRow.appendChild(val);
         menu.appendChild(sliderRow);
+
+        // Custom % input — allows boosting up to 10000% (type a value; the
+        // slider caps at 500 but the applied gain uses the typed value).
+        var inputRow = document.createElement('div');
+        inputRow.className = 'volume-menu-input-row';
+        var inp = document.createElement('input');
+        inp.type = 'number';
+        inp.min = 0;
+        inp.max = 100000;
+        inp.step = 5;
+        inp.value = String(savedVol);
+        inp.className = 'volume-menu-custom-input';
+        var pctLbl = document.createElement('span');
+        pctLbl.className = 'volume-menu-custom-pct';
+        pctLbl.textContent = '%';
+        function applyCustomPct() {
+            var raw = parseInt(inp.value, 10);
+            if (isNaN(raw)) raw = 100;
+            var pct = Math.max(0, Math.min(100000, raw));
+            inp.value = String(pct);
+            setMemberVolume(uid, pct);
+            slider.value = String(Math.min(pct, 500));
+        }
+        inp.addEventListener('input', applyCustomPct);
+        inp.addEventListener('change', applyCustomPct);
+        inputRow.appendChild(inp);
+        inputRow.appendChild(pctLbl);
+        menu.appendChild(inputRow);
 
         // Reset this member's volume back to 100% (clears the per-user override)
         var resetBtn = document.createElement('button');
@@ -3255,6 +3292,8 @@
             setMemberVolume(uid, 100);
             var s = menu.querySelector('.volume-menu-slider');
             if (s) s.value = '100';
+            var ci = menu.querySelector('.volume-menu-custom-input');
+            if (ci) ci.value = '100';
             closeVolumeMenu();
         });
         menu.appendChild(resetBtn);
@@ -3285,12 +3324,22 @@
         menu.style.left = x + 'px';
         menu.style.top = y + 'px';
 
+        // Close on click OUTSIDE the menu only — clicks inside (slider, custom
+        // % input, buttons) must never dismiss it. Previously the first click
+        // anywhere (including inside the menu) closed it, making the controls
+        // unusable.
+        if (menu._volDocClick) document.removeEventListener('click', menu._volDocClick);
+        var onDocClick = function (e) {
+            if (menu.style.display === 'none' || menu.contains(e.target)) return;
+            closeVolumeMenu();
+            document.removeEventListener('click', onDocClick);
+            menu._volDocClick = null;
+        };
+        menu._volDocClick = onDocClick;
         setTimeout(function () {
-            document.addEventListener('click', closeVolumeMenuOnce, { once: true });
+            document.addEventListener('click', onDocClick);
         }, 10);
     }
-
-    function closeVolumeMenuOnce() { closeVolumeMenu(); }
 
     function closeVolumeMenu() {
         var menu = el('volume-menu');
