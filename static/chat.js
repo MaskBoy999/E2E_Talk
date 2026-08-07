@@ -10695,8 +10695,10 @@ async function executeDmForwardToChannel(targetServerId, targetChannelId) {
             } catch (_) {}
         }
         let previewEncrypted = null;
-        if (fwdDmTargetKey && originalText) {
-            const previewPlaintext = JSON.stringify({ type: 'text', text: originalText });
+        // Wrap preview with emoji refs so recipients can render custom emojis.
+        const previewEmojiRefs = collectEmojiRefsFromMsgEl(msgDiv, originalText);
+        if (fwdDmTargetKey && (originalText || previewEmojiRefs.length > 0)) {
+            const previewPlaintext = JSON.stringify({ type: 'text', text: originalText || '', emojis: previewEmojiRefs });
             previewEncrypted = E2ECrypto.encryptMessage(previewPlaintext, fwdDmTargetKey);
         }
 
@@ -10782,7 +10784,9 @@ async function executeForward(targetServerId, targetServerName, targetChannelId,
     const textEl = msgDiv.querySelector('.text');
     const originalText = textEl ? extractRawMessageText(textEl) : '';
 
-    let previewText = originalText.substring(0, 80);
+    // Truncate at a :shortcode: boundary so a long emoji-only message never
+    // splits a shortcode in half (which would render as raw text for others).
+    let previewText = truncateForwardPreview(originalText);
     // Extract GIF/sticker/file data from the DOM for rich forward previews
     let gifData = null;
     let stickerData = null;
@@ -17434,6 +17438,24 @@ async function loadEmojiCache() {
     return emojiCache;
 }
 
+// Truncate a forward preview to ~80 chars without splitting a :emoji: shortcode
+// in half (a split shortcode renders as raw literal text for recipients).
+function truncateForwardPreview(text) {
+    if (!text || text.length <= 80) return text || '';
+    var cut = text.substring(0, 80);
+    // If we cut inside a :name: shortcode (odd colons before the cut point),
+    // extend to the closing colon so the last shortcode stays whole.
+    var colonCount = 0;
+    for (var i = 0; i < cut.length; i++) {
+        if (cut.charAt(i) === ':') colonCount++;
+    }
+    if (colonCount % 2 === 1) {
+        var close = text.indexOf(':', 80);
+        if (close !== -1) cut = text.substring(0, close + 1);
+    }
+    return cut;
+}
+
 // Collect shareable refs ({name, file_id, file_key, mime_type}) for every
 // :name: shortcode in `text` that exists in the local emoji registry. Only
 // entries with a shareable file_key are included, so recipients can decrypt them.
@@ -17482,33 +17504,30 @@ function collectEmojiRefsFromMsgEl(msgEl, text) {
 
     // Step 2: For emoji names in the text that weren't in the local cache,
     // look for rendered &lt;img&gt; elements in the message DOM that already
-    // display those emojis. Extract file_id and file_key from the src URL.
+    // display those emojis. Extract file_id and file_key from the data attrs
+    // stamped at render time (the rendered src is a blob URL, which can't be
+    // parsed back into file_id/file_key).
     const parts = text.split(/:([^:]+):/);
     if (parts.length > 1 && msgEl) {
-        const emojiImgs = msgEl.querySelectorAll('.text .emoji-inline');
+        const emojiImgs = msgEl.querySelectorAll('.text .emoji-inline, .text .emoji-loading');
         for (const img of emojiImgs) {
+            // Loaded emojis carry alt=":name:"; still-loading placeholders carry
+            // data-emoji-name="name" (and no alt attribute yet).
             const alt = img.getAttribute('alt') || '';
             const match = alt.match(/^:([^:]+):$/);
-            if (match) {
-                const name = match[1];
-                if (!seen[name] && text.includes(':' + name + ':')) {
-                    // Parse the src URL to extract file_id and file_key
-                    // src format: /api/emojis/{file_id}/{file_key}
-                    const src = img.getAttribute('src') || '';
-                    const srcParts = src.split('/');
-                    if (srcParts.length >= 2) {
-                        const fileId = decodeURIComponent(srcParts[srcParts.length - 2]);
-                        const fileKey = decodeURIComponent(srcParts[srcParts.length - 1]);
-                        if (fileId && fileKey && fileId !== 'null' && fileKey !== 'null') {
-                            seen[name] = true;
-                            refs.push({
-                                name: name,
-                                file_id: fileId,
-                                file_key: fileKey,
-                                mime_type: 'image/png',
-                            });
-                        }
-                    }
+            const spanName = img.getAttribute('data-emoji-name');
+            const name = match ? match[1] : spanName;
+            if (name && !seen[name] && text.includes(':' + name + ':')) {
+                const fileId = img.getAttribute('data-file-id');
+                const fileKey = img.getAttribute('data-file-key');
+                if (fileId && fileKey && fileId !== 'null' && fileKey !== 'null') {
+                    seen[name] = true;
+                    refs.push({
+                        name: name,
+                        file_id: fileId,
+                        file_key: fileKey,
+                        mime_type: 'image/png',
+                    });
                 }
             }
         }
@@ -17552,11 +17571,17 @@ function renderEmojiText(text, extraEmojis) {
             const name = parts[i];
             const entry = getEmojiEntry(name, extraEmojis);
             if (entry) {
+                // Stamp the shareable file metadata on the rendered element so
+                // forwards/edits can recover emoji refs even for emojis the
+                // current user didn't upload (the rendered src is a blob URL,
+                // which can't be parsed back into file_id/file_key).
+                const fileAttrs = (entry.file_id ? ' data-file-id="' + escapeAttr(entry.file_id) + '"' : '') +
+                    (entry.file_key ? ' data-file-key="' + escapeAttr(entry.file_key) + '"' : '');
                 if (emojiBlobCache[name]) {
-                    html += '<img class="' + emojiClass + '" src="' + emojiBlobCache[name] + '" alt=":' + name + ':" title=":' + name + ':">';
+                    html += '<img class="' + emojiClass + '" src="' + emojiBlobCache[name] + '" alt=":' + name + ':" title=":' + name + ':"' + fileAttrs + '>';
                 } else {
                     const spanClass = emojiOnly ? 'emoji-loading emoji-alone' : 'emoji-loading';
-                    html += '<span class="' + spanClass + '" data-emoji-name="' + escapeHtml(name) + '">:' + escapeHtml(name) + ':</span>';
+                    html += '<span class="' + spanClass + '" data-emoji-name="' + escapeHtml(name) + '"' + fileAttrs + '>:' + escapeHtml(name) + ':</span>';
                     loadEmojiBlob(name, extraEmojis);
                 }
             } else {
@@ -17595,6 +17620,12 @@ async function loadEmojiBlob(name, extraEmojis) {
             img.src = url;
             img.alt = ':' + name + ':';
             img.title = ':' + name + ':';
+            // Carry the stamped file metadata from the loading placeholder onto
+            // the finished <img> so forwards can still recover the emoji ref.
+            var fid = el.getAttribute('data-file-id');
+            var fkey = el.getAttribute('data-file-key');
+            if (fid) img.setAttribute('data-file-id', fid);
+            if (fkey) img.setAttribute('data-file-key', fkey);
             el.replaceWith(img);
         });
     } catch (e) {
@@ -18683,7 +18714,9 @@ async function executeDmForward(targetUserId, targetUsername, dmChannelId) {
     const textEl = msgDiv.querySelector('.text');
     const originalText = textEl ? extractRawMessageText(textEl) : '';
 
-    let previewText = originalText.substring(0, 80);
+    // Truncate at a :shortcode: boundary so a long emoji-only message never
+    // splits a shortcode in half (which would render as raw text for others).
+    let previewText = truncateForwardPreview(originalText);
 
     // Extract GIF/sticker/file data from the DOM for rich forward previews
     let gifData = null;
