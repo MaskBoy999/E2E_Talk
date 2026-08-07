@@ -54,11 +54,12 @@ test.describe('Key Blob Recovery: local data wipe resilience', () => {
                 headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     name,
+                    invite_code: inviteCode,
                     encrypted_name: encName.ciphertext,
                     name_nonce: encName.nonce,
                     channel_encrypted_name: encChName.ciphertext,
                     channel_name_nonce: encChName.nonce,
-                    invite_code_hash: inviteCodeHash,
+                    invite_code: inviteCode,
                 })
             });
             if (!res.ok) return { error: await res.text(), status: res.status };

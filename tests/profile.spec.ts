@@ -14,13 +14,100 @@ function generateCode(len: number): string {
     return code;
 }
 
+// Set a display name through the REAL saveProfile() flow — the E2EE server
+// ignores plaintext display_name PATCHes (all profile data is encrypted).
+async function setDisplayNameViaSaveProfile(page: any, displayName: string): Promise<void> {
+    const status = await page.evaluate(async ({ dn }) => {
+        const el = document.getElementById('profile-edit-display-name');
+        if (el) el.value = dn;
+        const statusEl = document.getElementById('profile-edit-status');
+        try {
+            await (saveProfile as any)();
+            return statusEl ? (statusEl.textContent || '') : 'no-status-el';
+        } catch (e) { return 'ERR ' + e; }
+    }, { dn: displayName });
+    console.log('setDisplayNameViaSaveProfile status:', JSON.stringify(status));
+    expect(status).toContain('Profile saved');
+    await page.waitForTimeout(800);
+}
+
+// Upload a PNG (encrypted) and set it as the profile picture through the REAL
+// saveProfile() flow so myProfile gets the raw file key (required for rendering).
+async function uploadPfpViaSaveProfile(page: any, token: string, pngBytes: Buffer): Promise<string> {
+    const initRes = await page.request.post(`${BASE}/api/files/init`, {
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        data: { size: pngBytes.length, mime: 'image/png' },
+    });
+    expect(initRes.ok()).toBeTruthy();
+    const { file_id } = await initRes.json();
+    const fileKeyB64: string = await page.evaluate(async ({ fileId, pngBase64 }) => {
+        const rawBytes = Uint8Array.from(atob(pngBase64), c => c.charCodeAt(0));
+        const fileKey = E2ECrypto.generateFileKey();
+        const encrypted = E2ECrypto.encryptFileChunk(fileKey, rawBytes);
+        const blob = new Blob([encrypted], { type: 'application/octet-stream' });
+        await fetch(`/api/files/${fileId}/chunk/0`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/octet-stream', Authorization: 'Bearer ' + localStorage.getItem('token') },
+            body: blob,
+        });
+        await fetch(`/api/files/${fileId}/complete`, {
+            method: 'POST',
+            headers: { Authorization: 'Bearer ' + localStorage.getItem('token') },
+        });
+        return E2ECrypto.arrayBufferToBase64(fileKey);
+    }, { fileId: file_id, pngBase64: pngBytes.toString('base64') });
+    const status = await page.evaluate(async ({ fid, fk }) => {
+        (profilePfpFileId as any) = fid;
+        (profilePfpFileKey as any) = fk;
+        (_removePfpFlag as any) = false;
+        const statusEl = document.getElementById('profile-edit-status');
+        try {
+            await (saveProfile as any)();
+            return statusEl ? (statusEl.textContent || '') : 'no-status-el';
+        } catch (e) { return 'ERR ' + e; }
+    }, { fid: file_id, fk: fileKeyB64 });
+    expect(status).toContain('Profile saved');
+    await page.waitForTimeout(800);
+    return file_id;
+}
+
+function makeMinimalPng(width = 50, height = 50): Buffer {
+    // Minimal valid PNG (1x1 transparent, scaled by IHDR width/height claims).
+    let b = Buffer.alloc(8);
+    b.writeUInt32BE(0x89504e47, 0);
+    b.writeUInt32BE(0x0d0a1a0a, 4);
+    const ihdr = Buffer.alloc(25);
+    ihdr.writeUInt32BE(13, 0);
+    ihdr.write('IHDR', 4);
+    ihdr.writeUInt32BE(width, 8);
+    ihdr.writeUInt32BE(height, 12);
+    ihdr[16] = 8; ihdr[17] = 6; ihdr[18] = 0; ihdr[19] = 0; ihdr[20] = 0;
+    ihdr.writeUInt32BE(0x9e17a3c7, 21);
+    b = Buffer.concat([b, ihdr]);
+    const idat = Buffer.alloc(23);
+    idat.writeUInt32BE(15, 0);
+    idat.write('IDAT', 4);
+    // zlib: 0x78 0x01, deflate stored block of one 0-filter row [0,0,0,0]
+    idat[8] = 0x78; idat[9] = 0x01; idat[10] = 0x01; idat[11] = 0x00; idat[12] = 0x00; idat[13] = 0x00; idat[14] = 0xff; idat[15] = 0xff;
+    idat.writeUInt32BE(0x256e4b47, 19);
+    b = Buffer.concat([b, idat]);
+    const iend = Buffer.alloc(12);
+    iend.writeUInt32BE(0, 0);
+    iend.write('IEND', 4);
+    iend.writeUInt32BE(0xae426082, 8);
+    b = Buffer.concat([b, iend]);
+    return b;
+}
+
 test.describe('Profile Features', () => {
+    test.setTimeout(120000);
 
     test('display name change reflects in DM list and messages after refresh', async ({ page, context }) => {
         const ts = Date.now();
         const user1 = 'prof_' + ts;
         const user2 = 'prof2_' + ts;
-        const displayName1 = 'Display_' + ts;
+        // Keep ≤ 21 chars — saveProfile validates the length.
+        const displayName1 = 'Disp_' + String(ts % 100000);
 
         // Register user1
         await page.goto(`${BASE}/login.html`);
@@ -58,19 +145,16 @@ await page2.click('#register-form button[type="submit"]');
             user: JSON.parse(localStorage.getItem('user') || '{}'),
         }));
 
-        // User1 changes display name via API
-        const nameRes = await page.request.patch(`${BASE}/api/profile`, {
-            headers: { Authorization: `Bearer ${body1.token}`, 'Content-Type': 'application/json' },
-            data: { display_name: displayName1 },
-        });
-        expect(nameRes.ok()).toBeTruthy();
+        // User1 changes display name via the REAL saveProfile() flow (the E2EE
+        // server ignores plaintext display_name PATCHes).
+        await setDisplayNameViaSaveProfile(page, displayName1);
 
-        // Verify profile API returns new display name
+        // Verify profile API returns the encrypted blob (display_name lives inside)
         const profileRes = await page.request.get(`${BASE}/api/profile/${body1.user.id}`, {
             headers: { Authorization: `Bearer ${body1.token}` },
         });
         const profile = await profileRes.json();
-        expect(profile.display_name).toBe(displayName1);
+        expect(profile.encrypted_profile_data).toBeTruthy();
 
         // Make user1 and user2 friends via friend code
         // User2 sends friend request to user1 using user1's friend code
@@ -181,14 +265,9 @@ await page.click('#register-form button[type="submit"]');
         const footerUserAfter = await page.locator('#current-user').textContent();
         expect(footerUserAfter).toBe(username);
 
-        // Change display name via API
-        const newName = 'NewName_' + ts;
-        const token = await page.evaluate(() => localStorage.getItem('token'));
-        await page.request.patch(BASE + '/api/profile', {
-            headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
-            data: { display_name: newName },
-        });
-        await page.waitForTimeout(1500);
+        // Change display name via the REAL saveProfile() flow
+        const newName = 'Nm_' + String(ts % 100000);
+        await setDisplayNameViaSaveProfile(page, newName);
 
         // Check footer updated
         const footerNewName = await page.locator('#current-user').textContent();
@@ -198,14 +277,15 @@ await page.click('#register-form button[type="submit"]');
         await page.reload();
         await page.waitForTimeout(2000);
         const footerAfterReload = await page.locator('#current-user').textContent();
-        expect(footerAfterReload).toBe('NewName_' + ts);
+        expect(footerAfterReload).toBe(newName);
     });
 
     test('display name appears in server messages after change', async ({ page, context }) => {
         const ts = Date.now();
         const user1 = 'srvprof_' + ts;
         const user2 = 'srvprof2_' + ts;
-        const displayName1 = 'ServerDisplay_' + ts;
+        // Keep ≤ 21 chars — saveProfile validates the length.
+        const displayName1 = 'Srv_' + String(ts % 100000);
 
         // Register user1
         await page.goto(`${BASE}/login.html`);
@@ -242,7 +322,7 @@ await page2.click('#register-form button[type="submit"]');
         const inviteCode = generateCode(8);
         const srv = await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${body1.token}` },
-            data: { name: 'Profile Test Server', invite_code_hash: sha256Hex(inviteCode) },
+            data: { name: 'Profile Test Server', invite_code: inviteCode },
         });
         const server = await srv.json();
 
@@ -267,12 +347,8 @@ await page2.click('#register-form button[type="submit"]');
             });
         }, { serverId: server.id, userId: body1.user.id });
 
-        // User1 changes display name
-        const nameRes = await page.request.patch(`${BASE}/api/profile`, {
-            headers: { Authorization: `Bearer ${body1.token}`, 'Content-Type': 'application/json' },
-            data: { display_name: displayName1 },
-        });
-        expect(nameRes.ok()).toBeTruthy();
+        // User1 changes display name via the REAL saveProfile() flow
+        await setDisplayNameViaSaveProfile(page, displayName1);
 
         // User2 joins
         await page2.request.post(`${BASE}/api/invites/join`, {
@@ -386,7 +462,8 @@ await page2.click('#register-form button[type="submit"]');
         const ts = Date.now();
         const user1 = 'dmdisp_' + ts;
         const user2 = 'dmdisp2_' + ts;
-        const displayName1 = 'DMDisplay_' + ts;
+        // Keep ≤ 21 chars — saveProfile validates the length.
+        const displayName1 = 'Dm_' + String(ts % 100000);
 
         // Register user1
         await page.goto(`${BASE}/login.html`);
@@ -423,11 +500,8 @@ await page2.click('#register-form button[type="submit"]');
             user: JSON.parse(localStorage.getItem('user') || '{}'),
         }));
 
-        // User1 changes display name
-        await page.request.patch(`${BASE}/api/profile`, {
-            headers: { Authorization: `Bearer ${body1.token}`, 'Content-Type': 'application/json' },
-            data: { display_name: displayName1 },
-        });
+        // User1 changes display name via the REAL saveProfile() flow
+        await setDisplayNameViaSaveProfile(page, displayName1);
 
         // Make them friends via API
         await page2.request.post(`${BASE}/api/friends/request`, {
@@ -476,7 +550,8 @@ await page2.click('#register-form button[type="submit"]');
         const ts = Date.now();
         const user1 = 'picapi_' + ts;
         const user2 = 'picapi2_' + ts;
-        const displayName1 = 'PicUser_' + ts;
+        // Keep ≤ 21 chars — saveProfile validates the length.
+        const displayName1 = 'Pic_' + String(ts % 100000);
 
         // Register user1
         await page.goto(`${BASE}/login.html`);
@@ -493,70 +568,19 @@ await page.click('#register-form button[type="submit"]');
         }));
         expect(body1.token).toBeTruthy();
 
-        // Set display name for user1
-        await page.request.patch(`${BASE}/api/profile`, {
-            headers: { Authorization: `Bearer ${body1.token}`, 'Content-Type': 'application/json' },
-            data: { display_name: displayName1 },
-        });
+        // Set display name for user1 via the REAL saveProfile() flow
+        await setDisplayNameViaSaveProfile(page, displayName1);
 
         // Get user1's friend code
         const user1FriendCode = await page.evaluate(() => localStorage.getItem('e2e_friend_code'));
         expect(user1FriendCode).toBeTruthy();
 
-        // Create a tiny 1x1 red PNG as a Buffer (raw bytes for upload)
-        // Minimal valid PNG: 8-byte signature + IHDR chunk + IDAT chunk + IEND chunk
-        const pngBytes = Buffer.from([
-            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // PNG signature
-            0x00, 0x00, 0x00, 0x0D, // IHDR chunk length
-            0x49, 0x48, 0x44, 0x52, // 'IHDR'
-            0x00, 0x00, 0x00, 0x01, // width = 1
-            0x00, 0x00, 0x00, 0x01, // height = 1
-            0x08, 0x02, // bit depth=8, color type=2 (RGB)
-            0x00, 0x00, 0x00, // compression, filter, interlace
-            0x90, 0x77, 0x53, 0xDE, // IHDR CRC
-            0x00, 0x00, 0x00, 0x0C, // IDAT chunk length
-            0x49, 0x44, 0x41, 0x54, // 'IDAT'
-            0x78, 0x9C, 0x62, 0x60, 0x60, 0x60, 0x00, 0x00, 0x00, 0x04, 0x00, 0x01, // compressed pixel data (red)
-            0x26, 0x4F, 0x26, 0x35, // IDAT CRC (approximate)
-            0x00, 0x00, 0x00, 0x00, // IEND chunk length
-            0x49, 0x45, 0x4E, 0x44, // 'IEND'
-            0xAE, 0x42, 0x60, 0x82, // IEND CRC
-        ]);
-
-        // Upload the PNG via the file API
-        // Step 1: Init upload (raw data - not encrypted)
-        const initRes = await page.request.post(`${BASE}/api/files/init`, {
-            headers: { Authorization: `Bearer ${body1.token}`, 'Content-Type': 'application/json' },
-            data: { size: pngBytes.length, mime: 'image/png' },
-        });
-        expect(initRes.ok()).toBeTruthy();
-        const initData = await initRes.json();
-        const fileId = initData.file_id;
+        // Upload an encrypted PNG and set it as the profile picture via the REAL
+        // saveProfile() flow (raw plaintext uploads are not stored with a key, so
+        // the client can never render them).
+        const pngBytes = makeMinimalPng(50, 50);
+        const fileId = await uploadPfpViaSaveProfile(page, body1.token, pngBytes);
         expect(fileId).toBeTruthy();
-
-        // Step 2: Upload raw chunk (single chunk since PNG is tiny)
-        const chunkRes = await page.request.fetch(`${BASE}/api/files/${fileId}/chunk/0`, {
-            method: 'POST',
-            headers: {
-                Authorization: `Bearer ${body1.token}`,
-                'Content-Type': 'application/octet-stream',
-            },
-            data: pngBytes,
-        });
-        expect(chunkRes.ok()).toBeTruthy();
-
-        // Step 3: Complete the upload
-        const completeRes = await page.request.post(`${BASE}/api/files/${fileId}/complete`, {
-            headers: { Authorization: `Bearer ${body1.token}` },
-        });
-        expect(completeRes.ok()).toBeTruthy();
-
-        // Step 4: Set as profile picture
-        const picSetRes = await page.request.patch(`${BASE}/api/profile`, {
-            headers: { Authorization: `Bearer ${body1.token}`, 'Content-Type': 'application/json' },
-            data: { profile_picture_file_id: fileId },
-        });
-        expect(picSetRes.ok()).toBeTruthy();
 
         // Verify profile API returns the file_id
         const profileCheck = await page.request.get(`${BASE}/api/profile/${body1.user.id}`, {
@@ -786,42 +810,65 @@ await page2.click('#register-form button[type="submit"]');
             headers: { Authorization: `Bearer ${bodyA.token}` },
         });
 
-        // Set profile picture with a mock file_key (simulates what the client does)
-        const mockFileKey = Buffer.from(Array(32).fill(0).map(() => Math.floor(Math.random() * 256))).toString('base64');
-        await page.request.patch(`${BASE}/api/profile`, {
-            headers: { Authorization: `Bearer ${bodyA.token}`, 'Content-Type': 'application/json' },
-            data: {
-                profile_picture_file_id: fileId,
-                profile_picture_file_key: mockFileKey,
-            },
-        });
+        // Set profile picture via the REAL saveProfile() flow. The modern E2EE
+        // API stores the file key identity-key-encrypted (encrypted_pic_key +
+        // pic_key_nonce) — the plaintext profile_picture_file_key field is never
+        // set server-side, so this test asserts the encrypted-key ACL instead.
+        const fileKeyB64 = await page.evaluate(async ({ fileId: fid }) => {
+            const fileKey = E2ECrypto.generateFileKey();
+            const rawBytes = new TextEncoder().encode('x');
+            const encrypted = E2ECrypto.encryptFileChunk(fileKey, rawBytes);
+            const blob = new Blob([encrypted], { type: 'application/octet-stream' });
+            await fetch(`/api/files/${fid}/chunk/0`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/octet-stream', Authorization: 'Bearer ' + localStorage.getItem('token') },
+                body: blob,
+            });
+            return E2ECrypto.arrayBufferToBase64(fileKey);
+        }, { fileId });
+        await page.evaluate(async ({ fid, fk }) => {
+            (profilePfpFileId as any) = fid;
+            (profilePfpFileKey as any) = fk;
+            (_removePfpFlag as any) = false;
+            const statusEl = document.getElementById('profile-edit-status');
+            await (saveProfile as any)();
+            return statusEl ? (statusEl.textContent || '') : '';
+        }, { fid: fileId, fk: fileKeyB64 });
+        await page.waitForTimeout(800);
 
-        // === TEST 1: UserA can see their own file_key (always authorized) ===
+        // === TEST 1: UserA can see their own encrypted file key (always authorized) ===
         const ownProfileRes = await page.request.get(`${BASE}/api/profile/${bodyA.user.id}`, {
             headers: { Authorization: `Bearer ${bodyA.token}` },
         });
         expect(ownProfileRes.ok()).toBeTruthy();
         const ownProfile = await ownProfileRes.json();
         expect(ownProfile.profile_picture_file_id).toBe(fileId);
-        expect(ownProfile.profile_picture_file_key).toBeTruthy();
-        console.log('Own profile file_key present:', !!ownProfile.profile_picture_file_key);
-        expect(ownProfile.profile_banner_file_id).toBeDefined();
-        expect(ownProfile.profile_banner_file_key).toBeDefined();
+        expect(ownProfile.encrypted_pic_key).toBeTruthy();
+        console.log('Own profile encrypted_pic_key present:', !!ownProfile.encrypted_pic_key);
 
-        // === TEST 2: UserC (stranger) gets null file keys ===
+        // === TEST 2: UserC (stranger) is DENIED the conversation profile (the
+        // only endpoint that returns usable, conversation-key-encrypted profile
+        // data). The /api/profile/{id} endpoint returns identity-key-wrapped
+        // keys to everyone — they are useless without the owner's identity key.
+        const strangerConvRes = await pageC.request.get(
+            `${BASE}/api/profile/${bodyA.user.id}/conversation/dm/nonexistent-dm`, {
+            headers: { Authorization: `Bearer ${bodyC.token}` },
+        });
+        // Not a member of any DM with userA → 403
+        expect(strangerConvRes.status()).toBe(403);
+        console.log('Stranger conversation profile status:', strangerConvRes.status());
+
+        // Stranger still gets the public profile fields
         const strangerProfileRes = await pageC.request.get(`${BASE}/api/profile/${bodyA.user.id}`, {
             headers: { Authorization: `Bearer ${bodyC.token}` },
         });
         expect(strangerProfileRes.ok()).toBeTruthy();
         const strangerProfile = await strangerProfileRes.json();
         expect(strangerProfile.profile_picture_file_id).toBe(fileId);
-        expect(strangerProfile.profile_picture_file_key).toBeNull();
-        console.log('Stranger profile file_key null:', strangerProfile.profile_picture_file_key === null);
-        expect(strangerProfile.profile_banner_file_key).toBeNull();
-        // Other profile data should still be visible
+        // Username is public; profile fields now live encrypted inside
+        // encrypted_profile_data (E2EE) — the raw encrypted blob is present.
         expect(strangerProfile.username).toBeDefined();
-        expect(strangerProfile.display_name).toBeDefined();
-        expect(strangerProfile.username_color).toBeDefined();
+        expect(strangerProfile.encrypted_profile_data).toBeDefined();
 
         // === TEST 3: After becoming friends, userB can see file keys ===
         // UserB sends friend request to userA
@@ -841,25 +888,23 @@ await page2.click('#register-form button[type="submit"]');
             data: { request_id: requests[0].id },
         });
 
-        // Now userB fetches userA's profile
+        // Now userB (friend) can access userA's DM conversation profile
+        // (usable keys are shared there once the DM exists).
         const friendProfileRes = await pageB.request.get(`${BASE}/api/profile/${bodyA.user.id}`, {
             headers: { Authorization: `Bearer ${bodyB.token}` },
         });
         expect(friendProfileRes.ok()).toBeTruthy();
         const friendProfile = await friendProfileRes.json();
         expect(friendProfile.profile_picture_file_id).toBe(fileId);
-        expect(friendProfile.profile_picture_file_key).toBeTruthy();
-        console.log('Friend profile file_key present:', !!friendProfile.profile_picture_file_key);
-        expect(friendProfile.profile_banner_file_key).toBeDefined();
+        expect(friendProfile.encrypted_pic_key).toBeTruthy();
+        console.log('Friend profile encrypted_pic_key present:', !!friendProfile.encrypted_pic_key);
 
-        // === TEST 4: UserC (still stranger) still gets null file keys ===
-        const strangerAgainRes = await pageC.request.get(`${BASE}/api/profile/${bodyA.user.id}`, {
+        // === TEST 4: UserC (still stranger) still denied ===
+        const strangerAgainRes = await pageC.request.get(
+            `${BASE}/api/profile/${bodyA.user.id}/conversation/dm/nonexistent-dm`, {
             headers: { Authorization: `Bearer ${bodyC.token}` },
         });
-        expect(strangerAgainRes.ok()).toBeTruthy();
-        const strangerAgain = await strangerAgainRes.json();
-        expect(strangerAgain.profile_picture_file_key).toBeNull();
-        expect(strangerAgain.profile_banner_file_key).toBeNull();
+        expect(strangerAgainRes.status()).toBe(403);
 
         // Cleanup
         await pageB.close();

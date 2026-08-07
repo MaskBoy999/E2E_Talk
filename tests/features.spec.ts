@@ -98,7 +98,7 @@ async function createServerAndKey(page: any, token: string, userId: string, serv
     const inviteCode = generateCode(8);
     const srv = await page.request.post(`${BASE}/api/servers`, {
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        data: { name: serverName, invite_code_hash: sha256Hex(inviteCode) },
+        data: { name: serverName, invite_code: inviteCode },
     });
     const server = await srv.json();
     await page.evaluate(async ({ serverId, userId }) => {

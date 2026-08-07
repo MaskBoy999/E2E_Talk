@@ -489,20 +489,46 @@ var E2ECrypto = (() => {
     }
 
     // ---- Key Bundle (password-encrypted key backup for full recovery) ----
+    // Bump BUNDLE_VERSION whenever NEW key types are added to the bundle so
+    // stale blobs (saved by an older build without those keys) can be detected
+    // on restore and rebuilt with the complete key set.
+    const BUNDLE_VERSION = 2;
+
+    // All encryption/identity key types that must be recoverable. Kept as a
+    // single source of truth so every key kind added in the future is simply
+    // listed here (and the version bumped) to be auto-included on next save.
+    const BUNDLE_KEY_TYPES = [
+        'e2e_identity_private_',
+        'e2e_identity_public_',
+        'e2e_server_',
+        'e2e_server_history_',
+        'e2e_file_key_',
+        'e2e_invite_',
+        'fkc_',
+    ];
+    const BUNDLE_EXACT_KEYS = [
+        'profile_key_cache',
+        'e2e_hmac_key',
+        'e2e_auth_key',
+        'e2e_friend_code',
+    ];
+
+    function isBundleKey(k) {
+        if (!k) return false;
+        for (let i = 0; i < BUNDLE_EXACT_KEYS.length; i++) {
+            if (k === BUNDLE_EXACT_KEYS[i]) return true;
+        }
+        for (let i = 0; i < BUNDLE_KEY_TYPES.length; i++) {
+            if (k.indexOf(BUNDLE_KEY_TYPES[i]) === 0) return true;
+        }
+        return false;
+    }
+
     function buildKeyBundle() {
-        const bundle = { v: 1 };
+        const bundle = { v: BUNDLE_VERSION };
         for (let i = 0; i < localStorage.length; i++) {
             const k = localStorage.key(i);
-            if (!k) continue;
-            if (k.indexOf('e2e_identity_private_') === 0 ||
-                k.indexOf('e2e_identity_public_') === 0 ||
-                (k.indexOf('e2e_server_') === 0 && k.indexOf('e2e_server_history_') !== 0) ||
-                k.indexOf('e2e_server_history_') === 0 ||
-                k === 'profile_key_cache' ||
-                k === 'e2e_hmac_key' ||
-                k === 'e2e_friend_code' ||
-                k.indexOf('e2e_file_key_') === 0 ||
-                k.indexOf('fkc_') === 0) {
+            if (isBundleKey(k)) {
                 bundle[k] = localStorage.getItem(k);
             }
         }
@@ -522,11 +548,17 @@ var E2ECrypto = (() => {
     function restoreKeyBundle(bundle) {
         if (!bundle || typeof bundle !== 'object') return;
         for (const k in bundle) {
+            // Skip metadata keys (bundle version) — only restore real keys.
+            if (k === 'v') continue;
             if (bundle.hasOwnProperty(k) && bundle[k] != null) {
                 localStorage.setItem(k, bundle[k]);
             }
         }
     }
+
+    // Expose the current bundle version so auth.js can detect stale blobs
+    // restored from an older client (missing newer key types).
+    window._BUNDLE_VERSION = BUNDLE_VERSION;
 
     // ---- Build public API ----
     return {

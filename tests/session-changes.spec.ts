@@ -73,7 +73,7 @@ test.describe('Session changes: code lengths, server picture, sticker crop, memo
         const res = await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
             data: {
-                invite_code_hash: serverCode,
+                invite_code: serverCode,
                 encrypted_name: encName.ciphertext,
                 name_nonce: encName.nonce,
                 channel_encrypted_name: encChName.ciphertext,
@@ -195,7 +195,7 @@ test.describe('Session changes: code lengths, server picture, sticker crop, memo
 
         const res = await page.request.post(`${BASE}/api/servers/${server.id}/invite`, {
             headers: { Authorization: `Bearer ${result.token}`, 'Content-Type': 'application/json' },
-            data: { invite_code_hash: regenResult.hash },
+            data: { invite_code: regenResult.code },
         });
         expect(res.ok()).toBeTruthy();
     });
@@ -240,7 +240,7 @@ test.describe('Session changes: code lengths, server picture, sticker crop, memo
         const createRes = await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${result.token}`, 'Content-Type': 'application/json' },
             data: {
-                invite_code_hash: serverCode,
+                invite_code: serverCode,
                 encrypted_name: encName.ciphertext,
                 name_nonce: encName.nonce,
                 channel_encrypted_name: encChName.ciphertext,

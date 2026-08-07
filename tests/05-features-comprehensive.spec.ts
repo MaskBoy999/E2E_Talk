@@ -98,7 +98,7 @@ test.describe('5 Features — DM Search, Channel Search, Infinite Scroll, Notifi
         const res = await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
             data: {
-                invite_code_hash: hash,
+                invite_code: inviteCode,
                 encrypted_name: encName.ciphertext,
                 name_nonce: encName.nonce,
                 channel_encrypted_name: encChName.ciphertext,

@@ -124,7 +124,7 @@ await page2.click('#register-form button[type="submit"]');
         const inviteCode = generateCode(8);
         const srv = await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${body.token}` },
-            data: { name: 'XSS Test Server', invite_code_hash: sha256Hex(inviteCode) },
+            data: { name: 'XSS Test Server', invite_code: inviteCode },
         });
         const server = await srv.json();
 
@@ -144,7 +144,7 @@ await page2.click('#register-form button[type="submit"]');
         // Set invite code hash
         await page.request.post(`${BASE}/api/servers/${server.id}/invite`, {
             headers: { Authorization: `Bearer ${body.token}`, 'Content-Type': 'application/json' },
-            data: { invite_code_hash: sha256Hex(inviteCode) },
+            data: { invite_code: inviteCode },
         });
 
         // XSS user joins
@@ -327,7 +327,7 @@ await page.click('#register-form button[type="submit"]');
 
         const srv = await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${body.token}` },
-            data: { name: 'Sec CT Test', invite_code_hash: sha256Hex(generateCode(8)) },
+            data: { name: 'Sec CT Test', invite_code: generateCode(8) },
         });
         const server = await srv.json();
 

@@ -359,7 +359,7 @@ test.describe('Profile + Message Rendering (Encrypted Profiles)', () => {
         const inviteCode = generateCode(8);
         const srvRes = await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${body1.token}` },
-            data: { name: 'PT ' + ts, invite_code_hash: sha256Hex(inviteCode) },
+            data: { name: 'PT ' + ts, invite_code: inviteCode },
         });
         expect(srvRes.ok()).toBeTruthy();
         const server = await srvRes.json();

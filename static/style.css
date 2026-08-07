@@ -2541,6 +2541,38 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     line-height: 1.4;
 }
 
+/* Session & Security Log (Settings → Security) */
+.session-log-list {
+    margin-top: 4px;
+    max-height: 220px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.session-log-empty {
+    color: var(--text-muted);
+    font-size: 12px;
+    padding: 8px 0;
+}
+.session-log-item {
+    background: var(--bg-secondary);
+    border: 1px solid var(--bg-border);
+    border-radius: 8px;
+    padding: 8px 10px;
+}
+.session-log-head {
+    color: var(--text-primary);
+    font-size: 12px;
+    font-weight: 600;
+}
+.session-log-detail {
+    color: var(--text-muted);
+    font-size: 11px;
+    margin-top: 2px;
+    line-height: 1.4;
+}
+
 .identity-key-box {
     display: flex;
     align-items: center;

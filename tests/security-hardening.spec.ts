@@ -205,7 +205,7 @@ test.describe('Security Hardening', () => {
         const inviteCode = 'INVITE_OK_' + ts;
         const srv = await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${owner.token}`, 'Content-Type': 'application/json' },
-            data: { name: 'RegTest_' + ts, invite_code_hash: sha256Hex(inviteCode) },
+            data: { name: 'RegTest_' + ts, invite_code: inviteCode },
         });
         const server = await srv.json();
 

@@ -98,7 +98,7 @@ test.describe('Profile Modal Features', () => {
         const inviteCode = generateCode(8);
         const srvRes = await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${body1.token}` },
-            data: { name: `ProfileSrv_${ts}`, invite_code_hash: sha256Hex(inviteCode) },
+            data: { name: `ProfileSrv_${ts}`, invite_code: inviteCode },
         });
         const server = await srvRes.json();
 
@@ -395,28 +395,28 @@ test.describe('Profile Modal Features', () => {
         await page.click('#profile-edit-btn');
         await page.waitForTimeout(500);
 
-        // Check glow options container exists
-        const glowContainer = page.locator('#profile-edit-glow-options');
+        // Check glow options container exists (rendered as #border-glow-options)
+        const glowContainer = page.locator('#border-glow-options');
         await expect(glowContainer).toBeVisible();
 
         // Check there are glow buttons (generated from the default color)
-        const glowBtns = page.locator('#profile-edit-glow-options .glow-btn');
+        const glowBtns = page.locator('#border-glow-options .glow-option-btn');
         const btnCount = await glowBtns.count();
         expect(btnCount).toBeGreaterThan(0);
 
-        // Click the first glow button and verify it becomes active
+        // Click the first glow button and verify it becomes selected
         await glowBtns.first().click();
         await page.waitForTimeout(300);
-        const isActive = await glowBtns.first().evaluate(el => el.classList.contains('active'));
+        const isActive = await glowBtns.first().evaluate(el => el.classList.contains('selected'));
         expect(isActive).toBeTruthy();
 
-        // Click a different glow button - the first should no longer be active
+        // Click a different glow button - the first should no longer be selected
         if (btnCount > 1) {
             await glowBtns.nth(1).click();
             await page.waitForTimeout(300);
-            const firstStillActive = await glowBtns.first().evaluate(el => el.classList.contains('active'));
+            const firstStillActive = await glowBtns.first().evaluate(el => el.classList.contains('selected'));
             expect(firstStillActive).toBeFalsy();
-            const secondActive = await glowBtns.nth(1).evaluate(el => el.classList.contains('active'));
+            const secondActive = await glowBtns.nth(1).evaluate(el => el.classList.contains('selected'));
             expect(secondActive).toBeTruthy();
         }
 
@@ -429,7 +429,8 @@ test.describe('Profile Modal Features', () => {
     test('sidebar footer updates in real-time after saving display name via profile edit UI', async ({ page }) => {
         const ts = Date.now();
         const username = 'pfooter_' + ts;
-        const newDisplayName = 'NewFooter_' + ts;
+        // Keep ≤ 21 chars — saveProfile validates the length.
+        const newDisplayName = 'Foot_' + String(ts % 100000);
 
         // Register (this stores e2e_password in localStorage)
         await page.goto(`${BASE}/login.html`);

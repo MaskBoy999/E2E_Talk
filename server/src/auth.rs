@@ -30,12 +30,20 @@ pub fn verify_password(password: &str, hash: &str) -> Result<bool, String> {
         .is_ok())
 }
 
-pub fn create_token(user_id: &str, username: &str, secret: &str) -> Result<String, String> {
+/// Issue a token with a caller-chosen lifetime. Callers (login/register/reauth)
+/// pass a duration chosen in Settings (clamped server-side to 30 days max);
+/// missing duration falls back to the 30-day default.
+pub fn create_token_with_duration(
+    user_id: &str,
+    username: &str,
+    secret: &str,
+    duration: chrono::Duration,
+) -> Result<String, String> {
     let claims = Claims {
         sub: user_id.to_string(),
         username: username.to_string(),
         exp: chrono::Utc::now()
-            .checked_add_signed(chrono::Duration::days(30))
+            .checked_add_signed(duration)
             .unwrap()
             .timestamp() as usize,
     };

@@ -227,7 +227,7 @@ await page2reg.click('#register-form button[type="submit"]');
         const inviteCode1 = generateCode(8);
         const srv = await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${body1.token}` },
-            data: { name: 'Test Server', invite_code_hash: sha256Hex(inviteCode1) },
+            data: { name: 'Test Server', invite_code: inviteCode1 },
         });
         const server = await srv.json();
         expect(server.id).toBeTruthy();
@@ -256,7 +256,7 @@ await page2reg.click('#register-form button[type="submit"]');
         // Get invite code
         const invRes = await page.request.post(`${BASE}/api/servers/${server.id}/invite`, {
             headers: { Authorization: `Bearer ${body1.token}`, 'Content-Type': 'application/json' },
-            data: { invite_code_hash: sha256Hex(inviteCode1) },
+            data: { invite_code: inviteCode1 },
         });
         const invite = await invRes.json();
         expect(invite.ok).toBeTruthy();
@@ -510,7 +510,7 @@ await page.click('#register-form button[type="submit"]');
         // Create server
         const srv = await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${body.token}` },
-            data: { name: 'Reload Server', invite_code_hash: sha256Hex(generateCode(8)) },
+            data: { name: 'Reload Server', invite_code: generateCode(8) },
         });
         const server = await srv.json();
 
@@ -582,7 +582,7 @@ await page.click('#register-form button[type="submit"]');
         // Create server
         const srv = await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${body.token}` },
-            data: { name: 'CT Server', invite_code_hash: sha256Hex(generateCode(8)) },
+            data: { name: 'CT Server', invite_code: generateCode(8) },
         });
         const server = await srv.json();
 
@@ -666,7 +666,7 @@ await page.click('#register-form button[type="submit"]');
         // Create a server with this user
         await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${body.token}` },
-            data: { name: 'Admin Test Server ' + ts, invite_code_hash: sha256Hex(generateCode(8)) },
+            data: { name: 'Admin Test Server ' + ts, invite_code: generateCode(8) },
         });
 
         // Go to admin panel — on fresh DB: setup_required (1st), setup_complete (2nd), login (3rd)
@@ -780,7 +780,7 @@ await page2.click('#register-form button[type="submit"]');
         const inviteCode2 = generateCode(8);
         const srv = await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${body1.token}` },
-            data: { name: 'Kick Test', invite_code_hash: sha256Hex(inviteCode2) },
+            data: { name: 'Kick Test', invite_code: inviteCode2 },
         });
         const server = await srv.json();
 
@@ -800,7 +800,7 @@ await page2.click('#register-form button[type="submit"]');
         // User2 joins
         const invRes = await page.request.post(`${BASE}/api/servers/${server.id}/invite`, {
             headers: { Authorization: `Bearer ${body1.token}`, 'Content-Type': 'application/json' },
-            data: { invite_code_hash: sha256Hex(inviteCode2) },
+            data: { invite_code: inviteCode2 },
         });
         const invite = await invRes.json();
         expect(invite.ok).toBeTruthy();
@@ -903,7 +903,7 @@ await page2.click('#register-form button[type="submit"]');
         const inviteCode3 = generateCode(8);
         const srv = await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${body1.token}` },
-            data: { name: 'Leave Test', invite_code_hash: sha256Hex(inviteCode3) },
+            data: { name: 'Leave Test', invite_code: inviteCode3 },
         });
         const server = await srv.json();
         await page.evaluate(async ({ serverId, userId }) => {
@@ -921,7 +921,7 @@ await page2.click('#register-form button[type="submit"]');
         // User2 joins, gets key
         const invRes = await page.request.post(`${BASE}/api/servers/${server.id}/invite`, {
             headers: { Authorization: `Bearer ${body1.token}`, 'Content-Type': 'application/json' },
-            data: { invite_code_hash: sha256Hex(inviteCode3) },
+            data: { invite_code: inviteCode3 },
         });
         const invite = await invRes.json();
         expect(invite.ok).toBeTruthy();

@@ -237,12 +237,27 @@ pub struct RegisterRequest {
     pub encrypted_hash_key: Option<String>,
     pub hash_key_salt: Option<String>,
     pub hash_key_nonce: Option<String>,
+    // Optional custom session lifetime in seconds (Settings → Security, max 30 days).
+    #[serde(default)]
+    pub duration_seconds: Option<u64>,
 }
 
 #[derive(Deserialize)]
 pub struct LoginRequest {
     pub username: String,
     pub password: String,
+    // Optional custom session lifetime in seconds (Settings → Security, max 30 days).
+    #[serde(default)]
+    pub duration_seconds: Option<u64>,
+}
+
+// Session lifetime clamp shared by register/login/reauth. Clients may request a
+// custom duration; the server floors it at 1 minute and caps it at 30 days so a
+// malformed request can never mint an over-long token.
+const MAX_SESSION_SECS: u64 = 30 * 24 * 60 * 60; // 30 days
+const MIN_SESSION_SECS: u64 = 60; // 1 minute
+fn session_duration_secs(dur: Option<u64>) -> u64 {
+    dur.unwrap_or(MAX_SESSION_SECS).clamp(MIN_SESSION_SECS, MAX_SESSION_SECS)
 }
 
 #[derive(Deserialize)]
@@ -329,7 +344,13 @@ pub async fn register(
         }
     }
 
-    let token = match auth::create_token(&user.id, &user.username, &state.config.jwt_secret) {
+    let session_secs = session_duration_secs(req.duration_seconds);
+    let token = match auth::create_token_with_duration(
+        &user.id,
+        &user.username,
+        &state.config.jwt_secret,
+        chrono::Duration::seconds(session_secs as i64),
+    ) {
         Ok(t) => t,
         Err(e) => {
             return (
@@ -370,10 +391,14 @@ pub async fn login(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LoginRequest>,
 ) -> impl IntoResponse {
-    // Per-IP rate limiting: 10 attempts per 5 minutes
+    // Per-IP rate limiting: 10 attempts per 5 minutes.
+    // Env-overridable so automated test suites (which log in dozens of users
+    // from one IP) can raise/disable the budget: set LOGIN_IP_MAX=0 to
+    // disable, or a number to raise it (same pattern as FRIEND_REQUEST_IP_MAX).
     let ip = get_client_ip(&headers);
     let ip_rate_key = format!("login_ip:{}", ip);
-    if !LOGIN_IP_RATE_LIMITER.check_and_increment(&ip_rate_key, 10, Duration::from_secs(300)) {
+    let ip_max: u32 = std::env::var("LOGIN_IP_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
+    if ip_max > 0 && !LOGIN_IP_RATE_LIMITER.check_and_increment(&ip_rate_key, ip_max, Duration::from_secs(300)) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": "Too many login attempts. Try again in 5 minutes."})),
@@ -381,9 +406,10 @@ pub async fn login(
             .into_response();
     }
 
-    // Per-username rate limiting (already existed)
+    // Per-username rate limiting (already existed). Env-overridable for tests.
     let rate_key = format!("login:{}", req.username);
-    if !LOGIN_RATE_LIMITER.check_and_increment(&rate_key, 10, Duration::from_secs(300)) {
+    let user_max: u32 = std::env::var("LOGIN_USER_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
+    if user_max > 0 && !LOGIN_RATE_LIMITER.check_and_increment(&rate_key, user_max, Duration::from_secs(300)) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": "Too many login attempts. Try again in 5 minutes."})),
@@ -425,7 +451,13 @@ pub async fn login(
         }
     };
 
-    let token = match auth::create_token(&user.id, &user.username, &state.config.jwt_secret) {
+    let session_secs = session_duration_secs(req.duration_seconds);
+    let token = match auth::create_token_with_duration(
+        &user.id,
+        &user.username,
+        &state.config.jwt_secret,
+        chrono::Duration::seconds(session_secs as i64),
+    ) {
         Ok(t) => t,
         Err(e) => {
             return (
@@ -440,7 +472,7 @@ pub async fn login(
     headers.insert(
         "set-cookie",
         HeaderValue::from_str(
-            &format!("token={}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=2592000", token)
+            &format!("token={}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age={}", token, session_secs)
         ).unwrap(),
     );
 
@@ -473,10 +505,13 @@ pub async fn get_auth_params(
     Path(username): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    // Per-IP rate limiting: 10 requests per minute
+    // Per-IP rate limiting: 10 requests per minute.
+    // Env-overridable for test suites (same pattern as LOGIN_IP_MAX): set
+    // AUTH_PARAMS_IP_MAX=0 to disable, or a number to raise it.
     let ip = get_client_ip(&headers);
     let ip_rate_key = format!("auth_params_ip:{}", ip);
-    if !AUTH_PARAMS_IP_RATE_LIMITER.check_and_increment(&ip_rate_key, 10, Duration::from_secs(60)) {
+    let ip_max: u32 = std::env::var("AUTH_PARAMS_IP_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
+    if ip_max > 0 && !AUTH_PARAMS_IP_RATE_LIMITER.check_and_increment(&ip_rate_key, ip_max, Duration::from_secs(60)) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": "Too many requests. Try again in 1 minute."})),
@@ -503,6 +538,10 @@ pub async fn get_auth_params(
 #[derive(Deserialize)]
 pub struct ReauthRequest {
     pub password: String,
+    /// Optional custom session lifetime in seconds (clamped server-side to
+    /// [60s, 30 days]). Missing/None keeps the legacy 30-day default.
+    #[serde(default)]
+    pub duration_seconds: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -735,7 +774,16 @@ pub async fn reauth(
             .into_response();
     }
 
-    let token = match auth::create_token(&user.id, &user.username, &state.config.jwt_secret) {
+    // Custom session duration chosen by the user in settings (clamped to
+    // [1 minute, 30 days]). Missing/invalid falls back to 30 days.
+    let duration_secs = session_duration_secs(req.duration_seconds);
+
+    let token = match auth::create_token_with_duration(
+        &user.id,
+        &user.username,
+        &state.config.jwt_secret,
+        chrono::Duration::seconds(duration_secs as i64),
+    ) {
         Ok(t) => t,
         Err(e) => {
             return (
@@ -750,7 +798,7 @@ pub async fn reauth(
     headers.insert(
         "set-cookie",
         HeaderValue::from_str(
-            &format!("token={}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=2592000", token)
+            &format!("token={}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age={}", token, duration_secs)
         ).unwrap(),
     );
 
@@ -3848,10 +3896,22 @@ pub async fn update_profile(
     // are NO LONGER accepted as plaintext fields. All profile data (including these)
     // must be sent inside encrypted_profile_data and encrypted with the profile data key.
 
-    // Before changing profile picture, delete the old one's file from DB and disk
-    let delete_current_pic = || -> Result<(), String> {
+    // Before changing profile picture, delete the old one's file from DB and disk.
+    // IMPORTANT: the client re-sends the unchanged picture/banner id on every save
+    // (the crop globals persist across saves in the same session). Deleting the file
+    // record for a file_id that is ABOUT to be re-assigned breaks the FK constraint
+    // (profile_picture_file_id REFERENCES files(id)) and fails the whole PATCH — which
+    // is exactly how a banner update silently failed. Only delete when the new file
+    // id actually differs from the current one.
+    let delete_current_pic = |keep_id: Option<&str>| -> Result<(), String> {
         let (_, _, old_file_id, _, _, _, _, _, _, _) = state.db.get_user_profile(&user_id)?;
         if let Some(old_id) = old_file_id {
+            if let Some(k) = keep_id {
+                if k == old_id {
+                    // Same file id re-sent — do NOT delete the file record we're about to re-set.
+                    return Ok(());
+                }
+            }
             // Delete from DB (checks ownership)
             if let Ok(old_info) = state.db.delete_file_record(&old_id) {
                 // Delete chunk files from disk
@@ -3869,7 +3929,7 @@ pub async fn update_profile(
 
     // Handle profile picture removal
     if req.remove_picture.unwrap_or(false) {
-        let _ = delete_current_pic();
+        let _ = delete_current_pic(None);
         if let Err(e) = state.db.update_profile_picture(&user_id, None, None, None) {
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
         }
@@ -3892,8 +3952,10 @@ pub async fn update_profile(
         if file_info.uploader_id != user_id {
             return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Not your file"}))).into_response();
         }
-        // Delete old profile pic before setting new one
-        let _ = delete_current_pic();
+        // Delete old profile pic before setting new one — but only when it's a
+        // DIFFERENT file than the one being set (re-sent unchanged ids must not
+        // delete the file record we're about to re-assign → FK violation).
+        let _ = delete_current_pic(Some(file_id));
         let enc_key = req.encrypted_pic_key.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
         let key_nonce = req.pic_key_nonce.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
         if let Err(e) = state.db.update_profile_picture(&user_id, Some(file_id), enc_key.as_deref(), key_nonce.as_deref()) {
@@ -4183,9 +4245,12 @@ pub async fn get_hmac_key(
     // The HMAC key is used by clients to hash friend codes and invite codes
     // during registration (before the user has a token).
     // Rate limited per-IP to prevent offline brute-force of friend codes.
+    // Env-overridable for test suites (same pattern as LOGIN_IP_MAX): set
+    // HMAC_KEY_IP_MAX=0 to disable, or a number to raise it.
     let ip = get_client_ip(&headers);
     let rate_key = format!("hmac_key:{}", ip);
-    if !HMAC_KEY_RATE_LIMITER.check_and_increment(&rate_key, 6, Duration::from_secs(60)) {
+    let ip_max: u32 = std::env::var("HMAC_KEY_IP_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(6);
+    if ip_max > 0 && !HMAC_KEY_RATE_LIMITER.check_and_increment(&rate_key, ip_max, Duration::from_secs(60)) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": "Too many requests. Try again later."})),

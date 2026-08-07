@@ -59,7 +59,7 @@ async function closeSettings(page: any) {
 
 test.describe('Clear Data and Sign Out Flows', () => {
 
-    test('Clear All Data preserves encryption keys after re-login', async ({ page }) => {
+    test('Clear All Data wipes everything; re-login restores keys from the server blob', async ({ page }) => {
         const username = randomId();
         const password = 'TestPass123!';
 
@@ -93,18 +93,25 @@ test.describe('Clear Data and Sign Out Flows', () => {
         // 4. Should redirect to login page
         await page.waitForURL('**/login.html', { timeout: 15000 });
 
-        // 5. Check that identity keys are preserved in localStorage
-        const hasIdentityAfter = await page.evaluate(() => {
+        // 5. The wipe is intentional: ALL local data (including identity keys)
+        //    is cleared, and the login page's logged-out wipe guarantees it.
+        //    Nothing must survive for a stale account to leak into a new one.
+        const wipedAfter = await page.evaluate(() => {
+            const keys: string[] = [];
             for (let i = 0; i < localStorage.length; i++) {
                 const k = localStorage.key(i);
-                if (k && k.startsWith('e2e_identity_private_')) return true;
+                if (k) keys.push(k);
             }
-            return false;
+            return {
+                hasIdentity: keys.some(k => k.startsWith('e2e_identity_private_')),
+                hasHmac: keys.indexOf('e2e_hmac_key') !== -1,
+                hasToken: keys.indexOf('token') !== -1,
+                count: keys.length,
+            };
         });
-        expect(hasIdentityAfter).toBe(true, 'Identity keys should be preserved after clear all data');
-
-        const hasHmacAfter = await page.evaluate(() => !!localStorage.getItem('e2e_hmac_key'));
-        expect(hasHmacAfter).toBe(true, 'HMAC key should be preserved after clear all data');
+        expect(wipedAfter.hasToken).toBe(false);
+        expect(wipedAfter.hasIdentity).toBe(false, 'Identity keys should be wiped by Clear All Data');
+        expect(wipedAfter.hasHmac).toBe(false);
 
         // 6. Re-login
         await loginUser(page, username, password);
@@ -117,7 +124,7 @@ test.describe('Clear Data and Sign Out Flows', () => {
         });
         expect(currentUser).toBe(username);
 
-        // 8. Verify identity keys still exist
+        // 8. Verify identity keys were restored from the server key blob
         const hasIdentityAfterLogin = await page.evaluate(() => {
             for (let i = 0; i < localStorage.length; i++) {
                 const k = localStorage.key(i);
@@ -125,10 +132,10 @@ test.describe('Clear Data and Sign Out Flows', () => {
             }
             return false;
         });
-        expect(hasIdentityAfterLogin).toBe(true, 'Identity keys should exist after re-login');
+        expect(hasIdentityAfterLogin).toBe(true, 'Identity keys should be restored from the key blob after re-login');
     });
 
-    test('Sign Out Only preserves ALL keys', async ({ page }) => {
+    test('Session expiry redirects to login page, which wipes ALL leftover keys; re-login restores from blob', async ({ page }) => {
         const username = randomId();
         const password = 'TestPass123!';
 
@@ -136,7 +143,7 @@ test.describe('Clear Data and Sign Out Flows', () => {
         await registerUser(page, username, password);
         await page.waitForTimeout(2000);
 
-        // 2. Snapshot all localStorage keys
+        // 2. Verify we have a reasonable set of keys
         const allKeysBefore = await page.evaluate(() => {
             const keys: string[] = [];
             for (let i = 0; i < localStorage.length; i++) {
@@ -144,25 +151,24 @@ test.describe('Clear Data and Sign Out Flows', () => {
             }
             return keys.sort();
         });
-
-        // Verify we have a reasonable set of keys
         expect(allKeysBefore.length).toBeGreaterThan(5);
         expect(allKeysBefore.some(k => k.startsWith('e2e_identity_private_'))).toBe(true);
         expect(allKeysBefore.some(k => k === 'e2e_hmac_key')).toBe(true);
 
-        // 3. Open settings and click Sign Out Only
-        await openSettings(page);
-
-        page.once('dialog', async (dialog: any) => {
-            await dialog.accept();
+        // 3. Simulate session expiry exactly like checkTokenExpiry(): the
+        //    token + user are dropped and the browser is sent to login.html.
+        //    (There is no separate "Sign Out Only" button anymore — signing
+        //    out and clearing data both land on the login page logged-out,
+        //    where the full wipe runs.)
+        await page.evaluate(() => {
+            localStorage.removeItem('token');
+            localStorage.removeItem('user');
         });
+        await page.goto('/login.html');
+        await page.waitForSelector('#login-form', { timeout: 15000 });
 
-        await page.click('#sign-out-only-btn');
-
-        // 4. Should redirect to login page
-        await page.waitForURL('**/login.html', { timeout: 15000 });
-
-        // 5. Snapshot all localStorage keys after sign out
+        // 4. The logged-out login page wipes EVERYTHING (identity, hmac,
+        //    server keys, friend code, device key, settings, audio cache).
         const allKeysAfter = await page.evaluate(() => {
             const keys: string[] = [];
             for (let i = 0; i < localStorage.length; i++) {
@@ -170,33 +176,9 @@ test.describe('Clear Data and Sign Out Flows', () => {
             }
             return keys.sort();
         });
+        expect(allKeysAfter.length).toBe(0, 'Login page wipe should leave localStorage empty');
 
-        // 6. Verify token and user are GONE
-        expect(allKeysAfter.some(k => k === 'token')).toBe(false, 'Token should be removed after sign out');
-        expect(allKeysAfter.some(k => k === 'user')).toBe(false, 'User should be removed after sign out');
-
-        // 7. Verify token and user are GONE, but ALL crypto keys are preserved
-        // Log missing keys for debugging
-        const missingKeys: string[] = [];
-        const criticalKeys = ['e2e_hmac_key', 'e2e_device_key', 'e2e_encrypted_password', 'e2e_friend_code'];
-        for (const key of criticalKeys) {
-            if (!allKeysAfter.includes(key)) missingKeys.push(key);
-        }
-        // Also check identity private keys (at least one)
-        const hasIdentityPrivate = allKeysAfter.some(k => k && k.startsWith('e2e_identity_private_'));
-        if (!hasIdentityPrivate) missingKeys.push('e2e_identity_private_*');
-        const hasIdentityPublic = allKeysAfter.some(k => k && k.startsWith('e2e_identity_public_'));
-        if (!hasIdentityPublic) missingKeys.push('e2e_identity_public_*');
-
-        expect(missingKeys.length).toBe(0, `Keys missing after sign out: ${missingKeys.join(', ')}`);
-
-        // Ensure we didn't lose any e2e_server_* keys
-        const serverKeysBefore2 = allKeysBefore.filter(k => k && k.startsWith('e2e_server_'));
-        for (const key of serverKeysBefore2) {
-            expect(allKeysAfter.includes(key)).toBe(true, `Server key '${key}' should be preserved after sign out`);
-        }
-
-        // 8. Re-login and verify everything works
+        // 5. Re-login restores keys from the server blob.
         await loginUser(page, username, password);
         await page.waitForTimeout(2000);
 
@@ -207,6 +189,15 @@ test.describe('Clear Data and Sign Out Flows', () => {
             return el ? el.textContent : null;
         });
         expect(currentUser).toBe(username);
+
+        const hasIdentity = await page.evaluate(() => {
+            for (let i = 0; i < localStorage.length; i++) {
+                const k = localStorage.key(i);
+                if (k && k.startsWith('e2e_identity_private_')) return true;
+            }
+            return false;
+        });
+        expect(hasIdentity).toBe(true, 'Identity keys should be restored from the key blob after re-login');
     });
 
     test('Key blob is saved before clear-all-data redirects', async ({ page }) => {

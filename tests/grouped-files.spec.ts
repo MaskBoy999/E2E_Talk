@@ -36,7 +36,7 @@ await page.click('#register-form button[type="submit"]');
     const inviteCode = generateCode(8);
     const srv = await page.request.post(`${BASE}/api/servers`, {
         headers: { Authorization: `Bearer ${body.token}` },
-        data: { name: 'GF Test Server ' + ts, invite_code_hash: sha256Hex(inviteCode) },
+        data: { name: 'GF Test Server ' + ts, invite_code: inviteCode },
     });
     const server = await srv.json();
 

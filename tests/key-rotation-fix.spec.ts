@@ -62,7 +62,7 @@ test.describe('Key rotation and notification sound sender_public_key fix', () =>
         const inviteCode = generateCode(8);
         const srvRes = await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${body.token}`, 'Content-Type': 'application/json' },
-            data: { name: 'RotFix ' + ts, invite_code_hash: sha256Hex(inviteCode) },
+            data: { name: 'RotFix ' + ts, invite_code: inviteCode },
         });
         const server = await srvRes.json();
         expect(server.id).toBeTruthy();
@@ -83,7 +83,7 @@ test.describe('Key rotation and notification sound sender_public_key fix', () =>
         // Generate invite so server has at least one member entry
         await page.request.post(`${BASE}/api/servers/${server.id}/invite`, {
             headers: { Authorization: `Bearer ${body.token}`, 'Content-Type': 'application/json' },
-            data: { invite_code_hash: sha256Hex(inviteCode) },
+            data: { invite_code: inviteCode },
         });
 
         // Call rotateServerKey directly via page.evaluate
@@ -275,7 +275,7 @@ test.describe('Key rotation and notification sound sender_public_key fix', () =>
         const inviteCode = generateCode(8);
         const srvRes = await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${body.token}`, 'Content-Type': 'application/json' },
-            data: { name: 'RotDec ' + ts, invite_code_hash: sha256Hex(inviteCode) },
+            data: { name: 'RotDec ' + ts, invite_code: inviteCode },
         });
         const server = await srvRes.json();
         expect(server.id).toBeTruthy();
@@ -296,7 +296,7 @@ test.describe('Key rotation and notification sound sender_public_key fix', () =>
         // Generate invite so server has members
         await page.request.post(`${BASE}/api/servers/${server.id}/invite`, {
             headers: { Authorization: `Bearer ${body.token}`, 'Content-Type': 'application/json' },
-            data: { invite_code_hash: sha256Hex(inviteCode) },
+            data: { invite_code: inviteCode },
         });
 
         // Rotate the server key — this uploads new key entries with identity.publicKey (the fix)

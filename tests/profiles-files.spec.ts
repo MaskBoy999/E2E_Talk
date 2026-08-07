@@ -34,7 +34,7 @@ async function createServerAndKey(page: any, token: string, userId: string, serv
     const inviteCode = generateCode(8);
     const srv = await page.request.post(`${BASE}/api/servers`, {
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        data: { name: serverName, invite_code_hash: sha256Hex(inviteCode) },
+        data: { name: serverName, invite_code: inviteCode },
     });
     const server = await srv.json();
     await page.evaluate(async ({ serverId, userId }: { serverId: string; userId: string }) => {
@@ -140,10 +140,15 @@ test.describe('Profile Snapshots', () => {
             );
             console.log('Decrypted snapshot:', JSON.stringify(decryptedSnapshot));
             expect(decryptedSnapshot).not.toBe('KEY_NOT_FOUND');
-            expect(decryptedSnapshot).not.toContain('DECRYPT_FAILED');
-            expect(decryptedSnapshot.snapshot).toHaveProperty('display_name');
-            expect(decryptedSnapshot.snapshot.display_name).toBeTruthy();
-            expect(decryptedSnapshot.messageText).toContain(testMessage);
+            if (typeof decryptedSnapshot === 'string') {
+                // Decryption failed — surface the error message for debugging
+                expect(decryptedSnapshot).not.toContain('DECRYPT_FAILED');
+            } else {
+                // Decryption succeeded — verify the snapshot contents
+                expect(decryptedSnapshot.snapshot).toHaveProperty('display_name');
+                expect(decryptedSnapshot.snapshot.display_name).toBeTruthy();
+                expect(decryptedSnapshot.messageText).toContain(testMessage);
+            }
         } else {
             console.log('SNAPSHOT SKIPPED: encrypted_profile_snapshot is null in API response');
         }
@@ -256,7 +261,7 @@ test.describe('User Stickers', () => {
         const { file_id } = await initRes.json();
 
         // Generate file key and encrypt
-        const encData = await page.evaluate((content: string) => {
+        const encData = await page.evaluate(({ content, ts: tsVal }: any) => {
             const key = E2ECrypto.generateFileKey();
             const plaintext = new TextEncoder().encode(content);
             const encrypted = E2ECrypto.aeadEncrypt(plaintext, key, null);
@@ -267,14 +272,23 @@ test.describe('User Stickers', () => {
                 identity.privateKey
             );
             const parts = encFileKey.split(':');
+            // Encrypt sticker_name with identity key (migration 041) and mime_type
+            // with the shareable file key (migration 038) — server stores neither
+            // in plaintext. aeadEncrypt returns base64 strings directly.
+            const encName = E2ECrypto.aeadEncrypt('test_sticker_' + tsVal, identity.privateKey, null);
+            const encMime = E2ECrypto.aeadEncrypt('image/png', key, null);
             return {
                 encrypted: E2ECrypto.arrayBufferToBase64(encrypted.ciphertext),
                 key: E2ECrypto.arrayBufferToBase64(key),
                 nonce: E2ECrypto.arrayBufferToBase64(encrypted.nonce),
                 encrypted_file_key: E2ECrypto.arrayBufferToBase64(E2ECrypto.base64ToArrayBuffer(parts[1])),
                 file_key_nonce: parts[0],
+                encrypted_sticker_name: encName.ciphertext,
+                sticker_name_nonce: encName.nonce,
+                encrypted_mime_type: encMime.ciphertext,
+                mime_nonce: encMime.nonce,
             };
-        }, fileContent);
+        }, { content: fileContent, ts });
 
         // Upload chunk
         const chunkRes = await page.request.post(`${BASE}/api/files/${file_id}/chunk/0`, {
@@ -288,7 +302,7 @@ test.describe('User Stickers', () => {
             headers: { Authorization: `Bearer ${body.token}` },
         });
 
-        // Register the sticker
+        // Register the sticker (modern E2EE payload — no plaintext name/mime)
         const stickerRes = await page.request.post(`${BASE}/api/users/me/stickers`, {
             headers: { Authorization: `Bearer ${body.token}`, 'Content-Type': 'application/json' },
             data: {
@@ -298,22 +312,38 @@ test.describe('User Stickers', () => {
                 mime_type: 'image/png',
                 encrypted_file_key: encData.encrypted_file_key,
                 file_key_nonce: encData.file_key_nonce,
+                encrypted_sticker_name: encData.encrypted_sticker_name,
+                sticker_name_nonce: encData.sticker_name_nonce,
+                encrypted_mime_type: encData.encrypted_mime_type,
+                mime_nonce: encData.mime_nonce,
             },
         });
         expect(stickerRes.ok()).toBeTruthy();
         const stickerData = await stickerRes.json();
         console.log('Sticker registered:', JSON.stringify(stickerData));
 
-        // List stickers to verify
+        // List stickers to verify (the modern API returns encrypted_sticker_name —
+        // the plaintext name lives only in the client's decrypted cache).
         const listRes = await page.request.get(`${BASE}/api/users/me/stickers`, {
             headers: { Authorization: `Bearer ${body.token}` },
         });
         expect(listRes.ok()).toBeTruthy();
         const stickers = await listRes.json();
-        console.log('Stickers list:', JSON.stringify(stickers));
+        console.log('Stickers list (first):', JSON.stringify(stickers[0]));
         expect(Array.isArray(stickers)).toBeTruthy();
         expect(stickers.length).toBeGreaterThanOrEqual(1);
-        expect(stickers.some((s: any) => s.sticker_name === 'test_sticker_' + ts)).toBeTruthy();
+        expect(stickers.some((s: any) => s.file_id === file_id)).toBeTruthy();
+        expect(stickers.some((s: any) => !!s.encrypted_sticker_name && !!s.sticker_name_nonce)).toBeTruthy();
+
+        // The app decrypts the name into userStickersCache — verify that path
+        const decryptedName = await page.evaluate(async ({ name }) => {
+            await loadUserStickers();
+            if (typeof userStickersCache === 'undefined' || !userStickersCache) return 'no-cache';
+            const all = userStickersCache.map((s: any) => s.sticker_name || '');
+            return userStickersCache.some((s: any) => s.sticker_name === name) ? 'found' : 'missing:' + JSON.stringify(all);
+        }, { name: 'test_sticker_' + ts });
+        console.log('Decrypted sticker name in cache:', decryptedName);
+        expect(decryptedName).toBe('found');
     });
 });
 
@@ -330,18 +360,20 @@ test.describe('Profile Updates', () => {
         // Register
         const body = await registerUser(page, username);
 
-        // Set a display name via profile update
-        const newDisplayName = 'UpdatedName_' + ts;
-        const updateRes = await page.request.patch(`${BASE}/api/profile`, {
-            headers: { Authorization: `Bearer ${body.token}`, 'Content-Type': 'application/json' },
-            data: {
-                display_name: newDisplayName,
-                username_color: '#ff6600',
-                encrypted_profile_data: null,
-            },
-        });
-        expect(updateRes.ok()).toBeTruthy();
-        console.log('Profile update response:', await updateRes.json());
+        // Set a display name via the REAL saveProfile() flow (the E2EE server
+        // ignores plaintext display_name PATCHes; names must be ≤ 21 chars).
+        const newDisplayName = 'Upd_' + String(ts % 100000);
+        const status = await page.evaluate(async ({ dn }) => {
+            const el = document.getElementById('profile-edit-display-name');
+            if (el) el.value = dn;
+            const statusEl = document.getElementById('profile-edit-status');
+            try {
+                await (saveProfile as any)();
+                return statusEl ? (statusEl.textContent || '') : 'no-status-el';
+            } catch (e) { return 'ERR ' + e; }
+        }, { dn: newDisplayName });
+        expect(status).toContain('Profile saved');
+        console.log('Profile update status:', JSON.stringify(status));
 
         // Verify the profile was updated via API
         const profileRes = await page.request.get(`${BASE}/api/profile/${body.user.id}`, {
@@ -350,7 +382,9 @@ test.describe('Profile Updates', () => {
         expect(profileRes.ok()).toBeTruthy();
         const profileData = await profileRes.json();
         console.log('Profile data from API:', JSON.stringify(profileData));
-        expect(profileData.display_name).toBe(newDisplayName);
+        // display_name lives inside encrypted_profile_data, so the plaintext field
+        // won't be set — verify the encrypted blob is present instead.
+        expect(profileData.encrypted_profile_data).toBeTruthy();
     });
 
     test('encrypted_profile_data is stored on profile update', async ({ page }) => {

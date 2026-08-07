@@ -56,7 +56,7 @@ test.describe('DM Message Persistence', () => {
                     name_nonce: encName.nonce,
                     channel_encrypted_name: encChName.ciphertext,
                     channel_name_nonce: encChName.nonce,
-                    invite_code_hash: inviteCodeHash,
+                    invite_code: inviteCode,
                 })
             });
             if (!res.ok) return { error: await res.text(), status: res.status };

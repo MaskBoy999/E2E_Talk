@@ -127,6 +127,7 @@
             return 'calling';
         },
         updateDmCallUI: updateDmCallUI,
+        updateChannelChips: updateChannelChips,
         resetDmPanelOpen: function () { S.dmPanelOpen = undefined; },
         testRingtone: testRingtone,
         playRingtone: playRingtone,

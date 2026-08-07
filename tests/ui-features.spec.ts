@@ -239,7 +239,7 @@ test.describe('UI Feature Tests', () => {
         const inviteCode = generateCode(8);
         const srv = await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${body1.token}` },
-            data: { name: 'Color Test Server', invite_code_hash: sha256Hex(inviteCode) },
+            data: { name: 'Color Test Server', invite_code: inviteCode },
         });
         const server = await srv.json();
 
@@ -464,7 +464,7 @@ test('username color preview in profile modal edit shows with text-shadow', asyn
         const inviteCode = generateCode(8);
         const srv = await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${body1.token}` },
-            data: { name: 'Shadow Test', invite_code_hash: sha256Hex(inviteCode) },
+            data: { name: 'Shadow Test', invite_code: inviteCode },
         });
         const server = await srv.json();
 
@@ -553,7 +553,7 @@ test('username color preview in profile modal edit shows with text-shadow', asyn
         const inviteCode = generateCode(8);
         const srv = await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${body1.token}` },
-            data: { name: 'Forward Test Server', invite_code_hash: sha256Hex(inviteCode) },
+            data: { name: 'Forward Test Server', invite_code: inviteCode },
         });
         const server = await srv.json();
 
@@ -735,7 +735,7 @@ test('username color preview in profile modal edit shows with text-shadow', asyn
         const inviteCode = generateCode(8);
         const srv = await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${body1.token}` },
-            data: { name: 'PFP Server', invite_code_hash: sha256Hex(inviteCode) },
+            data: { name: 'PFP Server', invite_code: inviteCode },
         });
         const server = await srv.json();
 
@@ -918,7 +918,7 @@ test('username color preview in profile modal edit shows with text-shadow', asyn
         const inviteCode = generateCode(8);
         const srv = await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${body1.token}` },
-            data: { name: 'Mention PFP Server', invite_code_hash: sha256Hex(inviteCode) },
+            data: { name: 'Mention PFP Server', invite_code: inviteCode },
         });
         const server = await srv.json();
 

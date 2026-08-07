@@ -94,13 +94,10 @@ async function waitForWs(page: any, maxRetries = 60) {
 async function becomeFriends(page1: any, page2: any, token1: string, token2: string) {
     const friendCode2 = await page2.evaluate(() => localStorage.getItem('e2e_friend_code'));
     expect(friendCode2).toBeTruthy();
-    // Get the HMAC key from page2's localStorage (used for client-side hashing)
-    const hmacKey = await page2.evaluate(() => localStorage.getItem('e2e_hmac_key'));
-    expect(hmacKey).toBeTruthy();
-    const friendCodeHash = hmacSha256Hex(hmacKey!, friendCode2!);
+    // The server hashes the friend code itself (migration 006) — send the code
     const fr = await page1.request.post(`${BASE}/api/friends/request`, {
         headers: { Authorization: `Bearer ${token1}`, 'Content-Type': 'application/json' },
-        data: { friend_code_hash: friendCodeHash },
+        data: { friend_code: friendCode2 },
     });
     expect(fr.ok()).toBeTruthy();
     const incoming = await (await page2.request.get(`${BASE}/api/friends/requests/incoming`, {
@@ -119,7 +116,7 @@ async function createServerAndKey(page: any, token: string, userId: string, serv
     const inviteCode = generateCode(8);
     const srv = await page.request.post(`${BASE}/api/servers`, {
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        data: { name: serverName, invite_code_hash: sha256Hex(inviteCode) },
+        data: { name: serverName, invite_code: inviteCode },
     });
     const server = await srv.json();
     await page.evaluate(async ({ serverId, userId }) => {
@@ -166,6 +163,27 @@ async function joinServerAndGetKey(pageOwner: any, pageJoiner: any, serverId: st
     }, { serverId, joinerUserId });
 }
 
+// Set a display name through the REAL saveProfile() flow (the E2EE server
+// ignores plaintext display_name PATCHes).
+async function setDisplayNameViaSaveProfile(page: any, displayName: string): Promise<void> {
+    const status = await page.evaluate(async ({ dn }) => {
+        const el = document.getElementById('profile-edit-display-name');
+        if (el) el.value = dn;
+        const statusEl = document.getElementById('profile-edit-status');
+        try {
+            await (saveProfile as any)();
+            return statusEl ? (statusEl.textContent || '') : 'no-status-el';
+        } catch (e) { return 'ERR ' + e; }
+    }, { dn: displayName });
+    console.log('setDisplayNameViaSaveProfile status:', JSON.stringify(status));
+    expect(status).toContain('Profile saved');
+    await page.waitForTimeout(800);
+}
+
+// Upload a profile picture through the REAL saveProfile() flow so the modern
+// encrypted_profile_data blob (raw file key inside) is written — the same way
+// the UI does it. The old plaintext PATCH (file_id only, no key) was ignored by
+// loadMyProfile, so the PFP never rendered after refresh.
 async function uploadProfilePicViaApi(page: any, token: string, pngBytes: Buffer): Promise<string> {
     const initRes = await page.request.post(`${BASE}/api/files/init`, {
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -173,20 +191,38 @@ async function uploadProfilePicViaApi(page: any, token: string, pngBytes: Buffer
     });
     expect(initRes.ok()).toBeTruthy();
     const { file_id } = await initRes.json();
-    const chunkRes = await page.request.fetch(`${BASE}/api/files/${file_id}/chunk/0`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/octet-stream' },
-        data: pngBytes,
-    });
-    expect(chunkRes.ok()).toBeTruthy();
-    await page.request.post(`${BASE}/api/files/${file_id}/complete`, {
-        headers: { Authorization: `Bearer ${token}` },
-    });
-    const setRes = await page.request.patch(`${BASE}/api/profile`, {
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        data: { profile_picture_file_id: file_id },
-    });
-    expect(setRes.ok()).toBeTruthy();
+
+    const fileKeyB64: string = await page.evaluate(async ({ fileId, pngBase64 }) => {
+        const rawBytes = Uint8Array.from(atob(pngBase64), c => c.charCodeAt(0));
+        const fileKey = E2ECrypto.generateFileKey();
+        const encrypted = E2ECrypto.encryptFileChunk(fileKey, rawBytes);
+        const blob = new Blob([encrypted], { type: 'application/octet-stream' });
+        await fetch(`/api/files/${fileId}/chunk/0`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/octet-stream', Authorization: 'Bearer ' + localStorage.getItem('token') },
+            body: blob,
+        });
+        await fetch(`/api/files/${fileId}/complete`, {
+            method: 'POST',
+            headers: { Authorization: 'Bearer ' + localStorage.getItem('token') },
+        });
+        return E2ECrypto.arrayBufferToBase64(fileKey);
+    }, { fileId: file_id, pngBase64: pngBytes.toString('base64') });
+
+    // Drive the real saveProfile() so encrypted_profile_data + identity-encrypted
+    // keys are all written exactly like the UI does.
+    const status = await page.evaluate(async ({ fid, fk }) => {
+        (profilePfpFileId as any) = fid;
+        (profilePfpFileKey as any) = fk;
+        (_removePfpFlag as any) = false;
+        const statusEl = document.getElementById('profile-edit-status');
+        try {
+            await (saveProfile as any)();
+            return statusEl ? (statusEl.textContent || '') : 'no-status-el';
+        } catch (e) { return 'ERR ' + e; }
+    }, { fid: file_id, fk: fileKeyB64 });
+    expect(status).toContain('Profile saved');
+    await page.waitForTimeout(800);
     return file_id;
 }
 
@@ -213,6 +249,7 @@ function hmacSha256Hex(key: string, data: string): string {
 // ══════════════════════════════════════════════════════════════════════
 
 test.describe('Profile Refresh & Message Persistence Fixes', () => {
+    test.setTimeout(120000);
 
     // ─── SOURCE CODE VERIFICATION TESTS ────────────────────────────
 
@@ -545,11 +582,10 @@ test.describe('Profile Refresh & Message Persistence Fixes', () => {
             const page2 = await ctx2.newPage();
             const bodyB = await registerUser(page2, userB);
 
-            // Set initial display name for user A
-            await page.request.patch(`${BASE}/api/profile`, {
-                headers: { Authorization: `Bearer ${bodyA.token}`, 'Content-Type': 'application/json' },
-                data: { display_name: 'OldName_' + ts },
-            });
+            // Set initial display name for user A via the REAL saveProfile() flow
+            // (the E2EE server ignores plaintext display_name PATCHes).
+            // Names must stay ≤ 21 chars (saveProfile validates).
+            await setDisplayNameViaSaveProfile(page, 'Old_' + String(ts % 100000));
 
             // Create server and user B joins
             const { serverId, inviteCode } = await createServerAndKey(page, bodyA.token, bodyA.user.id, 'RT Name ' + ts);
@@ -583,27 +619,24 @@ test.describe('Profile Refresh & Message Persistence Fixes', () => {
             const initialNames = await page2.locator('.message .display-name').allTextContents();
             console.log('Initial display names:', JSON.stringify(initialNames));
 
-            // User A changes their display name
-            await page.request.patch(`${BASE}/api/profile`, {
-                headers: { Authorization: `Bearer ${bodyA.token}`, 'Content-Type': 'application/json' },
-                data: { display_name: 'UpdatedName_' + ts },
-            });
-            await page.waitForTimeout(2000);
+            // User A changes their display name via the real saveProfile() flow
+            const updatedName = 'New_' + String(ts % 100000);
+            await setDisplayNameViaSaveProfile(page, updatedName);
 
-            // Wait for user B to receive the profile_updated WS event
-            await page2.waitForTimeout(3000);
+            // Wait for user B to receive the profile_updated WS event and re-render
+            await page2.waitForFunction(({ uname }) => {
+                var el = document.querySelector('.message .display-name');
+                if (!el) return false;
+                return el.textContent && el.textContent.indexOf(uname) !== -1;
+            }, { uname: updatedName }, { timeout: 20000 });
 
             // Check if display name updated on existing messages
             const updatedNames = await page2.locator('.message .display-name').allTextContents();
             console.log('Updated display names:', JSON.stringify(updatedNames));
 
-            const hasUpdatedName = updatedNames.some(n => n && n.includes('UpdatedName_'));
+            const hasUpdatedName = updatedNames.some(n => n && n.includes(updatedName));
             console.log('Has updated name:', hasUpdatedName);
-
-            // Note: This test verifies the profile_updated handler works.
-            // The display name update may or may not show depending on
-            // whether the profile data key is available for decryption.
-            // The important fix is that updateExistingMessageStyles() is called.
+            expect(hasUpdatedName).toBe(true);
 
             await page2.close();
             await ctx2.close();

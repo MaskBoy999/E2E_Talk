@@ -80,13 +80,17 @@ test.describe('Blob save failure — what survives cookie clear + re-login', () 
         const res = await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
             data: {
-                invite_code_hash: hash,
+                invite_code: code,
+                invite_code: inviteCode,
                 encrypted_name: encName.ciphertext,
                 name_nonce: encName.nonce,
                 channel_encrypted_name: encChName.ciphertext,
                 channel_name_nonce: encChName.nonce,
             },
         });
+        if (!res.ok()) {
+            console.log('CREATE SERVER FAIL', res.status(), (await res.text()).substring(0, 300));
+        }
         expect(res.ok()).toBeTruthy();
         const server = await res.json();
 
@@ -228,6 +232,10 @@ test.describe('Blob save failure — what survives cookie clear + re-login', () 
         const uid2 = uid + '_f';
 
         test(failureName + ': identity+server keys survive, profile key lost', async ({ page, context }) => {
+            // This flow registers two users, creates a server, uploads keys,
+            // applies a failure, clears cookies, and re-logins — it needs
+            // longer than the default 30s global timeout.
+            test.setTimeout(180000);
 
             // Capture browser console for debugging
             var browserLogs: string[] = [];

@@ -205,7 +205,7 @@ test('server channel shows display name and profile updates', async ({ browser }
     }, inviteCode);
     const srv = await page1.request.post(`${BASE}/api/servers`, {
         headers: { Authorization: `Bearer ${user1.token}`, 'Content-Type': 'application/json' },
-        data: { name: 'TestSrv', invite_code_hash: inviteCodeHash },
+        data: { name: 'TestSrv', invite_code: inviteCode },
     });
     expect(srv.ok()).toBeTruthy();
     const server = await srv.json();

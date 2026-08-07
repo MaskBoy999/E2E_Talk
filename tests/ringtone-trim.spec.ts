@@ -110,13 +110,15 @@ test.describe('Ringtone 30s cap + trim UI', () => {
         const name = await page.locator('#ringtone-file-name').textContent();
         expect(name).toContain('-12s.wav');
 
-        // Server holds an encrypted ringtone (never plaintext audio).
+        // Server holds an encrypted ringtone (never plaintext audio). A
+        // plaintext WAV always starts with the bytes "RIFF" (base64: "UklGR");
+        // ciphertext is random so checking the FIXED start position is exact,
+        // whereas a substring scan would flake on random base64 coincidences.
         const srv = await (await page.request.get(`${BASE}/api/ringtone`, {
             headers: { Authorization: `Bearer ${body.token}` },
         })).json();
         expect(srv.encrypted_sound).toBeTruthy();
-        const allText = JSON.stringify(srv);
-        expect(allText.indexOf('RIFF')).toBe(-1);
+        expect(srv.encrypted_sound.startsWith('UklGR')).toBe(false);
 
         // Decrypt + verify the stored audio is <= ~30s and >= 1s.
         const check = await page.evaluate(async () => {

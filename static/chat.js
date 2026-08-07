@@ -729,7 +729,14 @@ function getTokenExpiresAt(t) {
     return payload && payload.exp ? payload.exp * 1000 : null;
 }
 
+let _tokenExpiryTimer = null;
 function checkTokenExpiry() {
+    // Reschedule-safe: a previous timer (e.g. armed for the OLD token before a
+    // re-auth) must be cleared so the logout fires against the CURRENT expiry.
+    if (_tokenExpiryTimer) {
+        clearTimeout(_tokenExpiryTimer);
+        _tokenExpiryTimer = null;
+    }
     const t = token();
     if (!t) return;
     const expiresAt = getTokenExpiresAt(t);
@@ -742,7 +749,7 @@ function checkTokenExpiry() {
     }
     const msLeft = expiresAt - Date.now();
     const delay = Math.min(Math.max(msLeft - 5000, 0), 2147483647);
-    setTimeout(() => {
+    _tokenExpiryTimer = setTimeout(() => {
         localStorage.removeItem('token');
         localStorage.removeItem('user');
         window.location.href = 'login.html';
@@ -785,6 +792,143 @@ async function computeHashedPasswordGlobal(password) {
     if (!authKeyB64) throw new Error('e2e_auth_key not found in localStorage');
     const hashKeyBytes = E2ECrypto.base64ToArrayBuffer(authKeyB64);
     return E2ECrypto.hmacHex(new Uint8Array(hashKeyBytes), password);
+}
+
+// Shared helpers for the ringtone + notification-sound trim panels.
+
+// Format seconds as m:ss (used by both trim UIs).
+function fmtSec(s) {
+    var m = Math.floor(s / 60);
+    var ss = Math.floor(s % 60);
+    return m + ':' + (ss < 10 ? '0' : '') + ss;
+}
+
+// Format a session duration in seconds as a friendly label ("30 days", "12 hours").
+function fmtDuration(secs) {
+    secs = Math.max(1, Math.floor(secs));
+    if (secs % 86400 === 0) {
+        var d = secs / 86400;
+        return d + (d === 1 ? ' day' : ' days');
+    }
+    if (secs % 3600 === 0) {
+        var h = secs / 3600;
+        return h + (h === 1 ? ' hour' : ' hours');
+    }
+    if (secs % 60 === 0) return (secs / 60) + ' minutes';
+    return secs + ' seconds';
+}
+
+// Custom session duration chosen in Settings → Security (seconds). Applies to
+// login, registration, and re-authentication. Defaults to 30 days; floored at
+// 1 minute; capped at 30 days (the server re-clamps defensively).
+function getSessionDurationSecs() {
+    var v = localStorage.getItem('session_duration_seconds');
+    if (v === null) v = localStorage.getItem('reauth_duration_seconds');
+    var s = parseInt(v, 10);
+    if (!s || s < 60) s = 2592000;
+    if (s > 2592000) s = 2592000;
+    return s;
+}
+
+// Format an epoch-ms timestamp as a local "YYYY-MM-DD HH:MM" label.
+function fmtDateTime(ms) {
+    if (!ms) return 'Unknown';
+    var d = new Date(ms);
+    var pad = function (n) { return (n < 10 ? '0' : '') + n; };
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
+        ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+}
+
+// --- Session security log (Settings → Security) ---
+// Per-account, per-browser record of re-authentication events: when it happened,
+// what the session was set to expire at before, what it expires at now, and the
+// requested duration. Capped to the 10 most recent events.
+const SESSION_LOG_MAX = 10;
+
+function getSessionLog() {
+    try {
+        var raw = localStorage.getItem('session_security_log_' + (user ? user.id : ''));
+        var arr = raw ? JSON.parse(raw) : [];
+        return Array.isArray(arr) ? arr : [];
+    } catch (_) { return []; }
+}
+
+function recordReauthEvent(fromExp, toExp, durationSecs) {
+    if (!user) return;
+    try {
+        var arr = getSessionLog();
+        arr.push({
+            at: Date.now(),
+            from_exp: fromExp || null,
+            to_exp: toExp || null,
+            duration_secs: durationSecs || null,
+        });
+        if (arr.length > SESSION_LOG_MAX) arr = arr.slice(-SESSION_LOG_MAX);
+        localStorage.setItem('session_security_log_' + user.id, JSON.stringify(arr));
+    } catch (_) {}
+}
+
+function renderSessionLog() {
+    var listEl = document.getElementById('session-log-list');
+    if (!listEl) return;
+    // Current session expiry (derived live from the token in localStorage)
+    var expiresAtEl = document.getElementById('session-expires-at');
+    if (expiresAtEl) {
+        var expiresAt = getTokenExpiresAt(token());
+        expiresAtEl.textContent = expiresAt ? fmtDateTime(expiresAt) : 'Unknown';
+    }
+    var events = getSessionLog();
+    if (!events.length) {
+        listEl.innerHTML = '<div class="session-log-empty">No re-authentication events yet for this account.</div>';
+        return;
+    }
+    var html = '';
+    for (var i = events.length - 1; i >= 0; i--) {
+        var ev = events[i];
+        var fromRemain = ev.from_exp ? fmtDuration(Math.max(0, Math.round((ev.from_exp - ev.at) / 1000))) : 'unknown';
+        var fromUntil = fmtDateTime(ev.from_exp);
+        var toUntil = fmtDateTime(ev.to_exp);
+        var newDur = fmtDuration(ev.duration_secs);
+        html += '<div class="session-log-item">' +
+            '<div class="session-log-head">' + escapeHtml(fmtDateTime(ev.at)) + ' — Re-authenticated</div>' +
+            '<div class="session-log-detail">was: ' + escapeHtml(fromRemain) + ' remaining (until ' + escapeHtml(fromUntil) + ')</div>' +
+            '<div class="session-log-detail">now: ' + escapeHtml(newDur) + ' (until ' + escapeHtml(toUntil) + ')</div>' +
+            '</div>';
+    }
+    listEl.innerHTML = html;
+}
+
+// Slice a decoded AudioBuffer to [start, start+len] and encode it as a
+// 16-bit MONO PCM WAV ArrayBuffer. Shared by the ringtone and notification
+// sound trim flows so stored sounds are at most 30s (and small enough to
+// sync as encrypted base64 under the server body limit). Downmixing to mono
+// halves the payload; both use-cases are mono by nature.
+function encodeTrimmedWav(buf, start, len) {
+    var rate = buf.sampleRate;
+    var chans = buf.numberOfChannels;
+    var s0 = Math.floor(start * rate);
+    var s1 = Math.min(buf.length, Math.floor((start + len) * rate));
+    var n = Math.max(1, s1 - s0);
+    var blockAlign = 2;
+    var dataSize = n * blockAlign;
+    var ab = new ArrayBuffer(44 + dataSize);
+    var dv = new DataView(ab);
+    function wstr(off, s) { for (var i = 0; i < s.length; i++) dv.setUint8(off + i, s.charCodeAt(i)); }
+    wstr(0, 'RIFF'); dv.setUint32(4, 36 + dataSize, true); wstr(8, 'WAVE');
+    wstr(12, 'fmt '); dv.setUint32(16, 16, true);
+    dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+    dv.setUint32(24, rate, true); dv.setUint32(28, rate * blockAlign, true);
+    dv.setUint16(32, blockAlign, true); dv.setUint16(34, 16, true);
+    wstr(36, 'data'); dv.setUint32(40, dataSize, true);
+    var off = 44;
+    for (var i = s0; i < s1; i++) {
+        var sum = 0;
+        for (var c = 0; c < chans; c++) sum += buf.getChannelData(c)[i];
+        var v = Math.max(-1, Math.min(1, sum / chans));
+        dv.setInt16(off, v < 0 ? v * 0x8000 : v * 0x7FFF, true);
+        off += 2;
+    }
+    return ab;
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -859,10 +1003,12 @@ document.addEventListener('DOMContentLoaded', () => {
         settingsModal.style.display = 'flex';
         loadMyProfile();
         loadFriendRequestsDisabledSetting();
+        renderSessionLog();
     });
     document.getElementById('close-settings').addEventListener('click', () => {
         settingsModal.style.display = 'none';
         if (window._stopRingTrimPreview) window._stopRingTrimPreview();
+        if (window._stopNotifTrimPreview) window._stopNotifTrimPreview();
     });
 
     // Tab switching
@@ -872,8 +1018,9 @@ document.addEventListener('DOMContentLoaded', () => {
             settingsModal.querySelectorAll('.settings-panel').forEach(p => p.style.display = 'none');
             tab.classList.add('active');
             document.getElementById(tab.dataset.tab).style.display = 'block';
-            // Preview must not keep playing when we leave the Voice tab.
+            // Previews must not keep playing when we leave the tab.
             if (window._stopRingTrimPreview) window._stopRingTrimPreview();
+            if (window._stopNotifTrimPreview) window._stopNotifTrimPreview();
         });
     });
 
@@ -1117,6 +1264,269 @@ document.addEventListener('DOMContentLoaded', () => {
             notifSoundInput.click();
         });
 
+        // Trim state for the >30s notification-sound flow (picked segment
+        // preview/save). Mirrors the ringtone trim panel in the Voice tab.
+        var notifTrimTotal = document.getElementById('notif-trim-total');
+        var notifTrimStart = document.getElementById('notif-trim-start');
+        var notifTrimLen = document.getElementById('notif-trim-len');
+        var notifTrimStartLabel = document.getElementById('notif-trim-start-label');
+        var notifTrimLenLabel = document.getElementById('notif-trim-len-label');
+        var notifTrimPreviewBtn = document.getElementById('notif-trim-preview-btn');
+        var notifTrimSaveBtn = document.getElementById('notif-trim-save-btn');
+        var notifTrimCancelBtn = document.getElementById('notif-trim-cancel-btn');
+        var notifTrimWaveform = document.getElementById('notif-trim-waveform');
+        var _notifDecodedBuffer = null; // decoded AudioBuffer of the picked file
+        var _notifDecodedName = '';     // original file name (for the trimmed part)
+        var _notifTrimCtx = null;       // AudioContext used to decode + preview
+        var _notifPreviewSource = null; // active preview source (stopped on re-preview)
+        var _notifPreviewToken = 0;     // generation token — a stale onended must not null a newer source
+        var _notifWavePeaks = null;     // downsampled min/max peak pairs for the waveform
+
+        function notifGetTrimCtx() {
+            if (!_notifTrimCtx) {
+                try { _notifTrimCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (_) {}
+            }
+            if (_notifTrimCtx && _notifTrimCtx.state === 'suspended') _notifTrimCtx.resume().catch(function () {});
+            return _notifTrimCtx;
+        }
+
+        function hideNotifTrim() {
+            var trimEl = document.getElementById('notif-trim');
+            if (trimEl) trimEl.style.display = 'none';
+            _notifDecodedBuffer = null;
+        }
+
+        function updateNotifTrimLabels() {
+            if (!notifTrimStart || !notifTrimLen) return;
+            var start = parseInt(notifTrimStart.value, 10) || 0;
+            var len = parseInt(notifTrimLen.value, 10) || 1;
+            if (notifTrimStartLabel) notifTrimStartLabel.textContent = fmtSec(start);
+            if (notifTrimLenLabel) notifTrimLenLabel.textContent = len + 's (' + fmtSec(start + len) + ' end)';
+        }
+
+        // Downsample the decoded buffer to one min/max peak pair per pixel
+        // column (cached per buffer + canvas width). Multi-channel audio takes
+        // the loudest sample across channels so quiet pans still show up.
+        function notifComputePeaks() {
+            var buf = _notifDecodedBuffer;
+            if (!buf || !notifTrimWaveform) return;
+            var cssW = notifTrimWaveform.clientWidth || 560;
+            var chans = buf.numberOfChannels;
+            var len = buf.length;
+            var cols = Math.max(1, Math.floor(cssW));
+            var peaks = new Float32Array(cols * 2);
+            var chansData = [];
+            for (var ch = 0; ch < chans; ch++) chansData.push(buf.getChannelData(ch));
+            var per = Math.max(1, Math.floor(len / cols));
+            for (var c = 0; c < cols; c++) {
+                var s0 = c * per;
+                var s1 = Math.min(len, s0 + per);
+                var mn = 1.0, mx = -1.0;
+                for (var i = s0; i < s1; i++) {
+                    for (var ch = 0; ch < chans; ch++) {
+                        var v = chansData[ch][i];
+                        if (v < mn) mn = v;
+                        if (v > mx) mx = v;
+                    }
+                }
+                if (mn > 0) mn = 0;
+                if (mx < 0) mx = 0;
+                peaks[c * 2] = mn;
+                peaks[c * 2 + 1] = mx;
+            }
+            _notifWavePeaks = peaks;
+        }
+
+        function drawNotifTrimWaveform() {
+            var canvas = notifTrimWaveform;
+            var buf = _notifDecodedBuffer;
+            if (!canvas || !buf || !notifTrimStart || !notifTrimLen) return;
+            var dpr = window.devicePixelRatio || 1;
+            var cssW = canvas.clientWidth || 560;
+            var cssH = 80;
+            if (canvas.width !== Math.round(cssW * dpr) || canvas.height !== Math.round(cssH * dpr)) {
+                canvas.width = Math.round(cssW * dpr);
+                canvas.height = Math.round(cssH * dpr);
+            }
+            var ctx = canvas.getContext('2d');
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            ctx.clearRect(0, 0, cssW, cssH);
+            ctx.fillStyle = '#0e0e14';
+            ctx.fillRect(0, 0, cssW, cssH);
+
+            var dur = buf.duration || 1;
+            var start = parseInt(notifTrimStart.value, 10) || 0;
+            var len = parseInt(notifTrimLen.value, 10) || 1;
+            var selStartT = start;
+            var selEndT = start + len;
+            var midY = cssH / 2;
+            var amp = (cssH - 12) / 2;
+
+            if (!_notifWavePeaks || _notifWavePeaks.length !== Math.max(1, Math.floor(cssW)) * 2) {
+                notifComputePeaks();
+            }
+            var peaks = _notifWavePeaks;
+            if (!peaks) return;
+
+            ctx.fillStyle = 'rgba(255,255,255,0.08)';
+            ctx.fillRect(0, midY - 0.5, cssW, 1);
+
+            var cols = peaks.length / 2;
+            var xStep = cssW / cols;
+            for (var c = 0; c < cols; c++) {
+                var t0 = (c / cols) * dur;
+                var t1 = ((c + 1) / cols) * dur;
+                var inSel = t1 > selStartT && t0 < selEndT;
+                var mn = peaks[c * 2];
+                var mx = peaks[c * 2 + 1];
+                var y0 = midY - mx * amp;
+                var y1 = midY - mn * amp;
+                var x = c * xStep;
+                ctx.fillStyle = inSel ? 'rgba(88,101,242,0.95)' : 'rgba(148,155,190,0.55)';
+                ctx.fillRect(x, y0, Math.max(1, xStep), Math.max(1, y1 - y0));
+            }
+
+            var sx = (selStartT / dur) * cssW;
+            var ex = (selEndT / dur) * cssW;
+            ctx.fillStyle = 'rgba(255,255,255,0.85)';
+            ctx.fillRect(sx - 0.5, 0, 1, cssH);
+            ctx.fillRect(ex - 0.5, 0, 1, cssH);
+        }
+
+        // Click the waveform to jump the START slider to that time.
+        if (notifTrimWaveform) {
+            notifTrimWaveform.addEventListener('click', function (ev) {
+                var buf = _notifDecodedBuffer;
+                if (!buf || !notifTrimStart || !notifTrimLen) return;
+                var rect = notifTrimWaveform.getBoundingClientRect();
+                if (!rect.width) return;
+                var frac = (ev.clientX - rect.left) / rect.width;
+                var dur = buf.duration || 1;
+                var t = Math.max(0, Math.min(dur - 1, frac * dur));
+                var newStart = Math.floor(t);
+                notifTrimStart.value = newStart;
+                var maxLen = Math.min(30, Math.floor(dur - newStart));
+                notifTrimLen.max = Math.max(1, maxLen);
+                if (parseInt(notifTrimLen.value, 10) > maxLen) notifTrimLen.value = Math.max(1, maxLen);
+                updateNotifTrimLabels();
+                drawNotifTrimWaveform();
+            });
+        }
+
+        function showNotifTrim(duration) {
+            var trimEl = document.getElementById('notif-trim');
+            if (!trimEl || !notifTrimStart || !notifTrimLen) return;
+            var maxStart = Math.max(0, Math.floor(duration) - 1); // leave >= 1s
+            var defLen = Math.min(30, Math.floor(duration));
+            notifTrimStart.max = maxStart;
+            notifTrimStart.value = 0;
+            notifTrimLen.max = Math.min(30, Math.floor(duration));
+            notifTrimLen.value = defLen;
+            if (notifTrimTotal) notifTrimTotal.textContent = fmtSec(duration);
+            updateNotifTrimLabels();
+            trimEl.style.display = '';
+            _notifWavePeaks = null; // force recompute for the newly visible width
+            requestAnimationFrame(drawNotifTrimWaveform);
+        }
+
+        function notifRedraw() {
+            updateNotifTrimLabels();
+            drawNotifTrimWaveform();
+        }
+
+        if (notifTrimStart) notifTrimStart.addEventListener('input', function () {
+            var start = parseInt(notifTrimStart.value, 10) || 0;
+            var maxLen = Math.min(30, Math.floor((_notifDecodedBuffer ? _notifDecodedBuffer.duration : 0) - start));
+            if (notifTrimLen) {
+                notifTrimLen.max = Math.max(1, maxLen);
+                if (parseInt(notifTrimLen.value, 10) > maxLen) notifTrimLen.value = Math.max(1, maxLen);
+            }
+            notifRedraw();
+        });
+        if (notifTrimLen) notifTrimLen.addEventListener('input', function () {
+            var len = parseInt(notifTrimLen.value, 10) || 1;
+            var maxStart = Math.max(0, Math.floor((_notifDecodedBuffer ? _notifDecodedBuffer.duration : 0) - len));
+            if (notifTrimStart) {
+                notifTrimStart.max = maxStart;
+                if (parseInt(notifTrimStart.value, 10) > maxStart) notifTrimStart.value = maxStart;
+            }
+            notifRedraw();
+        });
+        window.addEventListener('resize', function () {
+            if (_notifDecodedBuffer && notifTrimWaveform) {
+                var colsNow = Math.max(1, Math.floor(notifTrimWaveform.clientWidth || 560));
+                if (!_notifWavePeaks || _notifWavePeaks.length !== colsNow * 2) {
+                    _notifWavePeaks = null;
+                    drawNotifTrimWaveform();
+                }
+            }
+        });
+
+        // Stop any active trim preview (also used when the settings modal
+        // closes or the user switches tabs so audio never plays on past UI).
+        function stopNotifPreview() {
+            _notifPreviewToken++; // invalidate any in-flight onended
+            if (_notifPreviewSource) {
+                try { _notifPreviewSource.stop(); } catch (_) {}
+                _notifPreviewSource = null;
+            }
+        }
+        window._stopNotifTrimPreview = stopNotifPreview;
+
+        if (notifTrimPreviewBtn) notifTrimPreviewBtn.addEventListener('click', function () {
+            var buf = _notifDecodedBuffer;
+            if (!buf || !notifTrimStart || !notifTrimLen) return;
+            var start = parseInt(notifTrimStart.value, 10) || 0;
+            var len = parseInt(notifTrimLen.value, 10) || 1;
+            var ctx = notifGetTrimCtx();
+            if (!ctx) return;
+            stopNotifPreview(); // never overlap a previous preview
+            try {
+                var src = ctx.createBufferSource();
+                src.buffer = buf;
+                src.connect(ctx.destination);
+                src.start(0, start, Math.min(len, Math.max(0, buf.duration - start)));
+                var myToken = _notifPreviewToken;
+                _notifPreviewSource = src;
+                src.onended = function () {
+                    if (_notifPreviewToken === myToken) _notifPreviewSource = null;
+                };
+            } catch (_) {}
+        });
+
+        // Slice the decoded buffer to [start, start+len] as a mono 16-bit WAV
+        // so the notification sound is at most 30s (and small enough to sync).
+        function makeTrimmedNotifFile(buf, start, len) {
+            var ab = encodeTrimmedWav(buf, start, len);
+            var base = (_notifDecodedName || 'notification').replace(/\.[^.]+$/, '') || 'notification';
+            return new File([ab], base + '-' + len + 's.wav', { type: 'audio/wav' });
+        }
+
+        if (notifTrimSaveBtn) notifTrimSaveBtn.addEventListener('click', function () {
+            var buf = _notifDecodedBuffer;
+            if (!buf || !notifTrimStart || !notifTrimLen) return;
+            var start = parseInt(notifTrimStart.value, 10) || 0;
+            var len = parseInt(notifTrimLen.value, 10) || 1;
+            var file = makeTrimmedNotifFile(buf, start, len);
+            var reader = new FileReader();
+            reader.onload = function (ev) {
+                try {
+                    saveNotifSoundData(ev.target.result, file.name, 'Notification sound saved (' + len + 's)!');
+                    syncNotificationSoundToServer(file);
+                    hideNotifTrim();
+                } catch (err) {
+                    if (notifSoundStatus) { notifSoundStatus.textContent = 'Failed to save sound. IndexedDB may be unavailable.'; notifSoundStatus.style.color = '#f44336'; }
+                }
+            };
+            reader.readAsDataURL(file);
+        });
+
+        if (notifTrimCancelBtn) notifTrimCancelBtn.addEventListener('click', function () {
+            hideNotifTrim();
+            if (notifSoundStatus) { notifSoundStatus.textContent = 'Cancelled'; notifSoundStatus.style.color = 'var(--text-muted)'; }
+            setTimeout(function () { if (notifSoundStatus) notifSoundStatus.textContent = ''; }, 2000);
+        });
+
         notifSoundInput.addEventListener('change', function (e) {
             var file = e.target.files[0];
             if (!file) return;
@@ -1124,27 +1534,72 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (notifSoundStatus) { notifSoundStatus.textContent = 'Please select an audio file (MP3, WAV, etc.)'; notifSoundStatus.style.color = '#f44336'; }
                 return;
             }
-            if (file.size > 50 * 1024 * 1024) {
-                if (notifSoundStatus) { notifSoundStatus.textContent = 'File too large (max 50 MB). Try a shorter or lower-quality audio file.'; notifSoundStatus.style.color = '#f44336'; }
+            // Notification sounds are capped at 30s. Large source files are
+            // allowed (they get trimmed to a 30s WAV before storing), so only
+            // reject absurd files that would be unwieldy to decode client-side.
+            if (file.size > 200 * 1024 * 1024) {
+                if (notifSoundStatus) { notifSoundStatus.textContent = 'File too large (max 200 MB). Try a shorter or lower-quality audio file.'; notifSoundStatus.style.color = '#f44336'; }
                 return;
             }
-            var reader = new FileReader();
-            reader.onload = function (ev) {
-                try {
-                    var dataUrl = ev.target.result;
-                    saveNotifSoundData(dataUrl, file.name, 'Custom sound saved!');
-                    syncNotificationSoundToServer(file);
-                } catch (err) {
-                    if (notifSoundStatus) { notifSoundStatus.textContent = 'Failed to save sound. IndexedDB may be unavailable.'; notifSoundStatus.style.color = '#f44336'; }
-                }
-            };
-            reader.readAsDataURL(file);
             e.target.value = '';
+            file.arrayBuffer().then(function (ab) {
+                var ctx = notifGetTrimCtx();
+                if (!ctx) { throw new Error('no audio ctx'); }
+                return new Promise(function (resolve, reject) {
+                    ctx.decodeAudioData(ab.slice(0), function (buf) {
+                        _notifDecodedBuffer = buf;
+                        _notifDecodedName = file.name;
+                        resolve(buf);
+                    }, function (err) { reject(err || new Error('decode failed')); });
+                });
+            }).then(function (buf) {
+                if (buf.duration <= 30 + 0.05) {
+                    // A new short file replaces any pending >30s trim choice.
+                    hideNotifTrim();
+                    // Within the length cap — but if the ORIGINAL file is still
+                    // huge (e.g. a 30MB WAV that happens to be 25s), reject
+                    // rather than store 30MB+ (its base64 body would exceed the
+                    // server's 32MB JSON body limit and the sync would fail).
+                    if (file.size > 20 * 1024 * 1024) {
+                        if (notifSoundStatus) {
+                            notifSoundStatus.textContent = 'File is under 30s but too large to store (max 20 MB). Use a compressed format (MP3) or a shorter clip.';
+                            notifSoundStatus.style.color = '#f44336';
+                        }
+                        setTimeout(function () { if (notifSoundStatus && notifSoundStatus.textContent.indexOf('under 30s') === 0) notifSoundStatus.textContent = ''; }, 6000);
+                        return;
+                    }
+                    // Save the original file as-is.
+                    var reader = new FileReader();
+                    reader.onload = function (ev) {
+                        try {
+                            saveNotifSoundData(ev.target.result, file.name, 'Custom sound saved!');
+                            syncNotificationSoundToServer(file);
+                        } catch (err) {
+                            if (notifSoundStatus) { notifSoundStatus.textContent = 'Failed to save sound. IndexedDB may be unavailable.'; notifSoundStatus.style.color = '#f44336'; }
+                        }
+                    };
+                    reader.readAsDataURL(file);
+                } else {
+                    showNotifTrim(buf.duration);
+                    if (notifSoundStatus) {
+                        notifSoundStatus.textContent = 'This audio is ' + fmtSec(buf.duration) + ' — pick the 1–30s part to keep.';
+                        notifSoundStatus.style.color = '#ff9800';
+                    }
+                }
+            }).catch(function (err) {
+                if (notifSoundStatus) {
+                    notifSoundStatus.textContent = 'Could not read that audio file: ' + (err && err.message ? err.message : 'decode failed');
+                    notifSoundStatus.style.color = '#f44336';
+                }
+                setTimeout(function () { if (notifSoundStatus && notifSoundStatus.textContent.indexOf('Could not') === 0) notifSoundStatus.textContent = ''; }, 5000);
+            });
         });
     }
 
     if (notifSoundResetBtn) {
         notifSoundResetBtn.addEventListener('click', function () {
+            if (window._stopNotifTrimPreview) window._stopNotifTrimPreview();
+            hideNotifTrim();
             _notifCachedUrl = null;
             _idbNotifDel('url').catch(function() {});
             _idbNotifDel('name').catch(function() {});
@@ -1194,6 +1649,15 @@ document.addEventListener('DOMContentLoaded', () => {
         var m = Math.floor(elapsed / 60);
         var s = elapsed % 60;
         if (notifRecordTimer) notifRecordTimer.textContent = m + ':' + (s < 10 ? '0' : '') + s;
+        // Notification sounds are capped at 30s — auto-stop the recording at
+        // the cap (mirrors the ringtone recorder).
+        if (elapsed >= 30 && _notifMediaRecorder && _notifMediaRecorder.state !== 'inactive') {
+            _notifMediaRecorder.stop();
+            if (notifSoundStatus) {
+                notifSoundStatus.textContent = 'Recording stopped at the 30s max';
+                notifSoundStatus.style.color = '#ff9800';
+            }
+        }
     }
 
     function cleanupNotifRecording() {
@@ -1348,12 +1812,6 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             if (_ringTrimCtx && _ringTrimCtx.state === 'suspended') _ringTrimCtx.resume().catch(function () {});
             return _ringTrimCtx;
-        }
-
-        function fmtSec(s) {
-            var m = Math.floor(s / 60);
-            var ss = Math.floor(s % 60);
-            return m + ':' + (ss < 10 ? '0' : '') + ss;
         }
 
         function hideRingTrim() {
@@ -1578,34 +2036,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // Slice the decoded buffer to [start, start+len] and encode as a 16-bit
         // PCM WAV file so the ringtone is at most 30s (and small enough to sync).
         function makeTrimmedRingtoneFile(buf, start, len) {
-            var rate = buf.sampleRate;
-            var chans = buf.numberOfChannels;
-            var s0 = Math.floor(start * rate);
-            var s1 = Math.min(buf.length, Math.floor((start + len) * rate));
-            var n = Math.max(1, s1 - s0);
-            // Downmix to MONO (16-bit PCM): ringtones are mono by nature, this
-            // halves the payload so the encrypted sync stays well under the
-            // server body limit and stores 2x less data per user.
-            var blockAlign = 2;
-            var dataSize = n * blockAlign;
-            var ab = new ArrayBuffer(44 + dataSize);
-            var dv = new DataView(ab);
-            function wstr(off, s) { for (var i = 0; i < s.length; i++) dv.setUint8(off + i, s.charCodeAt(i)); }
-            wstr(0, 'RIFF'); dv.setUint32(4, 36 + dataSize, true); wstr(8, 'WAVE');
-            wstr(12, 'fmt '); dv.setUint32(16, 16, true);
-            dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
-            dv.setUint32(24, rate, true); dv.setUint32(28, rate * blockAlign, true);
-            dv.setUint16(32, blockAlign, true); dv.setUint16(34, 16, true);
-            wstr(36, 'data'); dv.setUint32(40, dataSize, true);
-            var off = 44;
-            for (var i = s0; i < s1; i++) {
-                // Average the channels into one mono sample.
-                var sum = 0;
-                for (var c = 0; c < chans; c++) sum += buf.getChannelData(c)[i];
-                var v = Math.max(-1, Math.min(1, sum / chans));
-                dv.setInt16(off, v < 0 ? v * 0x8000 : v * 0x7FFF, true);
-                off += 2;
-            }
+            var ab = encodeTrimmedWav(buf, start, len);
             var base = (_ringDecodedName || 'ringtone').replace(/\.[^.]+$/, '') || 'ringtone';
             return new File([ab], base + '-' + len + 's.wav', { type: 'audio/wav' });
         }
@@ -1912,7 +2343,23 @@ document.addEventListener('DOMContentLoaded', () => {
     // Clear all client-side data (localStorage, sessionStorage, non-HttpOnly cookies).
     // HttpOnly cookies can only be cleared by the server (see /api/logout GET).
     function clearAllClientData() {
-        localStorage.clear();
+        // Preserve the session-duration preference (Settings → Security): a
+        // benign browser preference (a plain number, never keys or identity
+        // data) that users shouldn't have to re-enter on every login. All
+        // logins, keys, caches, and other settings are fully cleared. Using
+        // the iterate-and-skip pattern (like the login-page wipe in auth.js)
+        // avoids localStorage.clear()+re-set reordering keys or throwing on
+        // a full quota.
+        var keepDurationKeys = { 'session_duration_seconds': 1, 'reauth_duration_seconds': 1 };
+        var allKeys = [];
+        for (var di = 0; di < localStorage.length; di++) {
+            var dk = localStorage.key(di);
+            if (dk) allKeys.push(dk);
+        }
+        for (var dj = 0; dj < allKeys.length; dj++) {
+            if (keepDurationKeys[allKeys[dj]]) continue;
+            try { Storage.prototype.removeItem.call(localStorage, allKeys[dj]); } catch (_) {}
+        }
         try { sessionStorage.clear(); } catch (_) {}
         document.cookie.split(';').forEach(function(c) {
             document.cookie = c.replace(/^ +/, '').replace(/=.*/, '=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/');
@@ -1954,7 +2401,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Clear all data button in settings — robust logout + wipe sequence
     document.getElementById('clear-all-data-btn').addEventListener('click', async () => {
-        if (!confirm('This will clear ALL local data (logins, keys, settings) and sign you out. Continue?')) return;
+        if (!confirm('This will clear ALL local data (logins, keys, settings) and sign you out. The session-duration setting (Settings → Security) is kept. Continue?')) return;
         // 1. Close websocket first so no more messages arrive
         if (ws) { try { ws.close(); } catch (_) {} ws = null; }
         // 2. Call server logout to clear HttpOnly cookie (while token is still present)
@@ -1971,6 +2418,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!countdownEl) return;
         const expiresAt = getTokenExpiresAt(token());
         if (!expiresAt) { countdownEl.textContent = 'Unknown'; return; }
+        // Also keep the "expires at" line in the security log in sync
+        const expiresAtEl = document.getElementById('session-expires-at');
+        if (expiresAtEl) expiresAtEl.textContent = fmtDateTime(expiresAt);
         const msLeft = expiresAt - Date.now();
         if (msLeft <= 0) { countdownEl.textContent = 'Expired'; return; }
         const days = Math.floor(msLeft / 86400000);
@@ -1993,16 +2443,45 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         });
     }
-    // Wire refresh-action checkboxes
-    var refreshCheckboxes = ['hb_refresh_keys', 'hb_refresh_profiles', 'hb_refresh_members', 'hb_refresh_dms', 'hb_refresh_messages'];
+    // Session duration selector (security tab) — how long the session should
+    // last after login, registration, AND re-authentication. Defaults to 30 days.
+    // Max 30 days (server clamps again). Stored under session_duration_seconds
+    // (legacy key reauth_duration_seconds still read as a fallback).
+    var reauthDurationSelect = document.getElementById('reauth-duration-select');
+    if (reauthDurationSelect) {
+        var _validDurations = ['3600', '21600', '43200', '86400', '259200', '604800', '1209600', '2592000'];
+        var savedDur = localStorage.getItem('session_duration_seconds');
+        if (savedDur === null) savedDur = localStorage.getItem('reauth_duration_seconds');
+        if (_validDurations.indexOf(savedDur) === -1) savedDur = '2592000';
+        reauthDurationSelect.value = savedDur;
+        reauthDurationSelect.addEventListener('change', function() {
+            localStorage.setItem('session_duration_seconds', this.value);
+            localStorage.setItem('reauth_duration_seconds', this.value); // legacy read path
+        });
+    }
+    // Wire refresh-action checkboxes. Two groups with matching semantics to
+    // refreshAll(): the default-on group runs unless explicitly toggled off
+    // (!== 'false'), the opt-in group only runs once the user enables it
+    // (=== 'true'). The checkbox state mirrors the ACTUAL runtime behavior.
+    var refreshCheckboxes = ['hb_refresh_keys', 'hb_refresh_profiles', 'hb_refresh_members', 'hb_refresh_messages'];
     refreshCheckboxes.forEach(function(id) {
         var cb = document.getElementById(id);
         if (!cb) return;
-        // The HTML id IS the localStorage key — ensures consistency with refreshAll()
-        // Default: disabled (user must explicitly opt in to each action)
+        var saved = localStorage.getItem(id);
+        cb.checked = saved !== 'false';
+        cb.addEventListener('change', function() {
+            localStorage.setItem(id, this.checked ? 'true' : 'false');
+        });
+    });
+    // Opt-in heartbeat actions: heavier refreshes that rebuild DOM sections
+    // (DM sidebar, server strip) or hit extra endpoints. Disabled until the
+    // user explicitly enables them.
+    var optInRefreshCheckboxes = ['hb_refresh_dms', 'hb_refresh_servers', 'hb_refresh_friend_requests', 'hb_refresh_presence', 'hb_refresh_voice', 'hb_refresh_channels'];
+    optInRefreshCheckboxes.forEach(function(id) {
+        var cb = document.getElementById(id);
+        if (!cb) return;
         var saved = localStorage.getItem(id);
         cb.checked = saved === 'true';
-        // Save on change
         cb.addEventListener('change', function() {
             localStorage.setItem(id, this.checked ? 'true' : 'false');
         });
@@ -2054,13 +2533,16 @@ document.addEventListener('DOMContentLoaded', () => {
                 } catch (_) {
                     sendPassword = password; // Fall back to raw password for legacy accounts
                 }
+                // Custom session duration chosen in settings (clamped 1min–30 days;
+                // the server clamps again defensively).
+                var durationSecs = getSessionDurationSecs();
                 const res = await fetch('/api/reauth', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
                         'Authorization': 'Bearer ' + token()
                     },
-                    body: JSON.stringify({ password: sendPassword })
+                    body: JSON.stringify({ password: sendPassword, duration_seconds: durationSecs })
                 });
                 const data = await res.json();
                 if (!res.ok) {
@@ -2068,12 +2550,22 @@ document.addEventListener('DOMContentLoaded', () => {
                     reauthError.style.display = 'block';
                     return;
                 }
+                // Capture the OLD expiry before swapping in the new token, so the
+                // security log can show "from → to".
+                var oldExpAt = getTokenExpiresAt(token());
                 localStorage.setItem('token', data.token);
                 localStorage.setItem('user', JSON.stringify(data.user));
                 reauthSection.style.display = 'none';
                 document.getElementById('reauth-password').value = '';
                 updateSessionCountdown();
-                alert('Session extended by 30 days');
+                // Re-arm the auto-logout timer against the NEW token's expiry
+                // (reschedule-safe — clears any timer armed for the old token).
+                checkTokenExpiry();
+                // Log the re-auth event (from-expiry → to-expiry + chosen duration)
+                // and refresh the on-screen security log.
+                recordReauthEvent(oldExpAt, getTokenExpiresAt(data.token), durationSecs);
+                renderSessionLog();
+                alert('Session extended by ' + fmtDuration(durationSecs));
             } catch (e) {
                 reauthError.textContent = 'Server is not running';
                 reauthError.style.display = 'block';
@@ -4051,8 +4543,9 @@ document.addEventListener('DOMContentLoaded', () => {
     var _settingsModalEl = document.getElementById('settings-modal');
     if (_settingsModalEl) {
         _settingsModalEl.addEventListener('click', function (e) {
-            if (e.target === _settingsModalEl && window._stopRingTrimPreview) {
-                window._stopRingTrimPreview();
+            if (e.target === _settingsModalEl) {
+                if (window._stopRingTrimPreview) window._stopRingTrimPreview();
+                if (window._stopNotifTrimPreview) window._stopNotifTrimPreview();
             }
         });
     }
@@ -4067,8 +4560,9 @@ document.addEventListener('DOMContentLoaded', () => {
             var el = document.getElementById(modals[i]);
             if (el && el.style.display !== 'none' && el.style.display !== '') {
                 el.style.display = 'none';
-                if (el.id === 'settings-modal' && window._stopRingTrimPreview) {
-                    window._stopRingTrimPreview();
+                if (el.id === 'settings-modal') {
+                    if (window._stopRingTrimPreview) window._stopRingTrimPreview();
+                    if (window._stopNotifTrimPreview) window._stopNotifTrimPreview();
                 }
                 break;
             }
@@ -5924,11 +6418,69 @@ function refreshAll() {
         loadMembers(currentServerId);
     }
     
-    // 4. REMOVED: loadDmConversations() from heartbeat — DM data is already live
-    // via WS events (dm_new, friend_request_accepted, etc.). Rebuilding the
-    // entire sidebar on every heartbeat kills the active DM indicator.
+    // 4. Refresh DM conversation list (opt-in). DM data is mostly live via WS
+    // events, but this re-syncs the sidebar for anything missed while offline
+    // and preserves the active highlight (see refreshDmConversationsData).
+    if (localStorage.getItem('hb_refresh_dms') === 'true' && user) {
+        refreshDmConversationsData();
+    }
     
-    // 5. Update existing message DOM styles (text-shadow, colors from refreshed cache)
+    // 5. Refresh server list data (names, order, badges) — opt-in, and kept
+    // light (no key recovery/upload round-trips).
+    if (localStorage.getItem('hb_refresh_servers') === 'true' && user) {
+        refreshServerListData();
+    }
+    
+    // 6. Refresh friend request badge count — opt-in. Also live-refresh the
+    //    requests panel itself when it's open so new requests appear without
+    //    closing/reopening the modal.
+    if (localStorage.getItem('hb_refresh_friend_requests') === 'true' && user) {
+        loadFriendRequestBadge();
+        var _frModal = document.getElementById('friend-requests-modal');
+        if (_frModal && _frModal.style.display !== 'none') {
+            loadFriendRequests();
+        }
+    }
+    
+    // 7. Refresh presence dots (online/offline) from the live WS presence set — opt-in.
+    if (localStorage.getItem('hb_refresh_presence') === 'true') {
+        updatePresenceDots();
+    }
+    
+    // 8. Refresh DM-call waiting state — opt-in. The waiting state is
+    //    server-persisted, so it can change on another device (partner started
+    //    a call / left the waiting room). syncWaitingCalls() dispatches
+    //    'voice-waiting-changed', which the app-wide listener handles
+    //    (updateDmWaitingBanner + renderDmSidebar in DM view). Since that
+    //    rebuild drops the selected-DM highlight, restore it here.
+    if (localStorage.getItem('hb_refresh_voice') === 'true' && user && window.VoiceManager) {
+        if (VoiceManager.syncWaitingCalls) VoiceManager.syncWaitingCalls();
+        if (VoiceManager.updateDmCallUI) VoiceManager.updateDmCallUI();
+        if (viewMode === 'dms') restoreActiveDmHighlight();
+    }
+    
+    // 9. Refresh the current server's channel list — opt-in (covers renames,
+    //    additions, deletions by admins on another device). Skipped while
+    //    inside a voice channel so the member chips aren't clobbered by the
+    //    channel-list rebuild; the voice chips are re-rendered afterwards.
+    if (localStorage.getItem('hb_refresh_channels') === 'true' && user && viewMode === 'servers' && currentServerId) {
+        var _voiceState = (window.VoiceManager && VoiceManager.getState) ? VoiceManager.getState() : null;
+        var _inVoiceRoom = !!(_voiceState && _voiceState.connected && _voiceState.roomType === 'server');
+        if (!_inVoiceRoom) {
+            var _chRefreshServerId = currentServerId;
+            loadChannels(_chRefreshServerId).then(function () {
+                // Skip if the user switched servers while the fetch was in flight
+                if (currentServerId !== _chRefreshServerId) return;
+                restoreActiveChannelHighlight();
+                updateChannelMutedUI();
+                if (window.VoiceManager && VoiceManager.updateChannelChips) {
+                    try { VoiceManager.updateChannelChips(); } catch (_) {}
+                }
+            });
+        }
+    }
+    
+    // 10. Update existing message DOM styles (text-shadow, colors from refreshed cache)
     if (localStorage.getItem('hb_refresh_messages') !== 'false') {
         for (var uid in userDisplayNameCache) {
             if (userDisplayNameCache.hasOwnProperty(uid)) {
@@ -5936,6 +6488,93 @@ function refreshAll() {
             }
         }
     }
+}
+
+// Lightweight DM refresh for the heartbeat: re-fetches the conversation list
+// and re-renders the sidebar WITHOUT the heavy key/profile work that
+// loadDmConversations() does (that's covered by hb_refresh_profiles). Only
+// rebuilds #channel-list when actually in DM view — in server view that node
+// holds the channel items and must not be overwritten.
+async function refreshDmConversationsData() {
+    if (!user) return;
+    try {
+        const res = await authFetch('/api/dm/conversations');
+        if (!res.ok) return;
+        var fresh = await res.json();
+        if (!Array.isArray(fresh)) return;
+        // Preserve per-conversation in-memory data (prefetched identity public
+        // keys) so a refresh doesn't force re-fetching identities next tick.
+        var oldById = {};
+        for (var _oi = 0; _oi < dmConversations.length; _oi++) {
+            var _oc = dmConversations[_oi];
+            if (_oc && _oc.dm_channel_id) oldById[_oc.dm_channel_id] = _oc;
+        }
+        for (var _fi = 0; _fi < fresh.length; _fi++) {
+            var _fc = fresh[_fi];
+            if (!_fc || !_fc.dm_channel_id) continue;
+            var _old = oldById[_fc.dm_channel_id];
+            if (_old && _old.other_public_key && !_fc.other_public_key) {
+                _fc.other_public_key = _old.other_public_key;
+            }
+        }
+        dmConversations = fresh;
+    } catch (_) { return; }
+    // Prune stale unread entries for channels that no longer exist
+    var validDmIds = {};
+    for (var i = 0; i < dmConversations.length; i++) validDmIds[dmConversations[i].dm_channel_id] = true;
+    var pruned = false;
+    for (var dk in unreadDms) {
+        if (unreadDms.hasOwnProperty(dk) && dk !== '__missed__' && !validDmIds[dk]) {
+            delete unreadDms[dk];
+            pruned = true;
+        }
+    }
+    if (pruned) {
+        updateDmStripBadge();
+        saveMentionState();
+    }
+    // Keep the server-persisted DM-call waiting state in sync
+    if (window.VoiceManager && VoiceManager.syncWaitingCalls) VoiceManager.syncWaitingCalls();
+    updateDmWaitingBanner();
+    if (viewMode === 'dms') {
+        renderDmSidebar();
+        restoreActiveDmHighlight();
+    }
+}
+
+// Re-apply the active highlight to the currently-open DM after a sidebar
+// rebuild (a full DOM replacement would otherwise lose the "selected" state).
+function restoreActiveDmHighlight() {
+    if (viewMode !== 'dms' || !currentDmChannelId) return;
+    var el = document.querySelector('.dm-item[data-dm-id="' + currentDmChannelId + '"]');
+    if (el) el.classList.add('active');
+}
+
+// Re-apply the active highlight to the currently-open server channel after a
+// channel-list rebuild (mirrors restoreActiveDmHighlight).
+function restoreActiveChannelHighlight() {
+    if (viewMode !== 'servers' || !currentChannelId) return;
+    var el = document.querySelector('.channel-item[data-id="' + currentChannelId + '"]');
+    if (el) el.classList.add('active');
+}
+
+// Lightweight server-list refresh for the heartbeat: refreshes names/order/
+// badges WITHOUT the key recovery/upload round-trips that loadServers() does.
+async function refreshServerListData() {
+    if (!user) return;
+    try {
+        const res = await authFetch('/api/servers');
+        if (!res.ok) return;
+        var fresh = await res.json();
+        if (!Array.isArray(fresh)) return;
+        servers = fresh;
+        renderServerList();
+        restoreMentionState();
+        updateServerBadges();
+        updateChannelBadges();
+        updateDmStripBadge();
+        updateMentionsBadge();
+    } catch (_) {}
 }
 
 function restartRefreshHeartbeat() {
@@ -7034,7 +7673,7 @@ function connectWebSocket(t) {
                     try {
                         var notifData = JSON.parse(decryptedJson);
                         var notifType = data.notification_type || notifData.type;
-                        if (notifType === 'mention_notification' || notifType === 'reply_notification' || notifType === 'dm_new') {
+                        if (notifType === 'mention_notification' || notifType === 'reply_notification' || notifType === 'dm_new' || notifType === 'friend_request_accepted' || notifType === 'friend_request_received') {
                             // Dispatch to decrypted notification handler
                             handleDecryptedNotification(notifData);
                         }
@@ -7570,8 +8209,23 @@ async function loadServers() {
                         if (Array.isArray(_members)) {
                             for (var _mi = 0; _mi < _members.length; _mi++) {
                                 var _m = _members[_mi];
-                                if (_m.id !== user.id && !userDisplayNameCache[_m.id]) {
-                                    fetchServerConversationProfile(_m.id, currentServerId, _sKey);
+                                if (_m.id !== user.id) {
+                                    var _cachedEntry = userDisplayNameCache[_m.id];
+                                    // Fetch when the entry is missing OR lacks the file keys — a
+                                    // stale partial entry (e.g. display name only, persisted from
+                                    // an earlier session) would otherwise block the fetch forever
+                                    // and pfp/banner never load in server channels until a DM
+                                    // fetch overwrites the cache.
+                                    // Negative-cache guard: a member who genuinely has no pfp/banner
+                                    // must not trigger a refetch on EVERY render — only retry after
+                                    // the keyless result ages out (60s).
+                                    var _lastAttempt = _cachedEntry ? (_cachedEntry._profileFetchAttempted || 0) : 0;
+                                    if ((!_cachedEntry || (!_cachedEntry.profile_picture_file_key && !_cachedEntry.profile_banner_file_key)) &&
+                                        (Date.now() - _lastAttempt > 60000)) {
+                                        if (!userDisplayNameCache[_m.id]) userDisplayNameCache[_m.id] = {};
+                                        userDisplayNameCache[_m.id]._profileFetchAttempted = Date.now();
+                                        fetchServerConversationProfile(_m.id, currentServerId, _sKey);
+                                    }
                                 }
                             }
                         }
@@ -9066,9 +9720,13 @@ async function loadStickerPreview(container, stickerData) {
             e.stopPropagation();
             openMediaViewer(url, 'image', null, [{ url: url, type: 'image' }]);
         });
-        // Store sticker metadata on the container for forward extraction
+        // Store sticker metadata on the container for forward extraction AND
+        // edit preservation. Server-channel stickers encrypt the file key with
+        // the server key, so the nonce must be kept too — without it, a later
+        // edit re-render cannot decrypt the key and shows "[sticker unavailable]".
         container.setAttribute('data-file-id', stickerData.file_id || '');
         container.setAttribute('data-file-key', stickerData.file_key || '');
+        container.setAttribute('data-file-key-nonce', stickerData.file_key_nonce || '');
         container.setAttribute('data-mime-type', stickerData.mime_type || 'image/png');
         if (fileKeyBytes) {
             container.setAttribute('data-raw-file-key', E2ECrypto.arrayBufferToBase64(fileKeyBytes.buffer));
@@ -9477,6 +10135,7 @@ function handleEdit(messageId, msgDiv) {
             existingSticker = {
                 file_id: stickerMsgEl.getAttribute('data-file-id') || '',
                 file_key: stickerMsgEl.getAttribute('data-file-key') || '',
+                file_key_nonce: stickerMsgEl.getAttribute('data-file-key-nonce') || '',
                 mime_type: stickerMsgEl.getAttribute('data-mime-type') || 'image/png',
             };
         }
@@ -9528,6 +10187,7 @@ function handleEdit(messageId, msgDiv) {
                     payload.type = 'sticker';
                     payload.file_id = existingSticker.file_id;
                     payload.file_key = existingSticker.file_key;
+                    payload.file_key_nonce = existingSticker.file_key_nonce;
                     payload.mime_type = existingSticker.mime_type;
                     payload.text = newText;
                 }
@@ -9574,6 +10234,7 @@ function handleEdit(messageId, msgDiv) {
                     payload.type = 'sticker';
                     payload.file_id = existingSticker.file_id;
                     payload.file_key = existingSticker.file_key;
+                    payload.file_key_nonce = existingSticker.file_key_nonce;
                     payload.mime_type = existingSticker.mime_type;
                     payload.text = newText;
                 }
@@ -9649,16 +10310,22 @@ async function handleEditedMessage(msg, mode) {
 
     try {
         let decrypted = null;
+        let contentEl = null; // message content wrapper (created on demand for edits)
         
         // Try DM decryption: use msg.dm_channel_id or currentDmChannelId,
-        // and fetch the sender's identity key (not currentDmOtherUser)
+        // and fetch the sender's identity key (not currentDmOtherUser).
+        // IMPORTANT: the server sets sender_id to an HMAC hash — /api/identity
+        // expects the RAW UUID, so prefer sender_user_id (raw) and fall back to
+        // the DM partner (for own edits). Using the HMAC sender_id here 404s
+        // and silently drops live DM edits for the other participant.
         if (mode === 'dm') {
             var dmChannelId = msg.dm_channel_id || currentDmChannelId;
             if (dmChannelId) {
                 var kp = E2ECrypto.getIdentityKeyPair();
                 if (kp) {
                     try {
-                        var senderPubRes = await authFetch('/api/identity/' + msg.sender_id);
+                        var rawSenderId = msg.sender_user_id || (currentDmOtherUser && currentDmOtherUser.id);
+                        var senderPubRes = await authFetch('/api/identity/' + encodeURIComponent(rawSenderId));
                         if (senderPubRes.ok) {
                             var senderPubData = await senderPubRes.json();
                             var senderPubKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(senderPubData.identity_public_key));
@@ -9723,24 +10390,25 @@ async function handleEditedMessage(msg, mode) {
             textEl.innerHTML = timeHtml + renderEmojiText(renderText, extraEmojis);
             textEl.style.display = '';
         } else if (renderText) {
-            // If no text element exists but the edit added text, create one                    contentEl = existing.querySelector('.content');
-                    if (contentEl) {
-                        // Find where to insert: before the sticker/gif/file container
-                        var firstMedia = contentEl.querySelector('.gif-message, .sticker-message, .file-preview, .file-card');
-                        var newTextDiv = document.createElement('div');
-                        newTextDiv.className = 'text';
-                        newTextDiv.innerHTML = timeHtml + renderEmojiText(renderText, extraEmojis);
-                        if (firstMedia) {
-                            contentEl.insertBefore(newTextDiv, firstMedia);
-                        } else {
-                            contentEl.insertAdjacentElement('afterbegin', newTextDiv);
-                        }
-                        textEl = newTextDiv;
-                    }
+            // If no text element exists but the edit added text, create one.
+            contentEl = contentEl || existing.querySelector('.content');
+            if (contentEl) {
+                // Find where to insert: before the sticker/gif/file container
+                var firstMedia = contentEl.querySelector('.gif-message, .sticker-message, .file-preview, .file-card');
+                var newTextDiv = document.createElement('div');
+                newTextDiv.className = 'text';
+                newTextDiv.innerHTML = timeHtml + renderEmojiText(renderText, extraEmojis);
+                if (firstMedia) {
+                    contentEl.insertBefore(newTextDiv, firstMedia);
+                } else {
+                    contentEl.insertAdjacentElement('afterbegin', newTextDiv);
                 }
+                textEl = newTextDiv;
+            }
+        }
 
         // Update GIF container if the edit payload has GIF data
-        var contentEl = contentEl || existing.querySelector('.content');
+        contentEl = contentEl || existing.querySelector('.content');
         if (editGifData && editGifData.url) {
             var gifEl = existing.querySelector('.gif-message');
             if (gifEl) {
@@ -9764,6 +10432,7 @@ async function handleEditedMessage(msg, mode) {
             if (stickerEl) {
                 stickerEl.setAttribute('data-file-id', editStickerData.file_id);
                 stickerEl.setAttribute('data-file-key', editStickerData.file_key || '');
+                stickerEl.setAttribute('data-file-key-nonce', editStickerData.file_key_nonce || '');
                 stickerEl.setAttribute('data-mime-type', editStickerData.mime_type || 'image/png');
                 // Reload sticker preview
                 stickerEl.innerHTML = '';
@@ -9774,6 +10443,7 @@ async function handleEditedMessage(msg, mode) {
                 newStickerDiv.className = 'sticker-message';
                 newStickerDiv.setAttribute('data-file-id', editStickerData.file_id);
                 newStickerDiv.setAttribute('data-file-key', editStickerData.file_key || '');
+                newStickerDiv.setAttribute('data-file-key-nonce', editStickerData.file_key_nonce || '');
                 newStickerDiv.setAttribute('data-mime-type', editStickerData.mime_type || 'image/png');
                 contentEl.appendChild(newStickerDiv);
                 loadStickerPreview(newStickerDiv, editStickerData);
@@ -9982,6 +10652,7 @@ async function executeDmForwardToChannel(targetServerId, targetChannelId) {
             stickerData = {
                 file_id: stickerMsgEl.getAttribute('data-file-id') || '',
                 file_key: rawKey,
+                file_key_nonce: stickerMsgEl.getAttribute('data-file-key-nonce') || '',
                 mime_type: stickerMsgEl.getAttribute('data-mime-type') || 'image/png',
             };
         }
@@ -10109,6 +10780,7 @@ async function executeForward(targetServerId, targetServerName, targetChannelId,
             stickerData = {
                 file_id: stickerMsgEl.getAttribute('data-file-id') || '',
                 file_key: rawKey,
+                file_key_nonce: stickerMsgEl.getAttribute('data-file-key-nonce') || '',
                 mime_type: stickerMsgEl.getAttribute('data-mime-type') || 'image/png',
             };
         }
@@ -10603,6 +11275,12 @@ function renderDmSidebar() {
         });
     }
     updatePresenceDots();
+
+    // The friend-code panel (code value + toggle/copy/get/regen buttons) lives
+    // inside this re-rendered sidebar, so EVERY rebuild destroys its onclicks
+    // and dataset. Re-populate + re-bind here so no caller (including WS-driven
+    // re-renders after re-login) can ever leave the friend-code buttons dead.
+    loadMyFriendCode();
 }
 
 async function selectDmChannel(dmChannelId, otherUserId, otherUsername, element) {
@@ -11603,13 +12281,19 @@ async function loadMembers(serverId) {
                 '<div class="member-actions">' + actionBtns + '</div>';
             list.appendChild(div);
         });
-        // After rendering members, prefetch display names and PFPs for uncached members
+        // After rendering members, prefetch display names and PFPs — fetch when the
+        // cache entry is missing OR lacks the file keys (stale partial entries from
+        // earlier sessions must not block the fetch, or pfp/banner never appear in
+        // server channels until a DM fetch overwrites the cache).
         var srvKey = E2ECrypto.getServerKey(serverId);
         if (srvKey) {
             for (var i = 0; i < members.length; i++) {
                 var m2 = members[i];
-                if (m2.id !== user.id && !userDisplayNameCache[m2.id]) {
-                    fetchServerConversationProfile(m2.id, serverId, srvKey);
+                if (m2.id !== user.id) {
+                    var _cachedE = userDisplayNameCache[m2.id];
+                    if (!_cachedE || (!_cachedE.profile_picture_file_key && !_cachedE.profile_banner_file_key)) {
+                        fetchServerConversationProfile(m2.id, serverId, srvKey);
+                    }
                 }
             }
         }
@@ -17984,6 +18668,7 @@ async function executeDmForward(targetUserId, targetUsername, dmChannelId) {
             stickerData = {
                 file_id: stickerMsgEl.getAttribute('data-file-id') || '',
                 file_key: rawKey,
+                file_key_nonce: stickerMsgEl.getAttribute('data-file-key-nonce') || '',
                 mime_type: stickerMsgEl.getAttribute('data-mime-type') || 'image/png',
             };
         }
@@ -18694,6 +19379,18 @@ function handleDecryptedNotification(notifData) {
             playNotificationSound();
             showBrowserNotification('New DM', 'You received a new direct message', null);
         }
+    } else if (ntype === 'friend_request_accepted' || ntype === 'friend_request_received') {
+        // Offline-replayed friend event — reload DM conversations so the new
+        // friend's DM appears, then prefetch their conversation profile
+        // (pfp/banner/name keys) and re-share our own keys with them.
+        // loadDmConversations() already broadcasts profile keys and re-renders
+        // the sidebar internally, so no duplicate broadcast here.
+        loadDmConversations().then(function() {
+            try { uploadCurrentProfileToConversations(); } catch (_) {}
+        }).catch(function() {
+            try { renderDmSidebar(); } catch (_) {}
+        });
+        loadFriendRequestBadge();
     }
 }
 
@@ -20574,6 +21271,18 @@ async function saveProfile() {
         
         document.getElementById('profile-edit-modal').style.display = 'none';
         profileEditMode = false;
+        
+        // Reset the pending-upload globals so a later save in the same session
+        // (e.g. reopening the edit modal directly) doesn't re-send the unchanged
+        // picture/banner ids. The server would otherwise delete the file record
+        // for the id about to be re-assigned → FK constraint failure that silently
+        // dropped the whole PATCH (the banner-loss bug).
+        profilePfpFileId = null;
+        profilePfpFileKey = null;
+        profileBannerFileId = null;
+        profileBannerFileKey = null;
+        _removePfpFlag = false;
+        _removeBannerFlag = false;
         
         // After saving profile, broadcast updated keys to all DM conversations
         setTimeout(function() {

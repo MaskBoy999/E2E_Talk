@@ -441,7 +441,7 @@
             <div class="settings-panel" id="notification-settings" style="display:none">
                 <div class="settings-group">
                     <h4>Notification Sound</h4>
-                    <p class="settings-hint">Upload a custom MP3 (or other audio file) to use as your notification sound. Keep it small — it is stored in your browser's local storage.</p>
+                    <p class="settings-hint">Choose the sound played when you get a notification. Sounds are capped at 30 seconds — longer files let you pick the 1–30s part to keep. Encrypted end-to-end so it syncs across your devices.</p>
                 </div>
                 <div class="settings-group">
                     <div class="notif-sound-controls">
@@ -460,6 +460,26 @@
                     </div>
                     <p class="notif-sound-file-name" id="notif-sound-file-name" style="display:none;margin-top:8px;"></p>
                     <p class="notif-sound-status" id="notif-sound-status" style="margin-top:4px;font-size:13px;"></p>
+                    <div id="notif-trim" style="display:none;margin-top:10px;padding:10px 12px;background:rgba(88,101,242,0.08);border-radius:6px;border:1px solid var(--border-color);font-size:13px;color:var(--text-primary);">
+                        <div style="font-weight:600;margin-bottom:4px;">This audio is <span id="notif-trim-total">0:00</span> — pick the part to keep (1s–30s):</div>
+                        <canvas id="notif-trim-waveform" width="560" height="80" style="display:block;width:100%;height:80px;margin-top:8px;border-radius:6px;background:#0e0e14;cursor:pointer;" title="Click to jump the start time there"></canvas>
+                        <div style="font-size:11px;color:var(--text-muted);margin-top:3px;">Click the waveform to set the start time.</div>
+                        <div style="margin-top:8px;">
+                            <label for="notif-trim-start" style="font-size:12px;color:var(--text-secondary);">Start</label>
+                            <input type="range" id="notif-trim-start" min="0" max="1" step="1" value="0" style="width:100%;">
+                            <div style="font-size:11px;color:var(--text-muted);" id="notif-trim-start-label">0:00</div>
+                        </div>
+                        <div style="margin-top:6px;">
+                            <label for="notif-trim-len" style="font-size:12px;color:var(--text-secondary);">Length (seconds)</label>
+                            <input type="range" id="notif-trim-len" min="1" max="30" step="1" value="10" style="width:100%;">
+                            <div style="font-size:11px;color:var(--text-muted);" id="notif-trim-len-label">10s</div>
+                        </div>
+                        <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
+                            <button class="btn btn-secondary" id="notif-trim-preview-btn">▶ Preview</button>
+                            <button class="btn btn-primary" id="notif-trim-save-btn">Save This Part</button>
+                            <button class="btn btn-secondary" id="notif-trim-cancel-btn">Cancel</button>
+                        </div>
+                    </div>
                     <div class="notif-volume-row" style="display:flex;align-items:center;gap:10px;margin-top:8px;font-size:13px;color:var(--text-muted)">
                         <label for="notif-volume-slider">Volume:</label>
                         <input type="range" id="notif-volume-slider" min="0" max="100" value="50" class="notif-volume-slider">
@@ -486,8 +506,19 @@
                 <div class="settings-group">
                     <h4>Session</h4>
                     <p class="settings-hint">Your session expires in: <strong id="session-countdown">...</strong></p>
-                    <p class="settings-hint" style="margin-top:8px;font-size:12px;color:var(--text-muted)">Re-authenticate to extend your session by 30 days.</p>
-                    <button class="btn-reauth" id="reauth-btn">Re-authenticate</button>
+                    <p class="settings-hint" style="margin-top:8px;font-size:12px;color:var(--text-muted)">Re-authenticate to extend your session. You choose how long it lasts (max 30 days).</p>
+                    <label class="settings-checkbox-label" style="margin-top:6px;"><span style="font-size:12px;color:var(--text-muted)">Session duration (applies to login, registration &amp; re-auth; default 30 days):</span></label>
+                    <select id="reauth-duration-select" class="modal-input" style="margin-top:4px;max-width:200px;">
+                        <option value="3600">1 hour</option>
+                        <option value="21600">6 hours</option>
+                        <option value="43200">12 hours</option>
+                        <option value="86400">1 day</option>
+                        <option value="259200">3 days</option>
+                        <option value="604800">7 days</option>
+                        <option value="1209600">14 days</option>
+                        <option value="2592000">30 days</option>
+                    </select>
+                    <button class="btn-reauth" id="reauth-btn" style="margin-top:10px;">Re-authenticate</button>
                     <div style="margin-top:16px;">
                         <p class="settings-hint" style="font-size:12px;color:var(--text-muted)">Refresh heartbeat interval:</p>
                         <select id="heartbeat-interval-select" class="modal-input" style="margin-top:4px;">
@@ -496,11 +527,16 @@
                             <option value="30000">Every 30 seconds</option>
                             <option value="60000">Every 60 seconds</option>
                         </select>
-                        <p class="settings-hint" style="margin-top:10px;font-size:12px;color:var(--text-muted)">Auto-refresh on each heartbeat:</p>
+                        <p class="settings-hint" style="margin-top:10px;font-size:12px;color:var(--text-muted)">Auto-refresh on each heartbeat (only when the interval is enabled):</p>
                         <label class="settings-checkbox-label"><input type="checkbox" id="hb_refresh_keys"> <span>Re-broadcast key_needed</span></label>
                         <label class="settings-checkbox-label"><input type="checkbox" id="hb_refresh_profiles"> <span>Refresh profiles (names, colors, PFPs)</span></label>
                         <label class="settings-checkbox-label"><input type="checkbox" id="hb_refresh_members"> <span>Refresh server member list</span></label>
                         <label class="settings-checkbox-label"><input type="checkbox" id="hb_refresh_dms"> <span>Refresh DM conversation list</span></label>
+                        <label class="settings-checkbox-label"><input type="checkbox" id="hb_refresh_servers"> <span>Refresh server list (names, badges)</span></label>
+                        <label class="settings-checkbox-label"><input type="checkbox" id="hb_refresh_friend_requests"> <span>Refresh friend request badge</span></label>
+                        <label class="settings-checkbox-label"><input type="checkbox" id="hb_refresh_presence"> <span>Refresh presence (online/offline dots)</span></label>
+                        <label class="settings-checkbox-label"><input type="checkbox" id="hb_refresh_voice"> <span>Refresh DM-call waiting state</span></label>
+                        <label class="settings-checkbox-label"><input type="checkbox" id="hb_refresh_channels"> <span>Refresh server channel list</span></label>
                         <label class="settings-checkbox-label"><input type="checkbox" id="hb_refresh_messages"> <span>Update message display styles</span></label>
                     </div>
                     <div id="reauth-section" style="display:none;margin-top:12px;">
@@ -512,6 +548,13 @@
                             <button class="btn-reauth-confirm" id="reauth-confirm-btn" style="white-space:nowrap;font-size:13px;padding:8px 16px;margin:0;">Confirm</button>
                         </div>
                         <p id="reauth-error" class="error-text" style="display:none;margin-top:8px;"></p>
+                    </div>
+                </div>
+                <div class="settings-group">
+                    <h4>Session &amp; Security Log</h4>
+                    <p class="settings-hint">Current session expires at: <strong id="session-expires-at">…</strong></p>
+                    <div id="session-log-list" class="session-log-list">
+                        <div class="session-log-empty">No re-authentication events yet for this account.</div>
                     </div>
                 </div>
                 <div class="settings-group settings-danger">
@@ -949,6 +992,7 @@
                             <input type="text" id="profile-edit-glow-color-hex" class="theme-hex-input profile-hex-input" placeholder="#ffffff" maxlength="7">
                             <span class="profile-color-preview" id="profile-edit-glow-preview" style="width:32px;height:32px;border-radius:6px;background:#ffffff;"></span>
                         </div>
+                        <div id="border-glow-options" class="glow-options-container" style="margin-top:8px;"></div>
                     </div>
                     <div class="profile-edit-actions">
                         <button class="btn-cancel" id="profile-edit-cancel-btn">Cancel</button>

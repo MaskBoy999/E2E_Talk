@@ -71,7 +71,7 @@ test.describe('Encrypted Profile Data — Server Join', () => {
                 headers: { Authorization: 'Bearer ' + aInfo.token, 'Content-Type': 'application/json' },
                 data: {
                     name: 'EncryptedSrv_' + ts,
-                    invite_code_hash: inviteCode,
+                    invite_code: inviteCode,
                 },
             });
             expect(srvRes.ok()).toBeTruthy();

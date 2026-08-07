@@ -22,9 +22,14 @@ export default defineConfig({
             TURN_USERNAME: 'test-turn-user',
             TURN_PASSWORD: 'test-turn-pass',
             // The suite creates dozens of users from one IP — raise the
-            // friend-request rate limit so tests never 429 mid-suite.
+            // friend-request AND login rate limits so tests never 429
+            // mid-suite (same pattern for both).
             FRIEND_REQUEST_IP_MAX: '100000',
             FRIEND_REQUEST_USER_MAX: '100000',
+            LOGIN_IP_MAX: '100000',
+            LOGIN_USER_MAX: '100000',
+            AUTH_PARAMS_IP_MAX: '100000',
+            HMAC_KEY_IP_MAX: '100000',
         },
     },
 });

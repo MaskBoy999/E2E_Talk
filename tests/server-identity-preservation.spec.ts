@@ -47,7 +47,7 @@ test.describe('Server Channel Identity Preservation After Reload', () => {
         // Owner creates a server
         const srv = await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${ownerBody.token}`, 'Content-Type': 'application/json' },
-            data: { name: serverName, invite_code_hash: sha256Hex(inviteCode) },
+            data: { name: serverName, invite_code: inviteCode },
         });
         const server = await srv.json();
         expect(server.id).toBeTruthy();

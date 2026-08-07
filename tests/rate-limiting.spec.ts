@@ -41,7 +41,7 @@ async function createBasicServer(page: any, token: string, userId: string, name:
     const inviteCode = generateCode(8);
     const srv = await page.request.post(`${BASE}/api/servers`, {
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        data: { name, invite_code_hash: sha256Hex(inviteCode) },
+        data: { name, invite_code: inviteCode },
     });
     const server = await srv.json();
 

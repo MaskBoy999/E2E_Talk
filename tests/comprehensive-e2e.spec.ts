@@ -230,7 +230,7 @@ test.describe('Comprehensive E2E — All Features', () => {
 
         const srv = await (await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${body1.token}`, 'Content-Type': 'application/json' },
-            data: { invite_code_hash: hash },
+            data: { invite_code: inviteCode },
         })).json();
         const serverId = srv.id;
 
@@ -537,7 +537,7 @@ test.describe('Comprehensive E2E — All Features', () => {
 
         const srv = await (await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${body1.token}`, 'Content-Type': 'application/json' },
-            data: { invite_code_hash: hash },
+            data: { invite_code: inviteCode },
         })).json();
         const serverId = srv.id;
 

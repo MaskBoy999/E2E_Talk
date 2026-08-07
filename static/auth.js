@@ -3,12 +3,61 @@ function escapeHtml(str) {
     return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+// Custom session duration chosen in Settings → Security (seconds). Applies to
+// login, registration, and re-authentication. Defaults to 30 days; floored at
+// 1 minute; capped at 30 days (the server re-clamps defensively).
+function getSessionDurationSecs() {
+    var v = localStorage.getItem('session_duration_seconds');
+    if (v === null) v = localStorage.getItem('reauth_duration_seconds');
+    var s = parseInt(v, 10);
+    if (!s || s < 60) s = 2592000;
+    if (s > 2592000) s = 2592000;
+    return s;
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     const token = localStorage.getItem('token');
     if (token) {
         window.location.href = 'index.html';
         return;
     }
+
+    // --- Wipe ALL leftover client data when arriving on the login page
+    // without a session. A stale account's keys/cache must never leak into a
+    // new account on this browser: identity keys, server keys, friend codes,
+    // ringtone/notification audio cache (IndexedDB), themes, settings, unread
+    // markers — none of it is needed when nobody is logged in, and it causes
+    // cross-account data leakage (e.g. the ringtone/cache-owner bug). The
+    // login/register handlers below recreate everything after auth.
+    function wipeAllClientData() {
+        // 1) Secure-storage-aware clear: removes sensitive keys, the
+        //    in-memory encryption key, and the session key (bypasses the
+        //    interceptor).
+        try { if (window._secClearAll) window._secClearAll(); } catch (_) {}
+        // 2) Remove EVERYTHING else (non-sensitive keys: themes, settings,
+        //    mute flags, volume, invite codes, etc.) via the raw API.
+        try {
+            var keys = [];
+            for (var i = 0; i < localStorage.length; i++) {
+                var k = localStorage.key(i);
+                if (k) keys.push(k);
+            }
+            for (var j = 0; j < keys.length; j++) {
+                var wipeKey = keys[j];
+                // Preserve the session-duration preference (Settings → Security):
+                // a benign browser preference (a plain number, never keys or
+                // identity data) that users shouldn't have to re-enter on every
+                // login. It survives the wipe and is sent with login/register.
+                if (wipeKey === 'session_duration_seconds' || wipeKey === 'reauth_duration_seconds') continue;
+                Storage.prototype.removeItem.call(localStorage, wipeKey);
+            }
+        } catch (_) {}
+        // 3) Session storage (secure-storage session key + anything else).
+        try { sessionStorage.clear(); } catch (_) {}
+        // 4) IndexedDB audio cache (ringtone + notification sound blobs).
+        try { indexedDB.deleteDatabase('e2e_notif_sound'); } catch (_) {}
+    }
+    wipeAllClientData();
 
     // --- Toggle visibility for password inputs ---
     function setupToggleVisibility(btnId, inputId) {
@@ -146,7 +195,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const res = await fetch('/api/login', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username, password: loginPassword })
+                body: JSON.stringify({ username, password: loginPassword, duration_seconds: getSessionDurationSecs() })
             });
 
             const data = await res.json();
@@ -182,10 +231,15 @@ document.addEventListener('DOMContentLoaded', () => {
                             identityKeyPair = E2ECrypto.getIdentityKeyPair(data.user.id);
                             blobRestored = true;
                             // If the server flagged this blob as needing a rebuild
-                            // (missing profile_key_cache etc.), the re-save below will
-                            // create a fresh bundle with all local keys included.
-                            if (blobData.needs_rebuild) {
-                                console.log('auth: blob needs rebuild (flag from server) — Fix 6 will produce a complete bundle');
+                            // (missing profile_key_cache etc.), or the blob was saved
+                            // by an older client without the newest key types (lower
+                            // bundle version), the unconditional re-save at the end
+                            // of this handler rebuilds it with ALL current keys
+                            // (identity, server, file, invite, auth_key, ...).
+                            const blobVer = typeof bundle.v === 'number' ? bundle.v : 0;
+                            if (blobData.needs_rebuild || blobVer < (window._BUNDLE_VERSION || 2)) {
+                                console.log('auth: blob is stale (needs_rebuild=' + !!blobData.needs_rebuild +
+                                    ', bundle v' + blobVer + ') — will rebuild with complete key set');
                             }
                         }
                     }
@@ -361,6 +415,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     username, password: hashedPassword,
+                    duration_seconds: getSessionDurationSecs(),
                     encrypted_hash_key: encryptedHashKey.encrypted_private_key,
                     hash_key_salt: encryptedHashKey.salt,
                     hash_key_nonce: encryptedHashKey.nonce,

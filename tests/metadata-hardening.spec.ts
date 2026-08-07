@@ -34,7 +34,7 @@ async function createServerWithKey(page: any, token: string, userId: string, ser
     const inviteCode = generateCode(8);
     const srv = await page.request.post(`${BASE}/api/servers`, {
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        data: { name: serverName, invite_code_hash: sha256Hex(inviteCode) },
+        data: { name: serverName, invite_code: inviteCode },
     });
     const server = await srv.json();
 
@@ -74,7 +74,7 @@ test.describe('Metadata Hardening', () => {
         const inviteCode = generateCode(8);
         const srv = await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${body.token}`, 'Content-Type': 'application/json' },
-            data: { name: 'OrderTest_' + ts, invite_code_hash: sha256Hex(inviteCode) },
+            data: { name: 'OrderTest_' + ts, invite_code: inviteCode },
         });
         const server = await srv.json();
 

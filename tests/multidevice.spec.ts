@@ -68,7 +68,7 @@ await page.click('#register-form button[type="submit"]');
 
         const createRes = await page1.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${token1}`, 'Content-Type': 'application/json' },
-            data: { name: 'TestServer_' + ts, invite_code_hash: inviteCodeHash },
+            data: { name: 'TestServer_' + ts, invite_code: inviteCode },
         });
         expect(createRes.ok()).toBeTruthy();
         const serverData = await createRes.json();
@@ -343,7 +343,7 @@ await page.click('#register-form button[type="submit"]');
 
         const createRes = await page1.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${token1}`, 'Content-Type': 'application/json' },
-            data: { name: 'SendServer_' + ts, invite_code_hash: inviteCodeHash },
+            data: { name: 'SendServer_' + ts, invite_code: inviteCode },
         });
         expect(createRes.ok()).toBeTruthy();
         const serverData = await createRes.json();

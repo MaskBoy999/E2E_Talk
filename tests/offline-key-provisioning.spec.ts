@@ -32,7 +32,7 @@ async function registerUser(page: any, username: string) {
 async function createServerWithKey(page: any, token: string, ownerId: string, inviteCode: string) {
     const res = await page.request.post(`${BASE}/api/servers`, {
         headers: { Authorization: `Bearer ${token}` },
-        data: { name: 'OfflineTest', invite_code_hash: sha256Hex(inviteCode) },
+        data: { name: 'OfflineTest', invite_code: inviteCode },
     });
     const server = await res.json();
 
