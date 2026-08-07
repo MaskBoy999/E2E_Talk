@@ -1061,6 +1061,36 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     applyShowMsgTimes();
 
+    // Composer (chat-input bar: + attach, emoji/sticker/gif, text box, send)
+    // must only appear when a server TEXT channel or DM conversation is open.
+    // The #message-input `disabled` flag is the canonical “in a channel” signal
+    // (enabled exactly when a channel/DM is selected), and the voice channel
+    // view is not a text surface — so the bar hides there too. Watching the
+    // two attributes keeps every enable/disable call site in sync without
+    // touching them.
+    function updateComposerVisibility() {
+        var input = document.getElementById('message-input');
+        var bar = document.querySelector('.chat-input');
+        if (!input || !bar) return;
+        var voiceView = document.getElementById('voice-popup');
+        var inVoiceView = !!voiceView && getComputedStyle(voiceView).display !== 'none';
+        bar.style.display = (!input.disabled && !inVoiceView) ? '' : 'none';
+    }
+    (function initComposerVisibility() {
+        var composerInput = document.getElementById('message-input');
+        var composerBar = document.querySelector('.chat-input');
+        if (!composerInput || !composerBar || typeof MutationObserver === 'undefined') return;
+        try {
+            var composerObserver = new MutationObserver(updateComposerVisibility);
+            composerObserver.observe(composerInput, { attributes: true, attributeFilter: ['disabled'] });
+            var composerVoiceView = document.getElementById('voice-popup');
+            if (composerVoiceView) {
+                composerObserver.observe(composerVoiceView, { attributes: true, attributeFilter: ['style'] });
+            }
+        } catch (_) {}
+        updateComposerVisibility();
+    })();
+
     // Streamer mode toggle
     const streamerToggle = document.getElementById('streamer-mode-toggle');
     if (streamerToggle) {
