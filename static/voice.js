@@ -2511,7 +2511,9 @@
                     el2.style.height = 'auto';
                 } else {
                     // Collapsed: top panel of the text area (measured chat-body
-                    // top, below the chat header); CSS keeps the 52vh height.
+                    // top, below the chat header); CSS keeps the height
+                    // (clamp(460px, 68vh, 78vh) — DM calls are 1-on-1, so the
+                    // panel can be taller without scrolling the tiles).
                     el2.style.left = left + 'px';
                     el2.style.top = top + 'px';
                     el2.style.bottom = '';

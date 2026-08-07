@@ -122,8 +122,29 @@ test.describe('DM call per-member volume slider', () => {
         await page2.click('#incoming-call-accept');
         await page.waitForTimeout(2500);
 
-        // A right-clicks the partner's tile (the tile wrapper, not a video)
+        // 1-on-1 sizing: the panel is taller than the old 52vh and the
+        // partner's tile fits without scrolling (comfortable desktop viewport).
         await page.waitForSelector('.dm-call-tile', { timeout: 10000 });
+        await page.setViewportSize({ width: 1280, height: 900 });
+        await page.waitForTimeout(800);
+        const geo = await page.evaluate(() => {
+            const panel = document.getElementById('dm-call-panel') as HTMLElement;
+            const body = document.getElementById('dm-call-body') as HTMLElement;
+            const media = document.querySelector('.dm-call-tile-media') as HTMLElement;
+            if (!panel || !body || !media) return null;
+            return {
+                panelH: panel.getBoundingClientRect().height,
+                viewportH: window.innerHeight,
+                bodyScrollable: body.scrollHeight > body.clientHeight + 2,
+                mediaH: media.getBoundingClientRect().height,
+            };
+        });
+        expect(geo).not.toBeNull();
+        expect(geo!.panelH).toBeGreaterThanOrEqual(0.6 * geo!.viewportH);
+        expect(geo!.mediaH).toBeGreaterThanOrEqual(200);
+        expect(geo!.bodyScrollable).toBe(false);
+
+        // A right-clicks the partner's tile (the tile wrapper, not a video)
         await page.click('.dm-call-tile', { button: 'right', position: { x: 10, y: 10 } });
         await page.waitForSelector('#volume-menu:visible', { timeout: 5000 });
 

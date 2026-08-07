@@ -6734,7 +6734,10 @@ body.streamer-mode .dm-avatar:hover {
     right: 0;
     top: 56px;
     bottom: auto;
-    height: 52vh;
+    /* DM calls are always 1-on-1 (partner tile + self strip), so the panel
+       can be taller than a many-member voice channel view without scrolling
+       to see the partner's camera + screen share. */
+    height: clamp(460px, 68vh, 78vh);
     z-index: 880;
     flex-direction: column;
     background: var(--bg-secondary, #232338);
@@ -6854,8 +6857,8 @@ body.streamer-mode .dm-avatar:hover {
     gap: 8px;
     align-items: center;
     justify-content: center;
-    height: 160px;
-    min-height: 120px;
+    height: 210px;
+    min-height: 170px;
 }
 .dm-call-tile-media .remote-video-tile {
     height: 100%;
