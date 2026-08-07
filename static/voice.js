@@ -455,7 +455,10 @@
 
     function ensureE2eeWorker() {
         if (window.RTCRtpScriptTransform && !e2eeWorker) {
-            try { e2eeWorker = new Worker('/e2ee-worker.js'); } catch (_) {}
+            // ?v= busts the browser cache for the worker — a stale cached
+            // e2ee-worker.js silently breaks E2EE on EVERY room type (same
+            // stale-cache class of bug as voice.js, which is also versioned).
+            try { e2eeWorker = new Worker('/e2ee-worker.js?v=2'); } catch (_) {}
         }
         if (!window.RTCRtpScriptTransform && !S._warnedNoE2ee) {
             S._warnedNoE2ee = true;
@@ -568,6 +571,13 @@
         // belonged to the OLD room and must never receive the NEXT room's key
         // (stale-key risk when leaving a room with a still-deriving key).
         S._pendingRecvTransforms = [];
+        // Stop the server-key recovery poll (if any) — the guards inside also
+        // clear it, but an explicit teardown clear prevents a double-interval
+        // if the user leaves and rejoins the same room within one poll tick.
+        if (S._srvKeyTimer) {
+            clearInterval(S._srvKeyTimer);
+            S._srvKeyTimer = null;
+        }
         S._dmOtherPubB64 = null;
         S.muted = false;
         S.deafened = false;
@@ -903,10 +913,99 @@
                 }
             }
         };
+        // Stuck-peer watchdog: ICE can sit at 'checking' forever without ever
+        // firing the failed/disconnected handler (e.g. a one-sided edge where
+        // the remote's candidates arrived but a response was dropped). restartIce
+        // every 5s until the edge connects or the room ends.
+        // Stuck-peer recovery: if an edge is still negotiating after a few
+        // seconds, only the IMPOLITE side (the designated offerer) re-fires its
+        // negotiation — with slow backoff but NO hard cap on attempts (bounded
+        // by the room's lifetime: the watcher stops once connected, failed, or
+        // the room ends). Firing on both sides every 5s caused a renegotiation
+        // storm; firing on only one side with a growing delay is safe. On a
+        // heavily-loaded machine (many simultaneous peers) getUserMedia + the
+        // full offer/answer cycle can take tens of seconds, so giving up after
+        // a few tries left edges at 'new' forever.
+        if (!pc._polite) {
+            var _watchDelay = 5000;
+            (function watchPeer() {
+                setTimeout(function () {
+                    if (!S.connected || S.peers[uid] !== pc || pc.signalingState === 'closed') return;
+                    if (pc.connectionState === 'connected') return;
+                    var stillStuck = pc.connectionState === 'connecting' || pc.connectionState === 'new';
+                    if (stillStuck) {
+                        // A peer stuck in 'have-local-offer' sent an offer whose
+                        // answer was lost — it will NEVER return to 'stable' on
+                        // its own, so a bare onnegotiationneeded() nudge is a
+                        // no-op (the guard queues it). Roll the local offer back
+                        // first so the renegotiation can actually run.
+                        if (pc.signalingState === 'have-local-offer') {
+                            try {
+                                pc.setLocalDescription({ type: 'rollback' }).then(function () {
+                                    try { pc.onnegotiationneeded(); } catch (_) {}
+                                }).catch(function () {
+                                    try { pc.onnegotiationneeded(); } catch (_) {}
+                                });
+                            } catch (_) {
+                                try { pc.onnegotiationneeded(); } catch (_) {}
+                            }
+                        } else {
+                            try { pc.restartIce(); } catch (_) {}
+                            try { pc.onnegotiationneeded(); } catch (_) {}
+                        }
+                        _watchDelay = Math.min(_watchDelay * 1.6, 20000); // 5s → 8s → 13s → 20s (cap)
+                        watchPeer();
+                    }
+                }, _watchDelay);
+            })();
+        }
+        // ICE candidates that arrive BEFORE the remote description is set are
+        // buffered here — calling addIceCandidate early throws InvalidStateError
+        // and the old code swallowed it, silently dropping candidates. In a
+        // large mesh (late joiners negotiating N peers at once on a loaded main
+        // thread) the offer->answer window stretches, so this race dropped
+        // enough candidates to leave peers stuck at 'checking' forever.
+        pc._pendingIce = [];
+        pc._negotiating = false;
+        pc._makingOffer = false;
+        // Perfect negotiation (glare) roles: in a mesh BOTH sides create a peer
+        // for the same edge and both fire onnegotiationneeded at once. If both
+        // send offers and both roll back (naive rollback), each side ends up
+        // answering the OTHER's offer — two different SDP pairs, mismatched
+        // DTLS fingerprints → ICE stuck at 'checking' forever (exactly what the
+        // last joiners showed in the 10-user mesh). The fix: ONE side owns the
+        // offer per edge, chosen deterministically by user id (the "impolite"
+        // side, lower id, offers; the "polite" side, higher id, only answers).
+        // This mirrors the JSEP perfect-negotiation spec.
+        var selfIdForRole = getSelfId();
+        pc._polite = selfIdForRole > uid;
         pc.ontrack = function (e) {
             handleRemoteTrack(uid, e);
         };
         pc.onnegotiationneeded = function () {
+            // Perfect negotiation: BOTH sides may initiate (that's required for
+            // ICE-restart recovery — a polite side whose ICE failed must be able
+            // to renegotiate). The polite/impolite roles only decide who yields
+            // on GLARE (receiving an offer while holding a local offer), which
+            // is handled in handleSignal, not here.
+            // Perfect-negotiation guard: onnegotiationneeded can fire many times
+            // in a burst (one per added track, plus sender.transform assignment
+            // from applySendE2EE). A concurrent createOffer() while a negotiation
+            // is already in flight rejects with InvalidStateError, which the old
+            // code swallowed — leaving peers at 'new' forever in big meshes.
+            // If we're mid-negotiation, re-run once the current one settles.
+            if (pc._negotiating || pc._makingOffer || pc.signalingState !== 'stable') {
+                pc._negotiationQueued = true;
+                return;
+            }
+            pc._negotiating = true;
+            // _makingOffer is set SYNCHRONOUSLY (before createOffer resolves) so
+            // the glare check in handleSignal sees it even while signalingState
+            // is still 'stable' — otherwise a polite side could answer the
+            // remote's offer while its own offer is in flight, and the two
+            // sides would converge on different SDP pairs (DTLS mismatch).
+            pc._makingOffer = true;
+            pc._negotiationQueued = false;
             pc.createOffer().then(function (offer) {
                 return pc.setLocalDescription(offer);
             }).then(function () {
@@ -920,8 +1019,26 @@
                 });
             }).catch(function (err) {
                 console.warn('Offer failed:', err);
+            }).finally(function () {
+                pc._negotiating = false;
+                pc._makingOffer = false;
+                // If a burst of track additions happened while we were busy,
+                // renegotiate once to pick up anything that was missed.
+                if (pc._negotiationQueued && pc.signalingState === 'stable') {
+                    pc.onnegotiationneeded();
+                }
             });
         };
+        // Stuck-peer safety net: if the impolite side's offer was lost (no
+        // remote description after 4s), re-fire the negotiation so the edge
+        // recovers instead of sitting at 'new' forever.
+        if (!pc._polite) {
+            setTimeout(function () {
+                if (S.connected && S.peers[uid] === pc && !pc.remoteDescription && pc.connectionState === 'new' && pc.signalingState !== 'closed') {
+                    try { pc.onnegotiationneeded(); } catch (_) {}
+                }
+            }, 4000);
+        }
 
         S.peers[uid] = pc;
         addLocalTracks(pc);
@@ -1199,6 +1316,15 @@
         if (label) label.textContent = pct + '%';
     }
 
+    // Drain any candidates that arrived before the remote description existed.
+    function flushPendingIce(pc) {
+        var q = pc._pendingIce || [];
+        pc._pendingIce = [];
+        q.forEach(function (c) {
+            pc.addIceCandidate(c).catch(function (_) {});
+        });
+    }
+
     // ------------------------------------------------------------------
     // Signaling handling
     // ------------------------------------------------------------------
@@ -1211,30 +1337,85 @@
         }
         var sdp = signal.sdp;
         if (signal.type === 'offer') {
-            pc.setRemoteDescription({ type: 'offer', sdp: sdp }).then(function () {
-                addLocalTracks(pc);
-                applySendE2EE(pc);
-                return pc.createAnswer();
-            }).then(function (answer) {
-                return pc.setLocalDescription(answer);
-            }).then(function () {
-                send({
-                    type: 'voice_signal',
-                    room_type: S.roomType,
-                    channel_id: S.channelId || '',
-                    dm_channel_id: S.dmChannelId || '',
-                    to_user_id: fromUid,
-                    signal: { type: 'answer', sdp: pc.localDescription.sdp },
+            var answerOffer = function () {
+                pc.setRemoteDescription({ type: 'offer', sdp: sdp }).then(function () {
+                    addLocalTracks(pc);
+                    applySendE2EE(pc);
+                    flushPendingIce(pc);
+                    return pc.createAnswer();
+                }).then(function (answer) {
+                    return pc.setLocalDescription(answer);
+                }).then(function () {
+                    send({
+                        type: 'voice_signal',
+                        room_type: S.roomType,
+                        channel_id: S.channelId || '',
+                        dm_channel_id: S.dmChannelId || '',
+                        to_user_id: fromUid,
+                        signal: { type: 'answer', sdp: pc.localDescription.sdp },
+                    });
+                }).catch(function (err) {
+                    console.warn('Answer failed:', err);
                 });
-            }).catch(function (err) {
-                console.warn('Answer failed:', err);
-            });
+            };
+            var glare = pc.signalingState === 'have-local-offer';
+            if (glare) {
+                // Perfect-negotiation glare: exactly one side yields.
+                //   - Polite side (higher id): roll back our offer, accept the
+                //     remote's — converge on ONE SDP pair.
+                //   - Impolite side (lower id): ignore — we own this edge; the
+                //     polite side answers ours.
+                if (pc._polite) {
+                    pc.setLocalDescription({ type: 'rollback' }).then(function () {
+                        return pc.setRemoteDescription({ type: 'offer', sdp: sdp });
+                    }).then(function () {
+                        addLocalTracks(pc);
+                        applySendE2EE(pc);
+                        flushPendingIce(pc);
+                        return pc.createAnswer();
+                    }).then(function (answer) {
+                        return pc.setLocalDescription(answer);
+                    }).then(function () {
+                        send({
+                            type: 'voice_signal',
+                            room_type: S.roomType,
+                            channel_id: S.channelId || '',
+                            dm_channel_id: S.dmChannelId || '',
+                            to_user_id: fromUid,
+                            signal: { type: 'answer', sdp: pc.localDescription.sdp },
+                        });
+                    }).catch(function (err) {
+                        console.warn('Answer failed:', err);
+                    });
+                }
+                return;
+            }
+            // Our own offer is still being created (signalingState is still
+            // 'stable', _makingOffer true) — defer this offer a beat so the
+            // two offers don't cross mid-flight, then re-evaluate: whoever has
+            // the local offer by then wins the glare check properly.
+            if (pc._makingOffer) {
+                setTimeout(function () {
+                    if (!S.connected || S.peers[fromUid] !== pc || pc.signalingState === 'closed') return;
+                    handleSignal(fromUid, signal);
+                }, 150);
+                return;
+            }
+            answerOffer();
         } else if (signal.type === 'answer') {
-            pc.setRemoteDescription({ type: 'answer', sdp: sdp }).catch(function (err) {
+            pc.setRemoteDescription({ type: 'answer', sdp: sdp }).then(function () {
+                flushPendingIce(pc);
+            }).catch(function (err) {
                 console.warn('setRemote( answer ) failed:', err);
             });
         } else if (signal.type === 'ice') {
-            if (signal.candidate) {
+            if (!signal.candidate) return;
+            // Buffer until the remote description exists — addIceCandidate before
+            // that throws InvalidStateError and would lose the candidate.
+            if (!pc.remoteDescription) {
+                if (!pc._pendingIce) pc._pendingIce = [];
+                pc._pendingIce.push(signal.candidate);
+            } else {
                 pc.addIceCandidate(signal.candidate).catch(function (_) {});
             }
         }
@@ -1319,12 +1500,20 @@
         (data.members || []).forEach(function (m) { newMembers[m.user_id] = m; });
         S.members = newMembers;
 
-        // Connect to every other member
+        // Connect to every other member. Peers are created with a small stagger:
+        // when a user joins a large room, creating N peers synchronously fires N
+        // offers + candidate floods at once (glare + rate-limit pressure, and a
+        // last joiner on a loaded machine can end up with half its edges stuck).
+        // Spreading creation over ~100ms per peer keeps the signaling burst
+        // manageable without meaningfully delaying the call.
         var selfId = getSelfId();
-        Object.keys(S.members).forEach(function (uid) {
-            if (uid !== selfId && !S.peers[uid]) {
+        var peerUids = Object.keys(S.members).filter(function (uid) { return uid !== selfId && !S.peers[uid]; });
+        peerUids.forEach(function (uid, idx) {
+            setTimeout(function () {
+                if (!S.connected || S.roomKeyB64 === undefined) return;
+                if (S.peers[uid]) return;
                 createPeer(uid);
-            }
+            }, idx * 100);
         });
 
         if (S.roomType === 'server') {
@@ -1340,6 +1529,55 @@
         // Mic: auto start unless force-muted/deafened
         if (!S.muted && !S.deafened) {
             startMic();
+        }
+
+        // SERVER safety net: if the room key couldn't be derived at join
+        // (the device's server key fetch was in flight — e.g. a phone that
+        // just joined the server, or a key_needed handshake that raced the
+        // voice join), poll until the key appears, then re-derive and apply
+        // E2EE. WITHOUT this, one side encrypts with a room key the other
+        // side lacks → one-sided E2EE → total silence in the channel (DM
+        // calls were immune because their keys come from identity keys that
+        // are always present locally).
+        if (S.roomType === 'server' && !S.roomKeyB64) {
+            var _srvIdForKey = S.serverId;
+            var _srvKeyTries = 0;
+            var _srvKeyTimer = setInterval(function () {
+                if (!S.connected || S.roomType !== 'server' || S.serverId !== _srvIdForKey) {
+                    clearInterval(_srvKeyTimer);
+                    if (S._srvKeyTimer === _srvKeyTimer) S._srvKeyTimer = null;
+                    return;
+                }
+                if (S.roomKeyB64) {
+                    clearInterval(_srvKeyTimer);
+                    if (S._srvKeyTimer === _srvKeyTimer) S._srvKeyTimer = null;
+                    return;
+                }
+                _srvKeyTries++;
+                if (_srvKeyTries > 20) { // ~10s cap
+                    clearInterval(_srvKeyTimer);
+                    if (S._srvKeyTimer === _srvKeyTimer) S._srvKeyTimer = null;
+                    return;
+                }
+                if (!E2ECrypto.getServerKey(_srvIdForKey)) return;
+                clearInterval(_srvKeyTimer);
+                if (S._srvKeyTimer === _srvKeyTimer) S._srvKeyTimer = null;
+                deriveRoomKey();
+                deriveSignalKey();
+                // Re-apply E2EE to ANY peer created without the key, then nudge
+                // a renegotiation on EVERY peer: a keyless joiner's offers were
+                // refused for all of them (send() drops signals without a key),
+                // so each one must complete its own offer/answer cycle. Nudging
+                // only the first peer would leave 3+ member rooms silent with
+                // the other members (DM is always 1:1, so its single-peer nudge
+                // is fine there — this server mesh is not).
+                Object.keys(S.peers).forEach(function (uid) {
+                    var _pc = S.peers[uid];
+                    applySendE2EE(_pc);
+                    try { _pc.onnegotiationneeded(); } catch (_) {}
+                });
+            }, 500);
+            S._srvKeyTimer = _srvKeyTimer;
         }
 
         // DM safety net: if the room key still couldn't be derived at join
@@ -1380,11 +1618,15 @@
         if (S.roomType === 'dm' && list.some(function (m) { return m.user_id !== selfId; })) {
             markDmCallAnswered();
         }
-        // Open peers for newcomers
-        list.forEach(function (m) {
-            if (m.user_id !== selfId && !S.peers[m.user_id]) {
+        // Open peers for newcomers (staggered like the join path — see
+        // handleVoiceJoined for why the burst must be spread out).
+        var newUids = list.filter(function (m) { return m.user_id !== selfId && !S.peers[m.user_id]; });
+        newUids.forEach(function (m, idx) {
+            setTimeout(function () {
+                if (!S.connected || !S.members[m.user_id]) return;
+                if (S.peers[m.user_id]) return;
                 createPeer(m.user_id);
-            }
+            }, idx * 100);
         });
         // Close peers for people who left
         Object.keys(S.peers).forEach(function (uid) {
