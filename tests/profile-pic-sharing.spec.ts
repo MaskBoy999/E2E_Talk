@@ -289,6 +289,138 @@ test.describe('Profile Picture & Banner Sharing Between Users', () => {
         await ctx2.close();
     });
 
+    test('heartbeat refresh must not drop the sender PFP in a server channel', async ({ page, context }) => {
+        test.setTimeout(180000);
+        const ts = Date.now();
+        const user1 = 'hbpfp_a_' + ts;
+        const user2 = 'hbpfp_b_' + ts;
+
+        // User1 registers + sets a REAL profile picture (modern saveProfile flow)
+        const body1 = await registerUser(page, user1);
+        const pfpPng = makeMinimalPng(50, 50);
+        await uploadFileAndSetProfile(page, body1.token, pfpPng, 'profile_picture');
+
+        // User1 creates a server; User2 joins
+        const { serverId, inviteCode } = await createServerAndKey(page, body1.token, body1.user.id, 'HBPFP ' + ts);
+        const ctx2 = await context.browser()!.newContext();
+        const page2 = await ctx2.newPage();
+        const body2 = await registerUser(page2, user2);
+        await joinServerAndGetKey(page, page2, serverId, inviteCode, body2.user.id);
+
+        // Both load index and open the channel
+        await page.goto(`${BASE}/index.html`);
+        await page.waitForTimeout(3000);
+        await page2.goto(`${BASE}/index.html`);
+        await page2.waitForTimeout(3000);
+        for (const p of [page, page2]) {
+            await p.click('.server-icon:not(.add-server)');
+            await p.waitForSelector('.channel-item', { timeout: 10000 });
+            await p.click('.channel-item >> nth=0');
+            await p.waitForTimeout(2000);
+        }
+
+        // Enable the heartbeat with every setting on
+        for (const p of [page, page2]) {
+            await p.evaluate(() => {
+                localStorage.setItem('key_heartbeat_interval', '15000');
+                ['hb_refresh_keys', 'hb_refresh_profiles', 'hb_refresh_members', 'hb_refresh_messages',
+                 'hb_refresh_dms', 'hb_refresh_servers', 'hb_refresh_friend_requests', 'hb_refresh_presence',
+                 'hb_refresh_voice', 'hb_refresh_channels'].forEach(id => localStorage.setItem(id, 'true'));
+            });
+        }
+
+        // User1 sends a message carrying their PFP key
+        const input1 = page.locator('#message-input');
+        await expect(input1).toBeEnabled({ timeout: 10000 });
+        await input1.fill('hb pfp check ' + ts);
+        await page.click('#send-btn');
+        await page.waitForTimeout(3000);
+
+        // User2 waits until the sender's message avatar renders as an <img>
+        await page2.waitForFunction(() => {
+            return !!document.querySelector('.message .avatar img');
+        }, undefined, { timeout: 20000 });
+
+        // Capture WS event types B receives during the ticks (diagnostic)
+        await page2.evaluate(() => {
+            (window as any).__wsTypes = [];
+            const orig = ws.onmessage.bind(ws);
+            ws.onmessage = (ev: any) => {
+                try {
+                    const d = JSON.parse(ev.data);
+                    (window as any).__wsTypes.push(d.type || 'raw');
+                } catch (_) {}
+                return orig(ev);
+            };
+        });
+
+        // Run heartbeat ticks; IMMEDIATELY after a tick the avatar must still be
+        // an <img>. (Pre-fix: the profiles action deleted userDisplayNameCache and
+        // the messages action removed the avatar synchronously.)
+        let avatarSurvived = true;
+        for (let i = 0; i < 4; i++) {
+            const stillHasImg = await page2.evaluate(() => {
+                try { refreshAll(); } catch (e) { return { err: String(e) }; }
+                return !!document.querySelector('.message .avatar img');
+            });
+            if (!stillHasImg) { avatarSurvived = false; break; }
+            await page2.waitForTimeout(600);
+        }
+        expect(avatarSurvived).toBe(true);
+
+        // Guard branches of updateExistingMessageStyles: a legit PFP REMOVAL
+        // (file_id explicitly null) must still strip the avatar to an initial,
+        // while a key-only stub (file_id undefined + key present) must NOT.
+        const guardDiag = await page2.evaluate((uid) => {
+            const m = document.querySelector('.message');
+            const avatar = m ? m.querySelector('.avatar') : null;
+            if (!m || !avatar) return { err: 'no message/avatar' };
+            const cache = (userDisplayNameCache as any)[uid];
+            if (!cache) return { err: 'no cache for ' + uid };
+            // Save the real values so the final interval-tick assertion still sees them.
+            const realId = cache.profile_picture_file_id;
+            const realKey = cache.profile_picture_file_key;
+            // Shape 1: authoritative no-PFP (explicit null) → strip expected
+            cache.profile_picture_file_id = null;
+            cache.profile_picture_file_key = null;
+            updateExistingMessageStyles(uid);
+            const afterNull = !avatar.querySelector('img') && avatar.textContent.trim().length > 0;
+            // Restore a rendered avatar (simulate a fresh message) so shape 2
+            // has an <img> to preserve.
+            avatar.innerHTML = '<img class="avatar-img" src="blob:https://localhost:3443/x" alt="">';
+            cache.profile_picture_file_id = realId;
+            // Shape 2: key-only stub (undefined id + key) → img must survive
+            (userDisplayNameCache as any)['stub_' + uid] = {
+                profile_picture_file_key: 'dG9rZW4=AA',
+            };
+            const msg = document.querySelector('.message');
+            msg.setAttribute('data-sender-id', 'stub_' + uid);
+            updateExistingMessageStyles('stub_' + uid);
+            const afterStub = !!msg.querySelector('.avatar img');
+            msg.removeAttribute('data-sender-id');
+            delete (userDisplayNameCache as any)['stub_' + uid];
+            // Restore the real cache entry exactly as it was (the later assertion
+            // checks the key survives a real 17s interval tick).
+            cache.profile_picture_file_id = realId;
+            cache.profile_picture_file_key = realKey;
+            return { afterNull, afterStub };
+        }, body1.user.id);
+        console.log('GUARD DIAG:', JSON.stringify(guardDiag));
+        expect(guardDiag.afterNull).toBe(true);
+        expect(guardDiag.afterStub).toBe(true);
+
+        // And the sender's cache still holds the PFP key after a real interval tick
+        await page2.waitForTimeout(17000);
+        const cacheHasKey = await page2.evaluate((uid) => {
+            const e = (userDisplayNameCache as any)[uid];
+            return !!(e && e.profile_picture_file_key);
+        }, body1.user.id);
+        expect(cacheHasKey).toBe(true);
+
+        await page2.close();
+        await ctx2.close();
+    });
+
     test('PFP shared via DM message broadcast renders for DM recipient', async ({ page, context }) => {
         const ts = Date.now();
         const user1 = 'pfpdm1_' + ts;

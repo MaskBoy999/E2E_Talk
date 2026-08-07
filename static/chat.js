@@ -6385,14 +6385,18 @@ function refreshAll() {
         ws.send(JSON.stringify({ type: 'key_heartbeat' }));
     }
     
-    // 2. Refresh profile data for visible users (display names, colors, PFPs)
-    // Clears cache entries first so the fetch functions don't short-circuit on stale data.
+    // 2. Refresh profile data for visible users (display names, colors, PFPs).
+    // NOTE: we must NOT delete userDisplayNameCache entries here. The fetch
+    // functions below always overwrite without short-circuiting, and deleting
+    // first makes the in-flight UI (message avatars via updateExistingMessageStyles,
+    // the DM header via refreshDmProfileDisplay, the member list) re-render with
+    // the PFP/banner keys missing — the avatar is replaced by a plain initial
+    // until a reload re-fetches it. Keep old data until the refresh lands.
     if (localStorage.getItem('hb_refresh_profiles') !== 'false' && user) {
         // Refresh DM sidebar users
         if (viewMode === 'dms' && dmConversations) {
             dmConversations.forEach(function(conv) {
                 if (conv && conv.other_user_id) {
-                    delete userDisplayNameCache[conv.other_user_id];
                     fetchAndCacheUserProfile(conv.other_user_id);
                     fetchDmConversationProfile(conv.other_user_id, conv.dm_channel_id);
                 }
@@ -6402,7 +6406,6 @@ function refreshAll() {
         if (currentServerId) {
             currentServerMemberList.forEach(function(m) {
                 if (m && m.id && m.id !== user.id) {
-                    delete userDisplayNameCache[m.id];
                     fetchServerConversationProfile(m.id, currentServerId, E2ECrypto.getServerKey(currentServerId));
                 }
             });
@@ -6481,12 +6484,14 @@ function refreshAll() {
     }
     
     // 10. Update existing message DOM styles (text-shadow, colors from refreshed cache)
+    //     and retry stickers that failed while their key wasn't available yet.
     if (localStorage.getItem('hb_refresh_messages') !== 'false') {
         for (var uid in userDisplayNameCache) {
             if (userDisplayNameCache.hasOwnProperty(uid)) {
                 updateExistingMessageStyles(uid);
             }
         }
+        retryFailedStickers();
     }
 }
 
@@ -9654,19 +9659,18 @@ async function loadStickerPreview(container, stickerData) {
         // Old stickers: no file_key at all (identity-derived).
         let fileKeyBytes;
         if (stickerData.file_key) {
-            // Try channel key decryption (server messages: ciphertext + nonce)
+            // Try channel key decryption (server messages: ciphertext + nonce).
+            // tryDecryptWithAllKeysRaw tries the current key AND any historical
+            // (rotated) keys — message content already decrypts this way, so a
+            // sticker encrypted under a pre-rotation key must decrypt too.
             if (stickerData.file_key_nonce && currentServerId) {
-                var decryptKey = E2ECrypto.getServerKey(currentServerId);
-                if (decryptKey) {
+                var decryptedKeyB64 = tryDecryptWithAllKeysRaw(currentServerId, stickerData.file_key, stickerData.file_key_nonce);
+                if (decryptedKeyB64) {
                     try {
-                        var rawDecrypted = E2ECrypto.aeadDecrypt(stickerData.file_key, decryptKey, stickerData.file_key_nonce);
-                        if (rawDecrypted && rawDecrypted.length > 0) {
-                            // The decrypted result is the base64 string of the raw file key as UTF-8 bytes.
-                            // Convert it back to binary: decode UTF-8 → base64 string → Uint8Array.
-                            var decryptedKeyB64 = new TextDecoder().decode(rawDecrypted);
-                            fileKeyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(decryptedKeyB64));
-                        }
-                    } catch (_) {}
+                        // The decrypted result is the base64 string of the raw file
+                        // key as UTF-8 bytes → decode it back to a Uint8Array.
+                        fileKeyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(decryptedKeyB64));
+                    } catch (_) { fileKeyBytes = null; }
                 }
             }
             // Fallback: try identity-encrypted format (nonce:ciphertext) for own stickers
@@ -9743,8 +9747,30 @@ async function loadStickerPreview(container, stickerData) {
         });
         container.appendChild(dlBtn);
     } catch (e) {
+        // Mark the container so a later heartbeat tick can retry once the server
+        // key becomes available (e.g. the key_needed handshake finished after this
+        // message rendered). _stickerData was stashed before loadStickerPreview ran.
+        container.setAttribute('data-failed', '1');
         container.textContent = '[sticker unavailable]';
     }
+}
+
+// Re-attempt stickers that previously failed to load because their key wasn't
+// available yet. Called from the heartbeat so a sticker becomes available as
+// soon as its key arrives. Rate-limited per container (at most one retry every
+// 30s) so a genuinely undecryptable sticker doesn't re-download forever.
+function retryFailedStickers() {
+    var now = Date.now();
+    document.querySelectorAll('.sticker-message[data-failed="1"]').forEach(function (container) {
+        if (container.querySelector('.load-preview-btn')) return; // streamer mode: user must opt in
+        if (!container._stickerData) return;
+        var last = parseInt(container.getAttribute('data-failed-at') || '0', 10);
+        if (now - last < 30000) return;
+        container.setAttribute('data-failed-at', String(now));
+        container.removeAttribute('data-failed');
+        container.innerHTML = '';
+        loadStickerPreview(container, container._stickerData);
+    });
 }
 
 // --- Message Actions ---
@@ -13906,11 +13932,24 @@ function updateExistingMessageStyles(userId) {
                 getProfilePicUrl(picFileId, userId);
             }
         } else if (avatarEl && !picFileId) {
-            // Remove pic, show initial only
-            avatarEl.removeAttribute('data-profile-pic');
-            avatarEl.removeAttribute('data-profile-pic-load');
-            var initial = (nameEl ? nameEl.textContent : '?').charAt(0).toUpperCase();
-            avatarEl.innerHTML = initial;
+            // Only strip an existing avatar when the cache AUTHORITATIVELY says
+            // this user has no PFP. Two shapes are authoritative:
+            //   - profile_picture_file_id explicitly null (field removed / no PFP)
+            //   - id undefined AND no key (a no-PFP profile fetch; nothing set)
+            // Key-only stub entries (written from message decryption keyed by the
+            // HMAC'd sender id) carry a profile_picture_file_key but their file_id
+            // is *undefined* — they are incomplete, not authoritative. Stripping on
+            // those would replace a good avatar with an initial every heartbeat
+            // tick, so they must never trigger the strip.
+            var _authNoPfp = cache.profile_picture_file_id === null ||
+                (cache.profile_picture_file_id === undefined && !cache.profile_picture_file_key);
+            if (_authNoPfp) {
+                // Remove pic, show initial only
+                avatarEl.removeAttribute('data-profile-pic');
+                avatarEl.removeAttribute('data-profile-pic-load');
+                var initial = (nameEl ? nameEl.textContent : '?').charAt(0).toUpperCase();
+                avatarEl.innerHTML = initial;
+            }
         }
     });
 }

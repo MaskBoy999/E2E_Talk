@@ -236,4 +236,89 @@ test('sticker renders for both users in server channel, after refresh', async ({
 
     await ctxA.close();
 });
+
+test('heartbeat with all settings: sticker stays rendered, sender profile cache survives ticks, retry safe', async ({ page, context }) => {
+    test.setTimeout(180000);
+    const ts = Date.now();
+    const ctxA = await context.browser()!.newContext();
+    const pageA = await ctxA.newPage();
+    const pageB = page;
+
+    const a = await registerUser(pageA, 'stkhb_a_' + ts);
+    const b = await registerUser(pageB, 'stkhb_b_' + ts);
+
+    const { serverId, inviteCode } = await createServerAndKey(pageA, a.token, a.user.id, 'STKHB ' + ts);
+    await joinServerAndGetKey(pageA, pageB, serverId, inviteCode, b.user.id);
+
+    // Both load index fresh and open the channel
+    await pageA.goto(BASE + '/index.html');
+    await pageA.waitForTimeout(4000);
+    await pageB.goto(BASE + '/index.html');
+    await pageB.waitForTimeout(4000);
+    for (const p of [pageA, pageB]) {
+        await p.click('.server-icon:not(.add-server)');
+        await p.waitForSelector('.channel-item', { timeout: 10000 });
+        await p.click('.channel-item >> nth=0');
+        await p.waitForTimeout(2000);
+    }
+
+    // Enable the heartbeat with EVERY setting on (the reported repro)
+    for (const p of [pageA, pageB]) {
+        await p.evaluate(() => {
+            localStorage.setItem('key_heartbeat_interval', '15000');
+            ['hb_refresh_keys', 'hb_refresh_profiles', 'hb_refresh_members', 'hb_refresh_messages',
+             'hb_refresh_dms', 'hb_refresh_servers', 'hb_refresh_friend_requests', 'hb_refresh_presence',
+             'hb_refresh_voice', 'hb_refresh_channels'].forEach(id => localStorage.setItem(id, 'true'));
+        });
+    }
+
+    // A uploads a sticker and sends it
+    await uploadStickerViaApi(pageA, a.token, createTestImageBuffer(64), 'hb_sticker_' + ts);
+    await pageA.click('#sticker-btn');
+    await pageA.waitForSelector('#sticker-panel', { state: 'visible' });
+    await pageA.waitForTimeout(500);
+    const stickerTab = pageA.locator('.sticker-tab[data-tab="stickers"]');
+    if (await stickerTab.isVisible()) { await stickerTab.click(); }
+    await pageA.waitForTimeout(2500);
+    const firstSticker = pageA.locator('.sticker-grid-item, .sticker-grid img').first();
+    if (await firstSticker.isVisible({ timeout: 5000 }).catch(() => false)) {
+        await firstSticker.click();
+        await pageA.waitForTimeout(4000);
+    }
+
+    // B sees the sticker live
+    await pageB.waitForTimeout(4000);
+    const bSticker1 = await pageB.evaluate(() => {
+        const s = document.querySelector('.sticker-message');
+        return s ? { hasImg: !!s.querySelector('img'), unavailable: (s.textContent || '').indexOf('sticker unavailable') !== -1 } : null;
+    });
+    expect(bSticker1).toBeTruthy();
+    expect(bSticker1.hasImg).toBe(true);
+    expect(bSticker1.unavailable).toBe(false);
+
+    // Run several heartbeat ticks directly, then wait for one real interval tick
+    for (let i = 0; i < 4; i++) {
+        await pageB.evaluate(() => { refreshAll(); });
+        await pageB.waitForTimeout(800);
+    }
+    await pageB.waitForTimeout(17000);
+
+    // Sticker must STILL be rendered (never flipped to unavailable / data-failed)
+    const bSticker2 = await pageB.evaluate(() => {
+        const s = document.querySelector('.sticker-message');
+        return s ? { hasImg: !!s.querySelector('img'), unavailable: (s.textContent || '').indexOf('sticker unavailable') !== -1, failed: s.getAttribute('data-failed') === '1' } : null;
+    });
+    expect(bSticker2).toBeTruthy();
+    expect(bSticker2.hasImg).toBe(true);
+    expect(bSticker2.unavailable).toBe(false);
+    expect(bSticker2.failed).toBe(false);
+
+    // The failed-sticker retry helper must run without throwing
+    const retryErr = await pageB.evaluate(() => {
+        try { retryFailedStickers(); return null; } catch (e) { return String(e); }
+    });
+    expect(retryErr).toBeNull();
+
+    await ctxA.close();
+});
 });
