@@ -931,6 +931,197 @@ function encodeTrimmedWav(buf, start, len) {
     return ab;
 }
 
+// ========================= Typing indicators =========================
+// Ephemeral: the client sends a `typing` WS message at most once per 2s
+// while the composer has new input. The server relays user_id + channel/dm
+// ids to the OTHER members only (no content, nothing stored). The recipient
+// shows "X is typing…" and auto-hides after 4s without a refresh.
+var _typingSentAt = 0;
+var _typingRefreshTimer = null;
+var _typingHideTimer = null;
+var _typingSenderId = null;
+
+function sendTypingSignal() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    var now = Date.now();
+    if (now - _typingSentAt < 2000) return;
+    _typingSentAt = now;
+    if (currentChannelId && !currentDmChannelId) {
+        ws.send(JSON.stringify({ type: 'typing', channel_id: currentChannelId }));
+    } else if (currentDmChannelId) {
+        ws.send(JSON.stringify({ type: 'typing', dm_channel_id: currentDmChannelId }));
+    }
+}
+
+function showTypingIndicator(userId) {
+    _typingSenderId = userId;
+    var el = document.getElementById('typing-indicator');
+    if (!el) return;
+    var name = 'Someone';
+    var cache = userDisplayNameCache[userId];
+    if (cache && cache.display_name) name = cache.display_name;
+    else if (currentDmOtherUser && currentDmOtherUser.id === userId) name = currentDmOtherUser.display_name || currentDmOtherUser.username || 'Someone';
+    else {
+        var member = (currentServerMemberList || []).find(function (m) { return m.id === userId || m.user_id === userId; });
+        if (member) name = member.display_name || member.username || 'Someone';
+    }
+    el.textContent = name + ' is typing…';
+    el.style.display = '';
+    if (_typingHideTimer) clearTimeout(_typingHideTimer);
+    _typingHideTimer = setTimeout(hideTypingIndicator, 4000);
+}
+
+function hideTypingIndicator() {
+    _typingSenderId = null;
+    var el = document.getElementById('typing-indicator');
+    if (el) {
+        el.style.display = 'none';
+        el.textContent = '';
+    }
+    if (_typingHideTimer) { clearTimeout(_typingHideTimer); _typingHideTimer = null; }
+}
+
+// ========================= Message pinning =========================
+// Pins are per-channel metadata: the client records which message ids are
+// pinned (from REST lists + live WS events) and renders a 📌 badge. Pin/unpin
+// is sent over WS; the server stores ONLY the message id + channel id.
+
+function togglePinMessage(messageId, pin) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (currentDmChannelId) {
+        ws.send(JSON.stringify({ type: pin ? 'dm_pin' : 'dm_unpin', dm_channel_id: currentDmChannelId, message_id: messageId }));
+    } else if (currentChannelId) {
+        ws.send(JSON.stringify({ type: pin ? 'message_pin' : 'message_unpin', channel_id: currentChannelId, message_id: messageId }));
+    }
+}
+
+// Update a rendered message's pin badge + action button in place (no rebuild).
+function setMessagePinned(messageId, pinned) {
+    var list = document.getElementById('message-list');
+    if (!list) return;
+    var msgEl = list.querySelector('.message[data-message-id="' + CSS.escape(messageId) + '"]');
+    if (!msgEl) return;
+    if (pinned) {
+        msgEl.setAttribute('data-pinned', '1');
+        if (!msgEl.querySelector('.pin-badge')) {
+            var badge = document.createElement('span');
+            badge.className = 'pin-badge';
+            badge.title = 'Pinned message';
+            badge.textContent = '📌';
+            var header = msgEl.querySelector('.content .header') || msgEl.querySelector('.content');
+            if (header) header.appendChild(badge);
+        }
+    } else {
+        msgEl.removeAttribute('data-pinned');
+        var b = msgEl.querySelector('.pin-badge');
+        if (b) b.remove();
+    }
+    // Update the action button state (pin ⇄ unpin)
+    var btn = msgEl.querySelector('.msg-action-btn[data-action="pin"], .msg-action-btn[data-action="unpin"]');
+    if (btn) {
+        btn.setAttribute('data-action', pinned ? 'unpin' : 'pin');
+        btn.title = pinned ? 'Unpin' : 'Pin';
+    }
+}
+
+function openPinsModal() {
+    var modal = document.getElementById('pins-modal');
+    if (!modal) return;
+    modal.style.display = 'flex';
+    loadPinsList();
+}
+
+function closePinsModal() {
+    var modal = document.getElementById('pins-modal');
+    if (modal) modal.style.display = 'none';
+}
+
+async function loadPinsList() {
+    var listEl = document.getElementById('pins-list');
+    if (!listEl) return;
+    listEl.innerHTML = '<div class="pins-empty">Loading pins…</div>';
+    try {
+        var url = currentDmChannelId
+            ? '/api/dm/' + encodeURIComponent(currentDmChannelId) + '/pins'
+            : (currentChannelId ? '/api/channels/' + encodeURIComponent(currentChannelId) + '/pins' : null);
+        if (!url) {
+            listEl.innerHTML = '<div class="pins-empty">No conversation open</div>';
+            return;
+        }
+        var res = await authFetch(url);
+        if (!res.ok) {
+            listEl.innerHTML = '<div class="pins-empty">Could not load pins</div>';
+            return;
+        }
+        var msgs = await res.json();
+        if (!Array.isArray(msgs) || msgs.length === 0) {
+            listEl.innerHTML = '<div class="pins-empty">No pinned messages in this channel</div>';
+            return;
+        }
+        var html = '';
+        for (var i = 0; i < msgs.length; i++) {
+            var m = msgs[i];
+            var text = '';
+            if (currentDmChannelId) {
+                try {
+                    text = await decryptDmMessageForDisplay(m);
+                } catch (_) {}
+            } else if (currentServerId) {
+                try {
+                    text = tryDecryptWithAllKeys(currentServerId, m.encrypted_content, m.nonce);
+                } catch (_) {}
+            }
+            if (!text) text = '[encrypted]';
+            var senderId = m.sender_user_id || m.sender_id;
+            var senderName = 'Someone';
+            var sCache = userDisplayNameCache[senderId];
+            if (sCache && sCache.display_name) senderName = sCache.display_name;
+            else if (currentDmOtherUser && currentDmOtherUser.id === senderId) senderName = currentDmOtherUser.display_name || currentDmOtherUser.username || 'Someone';
+            var timeStr = '';
+            try {
+                var d = new Date(m.timestamp);
+                var now = new Date();
+                var diffMin = Math.floor((now - d) / 60000);
+                if (diffMin < 1) timeStr = 'now';
+                else if (diffMin < 60) timeStr = diffMin + 'm ago';
+                else if (diffMin < 1440) timeStr = Math.floor(diffMin / 60) + 'h ago';
+                else timeStr = Math.floor(diffMin / 1440) + 'd ago';
+            } catch (_) {}
+            var preview = (text || '').replace(/\s+/g, ' ').trim();
+            if (preview.length > 120) preview = preview.substring(0, 120) + '…';
+            html += '<div class="pins-item" data-message-id="' + escapeAttr(m.id) + '">' +
+                '<div class="pins-item-head">' +
+                    '<span class="pins-item-sender">' + escapeHtml(senderName) + '</span>' +
+                    '<span class="pins-item-time">' + timeStr + '</span>' +
+                    '<button class="pins-item-jump" data-jump-message="' + escapeAttr(m.id) + '" title="Jump to message">Jump</button>' +
+                '</div>' +
+                '<div class="pins-item-text">' + escapeHtml(preview) + '</div>' +
+            '</div>';
+        }
+        listEl.innerHTML = html;
+    } catch (e) {
+        listEl.innerHTML = '<div class="pins-empty">Could not load pins</div>';
+    }
+}
+
+// Decrypt a DM message's content for the pins panel (sender may be either party).
+async function decryptDmMessageForDisplay(m) {
+    var kp = E2ECrypto.getIdentityKeyPair();
+    if (!kp) return null;
+    var rawSenderId = m.sender_user_id || (currentDmOtherUser && currentDmOtherUser.id) || user.id;
+    var otherId = rawSenderId === user.id ? (currentDmOtherUser && currentDmOtherUser.id) : rawSenderId;
+    if (!otherId) return null;
+    try {
+        var r = await authFetch('/api/identity/' + encodeURIComponent(otherId));
+        if (!r.ok) return null;
+        var d = await r.json();
+        var senderPubKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(d.identity_public_key));
+        return E2ECrypto.decryptDm(m.encrypted_content, m.nonce, m.dm_channel_id || currentDmChannelId, kp.privateKey, senderPubKey, m.message_nonce);
+    } catch (_) {
+        return null;
+    }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     checkTokenExpiry();
 
@@ -1075,6 +1266,10 @@ document.addEventListener('DOMContentLoaded', () => {
         var voiceView = document.getElementById('voice-popup');
         var inVoiceView = !!voiceView && getComputedStyle(voiceView).display !== 'none';
         bar.style.display = (!input.disabled && !inVoiceView) ? '' : 'none';
+        // The pins button lives in the chat header: show it whenever a text
+        // channel or DM conversation is open (same condition as the composer).
+        var pinsBtn = document.getElementById('pins-btn');
+        if (pinsBtn) pinsBtn.style.display = (!input.disabled && !inVoiceView) ? '' : 'none';
     }
     (function initComposerVisibility() {
         var composerInput = document.getElementById('message-input');
@@ -3004,6 +3199,36 @@ document.addEventListener('DOMContentLoaded', () => {
             sendMessage();
         }
     });
+
+    // Typing indicator: send a throttled `typing` WS message while typing,
+    // and keep refreshing it (Discord-style) so the other side's 4s auto-hide
+    // never fires mid-typing. Cleared automatically on send (input clears).
+    document.getElementById('message-input').addEventListener('input', function () {
+        sendTypingSignal();
+        if (_typingRefreshTimer) clearTimeout(_typingRefreshTimer);
+        _typingRefreshTimer = setTimeout(sendTypingSignal, 2000);
+    });
+
+    // Pins modal wiring
+    var pinsBtn = document.getElementById('pins-btn');
+    if (pinsBtn) pinsBtn.addEventListener('click', openPinsModal);
+    var closePinsBtn = document.getElementById('close-pins-modal');
+    if (closePinsBtn) closePinsBtn.addEventListener('click', closePinsModal);
+    var pinsModal = document.getElementById('pins-modal');
+    if (pinsModal) {
+        pinsModal.addEventListener('click', function (e) {
+            if (e.target === pinsModal) closePinsModal();
+        });
+        // Jump-to-message from the pins panel
+        document.getElementById('pins-list').addEventListener('click', function (e) {
+            var jumpBtn = e.target.closest('.pins-item-jump');
+            if (!jumpBtn) return;
+            var msgId = jumpBtn.getAttribute('data-jump-message');
+            if (!msgId) return;
+            closePinsModal();
+            navigateToMessage(currentServerId, currentChannelId, currentDmChannelId, msgId);
+        });
+    }
 
     // Attachment popup menu
     var attachPopup = document.getElementById('attach-popup');
@@ -6755,8 +6980,42 @@ function connectWebSocket(t) {
             case 'ping':
                 ws.send(JSON.stringify({ type: 'pong' }));
                 break;
+            case 'typing':
+                // Ephemeral typing indicator from another member of the channel/DM
+                // we're currently viewing. user_id is the raw UUID (metadata only;
+                // the display name is resolved from the recipient's own cache).
+                if (data.user_id && data.user_id !== user.id) {
+                    if ((data.channel_id && data.channel_id === currentChannelId) ||
+                        (data.dm_channel_id && data.dm_channel_id === currentDmChannelId)) {
+                        showTypingIndicator(data.user_id);
+                    }
+                }
+                break;
+            case 'message_pinned':
+                if (data.channel_id === currentChannelId && data.message_id) {
+                    setMessagePinned(data.message_id, true);
+                }
+                break;
+            case 'message_unpinned':
+                if (data.channel_id === currentChannelId && data.message_id) {
+                    setMessagePinned(data.message_id, false);
+                }
+                break;
+            case 'dm_pinned':
+                if (data.dm_channel_id === currentDmChannelId && data.message_id) {
+                    setMessagePinned(data.message_id, true);
+                }
+                break;
+            case 'dm_unpinned':
+                if (data.dm_channel_id === currentDmChannelId && data.message_id) {
+                    setMessagePinned(data.message_id, false);
+                }
+                break;
             case 'message_new':
                 if (data.channel_id && data.message) {
+                    // A message arrived in the channel we're viewing — whoever was
+                    // typing sent it; clear the indicator.
+                    if (data.channel_id === currentChannelId) hideTypingIndicator();
                     // Decrypt encrypted_sender_username if present (P3)
                     if (data.message.encrypted_sender_username && data.message.sender_username_nonce && data.server_id) {
                         try {
@@ -6789,6 +7048,8 @@ function connectWebSocket(t) {
             case 'dm_new':
                 if (data.dm_channel_id && data.message) {
                     if (data.dm_channel_id === currentDmChannelId) {
+                        // Message arrived in the DM we're viewing — clear the typing indicator
+                        hideTypingIndicator();
                         // Decrypt encrypted_sender_username if present (P3) — runs inside the
                         // active channel block so we can reuse the otherPubKey fetched below.
                         // Clear any unread badge when viewing the DM
@@ -9247,6 +9508,9 @@ async function appendMessage(msg) {
     // Dedupe: a live WS push can race an in-flight REST load for the same
     // message, causing it to render twice. Skip if this id is already shown.
     if (msg && msg.id && list && list.querySelector('.message[data-message-id="' + CSS.escape(msg.id) + '"]')) return;
+    // Pin state comes from the REST/WS payload; live pin events patch in place
+    // via setMessagePinned (no re-render), so no existing-element lookup here.
+    var msgElHasPin = false;
     // Capture the view we started rendering for so a channel switch mid-await
     // can't leave a stale message appended into the wrong conversation.
     const _chanAtStart = currentChannelId;
@@ -9573,7 +9837,9 @@ async function appendMessage(msg) {
         div.dataset.streamerContent = 'true';
     }
 
+    var isPinned = !!msg.pinned || msgElHasPin;
     const actionsHtml = '<div class="message-actions">' +
+        '<button class="msg-action-btn" data-action="' + (isPinned ? 'unpin' : 'pin') + '" title="' + (isPinned ? 'Unpin' : 'Pin') + '">&#128204;</button>' +
         '<button class="msg-action-btn" data-action="reply" title="Reply">&#x21A9;</button>' +
         '<button class="msg-action-btn" data-action="forward" title="Forward to channel">&#x21AA;</button>' +
         '<button class="msg-action-btn" data-action="forward-dm" title="Forward to DM">&#x1F4AC;</button>' +
@@ -9590,6 +9856,7 @@ async function appendMessage(msg) {
         '<div class="content">' +
             '<div class="header">' +
                 '<span class="display-name"' + (senderColor ? ' style="color:' + senderColor + ';text-shadow:' + getDisplayNameTextShadow(senderColor, senderBorderColor) + '"' : '') + '>' + escapeHtml(displayName) + '</span>' +
+                (isPinned ? '<span class="pin-badge" title="Pinned message">&#128204;</span>' : '') +
             '</div>' +
             wrappedContent +
         '</div>' +
@@ -9893,6 +10160,10 @@ function setupMessageActions() {
             handleEdit(messageId, msgDiv);
         } else if (action === 'delete') {
             handleDelete(messageId, msgDiv);
+        } else if (action === 'pin') {
+            togglePinMessage(messageId, true);
+        } else if (action === 'unpin') {
+            togglePinMessage(messageId, false);
         }
     });
 
@@ -11991,7 +12262,9 @@ async function appendDmMessage(msg, kp, otherPublicKey) {
         contentHtml += '<div class="text" style="color:#888;font-style:italic">' + label + '</div>';
     }
 
+    var isPinned = !!msg.pinned;
     const actionsHtml = '<div class="message-actions">' +
+        '<button class="msg-action-btn" data-action="' + (isPinned ? 'unpin' : 'pin') + '" title="' + (isPinned ? 'Unpin' : 'Pin') + '">&#128204;</button>' +
         '<button class="msg-action-btn" data-action="reply" title="Reply">&#x21A9;</button>' +
         '<button class="msg-action-btn" data-action="dm-forward" title="Forward to channel">&#x21AA;</button>' +
         '<button class="msg-action-btn" data-action="dm-forward-dm" title="Forward to DM">&#x1F4AC;</button>' +
@@ -12018,6 +12291,7 @@ async function appendDmMessage(msg, kp, otherPublicKey) {
         '<div class="content">' +
             '<div class="header">' +
                 '<span class="display-name"' + (senderColor ? ' style="color:' + senderColor + ';text-shadow:' + getDisplayNameTextShadow(senderColor, senderBorderColor) + '"' : '') + '>' + escapeHtml(displayName) + '</span>' +
+                (isPinned ? '<span class="pin-badge" title="Pinned message">&#128204;</span>' : '') +
             '</div>' +
             wrappedContent +
             editedHtml +

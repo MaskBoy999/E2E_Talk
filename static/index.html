@@ -62,6 +62,7 @@
             <div class="chat-header">
                 <button class="hamburger" id="hamburger">&#9776;</button>
                 <h3 id="channel-name">Select a channel</h3>
+                <button class="pins-btn" id="pins-btn" style="display:none" title="Pinned messages">&#128204;</button>
                 <button class="server-settings-btn" id="server-settings-btn" style="display:none" title="Server Settings">&#9881;</button>
                 <button class="members-toggle" id="members-toggle" title="Members">&#9776;</button>
             </div>
@@ -86,6 +87,7 @@
                     <div id="member-list" class="member-list"></div>
                 </div>
             </div>
+            <div class="typing-indicator" id="typing-indicator" style="display:none"></div>
             <div class="reply-bar" id="reply-bar" style="display:none"></div>
             <div class="audio-recording-bar" id="audio-recording-bar" style="display:none">
                 <div class="recording-bar-left">
@@ -777,6 +779,17 @@
             <div class="progress-bar-container" style="margin:6px 12px">
                 <div class="progress-bar-fill" id="sticker-send-fill"></div>
             </div>
+        </div>
+    </div>
+
+    <!-- Pinned Messages Modal -->
+    <div class="modal" id="pins-modal" style="display:none">
+        <div class="modal-content">
+            <div class="pins-modal-header">
+                <h3>📌 Pinned Messages</h3>
+                <button class="pins-modal-close" id="close-pins-modal" title="Close">&#10005;</button>
+            </div>
+            <div id="pins-list" class="pins-list"></div>
         </div>
     </div>
 

@@ -1159,6 +1159,120 @@ async fn handle_ws_message(
                 }
             }
         }
+        "typing" => {
+            // Ephemeral typing indicator: relayed to the OTHER members of the
+            // channel/DM so they can render "X is typing…". Nothing is stored.
+            // The payload carries only user_id + channel/dm ids (metadata, no
+            // message content) — the recipient renders the display name from
+            // their own decrypted profile cache.
+            let channel_id = parsed.get("channel_id").and_then(|c| c.as_str()).unwrap_or("").to_string();
+            let dm_channel_id = parsed.get("dm_channel_id").and_then(|c| c.as_str()).unwrap_or("").to_string();
+            if !channel_id.is_empty() {
+                let server_id = match state.db.get_server_id_for_channel(&channel_id) {
+                    Ok(id) => id,
+                    Err(_) => return,
+                };
+                if !state.db.is_member_of_server(user_id, &server_id).unwrap_or(false) {
+                    return;
+                }
+                let typing = serde_json::json!({
+                    "type": "typing",
+                    "channel_id": channel_id,
+                    "user_id": user_id,
+                });
+                match state.db.get_server_members(&server_id) {
+                    Ok(members) => {
+                        let others: Vec<String> = members.into_iter().filter(|m| m != user_id).collect();
+                        state.ws_manager.broadcast_to_users(&others, &typing.to_string()).await;
+                    }
+                    Err(_) => {}
+                }
+            } else if !dm_channel_id.is_empty() {
+                if !state.db.is_dm_member(&dm_channel_id, user_id).unwrap_or(false) {
+                    return;
+                }
+                let typing = serde_json::json!({
+                    "type": "typing",
+                    "dm_channel_id": dm_channel_id,
+                    "user_id": user_id,
+                });
+                match state.db.get_dm_members(&dm_channel_id) {
+                    Ok(members) => {
+                        let others: Vec<String> = members.into_iter().filter(|m| m != user_id).collect();
+                        state.ws_manager.broadcast_to_users(&others, &typing.to_string()).await;
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+        "message_pin" | "message_unpin" => {
+            let channel_id = match parsed.get("channel_id").and_then(|c| c.as_str()) {
+                Some(c) => c.to_string(),
+                None => return,
+            };
+            let message_id = match parsed.get("message_id").and_then(|c| c.as_str()) {
+                Some(c) => c.to_string(),
+                None => return,
+            };
+            let server_id = match state.db.get_server_id_for_channel(&channel_id) {
+                Ok(id) => id,
+                Err(_) => return,
+            };
+            if !state.db.is_member_of_server(user_id, &server_id).unwrap_or(false) {
+                return;
+            }
+            if msg_type == "message_pin" {
+                if state.db.pin_message(&channel_id, &message_id, user_id).is_err() {
+                    return;
+                }
+            } else if state.db.unpin_message(&channel_id, &message_id).is_err() {
+                return;
+            }
+            let outgoing = serde_json::json!({
+                "type": if msg_type == "message_pin" { "message_pinned" } else { "message_unpinned" },
+                "channel_id": channel_id,
+                "message_id": message_id,
+                "user_id": user_id,
+            });
+            match state.db.get_server_members(&server_id) {
+                Ok(members) => {
+                    state.ws_manager.broadcast_to_users(&members, &outgoing.to_string()).await;
+                }
+                Err(_) => {}
+            }
+        }
+        "dm_pin" | "dm_unpin" => {
+            let dm_channel_id = match parsed.get("dm_channel_id").and_then(|c| c.as_str()) {
+                Some(c) => c.to_string(),
+                None => return,
+            };
+            let message_id = match parsed.get("message_id").and_then(|c| c.as_str()) {
+                Some(c) => c.to_string(),
+                None => return,
+            };
+            if !state.db.is_dm_member(&dm_channel_id, user_id).unwrap_or(false) {
+                return;
+            }
+            if msg_type == "dm_pin" {
+                if state.db.pin_dm_message(&dm_channel_id, &message_id, user_id).is_err() {
+                    return;
+                }
+            } else if state.db.unpin_dm_message(&dm_channel_id, &message_id).is_err() {
+                return;
+            }
+            let outgoing = serde_json::json!({
+                "type": if msg_type == "dm_pin" { "dm_pinned" } else { "dm_unpinned" },
+                "dm_channel_id": dm_channel_id,
+                "message_id": message_id,
+                "user_id": user_id,
+            });
+            match state.db.get_dm_members(&dm_channel_id) {
+                Ok(members) => {
+                    state.ws_manager.broadcast_to_users(&members, &outgoing.to_string()).await;
+                }
+                Err(_) => {}
+            }
+        }
         "key_heartbeat" => {
             // Periodic heartbeat: check all servers the user is a member of and
             // re-broadcast key_needed for servers where the user has no key entries

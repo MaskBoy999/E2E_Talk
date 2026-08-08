@@ -4611,6 +4611,108 @@ body.show-msg-times-hover .message:hover .file-card .time-hover {
     line-height: 1;
 }
 .msg-action-btn:hover { background: #3d3d3d; color: #fff; }
+.msg-action-btn[data-action="pin"]:hover,
+.msg-action-btn[data-action="unpin"]:hover { color: #f5c542; }
+
+/* Pinned message badge (next to the sender display name) */
+.pin-badge {
+    font-size: 11px;
+    margin-left: 6px;
+    vertical-align: middle;
+    opacity: 0.85;
+}
+
+/* Pins button in the chat header */
+.pins-btn {
+    background: none;
+    border: none;
+    color: #aaa;
+    cursor: pointer;
+    font-size: 16px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    margin-left: auto;
+    order: 2;
+}
+.pins-btn:hover { background: #3d3d3d; color: #fff; }
+
+/* Typing indicator (above the composer) */
+.typing-indicator {
+    padding: 4px 12px 0 12px;
+    font-size: 12px;
+    color: #888;
+    font-style: italic;
+    min-height: 16px;
+    user-select: none;
+}
+
+/* Pins modal list */
+.pins-modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+}
+.pins-modal-header h3 { margin: 0; }
+.pins-modal-close {
+    background: none;
+    border: none;
+    color: #aaa;
+    cursor: pointer;
+    font-size: 16px;
+}
+.pins-modal-close:hover { color: #fff; }
+.pins-list {
+    max-height: 50vh;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.pins-item {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid #3d3d3d;
+    border-radius: 8px;
+    padding: 10px 12px;
+}
+.pins-item-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+}
+.pins-item-sender {
+    color: #569cd6;
+    font-weight: 600;
+    font-size: 13px;
+}
+.pins-item-time {
+    color: #777;
+    font-size: 11px;
+    flex: 1;
+}
+.pins-item-jump {
+    background: #3d3d3d;
+    color: #ddd;
+    border: none;
+    border-radius: 4px;
+    padding: 3px 10px;
+    font-size: 12px;
+    cursor: pointer;
+}
+.pins-item-jump:hover { background: #569cd6; color: #fff; }
+.pins-item-text {
+    color: #ccc;
+    font-size: 13px;
+    line-height: 1.4;
+    word-break: break-word;
+}
+.pins-empty {
+    color: #888;
+    text-align: center;
+    padding: 20px;
+    font-size: 13px;
+}
 
 /* Reply Quote */
 .reply-quote {

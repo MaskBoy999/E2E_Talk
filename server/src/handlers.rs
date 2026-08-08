@@ -1960,6 +1960,9 @@ pub async fn list_messages(
     sender_ids.dedup();
     let conv_profiles = state.db.get_conversation_profiles_batch("channel", &server_id, &sender_ids).unwrap_or_default();
 
+    // Pinned message ids for this channel (metadata only — content stays encrypted)
+    let pinned_ids = state.db.get_pinned_message_ids(&channel_id).unwrap_or_default();
+
     let message_infos: Vec<serde_json::Value> = messages
         .iter()
         .map(|m| {
@@ -1979,6 +1982,8 @@ pub async fn list_messages(
                 "encrypted_profile_snapshot": m.encrypted_profile_snapshot.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                 "profile_snapshot_nonce": m.profile_snapshot_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
 
+                "pinned": pinned_ids.iter().any(|pid| pid == &m.id),
+
                 "conversation_profile": conv_profiles.get(&m.sender_id).map(|(data, nonce)| serde_json::json!({
                     "encrypted_profile_data": data,
                     "nonce": nonce,
@@ -1987,6 +1992,60 @@ pub async fn list_messages(
         })
         .collect();
 
+    (StatusCode::OK, Json(serde_json::json!(message_infos))).into_response()
+}
+
+/// List pinned messages for a server channel. Returns the full encrypted message
+/// rows (same shape as list_messages) so the client can decrypt + render them;
+/// the server only ever stores/returns pin metadata + ciphertext.
+pub async fn list_channel_pins(
+    Path(channel_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    let server_id = match state.db.get_server_id_for_channel(&channel_id) {
+        Ok(id) => id,
+        Err(e) => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    if !state.db.is_member_of_server(&user_id, &server_id).unwrap_or(false) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Not a member of this server"}))).into_response();
+    }
+    let messages = match state.db.get_pinned_messages(&channel_id) {
+        Ok(m) => m,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let mut sender_ids: Vec<&str> = messages.iter().map(|m| m.sender_id.as_str()).collect();
+    sender_ids.dedup();
+    let conv_profiles = state.db.get_conversation_profiles_batch("channel", &server_id, &sender_ids).unwrap_or_default();
+    let message_infos: Vec<serde_json::Value> = messages
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "id": m.id,
+                "sender_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &m.sender_id),
+                "sender_user_id": m.sender_id,
+                "sender_id_hash": m.sender_id_hash,
+                "encrypted_sender_username": m.encrypted_sender_username,
+                "sender_username_nonce": m.sender_username_nonce,
+                "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
+                "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
+                "timestamp": m.timestamp,
+                "edited_at": m.edited_at,
+                "key_version": m.key_version,
+                "encrypted_profile_snapshot": m.encrypted_profile_snapshot.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+                "profile_snapshot_nonce": m.profile_snapshot_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+                "pinned": true,
+                "conversation_profile": conv_profiles.get(&m.sender_id).map(|(data, nonce)| serde_json::json!({
+                    "encrypted_profile_data": data,
+                    "nonce": nonce,
+                })),
+            })
+        })
+        .collect();
     (StatusCode::OK, Json(serde_json::json!(message_infos))).into_response()
 }
 
@@ -2034,6 +2093,10 @@ pub async fn list_messages_around(
     sender_ids2.dedup();
     let conv_profiles2 = state.db.get_conversation_profiles_batch("channel", &server_id, &sender_ids2).unwrap_or_default();
 
+    // Pinned ids so a jump-to-pin (which loads messages around a target) still
+    // renders the 📌 badge on the pinned message.
+    let pinned_ids2 = state.db.get_pinned_message_ids(&channel_id).unwrap_or_default();
+
     let message_infos: Vec<serde_json::Value> = messages
         .iter()
         .map(|m| {
@@ -2052,6 +2115,8 @@ pub async fn list_messages_around(
                 "key_version": m.key_version,
                 "encrypted_profile_snapshot": m.encrypted_profile_snapshot.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                 "profile_snapshot_nonce": m.profile_snapshot_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+
+                "pinned": pinned_ids2.iter().any(|pid| pid == &m.id),
 
                 "conversation_profile": conv_profiles2.get(&m.sender_id).map(|(data, nonce)| serde_json::json!({
                     "encrypted_profile_data": data,
@@ -4922,6 +4987,8 @@ pub async fn list_dm_messages(
             dm_sender_ids.dedup();
             let dm_conv_profiles = state.db.get_conversation_profiles_batch("dm", &dm_channel_id, &dm_sender_ids).unwrap_or_default();
 
+            let dm_pinned_ids = state.db.get_pinned_dm_message_ids(&dm_channel_id).unwrap_or_default();
+
             let result: Vec<serde_json::Value> = msgs
                 .iter()
                 .map(|m| {
@@ -4940,6 +5007,7 @@ pub async fn list_dm_messages(
                         "sender_id_hash": m.sender_id_hash,
                         "encrypted_sender_username": m.encrypted_sender_username,
                         "sender_username_nonce": m.sender_username_nonce,
+                        "pinned": dm_pinned_ids.iter().any(|pid| pid == &m.id),
                         "conversation_profile": dm_conv_profiles.get(&m.sender_id).map(|(data, nonce)| serde_json::json!({
                             "encrypted_profile_data": data,
                             "nonce": nonce,
@@ -4948,6 +5016,56 @@ pub async fn list_dm_messages(
                 })
                 .collect();
             (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
+/// List pinned messages for a DM channel (encrypted rows — same shape as
+/// list_dm_messages) so the client can decrypt + render them.
+pub async fn list_dm_pins(
+    Path(dm_channel_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    if !state.db.is_dm_member(&dm_channel_id, &user_id).unwrap_or(false) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Not a member of this DM"}))).into_response();
+    }
+    let msgs = match state.db.get_pinned_dm_messages(&dm_channel_id) {
+        Ok(m) => m,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let mut dm_sender_ids: Vec<&str> = msgs.iter().map(|m| m.sender_id.as_str()).collect();
+    dm_sender_ids.dedup();
+    let dm_conv_profiles = state.db.get_conversation_profiles_batch("dm", &dm_channel_id, &dm_sender_ids).unwrap_or_default();
+    let result: Vec<serde_json::Value> = msgs
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "id": m.id,
+                "dm_channel_id": m.dm_channel_id,
+                "sender_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &m.sender_id),
+                "sender_user_id": m.sender_id,
+                "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
+                "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
+                "timestamp": m.timestamp,
+                "edited_at": m.edited_at,
+                "key_version": m.key_version,
+                "encrypted_profile_snapshot": m.encrypted_profile_snapshot.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+                "profile_snapshot_nonce": m.profile_snapshot_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+                "sender_id_hash": m.sender_id_hash,
+                "encrypted_sender_username": m.encrypted_sender_username,
+                "sender_username_nonce": m.sender_username_nonce,
+                "pinned": true,
+                "conversation_profile": dm_conv_profiles.get(&m.sender_id).map(|(data, nonce)| serde_json::json!({
+                    "encrypted_profile_data": data,
+                    "nonce": nonce,
+                })),
+            })
+        })
+        .collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
 }
 
 // --- DM Keys (envelope-encrypted distribution, same pattern as server keys) ---

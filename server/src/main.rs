@@ -224,6 +224,7 @@ async fn main() {
         .route("/api/servers/{server_id}/channels/{channel_id}/name", put(handlers::update_channel_name))
         .route("/api/channels/{channel_id}/messages", get(handlers::list_messages))
         .route("/api/channels/{channel_id}/messages/around/{message_id}", get(handlers::list_messages_around))
+        .route("/api/channels/{channel_id}/pins", get(handlers::list_channel_pins))
         .route("/api/channels/{channel_id}", delete(handlers::delete_channel))
         .route("/api/invites/join", post(handlers::join_server))
         .route("/api/identity/{user_id}", get(handlers::get_identity_key))
@@ -303,6 +304,7 @@ async fn main() {
         .route("/api/dm/conversations", get(handlers::list_dm_conversations))
         .route("/api/dm/{friend_user_id}", post(handlers::get_or_create_dm))
         .route("/api/dm/{dm_channel_id}/messages", get(handlers::list_dm_messages))
+        .route("/api/dm/{dm_channel_id}/pins", get(handlers::list_dm_pins))
         .route("/api/dm/{dm_channel_id}/keys", get(handlers::get_dm_keys).post(handlers::upload_dm_key))
         // Phase 5: File Sharing
         .route("/api/files/init", post(handlers::init_file_upload))

@@ -1058,6 +1058,10 @@ impl Database {
         // so the "waiting for you to join" indicator persists in the DM chat.
         let _ = conn.execute_batch(include_str!("../migrations/051_dm_call_waiting.sql"));
 
+        // Migration 052: Per-channel message pinning. Pins are metadata only
+        // (message IDs); message content stays encrypted in messages/dm_messages.
+        let _ = conn.execute_batch(include_str!("../migrations/052_pins.sql"));
+
         // Data migration: normalize legacy space-separated CURRENT_TIMESTAMP values
         // ("YYYY-MM-DD HH:MM:SS") to fixed-width RFC3339 ("YYYY-MM-DDTHH:MM:SS.000000Z")
         // so lexicographic ordering is consistent with newly-inserted messages.
@@ -4133,6 +4137,194 @@ impl Database {
             |row| row.get(0),
         )
         .map_err(|_| "Message not found".to_string())
+    }
+
+    // --- Per-channel message pinning (migration 052) ---
+    // Pins are metadata only: the server records WHICH message IDs are pinned
+    // per channel / DM channel. Message content stays encrypted in
+    // messages / dm_messages — the server never sees pinned content plaintext.
+
+    pub fn pin_message(&self, channel_id: &str, message_id: &str, user_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        // Verify the message belongs to this channel (prevents cross-channel pinning)
+        let actual_channel: String = conn
+            .query_row(
+                "SELECT channel_id FROM messages WHERE id = ?1",
+                params![message_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| "Message not found".to_string())?;
+        if actual_channel != channel_id {
+            return Err("Message is not in this channel".to_string());
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO message_pins (channel_id, message_id, pinned_by) VALUES (?1, ?2, ?3)",
+            params![channel_id, message_id, user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn unpin_message(&self, channel_id: &str, message_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM message_pins WHERE channel_id = ?1 AND message_id = ?2",
+            params![channel_id, message_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn pin_dm_message(&self, dm_channel_id: &str, message_id: &str, user_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let actual_channel: String = conn
+            .query_row(
+                "SELECT dm_channel_id FROM dm_messages WHERE id = ?1",
+                params![message_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| "Message not found".to_string())?;
+        if actual_channel != dm_channel_id {
+            return Err("Message is not in this DM channel".to_string());
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO dm_message_pins (dm_channel_id, message_id, pinned_by) VALUES (?1, ?2, ?3)",
+            params![dm_channel_id, message_id, user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn unpin_dm_message(&self, dm_channel_id: &str, message_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM dm_message_pins WHERE dm_channel_id = ?1 AND message_id = ?2",
+            params![dm_channel_id, message_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Pinned message IDs for a server channel, newest pin first.
+    pub fn get_pinned_message_ids(&self, channel_id: &str) -> Result<Vec<String>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT message_id FROM message_pins WHERE channel_id = ?1 ORDER BY pinned_at DESC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![channel_id], |row| row.get(0))
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    }
+
+    /// Pinned message IDs for a DM channel, newest pin first.
+    pub fn get_pinned_dm_message_ids(&self, dm_channel_id: &str) -> Result<Vec<String>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT message_id FROM dm_message_pins WHERE dm_channel_id = ?1 ORDER BY pinned_at DESC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![dm_channel_id], |row| row.get(0))
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    }
+
+    /// Full encrypted Message rows for pinned server-channel messages (newest pin first).
+    pub fn get_pinned_messages(&self, channel_id: &str) -> Result<Vec<Message>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT m.id, m.channel_id, m.sender_id, u.username, u.profile_picture_file_id,
+                        m.encrypted_content, m.nonce, m.timestamp, m.edited_at,
+                        m.key_version, m.encrypted_profile_snapshot, m.profile_snapshot_nonce,
+                        m.encrypted_sender_username, m.sender_username_nonce, m.sender_id_hash, m.file_id
+                 FROM message_pins p
+                 INNER JOIN messages m ON m.id = p.message_id
+                 INNER JOIN users u ON m.sender_id = u.id
+                 WHERE p.channel_id = ?1
+                 ORDER BY p.pinned_at DESC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![channel_id], |row| {
+                Ok(Message {
+                    id: row.get(0)?,
+                    channel_id: row.get(1)?,
+                    sender_id: row.get(2)?,
+                    encrypted_content: row.get(5)?,
+                    nonce: row.get(6)?,
+                    timestamp: row.get(7)?,
+                    edited_at: row.get(8)?,
+                    key_version: row.get(9)?,
+                    encrypted_profile_snapshot: row.get(10)?,
+                    profile_snapshot_nonce: row.get(11)?,
+                    encrypted_sender_username: row.get(12)?,
+                    sender_username_nonce: row.get(13)?,
+                    sender_id_hash: row.get(14).ok().flatten(),
+                    file_id: row.get(15).ok().flatten(),
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    }
+
+    /// Full encrypted DmMessage rows for pinned DM messages (newest pin first).
+    pub fn get_pinned_dm_messages(&self, dm_channel_id: &str) -> Result<Vec<DmMessage>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT m.id, m.dm_channel_id, m.sender_id, u.username, u.profile_picture_file_id,
+                        m.encrypted_content, m.nonce, m.timestamp, m.edited_at,
+                        m.key_version, m.encrypted_profile_snapshot, m.profile_snapshot_nonce,
+                        m.encrypted_sender_username, m.sender_username_nonce, m.sender_id_hash, m.file_id
+                 FROM dm_message_pins p
+                 INNER JOIN dm_messages m ON m.id = p.message_id
+                 INNER JOIN users u ON m.sender_id = u.id
+                 WHERE p.dm_channel_id = ?1
+                 ORDER BY p.pinned_at DESC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![dm_channel_id], |row| {
+                Ok(DmMessage {
+                    id: row.get(0)?,
+                    dm_channel_id: row.get(1)?,
+                    sender_id: row.get(2)?,
+                    encrypted_content: row.get(5)?,
+                    nonce: row.get(6)?,
+                    timestamp: row.get(7)?,
+                    edited_at: row.get(8)?,
+                    key_version: row.get(9)?,
+                    encrypted_profile_snapshot: row.get(10)?,
+                    profile_snapshot_nonce: row.get(11)?,
+                    encrypted_sender_username: row.get(12)?,
+                    sender_username_nonce: row.get(13)?,
+                    sender_id_hash: row.get(14).ok().flatten(),
+                    file_id: row.get(15).ok().flatten(),
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
     }
 
     // --- User Stickers --- (server_stickers removed in migration 035)
