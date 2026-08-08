@@ -54,6 +54,7 @@
         popupOpen: false,        // voice channel view (top panel in the text area)
         dmPanelOpen: undefined,  // DM call panel in the DM chat
         dmCallExpanded: false,   // DM call panel expanded → covers the WHOLE screen
+        dmPanelHeight: null,     // user-resized DM panel height (px) or null for the CSS default
         voiceFullscreen: false,  // voice channel view expanded → covers the WHOLE screen
         incomingCall: null,      // {callerId, callerUsername, dmChannelId}
         dmCallActive: false,     // we're in a DM call (ringing/connected)
@@ -2514,13 +2515,16 @@
                     el2.style.height = 'auto';
                 } else {
                     // Collapsed: top panel of the text area (measured chat-body
-                    // top, below the chat header); CSS keeps the height
-                    // (clamp(460px, 68vh, 78vh) — DM calls are 1-on-1, so the
-                    // panel can be taller without scrolling the tiles).
+                    // top, below the chat header); the user can drag the bottom
+                    // handle to resize it (saved in S.dmPanelHeight), otherwise
+                    // the CSS default clamp(460px, 68vh, 78vh) applies — DM
+                    // calls are 1-on-1, so the panel can be tall without
+                    // scrolling the tiles.
                     el2.style.left = left + 'px';
                     el2.style.top = top + 'px';
                     el2.style.bottom = '';
-                    el2.style.height = '';
+                    var dh = clampDmPanelHeight(S.dmPanelHeight);
+                    el2.style.height = dh ? dh + 'px' : '';
                 }
             } else if (S.voiceFullscreen) {
                 // Voice view fullscreen: covers the ENTIRE viewport too.
@@ -3126,6 +3130,62 @@
         bindClick(p, 'dm-call-end', function () { endDmCall(); });
         bindClick(p, 'dm-call-expand', function () { toggleDmExpand(); });
         bindClick(p, 'dm-call-close', function () { hideDmPanel(); });
+        initDmResize();
+    }
+
+    // Clamp a saved DM panel height to a sane range for the current viewport
+    // (min 180px so the tiles stay usable; max keeps the chat header plus a
+    // sliver of the text area visible below the panel).
+    function clampDmPanelHeight(h) {
+        if (!h) return null;
+        var min = 180;
+        var max = Math.max(min, window.innerHeight - 90);
+        return Math.max(min, Math.min(h, max));
+    }
+
+    // Drag the bottom handle to resize the DM call panel's height. The height
+    // lives in S.dmPanelHeight and is persisted in localStorage, so the user's
+    // choice survives page refreshes (unlike expand/fullscreen, which reset to
+    // OFF on every join/leave). Hidden while the panel is expanded.
+    function initDmResize() {
+        var handle = el('dm-call-resize');
+        var panel = el('dm-call-panel');
+        if (!handle || !panel) return;
+        try {
+            var saved = parseInt(localStorage.getItem('dm_call_panel_h'), 10);
+            if (saved && saved >= 180) S.dmPanelHeight = saved;
+        } catch (e) {}
+        var startY = 0;
+        var startH = 0;
+        var dragging = false;
+        function onMove(e) {
+            if (!dragging) return;
+            var h = clampDmPanelHeight(startH + (e.clientY - startY));
+            if (!h) return;
+            S.dmPanelHeight = h;
+            panel.style.height = h + 'px';
+            try { localStorage.setItem('dm_call_panel_h', String(h)); } catch (err) {}
+            e.preventDefault();
+        }
+        function onUp() {
+            if (!dragging) return;
+            dragging = false;
+            handle.classList.remove('dragging');
+            document.body.classList.remove('resizing-dm');
+        }
+        handle.addEventListener('pointerdown', function (e) {
+            if (S.dmCallExpanded) return;
+            dragging = true;
+            startY = e.clientY;
+            startH = panel.offsetHeight;
+            handle.classList.add('dragging');
+            document.body.classList.add('resizing-dm');
+            handle.setPointerCapture(e.pointerId);
+            e.preventDefault();
+        });
+        handle.addEventListener('pointermove', onMove);
+        handle.addEventListener('pointerup', onUp);
+        handle.addEventListener('pointercancel', onUp);
     }
 
     function renderDmPanel() {

@@ -6914,6 +6914,37 @@ body.streamer-mode .dm-avatar:hover {
     border-bottom: none;
     z-index: 2000;
 }
+/* Drag handle on the bottom edge of the DM call panel — grab it to resize
+   the panel height (persisted per-user in localStorage). Hidden when the
+   panel is expanded to full screen. */
+.dm-call-resize {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -8px;
+    height: 16px;
+    cursor: ns-resize;
+    z-index: 6;
+    touch-action: none;
+}
+.dm-call-resize::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    bottom: 1px;
+    width: 48px;
+    height: 5px;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.22);
+    transition: background 0.15s ease;
+}
+.dm-call-resize:hover::after,
+.dm-call-resize.dragging::after {
+    background: rgba(255, 255, 255, 0.45);
+}
+.dm-call-panel.expanded .dm-call-resize { display: none; }
+body.resizing-dm { cursor: ns-resize !important; user-select: none; }
 .dm-call-body {
     flex: 1;
     display: flex;
