@@ -10311,20 +10311,129 @@ async function scrollToMessageWithPagination(messageId, channelId, dmChannelId) 
     if (target) {
         // Unpin from latest so image loads don't yank the view back down
         _pinnedToBottom = false;
-        // Suppress scroll-listener pagination during the glide so the smooth
-        // scroll isn't interrupted by a scrollTop snap; re-enable after it settles.
-        if (_suppressScrollTimer) clearTimeout(_suppressScrollTimer);
-        _suppressScrollLoad = true;
-        target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        // Align the target, then RE-ALIGN as its media settles. Sticker
+        // previews and image/file uploads load asynchronously (decrypt key →
+        // fetch blob → createObjectURL), so a single scrollIntoView lands too
+        // far once the message grows taller. settleScrollOnTarget picks the
+        // right alignment (center for short messages, top-aligned for tall
+        // ones) and re-aligns once the layout is stable (or at a hard
+        // deadline), keeping the scroll-listener pagination suppressed
+        // throughout.
+        settleScrollOnTarget(target);
         target.classList.add('flash-highlight');
         // Keep the gold highlight visible long enough to identify the target,
         // even when it sits at the bottom edge (last message, nothing below).
         setTimeout(function () { target.classList.remove('flash-highlight'); }, 3800);
-        // Re-enable after the glide settles; stored id so a rapid second
-        // redirect can't have its suppression cleared by the first timer.
-        _suppressScrollTimer = setTimeout(function () { _suppressScrollLoad = false; _suppressScrollTimer = null; }, 800);
         if (list) updateJumpToBottomButton(list);
     }
+}
+
+/**
+ * Align a message in the scroll container and keep re-aligning while its
+ * media loads. Used by jump-to-message/pins: stickers, GIFs and image uploads
+ * render asynchronously (blob URLs, file decryption) and change the message's
+ * height after the initial scroll — without this the view drifts past the
+ * target (a sticker+text or tall image lands out of view).
+ *
+ * Alignment is height-aware: a message that fits comfortably in the viewport
+ * is CENTERED (looks best; short sticker-only pins behave as before), while a
+ * message taller than ~75% of the viewport can't be centered without cutting
+ * off its top — those are TOP-ALIGNED (with a small margin) so the whole
+ * message is visible from its start.
+ *
+ * Fast path: when the target has NO async media (no unloaded <img>, no
+ * sticker/gif/file placeholders), a single align is enough — this keeps
+ * notification/mention redirects snappy with exactly one glide.
+ *
+ * Slow path (async media present): poll the element height (cheap layout read)
+ * and re-align once it has been stable twice (~500ms). A hard deadline stops
+ * the poll and forces a final re-align so a stuck image can't hang the jump
+ * or leak a polling timer. Pagination suppression is extended on every
+ * re-align and finally released when settling completes.
+ */
+function settleScrollOnTarget(target) {
+    if (!target) return;
+    var done = false;
+    var deadline = null;
+    function release() {
+        done = true;
+        if (deadline) { clearTimeout(deadline); deadline = null; }
+        // Let scroll-listener pagination resume after the glide settles.
+        if (_suppressScrollTimer) clearTimeout(_suppressScrollTimer);
+        _suppressScrollTimer = setTimeout(function () { _suppressScrollLoad = false; _suppressScrollTimer = null; }, 800);
+    }
+    var container = target.closest('.message-list, #message-list, .messages, [class*=message-list]') || target.parentElement;
+    function align() {
+        if (done || !target || !target.isConnected) return;
+        var fits = container.clientHeight > 0 && target.offsetHeight < container.clientHeight * 0.75;
+        if (fits) {
+            target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        } else {
+            // Tall message: pin its TOP to the list's top edge (small margin)
+            // so its start — sticker, preview, filename — is always visible.
+            var top = target.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop;
+            container.scrollTo({ top: Math.max(0, top - 16), behavior: 'smooth' });
+        }
+    }
+    function recenter() {
+        if (done || !target || !target.isConnected) return;
+        if (_suppressScrollTimer) clearTimeout(_suppressScrollTimer);
+        _suppressScrollLoad = true;
+        align();
+        // Stored id so a rapid second redirect can't have its suppression
+        // cleared by the first timer.
+        _suppressScrollTimer = setTimeout(function () { _suppressScrollLoad = false; _suppressScrollTimer = null; }, 800);
+    }
+    // Async media check — when none is present, one scroll is enough.
+    var hasAsyncMedia = !!target.querySelector('img:not([complete]), .sticker-message[data-file-id], .gif-message[data-file-id], .file-preview, .file-card');
+    recenter(); // initial align
+    if (!hasAsyncMedia) {
+        // Plain message: single glide, then release suppression on the timer.
+        release();
+        return;
+    }
+    // Watch for late layout drift: media inside the target (its height grows)
+    // or in messages ABOVE it (its position moves down) can load AFTER the
+    // initial glide and push the message past the viewport center. Track the
+    // target's position RELATIVE TO THE SCROLL CONTAINER — that value is
+    // scroll-independent, so our own glide never looks like drift, and a
+    // static message is never re-scrolled (no redundant second glide).
+    var lastHeight = -1;
+    var lastTop = null;
+    var stableRuns = 0;
+    var corrected = false;
+    function poll() {
+        if (done || !target || !target.isConnected) return;
+        var h = target.offsetHeight;
+        var t = Math.round(target.getBoundingClientRect().top - container.getBoundingClientRect().top);
+        var changed = (lastHeight !== -1) && (h !== lastHeight || (lastTop !== null && Math.abs(t - lastTop) > 3));
+        lastHeight = h;
+        lastTop = t;
+        if (changed) {
+            // Real layout drift — re-align once per change and re-baseline.
+            recenter();
+            corrected = true;
+            stableRuns = 0;
+        } else {
+            stableRuns++;
+        }
+        if (corrected && stableRuns >= 2) {
+            // Drift corrected and layout is stable again — stop.
+            release();
+            return;
+        }
+        setTimeout(poll, 250);
+    }
+    setTimeout(poll, 250);
+    // Hard deadline — stop the watch. If the layout never settled (media kept
+    // changing, stableRuns stayed below 2) give one final re-align; a clean
+    // settle (stableRuns has been climbing) releases without a redundant
+    // second glide.
+    deadline = setTimeout(function () {
+        deadline = null;
+        if (stableRuns < 2) recenter();
+        release();
+    }, 2600);
 }
 
 /** Wait up to `timeout` ms for an element matching `selector` to appear in the DOM. */
