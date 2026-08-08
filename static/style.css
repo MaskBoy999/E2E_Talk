@@ -4611,6 +4611,11 @@ body.show-msg-times-hover .message:hover .file-card .time-hover {
     line-height: 1;
 }
 .msg-action-btn:hover { background: #3d3d3d; color: #fff; }
+/* Pin button: gold when the message is ALREADY pinned (visual state indicator) */
+.msg-action-btn.pinned {
+    color: #f5c542;
+    background: rgba(245, 197, 66, 0.12);
+}
 .msg-action-btn[data-action="pin"]:hover,
 .msg-action-btn[data-action="unpin"]:hover { color: #f5c542; }
 

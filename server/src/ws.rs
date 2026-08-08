@@ -1221,6 +1221,11 @@ async fn handle_ws_message(
             if !state.db.is_member_of_server(user_id, &server_id).unwrap_or(false) {
                 return;
             }
+            // Server channels: only the server OWNER may pin or unpin messages
+            // (no permission system yet — owner is the only elevated role).
+            if !state.db.is_server_owner(user_id, &server_id).unwrap_or(false) {
+                return;
+            }
             if msg_type == "message_pin" {
                 if state.db.pin_message(&channel_id, &message_id, user_id).is_err() {
                     return;

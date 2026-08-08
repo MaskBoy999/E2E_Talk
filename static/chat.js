@@ -986,6 +986,16 @@ function hideTypingIndicator() {
 // pinned (from REST lists + live WS events) and renders a 📌 badge. Pin/unpin
 // is sent over WS; the server stores ONLY the message id + channel id.
 
+// Build the pin/unpin action button. The glyph + gold `pinned` class show at a
+// glance whether the message is ALREADY pinned (📌, gold, "Unpin") or not
+// (📌 outline state, dimmed, "Pin"). setMessagePinned keeps the class in sync
+// on live pin/unpin events without re-rendering the message.
+function pinButtonHtml(isPinned) {
+    // The glyph stays 📌 in both states; the gold `pinned` class is the visual
+    // "already pinned" indicator.
+    return '<button class="msg-action-btn' + (isPinned ? ' pinned' : '') + '" data-action="' + (isPinned ? 'unpin' : 'pin') + '" title="' + (isPinned ? 'Unpin' : 'Pin') + '">&#128204;</button>';
+}
+
 function togglePinMessage(messageId, pin) {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     if (currentDmChannelId) {
@@ -1016,11 +1026,12 @@ function setMessagePinned(messageId, pinned) {
         var b = msgEl.querySelector('.pin-badge');
         if (b) b.remove();
     }
-    // Update the action button state (pin ⇄ unpin)
+    // Update the action button state (pin ⇄ unpin) + the gold pinned indicator
     var btn = msgEl.querySelector('.msg-action-btn[data-action="pin"], .msg-action-btn[data-action="unpin"]');
     if (btn) {
         btn.setAttribute('data-action', pinned ? 'unpin' : 'pin');
         btn.title = pinned ? 'Unpin' : 'Pin';
+        btn.classList.toggle('pinned', pinned);
     }
 }
 
@@ -9838,8 +9849,11 @@ async function appendMessage(msg) {
     }
 
     var isPinned = !!msg.pinned || msgElHasPin;
+    // Server channels: ONLY the server owner may pin/unpin (enforced server-side
+    // too). DMs have no owner — both members get the button (see appendDmMessage).
+    var canPin = !!isOwner;
     const actionsHtml = '<div class="message-actions">' +
-        '<button class="msg-action-btn" data-action="' + (isPinned ? 'unpin' : 'pin') + '" title="' + (isPinned ? 'Unpin' : 'Pin') + '">&#128204;</button>' +
+        (canPin ? pinButtonHtml(isPinned) : '') +
         '<button class="msg-action-btn" data-action="reply" title="Reply">&#x21A9;</button>' +
         '<button class="msg-action-btn" data-action="forward" title="Forward to channel">&#x21AA;</button>' +
         '<button class="msg-action-btn" data-action="forward-dm" title="Forward to DM">&#x1F4AC;</button>' +
@@ -12263,8 +12277,10 @@ async function appendDmMessage(msg, kp, otherPublicKey) {
     }
 
     var isPinned = !!msg.pinned;
+    // DM conversations have no owner: BOTH members may pin/unpin (server-side
+    // enforces owner-only for server channels, never for DMs).
     const actionsHtml = '<div class="message-actions">' +
-        '<button class="msg-action-btn" data-action="' + (isPinned ? 'unpin' : 'pin') + '" title="' + (isPinned ? 'Unpin' : 'Pin') + '">&#128204;</button>' +
+        pinButtonHtml(isPinned) +
         '<button class="msg-action-btn" data-action="reply" title="Reply">&#x21A9;</button>' +
         '<button class="msg-action-btn" data-action="dm-forward" title="Forward to channel">&#x21AA;</button>' +
         '<button class="msg-action-btn" data-action="dm-forward-dm" title="Forward to DM">&#x1F4AC;</button>' +
