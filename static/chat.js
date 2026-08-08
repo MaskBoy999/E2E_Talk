@@ -11889,7 +11889,17 @@ function updateDmWaitingBanner() {
     var otherName = wc.waitingUsername || (currentDmOtherUser && currentDmOtherUser.username) || 'the other person';
     var text = document.getElementById('dm-waiting-text');
     var joinBtn = document.getElementById('dm-waiting-join-btn');
-    if (text) text.textContent = otherName + ' is waiting for you to join the call';
+    if (text) {
+        // Colored + glowing display name, matching the call bars.
+        var wName = escapeHtml(otherName);
+        var wUid = wc.waitingUserId || (currentDmOtherUser && currentDmOtherUser.id);
+        var wCache = wUid && userDisplayNameCache[wUid];
+        if (wCache && wCache.username_color) {
+            var wStyle = 'color:' + wCache.username_color + ';text-shadow:' + getDisplayNameTextShadow(wCache.username_color, wCache.username_border_color) + ';';
+            wName = '<span style="' + wStyle + '">' + wName + '</span>';
+        }
+        text.innerHTML = wName + ' is waiting for you to join the call';
+    }
     if (joinBtn) joinBtn.textContent = 'Join Call';
     banner.style.display = 'flex';
     if (joinBtn) {

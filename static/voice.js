@@ -2141,7 +2141,10 @@
             var b = el('incoming-call-bar');
             if (b) b.classList.add('waiting');
             var name = el('incoming-call-name');
-            if (name) name.textContent = S.incomingCall.callerUsername + ' is waiting for you to join';
+            if (name) {
+                var disp = (typeof userDisplayNameCache !== 'undefined' && userDisplayNameCache[data.caller_id] && userDisplayNameCache[data.caller_id].display_name) || data.caller_username || S.incomingCall.callerUsername || '';
+                name.innerHTML = memberNameSpan(data.caller_id, disp) + ' is waiting for you to join';
+            }
             var acceptBtn = el('incoming-call-accept');
             if (acceptBtn) acceptBtn.textContent = 'Join';
             // Persist the waiting marker: the CALLER is the one waiting for us.
@@ -2663,7 +2666,14 @@
         syncOverlayBounds();
         bar.style.display = 'flex';
         var name = el('voice-bar-name');
-        if (name) name.textContent = S.roomType === 'dm' ? ('In call with ' + (S.dmCallPartner ? S.dmCallPartner.username : '…')) : (S.channelName || 'Voice Connected');
+        if (name) {
+            if (S.roomType === 'dm' && S.dmCallPartner) {
+                var pn = memberDisplayName(S.dmCallPartner.id, S.dmCallPartner);
+                name.innerHTML = 'In call with ' + memberNameSpan(S.dmCallPartner.id, pn);
+            } else {
+                name.textContent = S.channelName || 'Voice Connected';
+            }
+        }
         updateSelfUI();
         renderBar();
     }
@@ -2818,6 +2828,30 @@
         return (m && m.username) || 'Unknown';
     }
 
+    // Display-name color + glow (same treatment as the chat/member list):
+    // returns a CSS style string, or '' when the user has no custom color.
+    function memberNameStyle(uid) {
+        var style = '';
+        if (uid && typeof userDisplayNameCache !== 'undefined' && userDisplayNameCache[uid]) {
+            var color = userDisplayNameCache[uid].username_color;
+            if (color) {
+                style = 'color:' + color + ';';
+                if (typeof getDisplayNameTextShadow === 'function') {
+                    var border = userDisplayNameCache[uid].username_border_color;
+                    style += 'text-shadow:' + getDisplayNameTextShadow(color, border) + ';';
+                }
+            }
+        }
+        return style;
+    }
+
+    // Wraps a display name in a colored span when the user has a custom color;
+    // otherwise returns the plain escaped name.
+    function memberNameSpan(uid, name) {
+        var style = memberNameStyle(uid);
+        return style ? '<span style="' + style + '">' + esc(name) + '</span>' : esc(name);
+    }
+
     // Avatar HTML using the decrypted PFP pipeline (same as the channel list):
     // cached blob URL, or an async-loading placeholder with the initial letter.
     function memberAvatarHtml(uid, m, name, cls) {
@@ -2866,11 +2900,12 @@
         }) : m;
         var speaking = local.speaking && !(local.muted || local.force_muted);
         var name = memberDisplayName(uid, local);
+        var nameStyle = memberNameStyle(uid);
         var html = '<div class="voice-member-row' + (speaking ? ' speaking' : '') + '" data-uid="' + esc(uid) + '"' + (isSelf ? ' data-self="1"' : '') + '>';
         html += '<div class="voice-member-ident">';
         html += memberAvatarHtml(uid, local, name, 'voice-member-avatar');
         html += '<div class="voice-member-info">';
-        html += '<span class="voice-member-name">' + esc(name) + (local.is_owner ? ' 👑' : '') + (isSelf ? ' (you)' : '') + '</span>';
+        html += '<span class="voice-member-name"' + (nameStyle ? ' style="' + nameStyle + '"' : '') + '>' + esc(name) + (local.is_owner ? ' 👑' : '') + (isSelf ? ' (you)' : '') + '</span>';
         html += '<span class="voice-member-status">' + memberBadges(local, 'vm') + '</span>';
         html += '</div></div>';
         html += '<div class="voice-member-media">';
@@ -2927,6 +2962,15 @@
             row.addEventListener('contextmenu', function (e) {
                 e.preventDefault();
                 openVolumeMenu(e, row.dataset.uid);
+            });
+        });
+        // Click the member's PFP → open their profile view (like everywhere else).
+        list.querySelectorAll('.voice-member-avatar').forEach(function (av) {
+            av.addEventListener('click', function () {
+                var row = av.closest('.voice-member-row');
+                if (!row) return;
+                var uid = row.getAttribute('data-uid');
+                if (uid && typeof openProfileModal === 'function') openProfileModal(uid);
             });
         });
         wireVoiceMedia(list);
@@ -3008,12 +3052,14 @@
         p.style.display = 'flex';
         var name = el('dm-call-name');
         if (name) {
+            var pn = S.dmCallPartner ? memberDisplayName(S.dmCallPartner.id, S.dmCallPartner) : null;
+            var pid = S.dmCallPartner ? S.dmCallPartner.id : null;
             if (S.callWaiting) {
-                name.textContent = 'Waiting for ' + (S.dmCallPartner ? S.dmCallPartner.username : 'answer') + '…';
+                name.innerHTML = 'Waiting for ' + (pn ? memberNameSpan(pid, pn) : esc('answer')) + '…';
             } else if (!S.dmCallAnswered && S.dmCallActive) {
-                name.textContent = 'Calling ' + (S.dmCallPartner ? S.dmCallPartner.username : '…') + '…';
+                name.innerHTML = 'Calling ' + (pn ? memberNameSpan(pid, pn) : '…') + '…';
             } else {
-                name.textContent = S.dmCallPartner ? S.dmCallPartner.username : '…';
+                name.innerHTML = pn ? memberNameSpan(pid, pn) : '…';
             }
         }
         applyDmExpand();
@@ -3122,6 +3168,15 @@
                 if (uid) openVolumeMenu(e, uid);
             });
         });
+        // Click the member's PFP → open their profile view.
+        body.querySelectorAll('.dm-call-avatar').forEach(function (av) {
+            av.addEventListener('click', function () {
+                var tile = av.closest('.dm-call-tile');
+                if (!tile) return;
+                var uid = tile.getAttribute('data-uid');
+                if (uid && typeof openProfileModal === 'function') openProfileModal(uid);
+            });
+        });
         updateSelfUI();
     }
 
@@ -3133,7 +3188,7 @@
         html += '<div class="dm-call-tile-head">';
         html += memberAvatarHtml(uid, m, name, 'dm-call-avatar');
         html += '<div class="dm-call-tile-info">';
-        html += '<span>' + esc(name) + '</span>';
+        html += memberNameSpan(uid, name);
         html += memberBadges(m, 'vm');
         html += '</div></div>';
         html += '<div class="dm-call-tile-media">';
@@ -3156,12 +3211,14 @@
         m.style.display = 'flex';
         var name = el('dm-mini-bar-name');
         if (name) {
+            var pn = S.dmCallPartner ? memberDisplayName(S.dmCallPartner.id, S.dmCallPartner) : null;
+            var pid = S.dmCallPartner ? S.dmCallPartner.id : null;
             if (S.callWaiting) {
-                name.textContent = S.dmCallPartner ? ('Waiting for ' + S.dmCallPartner.username + '…') : 'Waiting for answer…';
+                name.innerHTML = pn ? ('Waiting for ' + memberNameSpan(pid, pn) + '…') : 'Waiting for answer…';
             } else if (!S.dmCallAnswered && S.dmCallActive) {
-                name.textContent = S.dmCallPartner ? ('Calling ' + S.dmCallPartner.username + '…') : 'Calling…';
+                name.innerHTML = pn ? ('Calling ' + memberNameSpan(pid, pn) + '…') : 'Calling…';
             } else {
-                name.textContent = S.dmCallPartner ? ('In call with ' + S.dmCallPartner.username) : 'In call';
+                name.innerHTML = pn ? ('In call with ' + memberNameSpan(pid, pn)) : 'In call';
             }
         }
     }
@@ -3193,7 +3250,10 @@
         b.classList.remove('waiting');
         b.style.display = 'flex';
         var name = el('incoming-call-name');
-        if (name) name.textContent = call.callerUsername + ' is calling…';
+        if (name) {
+            var disp = (call.callerId && typeof userDisplayNameCache !== 'undefined' && userDisplayNameCache[call.callerId] && userDisplayNameCache[call.callerId].display_name) || call.callerUsername || '…';
+            name.innerHTML = memberNameSpan(call.callerId, disp) + ' is calling…';
+        }
         var acceptBtn = el('incoming-call-accept');
         if (acceptBtn) acceptBtn.textContent = 'Accept';
     }
@@ -3676,13 +3736,25 @@
                 if (m.camera) badges += '<span class="vc-badge" title="Camera">📷</span>';
                 if (m.screen) badges += '<span class="vc-badge" title="Screen">🖥️</span>';
 
+                var chipStyle = memberNameStyle(m.user_id);
                 html += '<div class="voice-chip-row' + (speaking ? ' speaking' : '') + '" data-uid="' + esc(m.user_id) + '" title="' + esc(title) + '">' +
                     avatar +
-                    '<span class="voice-chip-name">' + esc(name) + '</span>' +
+                    '<span class="voice-chip-name"' + (chipStyle ? ' style="' + chipStyle + '"' : '') + '>' + esc(name) + '</span>' +
                     (badges ? '<span class="voice-chip-badges">' + badges + '</span>' : '') +
                     '</div>';
             });
             chipWrap.innerHTML = html;
+            // Click a chip's PFP → open that member's profile view.
+            chipWrap.querySelectorAll('.voice-chip-avatar').forEach(function (av) {
+                av.addEventListener('click', function (e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    var row = av.closest('.voice-chip-row');
+                    if (!row) return;
+                    var uid = row.getAttribute('data-uid');
+                    if (uid && typeof openProfileModal === 'function') openProfileModal(uid);
+                });
+            });
         });
     }
 
