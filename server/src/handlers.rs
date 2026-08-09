@@ -131,6 +131,28 @@ fn extract_user(headers: &HeaderMap, state: &AppState) -> Result<String, (Status
         )
     })?;
 
+    // Server-side session check: a force-kicked (revoked) session is rejected
+    // on the very next authenticated request, even though its JWT is still
+    // cryptographically valid. Tokens without a sid (pre-migration) are also
+    // rejected so the user re-logs in through the new flow exactly once.
+    if claims.sid.is_empty()
+        || state
+            .db
+            .auth_session_valid(&claims.sid)
+            .map_err(|_| {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({"error": "Session check failed"})),
+                )
+            })?
+            != true
+    {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Session revoked — please sign in again"})),
+        ));
+    }
+
     Ok(claims.sub)
 }
 
@@ -140,6 +162,20 @@ pub async fn logout(
 ) -> impl IntoResponse {
     // Validate the token if present (optional)
     let _ = extract_user(&headers, &state);
+
+    // Revoke this device's server-side session so a stolen token can't be
+    // replayed after sign-out (and the Devices panel stops listing it).
+    let auth_token: Option<String> = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer ").map(|s| s.to_string()));
+    if let Some(token) = auth_token {
+        if let Ok(claims) = auth::validate_token(&token, &state.config.jwt_secret) {
+            if !claims.sid.is_empty() {
+                let _ = state.db.revoke_auth_session(&claims.sid, &claims.sub);
+            }
+        }
+    }
 
     // Clear all known cookies by overwriting with blank expired values
     let mut resp_headers = HeaderMap::new();
@@ -173,6 +209,204 @@ pub async fn logout_get(
         HeaderValue::from_str("/login.html").unwrap(),
     );
     (StatusCode::FOUND, resp_headers, ())
+}
+
+// --- Session/device management (Settings → Security → Devices) ---
+
+/// GET /api/auth/sessions — every signed-in device of the current user.
+/// Only the device name and a short device-id suffix are returned (the full
+/// device id is a client key, not a secret, but there's no reason to show it
+/// in full). The session id IS returned so the client can kick by id.
+pub async fn list_auth_sessions(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let (user_id, current_sid) = match extract_claims(&headers, &state) {
+        Ok(c) => (c.sub, c.sid),
+        Err(r) => return r.into_response(),
+    };
+
+    let rows = match state.db.list_auth_sessions(&user_id) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
+
+    let sessions: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|(id, device_id, device_name, created_at, last_active_at, expires_at, revoked)| {
+            let short_id = if device_id.len() > 8 {
+                format!("…{}", &device_id[device_id.len() - 8..])
+            } else {
+                device_id.clone()
+            };
+            serde_json::json!({
+                "id": id,
+                "device_name": device_name,
+                "device_id": short_id,
+                "created_at": created_at,
+                "last_active_at": last_active_at,
+                "expires_at": expires_at,
+                "revoked": revoked != 0,
+                "is_current": id == current_sid,
+            })
+        })
+        .collect();
+
+    (StatusCode::OK, Json(serde_json::json!({"sessions": sessions}))).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct KickSessionRequest {
+    pub session_id: String,
+}
+
+/// POST /api/auth/sessions/kick — revoke one session. If that device is
+/// currently connected over WebSocket it is told immediately (session_revoked)
+/// and dropped from any voice room it occupies; otherwise the next time its
+/// token is validated (API call or WS auth) it is rejected.
+pub async fn kick_auth_session(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<KickSessionRequest>,
+) -> impl IntoResponse {
+    let (user_id, _current_sid) = match extract_claims(&headers, &state) {
+        Ok(c) => (c.sub, c.sid),
+        Err(r) => return r.into_response(),
+    };
+
+    let revoked = match state.db.revoke_auth_session(&req.session_id, &user_id) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
+    if !revoked {
+        // Already revoked or not yours — idempotent success either way.
+        return (StatusCode::OK, Json(serde_json::json!({"ok": true, "revoked": false}))).into_response();
+    }
+
+    // Live-kick: if that session's device has an open WS, tell it and drop it
+    // from any voice room it occupies (it can no longer hold a call slot).
+    if let Ok(Some((sid_user, device_id))) = state.db.get_auth_session_device(&req.session_id) {
+        if !device_id.is_empty() {
+            let kick_msg = serde_json::json!({
+                "type": "session_revoked",
+                "reason": "kicked",
+            });
+            state.ws_manager.broadcast_to_device(&sid_user, &device_id, &kick_msg.to_string()).await;
+            crate::ws::voice_remove_user_all_for_device(&state, &sid_user, &device_id).await;
+        }
+    }
+
+    (StatusCode::OK, Json(serde_json::json!({"ok": true, "revoked": true}))).into_response()
+}
+
+/// POST /api/auth/sessions/kick-all — revoke every session except the current
+/// one ("log out everywhere else" button).
+pub async fn kick_all_auth_sessions(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let (user_id, current_sid) = match extract_claims(&headers, &state) {
+        Ok(c) => (c.sub, c.sid),
+        Err(r) => return r.into_response(),
+    };
+
+    let n = match state.db.revoke_auth_sessions_except(&user_id, &current_sid) {
+        Ok(n) => n,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
+
+    // Live-kick every revoked session's device.
+    if let Ok(rows) = state.db.list_auth_sessions(&user_id) {
+        let kick_msg = serde_json::json!({
+            "type": "session_revoked",
+            "reason": "kicked",
+        });
+        for (sid, device_id, _, _, _, _, revoked) in rows {
+            if sid == current_sid || revoked == 0 {
+                continue;
+            }
+            if !device_id.is_empty() {
+                state.ws_manager.broadcast_to_device(&user_id, &device_id, &kick_msg.to_string()).await;
+                crate::ws::voice_remove_user_all_for_device(&state, &user_id, &device_id).await;
+            }
+        }
+    }
+
+    (StatusCode::OK, Json(serde_json::json!({"ok": true, "revoked": n}))).into_response()
+}
+
+/// Validate the Bearer token and return its claims (sid included). Reuses the
+/// same session-revocation enforcement as extract_user.
+fn extract_claims(
+    headers: &HeaderMap,
+    state: &AppState,
+) -> Result<auth::Claims, (StatusCode, Json<serde_json::Value>)> {
+    let token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer ").map(|s| s.to_string()))
+        .or_else(|| {
+            headers
+                .get("cookie")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|cookie_str| {
+                    cookie_str.split(';').find_map(|part| {
+                        let trimmed = part.trim();
+                        trimmed.strip_prefix("token=").map(|v| v.to_string())
+                    })
+                })
+        })
+        .ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Missing authorization"})),
+            )
+        })?;
+
+    let claims = auth::validate_token(&token, &state.config.jwt_secret).map_err(|_| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Invalid token"})),
+        )
+    })?;
+
+    if claims.sid.is_empty()
+        || state
+            .db
+            .auth_session_valid(&claims.sid)
+            .map_err(|_| {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({"error": "Session check failed"})),
+                )
+            })?
+            != true
+    {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Session revoked — please sign in again"})),
+        ));
+    }
+
+    Ok(claims)
 }
 
 fn get_client_ip(headers: &HeaderMap) -> String {
@@ -240,6 +474,11 @@ pub struct RegisterRequest {
     // Optional custom session lifetime in seconds (Settings → Security, max 30 days).
     #[serde(default)]
     pub duration_seconds: Option<u64>,
+    // Device identity for the session/device list (Settings → Security → Devices).
+    #[serde(default)]
+    pub device_id: Option<String>,
+    #[serde(default)]
+    pub device_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -249,6 +488,11 @@ pub struct LoginRequest {
     // Optional custom session lifetime in seconds (Settings → Security, max 30 days).
     #[serde(default)]
     pub duration_seconds: Option<u64>,
+    // Device identity for the session/device list (Settings → Security → Devices).
+    #[serde(default)]
+    pub device_id: Option<String>,
+    #[serde(default)]
+    pub device_name: Option<String>,
 }
 
 // Session lifetime clamp shared by register/login/reauth. Clients may request a
@@ -258,6 +502,38 @@ const MAX_SESSION_SECS: u64 = 30 * 24 * 60 * 60; // 30 days
 const MIN_SESSION_SECS: u64 = 60; // 1 minute
 fn session_duration_secs(dur: Option<u64>) -> u64 {
     dur.unwrap_or(MAX_SESSION_SECS).clamp(MIN_SESSION_SECS, MAX_SESSION_SECS)
+}
+
+/// Mint a session row + JWT for a (user, device) sign-in. Every login,
+/// registration, and re-auth goes through here so the Devices panel sees
+/// exactly what is signed in and any of it can be force-kicked later.
+fn mint_session_token(
+    state: &AppState,
+    user_id: &str,
+    username: &str,
+    device_id: Option<&str>,
+    device_name: Option<&str>,
+    session_secs: u64,
+) -> Result<String, String> {
+    let sid = uuid::Uuid::new_v4().to_string();
+    let expires_at = chrono::Utc::now()
+        .checked_add_signed(chrono::Duration::seconds(session_secs as i64))
+        .unwrap()
+        .to_rfc3339();
+    state.db.upsert_auth_session(
+        &sid,
+        user_id,
+        device_id.unwrap_or(""),
+        device_name.unwrap_or(""),
+        &expires_at,
+    )?;
+    auth::create_token_with_duration(
+        user_id,
+        username,
+        &sid,
+        &state.config.jwt_secret,
+        chrono::Duration::seconds(session_secs as i64),
+    )
 }
 
 #[derive(Deserialize)]
@@ -345,11 +621,13 @@ pub async fn register(
     }
 
     let session_secs = session_duration_secs(req.duration_seconds);
-    let token = match auth::create_token_with_duration(
+    let token = match mint_session_token(
+        &state,
         &user.id,
         &user.username,
-        &state.config.jwt_secret,
-        chrono::Duration::seconds(session_secs as i64),
+        req.device_id.as_deref(),
+        req.device_name.as_deref(),
+        session_secs,
     ) {
         Ok(t) => t,
         Err(e) => {
@@ -452,11 +730,13 @@ pub async fn login(
     };
 
     let session_secs = session_duration_secs(req.duration_seconds);
-    let token = match auth::create_token_with_duration(
+    let token = match mint_session_token(
+        &state,
         &user.id,
         &user.username,
-        &state.config.jwt_secret,
-        chrono::Duration::seconds(session_secs as i64),
+        req.device_id.as_deref(),
+        req.device_name.as_deref(),
+        session_secs,
     ) {
         Ok(t) => t,
         Err(e) => {
@@ -542,6 +822,11 @@ pub struct ReauthRequest {
     /// [60s, 30 days]). Missing/None keeps the legacy 30-day default.
     #[serde(default)]
     pub duration_seconds: Option<u64>,
+    // Device identity (Settings → Security → Devices).
+    #[serde(default)]
+    pub device_id: Option<String>,
+    #[serde(default)]
+    pub device_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -719,10 +1004,14 @@ pub async fn reauth(
         Err(e) => return e.into_response(),
     };
 
-    // Per-IP rate limiting: 10 attempts per 5 minutes
+    // Per-IP rate limiting: 10 attempts per 5 minutes.
+    // Env-overridable so automated test suites (which re-auth dozens of users
+    // from one IP) can raise/disable the budget: REAUTH_IP_MAX=0 disables,
+    // or a number raises it (same pattern as LOGIN_IP_MAX/LOGIN_USER_MAX).
     let ip = get_client_ip(&headers);
     let ip_rate_key = format!("reauth_ip:{}", ip);
-    if !REAUTH_IP_RATE_LIMITER.check_and_increment(&ip_rate_key, 10, Duration::from_secs(300)) {
+    let ip_max: u32 = std::env::var("REAUTH_IP_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
+    if ip_max > 0 && !REAUTH_IP_RATE_LIMITER.check_and_increment(&ip_rate_key, ip_max, Duration::from_secs(300)) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": "Too many reauth attempts. Try again in 5 minutes."})),
@@ -730,9 +1019,10 @@ pub async fn reauth(
             .into_response();
     }
 
-    // Per-user rate limiting: 10 attempts per 5 minutes
+    // Per-user rate limiting: 10 attempts per 5 minutes (env-overridable).
     let rate_key = format!("reauth:{}", user_id);
-    if !REAUTH_RATE_LIMITER.check_and_increment(&rate_key, 10, Duration::from_secs(300)) {
+    let user_max: u32 = std::env::var("REAUTH_USER_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
+    if user_max > 0 && !REAUTH_RATE_LIMITER.check_and_increment(&rate_key, user_max, Duration::from_secs(300)) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": "Too many reauth attempts. Try again in 5 minutes."})),
@@ -778,11 +1068,13 @@ pub async fn reauth(
     // [1 minute, 30 days]). Missing/invalid falls back to 30 days.
     let duration_secs = session_duration_secs(req.duration_seconds);
 
-    let token = match auth::create_token_with_duration(
+    let token = match mint_session_token(
+        &state,
         &user.id,
         &user.username,
-        &state.config.jwt_secret,
-        chrono::Duration::seconds(duration_secs as i64),
+        req.device_id.as_deref(),
+        req.device_name.as_deref(),
+        duration_secs,
     ) {
         Ok(t) => t,
         Err(e) => {

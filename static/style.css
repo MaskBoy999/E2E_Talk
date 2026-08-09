@@ -2583,6 +2583,55 @@ body.show-msg-times-hover .message:hover .file-card .time-hover {
     line-height: 1.4;
 }
 
+/* Devices panel (Settings → Security → Devices) */
+.device-item {
+    border-left: 3px solid var(--bg-border);
+}
+.device-item.device-current {
+    border-left-color: var(--accent, #5865f2);
+}
+.device-status {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 7px;
+    border-radius: 10px;
+    font-size: 10px;
+    font-weight: 600;
+    vertical-align: middle;
+}
+.device-status-this {
+    background: rgba(88, 101, 242, 0.18);
+    color: #aab3ff;
+}
+.device-status-on {
+    background: rgba(35, 165, 90, 0.18);
+    color: #57c785;
+}
+.device-status-off {
+    background: rgba(237, 66, 69, 0.15);
+    color: #e06a6d;
+}
+.device-id-suffix {
+    color: var(--text-muted);
+    font-weight: 400;
+    font-size: 11px;
+}
+.device-kick-row {
+    margin-top: 6px;
+}
+.device-kick-btn {
+    background: transparent;
+    border: 1px solid rgba(237, 66, 69, 0.5);
+    color: #e06a6d;
+    border-radius: 6px;
+    padding: 3px 12px;
+    font-size: 12px;
+    cursor: pointer;
+}
+.device-kick-btn:hover {
+    background: rgba(237, 66, 69, 0.12);
+}
+
 .identity-key-box {
     display: flex;
     align-items: center;
@@ -7276,6 +7325,12 @@ body.resizing-dm { cursor: ns-resize !important; user-select: none; }
     color: var(--text-faint, #777);
     text-transform: uppercase; letter-spacing: 0.4px;
     margin-top: 2px;
+}
+.volume-menu-vol-label {
+    font-size: 11px; font-weight: 700;
+    color: var(--text-faint, #777);
+    text-transform: uppercase; letter-spacing: 0.4px;
+    margin-top: 6px;
 }
 .volume-menu-view-row { display: flex; gap: 6px; flex-wrap: wrap; }
 .volume-menu-view-btn {

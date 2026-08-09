@@ -100,8 +100,11 @@ await page.click('#register-form button[type="submit"]');
             headers: { Authorization: `Bearer ${token1}` },
         });
         const channels = await chRes.json();
-        const general = channels.find((c: any) => c.name === 'general');
+        // Channel names are encrypted (no plaintext `name` field) — the default
+        // text channel created with the server is position 0.
+        const general = channels[0];
         expect(general).toBeTruthy();
+        expect(general.id).toBeTruthy();
         const channelId = general.id;
 
         // Device 1: connect WS + select channel + send message
@@ -125,32 +128,6 @@ await page.click('#register-form button[type="submit"]');
             }));
         }, { channelId, encResult });
         await page1.waitForTimeout(1000);
-
-        // Debug: verify crypto.js version loaded
-        const cryptoVer = await page1.evaluate(() => {
-            // Directly test encryption
-            const testKey = E2ECrypto.x25519GenerateKeyPair();
-            const testPrivB64 = E2ECrypto.arrayBufferToBase64(testKey.privateKey);
-            const privBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(testPrivB64));
-            
-            // Manually encrypt using internal functions (they're not exposed, so test via encryptKeyForEscrow)
-            const escrow = E2ECrypto.encryptKeyForEscrow(testPrivB64, 'testpassword');
-            
-            // Decode the encrypted key and check sizes
-            const encBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(escrow.encrypted_private_key));
-            const saltBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(escrow.salt));
-            const nonceBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(escrow.nonce));
-            
-            return {
-                privBytesLen: privBytes.length,
-                testPrivB64Len: testPrivB64.length,
-                encBytesLen: encBytes.length,
-                saltBytesLen: saltBytes.length,
-                nonceBytesLen: nonceBytes.length,
-                encB64Len: escrow.encrypted_private_key.length,
-            };
-        });
-        console.log('Crypto test encrypt:', JSON.stringify(cryptoVer));
 
         // Device 2: login with same account
         const ctx2 = await browser.newContext({ ignoreHTTPSErrors: true });
@@ -372,7 +349,7 @@ await page.click('#register-form button[type="submit"]');
             headers: { Authorization: `Bearer ${token1}` },
         });
         const channels = await chRes.json();
-        const general = channels.find((c: any) => c.name === 'general');
+        const general = channels[0];
         const channelId = general.id;
 
         // Device 2: login with same account

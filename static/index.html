@@ -563,6 +563,14 @@
                     </div>
                 </div>
                 <div class="settings-group">
+                    <h4>Devices</h4>
+                    <p class="settings-hint">Every device currently signed in to your account. You can force-sign-out any of them — they are kicked immediately, everywhere (including voice channels and calls).</p>
+                    <div id="devices-list" class="session-log-list">
+                        <div class="session-log-empty">Loading devices…</div>
+                    </div>
+                    <button class="btn-delete-account" id="kick-all-devices-btn" style="margin-top:10px;background:var(--danger,#ed4245);">Sign out all other devices</button>
+                </div>
+                <div class="settings-group">
                     <h4>Session &amp; Security Log</h4>
                     <p class="settings-hint">Current session expires at: <strong id="session-expires-at">…</strong></p>
                     <div id="session-log-list" class="session-log-list">

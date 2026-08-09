@@ -11,6 +11,9 @@ pub struct Claims {
     pub sub: String,
     pub username: String,
     pub exp: usize,
+    /// Server-side session id (auth_sessions.id). Required: tokens minted
+    /// before this field existed fail to decode and the user re-logs in once.
+    pub sid: String,
 }
 
 pub fn hash_password(password: &str) -> Result<String, String> {
@@ -36,12 +39,14 @@ pub fn verify_password(password: &str, hash: &str) -> Result<bool, String> {
 pub fn create_token_with_duration(
     user_id: &str,
     username: &str,
+    session_id: &str,
     secret: &str,
     duration: chrono::Duration,
 ) -> Result<String, String> {
     let claims = Claims {
         sub: user_id.to_string(),
         username: username.to_string(),
+        sid: session_id.to_string(),
         exp: chrono::Utc::now()
             .checked_add_signed(duration)
             .unwrap()

@@ -93,6 +93,11 @@ pub struct VoiceRoom {
     pub dm_channel_id: Option<String>,
     pub session_id: Option<String>,
     pub members: HashMap<String, VoiceMember>,
+    // user_id -> device_id of the device that CURRENTLY occupies the room.
+    // When the same user re-joins from another device, the old device is kicked
+    // and this map is updated so a stale device's later disconnect / page-load
+    // voice_leave_all can never evict the device that replaced it.
+    pub device_map: HashMap<String, String>,
 }
 
 fn voice_member_json(m: &VoiceMember) -> serde_json::Value {
@@ -230,6 +235,22 @@ impl WsManager {
         }
     }
 
+    /// Broadcast to every connection of the given users EXCEPT the connection
+    /// whose device_id matches `exclude_device` (used to kick the OLD device of
+    /// a user who just re-joined a voice room from another device, without
+    /// kicking the device that is joining).
+    pub async fn broadcast_to_users_except_device(&self, user_ids: &[String], exclude_device: &str, message: &str) {
+        let conns = self.connections.read().await;
+        for (uid, did, sender) in conns.values() {
+            if user_ids.contains(uid) {
+                let is_excluded = !exclude_device.is_empty() && did.as_deref() == Some(exclude_device);
+                if !is_excluded {
+                    let _ = sender.send(message.to_string());
+                }
+            }
+        }
+    }
+
     pub async fn broadcast_to_server(&self, _server_id: &str, message: &str) {
         let conns = self.connections.read().await;
         for (_conn_id, _did, sender) in conns.values() {
@@ -335,7 +356,37 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, client_ip: Strin
                 match serde_json::from_str::<WsAuthMessage>(text.as_str()) {
                     Ok(auth_msg) if auth_msg.msg_type == "auth" => {
                         match auth::validate_token(&auth_msg.token, &state.config.jwt_secret) {
-                            Ok(claims) => break (claims.sub, auth_msg.device_id, auth_msg.last_seen_timestamp),
+                            Ok(claims) => {
+                                // Server-side session check: a force-kicked
+                                // (revoked) session is rejected on WS auth, so
+                                // a kicked device is signed out even after a
+                                // refresh. Tokens without a sid (pre-migration)
+                                // are rejected so the user re-logs in once.
+                                let session_ok = if claims.sid.is_empty() {
+                                    false
+                                } else {
+                                    state.db.auth_session_valid(&claims.sid).unwrap_or(false)
+                                };
+                                if !session_ok {
+                                    let err = OutgoingMessage {
+                                        msg_type: "auth_error".to_string(),
+                                        channel_id: None,
+                                        server_id: None,
+                                        dm_channel_id: None,
+                                        message: None,
+                                        user_id: None,
+                                        username: None,
+                                        error: Some("Session revoked — please sign in again".to_string()),
+                                    };
+                                    let _ = sender
+                                        .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                                        .await;
+                                    return;
+                                }
+                                // Refresh the session's last-active marker.
+                                let _ = state.db.touch_auth_session(&claims.sid);
+                                break (claims.sub, auth_msg.device_id, auth_msg.last_seen_timestamp);
+                            }
                             Err(_) => {
                                 // Rate limit failed auth attempts per IP
                                 if !WS_AUTH_RATE_LIMITER.check_and_increment(&format!("ws_auth:{}", client_ip), 10, Duration::from_secs(60)) {
@@ -495,7 +546,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, client_ip: Strin
 
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 
-    let conn_id = state.ws_manager.add_connection(user_id.clone(), device_id, tx).await;
+    let conn_id = state.ws_manager.add_connection(user_id.clone(), device_id.clone(), tx).await;
 
     // Broadcast presence: this user is now online
     {
@@ -537,8 +588,11 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, client_ip: Strin
 
     state.ws_manager.remove_connection(conn_id).await;
 
-    // Remove the user from any voice rooms they were in and notify others
-    voice_remove_user_all(&state, &user_id).await;
+    // Remove the user from any voice rooms THIS device occupied and notify
+    // others. Scoped by device_id: when the same account is signed in on
+    // another device that replaced this one in a room, this connection's
+    // disconnect must not evict the replacement from the call.
+    voice_remove_user_all_for_device(&state, &user_id, device_id.as_deref().unwrap_or("")).await;
 
     // Broadcast presence: this user is now offline
     {
@@ -1336,7 +1390,10 @@ async fn handle_ws_message(
             // disconnect cleanup never ran — crash, stale socket, server restart).
             // Uses clear_waiting_on_empty=false so persisted DM waiting state
             // survives (the waiting room stays joinable across refreshes).
-            voice_remove_user_all(state, user_id).await;
+            // Scoped to THIS device: a kicked/replaced device's page load must
+            // never evict the device that replaced it from the room.
+            let device_id = parsed.get("device_id").and_then(|d| d.as_str()).unwrap_or("").to_string();
+            voice_remove_user_all_for_device(state, user_id, &device_id).await;
         }
         "voice_state" => {
             handle_voice_state(parsed, state, user_id).await;
@@ -1382,6 +1439,10 @@ async fn handle_voice_join(
     let channel_id = parsed.get("channel_id").and_then(|c| c.as_str()).unwrap_or("").to_string();
     let server_id = parsed.get("server_id").and_then(|c| c.as_str()).unwrap_or("").to_string();
     let dm_channel_id = parsed.get("dm_channel_id").and_then(|c| c.as_str()).unwrap_or("").to_string();
+    // Device id of the connection that is joining (from the client's
+    // e2e_device_key). Used to kick the user's OLD devices and to scope the
+    // join confirmation + later leave/disconnect cleanup to this device.
+    let device_id = parsed.get("device_id").and_then(|d| d.as_str()).unwrap_or("").to_string();
 
     // Validate membership / channel type
     if room_type == "server" {
@@ -1446,7 +1507,7 @@ async fn handle_voice_join(
 
     // All room mutation happens inside a scope so the write guard (and its &mut
     // borrow) drop before any .await below — the guard is not Send.
-    let (members_json, joined) = {
+    let (joined, replaced) = {
         let mut rooms = match state.voice_rooms.write() {
             Ok(r) => r,
             Err(_) => return,
@@ -1460,7 +1521,13 @@ async fn handle_voice_join(
             dm_channel_id: if dm_channel_id.is_empty() { None } else { Some(dm_channel_id.clone()) },
             session_id: None,
             members: HashMap::new(),
+            device_map: HashMap::new(),
         });
+        // If this user is already in the room from ANOTHER device, the old
+        // device(s) must be kicked before the new device is admitted — "last
+        // device wins" (like Discord killing the other session).
+        let replaced = room.members.contains_key(user_id);
+        room.device_map.insert(user_id.to_string(), device_id.clone());
         room.members.insert(user_id.to_string(), member);
         if create_session {
             if let Ok(sid) = state.db.create_voice_session(&channel_id) {
@@ -1487,8 +1554,51 @@ async fn handle_voice_join(
             "force_muted": force_muted,
             "force_deafened": force_deafened,
         });
-        (members_json, joined)
+        (joined, replaced)
     };
+
+    // The user's OLD device(s) are still connected and in the room — kick them
+    // BEFORE any join broadcast so they tear down first. The new device (this
+    // one) is excluded by device_id. (An empty device_id — a client without a
+    // device key, which shouldn't happen since e2e_device_key is created at
+    // login — can't be excluded, so skip the kick rather than kicking self.)
+    if replaced && !device_id.is_empty() {
+        let kick_msg = serde_json::json!({
+            "type": "voice_kicked",
+            "reason": "replaced",
+            "room_type": room_type,
+            "channel_id": channel_id,
+            "dm_channel_id": dm_channel_id,
+        });
+        state
+            .ws_manager
+            .broadcast_to_users_except_device(&[user_id.to_string()], &device_id, &kick_msg.to_string())
+            .await;
+        // Tell the OTHER members to drop their stale peer for this user (the
+        // old device is being torn down). Without this they keep the old peer
+        // and the new device's signals land on a dead connection.
+        let other_member_ids: Vec<String> = {
+            match state.voice_rooms.read() {
+                Ok(r) => r.get(&room_id)
+                    .map(|rm| rm.members.keys().filter(|u| **u != user_id).cloned().collect())
+                    .unwrap_or_default(),
+                Err(_) => Vec::new(),
+            }
+        };
+        if !other_member_ids.is_empty() {
+            let replaced_msg = serde_json::json!({
+                "type": "voice_member_replaced",
+                "user_id": user_id,
+                "room_type": room_type,
+                "channel_id": channel_id,
+                "dm_channel_id": dm_channel_id,
+            });
+            state
+                .ws_manager
+                .broadcast_to_users(&other_member_ids, &replaced_msg.to_string())
+                .await;
+        }
+    }
 
     // Notify everyone already in the room about the new member list (including self)
     let members_vec: Vec<serde_json::Value> = {
@@ -1509,7 +1619,17 @@ async fn handle_voice_join(
     // Drop the write lock before awaiting sends (lock guard isn't Send).
     voice_broadcast(state, &room_id, &members_msg).await;
 
-    send_to_user(state, user_id, &joined).await;
+    // The join confirmation goes ONLY to the device that joined. A kicked old
+    // device of the same user must never see it (it would re-join with stale
+    // state).
+    if !device_id.is_empty() {
+        state
+            .ws_manager
+            .broadcast_to_device(user_id, &device_id, &joined.to_string())
+            .await;
+    } else {
+        send_to_user(state, user_id, &joined).await;
+    }
 
     // Tell every server member who is now in each voice channel (so the channel
     // list shows members/activity even for users who aren't in the room).
@@ -1526,8 +1646,27 @@ async fn handle_voice_leave(
     let room_type = parsed.get("room_type").and_then(|t| t.as_str()).unwrap_or("server").to_string();
     let channel_id = parsed.get("channel_id").and_then(|c| c.as_str()).unwrap_or("").to_string();
     let dm_channel_id = parsed.get("dm_channel_id").and_then(|c| c.as_str()).unwrap_or("").to_string();
+    let device_id = parsed.get("device_id").and_then(|d| d.as_str()).unwrap_or("").to_string();
     let room_id = voice_room_id(&room_type, &channel_id, &dm_channel_id);
-    voice_remove_from_room(state, &room_id, user_id, true).await;
+    // Only the device that CURRENTLY occupies the room may leave it. A stale
+    // (kicked/replaced) device's explicit leave must not evict the device that
+    // replaced it.
+    let is_occupant = {
+        let rooms = match state.voice_rooms.read() {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        match rooms.get(&room_id) {
+            Some(room) => match room.device_map.get(user_id) {
+                Some(d) => *d == device_id,
+                None => device_id.is_empty(),
+            },
+            None => true, // room absent — nothing to remove anyway
+        }
+    };
+    if is_occupant {
+        voice_remove_from_room(state, &room_id, user_id, true).await;
+    }
 }
 
 /// Remove a user from a voice room. `clear_waiting_on_empty` is true for an
@@ -1546,6 +1685,7 @@ async fn voice_remove_from_room(state: &Arc<AppState>, room_id: &str, user_id: &
         let mut remaining_members = Vec::new();
         if let Some(room) = rooms.get_mut(room_id) {
             room.members.remove(user_id);
+            room.device_map.remove(user_id);
             if let Some(sid) = room.session_id.clone() {
                 let _ = state.db.remove_voice_participant(&sid, user_id);
             }
@@ -1965,7 +2105,12 @@ async fn handle_dm_call_end(
 }
 
 /// Remove a user from every voice room (called on WS disconnect).
-pub async fn voice_remove_user_all(state: &Arc<AppState>, user_id: &str) {
+/// Remove a user from every voice room their device currently occupies.
+/// `device_id` is the connection's device key — rooms where a DIFFERENT device
+/// of the same user is the current occupant are left untouched (the replaced
+/// device must not evict the replacement). An empty device_id matches rooms
+/// whose occupant has no device key (legacy clients).
+pub async fn voice_remove_user_all_for_device(state: &Arc<AppState>, user_id: &str, device_id: &str) {
     let room_ids: Vec<String> = {
         let rooms = match state.voice_rooms.read() {
             Ok(r) => r,
@@ -1973,7 +2118,13 @@ pub async fn voice_remove_user_all(state: &Arc<AppState>, user_id: &str) {
         };
         rooms
             .iter()
-            .filter(|(_, r)| r.members.contains_key(user_id))
+            .filter(|(_, r)| {
+                r.members.contains_key(user_id)
+                    && match r.device_map.get(user_id) {
+                        Some(d) => d == device_id,
+                        None => device_id.is_empty(),
+                    }
+            })
             .map(|(id, _)| id.clone())
             .collect()
     };

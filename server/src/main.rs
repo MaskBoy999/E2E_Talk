@@ -233,6 +233,9 @@ async fn main() {
         // Device management routes
         .route("/api/logout", post(handlers::logout).get(handlers::logout_get))
         .route("/api/reauth", post(handlers::reauth))
+        .route("/api/auth/sessions", get(handlers::list_auth_sessions))
+        .route("/api/auth/sessions/kick", post(handlers::kick_auth_session))
+        .route("/api/auth/sessions/kick-all", post(handlers::kick_all_auth_sessions))
         .route("/api/key-blob", put(handlers::save_user_key_blob).get(handlers::get_user_key_blob))
         .route("/api/user/{username}", get(handlers::get_user_id))
         // Specific routes must come before parameterized routes to avoid Axum

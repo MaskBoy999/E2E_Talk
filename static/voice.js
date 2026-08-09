@@ -142,6 +142,19 @@
         },
         updateDmCallUI: updateDmCallUI,
         updateChannelChips: updateChannelChips,
+        // Re-render self avatars/rows/tiles after the own profile loads (fresh
+        // device: pfp arrives async after the voice UI may have rendered).
+        refreshSelfProfile: function () {
+            if (!S.connected) {
+                updateChannelChips();
+                return;
+            }
+            renderBar();
+            renderPopup();
+            renderDmPanel();
+            updateChannelChips();
+            updateSelfUI();
+        },
         resetDmPanelOpen: function () { S.dmPanelOpen = undefined; },
         testRingtone: testRingtone,
         playRingtone: playRingtone,
@@ -502,6 +515,14 @@
         var w = getWs();
         if (w && w.readyState === WebSocket.OPEN) {
             var payload = obj;
+            // Tag every voice message with this device's key so the server can
+            // kick the OLD device when the same account joins from another
+            // device, and scope leave/disconnect cleanup to the occupying
+            // device. Same key the WS auth uses — a plaintext device id, no
+            // new secret exposure.
+            if (obj && typeof obj === 'object') {
+                try { obj.device_id = localStorage.getItem('e2e_device_key') || undefined; } catch (_) {}
+            }
             if (obj && obj.type === 'voice_signal' && obj.signal) {
                 var enc = encryptSignalPayload(obj.signal);
                 if (enc) {
@@ -511,6 +532,7 @@
                         channel_id: obj.channel_id,
                         dm_channel_id: obj.dm_channel_id,
                         to_user_id: obj.to_user_id,
+                        device_id: obj.device_id,
                         signal: enc, // { e, n } — ciphertext, server can't read it
                     };
                     S.sigSentEncrypted++;
@@ -645,7 +667,12 @@
 
     function closeAllPeers() {
         for (var uid in S.peers) {
-            try { S.peers[uid].close(); } catch (_) {}
+            var pc = S.peers[uid];
+            if (pc._videoWatchTimer) {
+                clearInterval(pc._videoWatchTimer);
+                pc._videoWatchTimer = null;
+            }
+            try { pc.close(); } catch (_) {}
         }
         S.peers = {};
         for (var uid2 in S.remoteAudioEls) {
@@ -1044,6 +1071,61 @@
         pc._pendingIce = [];
         pc._negotiating = false;
         pc._makingOffer = false;
+        // Video-negotiation watchdog: when a local video track (camera/screen)
+        // is added, a glare/rollback race can swallow the renegotiation that
+        // carries the video m-line. The sender then encodes ZERO frames — the
+        // other side gets a black/absent tile until the user leaves and
+        // rejoins ("sometimes I need to rejoin to see the camera"). Watch the
+        // encoder: if a live video sender has produced no frames for two
+        // consecutive checks (~8s), force the m-line back into the SDP by
+        // renegotiating (rolling back a stale offer first if needed).
+        pc._videoWatchCount = 0;
+        pc._videoWatchTimer = setInterval(function () {
+            if (!S.connected || S.peers[uid] !== pc || pc.signalingState === 'closed') {
+                clearInterval(pc._videoWatchTimer);
+                return;
+            }
+            var vids;
+            try {
+                vids = pc.getSenders().filter(function (s) { return s.track && s.track.kind === 'video' && s.track.readyState === 'live'; });
+            } catch (_) {
+                return;
+            }
+            if (!vids.length) {
+                pc._videoWatchCount = 0;
+                return;
+            }
+            pc.getStats().then(function (stats) {
+                if (!S.connected || S.peers[uid] !== pc) return;
+                var anyEncoded = false;
+                try {
+                    stats.forEach(function (r) {
+                        if (r.type === 'outbound-rtp' && (r.kind === 'video' || r.mediaType === 'video') && (r.framesEncoded || 0) > 0) anyEncoded = true;
+                    });
+                } catch (_) {}
+                if (anyEncoded) {
+                    pc._videoWatchCount = 0;
+                    return;
+                }
+                pc._videoWatchCount = (pc._videoWatchCount || 0) + 1;
+                if (pc._videoWatchCount >= 2) {
+                    pc._videoWatchCount = 0;
+                    if (pc.signalingState === 'stable') {
+                        try { pc.onnegotiationneeded(); } catch (_) {}
+                    } else if (pc.signalingState === 'have-local-offer' || pc.signalingState === 'have-remote-offer') {
+                        try {
+                            pc.setLocalDescription({ type: 'rollback' }).then(function () {
+                                try { pc.onnegotiationneeded(); } catch (_) {}
+                            }).catch(function () {
+                                try { pc.onnegotiationneeded(); } catch (_) {}
+                            });
+                        } catch (_) {
+                            try { pc.onnegotiationneeded(); } catch (_) {}
+                        }
+                    }
+                }
+            }).catch(function () {});
+        }, 4000);
         // Perfect negotiation (glare) roles: in a mesh BOTH sides create a peer
         // for the same edge and both fire onnegotiationneeded at once. If both
         // send offers and both roll back (naive rollback), each side ends up
@@ -1739,7 +1821,25 @@
                 tuneVideoSenders(pc);
                 flushPendingIce(pc);
             }).catch(function (err) {
+                // The answer may match an offer we already rolled back (e.g. the
+                // stuck-peer watchdog re-negotiated while the answer was in
+                // flight). Rolling back the leftover local offer and applying
+                // the answer re-converges the edge; if that still fails (no
+                // matching offer at all), re-offer so the remote answers the
+                // CURRENT negotiation.
                 console.warn('setRemote( answer ) failed:', err);
+                if (pc.signalingState === 'have-local-offer') {
+                    pc.setLocalDescription({ type: 'rollback' }).then(function () {
+                        return pc.setRemoteDescription({ type: 'answer', sdp: sdp });
+                    }).then(function () {
+                        tuneVideoSenders(pc);
+                        flushPendingIce(pc);
+                    }).catch(function () {
+                        try { pc.onnegotiationneeded(); } catch (_) {}
+                    });
+                } else {
+                    try { pc.onnegotiationneeded(); } catch (_) {}
+                }
             });
         } else if (signal.type === 'ice') {
             if (!signal.candidate) return;
@@ -1785,6 +1885,9 @@
             }
             case 'voice_kicked':
                 handleKicked(data);
+                break;
+            case 'voice_member_replaced':
+                handleMemberReplaced(data);
                 break;
             case 'voice_control_received':
                 handleControlReceived(data);
@@ -1969,7 +2072,12 @@
         // Close peers for people who left
         Object.keys(S.peers).forEach(function (uid) {
             if (!newMembers[uid]) {
-                try { S.peers[uid].close(); } catch (_) {}
+                var _pc = S.peers[uid];
+                if (_pc._videoWatchTimer) {
+                    clearInterval(_pc._videoWatchTimer);
+                    _pc._videoWatchTimer = null;
+                }
+                try { _pc.close(); } catch (_) {}
                 delete S.peers[uid];
                 removeRemoteAudioEls(uid);
                 delete S.remoteStreams[uid];
@@ -2091,7 +2199,12 @@
         if (!S.connected) return;
         delete S.members[uid];
         if (S.peers[uid]) {
-            try { S.peers[uid].close(); } catch (_) {}
+            var _pc2 = S.peers[uid];
+            if (_pc2._videoWatchTimer) {
+                clearInterval(_pc2._videoWatchTimer);
+                _pc2._videoWatchTimer = null;
+            }
+            try { _pc2.close(); } catch (_) {}
             delete S.peers[uid];
         }
         removeRemoteAudioEls(uid);
@@ -2119,13 +2232,39 @@
     }
 
     function handleKicked(data) {
-        showToast('You were kicked from the voice channel.');
+        if (data.reason === 'replaced') {
+            showToast('Signed in on another device — you left the call.');
+        } else {
+            showToast('You were kicked from the voice channel.');
+        }
         playSound('leave');
         teardownRoom();
         hideBar();
         hidePopup();
         hideDmPanel();
         hideMiniBar();
+    }
+
+    // The same user re-joined this room from ANOTHER device (this side must
+    // have been replaced). Our peer for them is stale — the old device is
+    // tearing down its connections, so any signal that lands here must create
+    // a FRESH peer instead of being fed into the dead one.
+    function handleMemberReplaced(data) {
+        var uid = data.user_id;
+        if (!uid || uid === getSelfId()) return;
+        if (S.peers[uid]) {
+            var _pc3 = S.peers[uid];
+            if (_pc3._videoWatchTimer) {
+                clearInterval(_pc3._videoWatchTimer);
+                _pc3._videoWatchTimer = null;
+            }
+            try { _pc3.close(); } catch (_) {}
+            delete S.peers[uid];
+        }
+        removeRemoteAudioEls(uid);
+        removeRemoteScreenAudioEls(uid);
+        delete S.remoteStreams[uid];
+        removeRemoteTile(uid);
     }
 
     function handleControlReceived(data) {
@@ -3836,30 +3975,10 @@
     // ------------------------------------------------------------------
     // UI: volume menu (right-click)
     // ------------------------------------------------------------------
-    function openVolumeMenu(e, uid, kind) {
-        var menu = el('volume-menu');
-        if (!menu) return;
-        // kind: 'member' (mic volume, default) | 'screen' (screen-share audio
-        // volume — right-click the member's SCREEN tile) | 'video' (camera
-        // tile — video only: no volume meter, since a camera feed carries no
-        // audio; the member's mic volume lives on the member row / tile
-        // chrome, and screen audio on the screen tile).
-        var isScreen = kind === 'screen';
-        var isVideoOnly = kind === 'video';
-        var member = S.members[uid];
-        var name = member ? (userDisplayNameCache[uid] && userDisplayNameCache[uid].display_name) || member.username || member.display_name || 'Member' : 'Member';
-        var selfId = getSelfId();
-
-        menu.innerHTML = '';
-        var header = document.createElement('div');
-        header.className = 'volume-menu-header';
-        header.textContent = (isScreen ? 'Screen share — ' : (isVideoOnly ? 'Camera — ' : '')) + name;
-        menu.appendChild(header);
-
-        // View transform section: mirror horizontally / rotate 90° left or
-        // right / reset — applies only to how THIS viewer sees the feed.
-        // The mirror is always horizontal regardless of rotation.
-        var viewKind = isScreen ? 'screen' : 'camera';
+    // Build the "View" section of the volume menu: mirror horizontally / rotate
+    // 90° left or right / reset — per-viewer CSS transforms on the feed being
+    // right-clicked (camera or screen tile only).
+    function buildViewSection(menu, uid, viewKind) {
         var tKey = uid + ':' + viewKind;
         var tState = S.tileTransforms[tKey] || { mirror: false, rot: 0 };
         var viewLabel = document.createElement('div');
@@ -3915,11 +4034,48 @@
         });
         viewRow.appendChild(btnViewReset);
         menu.appendChild(viewRow);
+    }
 
-        // A camera tile has NO audio of its own — only screen-share audio
-        // (screen tiles) and the member's mic (member row / tile chrome) do.
-        // So video-only menus show no volume meter at all.
+    function openVolumeMenu(e, uid, kind) {
+        var menu = el('volume-menu');
+        if (!menu) return;
+        // kind: 'member' (mic volume, default) | 'screen' (screen-share audio
+        // volume — right-click the member's SCREEN tile) | 'video' (camera
+        // tile — video only: no volume meter, since a camera feed carries no
+        // audio; the member's mic volume lives on the member row / tile
+        // chrome, and screen audio on the screen tile).
+        var isScreen = kind === 'screen';
+        var isVideoOnly = kind === 'video';
+        var member = S.members[uid];
+        var name = member ? (userDisplayNameCache[uid] && userDisplayNameCache[uid].display_name) || member.username || member.display_name || 'Member' : 'Member';
+        var selfId = getSelfId();
+
+        menu.innerHTML = '';
+        var header = document.createElement('div');
+        header.className = 'volume-menu-header';
+        header.textContent = (isScreen ? 'Screen share — ' : (isVideoOnly ? 'Camera — ' : '')) + name;
+        menu.appendChild(header);
+
+        // View transform section: mirror horizontally / rotate 90° left or
+        // right / reset — applies only to how THIS viewer sees the feed.
+        // The mirror is always horizontal regardless of rotation. Only shown
+        // when right-clicking a CAMERA or SCREEN tile (a member row has no
+        // feed to transform).
+        if (isScreen || isVideoOnly) {
+            buildViewSection(menu, uid, isScreen ? 'screen' : 'camera');
+        }
+
+        // Volume meter: the member row controls the member's MIC volume, the
+        // screen tile controls the SCREEN-share audio (a separate per-member
+        // volume), and a camera tile has no audio at all — no meter.
         if (!isVideoOnly) {
+            // Small caption so it's obvious WHICH volume this slider controls:
+            // the member's mic, or the screen-share audio (separate per-member
+            // volume).
+            var volLabel = document.createElement('div');
+            volLabel.className = 'volume-menu-vol-label';
+            volLabel.textContent = isScreen ? 'Screen audio volume' : 'Mic volume';
+            menu.appendChild(volLabel);
             var savedVol = parseInt(localStorage.getItem((isScreen ? 'voice_screen_volume_' : 'voice_volume_') + uid) || '100', 10);
             if (isNaN(savedVol)) savedVol = 100;
             var applyVol = isScreen ? setScreenVolume : setMemberVolume;
@@ -3990,8 +4146,11 @@
             menu.appendChild(resetBtn);
         }
 
-        // Owner controls — only for the server owner, server rooms, other members
-        if (S.roomType === 'server' && S.isOwner && uid !== selfId) {
+        // Owner controls — only for the server owner, server rooms, OTHER
+        // members, and only on the MEMBER row menu. Right-clicking a camera or
+        // screen tile is about the FEED (view transforms / screen audio), not
+        // the person — mute/deafen/kick live on the member row.
+        if (!isScreen && !isVideoOnly && S.roomType === 'server' && S.isOwner && uid !== selfId) {
             var m = S.members[uid];
             var row1 = document.createElement('button');
             row1.className = 'volume-menu-btn';

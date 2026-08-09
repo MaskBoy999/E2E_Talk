@@ -1062,6 +1062,10 @@ impl Database {
         // (message IDs); message content stays encrypted in messages/dm_messages.
         let _ = conn.execute_batch(include_str!("../migrations/052_pins.sql"));
 
+        // Migration 053: Auth sessions (Settings → Security → Devices). One row
+        // per signed-in device so sessions can be listed and force-kicked.
+        let _ = conn.execute_batch(include_str!("../migrations/053_auth_sessions.sql"));
+
         // Data migration: normalize legacy space-separated CURRENT_TIMESTAMP values
         // ("YYYY-MM-DD HH:MM:SS") to fixed-width RFC3339 ("YYYY-MM-DDTHH:MM:SS.000000Z")
         // so lexicographic ordering is consistent with newly-inserted messages.
@@ -5703,8 +5707,131 @@ impl Database {
         conn.execute("DELETE FROM user_stickers", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM conversation_profile_data", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM notification_sounds", []).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM auth_sessions", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM users", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM admin_config", []).map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    // ---- Auth sessions (Settings → Security → Devices) ----
+
+    /// Insert or refresh the session row for a (user, device) pair. A device
+    /// that signs in again keeps ONE row (new id, new token) instead of
+    /// accumulating stale entries.
+    pub fn upsert_auth_session(
+        &self,
+        id: &str,
+        user_id: &str,
+        device_id: &str,
+        device_name: &str,
+        expires_at: &str,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO auth_sessions (id, user_id, device_id, device_name, expires_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![id, user_id, device_id, device_name, expires_at],
+        )
+        .map_err(|e| e.to_string())?;
+        // Any OLDER session rows on the same device are replaced by this one:
+        // delete them (a re-auth on the same browser must not leave a stale
+        // "signed in" ghost, nor an extra row for the same device). Deletion
+        // also invalidates the old token on the next validation.
+        conn.execute(
+            "DELETE FROM auth_sessions WHERE user_id = ?1 AND device_id = ?2 AND id != ?3",
+            rusqlite::params![user_id, device_id, id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn touch_auth_session(&self, id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE auth_sessions SET last_active_at = CURRENT_TIMESTAMP WHERE id = ?1",
+            rusqlite::params![id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Returns Ok(true) when the session exists and is NOT revoked.
+    pub fn auth_session_valid(&self, id: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let revoked: i64 = conn
+            .query_row(
+                "SELECT COALESCE(revoked, 0) FROM auth_sessions WHERE id = ?1",
+                rusqlite::params![id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(revoked == 0)
+    }
+
+    pub fn list_auth_sessions(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<(String, String, String, String, String, String, i64)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, device_id, device_name, COALESCE(created_at,''), COALESCE(last_active_at,''), COALESCE(expires_at,''), COALESCE(revoked,0) \
+                 FROM auth_sessions WHERE user_id = ?1 ORDER BY last_active_at DESC, created_at DESC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params![user_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    }
+
+    /// Revoke a single session. Returns true if a live (non-revoked) row was
+    /// actually revoked (false = already revoked or nonexistent).
+    pub fn revoke_auth_session(&self, id: &str, user_id: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let n = conn
+            .execute(
+                "UPDATE auth_sessions SET revoked = 1, revoked_at = CURRENT_TIMESTAMP WHERE id = ?1 AND user_id = ?2 AND revoked = 0",
+                rusqlite::params![id, user_id],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(n > 0)
+    }
+
+    /// Revoke every session of a user EXCEPT the one with `keep_id` (used by
+    /// the "log out all other devices" button).
+    pub fn revoke_auth_sessions_except(&self, user_id: &str, keep_id: &str) -> Result<usize, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let n = conn
+            .execute(
+                "UPDATE auth_sessions SET revoked = 1, revoked_at = CURRENT_TIMESTAMP WHERE user_id = ?1 AND id != ?2 AND revoked = 0",
+                rusqlite::params![user_id, keep_id],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(n)
+    }
+
+    /// Fetch the device_id bound to a session (used to target the live WS
+    /// connection of the device being kicked).
+    pub fn get_auth_session_device(&self, id: &str) -> Result<Option<(String, String)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT user_id, device_id FROM auth_sessions WHERE id = ?1")
+            .map_err(|e| e.to_string())?;
+        let mut rows = stmt
+            .query_map(rusqlite::params![id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| e.to_string())?;
+        rows.next().transpose().map_err(|e| e.to_string())
     }
 }

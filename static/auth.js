@@ -3,6 +3,39 @@ function escapeHtml(str) {
     return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+// The persistent device key that identifies THIS browser in the session/
+// device list (Settings → Security → Devices). Same key sent on WS auth.
+function getDeviceId() {
+    var k = localStorage.getItem('e2e_device_key');
+    if (!k) {
+        k = E2ECrypto.arrayBufferToBase64(E2ECrypto.randomBytes(32));
+        localStorage.setItem('e2e_device_key', k);
+    }
+    return k;
+}
+
+// A short human-readable name for this browser/device, e.g. "Chrome on
+// Windows". Shown in the Devices panel to identify which entry is which.
+function getDeviceName() {
+    try {
+        var ua = navigator.userAgent;
+        var browser = 'Browser';
+        if (/Edg\//.test(ua)) browser = 'Edge';
+        else if (/OPR\//.test(ua) || /Opera/.test(ua)) browser = 'Opera';
+        else if (/Chrome\//.test(ua)) browser = 'Chrome';
+        else if (/Firefox\//.test(ua)) browser = 'Firefox';
+        else if (/Safari\//.test(ua)) browser = 'Safari';
+        else if (/MSIE|Trident/.test(ua)) browser = 'IE';
+        var os = 'Device';
+        if (/Windows/.test(ua)) os = 'Windows';
+        else if (/Android/.test(ua)) os = 'Android';
+        else if (/iPhone|iPad|iPod/.test(ua)) os = 'iOS';
+        else if (/Mac OS X/.test(ua)) os = 'macOS';
+        else if (/Linux/.test(ua)) os = 'Linux';
+        return browser + ' on ' + os;
+    } catch (_) { return 'Unknown device'; }
+}
+
 // Custom session duration chosen in Settings → Security (seconds). Applies to
 // login, registration, and re-authentication. Defaults to 30 days; floored at
 // 1 minute; capped at 30 days (the server re-clamps defensively).
@@ -195,7 +228,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const res = await fetch('/api/login', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username, password: loginPassword, duration_seconds: getSessionDurationSecs() })
+                body: JSON.stringify({ username, password: loginPassword, duration_seconds: getSessionDurationSecs(), device_id: getDeviceId(), device_name: getDeviceName() })
             });
 
             const data = await res.json();
@@ -416,6 +449,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 body: JSON.stringify({
                     username, password: hashedPassword,
                     duration_seconds: getSessionDurationSecs(),
+                    device_id: getDeviceId(),
+                    device_name: getDeviceName(),
                     encrypted_hash_key: encryptedHashKey.encrypted_private_key,
                     hash_key_salt: encryptedHashKey.salt,
                     hash_key_nonce: encryptedHashKey.nonce,

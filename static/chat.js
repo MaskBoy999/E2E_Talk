@@ -818,6 +818,28 @@ function fmtDuration(secs) {
     return secs + ' seconds';
 }
 
+// Human-readable name for this browser/device, shown in the Devices panel
+// (Settings → Security → Devices).
+function getDeviceName() {
+    try {
+        var ua = navigator.userAgent;
+        var browser = 'Browser';
+        if (/Edg\//.test(ua)) browser = 'Edge';
+        else if (/OPR\//.test(ua) || /Opera/.test(ua)) browser = 'Opera';
+        else if (/Chrome\//.test(ua)) browser = 'Chrome';
+        else if (/Firefox\//.test(ua)) browser = 'Firefox';
+        else if (/Safari\//.test(ua)) browser = 'Safari';
+        else if (/MSIE|Trident/.test(ua)) browser = 'IE';
+        var os = 'Device';
+        if (/Windows/.test(ua)) os = 'Windows';
+        else if (/Android/.test(ua)) os = 'Android';
+        else if (/iPhone|iPad|iPod/.test(ua)) os = 'iOS';
+        else if (/Mac OS X/.test(ua)) os = 'macOS';
+        else if (/Linux/.test(ua)) os = 'Linux';
+        return browser + ' on ' + os;
+    } catch (_) { return 'Unknown device'; }
+}
+
 // Custom session duration chosen in Settings → Security (seconds). Applies to
 // login, registration, and re-authentication. Defaults to 30 days; floored at
 // 1 minute; capped at 30 days (the server re-clamps defensively).
@@ -896,6 +918,135 @@ function renderSessionLog() {
             '</div>';
     }
     listEl.innerHTML = html;
+}
+
+// --- Devices panel (Settings → Security → Devices) ---
+// Lists every session on this account server-side and lets the user force-kick
+// any of them (this device included). The server revokes the session and, if
+// the device is connected, pushes a `session_revoked` WS message immediately.
+
+// Minimal self-contained toast (no toast infra exists in chat.js).
+function flashToast(msg, kind) {
+    try {
+        var c = document.getElementById('app-toasts');
+        if (!c) {
+            c = document.createElement('div');
+            c.id = 'app-toasts';
+            c.style.cssText = 'position:fixed;bottom:16px;left:50%;transform:translateX(-50%);z-index:99999;display:flex;flex-direction:column;gap:6px;align-items:center;pointer-events:none;';
+            document.body.appendChild(c);
+        }
+        var d = document.createElement('div');
+        d.textContent = msg;
+        d.style.cssText = 'background:' + (kind === 'error' ? 'rgba(237,66,69,.95)' : 'rgba(35,165,90,.95)') +
+            ';color:#fff;padding:8px 16px;border-radius:8px;font-size:13px;box-shadow:0 2px 10px rgba(0,0,0,.4);';
+        c.appendChild(d);
+        setTimeout(function () { d.remove(); }, 3200);
+    } catch (_) {}
+}
+
+// SQLite CURRENT_TIMESTAMP is UTC "YYYY-MM-DD HH:MM:SS"; normalize to a
+// parseable string with an explicit Z so Date.parse is unambiguous.
+function parseDbTime(str) {
+    if (!str) return null;
+    var s = String(str);
+    if (s.indexOf('T') === -1) {
+        s = s.replace(' ', 'T') + 'Z';
+    } else if (!/Z$/.test(s) && !/[+-]\d\d:\d\d$/.test(s)) {
+        s += 'Z';
+    }
+    var t = Date.parse(s);
+    return isNaN(t) ? null : t;
+}
+
+function renderDevicesPanel() {
+    var listEl = document.getElementById('devices-list');
+    if (!listEl) return;
+    listEl.innerHTML = '<div class="session-log-empty">Loading devices…</div>';
+    fetch('/api/auth/sessions', { headers: { 'Authorization': 'Bearer ' + token() } })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+            if (!data || !Array.isArray(data.sessions)) {
+                listEl.innerHTML = '<div class="session-log-empty">Could not load devices. Are you signed in?</div>';
+                return;
+            }
+            var sessions = data.sessions;
+            if (!sessions.length) {
+                listEl.innerHTML = '<div class="session-log-empty">No devices are signed in.</div>';
+                return;
+            }
+            var html = '';
+            for (var i = 0; i < sessions.length; i++) {
+                var s = sessions[i];
+                var name = s.device_name || 'Unknown device';
+                if (s.device_id) name += ' <span class="device-id-suffix">(' + escapeHtml(s.device_id) + ')</span>';
+                var lastActive = parseDbTime(s.last_active_at);
+                var created = parseDbTime(s.created_at);
+                var expires = parseDbTime(s.expires_at);
+                var status = s.revoked
+                    ? '<span class="device-status device-status-off">Signed out</span>'
+                    : (s.is_current
+                        ? '<span class="device-status device-status-this">This device</span>'
+                        : '<span class="device-status device-status-on">Active</span>');
+                var kickBtn = s.revoked || s.is_current
+                    ? ''
+                    : '<button type="button" class="device-kick-btn" data-sid="' + escapeHtml(s.id) + '">Sign out</button>';
+                html += '<div class="session-log-item device-item' + (s.is_current ? ' device-current' : '') + '">' +
+                    '<div class="session-log-head">' + escapeHtml(name) + ' ' + status + '</div>' +
+                    '<div class="session-log-detail">' +
+                        'Active ' + (lastActive ? escapeHtml(fmtDateTime(lastActive)) : 'recently') +
+                        (created ? ' · signed in ' + escapeHtml(fmtDateTime(created)) : '') +
+                        (expires ? ' · expires ' + escapeHtml(fmtDateTime(expires)) : '') +
+                    '</div>' +
+                    (kickBtn ? '<div class="device-kick-row">' + kickBtn + '</div>' : '') +
+                    '</div>';
+            }
+            listEl.innerHTML = html;
+        })
+        .catch(function () {
+            listEl.innerHTML = '<div class="session-log-empty">Could not load devices.</div>';
+        });
+}
+
+function kickDevice(sid) {
+    if (!sid) return;
+    if (!confirm('Sign this device out of your account everywhere? It will be disconnected from voice channels and calls too.')) return;
+    fetch('/api/auth/sessions/kick', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token() },
+        body: JSON.stringify({ session_id: sid })
+    })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+            if (data && data.ok) {
+                renderDevicesPanel();
+                flashToast('Device signed out.', 'success');
+            } else {
+                flashToast((data && data.error) || 'Failed to sign out device.', 'error');
+            }
+        })
+        .catch(function () {
+            flashToast('Server is not running.', 'error');
+        });
+}
+
+function kickAllDevices() {
+    if (!confirm('Sign out ALL other devices? You will stay signed in here. Other devices are disconnected from voice channels and calls too.')) return;
+    fetch('/api/auth/sessions/kick-all', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + token() }
+    })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+            if (data && data.ok) {
+                renderDevicesPanel();
+                flashToast('All other devices signed out.', 'success');
+            } else {
+                flashToast((data && data.error) || 'Failed to sign out devices.', 'error');
+            }
+        })
+        .catch(function () {
+            flashToast('Server is not running.', 'error');
+        });
 }
 
 // Slice a decoded AudioBuffer to [start, start+len] and encode it as a
@@ -1206,6 +1357,7 @@ document.addEventListener('DOMContentLoaded', () => {
         loadMyProfile();
         loadFriendRequestsDisabledSetting();
         renderSessionLog();
+        renderDevicesPanel();
     });
     document.getElementById('close-settings').addEventListener('click', () => {
         settingsModal.style.display = 'none';
@@ -2757,6 +2909,18 @@ document.addEventListener('DOMContentLoaded', () => {
     const reauthConfirmBtn = document.getElementById('reauth-confirm-btn');
     const reauthError = document.getElementById('reauth-error');
 
+    // Devices panel: kick-all button + per-device kick buttons (delegated so
+    // freshly rendered rows work without re-binding).
+    var kickAllBtn = document.getElementById('kick-all-devices-btn');
+    if (kickAllBtn) kickAllBtn.addEventListener('click', kickAllDevices);
+    var devicesList = document.getElementById('devices-list');
+    if (devicesList) {
+        devicesList.addEventListener('click', function (e) {
+            var btn = e.target.closest ? e.target.closest('.device-kick-btn') : null;
+            if (btn && btn.dataset.sid) kickDevice(btn.dataset.sid);
+        });
+    }
+
     if (reauthBtn) {
         reauthBtn.addEventListener('click', () => {
             reauthSection.style.display = reauthSection.style.display === 'none' ? 'block' : 'none';
@@ -2800,13 +2964,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Custom session duration chosen in settings (clamped 1min–30 days;
                 // the server clamps again defensively).
                 var durationSecs = getSessionDurationSecs();
+                var devId = localStorage.getItem('e2e_device_key');
                 const res = await fetch('/api/reauth', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
                         'Authorization': 'Bearer ' + token()
                     },
-                    body: JSON.stringify({ password: sendPassword, duration_seconds: durationSecs })
+                    body: JSON.stringify({ password: sendPassword, duration_seconds: durationSecs, device_id: devId || undefined, device_name: getDeviceName() })
                 });
                 const data = await res.json();
                 if (!res.ok) {
@@ -6914,7 +7079,12 @@ function connectWebSocket(t) {
     ws.onopen = () => {
         var devId = localStorage.getItem('e2e_device_key');
         var lastSeen = localStorage.getItem('e2e_last_seen') || undefined;
-        ws.send(JSON.stringify({ type: 'auth', token: t, device_id: devId || undefined, last_seen_timestamp: lastSeen }));
+        // Send the CURRENT token from localStorage, falling back to the one we
+        // were given: if a re-auth replaced the session between page load and
+        // socket open (or between reconnects), the fresh token must be used or
+        // the old (revoked) session would be rejected → unexpected sign-out.
+        var curToken = token() || t;
+        ws.send(JSON.stringify({ type: 'auth', token: curToken, device_id: devId || undefined, last_seen_timestamp: lastSeen }));
         // Start periodic key heartbeat (configurable via security tab)
         restartRefreshHeartbeat();
     };
@@ -6987,6 +7157,14 @@ function connectWebSocket(t) {
                 localStorage.removeItem('token');
                 localStorage.removeItem('user');
                 window.location.href = 'login.html';
+                break;
+            case 'session_revoked':
+                // Force-kicked from Settings → Security → Devices (this device
+                // or all others). Show why, then sign out.
+                flashToast('This device was signed out from another device.', 'error');
+                localStorage.removeItem('token');
+                localStorage.removeItem('user');
+                setTimeout(function () { window.location.href = 'login.html'; }, 1500);
                 break;
             case 'ping':
                 ws.send(JSON.stringify({ type: 'pong' }));
@@ -8132,7 +8310,12 @@ function connectWebSocket(t) {
         if (!_wsReconnectTimer) {
             _wsReconnectTimer = setTimeout(function() {
                 _wsReconnectTimer = null;
-                connectWebSocket(t);
+                // Reconnect with the CURRENT token from localStorage, not the
+                // stale `t` captured at page load: after a re-auth (which mints
+                // a NEW server-side session and revokes the old one on this
+                // device), a reconnect with the old token would be rejected.
+                var fresh = token();
+                if (fresh) connectWebSocket(fresh);
             }, 1000);
         }
     };
@@ -19686,6 +19869,15 @@ async function loadMyProfile() {
         if (data.display_name) userDisplayNameCache[user.id].display_name = data.display_name;
         if (data.username_color) userDisplayNameCache[user.id].username_color = data.username_color;
         if (data.username_border_color) userDisplayNameCache[user.id].username_border_color = data.username_border_color;
+        // Own pfp/banner ids + decrypted keys: without these the voice self
+        // tiles/rows (which render from userDisplayNameCache) show only the
+        // initial on a FRESH device until some other sync happens to populate
+        // them. Mirror what the message-path handlers store so every surface
+        // (chat, server popup, DM panel, channel-list chips) can load them.
+        if (data.profile_picture_file_id !== undefined) userDisplayNameCache[user.id].profile_picture_file_id = data.profile_picture_file_id;
+        if (data.profile_picture_file_key) userDisplayNameCache[user.id].profile_picture_file_key = data.profile_picture_file_key;
+        if (data.profile_banner_file_id !== undefined) userDisplayNameCache[user.id].profile_banner_file_id = data.profile_banner_file_id;
+        if (data.profile_banner_file_key) userDisplayNameCache[user.id].profile_banner_file_key = data.profile_banner_file_key;
         scheduleUserDisplayNameSave();
         
         // Update sidebar footer
@@ -19697,6 +19889,13 @@ async function loadMyProfile() {
         // A single call is sufficient — its async callback updates ALL matching DOM elements.
         if (myProfile && myProfile.profile_picture_file_id) {
             getProfilePicUrl(myProfile.profile_picture_file_id, user.id);
+        }
+
+        // Refresh voice surfaces that render the SELF avatar (server popup
+        // rows, DM call tiles, channel-list chips): on a fresh device they may
+        // have rendered before myProfile finished loading, showing the initial.
+        if (window.VoiceManager && typeof VoiceManager.refreshSelfProfile === 'function') {
+            try { VoiceManager.refreshSelfProfile(); } catch (_) {}
         }
         
         // Apply theme colors from decrypted profile data
@@ -21581,7 +21780,7 @@ async function verifyStoredPassword() {
             var res = await authFetch('/api/reauth', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ password: sendPassword })
+                body: JSON.stringify({ password: sendPassword, device_id: localStorage.getItem('e2e_device_key') || undefined, device_name: getDeviceName() })
             });
             if (res.ok) {
                 // Update the auth token from the reauth response (extends session)
