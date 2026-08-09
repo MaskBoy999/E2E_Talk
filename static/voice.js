@@ -32,6 +32,7 @@
         peers: {},               // uid -> RTCPeerConnection
         remoteStreams: {},       // uid -> {audio, camera, screen} MediaStream
         localStreams: { mic: null, camera: null, screen: null },
+        tileTransforms: {},        // 'uid:kind' -> { mirror:bool, rot:deg } per-viewer view transforms
         roomKeyB64: null,
         sigKeyB64: null,        // signaling subkey (SDP/ICE E2EE) derived from the room key
         _pendingRecvTransforms: [],  // receivers awaiting a decrypt transform until the room key arrives
@@ -44,6 +45,7 @@
         masterGain: null,
         micGain: null,
         remoteAudioEls: {},      // uid -> [HTMLAudioElement] (stacked for >100% volume)
+        remoteScreenAudioEls: {}, // uid -> [HTMLAudioElement] (screen-share audio, stacked the same way)
         analyser: null,
         speakingInterval: null,
         speaking: false,
@@ -51,6 +53,9 @@
         deafened: false,
         cameraOn: false,
         screenOn: false,
+        cameraFacing: 'user',   // 'user' | 'environment' (flip camera)
+        cameraFlash: false,     // torch on the active camera track (mobile)
+        mirrorCamera: false,    // mirror the SELF preview only (never the outgoing stream)
         popupOpen: false,        // voice channel view (top panel in the text area)
         dmPanelOpen: undefined,  // DM call panel in the DM chat
         dmCallExpanded: false,   // DM call panel expanded → covers the WHOLE screen
@@ -65,6 +70,7 @@
             speakerVolume: 100,
             noiseSuppressionMode: 'rnnoise', // 'off' | 'browser' | 'rnnoise'
             echoCancellation: false,          // Chrome's AEC on the mic (default OFF)
+            mirrorCamera: false,              // mirror the self camera preview
         },
         _viewLast: '',
         _lastSpeakSent: 0,
@@ -106,6 +112,13 @@
         toggleDeafen: toggleDeafen,
         toggleCamera: toggleCamera,
         toggleScreen: toggleScreen,
+        flipCamera: flipCamera,
+        toggleCameraMirror: toggleCameraMirror,
+        toggleCameraFlash: toggleCameraFlash,
+        setCameraFlashOn: setCameraFlashOn,
+        openCamOptMenu: openCamOptMenu,
+        closeCamOptMenu: closeCamOptMenu,
+        setScreenVolume: setScreenVolume,
         toggleServerPopup: toggleServerPopup,
         toggleVoiceFullscreen: toggleVoiceFullscreen,
         setMicVolume: setMicVolume,
@@ -212,6 +225,7 @@
         bindDmPanelControls();
         bindMiniBarControls();
         bindVolumeMenu();
+        bindCamOptMenu();
         bindIncomingCallControls();
         ensureAudioCtx();
         // Keep the fixed overlays aligned to the real text area (the sidebar
@@ -247,6 +261,10 @@
             delete S.settings.noiseSuppression;
             saveSettings();
         }
+        // Mirror is a per-user preference (persisted with the other voice
+        // settings) but it only affects the self preview, so it doubles as
+        // live call state — keep them in sync on load.
+        S.mirrorCamera = !!S.settings.mirrorCamera;
         // Fullscreen is a per-call UI state only — never persisted. Every join
         // and leave resets it, so a call always starts NOT fullscreen.
         resetFullscreenState();
@@ -255,7 +273,8 @@
 
     // Reset both fullscreen states to OFF (DM panel expand + voice view
     // fullscreen) and re-apply. Called on every join and leave so each call
-    // always starts in the normal (non-fullscreen) layout.
+    // always starts in the normal (non-fullscreen) layout. The white flash
+    // overlay is reset too (a call never starts with the screen white).
     function resetFullscreenState() {
         S.dmCallExpanded = false;
         S.voiceFullscreen = false;
@@ -263,6 +282,10 @@
         try { localStorage.removeItem('voice_fullscreen'); } catch (_) {}
         applyDmExpand();
         applyVoiceFullscreen();
+        S.cameraFlash = false;
+        var _ov = el('camera-flash-overlay');
+        if (_ov) _ov.style.display = 'none';
+        closeCamOptMenu();
     }
 
     // Fetch the server's TURN servers (if any) so WebRTC calls can traverse
@@ -628,6 +651,9 @@
         for (var uid2 in S.remoteAudioEls) {
             removeRemoteAudioEls(uid2);
         }
+        for (var uid3 in S.remoteScreenAudioEls) {
+            removeRemoteScreenAudioEls(uid3);
+        }
         S.remoteStreams = {};
         clearRemoteTiles();
     }
@@ -819,10 +845,18 @@
 
     function startCamera() {
         if (S.localStreams.camera) return Promise.resolve();
-        return navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 }, facingMode: 'user' }, audio: false })
+        // Flip uses S.cameraFacing ('user' | 'environment'); a fresh stream
+        // starts with the flash off (torch is a per-stream constraint). The
+        // white overlay never carries over into the restarted stream.
+        S.cameraFlash = false;
+        var _stOv = el('camera-flash-overlay');
+        if (_stOv) _stOv.style.display = 'none';
+        return navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 }, facingMode: S.cameraFacing || 'user' }, audio: false })
             .then(function (stream) {
                 S.localStreams.camera = stream;
                 S.cameraOn = true;
+                var cvt = stream.getVideoTracks()[0];
+                if (cvt) { try { cvt.contentHint = 'motion'; } catch (_) {} }
                 addLocalTracksToAllPeers();
                 sendVoiceState();
                 renderSelfPreview();
@@ -839,10 +873,18 @@
     function stopCamera() {
         if (S.localStreams.camera) {
             S.localStreams.camera.getTracks().forEach(function (t) { try { t.stop(); } catch (_) {} });
+            // Remove the track from every peer BEFORE nulling the stream —
+            // removeTrackFromAllPeers('camera') matches via isTrackKind() which
+            // needs S.localStreams.camera to still be set. (Nulling first used
+            // to leave a dead camera sender behind, which flipCamera's
+            // stop→start cycle then duplicated.)
+            removeTrackFromAllPeers('camera');
             S.localStreams.camera = null;
         }
         S.cameraOn = false;
-        removeTrackFromAllPeers('camera');
+        // Flash off — the torch dies with the stream, and the white overlay
+        // must never linger after the camera is turned off.
+        setCameraFlashOn(false);
         sendVoiceState();
         renderSelfPreview();
         renderPopup();
@@ -863,14 +905,28 @@
                 height: { max: 1080 },
                 frameRate: { ideal: 30, max: 30 },
             },
-            audio: false,
+            // Capture tab/system audio too (the Chrome picker shows the
+            // "Share tab audio" checkbox). The remote side receives it as a
+            // SECOND audio track and routes it through its own per-member
+            // volume control (right-click the screen tile).
+            audio: true,
         })
             .then(function (stream) {
                 S.localStreams.screen = stream;
                 S.screenOn = true;
-                stream.getVideoTracks()[0].addEventListener('ended', function () {
-                    stopScreen();
-                });
+                // A screen stream should always carry a video track, but guard
+                // anyway — if this line throws (e.g. an audio-only capture in
+                // tests), addLocalTracksToAllPeers below would never run and
+                // the screen audio would silently never be sent.
+                var svt = stream.getVideoTracks()[0];
+                if (svt) {
+                    // 'detail' biases the encoder toward keeping text crisp
+                    // (Discord-style screenshare hint) instead of motion.
+                    try { svt.contentHint = 'detail'; } catch (_) {}
+                    svt.addEventListener('ended', function () {
+                        stopScreen();
+                    });
+                }
                 addLocalTracksToAllPeers();
                 sendVoiceState();
                 renderSelfPreview();
@@ -887,10 +943,13 @@
     function stopScreen() {
         if (S.localStreams.screen) {
             S.localStreams.screen.getTracks().forEach(function (t) { try { t.stop(); } catch (_) {} });
+            // Remove BOTH the screen video + audio tracks BEFORE nulling the
+            // stream (removeTrackFromAllPeers('screen') matches against
+            // S.localStreams.screen.getTracks()).
+            removeTrackFromAllPeers('screen');
             S.localStreams.screen = null;
         }
         S.screenOn = false;
-        removeTrackFromAllPeers('screen');
         sendVoiceState();
         renderSelfPreview();
         renderPopup();
@@ -1089,6 +1148,14 @@
             if (st && !pc.getSenders().find(function (s) { return s.track && s.track.id === st.id; })) {
                 pc.addTrack(st, new MediaStream([st]));
             }
+            // Screen-share audio (tab/system): sent as its own track so the
+            // receiver can mix it separately from the mic (per-member screen
+            // volume). The mic audio track is added FIRST, so the receiver
+            // classifies audio tracks by fill order — mic, then screen.
+            var sat = S.localStreams.screen.getAudioTracks()[0];
+            if (sat && !pc.getSenders().find(function (s) { return s.track && s.track.id === sat.id; })) {
+                pc.addTrack(sat, new MediaStream([sat]));
+            }
         }
     }
 
@@ -1103,16 +1170,18 @@
     // Cap video send bitrate so screen shares / cameras don't saturate the
     // mesh. Unbounded encoders at high resolution + fps generate far more
     // RTP than the connection can carry → packet loss → decoder artifacts.
-    // Screen: 2.5 Mbps (static content, plenty). Camera: 1.2 Mbps. Prefer
-    // maintaining resolution so text in shares stays readable when bandwidth
-    // dips (degradationPreference is a sender parameter, not a capture one).
+    // Screen: 5 Mbps @ 1080p30 (2.5 Mbps was too low — any motion turned into
+    // blocky macro-blocking). Camera: 1.5 Mbps. 'balanced' lets the encoder
+    // drop resolution gracefully under congestion instead of quantizing the
+    // full frame into artifacts, and contentHint tells the encoder the screen
+    // content is detail-heavy (text) so it biases accordingly.
     function tuneVideoSenders(pc) {
         if (!pc || !pc.getSenders) return;
         try {
             pc.getSenders().forEach(function (s) {
                 if (!s.track || s.track.kind !== 'video') return;
                 var isScreen = S.localStreams.screen && S.localStreams.screen.getVideoTracks().indexOf(s.track) !== -1;
-                var maxBitrate = isScreen ? 2500000 : 1200000;
+                var maxBitrate = isScreen ? 5000000 : 1500000;
                 try {
                     var params = s.getParameters();
                     if (!params.encodings || params.encodings.length === 0) return;
@@ -1120,7 +1189,7 @@
                         enc.maxBitrate = maxBitrate;
                         enc.maxFramerate = 30;
                     });
-                    params.degradationPreference = isScreen ? 'maintain-resolution' : 'balanced';
+                    params.degradationPreference = 'balanced';
                     s.setParameters(params).catch(function () {});
                 } catch (_) {}
             });
@@ -1131,7 +1200,18 @@
         for (var uid in S.peers) {
             var pc = S.peers[uid];
             var senders = pc.getSenders().filter(function (s) {
-                return s.track && (kind === 'audio' ? s.track.kind === 'audio' : (s.track.kind === 'video' && isTrackKind(s.track, kind)));
+                if (!s.track) return false;
+                if (kind === 'audio') {
+                    // Mic audio only — muting must NOT kill the screen-share
+                    // audio (that is removed with kind 'screen' instead).
+                    if (s.track.kind !== 'audio') return false;
+                    if (S.localStreams.screen && S.localStreams.screen.getAudioTracks().indexOf(s.track) !== -1) return false;
+                    return true;
+                }
+                // 'screen' removes BOTH the screen video track and its audio
+                // track (the whole screen stream).
+                if (kind === 'screen') return S.localStreams.screen && S.localStreams.screen.getTracks().indexOf(s.track) !== -1;
+                return s.track.kind === 'video' && isTrackKind(s.track, kind);
             });
             senders.forEach(function (s) {
                 try { pc.removeTrack(s); } catch (_) {}
@@ -1207,37 +1287,74 @@
             if (!applyRecvE2EE(e.receiver)) {
                 queueRecvE2EE(e.receiver, e.track.id);
             }
+            S.remoteStreams[uid] = S.remoteStreams[uid] || {};
+            var mic = S.remoteStreams[uid].audio;
+            var scA = S.remoteStreams[uid].screenAudio;
             // Renegotiation (ICE restart, media add/remove) re-fires ontrack
             // with the SAME track object. Rebuilding the stream + refreshing
             // srcObject would RESTART the <audio> element playback → an
             // audible volume drop "for no reason". Keep playing if it's the
             // same track.
-            var prev = S.remoteStreams[uid] && S.remoteStreams[uid].audio;
-            if (prev && prev.getAudioTracks()[0] === e.track) return;
-            S.remoteStreams[uid] = S.remoteStreams[uid] || {};
-            S.remoteStreams[uid].audio = new MediaStream([e.track]);
-            playRemoteAudio(uid);
+            if (mic && mic.getAudioTracks()[0] === e.track) return;
+            if (scA && scA.getAudioTracks()[0] === e.track) return;
+            // The sender adds the mic audio track FIRST, then the screen-share
+            // audio track — so the first audio track is the mic and the
+            // second is the screen's tab/system audio. If the old mic track
+            // is already ended (mic restart), the new track replaces it.
+            if (mic && mic.getAudioTracks()[0] && mic.getAudioTracks()[0].readyState === 'ended') {
+                delete S.remoteStreams[uid].audio;
+                mic = null;
+            }
+            var slot = mic ? 'screenAudio' : 'audio';
+            S.remoteStreams[uid][slot] = new MediaStream([e.track]);
+            if (slot === 'audio') {
+                playRemoteAudio(uid);
+            } else {
+                playRemoteScreenAudio(uid);
+            }
+            e.track.onended = function () {
+                var st = S.remoteStreams[uid];
+                if (st && st[slot] && st[slot].getAudioTracks()[0] === e.track) {
+                    delete st[slot];
+                    if (slot === 'screenAudio') removeRemoteScreenAudioEls(uid);
+                }
+                renderPopup();
+                renderDmPanel();
+            };
         } else if (e.track.kind === 'video') {
             S.remoteStreams[uid] = S.remoteStreams[uid] || {};
             // MediaStream.id is read-only, so stream ids can never carry a
             // 'screen-' prefix — the sender's camStream.id/scrStream.id tagging
-            // silently no-ops. Classify from the member's broadcast flags, and
-            // when both are on use the fill order (camera is added first).
-            // e.streams is also often EMPTY for later renegotiated tracks, so
-            // never rely on it for classification.
+            // silently no-ops. e.streams is also often EMPTY for later
+            // renegotiated tracks, so never rely on it for classification.
+            //
+            // Primary signal: the member's broadcast camera_track_id /
+            // screen_track_id (the sender's track ids survive the SDP msid
+            // round-trip, so they match exactly). If the state broadcast
+            // hasn't arrived yet, park the track in a per-uid pending queue
+            // instead of guessing — fixVideoSlots() drains it the moment the
+            // ids arrive, so a screen share can never be mislabeled as a
+            // camera feed ("sharescreen looks wrong" race).
             var m = S.members[uid] || {};
-            var existing = S.remoteStreams[uid];
-            var key;
-            if (m.screen && !m.camera) key = 'screen';
-            else if (m.camera && !m.screen) key = 'camera';
-            else key = existing.camera ? 'screen' : 'camera'; // both on, or flags not yet arrived
-            S.remoteStreams[uid][key] = new MediaStream([e.track]);
-            // Clear the slot when the remote stops this track, so a stale
-            // stream doesn't linger on the tile.
+            var key = classifyVideoSlot(uid, e.track.id);
+            if (!key) {
+                // Unknown ids yet — hold the track until the state arrives.
+                S.remoteStreams[uid]._pending = S.remoteStreams[uid]._pending || [];
+                S.remoteStreams[uid]._pending.push(e.track);
+            } else {
+                S.remoteStreams[uid][key] = new MediaStream([e.track]);
+            }
+            // Clear the slot (or the pending queue) when the remote stops
+            // this track, so a stale stream doesn't linger on the tile.
             e.track.onended = function () {
-                if (S.remoteStreams[uid] && S.remoteStreams[uid][key] &&
-                    S.remoteStreams[uid][key].getTracks().indexOf(e.track) !== -1) {
-                    delete S.remoteStreams[uid][key];
+                var rs2 = S.remoteStreams[uid];
+                if (!rs2) return;
+                if (rs2._pending) {
+                    rs2._pending = rs2._pending.filter(function (t) { return t !== e.track; });
+                    if (!rs2._pending.length) delete rs2._pending;
+                }
+                if (key && rs2[key] && rs2[key].getTracks().indexOf(e.track) !== -1) {
+                    delete rs2[key];
                     renderPopup();
                     renderDmPanel();
                 }
@@ -1248,7 +1365,91 @@
             if (!applyRecvE2EE(e.receiver)) {
                 queueRecvE2EE(e.receiver, e.track.id);
             }
-            renderRemoteTile(uid, key);
+            if (key) renderRemoteTile(uid, key);
+            renderPopup();
+            renderDmPanel();
+        }
+    }
+
+    // Classify an incoming remote video track as 'camera' | 'screen' | null.
+    // Exact match against the member's broadcast track ids wins; flag-only
+    // fallbacks are used when the ids aren't known yet, and null means "hold
+    // the track until the ids arrive" (the pending queue).
+    function classifyVideoSlot(uid, trackId) {
+        var m = S.members[uid] || {};
+        if (m.camera_track_id && trackId === m.camera_track_id) return 'camera';
+        if (m.screen_track_id && trackId === m.screen_track_id) return 'screen';
+        // No ids (member state not arrived, or sender predates track-id
+        // signaling). Fall back to the broadcast flags, then to the fill
+        // order the sender uses (camera added before screen).
+        if (m.screen && !m.camera) return 'screen';
+        if (m.camera && !m.screen) return 'camera';
+        if (!m.camera && !m.screen) return null;
+        var existing = S.remoteStreams[uid];
+        var camLive = existing && existing.camera && existing.camera.getVideoTracks()[0] &&
+            existing.camera.getVideoTracks()[0].readyState !== 'ended';
+        return camLive ? 'screen' : 'camera';
+    }
+
+    // Re-slot remote video streams once a member's track ids arrive: drain the
+    // pending queue and move any track that landed in the wrong slot (the
+    // pre-id fill-order fallback) to where it belongs. Never clobbers a live
+    // stream that is already in the correct slot.
+    function fixVideoSlots(uid) {
+        var m = S.members[uid];
+        var rs = S.remoteStreams[uid];
+        if (!m || !rs) return;
+        var camId = m.camera_track_id || null;
+        var scrId = m.screen_track_id || null;
+        var changed = false;
+        // 1. Drain pending tracks now that the ids are known.
+        if (rs._pending && rs._pending.length) {
+            rs._pending = rs._pending.filter(function (t) {
+                var where = null;
+                if (camId && t.id === camId) where = 'camera';
+                else if (scrId && t.id === scrId) where = 'screen';
+                if (where) {
+                    rs[where] = new MediaStream([t]);
+                    changed = true;
+                    return false;
+                }
+                return true;
+            });
+            if (!rs._pending.length) delete rs._pending;
+        }
+        if (!camId && !scrId) {
+            if (changed) { renderPopup(); renderDmPanel(); }
+            return;
+        }
+        // 2. Move tracks that sit in the wrong slot (swapped, or the
+        // only-screen-in-camera-slot race).
+        var camStream = rs.camera || null;
+        var scrStream = rs.screen || null;
+        var inCam = function (id) { return !!(id && camStream && camStream.getVideoTracks().some(function (t) { return t.id === id; })); };
+        var inScr = function (id) { return !!(id && scrStream && scrStream.getVideoTracks().some(function (t) { return t.id === id; })); };
+        var cInCam = inCam(camId), cInScr = inScr(camId);
+        var sInCam = inCam(scrId), sInScr = inScr(scrId);
+        if ((!camId || cInCam) && (!scrId || sInScr)) {
+            if (changed) { renderPopup(); renderDmPanel(); }
+            return;
+        }
+        if (cInScr && sInCam) {
+            // Both present but swapped.
+            rs.camera = scrStream;
+            rs.screen = camStream;
+            changed = true;
+        } else if (cInScr && !sInCam) {
+            // Camera track landed in the screen slot.
+            rs.camera = scrStream;
+            rs.screen = null;
+            changed = true;
+        } else if (sInCam && !cInScr) {
+            // Screen track landed in the camera slot (only-screen race).
+            rs.screen = camStream;
+            rs.camera = null;
+            changed = true;
+        }
+        if (changed) {
             renderPopup();
             renderDmPanel();
         }
@@ -1360,6 +1561,88 @@
     function setMemberVolume(uid, pct) {
         try { localStorage.setItem('voice_volume_' + uid, String(pct)); } catch (_) {}
         if (S.remoteAudioEls[uid]) applyRemoteVolume(uid);
+        var label = document.getElementById('volume-menu-value');
+        if (label) label.textContent = pct + '%';
+    }
+
+    // ------------------------------------------------------------------
+    // Screen-share audio playback — a SEPARATE per-member volume from the
+    // mic, stored under voice_screen_volume_<uid> and applied to its own
+    // stacked <audio> elements (same >100% stacking as the mic). Right-click
+    // a member's screen tile to adjust it (0–500% slider, custom % to
+    // 100000%).
+    // ------------------------------------------------------------------
+    function remoteScreenVolumeFor(uid) {
+        var saved = parseFloat(localStorage.getItem('voice_screen_volume_' + uid) || '100');
+        var member = isNaN(saved) ? 1 : saved / 100;
+        return member * (S.settings.speakerVolume / 100) * (S.deafened ? 0 : 1);
+    }
+
+    function removeRemoteScreenAudioEls(uid) {
+        var els = S.remoteScreenAudioEls[uid];
+        if (els) {
+            els.forEach(function (el) {
+                try { el.pause(); } catch (_) {}
+                try { el.srcObject = null; } catch (_) {}
+                try { el.remove(); } catch (_) {}
+            });
+        }
+        delete S.remoteScreenAudioEls[uid];
+    }
+
+    function applyRemoteScreenVolume(uid) {
+        var els = S.remoteScreenAudioEls[uid];
+        if (!els) return;
+        var vol = Math.max(0, Math.min(1000, Math.round(remoteScreenVolumeFor(uid) * 100) / 100));
+        var need = Math.max(1, Math.ceil(vol));
+        var stream = S.remoteStreams[uid] && S.remoteStreams[uid].screenAudio;
+        while (els.length < need) {
+            var el2 = document.createElement('audio');
+            el2.autoplay = true;
+            el2.muted = false;
+            el2.style.display = 'none';
+            if (stream) el2.srcObject = stream;
+            el2.play().catch(function () {});
+            document.body.appendChild(el2);
+            els.push(el2);
+        }
+        while (els.length > need) {
+            var old = els.pop();
+            try { old.pause(); } catch (_) {}
+            try { old.remove(); } catch (_) {}
+        }
+        els.forEach(function (el, i) {
+            el.volume = Math.max(0, Math.min(1, vol - i));
+        });
+    }
+
+    function playRemoteScreenAudio(uid) {
+        if (!S.remoteStreams[uid] || !S.remoteStreams[uid].screenAudio) return;
+        try {
+            var stream = S.remoteStreams[uid].screenAudio;
+            var els = S.remoteScreenAudioEls[uid];
+            if (!els) {
+                removeRemoteScreenAudioEls(uid);
+                S.remoteScreenAudioEls[uid] = [];
+                els = S.remoteScreenAudioEls[uid];
+            }
+            var track = stream.getAudioTracks()[0];
+            if (!track) return;
+            els.forEach(function (el) {
+                var cur = null;
+                try { cur = el.srcObject; } catch (_) {}
+                var curTrack = cur && cur.getAudioTracks ? cur.getAudioTracks()[0] : null;
+                if (curTrack !== track) {
+                    try { el.srcObject = stream; } catch (_) {}
+                }
+            });
+            applyRemoteScreenVolume(uid);
+        } catch (_) {}
+    }
+
+    function setScreenVolume(uid, pct) {
+        try { localStorage.setItem('voice_screen_volume_' + uid, String(pct)); } catch (_) {}
+        if (S.remoteScreenAudioEls[uid]) applyRemoteScreenVolume(uid);
         var label = document.getElementById('volume-menu-value');
         if (label) label.textContent = pct + '%';
     }
@@ -1581,6 +1864,11 @@
             startMic();
         }
 
+        // Report current self state (mute/deafen/camera/screen/mirror) so peers
+        // render our tiles correctly right away — covers pre-started cameras
+        // and a mirror preference set before joining.
+        sendVoiceState();
+
         // SERVER safety net: if the room key couldn't be derived at join
         // (the device's server key fetch was in flight — e.g. a phone that
         // just joined the server, or a key_needed handshake that raced the
@@ -1712,7 +2000,11 @@
         // speaking toggle after joining with a pre-started camera.
         var mediaChanged = !prev ||
             prev.username !== member.username ||
-            (!isSelf && (prev.camera !== member.camera || prev.screen !== member.screen));
+            (!isSelf && (prev.camera !== member.camera || prev.screen !== member.screen)) ||
+            // Track ids change on track restarts (camera flip, screen restart)
+            // even when the on/off flags don't — re-slot so the right feed
+            // lands in the right tile.
+            (!isSelf && (prev.camera_track_id !== member.camera_track_id || prev.screen_track_id !== member.screen_track_id));
         S.members[member.user_id] = member;
         if (S.roomType === 'dm' && member.user_id !== getSelfId()) {
             markDmCallAnswered();
@@ -1725,6 +2017,10 @@
             updateSelfUI();
         }
         if (mediaChanged) {
+            // The state broadcast may have arrived AFTER the video tracks
+            // (their classification raced) — put every stream in the correct
+            // slot before re-rendering.
+            if (!isSelf) fixVideoSlots(member.user_id);
             renderBar();
             renderPopup();
             renderDmPanel();
@@ -1847,6 +2143,9 @@
             // Pause remote audio if deafened / apply member volumes
             Object.keys(S.remoteAudioEls).forEach(function (uid) {
                 applyRemoteVolume(uid);
+            });
+            Object.keys(S.remoteScreenAudioEls).forEach(function (uid) {
+                applyRemoteScreenVolume(uid);
             });
             updateSelfUI();
             renderBar();
@@ -2315,9 +2614,12 @@
             S.muted = false;
             if (S.connected) startMic();
         }
-        // Mute/unmute all remote audio
+        // Mute/unmute all remote audio (mic AND screen-share audio)
         Object.keys(S.remoteAudioEls).forEach(function (uid) {
             applyRemoteVolume(uid);
+        });
+        Object.keys(S.remoteScreenAudioEls).forEach(function (uid) {
+            applyRemoteScreenVolume(uid);
         });
         sendVoiceState();
         updateSelfUI();
@@ -2339,8 +2641,128 @@
         if (S.screenOn) stopScreen(); else startScreen();
     }
 
+    // Switch between the front and back camera (mobile). The camera is
+    // restarted with the new facingMode; peers renegotiate automatically
+    // (stopCamera removes the old track, startCamera re-adds the new one).
+    function flipCamera() {
+        ensureAudioCtx();
+        if (!S.cameraOn) {
+            showToast('Turn the camera on first.');
+            return;
+        }
+        S.cameraFacing = S.cameraFacing === 'user' ? 'environment' : 'user';
+        stopCamera();
+        startCamera();
+    }
+
+    // Mirror the SELF preview (scaleX flip). This only flips what you see of
+    // yourself — the outgoing stream stays unflipped for everyone else,
+    // exactly like Discord. Persisted in voice_settings.
+    function toggleCameraMirror() {
+        ensureAudioCtx();
+        S.mirrorCamera = !S.mirrorCamera;
+        S.settings.mirrorCamera = S.mirrorCamera;
+        saveSettings();
+        renderSelfPreview();
+        renderPopup();
+        renderDmPanel();
+        updateSelfUI();
+    }
+
+    // Flash on/off. Cameras with a torch (most rear cameras) use the real
+    // LED via applyConstraints. Cameras WITHOUT torch — like the selfie/
+    // front camera — fall back to a white screen overlay covering the app,
+    // with a button on it to turn the flash back off.
+    function setCameraFlashOn(on) {
+        S.cameraFlash = !!on;
+        var track = S.localStreams.camera && S.localStreams.camera.getVideoTracks()[0];
+        var torch = !!(track && track.getCapabilities && track.getCapabilities().torch);
+        if (torch && track) {
+            track.applyConstraints({ advanced: [{ torch: S.cameraFlash }] }).catch(function () {
+                S.cameraFlash = false;
+                showToast('Flash could not be toggled.');
+            });
+        } else {
+            var ov = el('camera-flash-overlay');
+            if (ov) ov.style.display = S.cameraFlash ? 'flex' : 'none';
+        }
+        closeCamOptMenu();
+        updateSelfUI();
+    }
+
+    function toggleCameraFlash() {
+        ensureAudioCtx();
+        if (!S.cameraOn || !S.localStreams.camera) {
+            showToast('Turn the camera on first.');
+            return;
+        }
+        setCameraFlashOn(!S.cameraFlash);
+    }
+
+    // Camera options dropdown (flip / mirror / flash) — one button in each
+    // call's control row opens it; it closes on an outside click. Flip and
+    // mirror close it immediately; flash closes it too (the white overlay
+    // itself becomes the "flash is on" indicator).
+    function openCamOptMenu(anchor) {
+        if (!S.cameraOn) {
+            showToast('Turn the camera on first.');
+            return;
+        }
+        var menu = el('voice-cam-opt-menu');
+        if (!menu) return;
+        updateCamOptMenuState();
+        menu.style.display = 'flex';
+        var r = anchor.getBoundingClientRect();
+        var mw = 200;
+        var x = Math.max(6, Math.min(r.left, window.innerWidth - mw - 8));
+        var y = r.bottom + 6;
+        if (y + 130 > window.innerHeight) y = Math.max(6, r.top - 130);
+        menu.style.left = x + 'px';
+        menu.style.top = y + 'px';
+        if (menu._camOptDocClick) document.removeEventListener('click', menu._camOptDocClick);
+        var onDocClick = function (e) {
+            if (menu.style.display === 'none' || menu.contains(e.target)) return;
+            closeCamOptMenu();
+            document.removeEventListener('click', onDocClick);
+            menu._camOptDocClick = null;
+        };
+        menu._camOptDocClick = onDocClick;
+        setTimeout(function () { document.addEventListener('click', onDocClick); }, 10);
+    }
+
+    function closeCamOptMenu() {
+        var menu = el('voice-cam-opt-menu');
+        if (menu) menu.style.display = 'none';
+    }
+
+    function updateCamOptMenuState() {
+        var mirror = el('cam-opt-mirror');
+        var flash = el('cam-opt-flash');
+        if (mirror) mirror.classList.toggle('active', !!S.mirrorCamera);
+        if (flash) flash.classList.toggle('active', !!S.cameraFlash);
+    }
+
+    function bindCamOptMenu() {
+        var menu = el('voice-cam-opt-menu');
+        if (!menu) return;
+        var flip = el('cam-opt-flip');
+        var mirror = el('cam-opt-mirror');
+        var flash = el('cam-opt-flash');
+        if (flip) flip.addEventListener('click', function (e) { e.stopPropagation(); flipCamera(); closeCamOptMenu(); });
+        if (mirror) mirror.addEventListener('click', function (e) { e.stopPropagation(); toggleCameraMirror(); closeCamOptMenu(); });
+        if (flash) flash.addEventListener('click', function (e) { e.stopPropagation(); toggleCameraFlash(); });
+        var off = el('camera-flash-off');
+        if (off) off.addEventListener('click', function () { setCameraFlashOn(false); });
+    }
+
     function sendVoiceState() {
         if (!S.connected) return;
+        // Track ids let receivers match incoming video tracks to the correct
+        // slot (camera vs screen) even when the track arrives BEFORE this
+        // state broadcast — otherwise a screen share can land in the camera
+        // slot (or vice versa) and "look wrong" until a renegotiation.
+        var camTrack = S.localStreams.camera && S.localStreams.camera.getVideoTracks()[0];
+        var scrTrack = S.localStreams.screen && S.localStreams.screen.getVideoTracks()[0];
         send({
             type: 'voice_state',
             room_type: S.roomType,
@@ -2351,6 +2773,8 @@
             camera: S.cameraOn,
             screen: S.screenOn,
             speaking: S.speaking,
+            camera_track_id: camTrack ? camTrack.id : null,
+            screen_track_id: scrTrack ? scrTrack.id : null,
         });
     }
 
@@ -2693,6 +3117,7 @@
         bindClick(bar, 'voice-bar-mute', function () { toggleMute(); });
         bindClick(bar, 'voice-bar-deafen', function () { toggleDeafen(); });
         bindClick(bar, 'voice-bar-camera', function () { toggleCamera(); });
+        bindClick(bar, 'voice-bar-cam-opt', function (e) { openCamOptMenu(this); });
         bindClick(bar, 'voice-bar-screen', function () { toggleScreen(); });
         bindClick(bar, 'voice-bar-leave', function () { leaveVoice(); });
         bindClick(bar, 'voice-bar-popup', function () {
@@ -2780,6 +3205,7 @@
         bindClick(pop, 'voice-popup-mute', function () { toggleMute(); });
         bindClick(pop, 'voice-popup-deafen', function () { toggleDeafen(); });
         bindClick(pop, 'voice-popup-camera', function () { toggleCamera(); });
+        bindClick(pop, 'voice-popup-cam-opt', function (e) { openCamOptMenu(this); });
         bindClick(pop, 'voice-popup-screen', function () { toggleScreen(); });
         bindClick(pop, 'voice-popup-leave', function () { leaveVoice(); });
         var pmv = pop.querySelector('#voice-popup-mic-volume');
@@ -2938,7 +3364,23 @@
                 video.srcObject = stream;
                 video.play().catch(function () {});
             }
+            // Mirror applies to the SELF camera preview only; per-viewer
+            // mirror/rotate transforms (right-click menu) apply on top for how
+            // YOU see this feed. Pure renderer-side CSS — nothing is sent.
+            video.classList.toggle('mirrored', isSelf && kind === 'camera' && S.mirrorCamera);
+            applyTileTransform(video, uid, kind);
             video.addEventListener('click', function () { toggleFullscreen(video); });
+            // Right-click on a remote video tile opens the per-member volume
+            // menu — screen tiles target the SCREEN audio volume, camera tiles
+            // target the member's mic volume (stops propagation so the member
+            // row's own handler doesn't double-open).
+            if (!isSelf) {
+                video.addEventListener('contextmenu', function (e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    openVolumeMenu(e, uid, kind === 'screen' ? 'screen' : 'video');
+                });
+            }
         });
     }
 
@@ -3013,6 +3455,12 @@
             v.playsInline = true;
             v.srcObject = S.localStreams.camera;
             v.className = 'voice-self-video';
+            // data-kind/self/uid let the fullscreen-exit path (moveTileBack /
+            // findTileSlot / reattachTileStream) restore the element live.
+            v.setAttribute('data-kind', 'camera');
+            v.setAttribute('data-self', '1');
+            v.setAttribute('data-uid', getSelfId());
+            if (S.mirrorCamera) v.classList.add('mirrored');
             v.addEventListener('click', function () { toggleFullscreen(v); });
             wrap.appendChild(v);
         }
@@ -3023,6 +3471,9 @@
             s.playsInline = true;
             s.srcObject = S.localStreams.screen;
             s.className = 'voice-self-video';
+            s.setAttribute('data-kind', 'screen');
+            s.setAttribute('data-self', '1');
+            s.setAttribute('data-uid', getSelfId());
             s.addEventListener('click', function () { toggleFullscreen(s); });
             wrap.appendChild(s);
         }
@@ -3126,6 +3577,7 @@
         bindClick(p, 'dm-call-mute', function () { toggleMute(); });
         bindClick(p, 'dm-call-deafen', function () { toggleDeafen(); });
         bindClick(p, 'dm-call-camera', function () { toggleCamera(); });
+        bindClick(p, 'dm-call-cam-opt', function (e) { openCamOptMenu(this); });
         bindClick(p, 'dm-call-screen', function () { toggleScreen(); });
         bindClick(p, 'dm-call-end', function () { endDmCall(); });
         bindClick(p, 'dm-call-expand', function () { toggleDmExpand(); });
@@ -3134,11 +3586,12 @@
     }
 
     // Clamp a saved DM panel height to a sane range for the current viewport
-    // (min 180px so the tiles stay usable; max keeps the chat header plus a
-    // sliver of the text area visible below the panel).
+    // (min 240px so the header, member tiles and control buttons never
+    // overlap; max keeps the chat header plus a sliver of the text area
+    // visible below the panel).
     function clampDmPanelHeight(h) {
         if (!h) return null;
-        var min = 180;
+        var min = 240;
         var max = Math.max(min, window.innerHeight - 90);
         return Math.max(min, Math.min(h, max));
     }
@@ -3153,7 +3606,7 @@
         if (!handle || !panel) return;
         try {
             var saved = parseInt(localStorage.getItem('dm_call_panel_h'), 10);
-            if (saved && saved >= 180) S.dmPanelHeight = saved;
+            if (saved && saved >= 240) S.dmPanelHeight = saved;
         } catch (e) {}
         var startY = 0;
         var startH = 0;
@@ -3209,11 +3662,16 @@
                 video.srcObject = S.remoteStreams[uid][kind];
                 video.play().catch(function () {});
             }
+            // Per-viewer mirror/rotate transform (right-click menu) — how YOU
+            // see this feed. Remote tiles never mirror by default.
+            applyTileTransform(video, uid, kind);
             video.addEventListener('click', function () { toggleFullscreen(video); });
             video.addEventListener('contextmenu', function (e) {
                 e.preventDefault();
                 e.stopPropagation();
-                openVolumeMenu(e, uid);
+                // Screen tiles open the SCREEN-audio volume; camera tiles the
+                // member's mic volume.
+                openVolumeMenu(e, uid, video.dataset.kind === 'screen' ? 'screen' : 'video');
             });
         });
         // Right-click ANYWHERE on a DM call tile (avatar, name, placeholder —
@@ -3225,7 +3683,7 @@
                 e.preventDefault();
                 e.stopPropagation();
                 var uid = tile.getAttribute('data-uid');
-                if (uid) openVolumeMenu(e, uid);
+                if (uid) openVolumeMenu(e, uid, 'member');
             });
         });
         // Click the member's PFP → open their profile view.
@@ -3337,88 +3795,200 @@
     }
 
     // ------------------------------------------------------------------
+    // UI: per-viewer tile transforms (right-click menu) — mirror/rotate only
+    // change how YOU see a member's camera/screen feed. Nothing is signaled
+    // or sent; the E2EE media path is untouched. The mirror is ALWAYS a
+    // horizontal flip in screen space, independent of any rotation applied.
+    // ------------------------------------------------------------------
+    function tileTransformCss(uid, kind) {
+        var st = S.tileTransforms[uid + ':' + kind];
+        if (!st || (!st.mirror && !st.rot)) return '';
+        // Rotate is applied FIRST (rightmost), then the horizontal flip — so
+        // scaleX(-1) always mirrors left↔right on screen, even when rotated.
+        var parts = [];
+        if (st.mirror) parts.push('scaleX(-1)');
+        if (st.rot) parts.push('rotate(' + st.rot + 'deg)');
+        return parts.join(' ');
+    }
+
+    function applyTileTransform(video, uid, kind) {
+        var css = tileTransformCss(uid, kind);
+        video.style.transform = css || '';
+    }
+
+    function applyTileTransformAll(uid, kind) {
+        document.querySelectorAll('.remote-video-tile[data-kind="' + kind + '"][data-uid="' + uid + '"]').forEach(function (v) {
+            applyTileTransform(v, uid, kind);
+        });
+    }
+
+    function setTileViewTransform(uid, kind, action, val) {
+        var key = uid + ':' + kind;
+        var st = S.tileTransforms[key] || { mirror: false, rot: 0 };
+        if (action === 'mirror') st.mirror = !!val;
+        else if (action === 'rot') st.rot = ((val % 360) + 360) % 360;
+        else if (action === 'reset') st = { mirror: false, rot: 0 };
+        if (st.mirror || st.rot) S.tileTransforms[key] = st;
+        else delete S.tileTransforms[key];
+        applyTileTransformAll(uid, kind);
+    }
+
+    // ------------------------------------------------------------------
     // UI: volume menu (right-click)
     // ------------------------------------------------------------------
-    function openVolumeMenu(e, uid) {
+    function openVolumeMenu(e, uid, kind) {
         var menu = el('volume-menu');
         if (!menu) return;
+        // kind: 'member' (mic volume, default) | 'screen' (screen-share audio
+        // volume — right-click the member's SCREEN tile) | 'video' (camera
+        // tile — video only: no volume meter, since a camera feed carries no
+        // audio; the member's mic volume lives on the member row / tile
+        // chrome, and screen audio on the screen tile).
+        var isScreen = kind === 'screen';
+        var isVideoOnly = kind === 'video';
         var member = S.members[uid];
-        var name = member ? member.username : 'Member';
+        var name = member ? (userDisplayNameCache[uid] && userDisplayNameCache[uid].display_name) || member.username || member.display_name || 'Member' : 'Member';
         var selfId = getSelfId();
 
         menu.innerHTML = '';
         var header = document.createElement('div');
         header.className = 'volume-menu-header';
-        header.textContent = name;
+        header.textContent = (isScreen ? 'Screen share — ' : (isVideoOnly ? 'Camera — ' : '')) + name;
         menu.appendChild(header);
 
-        var savedVol = parseInt(localStorage.getItem('voice_volume_' + uid) || '100', 10);
-        if (isNaN(savedVol)) savedVol = 100;
-        var sliderRow = document.createElement('div');
-        sliderRow.className = 'volume-menu-slider-row';
-        var slider = document.createElement('input');
-        slider.type = 'range';
-        slider.min = 0;
-        slider.max = 500;
-        // The slider covers the 0–500% fine-tuning range; the custom % input
-        // below goes up to 10000% for boosting quiet users.
-        slider.value = String(Math.min(savedVol, 500));
-        slider.className = 'volume-menu-slider';
-        var val = document.createElement('span');
-        val.id = 'volume-menu-value';
-        val.className = 'volume-menu-value';
-        val.textContent = savedVol + '%';
-        slider.addEventListener('input', function () {
-            var pct = parseInt(slider.value, 10);
-            setMemberVolume(uid, pct);
-            var inp = menu.querySelector('.volume-menu-custom-input');
-            if (inp) inp.value = String(pct);
+        // View transform section: mirror horizontally / rotate 90° left or
+        // right / reset — applies only to how THIS viewer sees the feed.
+        // The mirror is always horizontal regardless of rotation.
+        var viewKind = isScreen ? 'screen' : 'camera';
+        var tKey = uid + ':' + viewKind;
+        var tState = S.tileTransforms[tKey] || { mirror: false, rot: 0 };
+        var viewLabel = document.createElement('div');
+        viewLabel.className = 'volume-menu-view-label';
+        viewLabel.textContent = 'View';
+        menu.appendChild(viewLabel);
+        var viewRow = document.createElement('div');
+        viewRow.className = 'volume-menu-view-row';
+        var btnMirror = document.createElement('button');
+        btnMirror.type = 'button';
+        btnMirror.className = 'volume-menu-view-btn' + (tState.mirror ? ' active' : '');
+        btnMirror.title = 'Mirror horizontally (always horizontal, independent of rotation)';
+        btnMirror.textContent = '⇋ Mirror';
+        btnMirror.addEventListener('click', function (ev) {
+            ev.stopPropagation();
+            setTileViewTransform(uid, viewKind, 'mirror', !tState.mirror);
+            tState = S.tileTransforms[tKey] || { mirror: false, rot: 0 };
+            btnMirror.classList.toggle('active', !!tState.mirror);
         });
-        sliderRow.appendChild(slider);
-        sliderRow.appendChild(val);
-        menu.appendChild(sliderRow);
+        viewRow.appendChild(btnMirror);
+        var btnRotL = document.createElement('button');
+        btnRotL.type = 'button';
+        btnRotL.className = 'volume-menu-view-btn';
+        btnRotL.title = 'Rotate 90° left';
+        btnRotL.textContent = '⟲ 90°';
+        btnRotL.addEventListener('click', function (ev) {
+            ev.stopPropagation();
+            setTileViewTransform(uid, viewKind, 'rot', (tState.rot || 0) - 90);
+            tState = S.tileTransforms[tKey] || { mirror: false, rot: 0 };
+        });
+        viewRow.appendChild(btnRotL);
+        var btnRotR = document.createElement('button');
+        btnRotR.type = 'button';
+        btnRotR.className = 'volume-menu-view-btn';
+        btnRotR.title = 'Rotate 90° right';
+        btnRotR.textContent = '⟳ 90°';
+        btnRotR.addEventListener('click', function (ev) {
+            ev.stopPropagation();
+            setTileViewTransform(uid, viewKind, 'rot', (tState.rot || 0) + 90);
+            tState = S.tileTransforms[tKey] || { mirror: false, rot: 0 };
+        });
+        viewRow.appendChild(btnRotR);
+        var btnViewReset = document.createElement('button');
+        btnViewReset.type = 'button';
+        btnViewReset.className = 'volume-menu-view-btn';
+        btnViewReset.title = 'Reset view (no mirror, no rotation)';
+        btnViewReset.textContent = '↺ Reset';
+        btnViewReset.addEventListener('click', function (ev) {
+            ev.stopPropagation();
+            setTileViewTransform(uid, viewKind, 'reset', 0);
+            tState = { mirror: false, rot: 0 };
+            btnMirror.classList.remove('active');
+        });
+        viewRow.appendChild(btnViewReset);
+        menu.appendChild(viewRow);
 
-        // Custom % input — allows boosting up to 10000% (type a value; the
-        // slider caps at 500 but the applied gain uses the typed value).
-        var inputRow = document.createElement('div');
-        inputRow.className = 'volume-menu-input-row';
-        var inp = document.createElement('input');
-        inp.type = 'number';
-        inp.min = 0;
-        inp.max = 100000;
-        inp.step = 5;
-        inp.value = String(savedVol);
-        inp.className = 'volume-menu-custom-input';
-        var pctLbl = document.createElement('span');
-        pctLbl.className = 'volume-menu-custom-pct';
-        pctLbl.textContent = '%';
-        function applyCustomPct() {
-            var raw = parseInt(inp.value, 10);
-            if (isNaN(raw)) raw = 100;
-            var pct = Math.max(0, Math.min(100000, raw));
-            inp.value = String(pct);
-            setMemberVolume(uid, pct);
-            slider.value = String(Math.min(pct, 500));
+        // A camera tile has NO audio of its own — only screen-share audio
+        // (screen tiles) and the member's mic (member row / tile chrome) do.
+        // So video-only menus show no volume meter at all.
+        if (!isVideoOnly) {
+            var savedVol = parseInt(localStorage.getItem((isScreen ? 'voice_screen_volume_' : 'voice_volume_') + uid) || '100', 10);
+            if (isNaN(savedVol)) savedVol = 100;
+            var applyVol = isScreen ? setScreenVolume : setMemberVolume;
+            var sliderRow = document.createElement('div');
+            sliderRow.className = 'volume-menu-slider-row';
+            var slider = document.createElement('input');
+            slider.type = 'range';
+            slider.min = 0;
+            slider.max = 500;
+            // The slider covers the 0–500% fine-tuning range; the custom % input
+            // below goes up to 10000% for boosting quiet users.
+            slider.value = String(Math.min(savedVol, 500));
+            slider.className = 'volume-menu-slider';
+            var val = document.createElement('span');
+            val.id = 'volume-menu-value';
+            val.className = 'volume-menu-value';
+            val.textContent = savedVol + '%';
+            slider.addEventListener('input', function () {
+                var pct = parseInt(slider.value, 10);
+                applyVol(uid, pct);
+                var inp = menu.querySelector('.volume-menu-custom-input');
+                if (inp) inp.value = String(pct);
+            });
+            sliderRow.appendChild(slider);
+            sliderRow.appendChild(val);
+            menu.appendChild(sliderRow);
+
+            // Custom % input — allows boosting up to 10000% (type a value; the
+            // slider caps at 500 but the applied gain uses the typed value).
+            var inputRow = document.createElement('div');
+            inputRow.className = 'volume-menu-input-row';
+            var inp = document.createElement('input');
+            inp.type = 'number';
+            inp.min = 0;
+            inp.max = 100000;
+            inp.step = 5;
+            inp.value = String(savedVol);
+            inp.className = 'volume-menu-custom-input';
+            var pctLbl = document.createElement('span');
+            pctLbl.className = 'volume-menu-custom-pct';
+            pctLbl.textContent = '%';
+            function applyCustomPct() {
+                var raw = parseInt(inp.value, 10);
+                if (isNaN(raw)) raw = 100;
+                var pct = Math.max(0, Math.min(100000, raw));
+                inp.value = String(pct);
+                applyVol(uid, pct);
+                slider.value = String(Math.min(pct, 500));
+            }
+            inp.addEventListener('input', applyCustomPct);
+            inp.addEventListener('change', applyCustomPct);
+            inputRow.appendChild(inp);
+            inputRow.appendChild(pctLbl);
+            menu.appendChild(inputRow);
+
+            // Reset this member's volume back to 100% (clears the per-user override)
+            var resetBtn = document.createElement('button');
+            resetBtn.className = 'volume-menu-btn';
+            resetBtn.textContent = '↺ Reset volume (100%)';
+            resetBtn.addEventListener('click', function () {
+                applyVol(uid, 100);
+                var s = menu.querySelector('.volume-menu-slider');
+                if (s) s.value = '100';
+                var ci = menu.querySelector('.volume-menu-custom-input');
+                if (ci) ci.value = '100';
+                closeVolumeMenu();
+            });
+            menu.appendChild(resetBtn);
         }
-        inp.addEventListener('input', applyCustomPct);
-        inp.addEventListener('change', applyCustomPct);
-        inputRow.appendChild(inp);
-        inputRow.appendChild(pctLbl);
-        menu.appendChild(inputRow);
-
-        // Reset this member's volume back to 100% (clears the per-user override)
-        var resetBtn = document.createElement('button');
-        resetBtn.className = 'volume-menu-btn';
-        resetBtn.textContent = '↺ Reset volume (100%)';
-        resetBtn.addEventListener('click', function () {
-            setMemberVolume(uid, 100);
-            var s = menu.querySelector('.volume-menu-slider');
-            if (s) s.value = '100';
-            var ci = menu.querySelector('.volume-menu-custom-input');
-            if (ci) ci.value = '100';
-            closeVolumeMenu();
-        });
-        menu.appendChild(resetBtn);
 
         // Owner controls — only for the server owner, server rooms, other members
         if (S.roomType === 'server' && S.isOwner && uid !== selfId) {
@@ -3726,6 +4296,21 @@
             if (!b) return;
             b.classList.toggle('active', S.screenOn);
         });
+        // Camera options button (opens the flip/mirror/flash dropdown) —
+        // enabled only while the camera is on.
+        ['voice-bar-cam-opt', 'voice-popup-cam-opt', 'dm-call-cam-opt'].forEach(function (id) {
+            var b = el(id);
+            if (!b) return;
+            b.disabled = !S.cameraOn;
+        });
+        // Keep the dropdown's own option states fresh (active mirror/flash).
+        updateCamOptMenuState();
+        // If the camera turned off, never leave the white flash overlay up.
+        // (Directly — setCameraFlashOn would re-enter updateSelfUI.)
+        if (!S.cameraOn) {
+            var _ov2 = el('camera-flash-overlay');
+            if (_ov2) _ov2.style.display = 'none';
+        }
     }
 
     // ------------------------------------------------------------------
@@ -3836,6 +4421,9 @@
         Object.keys(S.remoteAudioEls).forEach(function (uid) {
             applyRemoteVolume(uid);
         });
+        Object.keys(S.remoteScreenAudioEls).forEach(function (uid) {
+            applyRemoteScreenVolume(uid);
+        });
     }
 
     function setNoiseSuppression(mode) {
@@ -3868,9 +4456,16 @@
     // Fullscreen a WRAPPER div, not the <video> element itself — Chrome shows
     // its native playback controls (play/pause, timeline, volume) on a
     // fullscreened <video> even without the controls attribute. With a plain
-    // div as the fullscreen element, no controls appear. The wrapper is
-    // removed on exit and the tiles re-render (fresh srcObject re-attached),
-    // which also unfreezes the frame Chrome detaches after fullscreen.
+    // div as the fullscreen element, no controls appear.
+    //
+    // On exit the SAME <video> element is moved back into its slot and its
+    // decoder state is preserved — the panel is NOT re-rendered. Re-rendering
+    // would destroy the element, and the fresh element's decoder must wait for
+    // a new keyframe before painting. A STATIC screen share (a quiet tab, a
+    // paused video) never sends one promptly, so the tile stayed black while
+    // the separate screen-audio elements kept playing ("lost the sharescreen
+    // video, hear only audio"). Keeping the element keeps the last frame and
+    // continues decoding seamlessly.
     function toggleFullscreen(el) {
         if (!el) return;
         var activeWrap = el.closest ? el.closest('.voice-fs-wrap') : null;
@@ -3890,8 +4485,8 @@
         // old code relied on fullscreenchange alone, which never fires when the
         // browser declines/stubs the request (embedded contexts, tests), leaving
         // the <video> stuck in the black wrapper forever.
-        var origParent = el.parentNode;
-        var origNext = el.nextSibling;
+        el._fsOrigParent = el.parentNode;
+        el._fsOrigNext = el.nextSibling;
         var wrap = document.createElement('div');
         wrap.className = 'voice-fs-wrap';
         wrap.appendChild(el);
@@ -3902,16 +4497,10 @@
             restored = true;
             document.removeEventListener('fullscreenchange', handler);
             if (el.parentNode === wrap) {
-                if (origNext && origNext.parentNode === origParent) {
-                    origParent.insertBefore(el, origNext);
-                } else {
-                    origParent.appendChild(el);
-                }
+                moveTileBack(el);
             }
             if (wrap.parentNode) wrap.remove();
-            renderPopup();
-            renderDmPanel();
-            renderSelfPreview();
+            reattachTileStream(el);
         };
         // Register BEFORE requestFullscreen: fullscreenchange also fires when
         // ENTERING fullscreen, so only restore when it is genuinely not active.
@@ -3932,12 +4521,97 @@
     }
 
     // Restore a <video> that lives inside a .voice-fs-wrap back into the
-    // member row / tile slot it was lifted from.
+    // member row / tile slot it was lifted from — WITHOUT destroying it. The
+    // element is moved out of the wrapper first (removing the wrapper would
+    // detach and lose the element's decoder state + last frame).
     function restoreFromFsWrap(wrap, el) {
+        if (el && el.parentNode === wrap) {
+            moveTileBack(el);
+        }
         if (wrap.parentNode) wrap.remove();
-        renderPopup();
-        renderDmPanel();
-        renderSelfPreview();
+        if (el) reattachTileStream(el);
+    }
+
+    // Put a fullscreened tile back into its live slot, preserving the <video>
+    // element. If the original container was re-rendered while fullscreened
+    // (camera/screen member update, DM self strip rebuild) the element is
+    // dropped instead — the fresh render already has a correct tile, and we
+    // make sure THAT tile has the stream attached.
+    function moveTileBack(el) {
+        var origParent = el._fsOrigParent;
+        var origNext = el._fsOrigNext;
+        if (origParent && origParent.isConnected) {
+            if (origNext && origNext.parentNode === origParent) {
+                origParent.insertBefore(el, origNext);
+            } else {
+                origParent.appendChild(el);
+            }
+            return;
+        }
+        var slot = findTileSlot(el);
+        if (slot) {
+            slot.appendChild(el);
+        } else {
+            // A duplicate already exists in the current render (or the tile was
+            // removed entirely) — make sure the live duplicate has its stream.
+            var dup = findTileDuplicate(el);
+            if (dup) reattachTileStream(dup);
+        }
+    }
+
+    // Find the live container this tile should live in (self strip, DM tile
+    // media, or voice member media), or null if a duplicate already exists.
+    function findTileSlot(el) {
+        var isSelf = el.dataset && el.dataset.self === '1';
+        var kind = el.dataset && el.dataset.kind;
+        if (isSelf) {
+            var dmPrev = el('dm-call-self');
+            if (!dmPrev) return null;
+            if (kind && dmPrev.querySelector('.voice-self-video[data-kind="' + kind + '"]')) return null;
+            return dmPrev;
+        }
+        var uid = el.dataset && el.dataset.uid;
+        if (!uid) return null;
+        var sel = '.dm-call-tile[data-uid="' + uid + '"] .dm-call-tile-media, .voice-member-row[data-uid="' + uid + '"] .voice-member-media';
+        var list = document.querySelectorAll(sel);
+        for (var i = 0; i < list.length; i++) {
+            if (!list[i].isConnected) continue;
+            if (kind && list[i].querySelector('.remote-video-tile[data-uid="' + uid + '"][data-kind="' + kind + '"]')) return null;
+            return list[i];
+        }
+        return null;
+    }
+
+    function findTileDuplicate(el) {
+        var isSelf = el.dataset && el.dataset.self === '1';
+        var kind = el.dataset && el.dataset.kind;
+        var uid = el.dataset && el.dataset.uid;
+        if (isSelf) {
+            var dmPrev = el('dm-call-self');
+            return dmPrev && kind ? dmPrev.querySelector('.voice-self-video[data-kind="' + kind + '"]') : null;
+        }
+        if (!uid) return null;
+        return document.querySelector('.remote-video-tile[data-uid="' + uid + '"][data-kind="' + kind + '"]');
+    }
+
+    // Re-attach the stream to a tile if it changed while fullscreened (a
+    // renegotiation can replace the underlying track). No-op when the stream
+    // is unchanged — the element's decoder keeps its state and last frame.
+    function reattachTileStream(el) {
+        if (!el || !el.isConnected) return;
+        var uid = el.dataset && el.dataset.uid;
+        var kind = el.dataset && el.dataset.kind;
+        var isSelf = el.dataset && el.dataset.self === '1';
+        var stream = null;
+        if (isSelf) {
+            stream = kind === 'camera' ? S.localStreams.camera : S.localStreams.screen;
+        } else if (uid && S.remoteStreams[uid]) {
+            stream = S.remoteStreams[uid][kind];
+        }
+        if (stream && el.srcObject !== stream) {
+            el.srcObject = stream;
+        }
+        try { el.play().catch(function () {}); } catch (_) {}
     }
 
     // ------------------------------------------------------------------

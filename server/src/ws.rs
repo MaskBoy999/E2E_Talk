@@ -79,6 +79,11 @@ pub struct VoiceMember {
     pub force_muted: bool,
     pub force_deafened: bool,
     pub is_owner: bool,
+    // Track ids the member is currently sending. Receivers match incoming
+    // video tracks against these so a screen share can never be mistaken for
+    // a camera feed (or vice versa) when flags + track arrival race.
+    pub camera_track_id: Option<String>,
+    pub screen_track_id: Option<String>,
 }
 
 pub struct VoiceRoom {
@@ -102,6 +107,8 @@ fn voice_member_json(m: &VoiceMember) -> serde_json::Value {
         "force_muted": m.force_muted,
         "force_deafened": m.force_deafened,
         "is_owner": m.is_owner,
+        "camera_track_id": m.camera_track_id,
+        "screen_track_id": m.screen_track_id,
     })
 }
 
@@ -1433,6 +1440,8 @@ async fn handle_voice_join(
         force_muted,
         force_deafened,
         is_owner,
+        camera_track_id: None,
+        screen_track_id: None,
     };
 
     // All room mutation happens inside a scope so the write guard (and its &mut
@@ -1625,6 +1634,17 @@ async fn handle_voice_state(
     let camera = parsed.get("camera").and_then(|m| m.as_bool()).unwrap_or(false);
     let screen = parsed.get("screen").and_then(|m| m.as_bool()).unwrap_or(false);
     let speaking = parsed.get("speaking").and_then(|m| m.as_bool()).unwrap_or(false);
+    // Track ids travel with the state so receivers can match tracks to slots.
+    let camera_track_id = parsed
+        .get("camera_track_id")
+        .and_then(|s| s.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let screen_track_id = parsed
+        .get("screen_track_id")
+        .and_then(|s| s.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
 
     let (member, server_id) = {
         let mut rooms = match state.voice_rooms.write() {
@@ -1645,6 +1665,8 @@ async fn handle_voice_state(
         m.camera = camera;
         m.screen = screen;
         m.speaking = speaking;
+        m.camera_track_id = camera_track_id.clone();
+        m.screen_track_id = screen_track_id.clone();
         let server_id = room.server_id.clone().unwrap_or_default();
         (m.clone(), server_id)
     };

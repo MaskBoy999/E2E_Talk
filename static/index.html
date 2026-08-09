@@ -1048,6 +1048,7 @@
             <button class="voice-bar-btn" id="voice-bar-mute" title="Mute">&#127908;</button>
             <button class="voice-bar-btn" id="voice-bar-deafen" title="Deafen">&#128266;</button>
             <button class="voice-bar-btn" id="voice-bar-camera" title="Camera">&#128247;</button>
+            <button class="voice-bar-btn voice-cam-opt" id="voice-bar-cam-opt" title="Camera options (flip / mirror / flash)">&#8942;</button>
             <button class="voice-bar-btn" id="voice-bar-screen" title="Share screen">&#128424;</button>
             <button class="voice-bar-btn voice-bar-leave" id="voice-bar-leave" title="Leave">&#128222;</button>
         </div>
@@ -1067,6 +1068,7 @@
             <button class="voice-popup-btn" id="voice-popup-mute" title="Mute">&#127908;</button>
             <button class="voice-popup-btn" id="voice-popup-deafen" title="Deafen">&#128266;</button>
             <button class="voice-popup-btn" id="voice-popup-camera" title="Camera">&#128247;</button>
+            <button class="voice-popup-btn voice-cam-opt" id="voice-popup-cam-opt" title="Camera options (flip / mirror / flash)">&#8942;</button>
             <button class="voice-popup-btn" id="voice-popup-screen" title="Share screen">&#128424;</button>
             <button class="voice-popup-btn voice-popup-leave" id="voice-popup-leave" title="Leave">&#128222;</button>
         </div>
@@ -1107,10 +1109,26 @@
             <button class="dm-call-btn" id="dm-call-mute" title="Mute">&#127908;</button>
             <button class="dm-call-btn" id="dm-call-deafen" title="Deafen">&#128266;</button>
             <button class="dm-call-btn" id="dm-call-camera" title="Camera">&#128247;</button>
+            <button class="dm-call-btn voice-cam-opt" id="dm-call-cam-opt" title="Camera options (flip / mirror / flash)">&#8942;</button>
             <button class="dm-call-btn" id="dm-call-screen" title="Share screen">&#128424;</button>
             <button class="dm-call-btn dm-call-end" id="dm-call-end" title="End call">&#128222;</button>
         </div>
         <div class="dm-call-resize" id="dm-call-resize" title="Drag to resize height"></div>
+    </div>
+
+    <!-- Camera options dropdown (flip / mirror / flash) — opened from the
+         &#8942; button in any call's control row; closes on outside click. -->
+    <div class="voice-cam-opt-menu" id="voice-cam-opt-menu" style="display:none">
+        <button type="button" id="cam-opt-flip" title="Flip camera">&#128260; Flip camera</button>
+        <button type="button" id="cam-opt-mirror" title="Mirror camera">&#8646; Mirror camera</button>
+        <button type="button" id="cam-opt-flash" title="Flash">&#9889; Flash</button>
+    </div>
+
+    <!-- White-screen flash (for cameras without torch, e.g. the selfie
+         camera): covers the whole app with a white layer + a button to turn
+         it off. Works in voice channels and DM calls alike. -->
+    <div class="camera-flash-overlay" id="camera-flash-overlay" style="display:none">
+        <button type="button" id="camera-flash-off" title="Turn off flash">&#9889; Turn off flash</button>
     </div>
 
     <!-- DM mini bar (persists when you switch to another chat) -->

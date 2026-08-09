@@ -6616,6 +6616,84 @@ body.streamer-mode .dm-avatar:hover {
 .voice-bar-btn.voice-bar-leave { background: #3a1622; color: #ff6b6b; }
 .voice-bar-btn.voice-bar-leave:hover { background: #4d1c2c; }
 
+/* Camera options button (opens the flip/mirror/flash dropdown) — compact,
+   dimmed until the camera is actually on. */
+.voice-cam-opt {
+    width: 26px;
+    height: 26px;
+    font-size: 13px;
+    opacity: 0.45;
+    background: transparent;
+}
+.voice-cam-opt:not([disabled]):hover { opacity: 1; background: #2c2c46; }
+.voice-cam-opt.active { opacity: 1; background: #3a3340; color: #b39ddb; }
+.voice-cam-opt[disabled] { cursor: not-allowed; opacity: 0.22; }
+
+/* Camera options dropdown (flip / mirror / flash) — positioned near the
+   opened button, above everything else. */
+.voice-cam-opt-menu {
+    position: fixed;
+    z-index: 100002;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 190px;
+    padding: 6px;
+    background: #23233a;
+    border: 1px solid var(--border-color, #3a3a55);
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+.voice-cam-opt-menu button {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 8px 10px;
+    border: none;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--text-primary, #e0e0e0);
+    font-size: 13px;
+    cursor: pointer;
+    text-align: left;
+}
+.voice-cam-opt-menu button:hover { background: #2c2c46; }
+.voice-cam-opt-menu button.active { background: #3a3340; color: #b39ddb; }
+
+/* White-screen flash (selfie cameras without torch): covers the WHOLE app
+   with white and a button to turn the flash back off. */
+.camera-flash-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 100003;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    background: #ffffff;
+    cursor: default;
+}
+.camera-flash-overlay button {
+    margin-top: 18px;
+    padding: 10px 18px;
+    border: none;
+    border-radius: 999px;
+    background: #111122;
+    color: #ffffff;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+}
+.camera-flash-overlay button:hover { background: #2c2c46; }
+
+/* Self-view camera mirror (scaleX flip) — only the local preview is
+   mirrored; the outgoing stream is never transformed. */
+video.voice-self-video.mirrored,
+video.remote-video-tile.mirrored {
+    transform: scaleX(-1);
+}
+
 /* ---- Server voice channel view: its own channel view covering the whole
    chat column (the channel name header and the text input space included).
    syncOverlayBounds sets top/bottom inline to stretch it exactly from the
@@ -7193,6 +7271,24 @@ body.resizing-dm { cursor: ns-resize !important; user-select: none; }
 }
 .volume-menu-btn:hover { background: #2c2c46; }
 .volume-menu-btn.danger { color: #ff6b6b; }
+.volume-menu-view-label {
+    font-size: 11px; font-weight: 700;
+    color: var(--text-faint, #777);
+    text-transform: uppercase; letter-spacing: 0.4px;
+    margin-top: 2px;
+}
+.volume-menu-view-row { display: flex; gap: 6px; flex-wrap: wrap; }
+.volume-menu-view-btn {
+    flex: 1; min-width: 58px;
+    background: var(--bg-primary, #1a1a2e);
+    border: none; border-radius: 8px;
+    color: var(--text-primary, #e0e0e0);
+    font-size: 12px; padding: 6px 8px; cursor: pointer;
+    text-align: center;
+    transition: background 0.12s ease;
+}
+.volume-menu-view-btn:hover { background: #2c2c46; }
+.volume-menu-view-btn.active { background: #3a3340; color: #b39ddb; }
 
 /* ---- Voice channel in the channel list ---- */
 .channel-item-voice { color: #b9d7ff; }

@@ -42,12 +42,31 @@ addEventListener('rtctransform', (event) => {
                 }
             }
             myKey = cached;
+            // Video senders only: force a keyframe every ~2.5s. A receiver
+            // that attaches mid-stream (room key arriving late, renegotiation,
+            // decoder restart) has NOTHING to decode until the next keyframe
+            // — every delta frame decrypts fine but can't be rendered, so the
+            // tile sits black/artifacted. Browsers' own keyframe cadence is
+            // low for static content, so this guarantees fast recovery.
+            // Started lazily on the first VIDEO frame (audio frames have no
+            // `type`), so audio-only calls never spin a timer.
+            event.transformer._codebuffKfStarted = false;
         },
         async transform(encodedFrame, controller) {
             try {
                 if (!myKey) {
                     controller.enqueue(encodedFrame);
                     return;
+                }
+                // Start the video keyframe timer on the first video frame
+                // (RTCEncodedVideoFrame has `.type`; audio frames don't).
+                if (operation === 'encrypt' && !event.transformer._codebuffKfStarted &&
+                    encodedFrame.type !== undefined &&
+                    typeof event.transformer.generateKeyFrame === 'function') {
+                    event.transformer._codebuffKfStarted = true;
+                    event.transformer._codebuffKfTimer = setInterval(() => {
+                        try { event.transformer.generateKeyFrame(); } catch (_) {}
+                    }, 2500);
                 }
                 const data = new Uint8Array(encodedFrame.data.byteLength);
                 data.set(new Uint8Array(encodedFrame.data));
@@ -88,5 +107,11 @@ addEventListener('rtctransform', (event) => {
         },
     });
 
-    transformer.readable.pipeThrough(transform).pipeTo(transformer.writable).catch(() => {});
+    const cleanup = () => {
+        if (event.transformer._codebuffKfTimer) {
+            clearInterval(event.transformer._codebuffKfTimer);
+            event.transformer._codebuffKfTimer = null;
+        }
+    };
+    transformer.readable.pipeThrough(transform).pipeTo(transformer.writable).then(cleanup, cleanup);
 });
