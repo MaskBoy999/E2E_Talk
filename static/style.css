@@ -6907,6 +6907,45 @@ video.remote-video-tile.mirrored {
     overflow: hidden;
     text-overflow: ellipsis;
 }
+
+/* Unload button — floats over the top-right corner of a LOADED feed. Clicking
+   stops receiving that feed AND tells the sender to stop sending it (bitrate);
+   the feed returns behind its Load button. Hover to reveal on pointer devices
+   (PC), always visible on touch/phones. */
+.voice-feed-unload-btn {
+    position: absolute;
+    z-index: 6;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    border: 1px solid var(--bg-border, #2a2a4a);
+    background: rgba(0, 0, 0, 0.72);
+    color: var(--text-primary, #eee);
+    font-size: 11px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0;
+    box-sizing: border-box;
+}
+.voice-feed-unload-btn:hover {
+    background: rgba(239, 83, 80, 0.9);
+}
+@media (hover: hover) and (pointer: fine) {
+    .voice-feed-unload-btn {
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.15s;
+    }
+    .voice-member-media:hover .voice-feed-unload-btn,
+    .dm-call-tile-media:hover .voice-feed-unload-btn,
+    .voice-fs-wrap:hover .voice-feed-unload-btn {
+        opacity: 1;
+        pointer-events: auto;
+    }
+}
 .voice-member-media .remote-video-tile {
     height: 100%;
     width: auto;
@@ -7213,6 +7252,45 @@ body.resizing-dm { cursor: ns-resize !important; user-select: none; }
     padding: 8px 12px;
     border-top: 1px solid var(--bg-border, #2a2a4a);
     min-height: 60px;
+    position: relative;
+}
+
+/* "Reconnecting video…" notice — shown over the local user's own feeds when
+   the per-sender video watchdog fires (a live feed stopped encoding and is
+   being renegotiated). Absolute inside the self strip / self member row so it
+   reads as "your feed is recovering", not a generic error. */
+.voice-video-reconnect-chip {
+    /* Body-level toast: fixed so no media-container re-render can wipe it. */
+    position: fixed;
+    top: 14px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 99999;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 12px;
+    border-radius: 12px;
+    background: rgba(26, 28, 48, 0.94);
+    border: 1px solid #f0b232;
+    color: #fff;
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+    pointer-events: none;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
+}
+.voice-video-reconnect-chip::before {
+    content: '';
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #f0b232;
+    animation: voice-reconnect-pulse 1s ease-in-out infinite;
+}
+@keyframes voice-reconnect-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
 }
 .dm-call-controls {
     display: flex; align-items: center; justify-content: center; gap: 10px;

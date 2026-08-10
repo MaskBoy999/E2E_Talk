@@ -676,6 +676,34 @@
                         Load each camera / screen share manually
                     </label>
                     <p class="settings-hint">When on, every camera and screen share shows a <strong>Load</strong> button until you click it — independently per person and per feed. You decide which feeds to load; senders keep sending regardless. Right-click (volume, mirror/rotate, owner controls) works everywhere, even on unloaded feeds.</p>
+                    <label class="settings-checkbox-label" style="margin-top:12px;"><span style="font-size:12px;color:var(--text-muted)">Black-feed auto-recovery (video watchdog):</span></label>
+                    <select id="voice-video-watchdog-secs" class="modal-input" style="margin-top:4px;max-width:200px;">
+                        <option value="0">Off</option>
+                        <option value="4">4 seconds</option>
+                        <option value="6">6 seconds</option>
+                        <option value="8" selected>8 seconds</option>
+                        <option value="10">10 seconds</option>
+                        <option value="15">15 seconds</option>
+                        <option value="20">20 seconds</option>
+                        <option value="30">30 seconds</option>
+                    </select>
+                    <p class="settings-hint">If a camera or screen share stops encoding (a dropped negotiation can leave it black), the app renegotiates automatically after this many seconds of no frames and shows a brief <strong>Reconnecting video…</strong> notice. Off disables auto-recovery.</p>
+                </div>
+                <div class="settings-group">
+                    <h4>Advanced — Call Diagnostics</h4>
+                    <p class="settings-hint">Live <code>getStats</code> for every peer in the current call/voice channel: frames encoded/decoded, packet loss, and whether the E2EE media transform is attached to each sender/receiver. A black feed usually shows <strong>0 frames decoded</strong> on the receiving side or a missing <strong>E2EE</strong> badge.</p>
+                    <div style="display:flex;align-items:center;gap:14px;margin-top:6px">
+                        <button type="button" id="voice-diag-refresh" class="btn btn-secondary">Refresh now</button>
+                        <button type="button" id="voice-diag-heal" class="btn btn-secondary" style="border-color:var(--danger,#ed4245)">Rejoin &amp; heal</button>
+                        <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-primary);cursor:pointer">
+                            <input type="checkbox" id="voice-diag-auto" checked style="width:15px;height:15px;accent-color:var(--accent,#5865f2)">
+                            Auto-refresh (every 2.5s)
+                        </label>
+                    </div>
+                    <p class="settings-hint"><strong>Rejoin &amp; heal</strong> first adds any missing E2EE transforms in place (no interruption); if a peer is still failed/disconnected or a video feed is still black, it leaves and rejoins the room so every connection is rebuilt from scratch.</p>
+                    <div id="voice-diag-list" style="margin-top:8px;font-family:ui-monospace,Consolas,monospace;font-size:11px;line-height:1.55;color:var(--text-primary);max-height:300px;overflow:auto;background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:6px;padding:8px 10px;white-space:pre-wrap;word-break:break-word">
+                        <div style="color:var(--text-muted)">Not in a call — join a voice channel or DM call to see per-peer stats.</div>
+                    </div>
                 </div>
                 <div class="settings-group">
                     <h4>Ringtone</h4>

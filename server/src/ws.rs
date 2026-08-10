@@ -90,6 +90,13 @@ pub struct VoiceMember {
     // (sender falls back to its own receive default).
     pub recv_camera_res: i64,
     pub recv_screen_res: i64,
+    // Manual video-load state: whether this viewer has per-feed loading on, and
+    // which feeds ("sender_uid:kind") they have explicitly LOADED / UNLOADED.
+    // Senders use it to stop sending a feed nobody is watching (bitrate) —
+    // plain metadata, same class as the camera/screen flags, never content.
+    pub manual_video_load: bool,
+    pub loaded_feeds: Vec<String>,
+    pub unloaded_feeds: Vec<String>,
 }
 
 pub struct VoiceRoom {
@@ -122,6 +129,9 @@ fn voice_member_json(m: &VoiceMember) -> serde_json::Value {
         "screen_track_id": m.screen_track_id,
         "recv_camera_res": m.recv_camera_res,
         "recv_screen_res": m.recv_screen_res,
+        "manual_video_load": m.manual_video_load,
+        "loaded_feeds": m.loaded_feeds,
+        "unloaded_feeds": m.unloaded_feeds,
     })
 }
 
@@ -1513,6 +1523,9 @@ async fn handle_voice_join(
         screen_track_id: None,
         recv_camera_res: 0,
         recv_screen_res: 0,
+        manual_video_load: false,
+        loaded_feeds: Vec::new(),
+        unloaded_feeds: Vec::new(),
     };
 
     // All room mutation happens inside a scope so the write guard (and its &mut
@@ -1798,6 +1811,26 @@ async fn handle_voice_state(
     // Receive-resolution preferences (0 when the client doesn't declare them).
     let recv_camera_res = parsed.get("recv_camera_res").and_then(|v| v.as_i64()).unwrap_or(0);
     let recv_screen_res = parsed.get("recv_screen_res").and_then(|v| v.as_i64()).unwrap_or(0);
+    // Manual video-load state (which feeds this viewer has loaded/unloaded).
+    let manual_video_load = parsed.get("manual_video_load").and_then(|v| v.as_bool()).unwrap_or(false);
+    let loaded_feeds: Vec<String> = parsed
+        .get("loaded_feeds")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let unloaded_feeds: Vec<String> = parsed
+        .get("unloaded_feeds")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
 
     let (member, server_id) = {
         let mut rooms = match state.voice_rooms.write() {
@@ -1822,6 +1855,9 @@ async fn handle_voice_state(
         m.screen_track_id = screen_track_id.clone();
         m.recv_camera_res = recv_camera_res;
         m.recv_screen_res = recv_screen_res;
+        m.manual_video_load = manual_video_load;
+        m.loaded_feeds = loaded_feeds;
+        m.unloaded_feeds = unloaded_feeds;
         let server_id = room.server_id.clone().unwrap_or_default();
         (m.clone(), server_id)
     };

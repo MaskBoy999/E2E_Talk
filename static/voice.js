@@ -85,6 +85,10 @@
             // feed shows a "Load" button (per user AND per kind) and is
             // attached only when clicked. Right-click menus are unaffected.
             manualVideoLoad: false,
+            // Black-feed auto-recovery: seconds of zero encoded frames before
+            // the per-sender watchdog forces a renegotiation (a dropped
+            // negotiation can leave a camera/screen feed black). 0 = off.
+            videoWatchdogSecs: 8,
         },
         _viewLast: '',
         _lastSpeakSent: 0,
@@ -145,6 +149,10 @@
         setSendRes: setSendRes,
         setRecvRes: setRecvRes,
         setManualVideoLoad: setManualVideoLoad,
+        setVideoWatchdogSecs: setVideoWatchdogSecs,
+        getPeerDiag: function () { return collectPeerDiag(); },
+        refreshVoiceDiag: renderVoiceDiag,
+        healAndRejoin: healAndRejoin,
         setMemberVolume: setMemberVolume,
         ownerControl: ownerControl,
         startDmCall: startDmCall,
@@ -242,6 +250,32 @@
                 });
                 return true;
             },
+            // Live getStats diagnostics for every peer (tests): frames
+            // encoded/decoded, packet loss, E2EE transform presence.
+            getPeerDiag: function () { return collectPeerDiag(); },
+            // Manual-load + send-gating introspection (tests). senderGates
+            // reports per-peer sender state: track kind, whether the track is
+            // held (nulled) because the receiver isn't watching / can't hear.
+            isFeedLoaded: isFeedLoaded,
+            unloadFeed: unloadFeed,
+            setTileTransform: function (uid, kind, action, val) {
+                setTileViewTransform(uid, kind, action, val);
+                return true;
+            },
+            senderGates: function (uid) {
+                var pc = S.peers[uid];
+                if (!pc || !pc.getSenders) return null;
+                return pc.getSenders().map(function (s) {
+                    // A gated sender has track === null; report the HELD
+                    // track's kind so callers can match it by media type.
+                    var held = s.track || s._voiceNulled;
+                    return {
+                        kind: held ? held.kind : 'none',
+                        gated: !!s._voiceNulled,
+                        id: held ? held.id : null,
+                    };
+                });
+            },
         },
     };
 
@@ -253,6 +287,7 @@
     function init() {
         loadSettings();
         fetchTurnConfig();
+        armVoiceAudioDebug();
         bindBarControls();
         bindPopupControls();
         bindDmPanelControls();
@@ -380,6 +415,8 @@
         if (rs) rs.value = S.settings.recvScreenRes || 480;
         var ml = document.getElementById('voice-manual-video-load');
         if (ml) ml.checked = !!S.settings.manualVideoLoad;
+        var wd = document.getElementById('voice-video-watchdog-secs');
+        if (wd) wd.value = String(S.settings.videoWatchdogSecs || 0);
         updateSettingsLabels();
     }
 
@@ -520,12 +557,86 @@
         }
     }
 
+    // ---- DEBUG (one-sided audio) ----
+    // Set window.__enableVoiceAudioDebug = true (test init script) to collect:
+    //   1. E2EE worker frame timing/drops (e2eeWorker.onmessage) →
+    //      window.__voiceE2eeStats
+    //   2. Remote <audio> element starvation events (waiting/stalled/playing)
+    //      → window.__voiceAudioElEvents (pushed by applyRemoteVolume)
+    //   3. Per-100ms inbound-rtp concealment deltas + jitter per peer →
+    //      window.__voiceAudioTimeline
+    // These correlate a stall in the crypto worker or an element underrun with
+    // the jitter-buffer concealment (audible stops) that appears on ONE side.
+    var _voiceAudioDbgArmed = false;
+    function armVoiceAudioDebug() {
+        // Attach the worker-stats handler whenever the worker exists (the
+        // early-return guard must NOT skip it: armVoiceAudioDebug() runs at
+        // init BEFORE the worker is created, and the guard would then prevent
+        // the handler from ever being attached to the real worker).
+        if (e2eeWorker) {
+            e2eeWorker.onmessage = function (ev) {
+                if (ev && ev.data && ev.data.type === 'voice-e2ee-stats') {
+                    var w = (window);
+                    // Always keep the LAST stats (cheap — one object per
+                    // second) so the diagnostics panel can detect a decrypt
+                    // transform that is ATTACHED but never invoked (the
+                    // one-way audio gap: enc/dec counters stay 0 while the
+                    // other direction flows). Full samples stay debug-only.
+                    w.__voiceE2eeStats = w.__voiceE2eeStats || { last: null, samples: [] };
+                    w.__voiceE2eeStats.last = ev.data.stats;
+                    if (w.__enableVoiceAudioDebug) {
+                        w.__voiceE2eeStats.samples.push({ t: Date.now(), stats: ev.data.stats });
+                        if (w.__voiceE2eeStats.samples.length > 200) w.__voiceE2eeStats.samples.shift();
+                    }
+                }
+            };
+        }
+        if (_voiceAudioDbgArmed) return;
+        _voiceAudioDbgArmed = true;
+        try {
+            (window).__voiceE2eeStats = (window).__voiceE2eeStats || { last: null, samples: [] };
+            (window).__voiceAudioTimeline = (window).__voiceAudioTimeline || [];
+            (window).__voiceAudioElEvents = (window).__voiceAudioElEvents || [];
+            setInterval(function () {
+                var w = (window);
+                if (!w.__enableVoiceAudioDebug || !S.connected) return;
+                Object.keys(S.peers).forEach(function (uid) {
+                    var pc = S.peers[uid];
+                    if (!pc) return;
+                    pc.getStats().then(function (stats) {
+                        var rec = { t: Date.now(), uid: uid.slice(0, 6) };
+                        stats.forEach(function (r) {
+                            if (r.type === 'inbound-rtp' && r.kind === 'audio') {
+                                rec.concealed = r.concealedSamples || 0;
+                                rec.emitted = r.jitterBufferEmittedCount || 0;
+                                rec.jitter = r.jitterBufferDelay ? (r.jitterBufferDelay / Math.max(1, r.jitterBufferEmittedCount)) * 1000 : 0;
+                                rec.packets = r.packetsReceived || 0;
+                                rec.lost = r.packetsLost || 0;
+                            }
+                        });
+                        if (rec.concealed !== undefined) {
+                            var last = w.__voiceAudioTimeline[w.__voiceAudioTimeline.length - 1];
+                            if (last && last.uid === rec.uid && rec.t - last.t < 500) {
+                                rec.dConcealed = rec.concealed - last.concealed;
+                                rec.dEmitted = rec.emitted - last.emitted;
+                                rec.dPackets = rec.packets - last.packets;
+                            }
+                            w.__voiceAudioTimeline.push(rec);
+                            if (w.__voiceAudioTimeline.length > 200) w.__voiceAudioTimeline.shift();
+                        }
+                    }).catch(function () {});
+                });
+            }, 100);
+        } catch (_) {}
+    }
+
     function ensureE2eeWorker() {
         if (window.RTCRtpScriptTransform && !e2eeWorker) {
             // ?v= busts the browser cache for the worker — a stale cached
             // e2ee-worker.js silently breaks E2EE on EVERY room type (same
             // stale-cache class of bug as voice.js, which is also versioned).
-            try { e2eeWorker = new Worker('/e2ee-worker.js?v=2'); } catch (_) {}
+            try { e2eeWorker = new Worker('/e2ee-worker.js?v=3'); } catch (_) {}
+            armVoiceAudioDebug();
         }
         if (!window.RTCRtpScriptTransform && !S._warnedNoE2ee) {
             S._warnedNoE2ee = true;
@@ -677,6 +788,7 @@
         closeAllPeers();
         stopLocalMedia();
         stopSpeakingDetection();
+        hideVideoReconnect();
         renderBar();
         renderPopup();
         renderDmPanel();
@@ -893,12 +1005,38 @@
         });
     }
 
+    // Gate (replaceTrack(null)) the mic sender on every peer WITHOUT removing
+    // it. Removing the m-line on mute (the old behavior) forced a renegotiation
+    // per mute/unmute, and unmute then addTrack()ed a BRAND-NEW transceiver —
+    // the receiver accumulated one extra audio receiver per cycle ("recv audio
+    // ×3 after muting/unmuting"), and the fresh sender could lose its E2EE
+    // encrypt transform ("send audio [E2EE ✗]"). Gating keeps the m-line, the
+    // sender object and its transform; unmute just replaceTrack()s the fresh
+    // mic track back on the same sender.
+    function gateMicSendersOnAllPeers() {
+        for (var uid in S.peers) {
+            var pc = S.peers[uid];
+            if (!pc || !pc.getSenders) continue;
+            pc.getSenders().forEach(function (s) {
+                var held = s.track || s._voiceNulled;
+                if (!held || held.kind !== 'audio') return;
+                // Screen-share (tab/system) audio is a separate feed — muting
+                // the mic must not gate it.
+                if (S.localStreams.screen && S.localStreams.screen.getAudioTracks().indexOf(held) !== -1) return;
+                applySenderGate(s, false);
+            });
+        }
+    }
+
     function stopMic() {
         teardownMicPipeline();
         if (S.localStreams.mic) {
             S.localStreams.mic.getTracks().forEach(function (t) { try { t.stop(); } catch (_) {} });
             S.localStreams.mic = null;
-            removeTrackFromAllPeers('audio');
+            // Keep the m-line + sender + its E2EE transform; just stop sending
+            // (the receiver sees a live track with 0 packets — correct for a
+            // muted sender). No renegotiation.
+            gateMicSendersOnAllPeers();
         }
         stopSpeakingDetection();
     }
@@ -1122,6 +1260,10 @@
         // consecutive checks (~8s), force the m-line back into the SDP by
         // renegotiating (rolling back a stale offer first if needed).
         pc._videoWatchCount = 0;
+        // Consecutive zero-frame checks (at the 4s interval) that trigger a
+        // renegotiation — derived from the configurable videoWatchdogSecs
+        // setting (Settings → Voice → Video Quality). 0 = watchdog off.
+        pc._videoWatchThreshold = watchdogCheckThreshold();
         pc._videoWatchTimer = setInterval(function () {
             if (!S.connected || S.peers[uid] !== pc || pc.signalingState === 'closed') {
                 clearInterval(pc._videoWatchTimer);
@@ -1133,38 +1275,218 @@
             } catch (_) {
                 return;
             }
-            if (!vids.length) {
-                pc._videoWatchCount = 0;
-                return;
-            }
             pc.getStats().then(function (stats) {
                 if (!S.connected || S.peers[uid] !== pc) return;
-                var anyEncoded = false;
+                // Per-sender check: EVERY live video sender must be encoding.
+                // The old aggregate check missed the camera+screen-both-on case
+                // — when a glare/rollback swallowed ONE of two video m-lines,
+                // the OTHER kept encoding, so `anyEncoded` stayed true and the
+                // dead feed stayed black forever ("turning both on blacks them
+                // out until I toggle the camera").
+                //
+                // Stuck = fewer encoded video outbound-rtp reports than live
+                // video senders. Count-based (NOT track-id matching): Chrome
+                // sometimes omits `trackId` on outbound-rtp reports, which made
+                // the old `encodedIds[trackId]` map never match — a perfectly
+                // healthy sender kept being seen as "stuck" and the watchdog
+                // renegotiated forever.
+                var liveVids = vids.length;
+                var encodedVids = 0;
                 try {
                     stats.forEach(function (r) {
-                        if (r.type === 'outbound-rtp' && (r.kind === 'video' || r.mediaType === 'video') && (r.framesEncoded || 0) > 0) anyEncoded = true;
+                        if (r.type === 'outbound-rtp' && (r.kind === 'video' || r.mediaType === 'video') && (r.framesEncoded || 0) > 0) {
+                            encodedVids++;
+                        }
                     });
                 } catch (_) {}
-                if (anyEncoded) {
+                var anyStuck = encodedVids < liveVids;
+                // NOTE: no reset here — the shared counter below handles both
+                // sender and receiver stuck signals together. (A reset here
+                // would zero the count every tick whenever the senders look
+                // fine, so a stuck RECEIVER could never accumulate to the
+                // threshold.)
+                // ---- RECEIVER-side check (the user's "black no matter what"):
+                // the SENDER-side watchdog above catches a sender that stopped
+                // ENCODING, but a black feed can also be a receiver that gets
+                // 0 packets / 0 decoded frames while the sender encodes fine
+                // (a held send-gate that never got the Load state, a lost
+                // renegotiation, or a missing/never-invoked decrypt transform).
+                // Watch every LIVE remote feed this side is EXPECTING (loaded
+                // and not deafened): if it decodes nothing for the threshold,
+                // heal it — re-apply E2EE transforms and renegotiate, which
+                // re-fires ontrack and re-syncs the sender's gate with our
+                // current load state.
+                var recvStuck = false;
+                try {
+                    // How many of THIS peer's video feeds are we actually
+                    // EXPECTING? A feed held behind its Load button (manual
+                    // load ON + not clicked, or explicitly unloaded) gets 0
+                    // packets BY DESIGN — that's not a bug to heal. Only a
+                    // feed we want but aren't getting is stuck.
+                    var expectedFeeds = 0;
+                    ['camera', 'screen'].forEach(function (kind) {
+                        if (isFeedLoaded(uid, kind)) expectedFeeds++;
+                    });
+                    var liveRecvs = pc.getReceivers().filter(function (r) {
+                        return r.track && r.track.readyState === 'live' && r.track.kind === 'video';
+                    });
+                    // Audio receivers are expected too (unless deafened): a
+                    // live remote mic/screen-audio that decodes nothing for the
+                    // whole window is the audio twin of the black feed — heal
+                    // it the same way (re-apply decrypt + renegotiate). Audio
+                    // is never gated by the Load feature, so any live receiver
+                    // counts (deafened receivers are excluded above).
+                    // (Deafened receivers get their audio held by every sender
+                    // — 0 packets is CORRECT then, so skip the check when we're
+                    // the deafened one. The member-side deafened flag is about
+                    // THEM, not us.)
+                    // A MUTED remote member also sends no audio by design —
+                    // skip their audio receiver too (mic audio gated on their
+                    // side). Screen-share audio still flows when only the mic
+                    // is muted, so we can't drop the whole peer: gate on the
+                    // member's mic-muted state only.
+                    var memberMuted = S.members && S.members[uid] && (S.members[uid].muted || S.members[uid].force_muted);
+                    var audioRecvs = pc.getReceivers().filter(function (r) {
+                        return r.track && r.track.readyState === 'live' && r.track.kind === 'audio' && !S.deafened && !memberMuted;
+                    });
+                    if ((expectedFeeds > 0 && liveRecvs.length) || audioRecvs.length) {
+                        var decodedV = 0, pktsV = 0, decodedA = 0, pktsA = 0;
+                        try {
+                            stats.forEach(function (r) {
+                                if (r.type !== 'inbound-rtp') return;
+                                var k = r.kind || r.mediaType;
+                                if (k === 'video') {
+                                    decodedV += r.framesDecoded || 0;
+                                    pktsV += r.packetsReceived || 0;
+                                } else if (k === 'audio') {
+                                    decodedA += r.framesDecoded || 0;
+                                    pktsA += r.packetsReceived || 0;
+                                }
+                            });
+                        } catch (_) {}
+                        // Per-track PROGRESS tracking (fixes the fire-loop):
+                        // a renegotiation (our own heal or a glare recovery)
+                        // RECREATES receivers / restarts the decoder, so
+                        // decodedV/pktsV are 0 for a window or two — flagging
+                        // that as "stuck" makes the watchdog re-fire forever
+                        // (fire → reset → 0 → fire). Instead, remember each
+                        // receiver's last-seen progress per track id; a
+                        // receiver is only STALLED when it made NO progress
+                        // since the previous check. A fresh receiver gets one
+                        // window to start (baseline recorded, not flagged).
+                        if (!pc._recvProgress) pc._recvProgress = {};
+                        var recvTrackIds = [];
+                        try {
+                            liveRecvs.concat(audioRecvs).forEach(function (r) {
+                                if (r.track && r.track.id) recvTrackIds.push(r.track.id);
+                            });
+                        } catch (_) {}
+                        var videoLive = liveRecvs.length > 0;
+                        var audioLive = audioRecvs.length > 0;
+                        if (videoLive || audioLive) {
+                            recvTrackIds.forEach(function (tid) {
+                                var prog = pc._recvProgress[tid] || null;
+                                if (!prog) {
+                                    // First sighting: baseline, don't flag yet.
+                                    pc._recvProgress[tid] = { seen: 1, pkts: pktsV, decoded: decodedV };
+                                    return;
+                                }
+                                prog.seen++;
+                                var pktsAdvanced = pktsV > prog.pkts;
+                                var decodedAdvanced = decodedV > prog.decoded;
+                                if (pktsAdvanced || decodedAdvanced) {
+                                    // Healthy: update baseline, drop any stall count.
+                                    prog.pkts = pktsV; prog.decoded = decodedV;
+                                    prog.stalled = 0;
+                                    return;
+                                }
+                                // No progress this window — count the stall.
+                                prog.stalled = (prog.stalled || 0) + 1;
+                            });
+                            // Compute a per-window stalled signal: ANY receiver
+                            // we're expecting that has gone a full window with
+                            // zero progress is a heal candidate.
+                            var anyStalled = false;
+                            recvTrackIds.forEach(function (tid) {
+                                var prog = pc._recvProgress[tid];
+                                if (prog && prog.stalled > 0 && prog.seen > 1) anyStalled = true;
+                            });
+                            // Only flag when we were EXPECTING at least one
+                            // feed (video) — audio receivers are always
+                            // expected unless deafened (handled above).
+                            if ((expectedFeeds > 0 && videoLive) || audioLive) {
+                                if (anyStalled) recvStuck = true;
+                            }
+                            // Prune track ids that no longer exist so the map
+                            // doesn't grow forever across renegotiations.
+                            try {
+                                Object.keys(pc._recvProgress).forEach(function (k) {
+                                    if (recvTrackIds.indexOf(k) === -1) delete pc._recvProgress[k];
+                                });
+                            } catch (_) {}
+                        }
+                    }
+                } catch (_) {}
+                // Debug snapshot for the diagnostics panel + tests: exposes
+                // exactly what the watchdog computed this check.
+                try {
+                    pc.__lastWatch = {
+                        ts: Date.now(),
+                        sig: pc.signalingState,
+                        liveVids: vids.length,
+                        encodedVids: encodedVids,
+                        anyStuck: anyStuck,
+                        expectedFeeds: expectedFeeds,
+                        liveRecvs: liveRecvs.length,
+                        audioRecvs: audioRecvs.length,
+                        decodedV: decodedV,
+                        pktsV: pktsV,
+                        decodedA: decodedA,
+                        pktsA: pktsA,
+                        recvStuck: recvStuck,
+                        count: pc._videoWatchCount || 0,
+                        threshold: pc._videoWatchThreshold,
+                    };
+                } catch (_) {}
+                if (!anyStuck && !recvStuck) {
                     pc._videoWatchCount = 0;
                     return;
                 }
+                if (!pc._videoWatchThreshold) {
+                    // Watchdog disabled (setting = 0) — do nothing.
+                    return;
+                }
                 pc._videoWatchCount = (pc._videoWatchCount || 0) + 1;
-                if (pc._videoWatchCount >= 2) {
+                if (pc._videoWatchCount >= pc._videoWatchThreshold) {
                     pc._videoWatchCount = 0;
-                    if (pc.signalingState === 'stable') {
-                        try { pc.onnegotiationneeded(); } catch (_) {}
-                    } else if (pc.signalingState === 'have-local-offer' || pc.signalingState === 'have-remote-offer') {
-                        try {
-                            pc.setLocalDescription({ type: 'rollback' }).then(function () {
-                                try { pc.onnegotiationneeded(); } catch (_) {}
-                            }).catch(function () {
-                                try { pc.onnegotiationneeded(); } catch (_) {}
-                            });
-                        } catch (_) {
-                            try { pc.onnegotiationneeded(); } catch (_) {}
-                        }
+                    // A renegotiation is ALREADY in flight (a previous watchdog
+                    // fire, an ICE restart, or a glare recovery). Firing again
+                    // now (rolling back + re-offering) would churn the SDP and
+                    // keep the encoder suspended — on slow networks each
+                    // renegotiation can outlast the watchdog interval, so every
+                    // check would land mid-renegotiation and re-fire forever
+                    // (the chip would never go away). Skip and re-check: if the
+                    // in-flight renegotiation fixes the m-line, the next check
+                    // sees encoding; if it doesn't, the check after that (state
+                    // back to stable) fires.
+                    if (pc.signalingState !== 'stable') {
+                        return;
                     }
+                    // Re-apply any missing E2EE transforms BEFORE renegotiating
+                    // — the renegotiation then re-fires ontrack/answers with
+                    // the transforms in place, healing a never-invoked decrypt
+                    // or a sender whose encrypt was lost.
+                    try { healE2eeInPlace(); } catch (_) {}
+                    // Tell the user WHY the feed is about to freeze briefly.
+                    // Prefer the RECEIVER-side kind when the sender looks fine
+                    // (their encoder is healthy — it's OUR feed that's stuck).
+                    showVideoReconnect(recvStuck && !anyStuck ? 'audio-or-video' : (recvStuck ? 'audio-or-video' : 'video'));
+                    try { pc.onnegotiationneeded(); } catch (_) {}
+                    // Re-broadcast our feed state so a held send-gate (the
+                    // sender thinks we don't want the feed) re-evaluates: the
+                    // receiver-side stuck signal with 0 pkts is exactly the
+                    // held-gate signature.
+                    try { sendVoiceState(); } catch (_) {}
                 }
             }).catch(function () {});
         }, 4000);
@@ -1244,6 +1566,12 @@
         S.peers[uid] = pc;
         addLocalTracks(pc);
         applySendE2EE(pc);
+        // Per-receiver send gating: hold feeds this receiver isn't watching
+        // (manual load / unloaded) and audio a deafened receiver can't hear.
+        // Feed gating FIRST so tuneVideoSenders only sizes ungated senders.
+        tuneFeedSenders(pc, uid);
+        tuneAudioSenders(pc, uid);
+        tuneVideoSenders(pc, uid);
         return pc;
     }
 
@@ -1253,23 +1581,31 @@
         // 'camera-'/'screen-' — the receiver classifies by member flags + fill
         // order instead (see handleRemoteTrack). Only the stream object matters
         // here; addTrack associates the track with it for the msid.
+        // A sender may hold a track via _voiceNulled (send gating held it with
+        // replaceTrack(null)) — such a sender is still OCCUPIED, so the guards
+        // below must count it or a gated feed would be re-added as a second
+        // sender (mic/camera restart, RNS pipeline finishing) and the receiver
+        // would get a duplicate m-line the gating never covers.
+        function senderOccupied(s, track) {
+            return (s.track && s.track.id === track.id) || (s._voiceNulled && s._voiceNulled.id === track.id);
+        }
         if (S.localStreams.mic && !S.muted && !S.deafened) {
             // Prefer the RNNoise-processed track when active; otherwise the
             // raw mic track.
             var at = (S.localStreams.processedMic && S.localStreams.processedMic.getAudioTracks()[0]) || S.localStreams.mic.getAudioTracks()[0];
-            if (at && !pc.getSenders().find(function (s) { return s.track && s.track.kind === 'audio'; })) {
+            if (at && !pc.getSenders().find(function (s) { return (s.track && s.track.kind === 'audio') || (s._voiceNulled && s._voiceNulled.kind === 'audio'); })) {
                 pc.addTrack(at, new MediaStream([at]));
             }
         }
         if (S.localStreams.camera && S.cameraOn) {
             var vt = S.localStreams.camera.getVideoTracks()[0];
-            if (vt && !pc.getSenders().find(function (s) { return s.track && s.track.id === vt.id; })) {
+            if (vt && !pc.getSenders().find(function (s) { return senderOccupied(s, vt); })) {
                 pc.addTrack(vt, new MediaStream([vt]));
             }
         }
         if (S.localStreams.screen && S.screenOn) {
             var st = S.localStreams.screen.getVideoTracks()[0];
-            if (st && !pc.getSenders().find(function (s) { return s.track && s.track.id === st.id; })) {
+            if (st && !pc.getSenders().find(function (s) { return senderOccupied(s, st); })) {
                 pc.addTrack(st, new MediaStream([st]));
             }
             // Screen-share audio (tab/system): sent as its own track so the
@@ -1277,7 +1613,7 @@
             // volume). The mic audio track is added FIRST, so the receiver
             // classifies audio tracks by fill order — mic, then screen.
             var sat = S.localStreams.screen.getAudioTracks()[0];
-            if (sat && !pc.getSenders().find(function (s) { return s.track && s.track.id === sat.id; })) {
+            if (sat && !pc.getSenders().find(function (s) { return senderOccupied(s, sat); })) {
                 pc.addTrack(sat, new MediaStream([sat]));
             }
         }
@@ -1287,7 +1623,9 @@
         for (var uid in S.peers) {
             addLocalTracks(S.peers[uid]);
             applySendE2EE(S.peers[uid]);
-            tuneVideoSenders(S.peers[uid]);
+            tuneFeedSenders(S.peers[uid], uid);
+            tuneAudioSenders(S.peers[uid], uid);
+            tuneVideoSenders(S.peers[uid], uid);
         }
     }
 
@@ -1343,20 +1681,25 @@
         for (var uid in S.peers) {
             var pc = S.peers[uid];
             var senders = pc.getSenders().filter(function (s) {
-                if (!s.track) return false;
+                // A sender may hold its track in _voiceNulled (send gating) —
+                // it must be removed too, or a gated sender would survive a
+                // mic restart with a dead held track.
+                var held = s.track || s._voiceNulled;
+                if (!held) return false;
                 if (kind === 'audio') {
                     // Mic audio only — muting must NOT kill the screen-share
                     // audio (that is removed with kind 'screen' instead).
-                    if (s.track.kind !== 'audio') return false;
-                    if (S.localStreams.screen && S.localStreams.screen.getAudioTracks().indexOf(s.track) !== -1) return false;
+                    if (held.kind !== 'audio') return false;
+                    if (S.localStreams.screen && S.localStreams.screen.getAudioTracks().indexOf(held) !== -1) return false;
                     return true;
                 }
                 // 'screen' removes BOTH the screen video track and its audio
                 // track (the whole screen stream).
-                if (kind === 'screen') return S.localStreams.screen && S.localStreams.screen.getTracks().indexOf(s.track) !== -1;
-                return s.track.kind === 'video' && isTrackKind(s.track, kind);
+                if (kind === 'screen') return S.localStreams.screen && S.localStreams.screen.getTracks().indexOf(held) !== -1;
+                return held.kind === 'video' && isTrackKind(held, kind);
             });
             senders.forEach(function (s) {
+                s._voiceNulled = null;
                 try { pc.removeTrack(s); } catch (_) {}
             });
             // Renegotiate
@@ -1371,6 +1714,112 @@
         if (kind === 'camera') return S.localStreams.camera && S.localStreams.camera.getVideoTracks().indexOf(track) !== -1;
         if (kind === 'screen') return S.localStreams.screen && S.localStreams.screen.getVideoTracks().indexOf(track) !== -1;
         return false;
+    }
+
+    // Does the receiver (member's broadcast state) want THIS sender's feed?
+    // The receiver's loaded/unloaded lists are keyed by the SENDER's uid (who
+    // is sending to them) — i.e. MY uid on this device. Manual-load ON: only
+    // explicitly loaded feeds. Manual-load OFF: everything except explicitly
+    // unloaded feeds. A missing member state (peer created before their
+    // voice_state arrived) defaults to yes — never drop media by accident.
+    function feedWanted(member, kind) {
+        if (!member) return true;
+        var key = getSelfId() + ':' + kind;
+        if (member.manual_video_load) {
+            return (member.loaded_feeds || []).indexOf(key) !== -1;
+        }
+        return (member.unloaded_feeds || []).indexOf(key) === -1;
+    }
+
+    // Per-peer video gating: hold a feed's RTP when the receiver isn't watching
+    // it (manual load on + not loaded, or explicitly unloaded) instead of
+    // encoding frames nobody renders. replaceTrack(null) keeps the m-line and
+    // the E2EE transform in place — no renegotiation, and restoring the same
+    // track object resumes instantly.
+    function tuneFeedSenders(pc, uid) {
+        if (!pc || !pc.getSenders) return;
+        if (!uid) {
+            for (var k in S.peers) {
+                if (S.peers[k] === pc) { uid = k; break; }
+            }
+        }
+        var member = S.members[uid];
+        pc.getSenders().forEach(function (s) {
+            // A gated sender has track === null but holds it in _voiceNulled —
+            // it must be re-evaluated too or it can never be restored.
+            var held = s.track || s._voiceNulled;
+            if (!held || held.kind !== 'video') return;
+            var kind = isTrackKind(held, 'camera') ? 'camera' : 'screen';
+            applySenderGate(s, feedWanted(member, kind));
+        });
+    }
+
+    // Per-peer AUDIO gating: a DEAFENED receiver can't hear anything, so stop
+    // sending mic + screen-share audio to them (pure bitrate waste). A MUTED
+    // receiver still hears, so they keep receiving.
+    function tuneAudioSenders(pc, uid) {
+        if (!pc || !pc.getSenders) return;
+        if (!uid) {
+            for (var k in S.peers) {
+                if (S.peers[k] === pc) { uid = k; break; }
+            }
+        }
+        var member = S.members[uid];
+        var want = !(member && member.deafened);
+        pc.getSenders().forEach(function (s) {
+            // Re-evaluate gated (nulled) senders too so a deafened receiver's
+            // audio resumes the moment they undeafen.
+            var held = s.track || s._voiceNulled;
+            if (!held || held.kind !== 'audio') return;
+            applySenderGate(s, want);
+        });
+    }
+
+    // replaceTrack(null) ↔ restore. s._voiceNulled remembers the held track so
+    // a later restore returns the SAME track object (media resumes with no new
+    // negotiation). The restore prefers the CURRENT track for that role (the
+    // mic may have been restarted with a new track while gated — e.g. the
+    // RNNoise processed track arriving after the gate).
+    function currentTrackFor(s) {
+        var held = s._voiceNulled;
+        if (!held) return null;
+        if (held.kind === 'audio') {
+            if (S.localStreams.screen && S.localStreams.screen.getAudioTracks().indexOf(held) !== -1) {
+                return S.localStreams.screen.getAudioTracks()[0] || null;
+            }
+            if (S.localStreams.mic) {
+                var processed = S.localStreams.processedMic && S.localStreams.processedMic.getAudioTracks()[0];
+                return processed || S.localStreams.mic.getAudioTracks()[0] || null;
+            }
+            return null;
+        }
+        if (S.localStreams.camera && S.localStreams.camera.getVideoTracks().indexOf(held) !== -1) {
+            return S.localStreams.camera.getVideoTracks()[0] || null;
+        }
+        if (S.localStreams.screen && S.localStreams.screen.getVideoTracks().indexOf(held) !== -1) {
+            return S.localStreams.screen.getVideoTracks()[0] || null;
+        }
+        return null;
+    }
+
+    function applySenderGate(s, want) {
+        if (want) {
+            if (s._voiceNulled) {
+                var fresh = currentTrackFor(s);
+                if (!fresh) {
+                    // The source stream is gone (mic stopped, screen off) —
+                    // stay gated rather than restoring a dead track. The next
+                    // gate evaluation (e.g. unmute after the mic restarts)
+                    // restores it.
+                    return;
+                }
+                s._voiceNulled = null;
+                try { s.replaceTrack(fresh); } catch (_) {}
+            }
+        } else if (!s._voiceNulled) {
+            s._voiceNulled = s.track;
+            try { s.replaceTrack(null); } catch (_) {}
+        }
     }
 
     function applySendE2EE(pc) {
@@ -1393,11 +1842,45 @@
         ensureE2eeWorker();
         if (!window.RTCRtpScriptTransform || !e2eeWorker || !S.roomKeyB64) return false;
         try {
+            // Never replace an existing transform mid-stream (see
+            // reapplyAllE2EE): a receiver that already has one is decrypting
+            // fine — reassigning would detach it and Chrome may not wire the
+            // replacement, silently killing that direction (one-sided audio).
+            if (receiver.transform) return true;
             receiver.transform = new RTCRtpScriptTransform(e2eeWorker, { operation: 'decrypt', key: S.roomKeyB64 });
             return true;
         } catch (_) {
             return false;
         }
+    }
+
+    // Heal ANY sender/receiver that lost its E2EE transform — track swaps,
+    // renegotiation recreating receivers, transient apply failures (which only
+    // queue, and the queue only flushes on key arrival — a failure after the
+    // key was already set stayed ✗ forever). Re-applies encrypt to EVERY sender
+    // (including gated/null-track ones: the transform survives replaceTrack,
+    // so setting it while gated is harmless and ready for the restore) and
+    // decrypt to every live receiver, then retries the pending queue. Called
+    // after every negotiation settles so a black/raw feed heals itself within
+    // one renegotiation.
+    function reapplyAllE2EE(pc) {
+        // Senders only, ADD where missing — never replace a working transform
+        // and never touch receivers (receiver re-application after the
+        // negotiation settles was the one-sided-audio regression). Receivers
+        // get their decrypt transform once at ontrack; new receivers created
+        // by renegotiation fire ontrack again and are covered there.
+        ensureE2eeWorker();
+        if (!window.RTCRtpScriptTransform || !e2eeWorker || !S.roomKeyB64) return;
+        try {
+            pc.getSenders().forEach(function (s) {
+                try {
+                    if (!s.transform) {
+                        s.transform = new RTCRtpScriptTransform(e2eeWorker, { operation: 'encrypt', key: S.roomKeyB64 });
+                    }
+                } catch (_) {}
+            });
+        } catch (_) {}
+        flushPendingRecvTransforms();
     }
 
     function queueRecvE2EE(receiver, trackId) {
@@ -1466,6 +1949,15 @@
             };
         } else if (e.track.kind === 'video') {
             S.remoteStreams[uid] = S.remoteStreams[uid] || {};
+            // E2EE on the receiver — queue if the key isn't ready yet (see
+            // applyRecvE2EE/flushPendingRecvTransforms). Applied for EVERY
+            // video track (including parked/pending ones) — a missing decrypt
+            // transform leaves the feed permanently black (encrypted frames
+            // can't decode).
+            ensureE2eeWorker();
+            if (!applyRecvE2EE(e.receiver)) {
+                queueRecvE2EE(e.receiver, e.track.id);
+            }
             // MediaStream.id is read-only, so stream ids can never carry a
             // 'screen-' prefix — the sender's camStream.id/scrStream.id tagging
             // silently no-ops. e.streams is also often EMPTY for later
@@ -1478,14 +1970,25 @@
             // instead of guessing — fixVideoSlots() drains it the moment the
             // ids arrive, so a screen share can never be mislabeled as a
             // camera feed ("sharescreen looks wrong" race).
-            var m = S.members[uid] || {};
             var key = classifyVideoSlot(uid, e.track.id);
-            if (!key) {
-                // Unknown ids yet — hold the track until the state arrives.
-                S.remoteStreams[uid]._pending = S.remoteStreams[uid]._pending || [];
-                S.remoteStreams[uid]._pending.push(e.track);
-            } else {
+            // Renegotiation re-fires ontrack with the SAME track object. If
+            // it's already in its slot, leave everything alone — rebuilding the
+            // panel would restart every <video> decoder → black flash on any
+            // member's renegotiation.
+            if (key) {
+                var existingStream = S.remoteStreams[uid][key];
+                if (existingStream && existingStream.getVideoTracks().some(function (t) { return t.id === e.track.id; })) {
+                    return;
+                }
                 S.remoteStreams[uid][key] = new MediaStream([e.track]);
+            } else {
+                // Unknown ids yet — hold the track until the state arrives
+                // (dedupe: renegotiation can re-fire before the ids arrive).
+                S.remoteStreams[uid]._pending = S.remoteStreams[uid]._pending || [];
+                if (!S.remoteStreams[uid]._pending.some(function (t) { return t.id === e.track.id; })) {
+                    S.remoteStreams[uid]._pending.push(e.track);
+                }
+                return;
             }
             // Clear the slot (or the pending queue) when the remote stops
             // this track, so a stale stream doesn't linger on the tile.
@@ -1503,12 +2006,6 @@
                     renderDmPanel();
                 }
             };
-            // E2EE on the receiver — queue if the key isn't ready yet (see
-            // applyRecvE2EE/flushPendingRecvTransforms).
-            ensureE2eeWorker();
-            if (!applyRecvE2EE(e.receiver)) {
-                queueRecvE2EE(e.receiver, e.track.id);
-            }
             if (key) renderRemoteTile(uid, key);
             renderPopup();
             renderDmPanel();
@@ -1647,6 +2144,17 @@
             el.style.display = 'none';
             if (stream) el.srcObject = stream;
             el.play().catch(function () {});
+            // DEBUG (one-sided audio): log starvation events on this element so
+            // we can correlate decoder underruns with the concealment pattern.
+            try {
+                if (window.__enableVoiceAudioDebug && window.__voiceAudioElEvents) {
+                    ['waiting', 'stalled', 'playing', 'emptied'].forEach(function (evName) {
+                        el.addEventListener(evName, function () {
+                            window.__voiceAudioElEvents.push({ t: Date.now(), ev: evName, uid: uid.slice(0, 6) });
+                        });
+                    });
+                }
+            } catch (_) {}
             document.body.appendChild(el);
             els.push(el);
         }
@@ -1881,6 +2389,7 @@
         } else if (signal.type === 'answer') {
             pc.setRemoteDescription({ type: 'answer', sdp: sdp }).then(function () {
                 tuneVideoSenders(pc);
+                reapplyAllE2EE(pc);
                 flushPendingIce(pc);
             }).catch(function (err) {
                 // The answer may match an offer we already rolled back (e.g. the
@@ -2146,6 +2655,14 @@
                 removeRemoteTile(uid);
             }
         });
+        // A full member-list snapshot carries everyone's feed state — re-gate
+        // our senders for every existing peer (load/unload + deafen changes).
+        Object.keys(S.peers).forEach(function (uid) {
+            if (!S.members[uid]) return;
+            tuneFeedSenders(S.peers[uid], uid);
+            tuneAudioSenders(S.peers[uid], uid);
+            tuneVideoSenders(S.peers[uid], uid);
+        });
 
         renderBar();
         renderPopup();
@@ -2175,11 +2692,24 @@
             // even when the on/off flags don't — re-slot so the right feed
             // lands in the right tile.
             (!isSelf && (prev.camera_track_id !== member.camera_track_id || prev.screen_track_id !== member.screen_track_id));
+        // What THIS member is willing to receive changed: manual-load
+        // loaded/unloaded feeds, or they deafened/undeafened. Re-gate our
+        // senders for them so we stop/start sending exactly what they watch.
+        var feedStateChanged = !prev ||
+            prev.manual_video_load !== member.manual_video_load ||
+            prev.deafened !== member.deafened ||
+            (prev.loaded_feeds || []).join(',') !== (member.loaded_feeds || []).join(',') ||
+            (prev.unloaded_feeds || []).join(',') !== (member.unloaded_feeds || []).join(',');
         S.members[member.user_id] = member;
         // The member changed their RECEIVE resolution — re-tune our sender for
         // them so we send exactly what they asked for (per-receiver scaling).
         if (!isSelf && prev &&
             (prev.recv_camera_res !== member.recv_camera_res || prev.recv_screen_res !== member.recv_screen_res)) {
+            tuneVideoSenders(S.peers[member.user_id], member.user_id);
+        }
+        if (!isSelf && feedStateChanged) {
+            tuneFeedSenders(S.peers[member.user_id], member.user_id);
+            tuneAudioSenders(S.peers[member.user_id], member.user_id);
             tuneVideoSenders(S.peers[member.user_id], member.user_id);
         }
         if (S.roomType === 'dm' && member.user_id !== getSelfId()) {
@@ -2986,6 +3516,12 @@
             // THIS member down to these heights (per-receiver quality).
             recv_camera_res: S.settings.recvCameraRes || 360,
             recv_screen_res: S.settings.recvScreenRes || 480,
+            // Manual video-load state: which feeds ("uid:kind") this viewer has
+            // explicitly loaded/unloaded, so every sender can stop sending a
+            // feed nobody is watching (bitrate) — see feedWanted().
+            manual_video_load: !!S.settings.manualVideoLoad,
+            loaded_feeds: loadedFeedsList(),
+            unloaded_feeds: unloadedFeedsList(),
         });
     }
 
@@ -3457,6 +3993,18 @@
         if (rs) rs.addEventListener('change', function (e) { setRecvRes('screen', e.target.value); });
         var ml = document.getElementById('voice-manual-video-load');
         if (ml) ml.addEventListener('change', function (e) { setManualVideoLoad(e.target.checked); });
+        var wd = document.getElementById('voice-video-watchdog-secs');
+        if (wd) wd.addEventListener('change', function (e) { setVideoWatchdogSecs(e.target.value); });
+        // Call diagnostics (Settings → Voice → Advanced)
+        var dr = document.getElementById('voice-diag-refresh');
+        if (dr) dr.addEventListener('click', function () { renderVoiceDiag(); });
+        var dh = document.getElementById('voice-diag-heal');
+        if (dh) dh.addEventListener('click', function () { healAndRejoin(); });
+        var da = document.getElementById('voice-diag-auto');
+        if (da) da.addEventListener('change', function (e) {
+            if (e.target.checked) renderVoiceDiag();
+        });
+        startVoiceDiagPoll();
     }
 
     function updateSettingsLabels() {
@@ -3626,6 +4174,9 @@
             html = '<div class="voice-member-empty">No one here yet</div>';
         }
         list.innerHTML = html;
+        // A member-row rebuild wipes the reconnect chip in the self row's media
+        // container — re-apply if the watchdog notice is currently showing.
+        syncVideoReconnectChips();
 
         // Right-click → volume menu (all users) + owner controls (server owner)
         list.querySelectorAll('.voice-member-row').forEach(function (row) {
@@ -3650,39 +4201,129 @@
         var lists = [el('voice-popup-members'), el('dm-call-body')];
         lists.forEach(function (l) {
             if (!l) return;
-            l.querySelectorAll('.remote-video-tile').forEach(function (t) { t.remove(); });
+            l.querySelectorAll('.remote-video-tile, .voice-feed-load-btn, .voice-feed-unload-btn').forEach(function (t) { t.remove(); });
         });
     }
 
     function removeRemoteTile(uid) {
         document.querySelectorAll('.remote-video-tile[data-uid="' + uid + '"]').forEach(function (t) { t.remove(); });
-        // Drop the manual-load state for this member's feeds (both kinds).
-        clearFeedLoaded(uid, 'camera');
-        clearFeedLoaded(uid, 'screen');
+        ['camera', 'screen'].forEach(function (k) {
+            var key = feedKey(uid, k);
+            document.querySelectorAll('.voice-feed-load-btn[data-feed="' + key + '"], .voice-feed-unload-btn[data-feed="' + key + '"]').forEach(function (b) { b.remove(); });
+            // Drop the manual-load state for this member's feeds (both kinds).
+            clearFeedLoaded(uid, k);
+        });
     }
 
     function feedKey(uid, kind) { return uid + ':' + kind; }
-    function isFeedLoaded(uid, kind) { return !!S._loadedFeeds[feedKey(uid, kind)]; }
+    // Tri-state per-feed load: true = explicitly loaded, false = explicitly
+    // unloaded, undefined = never touched (auto-load when the manual-load
+    // setting is OFF, held behind Load when it's ON). Unloading works even
+    // with the setting OFF — that feed stays unloaded until reloaded.
+    function isFeedLoaded(uid, kind) {
+        var key = feedKey(uid, kind);
+        if (S._loadedFeeds[key] === true) return true;
+        if (S._loadedFeeds[key] === false) return false;
+        return !S.settings.manualVideoLoad;
+    }
     function markFeedLoaded(uid, kind) { S._loadedFeeds[feedKey(uid, kind)] = true; }
+    function markFeedUnloaded(uid, kind) { S._loadedFeeds[feedKey(uid, kind)] = false; }
     function clearFeedLoaded(uid, kind) { delete S._loadedFeeds[feedKey(uid, kind)]; }
+    // The lists broadcast in voice_state so every sender knows which feeds
+    // ("uid:kind") this viewer is actually watching.
+    function loadedFeedsList() {
+        return Object.keys(S._loadedFeeds).filter(function (k) { return S._loadedFeeds[k] === true; });
+    }
+    function unloadedFeedsList() {
+        return Object.keys(S._loadedFeeds).filter(function (k) { return S._loadedFeeds[k] === false; });
+    }
+    // Stop receiving a feed AND tell every sender to stop sending it (bitrate).
+    // The feed returns behind its Load button; clicking Load (or disabling the
+    // manual-load feature) resumes both directions.
+    function unloadFeed(uid, kind) {
+        markFeedUnloaded(uid, kind);
+        var v = document.querySelector('.remote-video-tile[data-uid="' + uid + '"][data-kind="' + kind + '"]');
+        if (v) { try { v.srcObject = null; } catch (_) {} }
+        applyFeedPlaceholders();
+        if (S.connected) sendVoiceState();
+    }
 
-    // Attach a remote camera/screen stream to its tile — or, when manual video
-    // load is ON and the viewer hasn't clicked Load for THIS feed yet, hold it
-    // behind a Load button instead. Per (user, kind) — loading your camera and
-    // your screen are independent, as are different users' feeds. Right-click
-    // on the held tile (or its Load button) still opens the volume menu.
+    // Position a feed button (Load center / Unload top-right) over ITS OWN
+    // tile. Runs immediately and then retries across a few animation frames,
+    // because attachRemoteVideo can run before the container is laid out
+    // (panel hidden at render, stream still attaching) — without the retry the
+    // button falls to the flex row's static position (e.g. "on the right of
+    // the camera" instead of inside its top-right corner). Skipped while the
+    // video lives in a fullscreen wrap (its offsets are then relative to the
+    // wrap, not the tile container).
+    function positionFeedButton(btn, video, isLoad) {
+        if (!btn || !video) return;
+        var place = function () {
+            if (!btn.isConnected || !video.isConnected) return;
+            if (video.closest && video.closest('.voice-fs-wrap')) return;
+            // Use viewport bounding rects, NOT offsetLeft/offsetTop: the
+            // button's absolute coords are relative to ITS containing block,
+            // while the video's offsets are relative to ITS offsetParent.
+            // Those can differ (flex rows, nested positioned ancestors, CSS
+            // transforms on the tile) — the mismatch landed the button OUTSIDE
+            // the tile (e.g. "to the right of the camera"). Rect math is
+            // coordinate-system-proof and follows transforms too.
+            var vr = video.getBoundingClientRect();
+            if (vr.width <= 1 || vr.height <= 1) return; // not laid out yet
+            var op = btn.offsetParent;
+            if (!op) return;
+            var or = op.getBoundingClientRect();
+            var x = vr.left - or.left;
+            var y = vr.top - or.top;
+            if (isLoad) {
+                btn.style.left = Math.round(x + vr.width / 2) + 'px';
+                btn.style.top = Math.round(y + vr.height / 2) + 'px';
+            } else {
+                var bw = btn.offsetWidth || 22;
+                btn.style.left = Math.round(x + vr.width - bw - 6) + 'px';
+                btn.style.top = Math.round(y + 6) + 'px';
+            }
+        };
+        place();
+        var tries = 0;
+        (function retry() {
+            requestAnimationFrame(function () {
+                if (!btn.isConnected || tries >= 20) return;
+                tries++;
+                place();
+                retry();
+            });
+        })();
+        // The video's intrinsic size only becomes known once its decoder has a
+        // frame — that can be seconds after attach. Re-position when it
+        // changes (fires on dimension change) and on window resizes.
+        try { video.addEventListener('resize', place); } catch (_) {}
+        try { window.addEventListener('resize', place); } catch (_) {}
+    }
+
+    // Attach a remote camera/screen stream to its tile — or, when the feed
+    // isn't loaded (manual video load ON + not clicked, or explicitly
+    // unloaded), hold it behind a Load button instead. Per (user, kind) —
+    // loading your camera and your screen are independent, as are different
+    // users' feeds. A loaded feed gets an Unload button (top-right, hover to
+    // reveal on PC, always visible on touch) that stops both directions.
+    // Right-click on the held tile (or its Load/Unload button) still opens
+    // the volume menu.
     function attachRemoteVideo(video, uid, kind, stream) {
         if (!video) return;
         var parent = video.parentElement;
-        var holder = parent ? parent.querySelector('.voice-feed-load-btn[data-feed="' + feedKey(uid, kind) + '"]') : null;
-        var hold = !!stream && S.settings.manualVideoLoad && !isFeedLoaded(uid, kind);
+        var key = feedKey(uid, kind);
+        var holder = parent ? parent.querySelector('.voice-feed-load-btn[data-feed="' + key + '"]') : null;
+        var unloadBtn = parent ? parent.querySelector('.voice-feed-unload-btn[data-feed="' + key + '"]') : null;
+        var hold = !!stream && !isFeedLoaded(uid, kind);
         if (hold) {
             try { if (video.srcObject) video.srcObject = null; } catch (_) {}
+            if (unloadBtn) unloadBtn.style.display = 'none';
             if (!holder) {
                 holder = document.createElement('button');
                 holder.type = 'button';
                 holder.className = 'voice-feed-load-btn';
-                holder.setAttribute('data-feed', feedKey(uid, kind));
+                holder.setAttribute('data-feed', key);
                 holder.innerHTML = '<span class="voice-feed-load-ico">&#9654;</span><span class="voice-feed-load-lbl">' +
                     (kind === 'screen' ? 'Load screen' : 'Load camera') + '</span>';
                 holder.addEventListener('click', function () {
@@ -3693,6 +4334,8 @@
                         v.play().catch(function () {});
                     }
                     applyFeedPlaceholders();
+                    // The receiver now wants this feed — tell senders to resume.
+                    if (S.connected) sendVoiceState();
                 });
                 // Right-click on the Load button behaves like right-click on the
                 // feed tile (volume/view menu) — manual load never breaks it.
@@ -3708,16 +4351,47 @@
             // by side, and a container-centered button would land between them.
             // Re-computed every time the button is shown (layout can shift when
             // a sibling tile appears/disappears).
-            if (video.offsetWidth > 0) {
-                holder.style.left = Math.round(video.offsetLeft + video.offsetWidth / 2) + 'px';
-                holder.style.top = Math.round(video.offsetTop + video.offsetHeight / 2) + 'px';
-            }
             holder.style.display = 'flex';
+            positionFeedButton(holder, video, true);
         } else {
             if (holder) holder.style.display = 'none';
             if (stream && video.srcObject !== stream) {
-                video.srcObject = stream;
-                video.play().catch(function () {});
+                // Renegotiation re-fires ontrack with the SAME underlying track
+                // wrapped in a NEW MediaStream — replacing srcObject would
+                // restart the decoder → a black flash on every renegotiation.
+                // Keep the element's stream when the track didn't change.
+                var curVid = null;
+                try { curVid = video.srcObject && video.srcObject.getVideoTracks()[0]; } catch (_) {}
+                var newVid = stream.getVideoTracks()[0];
+                if (!(curVid && newVid && curVid.id === newVid.id)) {
+                    video.srcObject = stream;
+                    video.play().catch(function () {});
+                }
+            }
+            if (stream) {
+                if (!unloadBtn) {
+                    unloadBtn = document.createElement('button');
+                    unloadBtn.type = 'button';
+                    unloadBtn.className = 'voice-feed-unload-btn';
+                    unloadBtn.setAttribute('data-feed', key);
+                    unloadBtn.title = 'Stop receiving this feed — the sender stops sending it to you (tap Load to resume)';
+                    unloadBtn.textContent = '✕';
+                    unloadBtn.addEventListener('click', function (e) {
+                        e.stopPropagation();
+                        unloadFeed(uid, kind);
+                    });
+                    unloadBtn.addEventListener('contextmenu', function (e) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        openVolumeMenu(e, uid, kind === 'screen' ? 'screen' : 'video');
+                    });
+                    if (parent) parent.appendChild(unloadBtn);
+                }
+                unloadBtn.style.display = 'flex';
+                // Position over ITS OWN tile's top-right corner.
+                positionFeedButton(unloadBtn, video, false);
+            } else if (unloadBtn) {
+                unloadBtn.style.display = 'none';
             }
         }
     }
@@ -3790,6 +4464,8 @@
         if (dmPrev) {
             dmPrev.innerHTML = '';
             dmPrev.appendChild(selfPreviewEl());
+            // A re-render wipes the reconnect chip — re-apply if it was active.
+            syncVideoReconnectChips();
         }
     }
 
@@ -4108,8 +4784,67 @@
     }
 
     function applyTileTransform(video, uid, kind) {
+        var st = S.tileTransforms[uid + ':' + kind];
+        var rot = st && st.rot ? ((st.rot % 360) + 360) % 360 : 0;
         var css = tileTransformCss(uid, kind);
         video.style.transform = css || '';
+        // A 90°/270° rotation flips the CONTENT's aspect but leaves the layout
+        // box at its original dimensions — the rotated feed then overflows the
+        // tile and sticks out over the bottom/edges ("goes over the bottom in
+        // the dm call"). Swap the layout width/height to match the rotated
+        // content, scaled down to fit the container when needed. Resetting the
+        // inline dims FIRST makes the swap idempotent (offsetWidth/Height must
+        // reflect the CSS-driven box, not the previous swap).
+        var sideways = rot === 90 || rot === 270;
+        clearInlineDims(video);
+        if (!sideways) return;
+        var fsWrap = video.closest ? video.closest('.voice-fs-wrap') : null;
+        if (fsWrap) {
+            // Fullscreen: the wrap fills the screen (W×H) and its CSS forces the
+            // video to 100%×100% with !important, so the rotated element keeps
+            // the screen's aspect and gets cut off at the top/bottom. Swap the
+            // element to H×W (with !important so it beats the wrap rules) —
+            // after the 90° rotation the content then fills the screen exactly.
+            var fw = fsWrap.clientWidth || window.innerWidth;
+            var fh = fsWrap.clientHeight || window.innerHeight;
+            if (fw > 0 && fh > 0) {
+                setDimImportant(video, 'width', Math.round(fh) + 'px');
+                setDimImportant(video, 'height', Math.round(fw) + 'px');
+            }
+            return;
+        }
+        var bw = video.offsetWidth;
+        var bh = video.offsetHeight;
+        if (!(bw > 0 && bh > 0)) return;
+        var parent = video.parentElement;
+        var pw = parent ? parent.clientWidth : 0;
+        var ph = parent ? parent.clientHeight : 0;
+        // The rotated box is bh × bw (transposed).
+        var s = Math.min(1,
+            pw > 0 ? pw / bh : 1,
+            ph > 0 ? ph / bw : 1);
+        var nw = Math.max(1, Math.round(bh * s));
+        var nh = Math.max(1, Math.round(bw * s));
+        video.style.width = nw + 'px';
+        video.style.height = nh + 'px';
+        // Inline dims must beat the tile max-width/max-height caps.
+        video.style.maxWidth = 'none';
+        video.style.maxHeight = 'none';
+    }
+
+    // Reset any inline layout dims set by a previous rotation swap (including
+    // the !important ones used inside fullscreen).
+    function clearInlineDims(video) {
+        if (!video) return;
+        ['width', 'height', 'maxWidth', 'maxHeight'].forEach(function (p) {
+            try { video.style.removeProperty(p); } catch (_) {}
+            video.style[p] = '';
+        });
+    }
+
+    // Inline !important beats the fullscreen stylesheet's !important rules.
+    function setDimImportant(video, prop, val) {
+        try { video.style.setProperty(prop, val, 'important'); } catch (_) { video.style[prop] = val; }
     }
 
     function applyTileTransformAll(uid, kind) {
@@ -4817,18 +5552,455 @@
     // per kind). Senders keep sending; this only affects what the viewer loads.
     function setManualVideoLoad(on) {
         S.settings.manualVideoLoad = !!on;
+        if (!on) {
+            // Disabling manual load auto-loads EVERY feed again, including the
+            // ones explicitly unloaded with the Unload button (the toggle is
+            // the escape hatch) — otherwise a feed the user unloaded earlier
+            // would stay black until they click Load again.
+            Object.keys(S._loadedFeeds).forEach(function (k) {
+                if (S._loadedFeeds[k] === false) delete S._loadedFeeds[k];
+            });
+        }
         saveSettings();
         updateSettingsLabels();
         renderPopup();
         renderDmPanel();
         renderSelfPreview();
         applyFeedPlaceholders();
+        // Toggling changes what feeds this viewer is willing to receive —
+        // broadcast so every sender re-gates accordingly.
+        if (S.connected) sendVoiceState();
     }
 
     function retuneAllVideoSenders() {
         for (var uid in S.peers) {
             tuneVideoSenders(S.peers[uid], uid);
         }
+    }
+
+    // Black-feed watchdog: how many consecutive zero-frame checks (at the
+    // watchdog's 4s interval) trigger a renegotiation. Derived from the
+    // configurable videoWatchdogSecs setting; 0 = disabled.
+    function watchdogCheckThreshold() {
+        var secs = parseInt(S.settings.videoWatchdogSecs, 10) || 0;
+        if (secs <= 0) return 0;
+        return Math.max(1, Math.round(secs / 4));
+    }
+
+    function applyVideoWatchdogToPeers() {
+        var th = watchdogCheckThreshold();
+        for (var uid in S.peers) {
+            var _p = S.peers[uid];
+            _p._videoWatchThreshold = th;
+            if (th === 0) _p._videoWatchCount = 0;
+        }
+    }
+
+    // Set the seconds of zero frames before the video watchdog renegotiates
+    // (0 = off). Applies immediately to every existing peer.
+    function setVideoWatchdogSecs(secs) {
+        S.settings.videoWatchdogSecs = Math.max(0, Math.min(60, parseInt(secs, 10) || 0));
+        saveSettings();
+        updateSettingsLabels();
+        applyVideoWatchdogToPeers();
+    }
+
+    // ------------------------------------------------------------------
+    // Call diagnostics (Settings → Voice → Advanced)
+    // ------------------------------------------------------------------
+    // Live getStats for every peer so a black feed can be diagnosed at a
+    // glance instead of by feel: frames encoded/decoded, packet loss, and
+    // whether the E2EE media transform is attached to each sender/receiver.
+    // No wire changes — pure local getStats.
+    function fmtBytes(n) {
+        if (!n) return '0 B';
+        if (n < 1024) return n + ' B';
+        if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+        return (n / 1048576).toFixed(2) + ' MB';
+    }
+
+    // Aggregate one direction's stats for one kind (audio/video): sender or
+    // receiver side merged with its matching outbound/inbound-rtp reports.
+    function mergeDiagKind(trackAgg, rtpAgg) {
+        var m = { tracks: 0, transform: false, trackStates: [], reports: 0, frames: 0, packets: 0, loss: 0, bytes: 0 };
+        if (trackAgg) {
+            m.tracks = trackAgg.count || 0;
+            m.transform = !!trackAgg.transform;
+            m.trackStates = trackAgg.trackStates || [];
+        }
+        if (rtpAgg) {
+            m.reports = rtpAgg.count || 0;
+            m.frames = rtpAgg.frames || 0;
+            m.packets = rtpAgg.packets || 0;
+            m.loss = rtpAgg.loss || 0;
+            m.bytes = rtpAgg.bytes || 0;
+        }
+        return m;
+    }
+
+    // Resolves to an array of per-peer diagnostics (one entry per RTCPeerConnection
+    // in S.peers). Exposed on VoiceManager.getPeerDiag() and _debug.getPeerDiag.
+    function collectPeerDiag() {
+        var out = [];
+        var uids = S.connected ? Object.keys(S.peers) : [];
+        if (!uids.length) return Promise.resolve(out);
+        var jobs = uids.map(function (uid) {
+            var pc = S.peers[uid];
+            var entry = {
+                uid: uid,
+                connectionState: pc.connectionState || '?',
+                signalingState: pc.signalingState || '?',
+                senders: {},
+                receivers: {},
+            };
+            return pc.getStats().then(function (stats) {
+                var outAgg = {}, inAgg = {};
+                try {
+                    stats.forEach(function (r) {
+                        var k = r.kind || r.mediaType;
+                        if (!k) return;
+                        if (r.type === 'outbound-rtp') {
+                            (outAgg[k] = outAgg[k] || { count: 0, frames: 0, packets: 0, loss: 0, bytes: 0 });
+                            outAgg[k].count++;
+                            outAgg[k].frames += r.framesEncoded || 0;
+                            outAgg[k].packets += r.packetsSent || 0;
+                            outAgg[k].loss += r.packetsLost || 0;
+                            outAgg[k].bytes += r.bytesSent || 0;
+                        } else if (r.type === 'inbound-rtp') {
+                            (inAgg[k] = inAgg[k] || { count: 0, frames: 0, packets: 0, loss: 0, bytes: 0 });
+                            inAgg[k].count++;
+                            inAgg[k].frames += r.framesDecoded || 0;
+                            inAgg[k].packets += r.packetsReceived || 0;
+                            inAgg[k].loss += r.packetsLost || 0;
+                            inAgg[k].bytes += r.bytesReceived || 0;
+                        }
+                    });
+                } catch (_) {}
+                var sAgg = {}, rAgg = {};
+                pc.getSenders().forEach(function (s) {
+                    var kind = s.track ? s.track.kind : 'held';
+                    (sAgg[kind] = sAgg[kind] || { count: 0, transform: false, trackStates: [] });
+                    sAgg[kind].count++;
+                    sAgg[kind].transform = sAgg[kind].transform || !!s.transform;
+                    sAgg[kind].trackStates.push(s.track ? s.track.readyState : 'null');
+                });
+                pc.getReceivers().forEach(function (r) {
+                    var kind = r.track ? r.track.kind : 'held';
+                    (rAgg[kind] = rAgg[kind] || { count: 0, transform: false, trackStates: [] });
+                    rAgg[kind].count++;
+                    rAgg[kind].transform = rAgg[kind].transform || !!r.transform;
+                    rAgg[kind].trackStates.push(r.track ? r.track.readyState : 'null');
+                });
+                ['audio', 'video'].forEach(function (k) {
+                    if (outAgg[k] || sAgg[k]) entry.senders[k] = mergeDiagKind(sAgg[k], outAgg[k]);
+                    if (inAgg[k] || rAgg[k]) entry.receivers[k] = mergeDiagKind(rAgg[k], inAgg[k]);
+                });
+                return entry;
+            }).catch(function () {
+                entry.error = 'getStats failed';
+                return entry;
+            });
+        });
+        return Promise.all(jobs);
+    }
+
+    function shortUid(uid) {
+        return uid && uid.length > 10 ? uid.slice(0, 8) + '…' : (uid || '?');
+    }
+
+    // Human-readable diagnosis + suggested fix for the signatures the panel
+    // detects (black feed, missing E2EE, duplicate receivers). Rendered under
+    // the peer so the user knows WHAT is wrong and WHAT to do about it.
+    function diagReasons(p) {
+        var reasons = [];
+        ['audio', 'video'].forEach(function (k) {
+            var s = p.senders[k];
+            var r = p.receivers[k];
+            if (r) {
+                if (k === 'video' && r.tracks > 0 && r.frames === 0) {
+                    if (r.packets === 0) {
+                        reasons.push('⚠ Black feed: the sender is not sending this camera/screen to you (0 packets). If “Load each camera / screen share manually” is ON, click the <b>Load</b> button on their tile. If it’s OFF, their feed to you is stalled — the receiver watchdog renegotiates automatically, or ask them to toggle their camera/screen, or rejoin the call.');
+                    } else {
+                        reasons.push('⚠ Black feed: packets arrive but nothing decodes — a codec/key issue; the receiver watchdog heals it automatically (Reconnecting video…), or rejoin the call.');
+                    }
+                }
+                if (k === 'video' && r.tracks > 0 && !r.transform) {
+                    reasons.push('⚠ E2EE decrypt transform missing on this feed — encrypted frames can’t decode (black). The watchdog re-applies it automatically, or press <b>Rejoin &amp; heal</b>.');
+                }
+                // Accumulated m-lines: a member has at most ONE mic audio + ONE
+                // screen-share audio, and at most camera + screen video. More
+                // receivers than that are stale duplicates (lost removeTrack
+                // renegotiations) — they don't receive anything and can confuse
+                // the renderer, so surface them.
+                var maxRecv = k === 'audio' ? 2 : 2;
+                if (r.tracks > maxRecv) {
+                    reasons.push('⚠ ' + r.tracks + ' ' + k + ' receivers on this peer — accumulated m-lines from repeated camera/screen/mute toggles. The watchdog renegotiates to clean them up; if they persist, press <b>Rejoin &amp; heal</b>.');
+                }
+                if (k === 'audio' && r.tracks > 0 && r.frames === 0 && r.packets > 0) {
+                    reasons.push('ℹ Audio packets arrive but frames read 0 — usually a Chrome audio-stats quirk, not a problem, if you can hear them.');
+                }
+            }
+            if (s && k === 'audio' && s.tracks > 0 && !s.transform) {
+                reasons.push('⚠ Your mic is being sent WITHOUT end-to-end encryption. Mute + unmute once (restarts the mic on the same line) or rejoin the call to restore the encrypt transform.');
+            }
+            if (s && k === 'video' && s.tracks > 0 && s.frames === 0) {
+                reasons.push('⚠ Your camera to this peer is not encoding — toggle your camera off/on.');
+            }
+            // One-way E2EE gap: the worker shows frames DO flow through the
+            // transforms on one side but the OTHER direction's counters never
+            // move — a decrypt transform that Chrome attached but never
+            // invokes. The audio sounds fine (it arrives as plaintext) but the
+            // direction is NOT encrypted. The watchdog heals this by
+            // re-applying transforms + renegotiating.
+            if (k === 'audio' && r && r.tracks > 0 && r.transform) {
+                var st = window.__voiceE2eeStats && window.__voiceE2eeStats.last;
+                if (st && st.decA === 0 && st.encA > 0) {
+                    reasons.push('⚠ One-way E2EE gap: incoming audio decrypts 0 frames while the other side encrypts ' + st.encA + ' — Chrome attached the decrypt transform but never invokes it; this direction is flowing as PLAINTEXT. The watchdog re-negotiates to heal it (Reconnecting media…), or press <b>Rejoin &amp; heal</b>.');
+                }
+            }
+        });
+        var missing = [];
+        ['audio', 'video'].forEach(function (k) {
+            if (p.senders[k] && p.senders[k].tracks > 0 && !p.senders[k].transform) missing.push('send ' + k);
+            if (p.receivers[k] && p.receivers[k].tracks > 0 && !p.receivers[k].transform) missing.push('recv ' + k);
+        });
+        if (missing.length && !reasons.some(function (x) { return x.indexOf('rejoin the call to restore it') !== -1 || x.indexOf('restore the encrypt transform') !== -1; })) {
+            reasons.push('⚠ E2EE transform missing on: ' + missing.join(', ') + ' — rejoin the call to restore full end-to-end encryption.');
+        }
+        return reasons;
+    }
+
+    function diagPeerHtml(p) {
+        var html = '<div style="margin-top:4px">▸ <b>' + esc(shortUid(p.uid)) + '</b>  [' + esc(p.connectionState) + (p.signalingState ? ' / ' + esc(p.signalingState) : '') + (p.error ? ' / ' + esc(p.error) : '') + ']</div>';
+        ['audio', 'video'].forEach(function (k) {
+            var s = p.senders[k];
+            var r = p.receivers[k];
+            if (s) {
+                var warn = (k === 'video' && s.tracks > 0 && s.frames === 0) ? ' <span style="color:#f0b232">⚠ no frames encoded (they see you black?)</span>' : '';
+                html += '<div style="padding-left:12px">send ' + k + (s.tracks > 1 ? ' ×' + s.tracks : '') + ': frames ' + s.frames + ' · pkts ' + s.packets + ' · loss ' + s.loss + ' · ' + fmtBytes(s.bytes) + ' · [E2EE ' + (s.transform ? '<span style="color:#57f287">✓</span>' : '<span style="color:#f23f42">✗</span>') + ']' + (s.trackStates.length ? ' · ' + s.trackStates.join(',') : '') + warn + '</div>';
+            }
+            if (r) {
+                var warn2 = (k === 'video' && r.tracks > 0 && r.frames === 0) ? ' <span style="color:#f0b232">⚠ no frames decoded (black feed)</span>' : '';
+                html += '<div style="padding-left:12px">recv ' + k + (r.tracks > 1 ? ' ×' + r.tracks : '') + ': frames ' + r.frames + ' · pkts ' + r.packets + ' · loss ' + r.loss + ' · ' + fmtBytes(r.bytes) + ' · [E2EE ' + (r.transform ? '<span style="color:#57f287">✓</span>' : '<span style="color:#f23f42">✗</span>') + ']' + (r.trackStates.length ? ' · ' + r.trackStates.join(',') : '') + warn2 + '</div>';
+            }
+        });
+        var reasons = diagReasons(p);
+        if (reasons.length) {
+            html += '<div style="padding-left:12px;margin-top:3px;color:#f0b232">' + reasons.join('<br>') + '</div>';
+        }
+        return html;
+    }
+
+    function renderVoiceDiag() {
+        var list = el('voice-diag-list');
+        if (!list) return;
+        var when = Date.now();
+        collectPeerDiag().then(function (peers) {
+            // The panel may have been closed or re-rendered meanwhile — only
+            // paint if it's still the same element.
+            if (el('voice-diag-list') !== list) return;
+            if (!peers.length) {
+                list.innerHTML = '<div style="color:var(--text-muted)">Not in a call — join a voice channel or DM call to see per-peer stats.</div>';
+                return;
+            }
+            var html = peers.map(diagPeerHtml).join('');
+            html += '<div style="color:var(--text-muted);margin-top:6px">Updated ' + new Date(when).toLocaleTimeString() + ' · ' + peers.length + ' peer(s)</div>';
+            list.innerHTML = html;
+        });
+    }
+
+    // "Rejoin & heal" — the diagnostics panel's auto-fix. Two stages:
+    //   1. IN-PLACE E2EE heal (non-disruptive): add the encrypt transform to
+    //      any sender missing it and the decrypt transform to any receiver
+    //      missing it, then flush the pending-receiver queue. NEVER replaces a
+    //      working transform: reassigning a live receiver's transform
+    //      mid-stream was the root cause of the one-sided audio regression
+    //      (the decrypt transform stopped receiving frames entirely → permanent
+    //      concealment). A receiver with NO transform is already broken, so
+    //      adding one there is safe and is exactly the late-key / lost-
+    //      transform heal.
+    //   2. FULL REJOIN (disruptive but definitive) ONLY when a problem survives
+    //      the in-place heal: a peer stuck at failed/disconnected, or a black
+    //      video feed (receiver has packets but 0 frames decoded). Rejoining
+    //      recreates every peer from scratch — new receivers, transforms
+    //      applied fresh at ontrack — the reliable fix the panel's own reason
+    //      hints point at ("click Load on their tile / rejoin").
+    function healE2eeInPlace() {
+        var applied = 0;
+        ensureE2eeWorker();
+        if (!window.RTCRtpScriptTransform || !e2eeWorker || !S.roomKeyB64) return applied;
+        Object.keys(S.peers).forEach(function (uid) {
+            var pc = S.peers[uid];
+            if (!pc || !pc.getSenders) return;
+            try {
+                pc.getSenders().forEach(function (s) {
+                    try {
+                        if (!s.transform) {
+                            s.transform = new RTCRtpScriptTransform(e2eeWorker, { operation: 'encrypt', key: S.roomKeyB64 });
+                            applied++;
+                        }
+                    } catch (_) {}
+                });
+                pc.getReceivers().forEach(function (r) {
+                    try {
+                        if (r.track && r.track.readyState === 'live' && !r.transform) {
+                            r.transform = new RTCRtpScriptTransform(e2eeWorker, { operation: 'decrypt', key: S.roomKeyB64 });
+                            applied++;
+                        }
+                    } catch (_) {}
+                });
+            } catch (_) {}
+        });
+        flushPendingRecvTransforms();
+        return applied;
+    }
+
+    // Leave + rejoin the CURRENT room. DM rejoin is QUIET: it re-enters the
+    // voice room WITHOUT sending dm_call_ring — the partner is already in the
+    // call, so re-ringing them would be obnoxious. The partner's client sees
+    // our voice_joined and recreates its peer for us.
+    function rejoinCurrentRoom() {
+        if (S.roomType === 'server') {
+            var sid = S.serverId, cid = S.channelId, cname = S.channelName;
+            if (!sid || !cid) return;
+            leaveVoice();
+            joinServerVoice(sid, cid, cname);
+        } else if (S.roomType === 'dm') {
+            var ch = S.dmChannelId;
+            var partner = S.dmCallPartner;
+            var answered = S.dmCallAnswered;
+            if (!ch) return;
+            leaveVoice();
+            S.roomType = 'dm';
+            S.dmChannelId = ch;
+            S.dmCallPartner = partner;
+            S.dmCallActive = true;
+            S.dmCallAnswered = answered;
+            S.popupOpen = false;
+            S.callWaiting = false;
+            ensureDmCallKey(partner && partner.id).then(function (ok) {
+                if (!ok || S.roomType !== 'dm' || S.dmChannelId !== ch) return;
+                deriveRoomKey();
+                deriveSignalKey();
+                resetFullscreenState();
+                send({ type: 'voice_join', room_type: 'dm', dm_channel_id: ch });
+                playSound('join');
+                showToast('Rejoined call — peers reconnecting…');
+                updateDmCallUI();
+                notifyWaitingChanged();
+            });
+        }
+    }
+
+    // Does a peer still look broken after the in-place heal? (failed/
+    // disconnected connection, or a black video feed: packets arriving but 0
+    // frames decoded.) Returns a Promise<boolean>.
+    function diagStillBroken() {
+        return collectPeerDiag().then(function (diag) {
+            return diag.some(function (p) {
+                if (p.connectionState === 'failed' || p.connectionState === 'disconnected') return true;
+                var rv = p.receivers && p.receivers.video;
+                // Black-feed signature: a video track exists, packets arrive,
+                // but nothing decodes (mergeDiagKind reports track counts under
+                // `tracks`, not `count`).
+                if (rv && rv.tracks > 0 && rv.packets > 0 && rv.frames === 0) return true;
+                return false;
+            });
+        }).catch(function () { return false; });
+    }
+
+    // The diagnostics panel's "Rejoin & heal" button handler.
+    function healAndRejoin() {
+        if (!S.roomType || !S.connected) {
+            showToast('Not in a call — nothing to heal.');
+            return;
+        }
+        showToast('Healing E2EE transforms…');
+        var applied = healE2eeInPlace();
+        // Give the transforms a beat to take effect, then check whether the
+        // in-place heal was enough or a full rejoin is warranted.
+        setTimeout(function () {
+            if (!S.roomType || !S.connected) return;
+            diagStillBroken().then(function (broken) {
+                if (!S.roomType || !S.connected) return;
+                if (broken) {
+                    showToast('Rejoining room — reconnecting peers…');
+                    rejoinCurrentRoom();
+                } else {
+                    showToast(applied > 0
+                        ? 'Healed ' + applied + ' missing E2EE transform(s) in place.'
+                        : 'E2EE transforms OK — no rejoin needed.');
+                    renderVoiceDiag();
+                }
+            });
+        }, 500);
+    }
+
+    // Auto-refresh ticker: paints only while the Voice settings tab is visible
+    // and the auto checkbox is on (and a call is active). Cheap — one getStats
+    // per peer every 2.5s.
+    var _voiceDiagTimer = null;
+    function startVoiceDiagPoll() {
+        if (_voiceDiagTimer) return;
+        _voiceDiagTimer = setInterval(function () {
+            var diag = el('voice-diag-list');
+            if (!diag) return;
+            var auto = el('voice-diag-auto');
+            var panel = el('voice-settings');
+            if (!auto || !auto.checked) return;
+            if (!panel || panel.offsetParent === null) return;
+            renderVoiceDiag();
+        }, 2500);
+    }
+
+    // Transient "Reconnecting video…" notice shown when the per-sender watchdog
+    // fires (a live video feed stopped encoding — the screen is about to freeze
+    // briefly while the m-line is renegotiated). Shown over the LOCAL user's own
+    // feeds: the stuck encoder is ours, so this is the feed everyone else sees
+    // black. Auto-hides after a few seconds.
+    var _videoReconnectTimer = null;
+    var _videoReconnectActive = false;
+    // The reconnect notice lives in a BODY-LEVEL toast, NOT inside the media
+    // containers. The DM self strip and member rows are re-rendered constantly
+    // (camera/screen toggles, member updates, renegotiation-triggered re-)
+    // — an innerHTML rebuild of those hosts would wipe an embedded chip, and
+    // several wipe paths were found (innerHTML set, element replace, etc.). A
+    // fixed-position toast is immune to all of them: no render touches it.
+    function videoReconnectToast() {
+        var t = el('voice-reconnect-toast');
+        if (!t) {
+            t = document.createElement('div');
+            t.id = 'voice-reconnect-toast';
+            t.className = 'voice-video-reconnect-chip';
+            t.textContent = 'Reconnecting video…';
+            document.body.appendChild(t);
+        }
+        return t;
+    }
+    function syncVideoReconnectChips() {
+        var t = videoReconnectToast();
+        t.style.display = _videoReconnectActive ? 'flex' : 'none';
+    }
+    function showVideoReconnect(kind) {
+        _videoReconnectActive = true;
+        // The watchdog now covers AUDIO too (a live remote mic that decodes
+        // nothing for the whole window), so say which medium is reconnecting.
+        var t = videoReconnectToast();
+        if (kind === 'audio') {
+            t.textContent = 'Reconnecting audio…';
+        } else if (kind === 'video') {
+            t.textContent = 'Reconnecting video…';
+        } else {
+            t.textContent = 'Reconnecting media…';
+        }
+        syncVideoReconnectChips();
+        if (_videoReconnectTimer) clearTimeout(_videoReconnectTimer);
+        _videoReconnectTimer = setTimeout(hideVideoReconnect, 6000);
+    }
+
+    function hideVideoReconnect() {
+        _videoReconnectActive = false;
+        syncVideoReconnectChips();
     }
 
     function restartMicForSettings() {
@@ -4882,6 +6054,9 @@
         wrap.className = 'voice-fs-wrap';
         wrap.appendChild(el);
         document.body.appendChild(wrap);
+        // Re-apply the per-viewer mirror/rotate transform now that the element
+        // lives in the fullscreen wrap (the tile-mode dims don't apply there).
+        if (el.dataset) applyTileTransform(el, el.dataset.uid, el.dataset.kind);
         var restored = false;
         var restore = function () {
             if (restored) return;
@@ -4892,6 +6067,8 @@
             }
             if (wrap.parentNode) wrap.remove();
             reattachTileStream(el);
+            // Back in the tile — restore the tile-mode dims (swap/scaled).
+            if (el.dataset) applyTileTransform(el, el.dataset.uid, el.dataset.kind);
         };
         // Register BEFORE requestFullscreen: fullscreenchange also fires when
         // ENTERING fullscreen, so only restore when it is genuinely not active.
@@ -4920,7 +6097,10 @@
             moveTileBack(el);
         }
         if (wrap.parentNode) wrap.remove();
-        if (el) reattachTileStream(el);
+        if (el) {
+            reattachTileStream(el);
+            if (el.dataset) applyTileTransform(el, el.dataset.uid, el.dataset.kind);
+        }
     }
 
     // Put a fullscreened tile back into its live slot, preserving the <video>

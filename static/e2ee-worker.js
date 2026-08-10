@@ -14,11 +14,37 @@
 // transform's encrypt/decrypt.
 const keyCache = new Map();
 
+// ---- DEBUG (one-sided audio): frame timing + drop counters ----------------
+// Aggregate across ALL transforms on this worker. Every 1s we post a stats
+// message to the page (the app's e2eeWorker.onmessage collects it into
+// window.__voiceE2eeStats when window.__enableVoiceAudioDebug is set). This
+// tells us whether audio frames are being delayed/dropped in the crypto
+// transforms — a stall here delays frames past the receiver's jitter-buffer
+// playout deadline, which shows up as concealment (audible stops) on ONE side.
+const __dbg = { enc: 0, dec: 0, encDrop: 0, decDrop: 0, short: 0, encMs: 0, decMs: 0, encMaxMs: 0, decMaxMs: 0, lastTs: 0,
+    transforms: 0, encTransforms: 0, decTransforms: 0, decNoKey: 0, decEnter: 0, encNoKey: 0,
+    encV: 0, decV: 0, decVEnter: 0, encA: 0, decA: 0, decAEnter: 0 };
+setInterval(() => {
+    try {
+        self.postMessage({ type: 'voice-e2ee-stats', stats: {
+            enc: __dbg.enc, dec: __dbg.dec, encDrop: __dbg.encDrop, decDrop: __dbg.decDrop,
+            short: __dbg.short, encAvgMs: __dbg.enc ? __dbg.encMs / __dbg.enc : 0, decAvgMs: __dbg.dec ? __dbg.decMs / __dbg.dec : 0,
+            encMaxMs: __dbg.encMaxMs, decMaxMs: __dbg.decMaxMs,
+            transforms: __dbg.transforms, encTransforms: __dbg.encTransforms, decTransforms: __dbg.decTransforms,
+            decNoKey: __dbg.decNoKey, decEnter: __dbg.decEnter, encNoKey: __dbg.encNoKey,
+            encV: __dbg.encV, decV: __dbg.decV, decVEnter: __dbg.decVEnter, encA: __dbg.encA, decA: __dbg.decA, decAEnter: __dbg.decAEnter,
+        } });
+    } catch (_) {}
+}, 1000);
+
 addEventListener('rtctransform', (event) => {
     const transformer = event.transformer;
     const options = transformer.options || {};
     const operation = options.operation || 'encrypt';
     const keyB64 = options.key || '';
+    __dbg.transforms++;
+    if (operation === 'encrypt') __dbg.encTransforms++;
+    else __dbg.decTransforms++;
 
     // Per-transform key: start() runs before any transform() for this stream,
     // so `myKey` is race-free even when many transforms share the worker.
@@ -53,8 +79,19 @@ addEventListener('rtctransform', (event) => {
             event.transformer._codebuffKfStarted = false;
         },
         async transform(encodedFrame, controller) {
+            const t0 = Date.now();
             try {
                 if (!myKey) {
+                    // Frames arriving at a transform with no key: forwarded
+                    // UNENCRYPTED → the decoder gets ciphertext → concealment /
+                    // black. Counts discriminate a key-timing bug (transform
+                    // runs but keyless) from a wiring bug (transform never
+                    // receives frames at all — the one-sided audio signature).
+                    if (operation === 'decrypt') {
+                        if (encodedFrame.type !== undefined) __dbg.decNoKey++;
+                    } else {
+                        __dbg.encNoKey++;
+                    }
                     controller.enqueue(encodedFrame);
                     return;
                 }
@@ -71,6 +108,18 @@ addEventListener('rtctransform', (event) => {
                 const data = new Uint8Array(encodedFrame.data.byteLength);
                 data.set(new Uint8Array(encodedFrame.data));
 
+                // Per-kind counters: the one-sided-audio and black-video bugs
+                // both show up as a decrypt transform that STOPS receiving
+                // frames — splitting audio vs video isolates which direction
+                // died (a video renegotiation can kill the video decrypt while
+                // audio keeps flowing, and vice versa).
+                const isVideo = encodedFrame.type !== undefined;
+                if (operation === 'decrypt') {
+                    __dbg.decEnter++;
+                    if (isVideo) __dbg.decVEnter++;
+                    else __dbg.decAEnter++;
+                }
+
                 if (operation === 'encrypt') {
                     const nonce = crypto.getRandomValues(new Uint8Array(12));
                     const ciphertext = new Uint8Array(await crypto.subtle.encrypt(
@@ -80,11 +129,18 @@ addEventListener('rtctransform', (event) => {
                     out.set(nonce, 0);
                     out.set(ciphertext, 12);
                     encodedFrame.data = out.buffer;
+                    __dbg.enc++;
+                    if (isVideo) __dbg.encV++;
+                    else __dbg.encA++;
+                    const dt = Date.now() - t0;
+                    __dbg.encMs += dt;
+                    if (dt > __dbg.encMaxMs) __dbg.encMaxMs = dt;
                     controller.enqueue(encodedFrame);
                 } else {
                     if (data.length < 13) {
                         // Not our frame format — drop it rather than forwarding
                         // unencrypted bytes to the decoder.
+                        __dbg.short++;
                         return;
                     }
                     const nonce = data.slice(0, 12);
@@ -93,6 +149,12 @@ addEventListener('rtctransform', (event) => {
                         { name: 'AES-GCM', iv: nonce }, myKey, ciphertext
                     ));
                     encodedFrame.data = plain.buffer;
+                    __dbg.dec++;
+                    if (isVideo) __dbg.decV++;
+                    else __dbg.decA++;
+                    const dt = Date.now() - t0;
+                    __dbg.decMs += dt;
+                    if (dt > __dbg.decMaxMs) __dbg.decMaxMs = dt;
                     controller.enqueue(encodedFrame);
                 }
             } catch (_) {
@@ -103,6 +165,8 @@ addEventListener('rtctransform', (event) => {
                 //  - Encrypt failure: forwarding the PLAINTEXT bytes would leak
                 //    the frame in the clear to the server/peers.
                 // Dropping the frame is correct in both cases.
+                if (operation === 'encrypt') __dbg.encDrop++;
+                else __dbg.decDrop++;
             }
         },
     });
