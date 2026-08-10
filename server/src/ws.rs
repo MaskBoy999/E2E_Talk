@@ -84,6 +84,12 @@ pub struct VoiceMember {
     // a camera feed (or vice versa) when flags + track arrival race.
     pub camera_track_id: Option<String>,
     pub screen_track_id: Option<String>,
+    // Per-member RECEIVE resolution preference (Settings → Voice). Broadcast
+    // so every sender can scale the stream it sends THIS member down to what
+    // they asked for ("what the user sends to that person"). 0 = not declared
+    // (sender falls back to its own receive default).
+    pub recv_camera_res: i64,
+    pub recv_screen_res: i64,
 }
 
 pub struct VoiceRoom {
@@ -114,6 +120,8 @@ fn voice_member_json(m: &VoiceMember) -> serde_json::Value {
         "is_owner": m.is_owner,
         "camera_track_id": m.camera_track_id,
         "screen_track_id": m.screen_track_id,
+        "recv_camera_res": m.recv_camera_res,
+        "recv_screen_res": m.recv_screen_res,
     })
 }
 
@@ -1503,6 +1511,8 @@ async fn handle_voice_join(
         is_owner,
         camera_track_id: None,
         screen_track_id: None,
+        recv_camera_res: 0,
+        recv_screen_res: 0,
     };
 
     // All room mutation happens inside a scope so the write guard (and its &mut
@@ -1785,6 +1795,9 @@ async fn handle_voice_state(
         .and_then(|s| s.as_str())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
+    // Receive-resolution preferences (0 when the client doesn't declare them).
+    let recv_camera_res = parsed.get("recv_camera_res").and_then(|v| v.as_i64()).unwrap_or(0);
+    let recv_screen_res = parsed.get("recv_screen_res").and_then(|v| v.as_i64()).unwrap_or(0);
 
     let (member, server_id) = {
         let mut rooms = match state.voice_rooms.write() {
@@ -1807,6 +1820,8 @@ async fn handle_voice_state(
         m.speaking = speaking;
         m.camera_track_id = camera_track_id.clone();
         m.screen_track_id = screen_track_id.clone();
+        m.recv_camera_res = recv_camera_res;
+        m.recv_screen_res = recv_screen_res;
         let server_id = room.server_id.clone().unwrap_or_default();
         (m.clone(), server_id)
     };

@@ -625,6 +625,59 @@
                     <p class="settings-hint">Off by default — Chrome's AEC can gate the mic when it hears the same sound it is also playing (e.g. testing on one device with two windows, or a voice changer/external mixer). Turn it on if the other side hears their own voice echoed back.</p>
                 </div>
                 <div class="settings-group">
+                    <h4>Video Quality</h4>
+                    <p class="settings-hint">Applied to DM calls and voice channels. <strong>Send</strong> = the resolution you capture at; <strong>Receive</strong> = the resolution others send you (per person). Lower resolutions use less bandwidth and avoid the glitchy/torn artifacts. Defaults are deliberately low.</p>
+                    <label class="settings-checkbox-label" style="margin-top:4px;"><span style="font-size:12px;color:var(--text-muted)">Send — camera:</span></label>
+                    <select id="voice-send-camera-res" class="modal-input" style="margin-top:4px;max-width:200px;">
+                        <option value="144">144p</option>
+                        <option value="240">240p</option>
+                        <option value="360" selected>360p</option>
+                        <option value="480">480p</option>
+                        <option value="720">720p</option>
+                        <option value="1080">1080p</option>
+                        <option value="1440">1440p</option>
+                        <option value="2160">2160p (4K)</option>
+                    </select>
+                    <label class="settings-checkbox-label" style="margin-top:8px;"><span style="font-size:12px;color:var(--text-muted)">Send — screen share:</span></label>
+                    <select id="voice-send-screen-res" class="modal-input" style="margin-top:4px;max-width:200px;">
+                        <option value="144">144p</option>
+                        <option value="240">240p</option>
+                        <option value="360">360p</option>
+                        <option value="480" selected>480p</option>
+                        <option value="720">720p</option>
+                        <option value="1080">1080p</option>
+                        <option value="1440">1440p</option>
+                        <option value="2160">2160p (4K)</option>
+                    </select>
+                    <label class="settings-checkbox-label" style="margin-top:8px;"><span style="font-size:12px;color:var(--text-muted)">Receive — camera:</span></label>
+                    <select id="voice-recv-camera-res" class="modal-input" style="margin-top:4px;max-width:200px;">
+                        <option value="144">144p</option>
+                        <option value="240">240p</option>
+                        <option value="360" selected>360p</option>
+                        <option value="480">480p</option>
+                        <option value="720">720p</option>
+                        <option value="1080">1080p</option>
+                        <option value="1440">1440p</option>
+                        <option value="2160">2160p (4K)</option>
+                    </select>
+                    <label class="settings-checkbox-label" style="margin-top:8px;"><span style="font-size:12px;color:var(--text-muted)">Receive — screen share:</span></label>
+                    <select id="voice-recv-screen-res" class="modal-input" style="margin-top:4px;max-width:200px;">
+                        <option value="144">144p</option>
+                        <option value="240">240p</option>
+                        <option value="360">360p</option>
+                        <option value="480" selected>480p</option>
+                        <option value="720">720p</option>
+                        <option value="1080">1080p</option>
+                        <option value="1440">1440p</option>
+                        <option value="2160">2160p (4K)</option>
+                    </select>
+                    <label class="settings-checkbox-label" style="margin-top:12px;display:flex;align-items:center;gap:8px;font-size:14px;color:var(--text-primary);cursor:pointer">
+                        <input type="checkbox" id="voice-manual-video-load" style="width:16px;height:16px;accent-color:var(--accent,#5865f2)">
+                        Load each camera / screen share manually
+                    </label>
+                    <p class="settings-hint">When on, every camera and screen share shows a <strong>Load</strong> button until you click it — independently per person and per feed. You decide which feeds to load; senders keep sending regardless. Right-click (volume, mirror/rotate, owner controls) works everywhere, even on unloaded feeds.</p>
+                </div>
+                <div class="settings-group">
                     <h4>Ringtone</h4>
                     <p class="settings-hint">Choose the sound played when someone calls you. It loops until you answer. Ringtones are capped at 30 seconds — longer files let you pick the 1–30s part to keep. Encrypted end-to-end like your notification sound, so it syncs across your devices.</p>
                     <div class="notif-sound-controls">

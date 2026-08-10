@@ -71,11 +71,28 @@
             noiseSuppressionMode: 'rnnoise', // 'off' | 'browser' | 'rnnoise'
             echoCancellation: false,          // Chrome's AEC on the mic (default OFF)
             mirrorCamera: false,              // mirror the self camera preview
+            // Video quality (Settings → Voice → Video Quality). Send = the
+            // resolution each source is CAPTURED at; receive = the resolution
+            // senders scale their stream TO this member (broadcast in
+            // voice_state so every peer applies it per-receiver). Defaults are
+            // deliberately low: high-res + high-bitrate meshes are what cause
+            // the decoder artifacts ("screen looks glitched/torn").
+            sendCameraRes: 360,
+            sendScreenRes: 480,
+            recvCameraRes: 360,
+            recvScreenRes: 480,
+            // When ON, remote camera/screen feeds are NOT auto-loaded: each
+            // feed shows a "Load" button (per user AND per kind) and is
+            // attached only when clicked. Right-click menus are unaffected.
+            manualVideoLoad: false,
         },
         _viewLast: '',
         _lastSpeakSent: 0,
         _viewPoll: null,
         _pfpLoading: {},           // picKey -> true (in-flight PFP fetch guard)
+        // Manual per-feed video load: uid:kind -> true once the viewer clicked
+        // Load for that feed. Reset on leave/join so every call starts fresh.
+        _loadedFeeds: {},
         _dmOtherPubB64: null,      // partner identity pubkey fallback for DM call key derivation
         callWaiting: false,        // caller waited 30s unanswered — waiting for manual join
         _ringTimer: null,          // 30s unanswered-ring timeout handle (caller)
@@ -125,6 +142,9 @@
         setSpeakerVolume: setSpeakerVolume,
         setNoiseSuppression: setNoiseSuppression,
         setEchoCancellation: setEchoCancellation,
+        setSendRes: setSendRes,
+        setRecvRes: setRecvRes,
+        setManualVideoLoad: setManualVideoLoad,
         setMemberVolume: setMemberVolume,
         ownerControl: ownerControl,
         startDmCall: startDmCall,
@@ -350,6 +370,16 @@
         if (ns) ns.value = S.settings.noiseSuppressionMode || 'rnnoise';
         var ec = document.getElementById('voice-echo-cancellation');
         if (ec) ec.checked = !!S.settings.echoCancellation;
+        var sc = document.getElementById('voice-send-camera-res');
+        if (sc) sc.value = S.settings.sendCameraRes || 360;
+        var ss = document.getElementById('voice-send-screen-res');
+        if (ss) ss.value = S.settings.sendScreenRes || 480;
+        var rc = document.getElementById('voice-recv-camera-res');
+        if (rc) rc.value = S.settings.recvCameraRes || 360;
+        var rs = document.getElementById('voice-recv-screen-res');
+        if (rs) rs.value = S.settings.recvScreenRes || 480;
+        var ml = document.getElementById('voice-manual-video-load');
+        if (ml) ml.checked = !!S.settings.manualVideoLoad;
         updateSettingsLabels();
     }
 
@@ -601,6 +631,9 @@
         clearCalleeRingTimer();
         stopRingtone();
         var prevDmChannelId = S.dmChannelId;
+        // Manual video-load state is per-call: every join starts with feeds
+        // unloaded (each feed loads individually when the viewer clicks it).
+        S._loadedFeeds = {};
         S.connected = false;
         S.roomType = null;
         S.serverId = null;
@@ -878,7 +911,12 @@
         S.cameraFlash = false;
         var _stOv = el('camera-flash-overlay');
         if (_stOv) _stOv.style.display = 'none';
-        return navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 }, facingMode: S.cameraFacing || 'user' }, audio: false })
+        // Capture at the configured SEND resolution (Settings → Voice → Video
+        // Quality). Asking the encoder for less than the camera's native res is
+        // the cheapest way to cut encode cost + bitrate — the mesh-friendly
+        // default is deliberately low to avoid decoder artifacts.
+        var camH = S.settings.sendCameraRes || 360;
+        return navigator.mediaDevices.getUserMedia({ video: { width: { ideal: resW(camH) }, height: { ideal: camH }, frameRate: { ideal: 30, max: 30 }, facingMode: S.cameraFacing || 'user' }, audio: false })
             .then(function (stream) {
                 S.localStreams.camera = stream;
                 S.cameraOn = true;
@@ -925,11 +963,15 @@
         // static content — 1080p @ 30fps is plenty, and every frame is AES-GCM
         // encrypted per-peer, so huge native-res/fps captures starve the
         // pipeline and produce decoder artifacts.
+        var scrH = S.settings.sendScreenRes || 480;
         return navigator.mediaDevices.getDisplayMedia({
             video: {
                 cursor: 'always',
-                width: { max: 1920 },
-                height: { max: 1080 },
+                // Cap capture at the configured SEND resolution — asking the
+                // screen capture for less than native res cuts encode cost and
+                // bitrate at the source (the mesh-friendly default is low).
+                width: { max: resW(scrH) },
+                height: { max: scrH },
                 frameRate: { ideal: 30, max: 30 },
             },
             // Capture tab/system audio too (the Chrome picker shows the
@@ -1252,24 +1294,43 @@
     // Cap video send bitrate so screen shares / cameras don't saturate the
     // mesh. Unbounded encoders at high resolution + fps generate far more
     // RTP than the connection can carry → packet loss → decoder artifacts.
-    // Screen: 5 Mbps @ 1080p30 (2.5 Mbps was too low — any motion turned into
-    // blocky macro-blocking). Camera: 1.5 Mbps. 'balanced' lets the encoder
-    // drop resolution gracefully under congestion instead of quantizing the
-    // full frame into artifacts, and contentHint tells the encoder the screen
-    // content is detail-heavy (text) so it biases accordingly.
-    function tuneVideoSenders(pc) {
+    // The cap now follows the EFFECTIVE resolution (Settings → Voice → Video
+    // Quality): each sender is scaled down to what THIS receiver asked for
+    // (recv res broadcast in voice_state) and given a matching bitrate, so a
+    // 1080p screen at the old flat 5 Mbps no longer outruns the pipe.
+    // 'balanced' lets the encoder drop resolution gracefully under congestion
+    // instead of quantizing the full frame into artifacts, and contentHint
+    // tells the encoder the screen content is detail-heavy (text).
+    function tuneVideoSenders(pc, uid) {
         if (!pc || !pc.getSenders) return;
+        if (!uid) {
+            for (var k in S.peers) {
+                if (S.peers[k] === pc) { uid = k; break; }
+            }
+        }
         try {
             pc.getSenders().forEach(function (s) {
                 if (!s.track || s.track.kind !== 'video') return;
                 var isScreen = S.localStreams.screen && S.localStreams.screen.getVideoTracks().indexOf(s.track) !== -1;
-                var maxBitrate = isScreen ? 5000000 : 1500000;
+                var baseH = isScreen ? (S.settings.sendScreenRes || 480) : (S.settings.sendCameraRes || 360);
+                // What THIS receiver wants (their broadcast recv res; fall back
+                // to our own receive default when they haven't declared it).
+                var member = uid ? S.members[uid] : null;
+                var declared = member ? (isScreen ? member.recv_screen_res : member.recv_camera_res) : 0;
+                var wantH = declared > 0 ? declared : (isScreen ? (S.settings.recvScreenRes || 480) : (S.settings.recvCameraRes || 360));
+                var scale = Math.max(1, baseH / Math.max(1, wantH));
+                var effH = Math.round(baseH / scale);
+                var maxBitrate = bitrateForRes(effH, isScreen);
                 try {
                     var params = s.getParameters();
                     if (!params.encodings || params.encodings.length === 0) return;
                     params.encodings.forEach(function (enc) {
                         enc.maxBitrate = maxBitrate;
                         enc.maxFramerate = 30;
+                        // scaleResolutionDownBy is per-encoding, so each peer
+                        // gets its own resolution in the mesh ("what I send to
+                        // that person"). Scale DOWN only — never upscale.
+                        enc.scaleResolutionDownBy = scale;
                     });
                     params.degradationPreference = 'balanced';
                     s.setParameters(params).catch(function () {});
@@ -1437,6 +1498,7 @@
                 }
                 if (key && rs2[key] && rs2[key].getTracks().indexOf(e.track) !== -1) {
                     delete rs2[key];
+                    clearFeedLoaded(uid, key);
                     renderPopup();
                     renderDmPanel();
                 }
@@ -2114,6 +2176,12 @@
             // lands in the right tile.
             (!isSelf && (prev.camera_track_id !== member.camera_track_id || prev.screen_track_id !== member.screen_track_id));
         S.members[member.user_id] = member;
+        // The member changed their RECEIVE resolution — re-tune our sender for
+        // them so we send exactly what they asked for (per-receiver scaling).
+        if (!isSelf && prev &&
+            (prev.recv_camera_res !== member.recv_camera_res || prev.recv_screen_res !== member.recv_screen_res)) {
+            tuneVideoSenders(S.peers[member.user_id], member.user_id);
+        }
         if (S.roomType === 'dm' && member.user_id !== getSelfId()) {
             markDmCallAnswered();
         }
@@ -2914,6 +2982,10 @@
             speaking: S.speaking,
             camera_track_id: camTrack ? camTrack.id : null,
             screen_track_id: scrTrack ? scrTrack.id : null,
+            // Receive-resolution preference: every peer scales its sender for
+            // THIS member down to these heights (per-receiver quality).
+            recv_camera_res: S.settings.recvCameraRes || 360,
+            recv_screen_res: S.settings.recvScreenRes || 480,
         });
     }
 
@@ -3374,6 +3446,17 @@
         if (sns) sns.addEventListener('change', function (e) { setNoiseSuppression(e.target.value); });
         var sec = document.getElementById('voice-echo-cancellation');
         if (sec) sec.addEventListener('change', function (e) { setEchoCancellation(e.target.checked); });
+        // Video quality (Settings → Voice)
+        var sc = document.getElementById('voice-send-camera-res');
+        if (sc) sc.addEventListener('change', function (e) { setSendRes('camera', e.target.value); });
+        var ss = document.getElementById('voice-send-screen-res');
+        if (ss) ss.addEventListener('change', function (e) { setSendRes('screen', e.target.value); });
+        var rc = document.getElementById('voice-recv-camera-res');
+        if (rc) rc.addEventListener('change', function (e) { setRecvRes('camera', e.target.value); });
+        var rs = document.getElementById('voice-recv-screen-res');
+        if (rs) rs.addEventListener('change', function (e) { setRecvRes('screen', e.target.value); });
+        var ml = document.getElementById('voice-manual-video-load');
+        if (ml) ml.addEventListener('change', function (e) { setManualVideoLoad(e.target.checked); });
     }
 
     function updateSettingsLabels() {
@@ -3496,12 +3579,14 @@
             var stream = null;
             if (isSelf) {
                 stream = kind === 'camera' ? S.localStreams.camera : S.localStreams.screen;
-            } else if (S.remoteStreams[uid]) {
-                stream = S.remoteStreams[uid][kind];
-            }
-            if (stream) {
-                video.srcObject = stream;
-                video.play().catch(function () {});
+                if (stream) {
+                    video.srcObject = stream;
+                    video.play().catch(function () {});
+                }
+            } else {
+                if (S.remoteStreams[uid]) stream = S.remoteStreams[uid][kind];
+                // Manual-load aware: holds behind a Load button when enabled.
+                attachRemoteVideo(video, uid, kind, stream);
             }
             // Mirror applies to the SELF camera preview only; per-viewer
             // mirror/rotate transforms (right-click menu) apply on top for how
@@ -3571,17 +3656,90 @@
 
     function removeRemoteTile(uid) {
         document.querySelectorAll('.remote-video-tile[data-uid="' + uid + '"]').forEach(function (t) { t.remove(); });
+        // Drop the manual-load state for this member's feeds (both kinds).
+        clearFeedLoaded(uid, 'camera');
+        clearFeedLoaded(uid, 'screen');
+    }
+
+    function feedKey(uid, kind) { return uid + ':' + kind; }
+    function isFeedLoaded(uid, kind) { return !!S._loadedFeeds[feedKey(uid, kind)]; }
+    function markFeedLoaded(uid, kind) { S._loadedFeeds[feedKey(uid, kind)] = true; }
+    function clearFeedLoaded(uid, kind) { delete S._loadedFeeds[feedKey(uid, kind)]; }
+
+    // Attach a remote camera/screen stream to its tile — or, when manual video
+    // load is ON and the viewer hasn't clicked Load for THIS feed yet, hold it
+    // behind a Load button instead. Per (user, kind) — loading your camera and
+    // your screen are independent, as are different users' feeds. Right-click
+    // on the held tile (or its Load button) still opens the volume menu.
+    function attachRemoteVideo(video, uid, kind, stream) {
+        if (!video) return;
+        var parent = video.parentElement;
+        var holder = parent ? parent.querySelector('.voice-feed-load-btn[data-feed="' + feedKey(uid, kind) + '"]') : null;
+        var hold = !!stream && S.settings.manualVideoLoad && !isFeedLoaded(uid, kind);
+        if (hold) {
+            try { if (video.srcObject) video.srcObject = null; } catch (_) {}
+            if (!holder) {
+                holder = document.createElement('button');
+                holder.type = 'button';
+                holder.className = 'voice-feed-load-btn';
+                holder.setAttribute('data-feed', feedKey(uid, kind));
+                holder.innerHTML = '<span class="voice-feed-load-ico">&#9654;</span><span class="voice-feed-load-lbl">' +
+                    (kind === 'screen' ? 'Load screen' : 'Load camera') + '</span>';
+                holder.addEventListener('click', function () {
+                    markFeedLoaded(uid, kind);
+                    var v = document.querySelector('.remote-video-tile[data-uid="' + uid + '"][data-kind="' + kind + '"]');
+                    if (v && S.remoteStreams[uid] && S.remoteStreams[uid][kind]) {
+                        v.srcObject = S.remoteStreams[uid][kind];
+                        v.play().catch(function () {});
+                    }
+                    applyFeedPlaceholders();
+                });
+                // Right-click on the Load button behaves like right-click on the
+                // feed tile (volume/view menu) — manual load never breaks it.
+                holder.addEventListener('contextmenu', function (e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    openVolumeMenu(e, uid, kind === 'screen' ? 'screen' : 'video');
+                });
+                if (parent) parent.appendChild(holder);
+            }
+            // Position the button over ITS OWN tile, not the center of the
+            // media row — with both camera + screen present the tiles sit side
+            // by side, and a container-centered button would land between them.
+            // Re-computed every time the button is shown (layout can shift when
+            // a sibling tile appears/disappears).
+            if (video.offsetWidth > 0) {
+                holder.style.left = Math.round(video.offsetLeft + video.offsetWidth / 2) + 'px';
+                holder.style.top = Math.round(video.offsetTop + video.offsetHeight / 2) + 'px';
+            }
+            holder.style.display = 'flex';
+        } else {
+            if (holder) holder.style.display = 'none';
+            if (stream && video.srcObject !== stream) {
+                video.srcObject = stream;
+                video.play().catch(function () {});
+            }
+        }
+    }
+
+    // Re-evaluate every remote feed tile (used when the manual-load toggle or
+    // a Load click changes what should be attached vs held).
+    function applyFeedPlaceholders() {
+        document.querySelectorAll('.remote-video-tile[data-self="0"]').forEach(function (video) {
+            var uid = video.dataset.uid;
+            var kind = video.dataset.kind;
+            var stream = S.remoteStreams[uid] ? S.remoteStreams[uid][kind] : null;
+            attachRemoteVideo(video, uid, kind, stream);
+        });
     }
 
     function renderRemoteTile(uid, kind) {
         // The tile element IS the <video> (class remote-video-tile sits on the
-        // video itself) — attach srcObject directly.
+        // video itself) — attach srcObject directly (or hold behind Load when
+        // manual video load is on).
         var video = document.querySelector('.remote-video-tile[data-uid="' + uid + '"][data-kind="' + kind + '"]');
         if (!video) return;
-        if (S.remoteStreams[uid] && S.remoteStreams[uid][kind]) {
-            video.srcObject = S.remoteStreams[uid][kind];
-            video.play().catch(function () {});
-        }
+        attachRemoteVideo(video, uid, kind, S.remoteStreams[uid] ? S.remoteStreams[uid][kind] : null);
     }
 
     function selfPreviewEl() {
@@ -3797,10 +3955,9 @@
         body.querySelectorAll('.remote-video-tile').forEach(function (video) {
             var uid = video.dataset.uid;
             var kind = video.dataset.kind;
-            if (S.remoteStreams[uid] && S.remoteStreams[uid][kind]) {
-                video.srcObject = S.remoteStreams[uid][kind];
-                video.play().catch(function () {});
-            }
+            var _stream = S.remoteStreams[uid] ? S.remoteStreams[uid][kind] : null;
+            // Manual-load aware: holds behind a Load button when enabled.
+            attachRemoteVideo(video, uid, kind, _stream);
             // Per-viewer mirror/rotate transform (right-click menu) — how YOU
             // see this feed. Remote tiles never mirror by default.
             applyTileTransform(video, uid, kind);
@@ -4597,6 +4754,81 @@
         saveSettings();
         updateSettingsLabels();
         restartMicForSettings();
+    }
+
+    // ---- Video quality settings (Settings → Voice → Video Quality) ----
+
+    // 16:9 width for a target height (what getUserMedia/getDisplayMedia ask for).
+    function resW(h) {
+        return Math.round((h || 360) * 16 / 9);
+    }
+
+    // A bitrate that matches the EFFECTIVE resolution. Over-allocating bitrate
+    // at low resolution is harmless, but under-allocating at high resolution is
+    // exactly what produces the blocky/"torn" artifacts — so the cap follows
+    // the resolution instead of being a fixed per-kind number.
+    function bitrateForRes(h, isScreen) {
+        if (h >= 2160) return 12000000;
+        if (h >= 1440) return 8000000;
+        if (h >= 1080) return isScreen ? 5000000 : 3000000;
+        if (h >= 720) return 2500000;
+        if (h >= 480) return 1200000;
+        if (h >= 360) return 700000;
+        if (h >= 240) return 400000;
+        return 250000;
+    }
+
+    // Change the CAPTURE resolution of a source. If the source is live, restart
+    // it so the new resolution takes effect immediately (camera: re-request GUM
+    // at the new size; screen: re-prompt + re-capture).
+    function setSendRes(kind, h) {
+        h = parseInt(h, 10) || (kind === 'screen' ? 480 : 360);
+        S.settings[kind === 'screen' ? 'sendScreenRes' : 'sendCameraRes'] = h;
+        saveSettings();
+        updateSettingsLabels();
+        if (!S.connected) return;
+        if (kind === 'screen' && S.screenOn) {
+            stopScreen();
+            startScreen();
+        } else if (kind === 'camera' && S.cameraOn) {
+            stopCamera();
+            startCamera();
+        }
+        retuneAllVideoSenders();
+    }
+
+    // Change the resolution OTHERS send to us (per-receiver: each peer scales
+    // its sender for this member down to the requested height). Broadcast in
+    // voice_state so every peer applies it, then re-tune our own senders too
+    // (our own sender for each peer scales per THEIR declared preference).
+    function setRecvRes(kind, h) {
+        h = parseInt(h, 10) || (kind === 'screen' ? 480 : 360);
+        S.settings[kind === 'screen' ? 'recvScreenRes' : 'recvCameraRes'] = h;
+        saveSettings();
+        updateSettingsLabels();
+        if (S.connected) {
+            sendVoiceState();
+            retuneAllVideoSenders();
+        }
+    }
+
+    // Manual per-feed loading: when ON, remote camera/screen feeds are held as
+    // placeholders with a Load button until clicked (independently per user AND
+    // per kind). Senders keep sending; this only affects what the viewer loads.
+    function setManualVideoLoad(on) {
+        S.settings.manualVideoLoad = !!on;
+        saveSettings();
+        updateSettingsLabels();
+        renderPopup();
+        renderDmPanel();
+        renderSelfPreview();
+        applyFeedPlaceholders();
+    }
+
+    function retuneAllVideoSenders() {
+        for (var uid in S.peers) {
+            tuneVideoSenders(S.peers[uid], uid);
+        }
     }
 
     function restartMicForSettings() {

@@ -6870,6 +6870,42 @@ video.remote-video-tile.mirrored {
     align-items: center;
     height: 96px;
     max-width: 68%;
+    position: relative;
+}
+
+/* Manual video load (Settings → Voice → Video Quality): when a feed is held
+   behind a Load button, the button overlays the tile area. Covers the whole
+   tile region so clicking it loads THAT feed; right-click still opens the
+   volume/view menu. */
+.voice-feed-load-btn {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    border-radius: 10px;
+    border: 1px solid var(--bg-border, #2a2a4a);
+    background: rgba(0, 0, 0, 0.72);
+    color: var(--text-primary, #eee);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    max-width: 90%;
+}
+.voice-feed-load-btn:hover {
+    background: rgba(88, 101, 242, 0.85);
+}
+.voice-feed-load-ico {
+    font-size: 11px;
+}
+.voice-feed-load-lbl {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 .voice-member-media .remote-video-tile {
     height: 100%;
