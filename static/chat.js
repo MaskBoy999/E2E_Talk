@@ -1326,11 +1326,16 @@ document.addEventListener('DOMContentLoaded', () => {
     if (window.VoiceManager) {
         try { VoiceManager.init(); } catch (err) { console.warn('Voice init failed:', err); }
     }
+    // Show the DM-strip waiting indicator if a call is already waiting/ringing
+    // (restored from the server after a refresh). renderDmSidebar() also calls
+    // this once conversations load.
+    updateDmStripWaiting();
 
-    // Re-render the DM-call waiting banner + sidebar dots whenever voice.js
-    // changes the persisted waiting state (call starts/connects/ends, partner
-    // left, etc.).
+    // Re-render the DM-strip + DM-call waiting banner + sidebar dots whenever
+    // voice.js changes the persisted waiting state (call starts/connects/ends,
+    // partner left, etc.).
     document.addEventListener('voice-waiting-changed', function () {
+        updateDmStripWaiting();
         updateDmWaitingBanner();
         // Only rebuild the DM sidebar when actually in DM view. This event also
         // fires on server voice events (e.g. being kicked from a voice channel →
@@ -7098,7 +7103,7 @@ function connectWebSocket(t) {
 
         // Voice calls / voice channels — handled by VoiceManager
         if (window.VoiceManager && data.type && (
-            data.type.indexOf('voice_') === 0 || data.type.indexOf('dm_call_') === 0
+            data.type.indexOf('voice_') === 0 || data.type.indexOf('dm_call_') === 0 || data.type.indexOf('dm_waiting_') === 0
         )) {
             if (VoiceManager.onWsMessage(data)) return;
         }
@@ -7115,6 +7120,12 @@ function connectWebSocket(t) {
                 if (window.VoiceManager && VoiceManager.leaveAllStaleRooms) {
                     try { VoiceManager.leaveAllStaleRooms(); } catch (_) {}
                 }
+                // Re-sync the server-persisted DM-call waiting state. A WS
+                // reconnect (server restart, network blip, or a boot that
+                // landed outside DM view) can leave dmConversations stale —
+                // refetch so waiting indicators appear or disappear WITHOUT
+                // needing a manual conversation reload.
+                try { await refreshDmWaitingState(); } catch (_) {}
                 // Broadcast profile keys after a short delay (DMs already loaded during init)
                 setTimeout(async function() {
                     if (myProfile && dmConversations && dmConversations.length > 0) {
@@ -7687,6 +7698,13 @@ function connectWebSocket(t) {
                     dmConversations = dmConversations.filter(function(c) {
                         return c.other_user_id !== frByUserId;
                     });
+                }
+                // The removed DM's call (if any) is torn down by the server's
+                // dm_call_end broadcast; rebuild the waiting map from the
+                // filtered list so no stale marker for the removed channel
+                // lingers client-side in the meantime.
+                if (window.VoiceManager && VoiceManager.syncWaitingCalls) {
+                    VoiceManager.syncWaitingCalls();
                 }
                 if (viewMode === 'dms') {
                     renderDmSidebar();
@@ -11958,6 +11976,10 @@ function renderDmSidebar() {
     // and dataset. Re-populate + re-bind here so no caller (including WS-driven
     // re-renders after re-login) can ever leave the friend-code buttons dead.
     loadMyFriendCode();
+
+    // The DM-strip call indicator must stay in sync with the sidebar rows
+    // (both read the same VoiceManager waiting/call state).
+    updateDmStripWaiting();
 }
 
 async function selectDmChannel(dmChannelId, otherUserId, otherUsername, element) {
@@ -12030,13 +12052,97 @@ async function selectDmChannel(dmChannelId, otherUserId, otherUsername, element)
     if (window._closeSidebar) window._closeSidebar();
 }
 
-// DMs whose waiting banner the user dismissed this session (they can still
-// rejoin via the header call button or by reloading).
-var _dismissedWaiting = {};
+// Re-sync the server-persisted DM-call waiting state from the API. Merges
+// waiting_user_id / waiting_username into the cached dmConversations (or takes
+// the fresh list wholesale when nothing is cached yet, e.g. a boot that landed
+// outside DM view) so waiting indicators appear/disappear without a manual
+// conversation reload. Runs on WS reconnect (auth_ok).
+// Persistent DM-strip call indicator: shows on the top-left DM button from ANY
+// view (server channels, other DMs, modals) whenever a DM call is waiting
+// (amber phone, slow pulse) or ringing (green phone, fast pulse). Mirrors the
+// sidebar row dots — the sidebar is only visible in DM view, so this is the
+// "anywhere in the app" signal for a call someone is waiting on.
+function updateDmStripWaiting() {
+    var el = document.getElementById('dm-strip-waiting');
+    if (!el) return;
+    var vm = window.VoiceManager;
+    if (!vm || !dmConversations || !dmConversations.length) {
+        el.style.display = 'none';
+        el.classList.remove('calling');
+        return;
+    }
+    var state = null; // 'calling' | 'waiting'
+    // An incoming ring (someone is calling us, not yet waiting) is the
+    // callee-side "calling" state — most urgent, so it takes priority.
+    var inc = vm.getIncomingCall ? vm.getIncomingCall() : null;
+    if (inc && !inc.waiting) state = 'calling';
+    if (state !== 'calling') {
+        for (var i = 0; i < dmConversations.length; i++) {
+            var c = dmConversations[i];
+            if (!c || !c.dm_channel_id) continue;
+            var st = (vm.getCallState && vm.getCallState(c.dm_channel_id)) || null;
+            if (st === 'calling') { state = 'calling'; break; } // ringing takes priority
+            if (st === 'waiting' || (vm.getWaitingCall && vm.getWaitingCall(c.dm_channel_id))) {
+                state = 'waiting';
+            }
+        }
+    }
+    if (state === 'calling') {
+        el.style.display = 'flex';
+        el.classList.add('calling');
+        el.title = 'Call ringing';
+    } else if (state === 'waiting') {
+        el.style.display = 'flex';
+        el.classList.remove('calling');
+        el.title = 'Call waiting';
+    } else {
+        el.style.display = 'none';
+        el.classList.remove('calling');
+    }
+}
+
+async function refreshDmWaitingState() {
+    if (!user) return;
+    try {
+        const res = await authFetch('/api/dm/conversations');
+        if (!res.ok) return;
+        const convs = await res.json();
+        if (!Array.isArray(convs)) return;
+        if (!dmConversations || dmConversations.length === 0) {
+            dmConversations = convs;
+        } else {
+            var byId = {};
+            convs.forEach(function (c) { if (c && c.dm_channel_id) byId[c.dm_channel_id] = c; });
+            // Merge ONLY the server-persisted waiting fields into the cached
+            // list — replacing the array wholesale would drop prefetched
+            // identity keys and profile data.
+            for (var i = 0; i < dmConversations.length; i++) {
+                var cur = dmConversations[i];
+                var fresh = cur && byId[cur.dm_channel_id];
+                if (fresh) {
+                    cur.waiting_user_id = fresh.waiting_user_id || null;
+                    cur.waiting_username = fresh.waiting_username || '';
+                }
+            }
+            // Drop cached entries whose DM no longer exists (e.g. unfriended
+            // on another device while we were offline).
+            dmConversations = dmConversations.filter(function (c) { return c && byId[c.dm_channel_id]; });
+        }
+        if (window.VoiceManager && VoiceManager.syncWaitingCalls) VoiceManager.syncWaitingCalls();
+        if (viewMode === 'dms') {
+            renderDmSidebar();
+            restoreActiveDmHighlight();
+        }
+        updateDmWaitingBanner();
+    } catch (_) {}
+}
 
 // Persistent DM-call waiting banner: shows in the DM chat when someone is
 // waiting in a call for this conversation. Reads the server-persisted waiting
-// state (survives page refreshes) via VoiceManager.syncWaitingCalls().
+// state (survives page refreshes) via VoiceManager.syncWaitingCalls(). The
+// banner is intentionally NOT dismissible — while someone is waiting for us,
+// it stays visible until they stop waiting (leave, close tab, server restart)
+// or we join.
 function updateDmWaitingBanner() {
     var banner = document.getElementById('dm-waiting-banner');
     if (!banner) return;
@@ -12047,17 +12153,6 @@ function updateDmWaitingBanner() {
     }
     var wc = vm.getWaitingCall ? vm.getWaitingCall(currentDmChannelId) : null;
     if (!wc) {
-        delete _dismissedWaiting[currentDmChannelId];
-        banner.style.display = 'none';
-        return;
-    }
-    // User dismissed this banner for this DM — keep it hidden until the
-    // waiting state actually clears. Keyed by channel + waiting user so a
-    // transition to a different waiting person (e.g. they leave and the record
-    // flips to the remaining side) shows the banner again instead of being
-    // wrongly suppressed by a stale dismissal.
-    var dismissKey = currentDmChannelId + '|' + (wc.waitingUserId || '');
-    if (_dismissedWaiting[dismissKey]) {
         banner.style.display = 'none';
         return;
     }
@@ -12085,6 +12180,16 @@ function updateDmWaitingBanner() {
     }
     if (joinBtn) joinBtn.textContent = 'Join Call';
     banner.style.display = 'flex';
+    // The incoming-waiting bar and the banner both live at the top of the chat
+    // area. Once this DM is open the banner IS the indicator (same info, same
+    // Join action) — hide the bar so it can't overlap and intercept the
+    // banner's Join button. The bar re-appears if we navigate away (the banner
+    // hides, the bar's re-show logic runs on view changes).
+    var inc = vm.getIncomingCall ? vm.getIncomingCall() : null;
+    if (inc && inc.dmChannelId === currentDmChannelId && inc.waiting) {
+        var barEl = document.getElementById('incoming-call-bar');
+        if (barEl) barEl.style.display = 'none';
+    }
     if (joinBtn) {
         joinBtn.onclick = function () {
             if (!vm.joinWaitingCall || !currentDmOtherUser) return;
@@ -12092,13 +12197,11 @@ function updateDmWaitingBanner() {
             banner.style.display = 'none';
         };
     }
+    // No close/dismiss button — while someone is waiting for us the indicator
+    // stays until they stop waiting (leave, close tab, server restart,
+    // unfriend) or we join the call.
     var closeBtn = document.getElementById('dm-waiting-close-btn');
-    if (closeBtn) {
-        closeBtn.onclick = function () {
-            _dismissedWaiting[dismissKey] = true;
-            banner.style.display = 'none';
-        };
-    }
+    if (closeBtn) closeBtn.style.display = 'none';
 }
 
 async function loadDmMessages(dmChannelId, otherUserId, skipBottomScroll) {

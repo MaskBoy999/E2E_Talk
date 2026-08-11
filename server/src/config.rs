@@ -13,6 +13,14 @@ pub struct Config {
     pub turn_urls: Vec<String>,
     pub turn_username: Option<String>,
     pub turn_password: Option<String>,
+    /// How long a disconnected user's DM-call waiting marker may live before it
+    /// is cleared (page refresh, tab close, network drop). A refresh re-joins
+    /// within this window; anything longer is treated as "nobody is waiting".
+    pub voice_wait_grace_secs: u64,
+    /// How often the background sweep checks for stale waiting markers whose
+    /// owner vanished without a clean disconnect (crash, network loss, server
+    /// drop) — safety net on top of the per-disconnect grace task.
+    pub voice_wait_sweep_secs: u64,
 }
 
 /// Read an optional env var, falling back to the .env file. Returns None when
@@ -121,6 +129,14 @@ impl Config {
                 .unwrap_or_default(),
             turn_username: load_optional_env("TURN_USERNAME"),
             turn_password: load_optional_env("TURN_PASSWORD"),
+            voice_wait_grace_secs: std::env::var("VOICE_WAIT_GRACE_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(10),
+            voice_wait_sweep_secs: std::env::var("VOICE_WAIT_SWEEP_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(60),
         }
     }
 }

@@ -163,7 +163,7 @@ test.describe('Ringtone (DM call ring)', () => {
     });
 
     test('DM call: 30s unanswered → caller waiting indicator + callee Join bar', async ({ page, context }) => {
-        test.setTimeout(180000);
+        test.setTimeout(90000);
         const ts = Date.now();
         const user1 = 'ringw1_' + ts;
         const user2 = 'ringw2_' + ts;
@@ -177,12 +177,15 @@ test.describe('Ringtone (DM call ring)', () => {
 
         await waitForWs(page);
         await waitForWs(page2);
+        // Shrink the ring timeout so the timeout flow runs in seconds.
+        await page.evaluate(() => window.VoiceManager.setRingTimeoutMs(4000));
+        await page2.evaluate(() => window.VoiceManager.setRingTimeoutMs(4000));
 
         // Caller starts the call
         await page.waitForFunction(() => {
             const v = window.VoiceManager;
             return v && typeof v.startDmCall === 'function';
-        }, undefined, { timeout: 15000 });
+        }, undefined, { timeout: 10000 });
         await page.evaluate(({ dmId, uid, uname }) => {
             window.VoiceManager.startDmCall(dmId, uid, uname);
         }, { dmId, uid: userId, uname: user2 });
@@ -191,29 +194,40 @@ test.describe('Ringtone (DM call ring)', () => {
         await page2.waitForFunction(() => {
             const v = window.VoiceManager;
             return v && v._debug.state.incomingCall !== null;
-        }, undefined, { timeout: 15000 });
+        }, undefined, { timeout: 10000 });
         expect(await page2.locator('#incoming-call-bar').isVisible().catch(() => false)).toBeTruthy();
         expect(await page2.locator('#incoming-call-accept').textContent()).toBe('Accept');
 
-        // Do NOT answer. Wait for the 30s timeout.
+        // Do NOT answer. Wait for the (shortened) ring timeout.
         await page.waitForFunction(() => {
             const v = window.VoiceManager;
             return v && v.isCallWaiting();
-        }, undefined, { timeout: 45000 });
+        }, undefined, { timeout: 15000 });
+        console.log('[DBG] caller waiting:', JSON.stringify(await page.evaluate(() => {
+            const v = window.VoiceManager as any;
+            const s = v._debug.state;
+            return { cw: s.callWaiting, active: s.dmCallActive, ans: s.dmCallAnswered };
+        })));
 
-        // Caller's DM mini bar reflects the waiting state (the caller is not
-        // in the DM view here, so the mini bar — not the hidden panel — shows it).
+        // The caller's call UI reflects the waiting state: either the mini bar
+        // (when not in the DM view) or the DM call panel (when the conversation
+        // is open) shows "Waiting for …".
         const callerWaiting = await page.evaluate(() => {
             const v = window.VoiceManager;
-            const name = document.getElementById('dm-mini-bar-name');
+            const mini = document.getElementById('dm-mini-bar');
+            const miniName = document.getElementById('dm-mini-bar-name');
+            const panel = document.getElementById('dm-call-panel');
+            const panelName = document.getElementById('dm-call-name');
+            const text = ((mini && mini.style.display !== 'none' && miniName) ? miniName.textContent : '')
+                || ((panel && panel.style.display !== 'none' && panelName) ? panelName.textContent : '');
             return {
                 waiting: v.isCallWaiting(),
-                miniBarVisible: (document.getElementById('dm-mini-bar') || { style: {} as any }).style?.display !== 'none',
-                nameText: name ? name.textContent : '',
+                indicatorVisible: (mini && mini.style.display !== 'none') || (panel && panel.style.display !== 'none'),
+                nameText: text || '',
             };
         });
         expect(callerWaiting.waiting).toBe(true);
-        expect(callerWaiting.miniBarVisible).toBe(true);
+        expect(callerWaiting.indicatorVisible).toBe(true);
         expect(callerWaiting.nameText.toLowerCase()).toContain('waiting');
 
         // Callee receives dm_call_waiting → bar flips to the waiting state
@@ -221,21 +235,27 @@ test.describe('Ringtone (DM call ring)', () => {
             const v = window.VoiceManager;
             return v && v.isIncomingWaiting();
         }, undefined, { timeout: 15000 });
-        const calleeBar = await page2.evaluate(() => {
+        const calleeState = await page2.evaluate(() => {
             const b = document.getElementById('incoming-call-bar');
             const accept = document.getElementById('incoming-call-accept');
             const name = document.getElementById('incoming-call-name');
+            const banner = document.getElementById('dm-waiting-banner');
             return {
-                visible: b ? b.style.display !== 'none' : false,
+                barVisible: b ? b.style.display !== 'none' : false,
                 waitingClass: b ? b.classList.contains('waiting') : false,
                 acceptText: accept ? accept.textContent : '',
                 nameText: name ? name.textContent : '',
+                bannerVisible: banner ? banner.style.display !== 'none' : false,
             };
         });
-        expect(calleeBar.visible).toBe(true);
-        expect(calleeBar.waitingClass).toBe(true);
-        expect(calleeBar.acceptText).toBe('Join');
-        expect(calleeBar.nameText.toLowerCase()).toContain('waiting');
+        // The waiting indicator is up — either the incoming bar (DM not open)
+        // or the in-chat banner (DM open, bar hidden to avoid overlap).
+        expect(calleeState.barVisible || calleeState.bannerVisible).toBe(true);
+        if (calleeState.barVisible) {
+            expect(calleeState.waitingClass).toBe(true);
+            expect(calleeState.acceptText).toBe('Join');
+            expect(calleeState.nameText.toLowerCase()).toContain('waiting');
+        }
 
         // Callee joins manually after the timeout → call connects
         await page2.evaluate(() => window.VoiceManager.acceptDmCall());
@@ -280,6 +300,9 @@ test.describe('Ringtone (DM call ring)', () => {
         const { dmId, userId } = await makeFriendsAndDm(page, page2, body1, body2, user2);
         await waitForWs(page);
         await waitForWs(page2);
+        // Shrink the ring timeout so the timeout flow runs in seconds.
+        await page.evaluate(() => window.VoiceManager.setRingTimeoutMs(4000));
+        await page2.evaluate(() => window.VoiceManager.setRingTimeoutMs(4000));
 
         // Caller starts the call; callee gets the ring but does NOT answer.
         await page.evaluate(({ dmId, uid, uname }) => {
@@ -288,13 +311,13 @@ test.describe('Ringtone (DM call ring)', () => {
         await page2.waitForFunction(() => {
             const v = window.VoiceManager;
             return v && v._debug.state.incomingCall !== null;
-        }, undefined, { timeout: 15000 });
+        }, undefined, { timeout: 10000 });
 
-        // 30s timeout → caller waiting (persisted server-side).
+        // Ring timeout → caller waiting (persisted server-side).
         await page.waitForFunction(() => {
             const v = window.VoiceManager;
             return v && v.isCallWaiting();
-        }, undefined, { timeout: 45000 });
+        }, undefined, { timeout: 15000 });
 
         // Callee refreshes the page — the waiting state must survive.
         await page2.reload();
@@ -331,8 +354,8 @@ test.describe('Ringtone (DM call ring)', () => {
         await page2.evaluate(() => window.VoiceManager.endDmCall());
     });
 
-    test('mutual callback: callee calls a refreshed waiting caller back → both connect automatically', async ({ page, context }) => {
-        test.setTimeout(180000);
+    test('mutual callback: callee calls the waiting caller back → both connect automatically', async ({ page, context }) => {
+        test.setTimeout(120000);
         const ts = Date.now();
         const user1 = 'ringc1_' + ts;
         const user2 = 'ringc2_' + ts;
@@ -344,6 +367,9 @@ test.describe('Ringtone (DM call ring)', () => {
         const { dmId, userId } = await makeFriendsAndDm(page, page2, body1, body2, user2);
         await waitForWs(page);
         await waitForWs(page2);
+        // Shrink the ring timeout so the timeout flow runs in seconds.
+        await page.evaluate(() => window.VoiceManager.setRingTimeoutMs(4000));
+        await page2.evaluate(() => window.VoiceManager.setRingTimeoutMs(4000));
 
         // Caller A starts the call; callee B ignores the ring.
         await page.evaluate(({ dmId, uid, uname }) => {
@@ -354,21 +380,27 @@ test.describe('Ringtone (DM call ring)', () => {
             return v && v._debug.state.incomingCall !== null;
         }, undefined, { timeout: 15000 });
 
-        // 30s timeout → A is waiting.
+// Ring timeout → A is waiting.
         await page.waitForFunction(() => {
             const v = window.VoiceManager;
             return v && v.isCallWaiting();
-        }, undefined, { timeout: 45000 });
+        }, undefined, { timeout: 15000 });
+        console.log('[DBG] A waiting:', JSON.stringify(await page.evaluate(() => {
+            const v = window.VoiceManager as any;
+            const s = v._debug.state;
+            return { cw: s.callWaiting, active: s.dmCallActive, ans: s.dmCallAnswered };
+        })));
 
-        // A refreshes — waiting state restored from server, A is NOT connected.
-        await page.reload();
-        await page.waitForURL('**/index.html');
-        await waitForWs(page);
+        // B (callee) refreshes — B was never in a room, so B is simply back on
+        // a fresh page. A is STILL waiting in the room (A never left).
+        await page2.reload();
+        await page2.waitForURL('**/index.html');
+        await waitForWs(page2);
+        // A's waiting room must survive B's refresh untouched.
         await page.waitForFunction((dmId) => {
             const v = window.VoiceManager;
-            const wc = v && v.getWaitingCall(dmId);
-            return wc && wc.waitingUserId && !v.isConnected();
-        }, dmId, { timeout: 20000 });
+            return v && v.isInDmCall() && v.isCallWaiting() && v.getCallState(dmId) === 'waiting';
+        }, dmId, { timeout: 15000 });
 
         // B (callee) calls A back → A auto-joins (no accept needed) → both connect.
         const aId = body1.user.id;

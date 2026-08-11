@@ -166,6 +166,14 @@ async fn main() {
 
     let config = config::Config::from_env();
     let db = db::Database::new(&config.database_url).expect("Failed to initialize database");
+    // A server restart invalidates every in-memory voice room, so any persisted
+    // DM-call waiting state is stale (the waiting user's connection died with
+    // the server). Clear it so nobody is left with a phantom "waiting for you
+    // to join" indicator after a restart.
+    match db.clear_all_dm_call_waiting() {
+        Ok(()) => tracing::info!("Cleared stale DM-call waiting state on startup."),
+        Err(e) => tracing::warn!("Could not clear stale DM-call waiting state: {}", e),
+    }
     let ws_manager = ws::WsManager::new();
 
     let fresh = db.is_fresh_db().unwrap_or(true);
@@ -199,6 +207,23 @@ async fn main() {
                 let _ = tokio::task::spawn_blocking(move || {
                     s.db.cleanup_orphan_files("uploads");
                 }).await;
+            }
+        });
+    }
+
+    // Periodic sweep of stale DM-call waiting markers (owner gone longer than
+    // the grace window without a clean disconnect: crash, network loss, or the
+    // server dropping the socket without firing the disconnect cleanup). Runs
+    // alongside the per-disconnect grace task as the safety net — a refresh
+    // re-joins within the grace window, so it is never swept.
+    {
+        let state_for_sweep = state.clone();
+        tokio::spawn(async move {
+            let interval_secs = state_for_sweep.config.voice_wait_sweep_secs.max(5);
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            loop {
+                interval.tick().await;
+                ws::sweep_stale_waiting(&state_for_sweep).await;
             }
         });
     }
@@ -366,7 +391,12 @@ async fn main() {
 
     match use_tls {
         Some(tls_config) => {
-            let https_port = 3443u16;
+            // HTTPS_PORT lets tests run a second instance sharing the DB (for
+            // the server-restart behavior) without colliding with the main one.
+            let https_port: u16 = std::env::var("HTTPS_PORT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(3443u16);
             let https_addr: std::net::SocketAddr = format!("0.0.0.0:{}", https_port).parse().unwrap();
             tracing::info!("HTTPS available on https://localhost:{}", https_port);
             tracing::info!("HTTP available on http://localhost:{}", config.port);

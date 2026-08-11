@@ -5102,8 +5102,20 @@ pub async fn remove_friend(
         Ok(id) => id,
         Err(e) => return e.into_response(),
     };
+    // Unfriending removes the DM channel, so any active DM call or waiting
+    // room between the two users must end too — otherwise the room lingers
+    // forever with no way back in. find_dm_channel + get_dm_members MUST run
+    // BEFORE remove_friend (which deletes the channel and its members).
+    let dm_between = state.db.find_dm_channel(&user_id, &req.user_id).ok().flatten();
+    let dm_members = match &dm_between {
+        Some(id) => state.db.get_dm_members(id).unwrap_or_default(),
+        None => Vec::new(),
+    };
     match state.db.remove_friend(&user_id, &req.user_id) {
         Ok(()) => {
+            if let Some(dm_id) = dm_between {
+                crate::ws::end_dm_call_between(&state, &dm_id, &dm_members).await;
+            }
             // Notify both users that the friendship was removed
             // Include both the caller and the other user for multi-tab consistency
             let notify = serde_json::json!({

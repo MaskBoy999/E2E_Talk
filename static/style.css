@@ -2011,6 +2011,33 @@ body.show-msg-times-hover .message:hover .file-card .time-hover {
     pointer-events: none;
 }
 
+/* Persistent DM-strip call indicator: shows on the top-left DM button from
+   ANY view (server channels, other DMs) when a DM call is waiting (amber) or
+   ringing (green) — mirrors the sidebar row dots so a waiting call is never
+   missed while browsing elsewhere. */
+.dm-strip-waiting {
+    position: absolute;
+    bottom: -3px;
+    right: -3px;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 3px;
+    box-sizing: border-box;
+    border-radius: 50%;
+    background: rgba(240, 178, 50, 0.92);
+    color: #1a1a2e;
+    font-size: 10px;
+    line-height: 16px;
+    text-align: center;
+    pointer-events: none;
+    z-index: 2;
+    animation: incoming-wait-pulse 2s ease-in-out infinite;
+}
+.dm-strip-waiting.calling {
+    background: rgba(59, 165, 93, 0.92);
+    animation: incoming-wait-pulse 1s ease-in-out infinite;
+}
+
 .dm-item {
     position: relative;
 }

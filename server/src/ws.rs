@@ -1635,6 +1635,15 @@ async fn handle_voice_join(
     if room_type == "dm" && members_vec.len() >= 2 {
         let _ = state.db.clear_dm_call_waiting(&dm_channel_id);
     }
+    // A user ALONE in a DM room IS the waiting state (they called and are
+    // waiting, or they came back to the waiting room after a refresh). Persist
+    // it so the indicator survives page refreshes. Silent on purpose: when a
+    // caller first joins, the callee must keep ringing (the 30s dm_call_waiting
+    // broadcast is what flips their bar), so we never broadcast from here —
+    // the other side picks the state up via the conversation list.
+    if room_type == "dm" && members_vec.len() == 1 {
+        let _ = state.db.set_dm_call_waiting(&dm_channel_id, user_id);
+    }
     let members_msg = serde_json::json!({
         "type": "voice_members",
         "members": members_vec,
@@ -1734,13 +1743,13 @@ async fn voice_remove_from_room(state: &Arc<AppState>, room_id: &str, user_id: &
     }
 
     if empty {
-        // Room gone — everyone left. For an explicit leave (clear_waiting_on_empty
-        // = true) the call is abandoned: clear persisted waiting and notify
-        // remaining members.  For a WS disconnect (false) the user may reconnect
-        // so keep the persisted waiting state alive.
-        if is_dm && clear_waiting_on_empty {
+        if !is_dm {
+            return;
+        }
+        if clear_waiting_on_empty {
+            // Explicit leave: the call is abandoned — clear persisted waiting
+            // and notify any remaining online members that the call ended.
             let _ = state.db.clear_dm_call_waiting(&dm_channel_id);
-            // Notify any remaining online members that the call ended.
             if let Ok(members) = state.db.get_dm_members(&dm_channel_id) {
                 let others: Vec<String> = members.into_iter().filter(|m| m != user_id).collect();
                 let msg = serde_json::json!({
@@ -1749,6 +1758,36 @@ async fn voice_remove_from_room(state: &Arc<AppState>, room_id: &str, user_id: &
                 });
                 state.ws_manager.broadcast_to_users(&others, &msg.to_string()).await;
             }
+        } else {
+            // Connection drop (page refresh, tab close, network blip). A
+            // refresh re-joins the waiting room within seconds, so give it a
+            // grace window before concluding nobody is waiting anymore. If the
+            // room is STILL empty after the window (the tab really closed, or
+            // the connection died for good), clear the persisted marker so the
+            // other side's waiting indicator disappears instead of lingering.
+            let state2 = state.clone();
+            let dm2 = dm_channel_id.to_string();
+            let room2 = room_id.to_string();
+            let leaver = user_id.to_string();
+            let grace_secs = state.config.voice_wait_grace_secs;
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(grace_secs)).await;
+                let still_empty = match state2.voice_rooms.read() {
+                    Ok(r) => !r.contains_key(&room2),
+                    Err(_) => true,
+                };
+                if still_empty {
+                    let _ = state2.db.clear_dm_call_waiting(&dm2);
+                    if let Ok(members) = state2.db.get_dm_members(&dm2) {
+                        let others: Vec<String> = members.into_iter().filter(|m| m != &leaver).collect();
+                        let msg = serde_json::json!({
+                            "type": "dm_waiting_cleared",
+                            "dm_channel_id": dm2,
+                        });
+                        state2.ws_manager.broadcast_to_users(&others, &msg.to_string()).await;
+                    }
+                }
+            });
         }
         return;
     }
@@ -1779,6 +1818,79 @@ async fn voice_remove_from_room(state: &Arc<AppState>, room_id: &str, user_id: &
             "dm_channel_id": dm_channel_id,
         });
         voice_broadcast(state, room_id, &wait_msg).await;
+    }
+}
+
+/// Periodic safety net: clear DM-call waiting markers whose owner is gone for
+/// longer than the grace window — covers crashes / network loss where no WS
+/// disconnect event ever fired (the per-disconnect grace task is the primary
+/// path; this sweep backstops it). Only touches rows OLDER than the grace
+/// period, so a mid-grace refresh (which re-joins and refreshes the marker)
+/// is never cleared.
+pub async fn sweep_stale_waiting(state: &Arc<AppState>) {
+    let grace = state.config.voice_wait_grace_secs;
+    let stale = match state.db.list_stale_dm_call_waiting(grace as i64) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    for (dm_id, waiting_uid) in stale {
+        // If the waiting user is still connected AND still in the room, they
+        // are genuinely waiting — leave the marker alone (even if it has been
+        // sitting there for hours).
+        if state.ws_manager.is_user_connected(&waiting_uid).await {
+            let room_id = voice_room_id("dm", "", &dm_id);
+            let in_room = match state.voice_rooms.read() {
+                Ok(r) => r
+                    .get(&room_id)
+                    .map(|rm| rm.members.contains_key(&waiting_uid))
+                    .unwrap_or(false),
+                Err(_) => false,
+            };
+            if in_room {
+                continue;
+            }
+        }
+        // The waiter is gone — clear the marker and tell the other member so
+        // their indicator disappears without a reload.
+        let _ = state.db.clear_dm_call_waiting(&dm_id);
+        if let Ok(members) = state.db.get_dm_members(&dm_id) {
+            let others: Vec<String> = members.into_iter().filter(|m| *m != waiting_uid).collect();
+            let msg = serde_json::json!({
+                "type": "dm_waiting_cleared",
+                "dm_channel_id": dm_id,
+            });
+            state.ws_manager.broadcast_to_users(&others, &msg.to_string()).await;
+        }
+    }
+}
+
+/// End a DM call unconditionally (used when two users unfriend each other):
+/// drop the voice room, clear the persisted waiting state, and tell both DM
+/// members so their clients tear down the call UI (the DM itself is gone, so
+/// the call must not linger — nobody can ever join it again). `members` must
+/// be captured BEFORE the DM rows are deleted (remove_friend deletes
+/// dm_members, which would make get_dm_members return nobody to notify).
+pub async fn end_dm_call_between(state: &Arc<AppState>, dm_channel_id: &str, members: &[String]) {
+    let room_id = voice_room_id("dm", "", dm_channel_id);
+    {
+        let mut rooms = match state.voice_rooms.write() {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        if let Some(room) = rooms.remove(&room_id) {
+            if let Some(sid) = room.session_id {
+                let _ = state.db.end_voice_session(&sid);
+            }
+        }
+    }
+    let _ = state.db.clear_dm_call_waiting(dm_channel_id);
+    if !members.is_empty() {
+        let msg = serde_json::json!({
+            "type": "dm_call_end",
+            "dm_channel_id": dm_channel_id,
+            "reason": "ended",
+        });
+        state.ws_manager.broadcast_to_users(members, &msg.to_string()).await;
     }
 }
 

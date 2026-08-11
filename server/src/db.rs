@@ -3022,6 +3022,18 @@ impl Database {
         Ok(())
     }
 
+    /// Clear EVERY persisted DM-call waiting row. Called on server startup: a
+    /// restart invalidates all in-memory voice rooms, so every waiting record
+    /// is stale (the waiting user's connection died with the server). Without
+    /// this, users keep seeing phantom "waiting for you to join" indicators
+    /// until the next conversation reload.
+    pub fn clear_all_dm_call_waiting(&self) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM dm_call_waiting", [])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     /// Clear waiting entries where a specific user is the one waiting.
     /// Called on WS disconnect so the other side doesn't see a stale banner.
     pub fn clear_dm_call_waiting_for_user(&self, user_id: &str) -> Result<Vec<String>, String> {
@@ -3035,6 +3047,27 @@ impl Database {
             .filter_map(|r| r.ok())
             .collect();
         Ok(channels)
+    }
+
+    /// List DM-call waiting rows older than `older_than_secs` (age computed in
+    /// SQL against created_at). Used by the periodic sweep to clear markers
+    /// whose owner vanished without a clean disconnect.
+    pub fn list_stale_dm_call_waiting(&self, older_than_secs: i64) -> Result<Vec<(String, String)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT dm_channel_id, waiting_user_id FROM dm_call_waiting
+                 WHERE (strftime('%s','now') - strftime('%s', created_at)) > ?1",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![older_than_secs], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
     }
 
     /// Who is waiting in a DM call for this channel, if anyone.
@@ -3562,13 +3595,16 @@ impl Database {
         )
         .map_err(|e| e.to_string())?;
 
-        // Also delete any DM channel between these two users
+        // Also delete any DM channel between these two users (including any
+        // DM-call waiting row — the call can't linger after unfriending).
         if let Ok(Some(dm_id)) = Self::find_dm_channel_c(&conn, user_id, other_user_id) {
             conn.execute("DELETE FROM dm_messages WHERE dm_channel_id = ?1", params![dm_id])
                 .map_err(|e| e.to_string())?;
             conn.execute("DELETE FROM dm_members WHERE dm_channel_id = ?1", params![dm_id])
                 .map_err(|e| e.to_string())?;
             conn.execute("DELETE FROM dm_channels WHERE id = ?1", params![dm_id])
+                .map_err(|e| e.to_string())?;
+            conn.execute("DELETE FROM dm_call_waiting WHERE dm_channel_id = ?1", params![dm_id])
                 .map_err(|e| e.to_string())?;
         }
 

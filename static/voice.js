@@ -65,6 +65,10 @@
         dmCallActive: false,     // we're in a DM call (ringing/connected)
         dmCallAnswered: false,   // the other DM participant joined the room
         dmCallPartner: null,     // {id, username}
+        // How long a DM call rings before flipping to the waiting state (both
+        // sides). Default 30s; tests shorten it so the timeout flow runs in
+        // seconds instead of minutes.
+        ringTimeoutMs: 30000,
         settings: {
             micVolume: 100,
             speakerVolume: 100,
@@ -188,8 +192,15 @@
         testRingtone: testRingtone,
         playRingtone: playRingtone,
         stopRingtone: stopRingtone,
+        // Tests shorten the 30s ring so the timeout flow runs fast.
+        setRingTimeoutMs: function (ms) {
+            S.ringTimeoutMs = ms > 0 ? ms : 30000;
+            if (S._ringTimer) { clearTimeout(S._ringTimer); S._ringTimer = null; }
+            if (S._calleeRingTimer) { clearTimeout(S._calleeRingTimer); S._calleeRingTimer = null; }
+        },
         isCallWaiting: function () { return S.callWaiting; },
         isIncomingWaiting: function () { return !!(S.incomingCall && S.incomingCall.waiting); },
+        getIncomingCall: function () { return S.incomingCall ? { ...S.incomingCall } : null; },
         isConnected: function () { return S.connected; },
         isInDmCall: function () { return S.dmCallActive; },
         getState: function () { return JSON.parse(JSON.stringify(S)); },
@@ -2470,6 +2481,9 @@
             case 'dm_call_waiting':
                 handleDmCallWaiting(data);
                 break;
+            case 'dm_waiting_cleared':
+                handleDmWaitingCleared(data);
+                break;
             case 'dm_call_end':
                 handleDmCallEnd(data);
                 break;
@@ -2493,6 +2507,9 @@
         if (S.roomType === 'dm') {
             S.dmCallActive = true;
             S.incomingCall = null;
+            // Once we're in the room, the incoming/ringing bar is always gone
+            // (it must not linger after joining a waiting call).
+            hideIncomingCall();
             var selfIdHere = getSelfId();
             var otherJoined = (data.members || []).some(function (m) { return m.user_id !== selfIdHere; });
             if (otherJoined) {
@@ -3014,7 +3031,7 @@
                 updateDmCallUI();
                 notifyWaitingChanged();
             }
-        }, 30000);
+        }, S.ringTimeoutMs);
     }
 
     function clearRingTimer() {
@@ -3088,9 +3105,27 @@
         deriveSignalKey();
         send({ type: 'voice_join', room_type: 'dm', dm_channel_id: c.dmChannelId });
         playSound('join');
+        // Update the panel/mini-bar for the CURRENT view now (immediate
+        // feedback), then switch the view to this DM if we're not already
+        // there — selectDmChannel re-runs updateDmCallUI() at the end, so the
+        // panel appears the moment the DM view opens.
         updateDmCallUI();
-        // Switch the view to this DM so the panel is visible
-        if (typeof selectDmChannel === 'function' && window.currentDmOtherUser === null) {
+        // The old guard `window.currentDmOtherUser === null` NEVER matched:
+        // currentDmOtherUser is a top-level `let` (a global lexical binding,
+        // not a window property), so window.currentDmOtherUser is always
+        // undefined → selectDmChannel was never called and accepting from any
+        // other view (server channel, a different DM, home) left the user
+        // stranded with only the mini bar and no call panel. Now we switch the
+        // app into DM view whenever we're not already viewing this DM —
+        // enterDmView sets viewMode + renders the DM sidebar (selectDmChannel
+        // itself never sets viewMode), then selectDmChannel loads the
+        // conversation and re-runs updateDmCallUI() so the panel appears the
+        // moment the DM view opens.
+        if (typeof selectDmChannel === 'function' &&
+            (typeof currentDmChannelId === 'undefined' || currentDmChannelId !== c.dmChannelId)) {
+            if (typeof enterDmView === 'function' && (typeof viewMode === 'undefined' || viewMode !== 'dms')) {
+                try { enterDmView(); } catch (_) {}
+            }
             try { selectDmChannel(c.dmChannelId, c.callerId, c.callerUsername, null); } catch (_) {}
         }
     }
@@ -3111,6 +3146,13 @@
                 };
             }
         });
+        // NOTE: a page refresh, tab close or browser close must CLOSE the call
+        // — we deliberately do NOT rejoin here. The server clears our waiting
+        // marker once the grace window passes (and the periodic sweep backstops
+        // crashes where no disconnect event fired), and the other side's
+        // indicator disappears via dm_waiting_cleared. The only auto-rejoin
+        // left is the mid-session reconnect() path (network blip, same page),
+        // and the mutual-callback in handleDmCallRing (they called us back).
         // Let the DM chat re-render any waiting banner.
         if (typeof document !== 'undefined') {
             document.dispatchEvent(new CustomEvent('voice-waiting-changed'));
@@ -3133,14 +3175,28 @@
         S.dmCallActive = true;
         S.dmCallAnswered = false;
         S.popupOpen = false;
-        S.callWaiting = false;
+        // Joining the waiting room means WE are the one waiting until the
+        // partner shows up (voice_joined with otherJoined → markDmCallAnswered
+        // flips it off the moment they connect). Keeps the bar/mini-bar honest:
+        // "Waiting for X…" instead of a false "Calling X…" after a refresh.
+        S.callWaiting = true;
         resetFullscreenState();
         await ensureDmCallKey(partnerId);
         deriveRoomKey();
         deriveSignalKey();
         send({ type: 'voice_join', room_type: 'dm', dm_channel_id: dmChannelId });
         playSound('join');
+        // Same view switch as acceptDmCall: joining from outside this DM
+        // (incoming bar's Join while in a server channel, another DM, home)
+        // must land us IN the DM so the call panel is visible immediately.
         updateDmCallUI();
+        if (typeof selectDmChannel === 'function' &&
+            (typeof currentDmChannelId === 'undefined' || currentDmChannelId !== dmChannelId)) {
+            if (typeof enterDmView === 'function' && (typeof viewMode === 'undefined' || viewMode !== 'dms')) {
+                try { enterDmView(); } catch (_) {}
+            }
+            try { selectDmChannel(dmChannelId, partnerId, partnerUsername, null); } catch (_) {}
+        }
         // Clear the persisted waiting marker for this channel now that we're
         // (re)joining — the call connects if the other side is present.
         delete S.waitingCalls[dmChannelId];
@@ -3157,6 +3213,9 @@
         clearCalleeRingTimer();
         stopRingtone();
         playSound('leave');
+        // The green "ringing" badge must go away immediately (the server then
+        // re-flips us to the amber waiting badge via dm_call_waiting).
+        notifyWaitingChanged();
     }
 
     function endDmCall() {
@@ -3202,6 +3261,9 @@
         // joins this call (Discord behavior).
         S.incomingCall = { callerId: data.caller_id, callerUsername: data.caller_username, dmChannelId: data.dm_channel_id };
         showIncomingCall(S.incomingCall);
+        // The DM-strip indicator mirrors call state from ANY view — a fresh
+        // ring is the "calling" state for the callee, so update it now.
+        notifyWaitingChanged();
         // Play the user's custom ringtone (loops until answered / 30s timeout).
         playRingtone(true);
         // Local safety net: even if the caller's dm_call_waiting is never
@@ -3210,9 +3272,16 @@
         clearCalleeRingTimer();
         S._calleeRingTimer = setTimeout(function () {
             if (S.incomingCall && S.incomingCall.dmChannelId === data.dm_channel_id && !S.incomingCall.waiting) {
-                handleDmCallWaiting({ dm_channel_id: data.dm_channel_id });
+                // Pass the caller identity so the local fallback persists the
+                // correct waiting marker even if the server's dm_call_waiting
+                // never arrives (e.g. the caller's tab died).
+                handleDmCallWaiting({
+                    dm_channel_id: data.dm_channel_id,
+                    caller_id: S.incomingCall.callerId,
+                    caller_username: S.incomingCall.callerUsername,
+                });
             }
-        }, 30000);
+        }, S.ringTimeoutMs);
     }
 
     function clearCalleeRingTimer() {
@@ -3240,6 +3309,11 @@
             }
             var acceptBtn = el('incoming-call-accept');
             if (acceptBtn) acceptBtn.textContent = 'Join';
+            // Someone is waiting for us — the indicator must NOT be dismissible,
+            // so hide the Decline button (it only stops the ringing, and the
+            // ringing already stopped). It returns in showIncomingCall().
+            var declineBtn = el('incoming-call-decline');
+            if (declineBtn) declineBtn.style.display = 'none';
             // Persist the waiting marker: the CALLER is the one waiting for us.
             S.waitingCalls[data.dm_channel_id] = {
                 waitingUserId: data.caller_id,
@@ -3323,6 +3397,23 @@
             stopRingtone();
             showToast(isDecline ? 'Call declined.' : 'Call ended.');
             playSound('leave');
+            notifyWaitingChanged();
+        }
+        // The call is fully over (not a decline, and we never joined): the
+        // waiter is gone, so drop any persisted waiting marker for this
+        // channel even without an active call — otherwise the indicator would
+        // linger until the next conversation reload.
+        if (!isDecline && !S.dmCallActive && S.waitingCalls[data.dm_channel_id]) {
+            delete S.waitingCalls[data.dm_channel_id];
+            if (typeof dmConversations !== 'undefined' && dmConversations) {
+                dmConversations.forEach(function (c) {
+                    if (c && c.dm_channel_id === data.dm_channel_id) {
+                        c.waiting_user_id = null;
+                        c.waiting_username = '';
+                    }
+                });
+            }
+            notifyWaitingChanged();
         }
         if (S.dmCallActive && S.dmChannelId === data.dm_channel_id) {
             var wasConnected = S.connected;
@@ -3371,6 +3462,39 @@
                 }
             }
         }
+    }
+
+    // The person who was waiting for us is gone (left the room, closed the
+    // tab, their connection dropped and they never came back, or the server
+    // restarted). Remove the waiting marker and any waiting-state incoming
+    // bar so the indicator can't linger — the call is no longer joinable.
+    function handleDmWaitingCleared(data) {
+        var ch = data && data.dm_channel_id;
+        if (!ch) return;
+        var had = !!S.waitingCalls[ch];
+        if (S.waitingCalls[ch]) delete S.waitingCalls[ch];
+        // If the incoming bar was showing the waiting state for this channel,
+        // close it too — there is nobody waiting anymore.
+        if (S.incomingCall && S.incomingCall.dmChannelId === ch) {
+            var wasWaiting = !!S.incomingCall.waiting;
+            if (wasWaiting) {
+                S.incomingCall = null;
+                hideIncomingCall();
+                stopRingtone();
+                playSound('leave');
+            }
+        }
+        // Keep dmConversations in sync so a later syncWaitingCalls() rebuild
+        // doesn't resurrect the stale marker.
+        if (typeof dmConversations !== 'undefined' && dmConversations) {
+            dmConversations.forEach(function (c) {
+                if (c && c.dm_channel_id === ch) {
+                    c.waiting_user_id = null;
+                    c.waiting_username = '';
+                }
+            });
+        }
+        if (had) notifyWaitingChanged();
     }
 
     // ------------------------------------------------------------------
@@ -4837,6 +4961,8 @@
         }
         var acceptBtn = el('incoming-call-accept');
         if (acceptBtn) acceptBtn.textContent = 'Accept';
+        var declineBtn = el('incoming-call-decline');
+        if (declineBtn) declineBtn.style.display = '';
     }
 
     function hideIncomingCall() {
