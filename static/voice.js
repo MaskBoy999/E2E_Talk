@@ -155,6 +155,7 @@
         healAndRejoin: healAndRejoin,
         setMemberVolume: setMemberVolume,
         ownerControl: ownerControl,
+        callMemberFromVoice: callMemberFromVoice,
         startDmCall: startDmCall,
         acceptDmCall: acceptDmCall,
         declineDmCall: declineDmCall,
@@ -2926,10 +2927,54 @@
             .catch(function () { return false; });
     }
 
+    // Find the existing DM conversation with `uid`, or create one via the
+    // get-or-create DM endpoint (friends only). Resolves to the conversation
+    // object (with dm_channel_id) or null. The new conversation is cached into
+    // dmConversations so the DM list shows it and future lookups hit locally.
+    function getOrCreateDmChannelId(uid) {
+        if (typeof dmConversations !== 'undefined' && dmConversations) {
+            var found = dmConversations.find(function (c) { return c.other_user_id === uid; });
+            if (found && found.dm_channel_id) return Promise.resolve(found);
+        }
+        return authFetch('/api/dm/' + encodeURIComponent(uid), { method: 'POST' })
+            .then(function (res) { return res.ok ? res.json() : null; })
+            .then(function (data) {
+                if (!data || !data.id) return null;
+                if (typeof dmConversations !== 'undefined' && dmConversations) {
+                    var existing = dmConversations.find(function (c) { return c.dm_channel_id === data.id; });
+                    if (!existing) {
+                        existing = { dm_channel_id: data.id, other_user_id: uid, other_username: '', other_public_key: null };
+                        dmConversations.push(existing);
+                    }
+                    return existing;
+                }
+                return { dm_channel_id: data.id, other_user_id: uid, other_username: '' };
+            })
+            .catch(function () { return null; });
+    }
+
+    // Call a member found in a server voice channel (member row or channel-list
+    // chip). Finds/creates their DM, then starts a DM call — the current server
+    // room is left automatically by startDmCall, and if the callee accepts they
+    // leave the voice channel too and join this DM call.
+    function callMemberFromVoice(uid, username) {
+        if (!uid || uid === getSelfId()) return;
+        getOrCreateDmChannelId(uid).then(function (conv) {
+            if (!conv || !conv.dm_channel_id) {
+                showToast('Could not start a call — you may not be friends with that user.');
+                return;
+            }
+            var name = username || '';
+            if (conv.other_username) name = conv.other_username;
+            startDmCall(conv.dm_channel_id, uid, name);
+        });
+    }
+
     async    function startDmCall(dmChannelId, partnerId, partnerUsername) {
         ensureAudioCtx();
-        // If we're already in a server room, leave it first
-        if (S.connected && S.roomType === 'server') {
+        // If we're already in a room (server voice channel OR another DM
+        // call), leave it first — a DM call is exclusive like a voice channel.
+        if (S.connected && S.roomType) {
             leaveVoice();
         }
         S.roomType = 'dm';
@@ -3023,7 +3068,10 @@
         // to resume it → the remote audio graph is connected to a suspended
         // context → total silence on the callee side.
         ensureAudioCtx();
-        if (S.connected && S.roomType === 'server') {
+        // Accepting always leaves the CURRENT room first — whether that's a
+        // server voice channel or another DM call (Discord-style: accepting a
+        // new call moves you out of the old one).
+        if (S.connected && S.roomType) {
             leaveVoice();
         }
         S.roomType = 'dm';
@@ -3139,11 +3187,19 @@
             joinWaitingCall(data.dm_channel_id, data.caller_id, data.caller_username);
             return;
         }
-        if (S.dmCallActive || S.connected) {
-            // Already busy — let the caller know we can't join
-            send({ type: 'dm_call_end', dm_channel_id: data.dm_channel_id });
+        // Muted DM conversation (or the caller muted as a user): the call is
+        // ignored entirely — no bar, no ringtone, no waiting marker. The
+        // caller is auto-declined so they stop ringing and land in the waiting
+        // state (same as a manual decline) instead of ringing for 30s.
+        var mutedConv = (typeof isUserMuted === 'function' && isUserMuted(data.caller_id)) ||
+            (typeof isDmMuted === 'function' && isDmMuted(data.dm_channel_id));
+        if (mutedConv) {
+            send({ type: 'dm_call_end', dm_channel_id: data.dm_channel_id, reason: 'declined' });
             return;
         }
+        // Show the incoming bar even when we're busy (in a server voice
+        // channel or another DM call) — accepting leaves the current room and
+        // joins this call (Discord behavior).
         S.incomingCall = { callerId: data.caller_id, callerUsername: data.caller_username, dmChannelId: data.dm_channel_id };
         showIncomingCall(S.incomingCall);
         // Play the user's custom ringtone (loops until answered / 30s timeout).
@@ -4108,6 +4164,11 @@
         html += '<span class="voice-member-name"' + (nameStyle ? ' style="' + nameStyle + '"' : '') + '>' + esc(name) + (local.is_owner ? ' 👑' : '') + (isSelf ? ' (you)' : '') + '</span>';
         html += '<span class="voice-member-status">' + memberBadges(local, 'vm') + '</span>';
         html += '</div></div>';
+        // Call button on every OTHER member's row — starts a DM call with them
+        // (they leave the voice channel if they accept).
+        if (!isSelf) {
+            html += '<button class="voice-member-call" data-uid="' + esc(uid) + '" title="Call ' + esc(name) + '" aria-label="Call ' + esc(name) + '">📞</button>';
+        }
         html += '<div class="voice-member-media">';
         html += '<video class="remote-video-tile" data-uid="' + esc(uid) + '" data-kind="camera" data-self="' + (isSelf ? '1' : '0') + '" autoplay playsinline muted style="display:' + (local.camera ? 'block' : 'none') + '"></video>';
         html += '<video class="remote-video-tile" data-uid="' + esc(uid) + '" data-kind="screen" data-self="' + (isSelf ? '1' : '0') + '" autoplay playsinline muted style="display:' + (local.screen ? 'block' : 'none') + '"></video>';
@@ -4192,6 +4253,18 @@
                 if (!row) return;
                 var uid = row.getAttribute('data-uid');
                 if (uid && typeof openProfileModal === 'function') openProfileModal(uid);
+            });
+        });
+        // Call button → start a DM call with that member (they leave the voice
+        // channel when they accept).
+        list.querySelectorAll('.voice-member-call').forEach(function (btn) {
+            btn.addEventListener('click', function (e) {
+                e.preventDefault();
+                e.stopPropagation();
+                var uid = btn.getAttribute('data-uid');
+                if (!uid) return;
+                var m = S.members[uid];
+                callMemberFromVoice(uid, m ? (m.username || '') : '');
             });
         });
         wireVoiceMedia(list);
@@ -5507,10 +5580,14 @@
                 if (m.screen) badges += '<span class="vc-badge" title="Screen">🖥️</span>';
 
                 var chipStyle = memberNameStyle(m.user_id);
+                var isSelfChip = m.user_id === getSelfId();
                 html += '<div class="voice-chip-row' + (speaking ? ' speaking' : '') + '" data-uid="' + esc(m.user_id) + '" title="' + esc(title) + '">' +
                     avatar +
                     '<span class="voice-chip-name"' + (chipStyle ? ' style="' + chipStyle + '"' : '') + '>' + esc(name) + '</span>' +
                     (badges ? '<span class="voice-chip-badges">' + badges + '</span>' : '') +
+                    // Call button on every OTHER member's chip — starts a DM
+                    // call with them right from the channel list.
+                    (!isSelfChip ? '<button class="voice-chip-call" data-uid="' + esc(m.user_id) + '" title="Call ' + esc(name) + '" aria-label="Call ' + esc(name) + '">📞</button>' : '') +
                     '</div>';
             });
             chipWrap.innerHTML = html;
@@ -5523,6 +5600,16 @@
                     if (!row) return;
                     var uid = row.getAttribute('data-uid');
                     if (uid && typeof openProfileModal === 'function') openProfileModal(uid);
+                });
+            });
+            // Click a chip's call button → DM call with that member.
+            chipWrap.querySelectorAll('.voice-chip-call').forEach(function (btn) {
+                btn.addEventListener('click', function (e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    var uid = btn.getAttribute('data-uid');
+                    if (!uid) return;
+                    callMemberFromVoice(uid, '');
                 });
             });
         });

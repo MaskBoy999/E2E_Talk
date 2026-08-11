@@ -6857,6 +6857,46 @@ video.remote-video-tile.mirrored {
 .vm-badge.locked { color: #ef5350; }
 .voice-member-empty { color: var(--text-muted, #888); padding: 12px; text-align: center; }
 
+/* Call button on a voice-channel member row — starts a DM call with them */
+.voice-member-call {
+    flex: 0 0 auto;
+    background: rgba(255, 255, 255, 0.06);
+    border: none;
+    border-radius: 50%;
+    width: 30px; height: 30px;
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: #23a55a;
+    transition: background 0.12s ease;
+    flex-shrink: 0;
+}
+.voice-member-call:hover { background: rgba(35, 165, 90, 0.25); }
+
+/* Call button on a channel-list voice chip — visible on hover (always on touch) */
+.voice-chip-call {
+    flex: 0 0 auto;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    font-size: 11px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 1px 3px;
+    opacity: 0;
+    transition: opacity 0.12s ease;
+    color: #23a55a;
+    flex-shrink: 0;
+}
+.voice-chip-row:hover .voice-chip-call,
+.voice-chip-call:focus { opacity: 1; }
+@media (hover: none) {
+    .voice-chip-call { opacity: 1; }
+}
+
 /* Per-member media: camera + screen share side by side.
    Tiles fit the HEIGHT of the bubble and scale width proportionally (the
    video element keeps its aspect ratio via width:auto), capped by max-width
