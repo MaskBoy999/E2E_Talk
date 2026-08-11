@@ -4201,12 +4201,14 @@
         var lists = [el('voice-popup-members'), el('dm-call-body')];
         lists.forEach(function (l) {
             if (!l) return;
-            l.querySelectorAll('.remote-video-tile, .voice-feed-load-btn, .voice-feed-unload-btn').forEach(function (t) { t.remove(); });
+            l.querySelectorAll('.remote-video-tile, .voice-tile-slot, .voice-feed-load-btn, .voice-feed-unload-btn').forEach(function (t) { t.remove(); });
         });
     }
 
     function removeRemoteTile(uid) {
         document.querySelectorAll('.remote-video-tile[data-uid="' + uid + '"]').forEach(function (t) { t.remove(); });
+        // Rotation slots wrap their tile — drop them with it.
+        document.querySelectorAll('.voice-tile-slot[data-uid="' + uid + '"]').forEach(function (s) { s.remove(); });
         ['camera', 'screen'].forEach(function (k) {
             var key = feedKey(uid, k);
             document.querySelectorAll('.voice-feed-load-btn[data-feed="' + key + '"], .voice-feed-unload-btn[data-feed="' + key + '"]').forEach(function (b) { b.remove(); });
@@ -4311,10 +4313,26 @@
     // the volume menu.
     function attachRemoteVideo(video, uid, kind, stream) {
         if (!video) return;
+        // Feed buttons always live in the media row (not inside a rotation
+        // slot), so when the tile is currently wrapped look the row up.
         var parent = video.parentElement;
+        if (parent && parent.classList && parent.classList.contains('voice-tile-slot')) {
+            parent = parent.parentElement;
+        }
         var key = feedKey(uid, kind);
         var holder = parent ? parent.querySelector('.voice-feed-load-btn[data-feed="' + key + '"]') : null;
         var unloadBtn = parent ? parent.querySelector('.voice-feed-unload-btn[data-feed="' + key + '"]') : null;
+        // The tile element stays in the DOM with display:none when the member's
+        // feed is OFF — and the voice_state flip can arrive before the RTP
+        // track ends, so the stream can STILL be present here. Never show
+        // Load/Unload over a hidden tile: the button would keep its stale
+        // position and overlap the remaining visible feed's buttons ("stopping
+        // the screen share overlaps the camera's Load/Unload buttons").
+        if (!video.offsetParent) {
+            if (holder) holder.style.display = 'none';
+            if (unloadBtn) unloadBtn.style.display = 'none';
+            return;
+        }
         var hold = !!stream && !isFeedLoaded(uid, kind);
         if (hold) {
             try { if (video.srcObject) video.srcObject = null; } catch (_) {}
@@ -4787,49 +4805,105 @@
         var st = S.tileTransforms[uid + ':' + kind];
         var rot = st && st.rot ? ((st.rot % 360) + 360) % 360 : 0;
         var css = tileTransformCss(uid, kind);
-        video.style.transform = css || '';
-        // A 90°/270° rotation flips the CONTENT's aspect but leaves the layout
-        // box at its original dimensions — the rotated feed then overflows the
-        // tile and sticks out over the bottom/edges ("goes over the bottom in
-        // the dm call"). Swap the layout width/height to match the rotated
-        // content, scaled down to fit the container when needed. Resetting the
-        // inline dims FIRST makes the swap idempotent (offsetWidth/Height must
-        // reflect the CSS-driven box, not the previous swap).
         var sideways = rot === 90 || rot === 270;
-        clearInlineDims(video);
-        if (!sideways) return;
         var fsWrap = video.closest ? video.closest('.voice-fs-wrap') : null;
+        var slot = video.parentElement && video.parentElement.classList.contains('voice-tile-slot')
+            ? video.parentElement : null;
         if (fsWrap) {
             // Fullscreen: the wrap fills the screen (W×H) and its CSS forces the
-            // video to 100%×100% with !important, so the rotated element keeps
-            // the screen's aspect and gets cut off at the top/bottom. Swap the
+            // video to 100%×100% with !important, so a rotated element keeps the
+            // screen's aspect and gets cut off at the top/bottom. Swap the
             // element to H×W (with !important so it beats the wrap rules) —
             // after the 90° rotation the content then fills the screen exactly.
+            clearInlineDims(video);
+            if (!sideways) {
+                video.style.transform = css || '';
+                return;
+            }
             var fw = fsWrap.clientWidth || window.innerWidth;
             var fh = fsWrap.clientHeight || window.innerHeight;
             if (fw > 0 && fh > 0) {
                 setDimImportant(video, 'width', Math.round(fh) + 'px');
                 setDimImportant(video, 'height', Math.round(fw) + 'px');
             }
+            video.style.transform = css || '';
             return;
         }
+        var inMedia = video.parentElement && (
+            video.parentElement.classList.contains('voice-member-media') ||
+            video.parentElement.classList.contains('dm-call-tile-media'));
+        if (!sideways) {
+            // Back to normal: unwrap any rotation slot (the flex row reserves
+            // the video's natural footprint again) and clear the swapped dims.
+            if (slot && slot.parentElement) {
+                slot.parentElement.insertBefore(video, slot);
+                slot.remove();
+            }
+            clearInlineDims(video);
+            video.style.transform = css || '';
+            return;
+        }
+        // 90°/270° rotation. A rotated element's VISUAL box is the transpose of
+        // its LAYOUT box — the flex row reserves the layout box, so the wider
+        // visual sticks out and overlaps the sibling tile (rotated camera over
+        // the screen share and vice versa). Fix: wrap the video in a slot sized
+        // to the ROTATED visual box; the row then reserves the real footprint.
+        if (slot) {
+            // Already wrapped — reuse the slot's size (the video's %-based CSS
+            // height no longer resolves against the row inside the slot).
+            var sVw = parseFloat(slot.style.width);
+            var sVh = parseFloat(slot.style.height);
+            if (sVw > 0 && sVh > 0) {
+                video.style.width = Math.round(sVh) + 'px';
+                video.style.height = Math.round(sVw) + 'px';
+                video.style.maxWidth = 'none';
+                video.style.maxHeight = 'none';
+                video.style.transform = css || '';
+                return;
+            }
+        }
+        if (!inMedia) {
+            // Not in a tile row (e.g. the DM self preview) — plain transform.
+            clearInlineDims(video);
+            video.style.transform = css || '';
+            return;
+        }
+        // Measure the NATURAL (unrotated) size while the video is still a
+        // direct child of the row (height:100% resolves against the row).
+        clearInlineDims(video);
         var bw = video.offsetWidth;
         var bh = video.offsetHeight;
         if (!(bw > 0 && bh > 0)) return;
         var parent = video.parentElement;
         var pw = parent ? parent.clientWidth : 0;
         var ph = parent ? parent.clientHeight : 0;
-        // The rotated box is bh × bw (transposed).
+        // The rotated visual box is bh × bw scaled to fit the container.
         var s = Math.min(1,
             pw > 0 ? pw / bh : 1,
             ph > 0 ? ph / bw : 1);
-        var nw = Math.max(1, Math.round(bh * s));
-        var nh = Math.max(1, Math.round(bw * s));
-        video.style.width = nw + 'px';
-        video.style.height = nh + 'px';
+        // Slot = the rotated (portrait) visual box; the video's layout is the
+        // slot transposed (landscape, so the 16:9 content fills it without
+        // letterboxing) and the rotation turns it into exactly the slot size.
+        var Vw = Math.max(1, Math.round(bh * s));
+        var Vh = Math.max(1, Math.round(bw * s));
+        if (!slot) {
+            slot = document.createElement('div');
+            slot.className = 'voice-tile-slot';
+            slot.setAttribute('data-uid', uid);
+            slot.setAttribute('data-kind', kind);
+            parent.insertBefore(slot, video);
+            slot.appendChild(video);
+        }
+        slot.style.width = Vw + 'px';
+        slot.style.height = Vh + 'px';
+        slot.style.maxWidth = 'none';
+        slot.style.maxHeight = 'none';
+        video.style.width = Vh + 'px';
+        video.style.height = Vw + 'px';
         // Inline dims must beat the tile max-width/max-height caps.
         video.style.maxWidth = 'none';
         video.style.maxHeight = 'none';
+        video.style.transform = css || '';
     }
 
     // Reset any inline layout dims set by a previous rotation swap (including

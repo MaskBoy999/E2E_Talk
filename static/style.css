@@ -6957,6 +6957,33 @@ video.remote-video-tile.mirrored {
     cursor: pointer;
     border: 1px solid var(--bg-border, #2a2a4a);
 }
+
+/* Rotation slot (right-click → View → 90°): when a tile is rotated sideways
+   it is wrapped in a div sized to the ROTATED visual box, so the flex row
+   reserves the real footprint and the rotated feed never overlaps the
+   sibling camera/screen tile. The slot carries the tile look; the video
+   inside is the slot transposed and rotated 90°, filling it exactly. */
+.voice-tile-slot {
+    position: relative;
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    background: #000;
+    border-radius: 8px;
+    border: 1px solid var(--bg-border, #2a2a4a);
+    cursor: pointer;
+}
+.voice-tile-slot .remote-video-tile {
+    flex: 0 0 auto;
+    max-width: none !important;
+    max-height: none !important;
+    object-fit: contain;
+    border: none;
+    border-radius: 0;
+    background: transparent;
+}
 .voice-popup-controls {
     display: flex;
     align-items: center;
