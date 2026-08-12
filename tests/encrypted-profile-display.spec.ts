@@ -137,7 +137,14 @@ test.describe('Encrypted Profile Data — Friend Connection', () => {
             });
             expect(frRes.ok()).toBeTruthy();
 
-            // User A accepts the friend request
+            // User A accepts the friend request. The server returns
+            // from_user_id HMAC-hashed (privacy), so compute B's hash from the
+            // client's e2e_hmac_key to match the request from B.
+            const bHmac = await pageB.evaluate((uid) => {
+                const hk = localStorage.getItem('e2e_hmac_key');
+                if (!hk || !window.E2ECrypto) return null;
+                return E2ECrypto.hmacHex(hk, uid);
+            }, bInfo.user.id);
             const incomingRes = await pageA.request.get(`${BASE}/api/friends/requests/incoming`, {
                 headers: { Authorization: 'Bearer ' + aInfo.token },
             });
@@ -145,7 +152,7 @@ test.describe('Encrypted Profile Data — Friend Connection', () => {
             const requests = await incomingRes.json();
             let accepted = false;
             for (const req of requests) {
-                if (req.from_user_id === bInfo.user.id) {
+                if (req.from_user_id === bHmac) {
                     const acceptRes = await pageA.request.post(`${BASE}/api/friends/requests/accept`, {
                         headers: { Authorization: 'Bearer ' + aInfo.token, 'Content-Type': 'application/json' },
                         data: { request_id: req.id },

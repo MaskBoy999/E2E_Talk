@@ -5263,6 +5263,29 @@ body.show-msg-times .forward-preview .time-hover {
     .sticker-panel-content {
         padding: 6px;
     }
+    /* Incoming call bar: on phones it must fit the viewport — a long caller
+       name previously pushed it past the left edge and it got clipped. Span
+       the width with the name truncated in the middle. */
+    .incoming-call-bar {
+        left: 12px;
+        right: 12px;
+        width: auto;
+        max-width: none;
+        top: 12px;
+        gap: 8px;
+        padding: 10px 12px;
+    }
+    .incoming-call-name {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .incoming-call-btn {
+        padding: 8px 12px;
+        flex-shrink: 0;
+    }
 }
 
 /* Very small screens: further reduce emoji columns */
@@ -7532,10 +7555,17 @@ body.resizing-dm { cursor: ns-resize !important; user-select: none; }
     align-items: center;
     gap: 10px;
     padding: 12px 14px;
+    max-width: min(420px, calc(100vw - 32px));
     background: var(--bg-secondary, #232338);
     border: 1px solid var(--accent, #4fc3f7);
     border-radius: 12px;
     box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+}
+.incoming-call-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 .incoming-call-name { font-size: 14px; font-weight: 600; color: var(--text-primary, #e0e0e0); }
 .incoming-call-btn {

@@ -306,15 +306,18 @@ test.describe('Profile Fixes', () => {
         // The preview should be populated after renderProfileEdit calls updateProfileEditPreview
         const inputName = await page.inputValue('#profile-edit-display-name');
 
-        // Change the input to trigger the live preview listener
-        await page.fill('#profile-edit-display-name', 'PreviewTest_' + ts);
+        // Change the input to trigger the live preview listener. The input is
+        // capped at maxlength=21, so use a name that fits to assert the LIVE
+        // sync itself (a longer name would just be truncated by the input).
+        await page.fill('#profile-edit-display-name', 'Prev_' + String(ts).slice(-10));
+        const typedName = 'Prev_' + String(ts).slice(-10);
 
         // The input listener should update the preview
         const previewName = await page.evaluate(() => {
             const el = document.getElementById('profile-edit-display-name-preview');
             return el ? el.textContent : null;
         });
-        expect(previewName).toBe('PreviewTest_' + ts);
+        expect(previewName).toBe(typedName);
     });
 
     test('login auto-clears stale session', async ({ page }) => {

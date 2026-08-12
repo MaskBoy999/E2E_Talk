@@ -201,6 +201,9 @@
         buildHapticPattern: buildHapticPattern,
         getHapticPattern: getHapticPattern,
         vibrateNotifCue: vibrateNotifCue,
+        audioElementHealthSweep: audioElementHealthSweep,
+        showIncomingCall: showIncomingCall,
+        hideIncomingCall: hideIncomingCall,
         saveSettings: saveSettings,
         updateSettingsLabels: updateSettingsLabels,
         setHapticSetting: function (key, value) {
@@ -2327,6 +2330,39 @@
     document.addEventListener('click', retryRemoteAudioPlay, true);
     document.addEventListener('keydown', retryRemoteAudioPlay, true);
 
+    // ------------------------------------------------------------------
+    // Audio-element health sweep: the decoder watchdog heals a STALLED
+    // decoder (0 frames decoded), but "audio got messed up / silent until I
+    // rejoin" can also be the OUTPUT path — an <audio> element that is
+    // paused (autoplay blocked, play() raced a srcObject swap) or stuck in
+    // HAVE_NOTHING (the srcObject swap happened while the element was
+    // loading). Rejoin fixes it only because the whole graph is rebuilt, so
+    // re-create the same effect in place: re-attach the live stream to a
+    // stuck element (which restarts playback from the live decoder, not the
+    // beginning) and re-run play(). Runs every 2s while connected.
+    function audioElementHealthSweep() {
+        if (!S.connected) return;
+        Object.keys(S.remoteAudioEls).forEach(function (uid) {
+            var stream = S.remoteStreams[uid] && S.remoteStreams[uid].audio;
+            (S.remoteAudioEls[uid] || []).forEach(function (el) {
+                try {
+                    if (el.srcObject && stream) {
+                        if (el.paused) {
+                            el.play().catch(function () {});
+                        } else if (el.readyState === 0 /* HAVE_NOTHING */) {
+                            // Element never got data — re-attach the live
+                            // stream to kick the decoder pipeline.
+                            el.srcObject = null;
+                            el.srcObject = stream;
+                            el.play().catch(function () {});
+                        }
+                    }
+                } catch (_) {}
+            });
+        });
+    }
+    setInterval(audioElementHealthSweep, 2000);
+
     function setMemberVolume(uid, pct) {
         try { localStorage.setItem('voice_volume_' + uid, String(pct)); } catch (_) {}
         if (S.remoteAudioEls[uid]) applyRemoteVolume(uid);
@@ -3146,6 +3182,11 @@
         S.dmCallAnswered = false;
         S.popupOpen = false;
         S.callWaiting = false;
+        // Every call entry starts with the panel state fresh: hideDmPanel()
+        // sets dmPanelOpen=false on leave and it was never reset, so a user
+        // who left one call would never see the panel in ANY later call
+        // (accept/join showed nothing).
+        S.dmPanelOpen = undefined;
         // Await the partner's key BEFORE joining — otherwise the signaling E2EE
         // drops every offer/answer and the call never connects.
         await ensureDmCallKey(partnerId);
@@ -3262,6 +3303,9 @@
         S.dmCallActive = true;
         S.dmCallAnswered = true;
         S.callWaiting = false;
+        // Every call entry starts with the panel state fresh (see startDmCall)
+        // so accepting after a previous leave still shows the panel.
+        S.dmPanelOpen = undefined;
         // The call is live the moment we accept — drop any persisted waiting
         // marker (both places) so syncWaitingCalls() can't resurrect it.
         clearWaitingMarkerForChannel(c.dmChannelId);
@@ -3353,6 +3397,8 @@
         S.dmCallActive = true;
         S.dmCallAnswered = false;
         S.popupOpen = false;
+        // Every call entry starts with the panel state fresh (see startDmCall).
+        S.dmPanelOpen = undefined;
         // Joining the waiting room means WE are the one waiting until the
         // partner shows up (voice_joined with otherJoined → markDmCallAnswered
         // flips it off the moment they connect). Keeps the bar/mini-bar honest:

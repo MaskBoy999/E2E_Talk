@@ -81,7 +81,6 @@ test.describe('Blob save failure — what survives cookie clear + re-login', () 
             headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
             data: {
                 invite_code: code,
-                invite_code: inviteCode,
                 encrypted_name: encName.ciphertext,
                 name_nonce: encName.nonce,
                 channel_encrypted_name: encChName.ciphertext,

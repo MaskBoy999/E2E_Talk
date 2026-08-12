@@ -492,6 +492,14 @@ async function fetchDmConversationProfile(userId, dmChannelId) {
         updateExistingMessageStyles(userId);
         updateMemberListItem(userId);
         refreshDmProfileDisplay(userId);
+        // Kick the async pic load NOW so ANY already-rendered placeholder rows
+        // (DM list rendered before this fetch landed) get their image injected
+        // when the decrypt completes — no conversation click required. Without
+        // this, a slow profile fetch left the DM-list avatar as an initial
+        // until the sidebar happened to re-render.
+        if (decrypted.profile_picture_file_id && decrypted.profile_picture_file_key) {
+            getProfilePicUrl(decrypted.profile_picture_file_id, userId);
+        }
     } catch (e) {}
 }
 
@@ -12002,7 +12010,10 @@ function renderDmSidebar() {
                 : '<span class="dm-waiting-dot" title="In a call — waiting for the other person">&#128222;</span>';
         }
         html += '<div class="channel-item dm-item" data-dm-id="' + c.dm_channel_id + '" data-user-id="' + escapeAttr(c.other_user_id) + '" data-username="' + escapeAttr(c.other_username) + '">' +
-            '<div class="dm-avatar' + (dmPicCacheKey ? ' profile-pic-target' : '') + '"' + (dmPicCacheKey ? ' data-profile-pic-load="' + dmPicCacheKey + '"' : '') + '>' + dmAvatarHtml + '</div>' +
+            // data-profile-pic-load only when the URL isn't cached yet — an
+            // already-loaded avatar must not be marked as "pending load"
+            // (it would keep a stale loading pulse over the rendered image).
+            '<div class="dm-avatar' + (dmPicCacheKey ? ' profile-pic-target' : '') + '"' + (dmPicCacheKey && !dmPicUrl ? ' data-profile-pic-load="' + dmPicCacheKey + '"' : '') + '>' + dmAvatarHtml + '</div>' +
             '<div class="dm-info">' +
                 '<div class="dm-name' + (dmColor ? ' has-glow' : '') + '"' + (dmColor ? ' style="color:' + dmColor + ';text-shadow:' + getDisplayNameTextShadow(dmColor, dmBorderColor) + '"' : '') + '>' + escapeHtml(displayName) + '</div>' +
                 '<div class="dm-preview' + (streamerMode ? ' streamer-hidden-preview' : '') + '">' + escapeHtml(preview) + '</div>' +
@@ -20011,6 +20022,22 @@ async function uploadCurrentProfileToConversations() {
     if (!myProfile) return;
     var ident = E2ECrypto.getIdentityKeyPair();
     if (!ident) return;
+    // Refresh myProfile from the AUTHORITATIVE server copy before building the
+    // payload. A stale in-memory myProfile — e.g. a second device whose boot
+    // decrypt hadn't finished, or one that booted before this device saved a
+    // banner/PFP — would otherwise OVERWRITE the good per-conversation
+    // profiles with a payload missing those fields. That is exactly how a
+    // user's banner silently disappeared for everyone else until they re-saved.
+    try { await loadMyProfile(); } catch (_) {}
+    if (!myProfile) return;
+    // If the server says we HAVE a banner/PFP but we couldn't recover its raw
+    // key (own-profile decrypt failed — e.g. identity key not restored yet),
+    // do NOT re-upload: the payload would null out the keys other users
+    // already hold in the conversation profiles.
+    if ((myProfile.profile_banner_file_id && !myProfile.profile_banner_file_key) ||
+        (myProfile.profile_picture_file_id && !myProfile.profile_picture_file_key)) {
+        return;
+    }
     var profileData = {
         display_name: myProfile.display_name || (user && user.display_name) || (user && user.username) || '',
         nickname: myProfile.nickname || '',
