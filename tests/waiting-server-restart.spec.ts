@@ -148,7 +148,7 @@ test.describe('Server restart clears stale DM-call waiting state', () => {
         await page2.reload();
         await page2.waitForSelector('.dm-item, [data-dm-id]', { timeout: 15000 });
         await page2.waitForTimeout(1500);
-        const dots = await page2.evaluate(() => document.querySelectorAll('.dm-waiting-dot').length);
+        const dots = await page2.evaluate(() => document.querySelectorAll('.dm-waiting-dot, .dm-for-us-dot').length);
         expect(dots).toBe(0);
         const bannerHidden = await page2.evaluate(() => {
             const b = document.getElementById('dm-waiting-banner');

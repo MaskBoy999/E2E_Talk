@@ -19,6 +19,7 @@
                 <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z"/></svg>
                 <span class="badge" id="dm-strip-badge" style="display:none"></span>
                 <span class="dm-strip-waiting" id="dm-strip-waiting" style="display:none" title="Call waiting">&#128222;</span>
+                <span class="dm-strip-for-us" id="dm-strip-for-us" style="display:none" title="Someone is waiting for you to join their call">&#128222;</span>
             </div>
             <div class="mentions-strip-btn" id="mentions-strip-btn" title="Notifications">
                 <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.89 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>
@@ -505,6 +506,50 @@
                     <p class="settings-hint">When enabled, the notification sound is silenced while you are actively viewing this tab — it only plays when the app is in the background (e.g. another tab or window is focused).</p>
                 </div>
                 <div class="settings-group" style="margin-top:16px;border-top:1px solid var(--bg-border);padding-top:16px">
+                    <h4>Haptic Alerts <span style="color:var(--text-muted);font-weight:400;font-size:12px">(mobile)</span></h4>
+                    <p class="settings-hint">Vibrate when a notification arrives, independently configurable for the notification box and for DM conversations. <strong>Pulse</strong> is how long each buzz lasts (intensity), <strong>Gap</strong> the pause between buzzes, <strong>Pulses</strong> how many buzzes per cue.</p>
+
+                    <div style="margin-top:8px;font-size:12px;color:var(--text-secondary);font-weight:600">Notification box <span style="color:var(--text-muted,#888);font-weight:400">(mentions &amp; replies)</span></div>
+                    <label style="display:flex;align-items:center;gap:8px;font-size:14px;color:var(--text-primary);cursor:pointer;margin-top:4px">
+                        <input type="checkbox" id="notif-haptic-inbox" style="width:16px;height:16px;accent-color:var(--accent,#5865f2)">
+                        Vibrate on new mentions &amp; replies
+                    </label>
+                    <div class="settings-slider-row">
+                        <input type="range" id="notif-haptic-inbox-pulse" min="10" max="500" step="10" value="120" class="settings-slider">
+                        <span class="settings-slider-value" id="notif-haptic-inbox-pulse-val">120ms</span>
+                    </div>
+                    <div class="settings-slider-row">
+                        <input type="range" id="notif-haptic-inbox-gap" min="10" max="500" step="10" value="90" class="settings-slider">
+                        <span class="settings-slider-value" id="notif-haptic-inbox-gap-val">90ms</span>
+                    </div>
+                    <div class="settings-slider-row">
+                        <input type="range" id="notif-haptic-inbox-pulses" min="1" max="5" step="1" value="2" class="settings-slider">
+                        <span class="settings-slider-value" id="notif-haptic-inbox-pulses-val">2×</span>
+                    </div>
+                    <button type="button" id="notif-haptic-inbox-test" style="margin-top:8px;border:1px solid var(--bg-border,#2a2a4a);background:var(--bg-tertiary,#23233c);color:var(--text-primary,#fff);border-radius:6px;padding:5px 12px;cursor:pointer;font-size:12px">Test pattern</button>
+                    <button type="button" id="notif-haptic-inbox-reset" style="margin-top:8px;margin-left:6px;border:1px solid var(--bg-border,#2a2a4a);background:var(--bg-tertiary,#23233c);color:var(--text-muted,#aaa);border-radius:6px;padding:5px 12px;cursor:pointer;font-size:12px">Reset</button>
+
+                    <div style="margin-top:16px;font-size:12px;color:var(--text-secondary);font-weight:600">DM conversations</div>
+                    <label style="display:flex;align-items:center;gap:8px;font-size:14px;color:var(--text-primary);cursor:pointer;margin-top:4px">
+                        <input type="checkbox" id="notif-haptic-dm" style="width:16px;height:16px;accent-color:var(--accent,#5865f2)">
+                        Vibrate on new DM messages
+                    </label>
+                    <div class="settings-slider-row">
+                        <input type="range" id="notif-haptic-dm-pulse" min="10" max="500" step="10" value="80" class="settings-slider">
+                        <span class="settings-slider-value" id="notif-haptic-dm-pulse-val">80ms</span>
+                    </div>
+                    <div class="settings-slider-row">
+                        <input type="range" id="notif-haptic-dm-gap" min="10" max="500" step="10" value="60" class="settings-slider">
+                        <span class="settings-slider-value" id="notif-haptic-dm-gap-val">60ms</span>
+                    </div>
+                    <div class="settings-slider-row">
+                        <input type="range" id="notif-haptic-dm-pulses" min="1" max="5" step="1" value="2" class="settings-slider">
+                        <span class="settings-slider-value" id="notif-haptic-dm-pulses-val">2×</span>
+                    </div>
+                    <button type="button" id="notif-haptic-dm-test" style="margin-top:8px;border:1px solid var(--bg-border,#2a2a4a);background:var(--bg-tertiary,#23233c);color:var(--text-primary,#fff);border-radius:6px;padding:5px 12px;cursor:pointer;font-size:12px">Test pattern</button>
+                    <button type="button" id="notif-haptic-dm-reset" style="margin-top:8px;margin-left:6px;border:1px solid var(--bg-border,#2a2a4a);background:var(--bg-tertiary,#23233c);color:var(--text-muted,#aaa);border-radius:6px;padding:5px 12px;cursor:pointer;font-size:12px">Reset</button>
+                </div>
+                <div class="settings-group" style="margin-top:16px;border-top:1px solid var(--bg-border);padding-top:16px">
                     <h4>Muted Servers &amp; Channels</h4>
                     <p class="settings-hint">Right-click a channel in the sidebar to mute or unmute it. Muted servers and channels will not trigger notifications or update badges.</p>
                     <div class="muted-list" id="muted-list">
@@ -623,6 +668,66 @@
                         Use the browser's echo cancellation on the mic
                     </label>
                     <p class="settings-hint">Off by default — Chrome's AEC can gate the mic when it hears the same sound it is also playing (e.g. testing on one device with two windows, or a voice changer/external mixer). Turn it on if the other side hears their own voice echoed back.</p>
+                </div>
+                <div class="settings-group">
+                    <h4>Haptics</h4>
+                    <label style="display:flex;align-items:center;gap:8px;font-size:14px;color:var(--text-primary);cursor:pointer">
+                        <input type="checkbox" id="voice-haptic-incoming" style="width:16px;height:16px;accent-color:var(--accent,#5865f2)">
+                        Vibrate on incoming calls
+                    </label>
+                    <label style="display:flex;align-items:center;gap:8px;font-size:14px;color:var(--text-primary);cursor:pointer;margin-top:8px">
+                        <input type="checkbox" id="voice-haptic-waiting" style="width:16px;height:16px;accent-color:var(--accent,#5865f2)">
+                        Vibrate when a call becomes waiting
+                    </label>
+                    <p class="settings-hint">Mobile only. The first vibrates the moment someone calls you, so you notice even on silent; while the call is unanswered it repeats once per ringtone cycle. The second is a short buzz when the ring times out and the call moves to the waiting room (the green ring badge flips to red). Both work even if the screen is off or you're in another tab. Tune each cue below — <strong>Pulse</strong> is how long each buzz lasts (intensity), <strong>Gap</strong> the pause between buzzes, <strong>Pulses</strong> how many buzzes per cue.</p>
+
+                    <div style="margin-top:14px;font-size:12px;color:var(--text-secondary);font-weight:600">Incoming call pattern <span style="color:var(--text-muted,#888);font-weight:400">(repeats once per ringtone cycle while ringing)</span></div>
+                    <div class="settings-slider-row">
+                        <input type="range" id="voice-haptic-ring-pulse" min="10" max="500" step="10" value="150" class="settings-slider">
+                        <span class="settings-slider-value" id="voice-haptic-ring-pulse-val">150ms</span>
+                    </div>
+                    <div class="settings-slider-row">
+                        <input type="range" id="voice-haptic-ring-gap" min="10" max="500" step="10" value="80" class="settings-slider">
+                        <span class="settings-slider-value" id="voice-haptic-ring-gap-val">80ms</span>
+                    </div>
+                    <div class="settings-slider-row">
+                        <input type="range" id="voice-haptic-ring-pulses" min="1" max="5" step="1" value="2" class="settings-slider">
+                        <span class="settings-slider-value" id="voice-haptic-ring-pulses-val">2×</span>
+                    </div>
+                    <button type="button" id="voice-haptic-ring-test" style="margin-top:8px;border:1px solid var(--bg-border,#2a2a4a);background:var(--bg-tertiary,#23233c);color:var(--text-primary,#fff);border-radius:6px;padding:5px 12px;cursor:pointer;font-size:12px">Test pattern</button>
+                    <button type="button" id="voice-haptic-ring-reset" style="margin-top:8px;margin-left:6px;border:1px solid var(--bg-border,#2a2a4a);background:var(--bg-tertiary,#23233c);color:var(--text-muted,#aaa);border-radius:6px;padding:5px 12px;cursor:pointer;font-size:12px">Reset</button>
+
+                    <div style="margin-top:16px;font-size:12px;color:var(--text-secondary);font-weight:600">Waiting pattern <span style="color:var(--text-muted,#888);font-weight:400">(when the ring times out)</span></div>
+                    <div class="settings-slider-row">
+                        <input type="range" id="voice-haptic-waiting-pulse" min="10" max="500" step="10" value="60" class="settings-slider">
+                        <span class="settings-slider-value" id="voice-haptic-waiting-pulse-val">60ms</span>
+                    </div>
+                    <div class="settings-slider-row">
+                        <input type="range" id="voice-haptic-waiting-gap" min="10" max="500" step="10" value="40" class="settings-slider">
+                        <span class="settings-slider-value" id="voice-haptic-waiting-gap-val">40ms</span>
+                    </div>
+                    <div class="settings-slider-row">
+                        <input type="range" id="voice-haptic-waiting-pulses" min="1" max="5" step="1" value="2" class="settings-slider">
+                        <span class="settings-slider-value" id="voice-haptic-waiting-pulses-val">2×</span>
+                    </div>
+                    <button type="button" id="voice-haptic-waiting-test" style="margin-top:8px;border:1px solid var(--bg-border,#2a2a4a);background:var(--bg-tertiary,#23233c);color:var(--text-primary,#fff);border-radius:6px;padding:5px 12px;cursor:pointer;font-size:12px">Test pattern</button>
+                    <button type="button" id="voice-haptic-waiting-reset" style="margin-top:8px;margin-left:6px;border:1px solid var(--bg-border,#2a2a4a);background:var(--bg-tertiary,#23233c);color:var(--text-muted,#aaa);border-radius:6px;padding:5px 12px;cursor:pointer;font-size:12px">Reset</button>
+
+                    <div style="margin-top:16px;font-size:12px;color:var(--text-secondary);font-weight:600">Battery-friendly <span style="color:var(--text-muted,#888);font-weight:400">(skip repeating buzzes to save battery)</span></div>
+                    <label style="display:flex;align-items:center;gap:8px;font-size:14px;color:var(--text-primary);cursor:pointer">
+                        <input type="checkbox" id="voice-haptic-battery-friendly" style="width:16px;height:16px;accent-color:var(--accent,#5865f2)">
+                        Skip repeating ring buzzes while the device is low on battery or backgrounded
+                    </label>
+                    <div class="settings-slider-row">
+                        <input type="range" id="voice-haptic-battery-threshold" min="0" max="100" step="5" value="20" class="settings-slider">
+                        <span class="settings-slider-value" id="voice-haptic-battery-threshold-val">20%</span>
+                    </div>
+                    <p class="settings-hint">Below this battery level (0% disables the battery check), repeating ring buzzes are skipped — the initial buzz and one-shot cues (waiting flip, notifications) still fire. Note: iOS Safari has no Battery API, so the battery half only applies on Android/Chrome.</p>
+                    <div class="settings-slider-row">
+                        <input type="range" id="voice-haptic-background-threshold" min="0" max="120" step="5" value="10" class="settings-slider">
+                        <span class="settings-slider-value" id="voice-haptic-background-threshold-val">10 min</span>
+                    </div>
+                    <p class="settings-hint">After the app has been backgrounded this long, repeating ring buzzes are skipped (0 disables the background check). Buzzes resume the moment you return to the app.</p>
                 </div>
                 <div class="settings-group">
                     <h4>Video Quality</h4>

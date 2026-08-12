@@ -75,6 +75,35 @@
             noiseSuppressionMode: 'rnnoise', // 'off' | 'browser' | 'rnnoise'
             echoCancellation: false,          // Chrome's AEC on the mic (default OFF)
             mirrorCamera: false,              // mirror the self camera preview
+            // Haptic cues (mobile). hapticIncoming: vibrate when a NEW
+            // incoming ring starts (notice a call on silent mode).
+            // hapticWaiting: vibrate when the ring flips to the waiting state
+            // (the green→red badge transition). Both are felt even if the
+            // screen is locked or the app is in another tab.
+            hapticIncoming: true,
+            hapticWaiting: true,
+            // Configurable haptic patterns per event type — power users tune
+            // intensity (pulse ms), spacing (gap ms) and pulses per cue in
+            // Settings → Voice → Haptics. Each { pulse, gap, pulses } becomes
+            // a navigator.vibrate pattern [pulse, gap, pulse, …, pulse].
+            hapticRingPattern: { pulse: 150, gap: 80, pulses: 2 },    // → [150, 80, 150]
+            hapticWaitingPattern: { pulse: 60, gap: 40, pulses: 2 },  // → [60, 40, 60]
+            // Notification haptics (Settings → Notifications → Haptic Alerts):
+            // notifInbox = a mention/reply lands in the notification box;
+            // notifDm = a new message arrives from a DM conversation.
+            hapticNotifInbox: true,
+            hapticNotifDm: true,
+            hapticNotifInboxPattern: { pulse: 120, gap: 90, pulses: 2 },  // → [120, 90, 120]
+            hapticNotifDmPattern: { pulse: 80, gap: 60, pulses: 2 },      // → [80, 60, 80]
+            // Battery-friendly haptics: while the device is low on battery or
+            // the app has been backgrounded for a while, skip the REPEATING
+            // ring buzz (one per ringtone cycle) to save battery — the initial
+            // single cue and one-shot cues (waiting flip, notifications) still
+            // fire. Thresholds are configurable; the whole mode can be turned
+            // off (default ON, thresholds 20% / 10 min).
+            hapticBatteryFriendly: true,
+            hapticBatteryThreshold: 20,   // % below which repeats are skipped
+            hapticBackgroundThreshold: 10, // minutes backgrounded before repeats are skipped
             // Video quality (Settings → Voice → Video Quality). Send = the
             // resolution each source is CAPTURED at; receive = the resolution
             // senders scale their stream TO this member (broadcast in
@@ -163,6 +192,39 @@
         startDmCall: startDmCall,
         acceptDmCall: acceptDmCall,
         declineDmCall: declineDmCall,
+        // Mobile haptic cues (exposed for tests).
+        vibrateIncomingRingCue: vibrateIncomingRingCue,
+        vibrateWaitingCue: vibrateWaitingCue,
+        startRingHapticTicker: startRingHapticTicker,
+        stopRingHapticTicker: stopRingHapticTicker,
+        testHapticPattern: testHapticPattern,
+        buildHapticPattern: buildHapticPattern,
+        getHapticPattern: getHapticPattern,
+        vibrateNotifCue: vibrateNotifCue,
+        saveSettings: saveSettings,
+        updateSettingsLabels: updateSettingsLabels,
+        setHapticSetting: function (key, value) {
+            if (!S.settings) S.settings = {};
+            S.settings[key] = value;
+            saveSettings();
+        },
+        // Battery-friendly haptics (exposed for tests).
+        hapticRepeatsSuppressed: hapticRepeatsSuppressed,
+        getBackgroundedMinutes: getBackgroundedMinutes,
+        getBatteryLevel: getBatteryLevel,
+        refreshBatteryCache: refreshBatteryCache,
+        setBatteryLevelForTest: function (pct) {
+            // Test hook: simulate a battery level so the ticker's synchronous
+            // check behaves deterministically without the Battery API.
+            S._batteryOverridePct = (pct === null) ? null : pct;
+            refreshBatteryCache();
+        },
+        setBackgroundedMinutesForTest: function (minutes) {
+            // Test hook: simulate "backgrounded for N minutes" without a real
+            // visibility change (headless has no concept of hidden tabs).
+            S._bgOverrideMinutes = (minutes > 0) ? minutes : null;
+        },
+        resetHapticPattern: resetHapticPattern,
         endDmCall: endDmCall,
         joinWaitingCall: joinWaitingCall,
         syncWaitingCalls: syncWaitingCalls,
@@ -417,6 +479,46 @@
         if (ns) ns.value = S.settings.noiseSuppressionMode || 'rnnoise';
         var ec = document.getElementById('voice-echo-cancellation');
         if (ec) ec.checked = !!S.settings.echoCancellation;
+        var hi = document.getElementById('voice-haptic-incoming');
+        if (hi) hi.checked = S.settings.hapticIncoming !== false;
+        var hw = document.getElementById('voice-haptic-waiting');
+        if (hw) hw.checked = S.settings.hapticWaiting !== false;
+        var hrp = document.getElementById('voice-haptic-ring-pulse');
+        if (hrp) hrp.value = String(getHapticPattern('ring').pulse);
+        var hrg = document.getElementById('voice-haptic-ring-gap');
+        if (hrg) hrg.value = String(getHapticPattern('ring').gap);
+        var hrc = document.getElementById('voice-haptic-ring-pulses');
+        if (hrc) hrc.value = String(getHapticPattern('ring').pulses);
+        var hwp = document.getElementById('voice-haptic-waiting-pulse');
+        if (hwp) hwp.value = String(getHapticPattern('waiting').pulse);
+        var hwg = document.getElementById('voice-haptic-waiting-gap');
+        if (hwg) hwg.value = String(getHapticPattern('waiting').gap);
+        var hwc = document.getElementById('voice-haptic-waiting-pulses');
+        if (hwc) hwc.value = String(getHapticPattern('waiting').pulses);
+        // Notification haptic toggles + sliders (Settings → Notifications).
+        var nih = document.getElementById('notif-haptic-inbox');
+        if (nih) nih.checked = S.settings.hapticNotifInbox !== false;
+        var ndh = document.getElementById('notif-haptic-dm');
+        if (ndh) ndh.checked = S.settings.hapticNotifDm !== false;
+        var nip = document.getElementById('notif-haptic-inbox-pulse');
+        if (nip) nip.value = String(getHapticPattern('notifInbox').pulse);
+        var nig = document.getElementById('notif-haptic-inbox-gap');
+        if (nig) nig.value = String(getHapticPattern('notifInbox').gap);
+        var nic = document.getElementById('notif-haptic-inbox-pulses');
+        if (nic) nic.value = String(getHapticPattern('notifInbox').pulses);
+        var ndp = document.getElementById('notif-haptic-dm-pulse');
+        if (ndp) ndp.value = String(getHapticPattern('notifDm').pulse);
+        var ndg = document.getElementById('notif-haptic-dm-gap');
+        if (ndg) ndg.value = String(getHapticPattern('notifDm').gap);
+        var ndc = document.getElementById('notif-haptic-dm-pulses');
+        if (ndc) ndc.value = String(getHapticPattern('notifDm').pulses);
+        // Battery-friendly haptics (Settings → Voice → Haptics).
+        var hbf = document.getElementById('voice-haptic-battery-friendly');
+        if (hbf) hbf.checked = S.settings.hapticBatteryFriendly !== false;
+        var hbt = document.getElementById('voice-haptic-battery-threshold');
+        if (hbt) hbt.value = S.settings.hapticBatteryThreshold != null ? String(S.settings.hapticBatteryThreshold) : '20';
+        var hgt = document.getElementById('voice-haptic-background-threshold');
+        if (hgt) hgt.value = S.settings.hapticBackgroundThreshold != null ? String(S.settings.hapticBackgroundThreshold) : '10';
         var sc = document.getElementById('voice-send-camera-res');
         if (sc) sc.value = S.settings.sendCameraRes || 360;
         var ss = document.getElementById('voice-send-screen-res');
@@ -793,9 +895,12 @@
         // Always leave the call in the normal layout — fullscreen never
         // carries over into the next call.
         resetFullscreenState();
-        if (S.waitingCalls && prevDmChannelId && S.waitingCalls[prevDmChannelId]) {
-            delete S.waitingCalls[prevDmChannelId];
-            notifyWaitingChanged();
+        // Leaving drops the marker in BOTH places (S.waitingCalls AND the
+        // dmConversations fields syncWaitingCalls() rebuilds from) — otherwise
+        // the next syncWaitingCalls() on navigation resurrects a phantom
+        // waiting indicator for the call we just left.
+        if (prevDmChannelId) {
+            clearWaitingMarkerForChannel(prevDmChannelId);
         }
         closeAllPeers();
         stopLocalMedia();
@@ -2839,12 +2944,50 @@
         if (!data || !data.server_id) return;
         S.serverPresence[data.server_id] = data;
         updateChannelChips();
+        // The server-list voice dots must track presence live — every voice
+        // join/leave/speaking change re-broadcasts voice_presence to all
+        // server members (including ourselves), so a dot appears/disappears
+        // the moment someone enters or leaves a voice channel.
+        updateServerVoiceIndicators();
     }
 
     // Ask the server for the current voice presence snapshot for a server.
     function requestServerPresence(serverId) {
         if (!serverId) return;
         send({ type: 'voice_presence_request', server_id: serverId });
+    }
+
+    // Server-list voice indicator: a small green dot on each server icon whose
+    // server has at least one member in a voice channel (from the server-wide
+    // voice_presence snapshot). Called on every presence broadcast AND after
+    // the server list is (re)built, because a rebuild wipes the dots. "Even own
+    // person": the presence snapshot includes us, so joining a voice channel
+    // lights up our own server icon too.
+    function updateServerVoiceIndicators() {
+        var icons = document.querySelectorAll('.server-icon[data-id]');
+        icons.forEach(function (icon) {
+            var sid = icon.getAttribute('data-id');
+            if (!sid) return;
+            var presence = S.serverPresence[sid];
+            var active = false;
+            if (presence && presence.channels) {
+                for (var i = 0; i < presence.channels.length; i++) {
+                    if ((presence.channels[i].members || []).length > 0) {
+                        active = true;
+                        break;
+                    }
+                }
+            }
+            var dot = icon.querySelector('.server-voice-dot');
+            if (active && !dot) {
+                dot = document.createElement('span');
+                dot.className = 'server-voice-dot';
+                dot.title = 'Someone is in a voice channel';
+                icon.appendChild(dot);
+            } else if (!active && dot) {
+                dot.remove();
+            }
+        });
     }
 
     function handleKicked(data) {
@@ -3061,15 +3204,35 @@
         if (!changed) return;
         // Update mini bar / panel to reflect the new state (Calling → In call),
         // but ONLY for the view we're actually in: panel when the DM chat is
-        // open, floating mini bar everywhere else. (Previously this forced the
-        // DM call panel open over whatever channel the user was viewing.)
+        // open, floating mini bar everywhere else.
         updateDmCallUI();
-        notifyWaitingChanged();
-        // The call is live — drop any persisted waiting marker for this channel.
-        if (S.dmChannelId && S.waitingCalls[S.dmChannelId]) {
-            delete S.waitingCalls[S.dmChannelId];
-            notifyWaitingChanged();
+        // The call just connected — put BOTH sides in the call's DM view so the
+        // panel is visible immediately. The callee already gets this from
+        // acceptDmCall; the CALLER who started the call from outside the DM
+        // (the 📞 button on a voice-channel member row/chip, another DM, home)
+        // was left stranded with only the floating mini-bar and had to reopen
+        // the DM conversation to see the popup. Mirror acceptDmCall /
+        // joinWaitingCall: switch the app into this DM (enterDmView sets
+        // viewMode, selectDmChannel re-runs updateDmCallUI at the end so the
+        // panel appears the moment the DM view opens).
+        if (S.dmChannelId && typeof selectDmChannel === 'function' &&
+            (typeof currentDmChannelId === 'undefined' || currentDmChannelId !== S.dmChannelId)) {
+            var _partner = S.dmCallPartner || null;
+            if (typeof enterDmView === 'function' && (typeof viewMode === 'undefined' || viewMode !== 'dms')) {
+                try { enterDmView(); } catch (_) {}
+            }
+            try {
+                selectDmChannel(S.dmChannelId, _partner ? _partner.id : null, _partner ? (_partner.username || '') : '', null);
+            } catch (_) {}
         }
+        // The call is live — drop any persisted waiting marker for this channel
+        // (both S.waitingCalls and the dmConversations fields syncWaitingCalls
+        // rebuilds from, so a later navigation can't resurrect a phantom
+        // "waiting" indicator while the call is connected).
+        if (S.dmChannelId) {
+            clearWaitingMarkerForChannel(S.dmChannelId);
+        }
+        notifyWaitingChanged();
     }
 
     async function acceptDmCall() {
@@ -3099,6 +3262,9 @@
         S.dmCallActive = true;
         S.dmCallAnswered = true;
         S.callWaiting = false;
+        // The call is live the moment we accept — drop any persisted waiting
+        // marker (both places) so syncWaitingCalls() can't resurrect it.
+        clearWaitingMarkerForChannel(c.dmChannelId);
         resetFullscreenState();
         await ensureDmCallKey(c.callerId);
         deriveRoomKey();
@@ -3138,8 +3304,20 @@
     function syncWaitingCalls() {
         if (typeof dmConversations === 'undefined' || !dmConversations) return;
         S.waitingCalls = {};
+        var selfId = getSelfId();
         dmConversations.forEach(function (conv) {
             if (conv && conv.dm_channel_id && conv.waiting_user_id) {
+                // A marker pointing at OUR OWN user id means "I am the one
+                // waiting". That is only true while THIS page is actually in
+                // the waiting room. After a page refresh the call is CLOSED
+                // (refresh leaves all calls by design), so a self-referencing
+                // marker is a stale leftover from the dead room — it must not
+                // resurrect the "waiting for X" indicator. Markers pointing at
+                // the OTHER user ("they are waiting for US") are about the
+                // OTHER side's room, which survives our refresh, so they stay.
+                if (selfId && conv.waiting_user_id === selfId) {
+                    if (!(S.dmCallActive && S.dmChannelId === conv.dm_channel_id)) return;
+                }
                 S.waitingCalls[conv.dm_channel_id] = {
                     waitingUserId: conv.waiting_user_id,
                     waitingUsername: conv.waiting_username || '',
@@ -3198,8 +3376,10 @@
             try { selectDmChannel(dmChannelId, partnerId, partnerUsername, null); } catch (_) {}
         }
         // Clear the persisted waiting marker for this channel now that we're
-        // (re)joining — the call connects if the other side is present.
-        delete S.waitingCalls[dmChannelId];
+        // (re)joining — the call connects if the other side is present. Clear
+        // the marker in BOTH places (S.waitingCalls + dmConversations fields)
+        // so syncWaitingCalls() can't resurrect it while we're connected.
+        clearWaitingMarkerForChannel(dmChannelId);
         if (typeof document !== 'undefined') {
             document.dispatchEvent(new CustomEvent('voice-waiting-changed'));
         }
@@ -3266,6 +3446,11 @@
         notifyWaitingChanged();
         // Play the user's custom ringtone (loops until answered / 30s timeout).
         playRingtone(true);
+        // A genuine new ring just started (all early-return guards passed) —
+        // buzz so a call on silent mode is noticed before the ring times out,
+        // then keep buzzing once per ringtone cycle until it's answered or
+        // declined. startRingHapticTicker fires the immediate first cue itself.
+        startRingHapticTicker();
         // Local safety net: even if the caller's dm_call_waiting is never
         // delivered (e.g. the caller's tab died), stop ringing after 30s and
         // flip the incoming bar to the waiting state.
@@ -3297,8 +3482,15 @@
         // flip it to the waiting state so we can still join the call manually.
         // NOTE: S.dmChannelId is still null here (we haven't joined yet), so the
         // channel match must use S.incomingCall — not the early-return guard.
-        if (S.incomingCall && S.incomingCall.dmChannelId === data.dm_channel_id) {
+        // The !S.incomingCall.waiting guard makes the flip idempotent: the
+        // server's dm_call_waiting AND the local 30s fallback timer both arrive
+        // for a timed-out ring, and without the guard the flip (persist marker,
+        // hide Decline, vibrate) would run twice — a double haptic buzz.
+        if (S.incomingCall && S.incomingCall.dmChannelId === data.dm_channel_id && !S.incomingCall.waiting) {
             S.incomingCall.waiting = true;
+            // Ring → waiting: the badge just flipped green→red — vibrate so
+            // the transition is felt even if the screen is off / app hidden.
+            vibrateWaitingCue();
             stopRingtone();
             var b = el('incoming-call-bar');
             if (b) b.classList.add('waiting');
@@ -3423,6 +3615,11 @@
             if (isDecline) {
                 // Callee declined — place caller in waiting state (same as 30s
                 // timeout) so they can call again. Don't tear down the room.
+                // The ring→waiting transition is felt as well as seen: the
+                // waiting haptic (default [60,40,60]) fires here too, exactly
+                // like the 30s-unanswered path — the user asked for the cue on
+                // decline as well as timeout.
+                vibrateWaitingCue();
                 S.callWaiting = true;
                 S.dmCallAnswered = false;
                 S.waitingCalls[data.dm_channel_id] = {
@@ -3782,6 +3979,280 @@
         if (typeof document !== 'undefined') {
             document.dispatchEvent(new CustomEvent('voice-waiting-changed'));
         }
+    }
+
+    // Clear the persisted waiting marker for a DM channel on THIS client (both
+    // the live S.waitingCalls entry and the cached dmConversations fields that
+    // syncWaitingCalls() rebuilds from). Keeping the two in lockstep is what
+    // prevents the "double stalemate": a stale local waiting_user_id survives
+    // call transitions (connected, joined, left) because syncWaitingCalls()
+    // re-reads the conversation list, resurrecting a phantom "waiting"
+    // indicator for a call nobody is in. Call this whenever the authoritative
+    // server state says nobody is waiting (call live, call ended, we joined).
+    function clearWaitingMarkerForChannel(dmChannelId) {
+        if (!dmChannelId) return;
+        var had = !!(S.waitingCalls && S.waitingCalls[dmChannelId]);
+        if (S.waitingCalls && S.waitingCalls[dmChannelId]) {
+            delete S.waitingCalls[dmChannelId];
+        }
+        if (typeof dmConversations !== 'undefined' && dmConversations) {
+            dmConversations.forEach(function (c) {
+                if (c && c.dm_channel_id === dmChannelId && (c.waiting_user_id || c.waiting_username)) {
+                    c.waiting_user_id = null;
+                    c.waiting_username = '';
+                }
+            });
+        }
+        if (had) notifyWaitingChanged();
+    }
+
+    // Build a navigator.vibrate pattern from a { pulse, gap, pulses } config:
+    // [pulse, gap, pulse, gap, …, pulse] — `pulses` buzzes separated by `gap`
+    // pauses. Clamped to sane bounds regardless of what the sliders or
+    // persisted settings contain.
+    function buildHapticPattern(cfg) {
+        var pulse = parseInt(cfg && cfg.pulse, 10);
+        var gap = parseInt(cfg && cfg.gap, 10);
+        var pulses = parseInt(cfg && cfg.pulses, 10);
+        if (isNaN(pulse)) pulse = 150;
+        if (isNaN(gap)) gap = 80;
+        if (isNaN(pulses)) pulses = 2;
+        pulse = Math.max(10, Math.min(2000, pulse));
+        gap = Math.max(10, Math.min(2000, gap));
+        pulses = Math.max(1, Math.min(10, pulses));
+        var pattern = [];
+        for (var i = 0; i < pulses; i++) {
+            if (i > 0) pattern.push(gap);
+            pattern.push(pulse);
+        }
+        return pattern;
+    }
+
+    // The configured pattern for an event type ('ring' | 'waiting' |
+    // 'notifInbox' | 'notifDm'). Installs the default into S.settings when
+    // absent (old persisted settings) so slider edits always mutate a
+    // persisted object.
+    var HAPTIC_KINDS = {
+        ring:        { key: 'hapticRingPattern',        def: { pulse: 150, gap: 80, pulses: 2 } },
+        waiting:     { key: 'hapticWaitingPattern',     def: { pulse: 60, gap: 40, pulses: 2 } },
+        notifInbox:  { key: 'hapticNotifInboxPattern',  def: { pulse: 120, gap: 90, pulses: 2 } },
+        notifDm:     { key: 'hapticNotifDmPattern',     def: { pulse: 80, gap: 60, pulses: 2 } },
+    };
+    function getHapticPattern(kind) {
+        if (!S.settings) S.settings = {};
+        var entry = HAPTIC_KINDS[kind] || HAPTIC_KINDS.ring;
+        var cfg = S.settings[entry.key];
+        if (!cfg || typeof cfg !== 'object') {
+            cfg = { pulse: entry.def.pulse, gap: entry.def.gap, pulses: entry.def.pulses };
+            S.settings[entry.key] = cfg;
+        }
+        return cfg;
+    }
+
+    // Haptic cue (mobile) when a NEW incoming ring starts — a distinct,
+    // longer ring-like pattern so it's felt as "someone is calling" (vs the
+    // short double-buzz of the ring→waiting cue). Uses the tuned pattern from
+    // Settings → Voice → Haptics. Gated by Settings → Voice → Haptics →
+    // "Vibrate on incoming calls". navigator.vibrate is a no-op on
+    // browsers/devices without a vibrator, so the API check is enough.
+    function vibrateIncomingRingCue() {
+        if (S.settings && S.settings.hapticIncoming === false) return;
+        if (typeof navigator === 'undefined' || !navigator.vibrate) return;
+        try { navigator.vibrate(buildHapticPattern(getHapticPattern('ring'))); } catch (_) {}
+    }
+
+    // Repeating haptic ticker for a PROLONGED unanswered ring: instead of one
+    // pulse at ring start, buzz once per ringtone cycle so the call keeps being
+    // felt until it's answered/declined/times out. Default ringtone cycles at
+    // 1100ms (see playDefaultRingtone's repeat); a custom ringtone re-syncs the
+    // cadence to its decoded length via resyncRingHapticTicker. Runs only while
+    // an incoming ring is active (S.incomingCall); each buzz is gated by the
+    // same Settings → Voice → "Vibrate on incoming calls" toggle.
+    function startRingHapticTicker() {
+        stopRingHapticTicker();
+        // Default ringtone cycle (playDefaultRingtone repeats every 1100ms).
+        S._ringHapticCycleMs = 1100;
+        // The first cue fires immediately (the single-pulse behavior)…
+        vibrateIncomingRingCue();
+        // …then once per ringtone cycle. Battery-friendly mode: repeats are
+        // skipped while the device is low on battery or backgrounded too long,
+        // but the timer keeps running so buzzes resume the moment conditions
+        // improve (the user plugs in / returns to the app).
+        startBatteryPoll();
+        tickRingHaptic();
+    }
+
+    function tickRingHaptic() {
+        S._ringHapticTimer = setTimeout(function () {
+            // The ring ended or flipped to waiting — stop ticking entirely.
+            if (!S.incomingCall) return;
+            if (!hapticRepeatsSuppressed()) {
+                vibrateIncomingRingCue();
+            }
+            tickRingHaptic();
+        }, S._ringHapticCycleMs || 1100);
+    }
+
+    // Custom-ringtone path: re-sync the buzz cadence to the decoded audio
+    // length so a 1-30s file buzzes once per actual loop instead of the
+    // default 1.1s cadence. The pending timer fires at most once at the old
+    // cadence; subsequent ticks use the ringtone's real cycle.
+    function resyncRingHapticTicker(cycleMs) {
+        if (!S.incomingCall || !S._ringHapticTimer || !(cycleMs > 0)) return;
+        S._ringHapticCycleMs = cycleMs;
+    }
+
+    function stopRingHapticTicker() {
+        if (S._ringHapticTimer) {
+            clearTimeout(S._ringHapticTimer);
+            S._ringHapticTimer = null;
+        }
+        S._ringHapticCycleMs = null;
+        stopBatteryPoll();
+    }
+
+    // ------------------------------------------------------------------
+    // Battery-friendly haptics: skip REPEATING buzzes (the per-ringtone-cycle
+    // ring ticker) while the device is low on battery or the app has been
+    // backgrounded for a while. One-shot cues (first ring buzz, waiting flip,
+    // notifications) still fire — repeats are the battery drain. Thresholds are
+    // configurable in Settings → Voice → Haptics; the whole mode can be turned
+    // off. Uses the Battery Status API (Chrome/Android; Firefox uses a
+    // permission prompt; Safari/iOS desktop unsupported → treated as "not low").
+    //
+    // Backgrounded-time tracking: `document.visibilityState` is authoritative
+    // on mobile (the page is hidden when another app/notification shade is
+    // up). We record when we became hidden and how long we've been hidden on
+    // each tick; the hidden-start timestamp survives via a monotonic clock so
+    // a 15-min backgrounding is measured correctly even if ticks are delayed.
+    var _bgStartedMs = null;
+    function _updateBackgroundStart() {
+        if (typeof document === 'undefined') return;
+        if (document.visibilityState === 'hidden') {
+            if (_bgStartedMs === null) _bgStartedMs = Date.now();
+        } else {
+            _bgStartedMs = null;
+        }
+    }
+    if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+        document.addEventListener('visibilitychange', _updateBackgroundStart);
+    }
+
+    // How many minutes the app has been continuously backgrounded (0 if
+    // visible). Clamped to 0 so a negative (clock skew) never triggers. The
+    // _bgOverrideMinutes hook lets tests simulate a backgrounding without a
+    // real visibility change (headless pages are always "visible").
+    function getBackgroundedMinutes() {
+        if (S && S._bgOverrideMinutes != null) {
+            return Math.max(0, S._bgOverrideMinutes);
+        }
+        _updateBackgroundStart();
+        if (_bgStartedMs === null) return 0;
+        return Math.max(0, Math.round((Date.now() - _bgStartedMs) / 60000));
+    }
+
+    // Resolves with the current battery level in % (0-100), or null when the
+    // Battery Status API is unavailable (treated as "not low"). Cached per
+    // call; the API is cheap to poll.
+    function getBatteryLevel() {
+        if (typeof navigator === 'undefined' || !navigator.getBattery) {
+            return Promise.resolve(null);
+        }
+        try {
+            return navigator.getBattery().then(function (b) {
+                return (b && typeof b.level === 'number') ? Math.round(b.level * 100) : null;
+            }).catch(function () { return null; });
+        } catch (_) {
+            return Promise.resolve(null);
+        }
+    }
+
+    // True when battery-friendly mode is enabled AND the device currently
+    // qualifies (low battery or backgrounded too long). Repeats should be
+    // skipped; one-shot cues should NOT be gated by this.
+    function hapticRepeatsSuppressed() {
+        if (!S.settings || S.settings.hapticBatteryFriendly === false) return false;
+        // Thresholds are customizable; a threshold of 0 disables that half of
+        // the check entirely (so "never skip" is possible).
+        var bgThr = (S.settings.hapticBackgroundThreshold != null) ? S.settings.hapticBackgroundThreshold : 10;
+        if (bgThr > 0 && getBackgroundedMinutes() >= bgThr) return true;
+        // Battery check is async; for the synchronous ticker path we cache the
+        // last result and re-poll in the background (see refreshBatteryCache).
+        if (S._batteryLow === true) return true;
+        return false;
+    }
+
+    // Async refresh of the cached battery-low flag (polled on an interval while
+    // a ring is active so the ticker's synchronous check stays cheap and
+    // current). Stops when no ring is active.
+    function refreshBatteryCache() {
+        // A test/injected override wins over the real Battery API so behavior
+        // is deterministic (headless browsers may expose a stub API).
+        if (S && S._batteryOverridePct != null) {
+            var thrO = S.settings && typeof S.settings.hapticBatteryThreshold === 'number'
+                ? S.settings.hapticBatteryThreshold : 20;
+            S._batteryLow = thrO > 0 && S._batteryOverridePct <= thrO;
+            return;
+        }
+        getBatteryLevel().then(function (pct) {
+            if (pct === null) return; // no Battery API — leave the cached flag alone
+            var thr = S.settings && typeof S.settings.hapticBatteryThreshold === 'number'
+                ? S.settings.hapticBatteryThreshold : 20;
+            // A threshold of 0 disables the battery half of the check.
+            S._batteryLow = thr > 0 && pct <= thr;
+        });
+    }
+    // Re-check battery once a minute while a ring is active.
+    function startBatteryPoll() {
+        stopBatteryPoll();
+        refreshBatteryCache();
+        S._batteryPollTimer = setInterval(refreshBatteryCache, 60000);
+    }
+    function stopBatteryPoll() {
+        if (S._batteryPollTimer) {
+            clearInterval(S._batteryPollTimer);
+            S._batteryPollTimer = null;
+        }
+    }
+
+    // Brief haptic cue (mobile) when an incoming ring flips to the waiting
+    // state — the green→red badge transition — so it's felt as well as seen.
+    // Respects Settings → Voice → Haptics; navigator.vibrate is a no-op on
+    // browsers/devices without a vibrator, so the API check is enough.
+    function vibrateWaitingCue() {
+        if (S.settings && S.settings.hapticWaiting === false) return;
+        if (typeof navigator === 'undefined' || !navigator.vibrate) return;
+        try { navigator.vibrate(buildHapticPattern(getHapticPattern('waiting'))); } catch (_) {}
+    }
+
+    // Haptic cue (mobile) for notifications — 'notifInbox' (a mention/reply
+    // landed in the notification box) or 'notifDm' (a new DM message arrived).
+    // Each is gated by its own toggle in Settings → Notifications → Haptic
+    // Alerts and uses its own tunable { pulse, gap, pulses } pattern.
+    function vibrateNotifCue(kind) {
+        if (kind === 'notifInbox' && S.settings && S.settings.hapticNotifInbox === false) return;
+        if (kind === 'notifDm' && S.settings && S.settings.hapticNotifDm === false) return;
+        if (typeof navigator === 'undefined' || !navigator.vibrate) return;
+        try { navigator.vibrate(buildHapticPattern(getHapticPattern(kind))); } catch (_) {}
+    }
+
+    // "Test pattern" buttons in Settings → Voice → Haptics: buzz immediately
+    // with the configured pattern, bypassing the enable toggles so power users
+    // can tune intensity/duration while the cue is disabled.
+    function testHapticPattern(kind) {
+        if (typeof navigator === 'undefined' || !navigator.vibrate) return;
+        try { navigator.vibrate(buildHapticPattern(getHapticPattern(kind))); } catch (_) {}
+    }
+
+    // Reset a haptic pattern back to its default ({ pulse, gap, pulses } from
+    // HAPTIC_KINDS) and refresh the slider UI/labels.
+    function resetHapticPattern(kind) {
+        var entry = HAPTIC_KINDS[kind] || HAPTIC_KINDS.ring;
+        if (!S.settings) S.settings = {};
+        S.settings[entry.key] = { pulse: entry.def.pulse, gap: entry.def.gap, pulses: entry.def.pulses };
+        saveSettings();
+        applySettingsToUI();
+        updateSettingsLabels();
     }
 
     function showToast(msg) {
@@ -4162,6 +4633,73 @@
         if (sns) sns.addEventListener('change', function (e) { setNoiseSuppression(e.target.value); });
         var sec = document.getElementById('voice-echo-cancellation');
         if (sec) sec.addEventListener('change', function (e) { setEchoCancellation(e.target.checked); });
+        var shi = document.getElementById('voice-haptic-incoming');
+        if (shi) shi.addEventListener('change', function (e) {
+            S.settings.hapticIncoming = !!e.target.checked;
+            saveSettings();
+        });
+        var shw = document.getElementById('voice-haptic-waiting');
+        if (shw) shw.addEventListener('change', function (e) {
+            S.settings.hapticWaiting = !!e.target.checked;
+            saveSettings();
+        });
+        // Haptic pattern tuning sliders — live-update the pattern + labels.
+        var bindHapticSlider = function (id, kind, field) {
+            var s = document.getElementById(id);
+            if (!s) return;
+            s.addEventListener('input', function (e) {
+                var v = parseInt(e.target.value, 10);
+                if (isNaN(v)) return;
+                getHapticPattern(kind)[field] = v;
+                saveSettings();
+                updateSettingsLabels();
+            });
+        };
+        bindHapticSlider('voice-haptic-ring-pulse', 'ring', 'pulse');
+        bindHapticSlider('voice-haptic-ring-gap', 'ring', 'gap');
+        bindHapticSlider('voice-haptic-ring-pulses', 'ring', 'pulses');
+        bindHapticSlider('voice-haptic-waiting-pulse', 'waiting', 'pulse');
+        bindHapticSlider('voice-haptic-waiting-gap', 'waiting', 'gap');
+        bindHapticSlider('voice-haptic-waiting-pulses', 'waiting', 'pulses');
+        // Test buttons — buzz immediately with the tuned pattern (bypasses the
+        // enable toggles so the pattern can be tuned while the cue is off).
+        var hrt = document.getElementById('voice-haptic-ring-test');
+        if (hrt) hrt.addEventListener('click', function () { testHapticPattern('ring'); });
+        var hwt = document.getElementById('voice-haptic-waiting-test');
+        if (hwt) hwt.addEventListener('click', function () { testHapticPattern('waiting'); });
+        // Reset buttons — restore each haptic pattern to its default.
+        var bindHapticReset = function (id, kind) {
+            var b = document.getElementById(id);
+            if (!b) return;
+            b.addEventListener('click', function () { resetHapticPattern(kind); });
+        };
+        bindHapticReset('voice-haptic-ring-reset', 'ring');
+        bindHapticReset('voice-haptic-waiting-reset', 'waiting');
+        bindHapticReset('notif-haptic-inbox-reset', 'notifInbox');
+        bindHapticReset('notif-haptic-dm-reset', 'notifDm');
+        // Battery-friendly haptics (Settings → Voice → Haptics).
+        var hbf = document.getElementById('voice-haptic-battery-friendly');
+        if (hbf) hbf.addEventListener('change', function (e) {
+            S.settings.hapticBatteryFriendly = !!e.target.checked;
+            saveSettings();
+        });
+        var hbt = document.getElementById('voice-haptic-battery-threshold');
+        if (hbt) hbt.addEventListener('input', function (e) {
+            var v = parseInt(e.target.value, 10);
+            if (isNaN(v)) return;
+            S.settings.hapticBatteryThreshold = v;
+            saveSettings();
+            refreshBatteryCache();
+            updateSettingsLabels();
+        });
+        var hgt = document.getElementById('voice-haptic-background-threshold');
+        if (hgt) hgt.addEventListener('input', function (e) {
+            var v = parseInt(e.target.value, 10);
+            if (isNaN(v)) return;
+            S.settings.hapticBackgroundThreshold = v;
+            saveSettings();
+            updateSettingsLabels();
+        });
         // Video quality (Settings → Voice)
         var sc = document.getElementById('voice-send-camera-res');
         if (sc) sc.addEventListener('change', function (e) { setSendRes('camera', e.target.value); });
@@ -4198,6 +4736,37 @@
         if (psv) psv.value = S.settings.speakerVolume;
         var pns = document.getElementById('voice-popup-noise-suppression');
         if (pns) pns.value = S.settings.noiseSuppressionMode || 'rnnoise';
+        // Haptic pattern tuning sliders (Settings → Voice → Haptics).
+        var hrpv = document.getElementById('voice-haptic-ring-pulse-val');
+        if (hrpv) hrpv.textContent = getHapticPattern('ring').pulse + 'ms';
+        var hrgv = document.getElementById('voice-haptic-ring-gap-val');
+        if (hrgv) hrgv.textContent = getHapticPattern('ring').gap + 'ms';
+        var hrcv = document.getElementById('voice-haptic-ring-pulses-val');
+        if (hrcv) hrcv.textContent = getHapticPattern('ring').pulses + '×';
+        var hwpv = document.getElementById('voice-haptic-waiting-pulse-val');
+        if (hwpv) hwpv.textContent = getHapticPattern('waiting').pulse + 'ms';
+        var hwgv = document.getElementById('voice-haptic-waiting-gap-val');
+        if (hwgv) hwgv.textContent = getHapticPattern('waiting').gap + 'ms';
+        var hwcv = document.getElementById('voice-haptic-waiting-pulses-val');
+        if (hwcv) hwcv.textContent = getHapticPattern('waiting').pulses + '×';
+        // Notification haptic labels (Settings → Notifications).
+        var nipv = document.getElementById('notif-haptic-inbox-pulse-val');
+        if (nipv) nipv.textContent = getHapticPattern('notifInbox').pulse + 'ms';
+        var nigv = document.getElementById('notif-haptic-inbox-gap-val');
+        if (nigv) nigv.textContent = getHapticPattern('notifInbox').gap + 'ms';
+        var nicv = document.getElementById('notif-haptic-inbox-pulses-val');
+        if (nicv) nicv.textContent = getHapticPattern('notifInbox').pulses + '×';
+        var ndpv = document.getElementById('notif-haptic-dm-pulse-val');
+        if (ndpv) ndpv.textContent = getHapticPattern('notifDm').pulse + 'ms';
+        var ndgv = document.getElementById('notif-haptic-dm-gap-val');
+        if (ndgv) ndgv.textContent = getHapticPattern('notifDm').gap + 'ms';
+        var ndcv = document.getElementById('notif-haptic-dm-pulses-val');
+        if (ndcv) ndcv.textContent = getHapticPattern('notifDm').pulses + '×';
+        // Battery-friendly labels (Settings → Voice → Haptics).
+        var hbtv = document.getElementById('voice-haptic-battery-threshold-val');
+        if (hbtv) hbtv.textContent = (S.settings.hapticBatteryThreshold != null ? S.settings.hapticBatteryThreshold : 20) + '%';
+        var hgtv = document.getElementById('voice-haptic-background-threshold-val');
+        if (hgtv) hgtv.textContent = (S.settings.hapticBackgroundThreshold != null ? S.settings.hapticBackgroundThreshold : 10) + ' min';
     }
 
     // Display name from the decrypted profile cache, falling back to username.
@@ -5452,6 +6021,9 @@
     // shorter than the ring, it loops. Falls back to a default beep pattern
     // when no custom ringtone is set.
     function stopRingtone() {
+        // Stop the per-cycle haptic ticker: the ring is over (answered,
+        // declined, waiting-flip, hang-up). It restarts on a new ring.
+        stopRingHapticTicker();
         // Bump the token so any in-flight async ringtone load/decode aborts
         // instead of starting a source after the ring ended.
         S._ringToken = (S._ringToken || 0) + 1;
@@ -5519,6 +6091,12 @@
                             source.start(0);
                             S._ringtoneSource = source;
                             S._ringtoneGain = gain;
+                            // Sync the haptic ticker to the real ringtone
+                            // length so an unanswered call buzzes once per
+                            // actual loop (custom files are 1-30s).
+                            if (loop && S.incomingCall && typeof buffer.duration === 'number' && buffer.duration > 0) {
+                                resyncRingHapticTicker(Math.round(buffer.duration * 1000));
+                            }
                         } catch (err) {
                             console.warn('Ringtone play failed, using default:', err);
                             playDefaultRingtone(loop, token);
@@ -6503,6 +7081,9 @@
         // after a socket drop (without waiting for the next channel-list rebuild).
         var sid = (typeof currentServerId !== 'undefined' && currentServerId) || S.serverId;
         if (sid) requestServerPresence(sid);
+        // Re-apply the server-list voice dots in case the list was rebuilt
+        // while the socket was down (a rebuild wipes them).
+        updateServerVoiceIndicators();
     };
 
     // Page-load fallback: a freshly loaded page sends voice_leave_all so the
@@ -6529,5 +7110,12 @@
     };
 
     VoiceManager.requestServerPresence = requestServerPresence;
+    VoiceManager.updateServerVoiceIndicators = updateServerVoiceIndicators;
+    // Cached voice_presence snapshot for a server (null if never requested /
+    // no voice activity since load) — lets the server-list renderer skip
+    // re-requesting snapshots it already has.
+    VoiceManager.getServerPresence = function (serverId) {
+        return S.serverPresence[serverId] || null;
+    };
     VoiceManager.refreshChannelChips = updateChannelChips;
 })();

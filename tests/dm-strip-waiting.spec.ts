@@ -149,8 +149,20 @@ async function stripState(page: any) {
             exists: true,
             visible: el.style.display !== 'none',
             calling: el.classList.contains('calling'),
+            connected: el.classList.contains('connected'),
             title: el.title,
         };
+    });
+}
+
+// The SECOND strip badge — red phone, someone called US and is waiting in the
+// call waiting room FOR us. Independent of the active-call badge so both can
+// be visible at once (in a call with A while B waits for us).
+async function stripForUsState(page: any) {
+    return await page.evaluate(() => {
+        const el = document.getElementById('dm-strip-for-us') as HTMLElement;
+        if (!el) return { exists: false, visible: false, title: '' };
+        return { exists: true, visible: el.style.display !== 'none', title: el.title };
     });
 }
 
@@ -222,23 +234,27 @@ test.describe('DM-strip waiting/calling indicator (visible from anywhere)', () =
 
         // Callee B navigates to the SERVER view — the strip indicator must
         // still be visible there (the sidebar dot is only visible in DM view).
+        // B declined, so A is the one waiting → B sees the RED "waiting FOR
+        // us" badge (dm-strip-for-us), NOT the amber active-call badge.
         expect(await goToServerView(page2)).toBe(true);
         await page2.waitForFunction(() => {
-            const el = document.getElementById('dm-strip-waiting') as HTMLElement;
+            const el = document.getElementById('dm-strip-for-us') as HTMLElement;
             return el && el.style.display !== 'none';
         }, undefined, { timeout: 10000 });
 
-        const sWaiting = await stripState(page2);
+        const sWaiting = await stripForUsState(page2);
         expect(sWaiting.exists).toBe(true);
         expect(sWaiting.visible).toBe(true);
-        expect(sWaiting.calling).toBe(false); // amber = waiting, not ringing
-        expect(sWaiting.title).toBe('Call waiting');
+        expect(sWaiting.title).toContain('waiting for you');
+        // The ACTIVE-call badge stays hidden — B is not in a call/waiting room.
+        const sActive = await stripState(page2);
+        expect(sActive.visible).toBe(false);
 
         // In server view the sidebar shows channels, NOT the DM row dot — the
         // strip is the only waiting indicator visible here.
-        expect(await page2.locator('.dm-waiting-dot').count()).toBe(0);
+        expect(await page2.locator('.dm-for-us-dot').count()).toBe(0);
 
-        // B joins the waiting call → indicator disappears.
+        // B joins the waiting call → both indicators disappear.
         await openDm(page2);
         const joinVisible = await page2.locator('#dm-waiting-join-btn').isVisible().catch(() => false);
         expect(joinVisible).toBeTruthy();
@@ -252,8 +268,13 @@ test.describe('DM-strip waiting/calling indicator (visible from anywhere)', () =
             return v && v.isConnected() && v.isInDmCall();
         }, undefined, { timeout: 20000 });
 
-        const sGone = await stripState(page2);
-        expect(sGone.visible).toBe(false);
+        // B joined → the call CONNECTS: the red "waiting for us" badge clears
+        // and the active-call badge flips to the blue "in call" state (🎤).
+        const sConnected = await stripState(page2);
+        expect(sConnected.visible).toBe(true);
+        expect(sConnected.connected).toBe(true);
+        const sForUsGone = await stripForUsState(page2);
+        expect(sForUsGone.visible).toBe(false);
 
         await ctx1.close().catch(() => {});
         await ctx2.close().catch(() => {});
@@ -315,23 +336,33 @@ test.describe('DM-strip waiting/calling indicator (visible from anywhere)', () =
         const sRingingA = await stripState(page1);
         expect(sRingingA.calling).toBe(true);
 
-        // B declines → both strips flip to the amber waiting badge.
+        // B declines → the SAME call shows DIFFERENT indicators on each side:
+        // B (declined, not in the room) gets the red "waiting FOR us" badge;
+        // A (still in the waiting room) gets the amber "waiting with them"
+        // badge. The two must never look the same.
         await page2.evaluate(() => window.VoiceManager.declineDmCall());
+        // B: red badge appears, active-call badge stays hidden.
         await page2.waitForFunction(() => {
-            const el = document.getElementById('dm-strip-waiting') as HTMLElement;
-            return el && el.style.display !== 'none' && !el.classList.contains('calling') && el.title === 'Call waiting';
+            const el = document.getElementById('dm-strip-for-us') as HTMLElement;
+            return el && el.style.display !== 'none';
         }, undefined, { timeout: 15000 });
-        const sWaitingB = await stripState(page2);
-        expect(sWaitingB.calling).toBe(false);
-        expect(sWaitingB.title).toBe('Call waiting');
+        const sWaitingB = await stripForUsState(page2);
+        expect(sWaitingB.visible).toBe(true);
+        expect(sWaitingB.title).toContain('waiting for you');
+        const sActiveB = await stripState(page2);
+        expect(sActiveB.visible).toBe(false);
 
+        // A: amber active-call badge (not calling, not connected), no red.
         await page1.waitForFunction(() => {
             const el = document.getElementById('dm-strip-waiting') as HTMLElement;
-            return el && el.style.display !== 'none' && !el.classList.contains('calling') && el.title === 'Call waiting';
+            return el && el.style.display !== 'none' && !el.classList.contains('calling') && el.title.indexOf('waiting for the other person') !== -1;
         }, undefined, { timeout: 15000 });
         const sWaitingA = await stripState(page1);
         expect(sWaitingA.calling).toBe(false);
-        expect(sWaitingA.title).toBe('Call waiting');
+        expect(sWaitingA.connected).toBe(false);
+        expect(sWaitingA.title).toContain('waiting for the other person');
+        const sForUsA = await stripForUsState(page1);
+        expect(sForUsA.visible).toBe(false);
 
         await ctx1.close().catch(() => {});
         await ctx2.close().catch(() => {});
@@ -364,19 +395,23 @@ test.describe('DM-strip waiting/calling indicator (visible from anywhere)', () =
         await startCallAndDecline(page1, page2, dm, userData, userB);
 
         // B refreshes; the persisted marker must bring the strip indicator
-        // back without opening the DM conversation.
+        // back without opening the DM conversation. B declined → the marker is
+        // "A is waiting for us" → the RED badge returns after the refresh.
         await page2.reload();
         await page2.waitForURL('**/index.html', { timeout: 15000 });
         await waitForWs(page2);
         expect(await goToServerView(page2)).toBe(true);
         await page2.waitForFunction(() => {
-            const el = document.getElementById('dm-strip-waiting') as HTMLElement;
+            const el = document.getElementById('dm-strip-for-us') as HTMLElement;
             return el && el.style.display !== 'none';
         }, undefined, { timeout: 20000 });
-        const s = await stripState(page2);
+        const s = await stripForUsState(page2);
         expect(s.visible).toBe(true);
-        expect(s.calling).toBe(false);
-        expect(s.title).toBe('Call waiting');
+        expect(s.title).toContain('waiting for you');
+        // Not a ringing call, and the active-call badge stays hidden.
+        const sActive = await stripState(page2);
+        expect(sActive.visible).toBe(false);
+        expect(sActive.calling).toBe(false);
 
         await ctx1.close().catch(() => {});
         await ctx2.close().catch(() => {});

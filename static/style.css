@@ -678,6 +678,22 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     transform: scale(0.9);
 }
 
+/* Visible pulse for the DM-row call badges. The shared incoming-wait-pulse
+   only animates an amber box-shadow (right for bars/banners) — the row dots
+   need an actual opacity/scale pulse so the states are unmistakable. */
+@keyframes dm-badge-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.45; }
+}
+/* FAST, urgent pulse — used ONLY by the RINGING state (caller + callee green
+   badge). The instant the ring times out or is declined, the badge is
+   replaced by the red waiting-for-us dot, so the ring→waiting flip is
+   visually obvious: fast green → calm red. */
+@keyframes dm-ring-pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.35; transform: scale(1.18); }
+}
+
 /* Small phone badge on DM sidebar items with a waiting call */
 .dm-waiting-dot {
     margin-left: auto;
@@ -685,7 +701,8 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     font-size: 13px;
     color: #f0b232;
     flex-shrink: 0;
-    animation: incoming-wait-pulse 2s ease-in-out infinite;
+    display: inline-block;
+    animation: dm-badge-pulse 2s ease-in-out infinite;
 }
 .dm-calling-dot {
     margin-left: auto;
@@ -693,7 +710,8 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     font-size: 13px;
     color: #3ba55d;
     flex-shrink: 0;
-    animation: incoming-wait-pulse 1s ease-in-out infinite;
+    display: inline-block;
+    animation: dm-ring-pulse 0.55s ease-in-out infinite;
 }
 .dm-connected-dot {
     margin-left: auto;
@@ -701,6 +719,20 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     font-size: 13px;
     color: #5865f2;
     flex-shrink: 0;
+}
+/* Someone else called US and is waiting in the call waiting room for us to
+   join — visually distinct from "I'm the one waiting" (amber) and from being
+   in the call (blue mic). Red/missed-call style, calm slow pulse (slower
+   than the fast green ring so the transition reads at a glance). */
+.dm-for-us-dot {
+    margin-left: auto;
+    align-self: center;
+    font-size: 13px;
+    color: #ed4245;
+    flex-shrink: 0;
+    display: inline-block;
+    animation: dm-badge-pulse 1.8s ease-in-out infinite;
+    filter: drop-shadow(0 0 3px rgba(237, 66, 69, 0.6));
 }
 
 .members-panel {
@@ -2031,11 +2063,38 @@ body.show-msg-times-hover .message:hover .file-card .time-hover {
     text-align: center;
     pointer-events: none;
     z-index: 2;
-    animation: incoming-wait-pulse 2s ease-in-out infinite;
+    animation: dm-badge-pulse 2s ease-in-out infinite;
 }
 .dm-strip-waiting.calling {
     background: rgba(59, 165, 93, 0.92);
-    animation: incoming-wait-pulse 1s ease-in-out infinite;
+    animation: dm-ring-pulse 0.55s ease-in-out infinite;
+}
+.dm-strip-waiting.connected {
+    background: rgba(88, 101, 242, 0.92);
+    animation: none;
+}
+/* Second strip badge: SOMEONE ELSE is waiting in a DM call waiting room for
+   us (they called, we didn't join). Sits at the BOTTOM-LEFT so it never
+   collides with the active-call badge (bottom-right) or the unread dot
+   (top-right) — the two can be visible at the same time. */
+.dm-strip-for-us {
+    position: absolute;
+    bottom: -3px;
+    left: -3px;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 3px;
+    box-sizing: border-box;
+    border-radius: 50%;
+    background: rgba(237, 66, 69, 0.92);
+    color: #fff;
+    font-size: 10px;
+    line-height: 16px;
+    text-align: center;
+    pointer-events: none;
+    z-index: 2;
+    animation: dm-badge-pulse 1.8s ease-in-out infinite;
+    box-shadow: 0 0 4px rgba(237, 66, 69, 0.5);
 }
 
 .dm-item {
@@ -2234,6 +2293,25 @@ body.show-msg-times-hover .message:hover .file-card .time-hover {
 
 .channel-item {
     position: relative;
+}
+
+/* Server-list voice indicator: a green dot at the BOTTOM-RIGHT of the server
+   icon when at least one member is in a voice channel in that server. Kept
+   away from the mention/unread badge (top-right) so the two never overlap.
+   Updated live from the server-wide voice_presence broadcasts. */
+.server-voice-dot {
+    position: absolute;
+    bottom: -4px;
+    right: -4px;
+    width: 11px;
+    height: 11px;
+    background: #3ba55d;
+    border: 2px solid #111127;
+    border-radius: 50%;
+    pointer-events: none;
+    z-index: 5;
+    box-shadow: 0 0 4px rgba(59, 165, 93, 0.55);
+    animation: voice-active-pulse 1.6s ease-in-out infinite;
 }
 
 .channel-item .mention-badge {
@@ -2557,6 +2635,11 @@ body.show-msg-times-hover .message:hover .file-card .time-hover {
 .settings-tab.active {
     color: var(--accent);
     border-bottom-color: var(--accent);
+    /* Slight shadow under the active tab so tabs read as separate buttons,
+       especially when squished on narrow/phone screens. */
+    box-shadow: 0 3px 6px -2px rgba(0, 0, 0, 0.45);
+    background: var(--bg-tertiary);
+    border-radius: 6px 6px 0 0;
 }
 
 .settings-panel {

@@ -155,8 +155,10 @@ test.describe('DM call flow: decline, waiting, indicators, persistence', () => {
             await page2.waitForTimeout(300);
         }
 
+        // Callee declined → the CALLER is waiting for them → the callee's
+        // sidebar shows the red "waiting for us" dot.
         const hasIndicator = await page2.evaluate(() => {
-            return !!document.querySelector('.dm-waiting-dot, .dm-calling-dot');
+            return !!document.querySelector('.dm-for-us-dot');
         });
         expect(hasIndicator).toBeTruthy();
 
@@ -188,7 +190,7 @@ test.describe('DM call flow: decline, waiting, indicators, persistence', () => {
         expect(bannerAfterRefresh).toBeTruthy();
 
         const indicatorAfterRefresh = await page2.evaluate(() => {
-            return !!document.querySelector('.dm-waiting-dot');
+            return !!document.querySelector('.dm-for-us-dot');
         });
         expect(indicatorAfterRefresh).toBeTruthy();
 
@@ -211,7 +213,7 @@ test.describe('DM call flow: decline, waiting, indicators, persistence', () => {
         await page2.waitForTimeout(800);
         const indicatorGone = await page2.evaluate(() => {
             const banner = document.getElementById('dm-waiting-banner');
-            return !document.querySelector('.dm-waiting-dot')
+            return !document.querySelector('.dm-for-us-dot')
                 && (!banner || banner.style.display === 'none');
         });
         expect(indicatorGone).toBeTruthy();
@@ -231,7 +233,7 @@ test.describe('DM call flow: decline, waiting, indicators, persistence', () => {
             await page2.waitForTimeout(300);
         }
         const indicatorStillVisible = await page2.evaluate(() => {
-            return !!document.querySelector('.dm-waiting-dot');
+            return !!document.querySelector('.dm-for-us-dot');
         });
         expect(indicatorStillVisible).toBeFalsy();
 

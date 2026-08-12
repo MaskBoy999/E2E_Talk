@@ -175,12 +175,15 @@ test.describe('DM-call waiting indicator: no dismiss, refresh persistence, leave
             return false;
         }, undefined, { timeout: 10000 });
 
-        // --- Callee refreshes: sidebar dot appears WITHOUT opening the conversation ---
+        // --- Callee refreshes: sidebar dot appears WITHOUT opening the
+        // conversation. B declined, so A is waiting FOR B → the red
+        // "waiting for us" dot (NOT the amber "waiting with them" one).
         await page2.reload();
         await page2.waitForSelector('.dm-item, [data-dm-id]', { timeout: 15000 });
         await page2.waitForFunction(() => {
-            return !!document.querySelector('.dm-waiting-dot');
+            return !!document.querySelector('.dm-for-us-dot');
         }, undefined, { timeout: 15000 });
+        expect(await page2.locator('.dm-waiting-dot').count()).toBe(0);
 
         // --- Caller refreshes: auto-rejoins the waiting room, call UI returns ---
         await dbg(page2, 'callee after refresh');
@@ -200,7 +203,7 @@ test.describe('DM-call waiting indicator: no dismiss, refresh persistence, leave
         }, dm.id, { timeout: 25000 });
         await dbg(page2, 'callee after grace (indicator cleared)');
         await page2.waitForTimeout(800);
-        const dotGone = await page2.evaluate(() => !!document.querySelector('.dm-waiting-dot'));
+        const dotGone = await page2.evaluate(() => !!document.querySelector('.dm-for-us-dot'));
         expect(dotGone).toBe(false);
     });
 
@@ -241,8 +244,9 @@ test.describe('DM-call waiting indicator: no dismiss, refresh persistence, leave
         const conv = convs.find((c: any) => c.dm_channel_id === dm.id);
         expect(conv && conv.waiting_user_id).toBeFalsy();
 
-        // Sidebar dot is gone after a sidebar re-render.
-        const dotGone = await page2.evaluate(() => !!document.querySelector('.dm-waiting-dot'));
+        // Sidebar dot is gone after a sidebar re-render (the callee's
+        // indicator is the red "waiting for us" dot).
+        const dotGone = await page2.evaluate(() => !!document.querySelector('.dm-for-us-dot'));
         expect(dotGone).toBe(false);
     });
 

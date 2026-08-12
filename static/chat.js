@@ -2760,6 +2760,45 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    // Notification haptic alerts (mobile) — enable toggles, pattern sliders
+    // and Test buttons in Settings → Notifications → Haptic Alerts. State lives
+    // in VoiceManager.settings (voice_settings) so the cues share the same
+    // buildHapticPattern/getHapticPattern machinery; this tab is bound here
+    // because chat.js owns the Notifications settings.
+    var bindNotifHaptic = function (idPrefix, kind, toggleKey) {
+        var tg = document.getElementById(idPrefix);
+        if (tg) {
+            tg.addEventListener('change', function () {
+                var vm = window.VoiceManager;
+                if (vm && vm.setHapticSetting) vm.setHapticSetting(toggleKey, tg.checked);
+            });
+        }
+        ['pulse', 'gap', 'pulses'].forEach(function (suffix) {
+            var s = document.getElementById(idPrefix + '-' + suffix);
+            if (!s) return;
+            s.addEventListener('input', function () {
+                var vm = window.VoiceManager;
+                if (!vm) return;
+                var v = parseInt(s.value, 10);
+                if (isNaN(v)) return;
+                try {
+                    vm.getHapticPattern(kind)[suffix] = v;
+                    vm.saveSettings();
+                    vm.updateSettingsLabels();
+                } catch (_) {}
+            });
+        });
+        var t = document.getElementById(idPrefix + '-test');
+        if (t) {
+            t.addEventListener('click', function () {
+                var vm = window.VoiceManager;
+                if (vm && vm.testHapticPattern) vm.testHapticPattern(kind);
+            });
+        }
+    };
+    bindNotifHaptic('notif-haptic-inbox', 'notifInbox', 'hapticNotifInbox');
+    bindNotifHaptic('notif-haptic-dm', 'notifDm', 'hapticNotifDm');
+
     // Delete account
     // Clear all client-side data (localStorage, sessionStorage, non-HttpOnly cookies).
     // HttpOnly cookies can only be cleared by the server (see /api/logout GET).
@@ -5856,6 +5895,15 @@ function showMissedActivityNotification(newDms, newServerMsgs) {
 
 // --- Unread mention tracking + badge rendering ---
 
+// Fire a notification haptic cue (mobile) via VoiceManager — a safe no-op if
+// VoiceManager isn't loaded yet or the device has no vibrator.
+function fireNotifHaptic(kind) {
+    var vm = window.VoiceManager;
+    if (vm && typeof vm.vibrateNotifCue === 'function') {
+        try { vm.vibrateNotifCue(kind); } catch (_) {}
+    }
+}
+
 function trackUnreadMention(serverId, channelId, dmChannelId, messageId, senderUsername, channelName, serverName, notifType, senderId, senderProfilePic) {
     // Skip notification if the server or channel is muted
     if (isMuted(serverId, channelId)) return;
@@ -5887,12 +5935,16 @@ function trackUnreadMention(serverId, channelId, dmChannelId, messageId, senderU
         updateChannelBadges();
         updateMentionsBadge();
         saveMentionState();
+        // A mention/reply just landed in the notification box → vibrate (mobile).
+        fireNotifHaptic('notifInbox');
     } else if (dmChannelId) {
         unreadDms[dmChannelId] = (unreadDms[dmChannelId] || 0) + 1;
         updateDmStripBadge();
         updateMentionsBadge();
         if (viewMode === 'dms') renderDmSidebar();
         saveMentionState();
+        // A mention/reply arrived from a DM conversation → vibrate (mobile).
+        fireNotifHaptic('notifDm');
     }
 }
 
@@ -7292,6 +7344,8 @@ function connectWebSocket(t) {
                             saveMentionState();
                             showBrowserNotification('New DM', data.message.sender_username + ' sent you a message');
                             playNotificationSound();
+                            // New message from a DM conversation → vibrate (mobile).
+                            fireNotifHaptic('notifDm');
                         }
                     }
                     // Only reload DM list for messages in OTHER channels (to update preview/badge).
@@ -8845,6 +8899,21 @@ function renderServerList() {
     
     updateServerBadges();
     updateServerMutedUI();
+
+    // Server-list voice dots: request a live voice_presence snapshot for any
+    // server we don't have one for yet (a rebuild wiped the dots; events also
+    // stream updates in live via voice_presence broadcasts), then re-apply the
+    // dots from whatever snapshots we have.
+    if (window.VoiceManager && VoiceManager.requestServerPresence) {
+        servers.forEach(function (s) {
+            if (s && s.id && !(VoiceManager.getServerPresence && VoiceManager.getServerPresence(s.id))) {
+                VoiceManager.requestServerPresence(s.id);
+            }
+        });
+    }
+    if (window.VoiceManager && VoiceManager.updateServerVoiceIndicators) {
+        VoiceManager.updateServerVoiceIndicators();
+    }
 }
 
 async function selectServer(serverId) {
@@ -11902,16 +11971,35 @@ function renderDmSidebar() {
             }
         }
         var streamerMode = localStorage.getItem('streamerMode') === 'true';
-        // Show call state indicator: calling, waiting, or connected.
+        // Show call state indicator — FOUR distinct states so "we're in a call
+        // / waiting room WITH them" never looks like "they're waiting FOR us":
+        //   🎤 blue  — we're in an active call with this person (connected)
+        //   📞 green — we're calling them (ringing)
+        //   📞 amber — we're in the call waiting room WITH them (waiting for
+        //              them to join / they left mid-call / they didn't answer)
+        //   📞 red   — THEY called us and are waiting in the waiting room FOR
+        //              us — a different relationship, a different indicator.
         var _callState = (window.VoiceManager && VoiceManager.getCallState) ? VoiceManager.getCallState(c.dm_channel_id) : null;
         var _wc = (!_callState && window.VoiceManager && VoiceManager.getWaitingCall) ? VoiceManager.getWaitingCall(c.dm_channel_id) : null;
+        // LIVE on BOTH sides: an incoming ring (someone calling US, not yet
+        // waiting) must surface on the CALLEE's row too — without this the
+        // caller shows green while the callee's row stays empty until the
+        // ring times out. Mirrors the strip, which already checks the
+        // incoming call.
+        var _inc = (window.VoiceManager && VoiceManager.getIncomingCall) ? VoiceManager.getIncomingCall() : null;
+        var _ringingUs = _inc && !_inc.waiting && _inc.dmChannelId === c.dm_channel_id;
         var callBadge = '';
-        if (_callState === 'calling') {
+        if (_callState === 'calling' || _ringingUs) {
             callBadge = '<span class="dm-calling-dot" title="Calling…">&#128222;</span>';
-        } else if (_callState === 'waiting' || _wc) {
-            callBadge = '<span class="dm-waiting-dot" title="Call waiting">&#128222;</span>';
+        } else if (_callState === 'waiting') {
+            callBadge = '<span class="dm-waiting-dot" title="In a call — waiting for the other person">&#128222;</span>';
         } else if (_callState === 'connected') {
             callBadge = '<span class="dm-connected-dot" title="In call">&#127908;</span>';
+        } else if (_wc) {
+            var _waitingForUs = _wc.waitingUserId && user && _wc.waitingUserId !== user.id;
+            callBadge = _waitingForUs
+                ? '<span class="dm-for-us-dot" title="Waiting for you to join the call">&#128222;</span>'
+                : '<span class="dm-waiting-dot" title="In a call — waiting for the other person">&#128222;</span>';
         }
         html += '<div class="channel-item dm-item" data-dm-id="' + c.dm_channel_id + '" data-user-id="' + escapeAttr(c.other_user_id) + '" data-username="' + escapeAttr(c.other_username) + '">' +
             '<div class="dm-avatar' + (dmPicCacheKey ? ' profile-pic-target' : '') + '"' + (dmPicCacheKey ? ' data-profile-pic-load="' + dmPicCacheKey + '"' : '') + '>' + dmAvatarHtml + '</div>' +
@@ -12057,47 +12145,78 @@ async function selectDmChannel(dmChannelId, otherUserId, otherUsername, element)
 // the fresh list wholesale when nothing is cached yet, e.g. a boot that landed
 // outside DM view) so waiting indicators appear/disappear without a manual
 // conversation reload. Runs on WS reconnect (auth_ok).
-// Persistent DM-strip call indicator: shows on the top-left DM button from ANY
-// view (server channels, other DMs, modals) whenever a DM call is waiting
-// (amber phone, slow pulse) or ringing (green phone, fast pulse). Mirrors the
-// sidebar row dots — the sidebar is only visible in DM view, so this is the
-// "anywhere in the app" signal for a call someone is waiting on.
+// Persistent DM-strip call indicators on the top-left DM button, visible from
+// ANY view (server channels, other DMs, modals). TWO independent badges so an
+// active call and a "someone is waiting FOR us" state can coexist:
+//   #dm-strip-waiting (bottom-right): the ACTIVE call state — green phone
+//     (ringing), amber phone (we're in the waiting room with them), blue mic
+//     (connected, in a live call).
+//   #dm-strip-for-us (bottom-left): red phone — someone called US and is
+//     waiting in the waiting room FOR us. Independent of the active-call badge:
+//     being in a call with A while B waits for us shows BOTH at once.
 function updateDmStripWaiting() {
     var el = document.getElementById('dm-strip-waiting');
     if (!el) return;
+    var el2 = document.getElementById('dm-strip-for-us');
     var vm = window.VoiceManager;
     if (!vm || !dmConversations || !dmConversations.length) {
         el.style.display = 'none';
         el.classList.remove('calling');
+        el.classList.remove('connected');
+        if (el2) el2.style.display = 'none';
         return;
     }
-    var state = null; // 'calling' | 'waiting'
+    var state = null; // 'calling' | 'waiting' | 'connected' — the ACTIVE call
+    var forUs = false; // someone else waits in a call waiting room FOR us
+    var selfId = (user && user.id) || null;
     // An incoming ring (someone is calling us, not yet waiting) is the
     // callee-side "calling" state — most urgent, so it takes priority.
     var inc = vm.getIncomingCall ? vm.getIncomingCall() : null;
     if (inc && !inc.waiting) state = 'calling';
-    if (state !== 'calling') {
-        for (var i = 0; i < dmConversations.length; i++) {
-            var c = dmConversations[i];
-            if (!c || !c.dm_channel_id) continue;
-            var st = (vm.getCallState && vm.getCallState(c.dm_channel_id)) || null;
-            if (st === 'calling') { state = 'calling'; break; } // ringing takes priority
-            if (st === 'waiting' || (vm.getWaitingCall && vm.getWaitingCall(c.dm_channel_id))) {
-                state = 'waiting';
-            }
-        }
+    for (var i = 0; i < dmConversations.length; i++) {
+        var c = dmConversations[i];
+        if (!c || !c.dm_channel_id) continue;
+        var st = (vm.getCallState && vm.getCallState(c.dm_channel_id)) || null;
+        if (st === 'calling') { if (state !== 'calling') state = 'calling'; } // ringing takes priority
+        else if (st === 'waiting') { if (state !== 'connected') state = 'waiting'; }
+        else if (st === 'connected') { if (!state) state = 'connected'; }
+        // Someone ELSE waiting for us (waitingUserId !== self) is an
+        // independent fact — track it regardless of the active call state, so
+        // an incoming ring for one conversation never hides a waiting-for-us
+        // badge from another.
+        var wc = (vm.getWaitingCall && vm.getWaitingCall(c.dm_channel_id)) || null;
+        if (wc && wc.waitingUserId && selfId && wc.waitingUserId !== selfId) forUs = true;
     }
     if (state === 'calling') {
         el.style.display = 'flex';
         el.classList.add('calling');
+        el.classList.remove('connected');
+        el.textContent = '\uD83D\uDCDE'; // 📞
         el.title = 'Call ringing';
     } else if (state === 'waiting') {
         el.style.display = 'flex';
         el.classList.remove('calling');
-        el.title = 'Call waiting';
+        el.classList.remove('connected');
+        el.textContent = '\uD83D\uDCDE'; // 📞
+        el.title = 'In a call — waiting for the other person';
+    } else if (state === 'connected') {
+        el.style.display = 'flex';
+        el.classList.remove('calling');
+        el.classList.add('connected');
+        el.textContent = '\uD83C\uDFA4'; // 🎤
+        el.title = 'In a call';
     } else {
         el.style.display = 'none';
         el.classList.remove('calling');
+        el.classList.remove('connected');
+    }
+    if (el2) {
+        if (forUs) {
+            el2.style.display = 'flex';
+            el2.title = 'Someone is waiting for you to join their call';
+        } else {
+            el2.style.display = 'none';
+        }
     }
 }
 
