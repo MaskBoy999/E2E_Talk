@@ -221,8 +221,10 @@ test('banner survives on a fresh device after the owner auto-heals a corrupted c
     const good = await readConvProfile(pageB, bodyB.user.id, convId);
     const goodBannerId = good.profile_banner_file_id;
 
-    // CORRUPT the conversation profile with a no-banner payload (the pre-fix
-    // stale-overwrite from a second device).
+    // CORRUPT the conversation profile with a no-banner payload. The modern
+    // server guard would reject this as a non-authoritative drop, so it is sent
+    // with authoritative:true to simulate corruption that predates the guard
+    // (the original stale-overwrite bug).
     const stalePayload = JSON.stringify({
         display_name: bodyB.user.username,
         nickname: '',
@@ -249,6 +251,9 @@ test('banner survives on a fresh device after the owner auto-heals a corrupted c
                 conversation_id: cid,
                 encrypted_profile_data: enc.ciphertext,
                 nonce: enc.nonce,
+                authoritative: true,
+                profile_picture_file_id: null,
+                profile_banner_file_id: null,
             }),
         });
     }, { uid: bodyB.user.id, cid: convId, payload: stalePayload });
@@ -263,6 +268,111 @@ test('banner survives on a fresh device after the owner auto-heals a corrupted c
     const healed = await readConvProfile(pageB, bodyB.user.id, convId);
     expect(healed.profile_banner_file_id).toBe(goodBannerId);
     expect(healed.profile_banner_file_key).toBeTruthy();
+
+    // A logs in FRESH (B offline) and opens B's profile — the banner must show.
+    await page.close();
+    await pageB.close();
+    const ctxA2 = await context.browser()!.newContext({ ignoreHTTPSErrors: true });
+    const pageA2 = await ctxA2.newPage();
+    await pageA2.goto(`${BASE}/login.html`);
+    await pageA2.waitForSelector('#login-username');
+    await pageA2.fill('#login-username', userA);
+    await pageA2.fill('#login-password', 'password123');
+    await pageA2.click('#login-form button[type="submit"]');
+    await pageA2.waitForURL('**/index.html', { timeout: 15000 });
+    await pageA2.waitForTimeout(4000);
+
+    const state = await pageA2.evaluate(async (uid) => {
+        await (window as any).openProfileModal(uid);
+        await new Promise((r) => setTimeout(r, 3000));
+        const img = document.getElementById('profile-banner-img');
+        const bg = img ? getComputedStyle(img).backgroundImage : 'NO-EL';
+        return {
+            bg: bg.slice(0, 80),
+            cacheBannerId: (userDisplayNameCache[uid] || {}).profile_banner_file_id || null,
+            cacheHasKey: !!(userDisplayNameCache[uid] || {}).profile_banner_file_key,
+        };
+    }, bodyB.user.id);
+    expect(state.bg).toContain('blob:');
+    expect(state.cacheBannerId).toBe(goodBannerId);
+    expect(state.cacheHasKey).toBe(true);
+});
+
+test('server rejects a non-authoritative upload that would drop the banner, and the banner still loads on a fresh device', async ({ page, context }) => {
+    test.setTimeout(180000);
+    const ts = Date.now();
+    const userA = 'gsa_' + ts;
+    const userB = 'gsb_' + ts;
+    const bodyA = await registerUser(page, userA);
+    const ctxB = await context.browser()!.newContext({ ignoreHTTPSErrors: true });
+    const pageB = await ctxB.newPage();
+    const bodyB = await registerUser(pageB, userB);
+
+    // Become friends.
+    const fcA = await page.evaluate(() => localStorage.getItem('e2e_friend_code'));
+    const fr = await pageB.request.post(`${BASE}/api/friends/request`, {
+        headers: { Authorization: `Bearer ${bodyB.token}`, 'Content-Type': 'application/json' },
+        data: { friend_code: fcA },
+    });
+    expect(fr.ok()).toBeTruthy();
+    const incoming = await (await page.request.get(`${BASE}/api/friends/requests/incoming`, {
+        headers: { Authorization: `Bearer ${bodyA.token}` },
+    })).json();
+    const acc = await page.request.post(`${BASE}/api/friends/requests/accept`, {
+        headers: { Authorization: `Bearer ${bodyA.token}`, 'Content-Type': 'application/json' },
+        data: { request_id: incoming[0].id },
+    });
+    expect(acc.ok()).toBeTruthy();
+    await page.waitForTimeout(2500);
+
+    // B sets a banner -> conversation profile carries the banner key.
+    await uploadFileAndSet(pageB, bodyB.token, makeMinimalPng(200, 100), 'profile_banner');
+    const convId = await pageB.evaluate((uid) => {
+        const c = dmConversations.find((x: any) => x.other_user_id === uid);
+        return c ? c.dm_channel_id : null;
+    }, bodyA.user.id);
+    const good = await readConvProfile(pageB, bodyB.user.id, convId);
+    const goodBannerId = good.profile_banner_file_id;
+    expect(goodBannerId).toBeTruthy();
+
+    // A stale-style PUT: no `authoritative` flag (defaults to false) and no
+    // banner claim. The server must reject with 409 and keep the stored profile.
+    const stalePayload = JSON.stringify({
+        display_name: bodyB.user.username,
+        nickname: '',
+        description: '',
+        username_color: '#4fc3f7',
+        username_border_color: '',
+        profile_background_color: '',
+        profile_picture_file_id: null,
+        profile_banner_file_id: null,
+        profile_picture_file_key: null,
+        profile_banner_file_key: null,
+    });
+    const status = await pageB.evaluate(async ({ uid, cid, payload }) => {
+        const ident = E2ECrypto.getIdentityKeyPair();
+        const conv = dmConversations.find((c: any) => c.dm_channel_id === cid);
+        const otherPub = new Uint8Array(E2ECrypto.base64ToArrayBuffer(conv.other_public_key));
+        const dmKey = E2ECrypto.getDmKey(cid, ident.privateKey, otherPub);
+        const enc = E2ECrypto.aeadEncrypt(payload, dmKey);
+        const res = await fetch('/api/profile/conversation', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + localStorage.getItem('token') },
+            body: JSON.stringify({
+                conversation_type: 'dm',
+                conversation_id: cid,
+                encrypted_profile_data: enc.ciphertext,
+                nonce: enc.nonce,
+            }),
+        });
+        return res.status;
+    }, { uid: bodyB.user.id, cid: convId, payload: stalePayload });
+    expect(status).toBe(409);
+
+    // The stored conversation profile is untouched.
+    const stillGood = await readConvProfile(pageB, bodyB.user.id, convId);
+    expect(stillGood.profile_banner_file_id).toBe(goodBannerId);
+    expect(stillGood.profile_banner_file_key).toBeTruthy();
 
     // A logs in FRESH (B offline) and opens B's profile — the banner must show.
     await page.close();

@@ -19956,8 +19956,18 @@ function updateSidebarFooter() {
 // to a DM or server channel can decrypt the user's current profile.
 // Stores the ACTUAL profile data (description, nickname, colors) re-encrypted
 // with each conversation's key so a single fetch + decrypt gives everything.
-async function uploadConversationProfiles(identity, profileDataJson) {
+async function uploadConversationProfiles(identity, profileDataJson, authoritative) {
     if (!dmConversations || !servers) return;
+    // Field-presence metadata for the server-side drop guard: the file ids
+    // being uploaded are already server-visible (users table), and telling the
+    // server which fields this payload carries lets it reject a background
+    // re-upload that would silently erase a banner/PFP a previous upload or the
+    // user's current profile still has.
+    var _profileMeta = null;
+    try { _profileMeta = JSON.parse(profileDataJson); } catch (_) {}
+    var metaPfp = (_profileMeta && _profileMeta.profile_picture_file_id) || null;
+    var metaBanner = (_profileMeta && _profileMeta.profile_banner_file_id) || null;
+    var isAuthoritative = authoritative === true;
     
     // For each DM conversation: encrypt profile data JSON directly with DM key, upload
     for (var i = 0; i < dmConversations.length; i++) {
@@ -19987,6 +19997,9 @@ async function uploadConversationProfiles(identity, profileDataJson) {
                     conversation_id: conv.dm_channel_id,
                     encrypted_profile_data: encDm.ciphertext,
                     nonce: encDm.nonce,
+                    authoritative: isAuthoritative,
+                    profile_picture_file_id: metaPfp,
+                    profile_banner_file_id: metaBanner,
                 }),
             });
         } catch (e) {
@@ -20009,6 +20022,9 @@ async function uploadConversationProfiles(identity, profileDataJson) {
                     conversation_id: serverId,
                     encrypted_profile_data: encSrv.ciphertext,
                     nonce: encSrv.nonce,
+                    authoritative: isAuthoritative,
+                    profile_picture_file_id: metaPfp,
+                    profile_banner_file_id: metaBanner,
                 }),
             });
         } catch (e) {
@@ -20051,7 +20067,11 @@ async function uploadCurrentProfileToConversations() {
         profile_banner_file_key: myProfile.profile_banner_file_key || null,
     };
     var profileDataJson = JSON.stringify(profileData);
-    await uploadConversationProfiles(ident, profileDataJson);
+    // authoritative=false: a background re-upload. The server rejects it if it
+    // would DROP a banner/PFP the user currently has — a second line of
+    // defense against stale-device overwrites even after the myProfile refresh
+    // above.
+    await uploadConversationProfiles(ident, profileDataJson, false);
 }
 
 async function loadMyProfile() {
@@ -22228,8 +22248,10 @@ async function saveProfile() {
         
         // Upload per-conversation encrypted profile data FIRST so the data is
         // available when the PATCH triggers the profile_updated WS broadcast.
+        // authoritative=true: this is the user's explicit save — the one place
+        // removals (null banner/PFP) are allowed to change field presence.
         try {
-            await uploadConversationProfiles(identityForKeys, profileDataJson);
+            await uploadConversationProfiles(identityForKeys, profileDataJson, true);
         } catch (e) {
             console.warn('Failed to upload conversation profiles:', e);
         }

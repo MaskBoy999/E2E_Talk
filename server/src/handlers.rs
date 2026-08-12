@@ -4422,6 +4422,20 @@ pub struct UpsertConversationProfileRequest {
     pub conversation_id: String,
     pub encrypted_profile_data: String,
     pub nonce: String,
+    // E2EE-safe field-presence metadata. The server cannot see inside the
+    // ciphertext, so the client reports which banner/PFP file ids it is
+    // uploading (file ids are already server-visible in the users table, so
+    // nothing new leaks). authoritative=true means the user explicitly saved
+    // their profile (removals included); everything else is a background
+    // re-upload and must never DROP fields a previous upload or the users
+    // table still has — that is how a stale device silently erased another
+    // user's banner for everyone else.
+    #[serde(default)]
+    pub authoritative: Option<bool>,
+    #[serde(default)]
+    pub profile_picture_file_id: Option<String>,
+    #[serde(default)]
+    pub profile_banner_file_id: Option<String>,
 }
 
 pub async fn upsert_conversation_profile(
@@ -4457,7 +4471,41 @@ pub async fn upsert_conversation_profile(
         return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Not a member of this conversation"}))).into_response();
     }
 
-    match state.db.upsert_conversation_profile(&user_id, &req.conversation_type, &req.conversation_id, &req.encrypted_profile_data, &req.nonce) {
+    // Normalize empty-string claims to None (the client sends null or a real id).
+    let claim_pfp = req.profile_picture_file_id.as_deref().filter(|s| !s.is_empty()).map(|s| s.to_string());
+    let claim_banner = req.profile_banner_file_id.as_deref().filter(|s| !s.is_empty()).map(|s| s.to_string());
+    let is_authoritative = req.authoritative.unwrap_or(false);
+
+    if !is_authoritative {
+        // Authoritative banner/PFP per the users table (only updated by
+        // PATCH /api/profile — the one place removals can be expressed).
+        let (_, _, auth_pfp, _, auth_banner, _, _, _, _, _) = match state.db.get_user_profile(&user_id) {
+            Ok(p) => p,
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+        };
+        // What the previous upload of THIS conversation profile carried (if any).
+        let stored = state.db.get_conversation_profile_meta(&user_id, &req.conversation_type, &req.conversation_id).unwrap_or(None);
+        let stored_pfp = stored.as_ref().and_then(|(p, _)| p.clone());
+        let stored_banner = stored.as_ref().and_then(|(_, b)| b.clone());
+
+        // Drop guard: a background re-upload must never remove a field the
+        // user currently has (users table) or that this conversation profile
+        // previously carried.
+        let drops_pfp = claim_pfp.is_none() && (auth_pfp.is_some() || stored_pfp.is_some());
+        let drops_banner = claim_banner.is_none() && (auth_banner.is_some() || stored_banner.is_some());
+        // Re-add guard: a background re-upload must never resurrect a field
+        // the user no longer has anywhere (users table AND previous upload).
+        let readds_pfp = claim_pfp.is_some() && auth_pfp.is_none() && stored_pfp.is_none();
+        let readds_banner = claim_banner.is_some() && auth_banner.is_none() && stored_banner.is_none();
+
+        if drops_pfp || drops_banner || readds_pfp || readds_banner {
+            return (StatusCode::CONFLICT, Json(serde_json::json!({
+                "error": "conversation profile upload would change pic/banner field presence outside an explicit profile save; rejected"
+            }))).into_response();
+        }
+    }
+
+    match state.db.upsert_conversation_profile(&user_id, &req.conversation_type, &req.conversation_id, &req.encrypted_profile_data, &req.nonce, claim_pfp.as_deref(), claim_banner.as_deref()) {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }

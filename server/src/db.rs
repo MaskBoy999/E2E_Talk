@@ -1066,6 +1066,11 @@ impl Database {
         // per signed-in device so sessions can be listed and force-kicked.
         let _ = conn.execute_batch(include_str!("../migrations/053_auth_sessions.sql"));
 
+        // Migration 054: Conversation-profile field-presence metadata so the
+        // server can reject non-authoritative uploads that would drop fields
+        // (banner/PFP) a previous upload (or the users table) already carries.
+        let _ = conn.execute_batch(include_str!("../migrations/054_conv_profile_meta.sql"));
+
         // Data migration: normalize legacy space-separated CURRENT_TIMESTAMP values
         // ("YYYY-MM-DD HH:MM:SS") to fixed-width RFC3339 ("YYYY-MM-DDTHH:MM:SS.000000Z")
         // so lexicographic ordering is consistent with newly-inserted messages.
@@ -1342,15 +1347,31 @@ impl Database {
         .map_err(|_| "User not found".to_string())
     }
 
-    pub fn upsert_conversation_profile(&self, user_id: &str, conv_type: &str, conv_id: &str, encrypted_data: &str, nonce: &str) -> Result<(), String> {
+    pub fn upsert_conversation_profile(&self, user_id: &str, conv_type: &str, conv_id: &str, encrypted_data: &str, nonce: &str, pfp_file_id: Option<&str>, banner_file_id: Option<&str>) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
-            "INSERT OR REPLACE INTO conversation_profile_data (user_id, conversation_type, conversation_id, encrypted_profile_data, nonce, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))",
-            params![user_id, conv_type, conv_id, encrypted_data, nonce],
+            "INSERT OR REPLACE INTO conversation_profile_data (user_id, conversation_type, conversation_id, encrypted_profile_data, nonce, profile_picture_file_id, profile_banner_file_id, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'))",
+            params![user_id, conv_type, conv_id, encrypted_data, nonce, pfp_file_id, banner_file_id],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    /// Last-uploaded field-presence metadata (pfp id, banner id) for a
+    /// conversation profile. None = no row (never uploaded).
+    pub fn get_conversation_profile_meta(&self, user_id: &str, conv_type: &str, conv_id: &str) -> Result<Option<(Option<String>, Option<String>)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let result = conn.query_row(
+            "SELECT profile_picture_file_id, profile_banner_file_id FROM conversation_profile_data WHERE user_id = ?1 AND conversation_type = ?2 AND conversation_id = ?3",
+            params![user_id, conv_type, conv_id],
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)),
+        );
+        match result {
+            Ok(val) => Ok(Some(val)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
     }
 
     pub fn get_conversation_profile(&self, user_id: &str, conv_type: &str, conv_id: &str) -> Result<Option<(String, String)>, String> {
