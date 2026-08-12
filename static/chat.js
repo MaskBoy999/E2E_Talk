@@ -3063,7 +3063,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function show2FaModal(id) {
         var el = document.getElementById(id);
-        if (el) el.style.display = 'flex';
+        if (el) {
+            // 2FA flows are security-sensitive: the password field must always
+            // start hidden — never carry over a previous show/hide state.
+            if (id === 'twofa-enroll-modal') {
+                var pwInput = document.getElementById('twofa-password');
+                if (pwInput) { pwInput.type = 'password'; pwInput.value = ''; }
+                var tgl = document.getElementById('toggle-twofa-password');
+                if (tgl) { tgl.innerHTML = '&#128065;'; tgl.classList.remove('active'); }
+            }
+            el.style.display = 'flex';
+        }
     }
     function hide2FaModal(id) {
         var el = document.getElementById(id);
@@ -3082,24 +3092,15 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (_) {}
     }
 
-    // Close on overlay click + Esc for both 2FA modals.
-    [twofaEnrollModal, twofaDisableModal].forEach(function (modal) {
-        if (!modal) return;
-        modal.addEventListener('click', function (e) { if (e.target === modal) modal.style.display = 'none'; });
-    });
-    document.addEventListener('keydown', function (e) {
-        if (e.key === 'Escape') {
-            if (twofaEnrollModal && twofaEnrollModal.style.display === 'flex') twofaEnrollModal.style.display = 'none';
-            if (twofaDisableModal && twofaDisableModal.style.display === 'flex') twofaDisableModal.style.display = 'none';
-        }
-    });
+    // 2FA flows are security-sensitive: these modals are deliberately NOT
+    // dismissible by clicking the backdrop or pressing Escape — the only way
+    // out is the explicit Cancel button (or completing the flow successfully).
 
     if (enable2faBtn) {
         enable2faBtn.addEventListener('click', function () {
             _twofaEnroll = null;
             document.getElementById('twofa-step-password').style.display = 'block';
             document.getElementById('twofa-step-qr').style.display = 'none';
-            document.getElementById('twofa-password').value = '';
             document.getElementById('twofa-password-error').style.display = 'none';
             show2FaModal('twofa-enroll-modal');
         });
@@ -3186,6 +3187,36 @@ document.addEventListener('DOMContentLoaded', () => {
             document.body.removeChild(ta);
             var st = document.getElementById('twofa-copy-status');
             if (st) { st.textContent = 'Copied!'; setTimeout(function () { st.textContent = ''; }, 2000); }
+        });
+    }
+
+    // Download the recovery codes as a text file (one-time codes — save them
+    // somewhere private before finishing enrollment).
+    var twofaSaveBtn = document.getElementById('twofa-save-codes');
+    if (twofaSaveBtn) {
+        twofaSaveBtn.addEventListener('click', function () {
+            if (!_twofaEnroll || !_twofaEnroll.recovery_codes || !_twofaEnroll.recovery_codes.length) return;
+            var lines = _twofaEnroll.recovery_codes.map(function (c, i) { return (i + 1) + '. ' + c; }).join('\n');
+            var uname = '';
+            try { uname = (JSON.parse(localStorage.getItem('user') || '{}').username) || ''; } catch (_) {}
+            var text = 'E2E Chat — Two-Factor Authentication recovery codes\n' +
+                (uname ? 'Account: ' + uname + '\n' : '') +
+                'Generated: ' + new Date().toLocaleString() + '\n' +
+                '----------------------------------------\n' +
+                'Each code works exactly ONCE. Keep this file private — it is your\n' +
+                'only way back into the account if you lose your authenticator app.\n\n' +
+                lines + '\n';
+            var blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+            var url = URL.createObjectURL(blob);
+            var a = document.createElement('a');
+            a.href = url;
+            a.download = 'e2e-chat-2fa-recovery-codes.txt';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
+            var st = document.getElementById('twofa-copy-status');
+            if (st) { st.textContent = 'Saved!'; setTimeout(function () { st.textContent = ''; }, 2000); }
         });
     }
 
@@ -5274,6 +5305,15 @@ document.addEventListener('DOMContentLoaded', () => {
     // Global Escape key closes the topmost visible modal
     document.addEventListener('keydown', function (e) {
         if (e.key !== 'Escape') return;
+        // 2FA flows are Cancel-only: while one of these security-sensitive
+        // modals is open, Escape must not close anything underneath (e.g. the
+        // settings modal behind the enrollment popup).
+        var enroll2fa = document.getElementById('twofa-enroll-modal');
+        var disable2fa = document.getElementById('twofa-disable-modal');
+        if ((enroll2fa && enroll2fa.style.display !== 'none' && enroll2fa.style.display !== '') ||
+            (disable2fa && disable2fa.style.display !== 'none' && disable2fa.style.display !== '')) {
+            return;
+        }
         // Find the first (topmost) visible modal and close it
         var modals = ['friend-code-password-modal', 'sticker-upload-modal', 'upload-modal',
                       'settings-modal', 'server-settings-modal', 'friend-requests-modal',

@@ -5703,6 +5703,59 @@ body.show-msg-times .forward-preview .time-hover {
     }
 }
 
+/* ===== 2FA modals (enroll + disable): Cancel-only, phone friendly ===== */
+/* Security-sensitive flows: the ONLY way to dismiss these is the Cancel
+   button — backdrop clicks and Escape are intentionally not wired up. */
+#twofa-enroll-modal,
+#twofa-disable-modal {
+    overflow-y: auto;
+    align-items: flex-start;
+}
+#twofa-enroll-modal .modal-content,
+#twofa-disable-modal .modal-content {
+    margin: auto;
+    width: 100%;
+}
+
+/* QR image must shrink to fit narrow screens */
+#twofa-enroll-modal #twofa-qr img {
+    max-width: 100%;
+    height: auto;
+}
+
+/* Recovery codes: two compact columns by default, stack on tiny screens */
+#twofa-recovery-codes {
+    font-family: monospace;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px;
+    margin: 8px 0;
+    font-size: 13px;
+}
+
+@media (max-width: 480px) {
+    #twofa-enroll-modal .modal-content,
+    #twofa-disable-modal .modal-content {
+        padding: 18px;
+    }
+    /* Disable modal: stack Cancel / Disable buttons full-width */
+    #twofa-disable-modal .modal-actions {
+        flex-direction: column;
+    }
+    #twofa-disable-modal .modal-actions .btn-cancel,
+    #twofa-disable-modal .modal-actions .btn-invite {
+        width: 100%;
+        text-align: center;
+    }
+}
+
+@media (max-width: 380px) {
+    /* Very narrow phones: recovery codes go single-column */
+    #twofa-recovery-codes {
+        grid-template-columns: 1fr;
+    }
+}
+
 /* ===== Profile Modal ===== */
 .profile-modal-content {
     max-width: 440px;
