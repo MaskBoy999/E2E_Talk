@@ -55,7 +55,6 @@
         screenOn: false,
         cameraFacing: 'user',   // 'user' | 'environment' (flip camera)
         cameraFlash: false,     // torch on the active camera track (mobile)
-        mirrorCamera: false,    // mirror the SELF preview only (never the outgoing stream)
         popupOpen: false,        // voice channel view (top panel in the text area)
         dmPanelOpen: undefined,  // DM call panel in the DM chat
         dmCallExpanded: false,   // DM call panel expanded → covers the WHOLE screen
@@ -74,7 +73,6 @@
             speakerVolume: 100,
             noiseSuppressionMode: 'rnnoise', // 'off' | 'browser' | 'rnnoise'
             echoCancellation: false,          // Chrome's AEC on the mic (default OFF)
-            mirrorCamera: false,              // mirror the self camera preview
             // Haptic cues (mobile). hapticIncoming: vibrate when a NEW
             // incoming ring starts (notice a call on silent mode).
             // hapticWaiting: vibrate when the ring flips to the waiting state
@@ -167,7 +165,6 @@
         toggleCamera: toggleCamera,
         toggleScreen: toggleScreen,
         flipCamera: flipCamera,
-        toggleCameraMirror: toggleCameraMirror,
         toggleCameraFlash: toggleCameraFlash,
         setCameraFlashOn: setCameraFlashOn,
         openCamOptMenu: openCamOptMenu,
@@ -406,10 +403,6 @@
             delete S.settings.noiseSuppression;
             saveSettings();
         }
-        // Mirror is a per-user preference (persisted with the other voice
-        // settings) but it only affects the self preview, so it doubles as
-        // live call state — keep them in sync on load.
-        S.mirrorCamera = !!S.settings.mirrorCamera;
         // Fullscreen is a per-call UI state only — never persisted. Every join
         // and leave resets it, so a call always starts NOT fullscreen.
         resetFullscreenState();
@@ -3815,20 +3808,6 @@
         startCamera();
     }
 
-    // Mirror the SELF preview (scaleX flip). This only flips what you see of
-    // yourself — the outgoing stream stays unflipped for everyone else,
-    // exactly like Discord. Persisted in voice_settings.
-    function toggleCameraMirror() {
-        ensureAudioCtx();
-        S.mirrorCamera = !S.mirrorCamera;
-        S.settings.mirrorCamera = S.mirrorCamera;
-        saveSettings();
-        renderSelfPreview();
-        renderPopup();
-        renderDmPanel();
-        updateSelfUI();
-    }
-
     // Flash on/off. Cameras with a torch (most rear cameras) use the real
     // LED via applyConstraints. Cameras WITHOUT torch — like the selfie/
     // front camera — fall back to a white screen overlay covering the app,
@@ -3896,9 +3875,7 @@
     }
 
     function updateCamOptMenuState() {
-        var mirror = el('cam-opt-mirror');
         var flash = el('cam-opt-flash');
-        if (mirror) mirror.classList.toggle('active', !!S.mirrorCamera);
         if (flash) flash.classList.toggle('active', !!S.cameraFlash);
     }
 
@@ -3906,10 +3883,8 @@
         var menu = el('voice-cam-opt-menu');
         if (!menu) return;
         var flip = el('cam-opt-flip');
-        var mirror = el('cam-opt-mirror');
         var flash = el('cam-opt-flash');
         if (flip) flip.addEventListener('click', function (e) { e.stopPropagation(); flipCamera(); closeCamOptMenu(); });
-        if (mirror) mirror.addEventListener('click', function (e) { e.stopPropagation(); toggleCameraMirror(); closeCamOptMenu(); });
         if (flash) flash.addEventListener('click', function (e) { e.stopPropagation(); toggleCameraFlash(); });
         var off = el('camera-flash-off');
         if (off) off.addEventListener('click', function () { setCameraFlashOn(false); });
@@ -4936,24 +4911,24 @@
                 // Manual-load aware: holds behind a Load button when enabled.
                 attachRemoteVideo(video, uid, kind, stream);
             }
-            // Mirror applies to the SELF camera preview only; per-viewer
-            // mirror/rotate transforms (right-click menu) apply on top for how
-            // YOU see this feed. Pure renderer-side CSS — nothing is sent.
-            video.classList.toggle('mirrored', isSelf && kind === 'camera' && S.mirrorCamera);
+            // Per-viewer mirror/rotate transforms (right-click menu) apply for
+            // how YOU see this feed — remote and SELF tiles alike. Pure
+            // renderer-side CSS — nothing is sent.
             applyTileTransform(video, uid, kind);
             video.addEventListener('click', function () { toggleFullscreen(video); });
-            // Right-click on a remote video tile opens the per-member volume
-            // menu — screen tiles target the SCREEN audio volume, camera tiles
-            // target the member's mic volume (stops propagation so the member
-            // row's own handler doesn't double-open).
-            if (!isSelf) {
-                video.addEventListener('contextmenu', function (e) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    openVolumeMenu(e, uid, kind === 'screen' ? 'screen' : 'video');
-                });
-            }
+            // Right-click on a camera/screen tile opens the View menu (mirror /
+            // rotate / reset) — on SELF tiles too. Screen tiles also target the
+            // SCREEN audio volume; camera tiles have no audio at all (the
+            // member's mic volume lives on the member row / tile chrome). Stops
+            // propagation so the member row's own handler doesn't double-open.
+            video.addEventListener('contextmenu', function (e) {
+                e.preventDefault();
+                e.stopPropagation();
+                openVolumeMenu(e, uid, kind === 'screen' ? 'screen' : 'video');
+            });
         });
+        // Tiles may have been rebuilt — re-sync any "Reset view" hint chips.
+        syncAllResetViewChips();
     }
 
     function renderPopup() {
@@ -5013,7 +4988,7 @@
         var lists = [el('voice-popup-members'), el('dm-call-body')];
         lists.forEach(function (l) {
             if (!l) return;
-            l.querySelectorAll('.remote-video-tile, .voice-tile-slot, .voice-feed-load-btn, .voice-feed-unload-btn').forEach(function (t) { t.remove(); });
+            l.querySelectorAll('.remote-video-tile, .voice-tile-slot, .voice-feed-load-btn, .voice-feed-unload-btn, .voice-tile-reset-view').forEach(function (t) { t.remove(); });
         });
     }
 
@@ -5023,7 +4998,7 @@
         document.querySelectorAll('.voice-tile-slot[data-uid="' + uid + '"]').forEach(function (s) { s.remove(); });
         ['camera', 'screen'].forEach(function (k) {
             var key = feedKey(uid, k);
-            document.querySelectorAll('.voice-feed-load-btn[data-feed="' + key + '"], .voice-feed-unload-btn[data-feed="' + key + '"]').forEach(function (b) { b.remove(); });
+            document.querySelectorAll('.voice-feed-load-btn[data-feed="' + key + '"], .voice-feed-unload-btn[data-feed="' + key + '"], .voice-tile-reset-view[data-feed="' + resetViewChipFeedKey(uid, k) + '"]').forEach(function (b) { b.remove(); });
             // Drop the manual-load state for this member's feeds (both kinds).
             clearFeedLoaded(uid, k);
         });
@@ -5261,8 +5236,14 @@
             v.setAttribute('data-kind', 'camera');
             v.setAttribute('data-self', '1');
             v.setAttribute('data-uid', getSelfId());
-            if (S.mirrorCamera) v.classList.add('mirrored');
             v.addEventListener('click', function () { toggleFullscreen(v); });
+            // Right-click our own camera in the DM self strip -> View menu
+            // (mirror / rotate / reset), same as everyone else's tiles.
+            v.addEventListener('contextmenu', function (e) {
+                e.preventDefault();
+                e.stopPropagation();
+                openVolumeMenu(e, getSelfId(), 'video');
+            });
             wrap.appendChild(v);
         }
         if (S.screenOn && S.localStreams.screen) {
@@ -5276,6 +5257,13 @@
             s.setAttribute('data-self', '1');
             s.setAttribute('data-uid', getSelfId());
             s.addEventListener('click', function () { toggleFullscreen(s); });
+            // Right-click our own screen share in the DM self strip -> View
+            // menu (mirror / rotate / reset), same as everyone else's tiles.
+            s.addEventListener('contextmenu', function (e) {
+                e.preventDefault();
+                e.stopPropagation();
+                openVolumeMenu(e, getSelfId(), 'screen');
+            });
             wrap.appendChild(s);
         }
         if (!S.cameraOn && !S.screenOn) {
@@ -5296,6 +5284,14 @@
             dmPrev.appendChild(selfPreviewEl());
             // A re-render wipes the reconnect chip — re-apply if it was active.
             syncVideoReconnectChips();
+            // Fresh self-strip videos: re-apply any per-viewer mirror/rotate
+            // transform (and its rotation slot) so a rebuild doesn't silently
+            // reset how YOU had your own feeds arranged.
+            document.querySelectorAll('#dm-call-self video.voice-self-video').forEach(function (v) {
+                applyTileTransform(v, v.dataset.uid, v.dataset.kind);
+            });
+            // The self strip was rebuilt — restore any "Reset view" hint chip.
+            syncAllResetViewChips();
         }
     }
 
@@ -5645,7 +5641,12 @@
         }
         var inMedia = video.parentElement && (
             video.parentElement.classList.contains('voice-member-media') ||
-            video.parentElement.classList.contains('dm-call-tile-media'));
+            video.parentElement.classList.contains('dm-call-tile-media') ||
+            // The DM call panel's self strip — camera + screen share side by
+            // side. Without the slot a rotated SELF camera's visual box sticks
+            // out and overlaps the sibling screen tile (same bug as remote
+            // tiles, which were already fixed).
+            video.parentElement.classList.contains('voice-self-preview-wrap'));
         if (!sideways) {
             // Back to normal: unwrap any rotation slot (the flex row reserves
             // the video's natural footprint again) and clear the swapped dims.
@@ -5736,8 +5737,86 @@
     }
 
     function applyTileTransformAll(uid, kind) {
-        document.querySelectorAll('.remote-video-tile[data-kind="' + kind + '"][data-uid="' + uid + '"]').forEach(function (v) {
+        // Both tile classes: remote/popup tiles (.remote-video-tile) and the
+        // DM panel's own self strip (.voice-self-video).
+        document.querySelectorAll('.remote-video-tile[data-kind="' + kind + '"][data-uid="' + uid + '"], .voice-self-video[data-kind="' + kind + '"][data-uid="' + uid + '"]').forEach(function (v) {
             applyTileTransform(v, uid, kind);
+        });
+        // Keep the "Reset view" hint chip in sync with the transform state.
+        syncResetViewChips(uid, kind);
+    }
+
+    // ------------------------------------------------------------------
+    // "Reset view" hint chip
+    // ------------------------------------------------------------------
+    // Floats at the bottom-center of ANY tile (camera or screen, remote or
+    // your own, tile or fullscreen) whose feed is mirrored/rotated for you, so
+    // the transform is noticeable and restorable in one click. Clicking clears
+    // the per-viewer transform; right-click opens the same view/volume menu.
+    function resetViewChipFeedKey(uid, kind) { return 'rv:' + feedKey(uid, kind); }
+
+    function positionResetViewChip(chip, video) {
+        if (!chip || !video) return;
+        var place = function () {
+            if (!chip.isConnected || !video.isConnected) return;
+            var vr = video.getBoundingClientRect();
+            if (vr.width <= 1 || vr.height <= 1) return; // not laid out yet
+            var op = chip.offsetParent;
+            if (!op) return;
+            var or = op.getBoundingClientRect();
+            var cw = chip.offsetWidth || 90;
+            var ch = chip.offsetHeight || 24;
+            chip.style.left = Math.round(vr.left - or.left + (vr.width - cw) / 2) + 'px';
+            chip.style.top = Math.round(vr.top - or.top + vr.height - ch - 6) + 'px';
+        };
+        place();
+        var tries = 0;
+        (function retry() {
+            if (tries < 5 && chip.isConnected && !chip.style.left) {
+                tries++;
+                setTimeout(place, 60);
+            }
+        })();
+    }
+
+    function syncResetViewChips(uid, kind) {
+        var key = resetViewChipFeedKey(uid, kind);
+        document.querySelectorAll('.voice-tile-reset-view[data-feed="' + key + '"]').forEach(function (c) { c.remove(); });
+        var st = S.tileTransforms[uid + ':' + kind];
+        if (!st || (!st.mirror && !st.rot)) return;
+        // Only over a VISIBLE video for this feed (skip display:none tiles —
+        // a hidden feed's chip would linger over the remaining visible one).
+        var video = null;
+        document.querySelectorAll('.remote-video-tile[data-kind="' + kind + '"][data-uid="' + uid + '"], .voice-self-video[data-kind="' + kind + '"][data-uid="' + uid + '"]').forEach(function (v) {
+            if (!video && v.offsetParent) video = v;
+        });
+        if (!video) return;
+        var parent = video.parentElement;
+        if (parent && parent.classList && parent.classList.contains('voice-tile-slot')) parent = parent.parentElement;
+        if (!parent) return;
+        var chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = 'voice-tile-reset-view';
+        chip.setAttribute('data-feed', key);
+        chip.title = 'This feed is mirrored/rotated for you — click to reset';
+        chip.innerHTML = '<span class="voice-tile-reset-ico">&#8635;</span><span class="voice-tile-reset-lbl">Reset view</span>';
+        chip.addEventListener('click', function (e) {
+            e.stopPropagation();
+            setTileViewTransform(uid, kind, 'reset', 0);
+        });
+        chip.addEventListener('contextmenu', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            openVolumeMenu(e, uid, kind === 'screen' ? 'screen' : 'video');
+        });
+        parent.appendChild(chip);
+        positionResetViewChip(chip, video);
+    }
+
+    function syncAllResetViewChips() {
+        Object.keys(S.tileTransforms).forEach(function (key) {
+            var parts = key.split(':');
+            if (parts.length === 2) syncResetViewChips(parts[0], parts[1]);
         });
     }
 
@@ -5826,14 +5905,28 @@
         // chrome, and screen audio on the screen tile).
         var isScreen = kind === 'screen';
         var isVideoOnly = kind === 'video';
+        var selfId = getSelfId();
+        var isSelf = uid === selfId;
         var member = S.members[uid];
         var name = member ? (userDisplayNameCache[uid] && userDisplayNameCache[uid].display_name) || member.username || member.display_name || 'Member' : 'Member';
-        var selfId = getSelfId();
+        // Your own camera/screen: the View section (mirror / rotate / reset)
+        // works exactly like everyone else's tiles. Volume sliders are skipped
+        // — you don't adjust your own mic or the audio of your own share here.
+        var headerName;
+        if (isSelf) {
+            if (isScreen) headerName = 'Your screen share';
+            else if (isVideoOnly) headerName = 'Your camera';
+            else headerName = 'You';
+        } else {
+            headerName = name;
+        }
 
         menu.innerHTML = '';
         var header = document.createElement('div');
         header.className = 'volume-menu-header';
-        header.textContent = (isScreen ? 'Screen share — ' : (isVideoOnly ? 'Camera — ' : '')) + name;
+        // Self tiles already carry "Your camera / Your screen share" — no
+        // redundant prefix.
+        header.textContent = isSelf ? headerName : ((isScreen ? 'Screen share — ' : (isVideoOnly ? 'Camera — ' : '')) + headerName);
         menu.appendChild(header);
 
         // View transform section: mirror horizontally / rotate 90° left or
@@ -5847,8 +5940,9 @@
 
         // Volume meter: the member row controls the member's MIC volume, the
         // screen tile controls the SCREEN-share audio (a separate per-member
-        // volume), and a camera tile has no audio at all — no meter.
-        if (!isVideoOnly) {
+        // volume), and a camera tile has no audio at all — no meter. Skipped
+        // for your own tiles (no self-loopback volume here).
+        if (!isVideoOnly && !isSelf) {
             // Small caption so it's obvious WHICH volume this slider controls:
             // the member's mic, or the screen-share audio (separate per-member
             // volume).
@@ -6968,6 +7062,8 @@
         // Re-apply the per-viewer mirror/rotate transform now that the element
         // lives in the fullscreen wrap (the tile-mode dims don't apply there).
         if (el.dataset) applyTileTransform(el, el.dataset.uid, el.dataset.kind);
+        // Move the "Reset view" hint chip into the fullscreen wrap with the tile.
+        if (el.dataset) syncResetViewChips(el.dataset.uid, el.dataset.kind);
         var restored = false;
         var restore = function () {
             if (restored) return;
@@ -6980,6 +7076,8 @@
             reattachTileStream(el);
             // Back in the tile — restore the tile-mode dims (swap/scaled).
             if (el.dataset) applyTileTransform(el, el.dataset.uid, el.dataset.kind);
+            // Bring the "Reset view" hint chip back to the tile with the video.
+            if (el.dataset) syncResetViewChips(el.dataset.uid, el.dataset.kind);
         };
         // Register BEFORE requestFullscreen: fullscreenchange also fires when
         // ENTERING fullscreen, so only restore when it is genuinely not active.

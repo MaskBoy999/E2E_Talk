@@ -209,21 +209,54 @@ test.describe('camera options + screen audio volume + resize minimum', () => {
             return s.cameraOn && s.cameraFacing === 'environment';
         }, undefined, { timeout: 15000 });
 
-        // Mirror: self camera preview gets the .mirrored class (DM self strip)
-        await page.evaluate(() => (window.VoiceManager as any).toggleCameraMirror());
-        await page.waitForFunction(() => {
-            const s = (window.VoiceManager as any)._debug.state;
-            return s.mirrorCamera === true;
-        }, undefined, { timeout: 10000 });
-        const mirrored = await page.evaluate(() => {
-            const v = document.querySelector('#dm-call-self video.voice-self-video');
-            return v ? v.classList.contains('mirrored') : false;
+        // Mirror now lives in the right-click menu (moved out of the ⋮
+        // dropdown). Right-click OUR OWN camera in the DM self strip: the menu
+        // shows the View section (mirror/rotate/reset) and NO volume meter.
+        const selfCam = page.locator('#dm-call-self video.voice-self-video[data-kind="camera"]');
+        await selfCam.waitFor({ state: 'visible', timeout: 15000 });
+        await selfCam.click({ button: 'right' });
+        await page.waitForSelector('#volume-menu', { state: 'visible', timeout: 10000 });
+        const selfHeader = await page.evaluate(() => {
+            const m = document.getElementById('volume-menu')!;
+            return m.querySelector('.volume-menu-header')!.textContent;
         });
-        expect(mirrored).toBe(true);
-        // ... and the OUTGOING stream is never flipped (mirror is preview-only)
+        expect(selfHeader).toContain('Your camera');
+        // Our own tiles never get a volume meter — only other people's feeds do.
+        const selfHasVol = await page.evaluate(() => !!document.querySelector('#volume-menu .volume-menu-slider'));
+        expect(selfHasVol).toBe(false);
+        // View section present: mirror it (find the button by text to dodge
+        // the unicode arrow).
+        await page.evaluate(() => {
+            const btns = document.querySelectorAll('#volume-menu .volume-menu-view-btn');
+            for (const b of btns) {
+                if (b.textContent && b.textContent.indexOf('Mirror') !== -1) {
+                    (b as HTMLButtonElement).click();
+                    break;
+                }
+            }
+        });
+        await page.waitForFunction(() => {
+            const v = document.querySelector('#dm-call-self video.voice-self-video[data-kind="camera"]') as HTMLElement | null;
+            return !!v && (v.style.transform || '').indexOf('scaleX(-1)') !== -1;
+        }, undefined, { timeout: 10000 });
+        // And the OUTGOING stream is never flipped (mirror is preview-only —
+        // it's a per-viewer render transform, nothing is sent).
         const mirrorPersisted = await page.evaluate(() =>
-            JSON.parse(localStorage.getItem('voice_settings') || '{}').mirrorCamera === true);
+            JSON.parse(localStorage.getItem('voice_settings') || '{}').mirrorCamera === undefined);
         expect(mirrorPersisted).toBe(true);
+        // Close the menu with an outside click.
+        await page.mouse.click(5, 5);
+        await page.waitForSelector('#volume-menu', { state: 'hidden', timeout: 5000 });
+
+        // The "Reset view" hint chip floats over the mirrored tile, and one
+        // click restores the feed.
+        await page.waitForSelector('#dm-call-self .voice-tile-reset-view', { state: 'visible', timeout: 10000 });
+        await page.click('#dm-call-self .voice-tile-reset-view');
+        await page.waitForFunction(() => {
+            const v = document.querySelector('#dm-call-self video.voice-self-video[data-kind="camera"]') as HTMLElement | null;
+            return !v || (v.style.transform || '') === '';
+        }, undefined, { timeout: 10000 });
+        await page.waitForSelector('#dm-call-self .voice-tile-reset-view', { state: 'detached', timeout: 10000 });
 
         // Flash: torch toggles on (mocked capability + applyConstraints)
         await page.evaluate(() => (window.VoiceManager as any).toggleCameraFlash());
@@ -254,6 +287,77 @@ test.describe('camera options + screen audio volume + resize minimum', () => {
             };
         }, aUid);
         expect(bState.screenAudioStreams).toBe(true);
+
+        // ---- 2b. Right-click OUR OWN screen share -> View section, NO volume
+        // meter (you never hear your own share; only others' shares get one). ----
+        const selfScreen = page.locator('#dm-call-self video.voice-self-video[data-kind="screen"]');
+        await selfScreen.waitFor({ state: 'visible', timeout: 15000 });
+        await selfScreen.click({ button: 'right' });
+        await page.waitForSelector('#volume-menu', { state: 'visible', timeout: 10000 });
+        const selfScreenHeader = await page.evaluate(() => {
+            const m = document.getElementById('volume-menu')!;
+            return m.querySelector('.volume-menu-header')!.textContent;
+        });
+        expect(selfScreenHeader).toContain('Your screen share');
+        const selfScreenHasVol = await page.evaluate(() => !!document.querySelector('#volume-menu .volume-menu-slider'));
+        expect(selfScreenHasVol).toBe(false);
+        // View section still there (rotate right, then back) — and it works.
+        await page.evaluate(() => {
+            const btns = document.querySelectorAll('#volume-menu .volume-menu-view-btn');
+            for (const b of btns) {
+                if (b.textContent && b.textContent.indexOf('90°') !== -1 && b.textContent.indexOf('⟳') !== -1) {
+                    (b as HTMLButtonElement).click();
+                    break;
+                }
+            }
+        });
+        await page.waitForFunction(() => {
+            const v = document.querySelector('#dm-call-self video.voice-self-video[data-kind="screen"]') as HTMLElement | null;
+            return !!v && (v.style.transform || '').indexOf('rotate(90deg)') !== -1;
+        }, undefined, { timeout: 10000 });
+        // The Reset view chip appears over the rotated screen too.
+        await page.waitForSelector('#dm-call-self .voice-tile-reset-view', { state: 'visible', timeout: 10000 });
+        await page.mouse.click(5, 5);
+        await page.waitForSelector('#volume-menu', { state: 'hidden', timeout: 5000 });
+
+        // ---- 2c. Rotating OUR OWN CAMERA must not overlap the screen tile
+        // either — it gets the same rotation-slot treatment as everyone
+        // else's tiles (this was the self-strip gap). ----
+        const selfCam2 = page.locator('#dm-call-self video.voice-self-video[data-kind="camera"]');
+        await selfCam2.waitFor({ state: 'visible', timeout: 15000 });
+        await selfCam2.click({ button: 'right' });
+        await page.waitForSelector('#volume-menu', { state: 'visible', timeout: 10000 });
+        await page.evaluate(() => {
+            const btns = document.querySelectorAll('#volume-menu .volume-menu-view-btn');
+            for (const b of btns) {
+                if (b.textContent && b.textContent.indexOf('90°') !== -1 && b.textContent.indexOf('⟳') !== -1) {
+                    (b as HTMLButtonElement).click();
+                    break;
+                }
+            }
+        });
+        await page.waitForFunction(() => {
+            const v = document.querySelector('#dm-call-self video.voice-self-video[data-kind="camera"]') as HTMLElement | null;
+            return !!v && (v.style.transform || '').indexOf('rotate(90deg)') !== -1;
+        }, undefined, { timeout: 10000 });
+        await page.mouse.click(5, 5);
+        await page.waitForSelector('#volume-menu', { state: 'hidden', timeout: 5000 });
+        // The camera is inside a rotation slot that reserves its rotated
+        // footprint, so it no longer overlaps the sibling screen tile.
+        const selfOverlap = await page.evaluate(() => {
+            const cam = document.querySelector('#dm-call-self video.voice-self-video[data-kind="camera"]') as HTMLElement | null;
+            const scr = document.querySelector('#dm-call-self video.voice-self-video[data-kind="screen"]') as HTMLElement | null;
+            if (!cam || !scr) return { ok: false, reason: 'missing videos' };
+            const camSlot = cam.closest('.voice-tile-slot') as HTMLElement | null;
+            const scrSlot = scr.closest('.voice-tile-slot') as HTMLElement | null;
+            const cr = (camSlot || cam).getBoundingClientRect();
+            const sr = (scrSlot || scr).getBoundingClientRect();
+            const intersects = !(cr.right <= sr.left || sr.right <= cr.left || cr.bottom <= sr.top || sr.bottom <= cr.top);
+            return { ok: true, intersects, camSlot: !!camSlot, scrSlot: !!scrSlot };
+        });
+        expect(selfOverlap.ok).toBe(true);
+        expect(selfOverlap.camSlot).toBe(true);
+        expect(selfOverlap.intersects).toBe(false);
 
         // ---- 3. Right-click B's view of A's SCREEN tile -> "Screen share" volume menu ----
         const screenTile = page2.locator('.dm-call-tile video[data-kind="screen"]');
@@ -361,6 +465,8 @@ test.describe('camera options + screen audio volume + resize minimum', () => {
         }, undefined, { timeout: 15000 });
 
         // ---- Dropdown: open via the DM control row's ⋮ button ----
+        // Mirror was moved to the right-click menu — the dropdown now holds
+        // only Flip and Flash.
         await page.click('#dm-call-cam-opt');
         await page.waitForSelector('#voice-cam-opt-menu', { state: 'visible', timeout: 10000 });
         const opts = await page.evaluate(() =>
@@ -369,16 +475,8 @@ test.describe('camera options + screen audio volume + resize minimum', () => {
                 return b ? b.textContent!.trim() : null;
             }));
         expect(opts[0]).toContain('Flip');
-        expect(opts[1]).toContain('Mirror');
+        expect(opts[1]).toBeNull();   // mirror removed from the dropdown
         expect(opts[2]).toContain('Flash');
-
-        // Mirror via the menu -> active state, menu closes
-        await page.click('#cam-opt-mirror');
-        await page.waitForFunction(() => {
-            const s = (window.VoiceManager as any)._debug.state;
-            return s.mirrorCamera === true;
-        }, undefined, { timeout: 10000 });
-        await page.waitForSelector('#voice-cam-opt-menu', { state: 'hidden', timeout: 5000 });
 
         // Reopen -> Flash. NO torch -> white overlay shows, menu closes
         await page.click('#dm-call-cam-opt');

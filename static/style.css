@@ -7131,6 +7131,40 @@ video.remote-video-tile.mirrored {
     border: 1px solid var(--bg-border, #2a2a4a);
 }
 
+/* "Reset view" hint chip — floats at the bottom-center of any tile whose
+   feed is mirrored/rotated for you (remote or your own, tile or fullscreen).
+   One click clears the per-viewer transform. Sits above the feed buttons but
+   below nothing that matters; small so it never blocks the feed. */
+.voice-tile-reset-view {
+    position: absolute;
+    z-index: 7;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 10px;
+    border-radius: 10px;
+    border: 1px solid var(--bg-border, #2a2a4a);
+    background: rgba(0, 0, 0, 0.72);
+    color: var(--text-primary, #eee);
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    max-width: 80%;
+    box-sizing: border-box;
+}
+.voice-tile-reset-view:hover {
+    background: rgba(88, 101, 242, 0.85);
+}
+.voice-tile-reset-ico {
+    font-size: 11px;
+    line-height: 1;
+}
+.voice-tile-reset-lbl {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
 /* Rotation slot (right-click → View → 90°): when a tile is rotated sideways
    it is wrapped in a div sized to the ROTATED visual box, so the flex row
    reserves the real footprint and the rotated feed never overlaps the
@@ -7148,7 +7182,8 @@ video.remote-video-tile.mirrored {
     border: 1px solid var(--bg-border, #2a2a4a);
     cursor: pointer;
 }
-.voice-tile-slot .remote-video-tile {
+.voice-tile-slot .remote-video-tile,
+.voice-tile-slot .voice-self-video {
     flex: 0 0 auto;
     max-width: none !important;
     max-height: none !important;
