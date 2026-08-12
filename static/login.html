@@ -28,6 +28,16 @@
                 <p class="toggle"><a href="admin.html" class="admin-link-login">Host Admin</a></p>
             </form>
 
+            <!-- Two-Factor Code Step (shown when the account has 2FA enabled) -->
+            <form id="login-2fa-form" style="display:none;">
+                <h2>Two-Factor Authentication</h2>
+                <p class="subtitle">Enter the 6-digit code from your authenticator app, or one of your recovery codes.</p>
+                <input type="text" id="login-2fa-code" placeholder="Code" required autocomplete="one-time-code" maxlength="12" inputmode="text">
+                <p id="login-2fa-error" class="error" style="display:none;"></p>
+                <button type="submit">Verify &amp; Log In</button>
+                <button type="button" id="login-2fa-back" style="background:none;border:none;color:var(--accent,#5865F2);cursor:pointer;margin-top:10px;font-size:13px;">&larr; Back to login</button>
+            </form>
+
             <!-- Register Form -->
             <form id="register-form" style="display: none;">
                 <h2>Register</h2>

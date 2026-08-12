@@ -608,6 +608,15 @@
                     </div>
                 </div>
                 <div class="settings-group">
+                    <h4>Two-Factor Authentication (2FA)</h4>
+                    <p class="settings-hint">Protect your account with a one-time code from an authenticator app (Google Authenticator, Authy, 1Password, &hellip;). You&rsquo;ll need it at every login, or one of your 8 one-time recovery codes.</p>
+                    <p class="settings-hint" id="twofa-status-line" style="font-weight:600;">Checking&hellip;</p>
+                    <div style="display:flex;gap:10px;margin-top:6px;flex-wrap:wrap;">
+                        <button class="btn-reauth" id="enable-2fa-btn">Enable 2FA</button>
+                        <button class="btn-delete-account" id="disable-2fa-btn" style="background:var(--danger,#ed4245);display:none;">Disable 2FA</button>
+                    </div>
+                </div>
+                <div class="settings-group">
                     <h4>Devices</h4>
                     <p class="settings-hint">Every device currently signed in to your account. You can force-sign-out any of them — they are kicked immediately, everywhere (including voice channels and calls).</p>
                     <div id="devices-list" class="session-log-list">
@@ -1230,6 +1239,7 @@
     <script src="crypto.js?v=8"></script>
     <script src="qrcode.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
     <!-- ===== Voice UI containers (managed by voice.js) ===== -->
 
     <!-- Voice bar (bottom-left; hidden while viewing the voice channel itself) -->
@@ -1345,6 +1355,55 @@
 
     <!-- Per-member volume menu (right-click) -->
     <div class="volume-menu" id="volume-menu" style="display:none"></div>
+
+    <!-- 2FA enrollment modals -->
+    <div class="modal" id="twofa-enroll-modal" style="display:none">
+        <div class="modal-content" style="max-width:520px">
+            <h3 style="margin-bottom:8px;color:var(--accent)">Enable Two-Factor Authentication</h3>
+            <div id="twofa-step-password">
+                <p style="color:var(--text-muted);font-size:13px;margin-bottom:10px;">Confirm your password to begin enrollment.</p>
+                <div class="auth-input-row" style="margin-bottom:10px;">
+                    <input type="password" id="twofa-password" placeholder="Password" autocomplete="off" class="modal-input auth-code-input" style="flex:1;" />
+                    <button type="button" class="toggle-visibility-btn" id="toggle-twofa-password" title="Show/Hide">&#128065;</button>
+                </div>
+                <button class="btn-invite" id="twofa-start-btn">Begin enrollment</button>
+                <p id="twofa-password-error" style="color:var(--danger);display:none;font-size:13px;margin-top:8px;"></p>
+            </div>
+            <div id="twofa-step-qr" style="display:none;">
+                <p style="color:var(--text-muted);font-size:13px;margin-bottom:10px;">Scan the QR with your authenticator app, or enter the secret manually:</p>
+                <div style="text-align:center;margin-bottom:10px;">
+                    <div id="twofa-qr" style="display:inline-block;background:#fff;padding:8px;border-radius:8px;"></div>
+                </div>
+                <p id="twofa-secret-text" style="font-family:monospace;word-break:break-all;font-size:12px;color:var(--text-muted);margin-bottom:10px;"></p>
+                <p style="color:var(--text-muted);font-size:13px;"><strong>Recovery codes</strong> — save these now, they&rsquo;re shown only once:</p>
+                <div id="twofa-recovery-codes" style="font-family:monospace;display:grid;grid-template-columns:1fr 1fr;gap:4px;margin:8px 0;font-size:13px;"></div>
+                <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;">
+                    <button class="btn-invite" id="twofa-copy-codes" style="font-size:12px;padding:6px 12px;">Copy codes</button>
+                    <span id="twofa-copy-status" style="font-size:12px;color:var(--text-muted);"></span>
+                </div>
+                <p style="color:var(--text-muted);font-size:13px;margin-bottom:6px;">Enter the 6-digit code from your app to confirm:</p>
+                <input type="text" id="twofa-verify-code" placeholder="6-digit code" maxlength="12" class="modal-input" style="width:100%;box-sizing:border-box;margin-bottom:10px;" />
+                <button class="btn-invite" id="twofa-verify-btn">Verify &amp; Enable</button>
+                <p id="twofa-verify-error" style="color:var(--danger);display:none;font-size:13px;margin-top:8px;"></p>
+            </div>
+            <div class="modal-actions" style="margin-top:14px;">
+                <button class="btn-cancel" id="twofa-enroll-cancel">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="twofa-disable-modal" style="display:none">
+        <div class="modal-content" style="max-width:420px">
+            <h3 style="margin-bottom:8px;color:var(--danger)">Disable Two-Factor Authentication</h3>
+            <p style="color:var(--text-muted);font-size:13px;margin-bottom:10px;">Enter your current code or a recovery code to disable 2FA.</p>
+            <input type="text" id="twofa-disable-code" placeholder="Code" maxlength="12" class="modal-input" style="width:100%;box-sizing:border-box;margin-bottom:10px;" />
+            <p id="twofa-disable-error" style="color:var(--danger);display:none;font-size:13px;margin-bottom:8px;"></p>
+            <div class="modal-actions">
+                <button class="btn-cancel" id="twofa-disable-cancel">Cancel</button>
+                <button class="btn-invite" id="twofa-disable-confirm" style="background:#ed4245;border-color:#ed4245;">Disable 2FA</button>
+            </div>
+        </div>
+    </div>
 
     <script src="secure-storage.js?v=1"></script>
     <script src="voice.js?v=2"></script>

@@ -28,6 +28,9 @@ export default defineConfig({
             FRIEND_REQUEST_USER_MAX: '100000',
             LOGIN_IP_MAX: '100000',
             LOGIN_USER_MAX: '100000',
+            // 2FA code-verification shares the login limiter space; raise it so
+            // the twofa suite's repeated code attempts never 429 mid-suite.
+            LOGIN_2FA_IP_MAX: '100000',
             AUTH_PARAMS_IP_MAX: '100000',
             HMAC_KEY_IP_MAX: '100000',
             // Admin-login attempts share a per-IP budget; raise it for the suite

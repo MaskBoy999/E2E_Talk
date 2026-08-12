@@ -1074,6 +1074,8 @@ impl Database {
         // Migration 055: Append-only admin audit log (G4) — who did what in
         // the admin panel, when, to which target, from which IP.
         let _ = conn.execute_batch(include_str!("../migrations/055_admin_audit.sql"));
+        // Migration 056: TOTP 2FA (encrypted secret) + one-time recovery codes.
+        let _ = conn.execute_batch(include_str!("../migrations/056_2fa.sql"));
 
         // Data migration: normalize legacy space-separated CURRENT_TIMESTAMP values
         // ("YYYY-MM-DD HH:MM:SS") to fixed-width RFC3339 ("YYYY-MM-DDTHH:MM:SS.000000Z")
@@ -4669,6 +4671,105 @@ impl Database {
         )
         .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    // --- Two-factor auth (TOTP + recovery codes) ---
+
+    pub fn totp_enabled(&self, user_id: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM totp_secrets WHERE user_id = ?1",
+                params![user_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(count > 0)
+    }
+
+    pub fn save_totp_secret(&self, user_id: &str, secret_encrypted: &str, nonce: &str, salt: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT OR REPLACE INTO totp_secrets (user_id, secret_encrypted, nonce, salt) VALUES (?1, ?2, ?3, ?4)",
+            params![user_id, secret_encrypted, nonce, salt],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// (secret_encrypted_b64, nonce_b64, salt) for a user, or None when 2FA is off.
+    pub fn get_totp_secret(&self, user_id: &str) -> Result<Option<(String, String, String)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let res = conn.query_row(
+            "SELECT secret_encrypted, nonce, salt FROM totp_secrets WHERE user_id = ?1",
+            params![user_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
+        );
+        match res {
+            Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    pub fn save_recovery_code_hashes(&self, user_id: &str, hashes: &[String]) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        for h in hashes {
+            conn.execute(
+                "INSERT OR IGNORE INTO recovery_codes (user_id, code_hash) VALUES (?1, ?2)",
+                params![user_id, h],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    /// (code_hash, used) for a user's recovery codes.
+    pub fn list_recovery_code_hashes(&self, user_id: &str) -> Result<Vec<(String, bool)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT code_hash, used FROM recovery_codes WHERE user_id = ?1")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![user_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? != 0))
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    }
+
+    pub fn mark_recovery_code_used(&self, user_id: &str, hash: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE recovery_codes SET used = 1, used_at = datetime('now') WHERE user_id = ?1 AND code_hash = ?2",
+            params![user_id, hash],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn delete_totp(&self, user_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM totp_secrets WHERE user_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM recovery_codes WHERE user_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// (id, username, two_factor_enabled) for the admin Users tab.
+    pub fn list_users_with_2fa(&self) -> Result<Vec<(String, String, bool)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT u.id, u.username, CASE WHEN t.user_id IS NULL THEN 0 ELSE 1 END
+                 FROM users u LEFT JOIN totp_secrets t ON t.user_id = u.id ORDER BY u.created_at DESC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)? != 0)))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
     }
 
     /// Append to the admin audit log (G4). Tokens/passwords are never logged.

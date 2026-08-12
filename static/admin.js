@@ -212,6 +212,13 @@ document.addEventListener('DOMContentLoaded', () => {
         filterTab(tab);
     });
 
+    // Force-disable a user's 2FA (delegated — rows are re-rendered frequently)
+    document.getElementById('admin-panel').addEventListener('click', function (e) {
+        var btn = e.target.closest('[data-2fa-uid]');
+        if (!btn) return;
+        disableUser2fa(btn.dataset['2faUid'], btn.dataset['2faUname']);
+    });
+
     // Page size selector change (delegated)
     document.getElementById('admin-panel').addEventListener('change', function (e) {
         var sel = e.target.closest('.pag-size-select');
@@ -448,7 +455,7 @@ function renderUsers(users) {
     tabTotals['users'] = users.length;
     const p = paginate(users, 'users');
     updateCount('users-count', p.total);
-    renderTable('user-list', 14,
+    renderTable('user-list', 15,
         p.items.map(u =>
             '<td>' + escapeHtml(u.username) + '</td>' +
             '<td class="id-cell" title="' + escapeHtml(u.id) + '">' + escapeHtml(truncate(u.id, 12)) + '</td>' +
@@ -459,6 +466,9 @@ function renderUsers(users) {
             '<td class="id-cell">' + escapeHtml(truncate(u.profile_banner_file_id || '', 12)) + '</td>' +
             '<td class="blob-cell">' + escapeHtml(truncate(u.profile_banner_file_key || '', 20)) + '</td>' +
             '<td>' + (u.friend_requests_disabled ? 'Yes' : 'No') + '</td>' +
+            (u.two_factor_enabled
+                ? '<td><span style="color:#43b581;font-weight:600;">ON</span> <button class="btn-delete-sm" data-2fa-uid="' + escapeHtml(u.id) + '" data-2fa-uname="' + escapeHtml(u.username) + '">Disable</button></td>'
+                : '<td style="color:#666;">Off</td>') +
             '<td class="blob-cell">' + escapeHtml(truncate(u.encrypted_profile_data || '', 30)) + '</td>' +
             '<td class="blob-cell">' + escapeHtml(truncate(u.friend_code_hash || '', 20)) + '</td>' +
             '<td class="blob-cell">' + escapeHtml(truncate(u.encrypted_hash_key || '', 20)) + '</td>' +
@@ -468,6 +478,25 @@ function renderUsers(users) {
         'No users'
     );
     renderPaginationControls('users');
+}
+
+// Force-disable 2FA for a user (admin action).
+async function disableUser2fa(userId, username) {
+    if (!confirm('Disable two-factor authentication for "' + username + '"?\nThey will no longer need a code to log in. This cannot be undone by the user.')) return;
+    try {
+        const adminToken = sessionStorage.getItem('admin_token') || '';
+        const res = await fetch('/api/admin/users/' + encodeURIComponent(userId) + '/disable-2fa', {
+            method: 'POST',
+            headers: adminToken ? { 'Authorization': 'Bearer ' + adminToken } : {},
+        });
+        const data = await res.json();
+        if (!res.ok) { alert('Failed: ' + (data.error || 'HTTP ' + res.status)); return; }
+        alert('2FA disabled for ' + username);
+        loadUsers();
+        loadAuditLog();
+    } catch (e) {
+        alert('Server is not running');
+    }
 }
 
 // --- Servers ---

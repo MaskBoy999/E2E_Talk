@@ -16,6 +16,7 @@ mod auth;
 mod config;
 mod db;
 mod handlers;
+mod totp;
 mod ws;
 
 pub struct AppState {
@@ -410,6 +411,11 @@ async fn main() {
         .route("/api/auth-params/{username}", get(handlers::get_auth_params))
         .route("/api/register", post(handlers::register))
         .route("/api/login", post(handlers::login))
+        .route("/api/login/2fa", post(handlers::login_2fa))
+        .route("/api/2fa/enroll", post(handlers::enroll_2fa))
+        .route("/api/2fa/verify-enroll", post(handlers::verify_enroll_2fa))
+        .route("/api/2fa/disable", post(handlers::disable_2fa))
+        .route("/api/2fa/status", get(handlers::get_2fa_status))
         .route("/api/servers", get(handlers::list_servers).post(handlers::create_server))
         .route("/api/servers/{server_id}/channels", get(handlers::list_channels).post(handlers::create_channel))
         .route("/api/servers/{server_id}/members", get(handlers::list_server_members))
@@ -456,6 +462,7 @@ async fn main() {
         .route("/api/admin/logout", post(handlers::admin_logout))
         .route("/api/admin/users", get(handlers::admin_list_users))
         .route("/api/admin/users/{user_id}", delete(handlers::admin_delete_user))
+        .route("/api/admin/users/{user_id}/disable-2fa", post(handlers::admin_disable_user_2fa))
         .route("/api/admin/users/{user_id}/stats", get(handlers::admin_user_cascade_stats))
         .route("/api/admin/servers", get(handlers::admin_list_servers))
         .route("/api/admin/servers/{server_id}", delete(handlers::admin_delete_server))

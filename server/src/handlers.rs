@@ -1,3 +1,4 @@
+use crate::totp;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
@@ -830,6 +831,33 @@ pub async fn login(
         }
     };
 
+    // 2FA (TOTP): the password stage only earns a short-lived pending token;
+    // the real session is minted by /api/login/2fa after a valid code.
+    if state.db.totp_enabled(&user.id).unwrap_or(false) {
+        let session_secs = session_duration_secs(req.duration_seconds);
+        return match auth::create_pending_2fa_token(
+            &user.id,
+            &user.username,
+            &state.config.jwt_secret,
+            chrono::Duration::minutes(5),
+            session_secs,
+        ) {
+            Ok(pending) => (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "two_factor_required": true,
+                    "pending_token": pending,
+                })),
+            )
+                .into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response(),
+        };
+    }
+
     let session_secs = session_duration_secs(req.duration_seconds);
     let token = match mint_session_token(
         &state,
@@ -873,6 +901,394 @@ pub async fn login(
             "profile_banner_file_id_hash": profile_pic.2
         }
     }))).into_response()
+}
+
+// --- Two-factor authentication (TOTP + recovery codes) ---
+
+#[derive(Deserialize)]
+pub struct Login2FaRequest {
+    pub pending_token: String,
+    pub code: String,
+}
+
+/// Second step of login for 2FA-enabled accounts. Verifies the short-lived
+/// pending token (password step done) + a TOTP code or one-time recovery code,
+/// then mints the real session — same success shape as /api/login.
+pub async fn login_2fa(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<Login2FaRequest>,
+) -> impl IntoResponse {
+    // 6-digit codes need brute-force protection: per-IP budget (env-overridable
+    // for tests, same pattern as LOGIN_IP_MAX).
+    let ip = get_client_ip(&headers);
+    let ip_rate_key = format!("login2fa_ip:{}", ip);
+    let ip_max: u32 = std::env::var("LOGIN_2FA_IP_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
+    if ip_max > 0 && !LOGIN_RATE_LIMITER.check_and_increment(&ip_rate_key, ip_max, Duration::from_secs(300)) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "Too many attempts. Try again in 5 minutes."})),
+        )
+            .into_response();
+    }
+
+    let claims = match auth::validate_token(&req.pending_token, &state.config.jwt_secret) {
+        Ok(c) => c,
+        Err(_) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Session expired. Please log in again."})),
+            )
+                .into_response();
+        }
+    };
+    if claims.purpose.as_deref() != Some("2fa_pending") {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Invalid session. Please log in again."})),
+        )
+            .into_response();
+    }
+
+    let secret_row = match state.db.get_totp_secret(&claims.sub) {
+        Ok(Some(r)) => r,
+        _ => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "2FA is not enabled for this account"})),
+            )
+                .into_response();
+        }
+    };
+    let secret = match totp::decrypt_secret(&secret_row.0, &secret_row.1, &state.config.jwt_secret) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
+
+    // TOTP code, or a (still-unused) one-time recovery code.
+    let mut used_recovery: Option<String> = None;
+    if !totp::verify_totp(&secret, &req.code, 1) {
+        let salt = &secret_row.2;
+        let code_hash = totp::hash_recovery_code(salt, &req.code);
+        let hashes = match state.db.list_recovery_code_hashes(&claims.sub) {
+            Ok(h) => h,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": e})),
+                )
+                    .into_response();
+            }
+        };
+        match hashes.iter().find(|(h, used)| h == &code_hash && !*used) {
+            Some(_) => used_recovery = Some(code_hash),
+            None => {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({"error": "Invalid code"})),
+                )
+                    .into_response();
+            }
+        }
+    }
+    if let Some(h) = used_recovery {
+        if let Err(e) = state.db.mark_recovery_code_used(&claims.sub, &h) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    }
+
+    let user = match state.db.get_user_by_username(&claims.username) {
+        Ok(u) => u,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
+    let session_secs = session_duration_secs(claims.duration_secs);
+    let token = match mint_session_token(&state, &user.id, &user.username, None, None, session_secs) {
+        Ok(t) => t,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
+
+    let mut headers_out = HeaderMap::new();
+    headers_out.insert(
+        "set-cookie",
+        HeaderValue::from_str(
+            &format!("token={}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age={}", token, session_secs)
+        )
+        .unwrap(),
+    );
+    let profile_pic = match state.db.get_user_profile(&user.id) {
+        Ok((_, _, pp, pph, _, bh, _, _, _, _)) => (pp, pph, bh),
+        Err(_) => (None, None, None),
+    };
+
+    (StatusCode::OK, headers_out, Json(serde_json::json!({
+        "token": token,
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "profile_picture_file_id": profile_pic.0,
+            "profile_picture_file_id_hash": profile_pic.1,
+            "profile_banner_file_id_hash": profile_pic.2
+        }
+    }))).into_response()
+}
+
+// --- 2FA enrollment / status / disable ---
+
+/// Pending enrollments: user_id → (secret_b32, recovery_salt, recovery_codes, expiry).
+/// Kept in memory (single instance); the secret is only persisted once the user
+/// proves they scanned the QR by submitting a valid code.
+static PENDING_2FA_ENROLL: LazyLock<Mutex<HashMap<String, (String, String, Vec<String>, Instant)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+const PENDING_2FA_TTL: Duration = Duration::from_secs(600); // 10 minutes
+
+#[derive(Deserialize)]
+pub struct Enroll2FaRequest {
+    /// Client-computed password hash (same value /api/login accepts).
+    pub password: String,
+}
+
+pub async fn enroll_2fa(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<Enroll2FaRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    if state.db.totp_enabled(&user_id).unwrap_or(false) {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "2FA is already enabled"})),
+        )
+            .into_response();
+    }
+    // Re-verify the password so a stolen session can't silently lock the owner out.
+    let stored_hash = match state.db.get_password_hash_by_id(&user_id) {
+        Ok(h) => h,
+        Err(_) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "User not found"})),
+            )
+                .into_response();
+        }
+    };
+    if req.password != stored_hash {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Wrong password"})),
+        )
+            .into_response();
+    }
+
+    let secret = totp::generate_secret();
+    let salt: String = {
+        use rand::Rng;
+        rand::thread_rng().gen::<[u8; 16]>().iter().map(|b| format!("{:02x}", b)).collect()
+    };
+    let codes = totp::generate_recovery_codes(8);
+    {
+        let mut pending = PENDING_2FA_ENROLL.lock().unwrap();
+        if pending.len() > 200 {
+            let now = Instant::now();
+            pending.retain(|_, v| now.duration_since(v.3) <= PENDING_2FA_TTL);
+        }
+        pending.insert(user_id.clone(), (secret.clone(), salt, codes.clone(), Instant::now()));
+    }
+    let username = claims_username_from_user_id(&state, &user_id).unwrap_or_else(|| "user".to_string());
+    let otpauth = totp::otpauth_uri("E2E Chat", &username, &secret);
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "secret_base32": secret,
+            "otpauth_url": otpauth,
+            "recovery_codes": codes,
+        })),
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+pub struct VerifyEnroll2FaRequest {
+    pub code: String,
+}
+
+pub async fn verify_enroll_2fa(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<VerifyEnroll2FaRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    let entry = {
+        let mut pending = PENDING_2FA_ENROLL.lock().unwrap();
+        match pending.get(&user_id) {
+            Some((secret, salt, codes, exp)) => {
+                if Instant::now().duration_since(*exp) > PENDING_2FA_TTL {
+                    pending.remove(&user_id);
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({"error": "Enrollment expired. Please start over."})),
+                    )
+                        .into_response();
+                }
+                (secret.clone(), salt.clone(), codes.clone())
+            }
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "No pending enrollment. Please start over."})),
+                )
+                    .into_response();
+            }
+        }
+    };
+    if !totp::verify_totp(&entry.0, &req.code, 1) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Invalid code"})),
+        )
+            .into_response();
+    }
+    let (ct, nonce) = match totp::encrypt_secret(&entry.0, &state.config.jwt_secret) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
+    let hashes: Vec<String> = entry
+        .2
+        .iter()
+        .map(|c| totp::hash_recovery_code(&entry.1, c))
+        .collect();
+    if let Err(e) = state.db.save_totp_secret(&user_id, &ct, &nonce, &entry.1) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response();
+    }
+    if let Err(e) = state.db.save_recovery_code_hashes(&user_id, &hashes) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response();
+    }
+    PENDING_2FA_ENROLL.lock().unwrap().remove(&user_id);
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"ok": true, "enabled": true})),
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+pub struct Disable2FaRequest {
+    /// Current TOTP code or an unused recovery code.
+    pub code: String,
+}
+
+pub async fn disable_2fa(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<Disable2FaRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    let secret_row = match state.db.get_totp_secret(&user_id) {
+        Ok(Some(r)) => r,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "2FA is not enabled"})),
+            )
+                .into_response();
+        }
+    };
+    let secret = match totp::decrypt_secret(&secret_row.0, &secret_row.1, &state.config.jwt_secret) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
+    let mut ok = totp::verify_totp(&secret, &req.code, 1);
+    if !ok {
+        let code_hash = totp::hash_recovery_code(&secret_row.2, &req.code);
+        let hashes = state.db.list_recovery_code_hashes(&user_id).unwrap_or_default();
+        ok = hashes.iter().any(|(h, used)| h == &code_hash && !*used);
+    }
+    if !ok {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Invalid code"})),
+        )
+            .into_response();
+    }
+    if let Err(e) = state.db.delete_totp(&user_id) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response();
+    }
+    (StatusCode::OK, Json(serde_json::json!({"ok": true, "enabled": false}))).into_response()
+}
+
+pub async fn get_2fa_status(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    let enabled = state.db.totp_enabled(&user_id).unwrap_or(false);
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"enabled": enabled})),
+    )
+        .into_response()
+}
+
+fn claims_username_from_user_id(state: &AppState, user_id: &str) -> Option<String> {
+    state.db.get_username_by_id(user_id).ok().flatten()
 }
 
 // --- Auth-Params (pre-login hash_key fetch) ---
@@ -3055,6 +3471,15 @@ pub async fn admin_list_users(
         }
     };
 
+    // Map user_id → 2FA status so the panel can show who has it enabled.
+    let twofa: std::collections::HashMap<String, bool> = state
+        .db
+        .list_users_with_2fa()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(id, _uname, on)| (id, on))
+        .collect();
+
     let user_infos: Vec<serde_json::Value> = users
         .iter()
         .map(|(id, username, _pw_hash, created_at, _display_name, identity_public_key, profile_picture_file_id, friend_requests_disabled, encrypted_friend_code, friend_code_salt, friend_code_nonce, encrypted_profile_data, encrypted_profile_salt, encrypted_profile_nonce, profile_banner_file_id, _description, _nickname, friend_code_hash, encrypted_hash_key, hash_key_salt, hash_key_nonce)| {
@@ -3062,6 +3487,7 @@ pub async fn admin_list_users(
                 "id": id,
                 "username": username,
                 "created_at": created_at,
+                "two_factor_enabled": twofa.get(id).copied().unwrap_or(false),
                 "identity_public_key": if identity_public_key.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(identity_public_key.clone()) },
                 "profile_picture_file_id": profile_picture_file_id,
                 "friend_requests_disabled": *friend_requests_disabled != 0,
@@ -3081,6 +3507,32 @@ pub async fn admin_list_users(
         .collect();
 
     (StatusCode::OK, Json(serde_json::json!(user_infos))).into_response()
+}
+
+pub async fn admin_disable_user_2fa(
+    headers: HeaderMap,
+    Path(user_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) {
+        return e.into_response();
+    }
+    if !state.db.totp_enabled(&user_id).unwrap_or(false) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "2FA is not enabled for this user"})),
+        )
+            .into_response();
+    }
+    if let Err(e) = state.db.delete_totp(&user_id) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response();
+    }
+    log_admin_action(&state, "admin_disable_2fa", Some(&user_id), &headers);
+    (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
 }
 
 pub async fn admin_delete_user(

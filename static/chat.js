@@ -3054,6 +3054,216 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    // --- Two-Factor Authentication (2FA) ---
+    var twofaEnrollModal = document.getElementById('twofa-enroll-modal');
+    var twofaDisableModal = document.getElementById('twofa-disable-modal');
+    var enable2faBtn = document.getElementById('enable-2fa-btn');
+    var disable2faBtn = document.getElementById('disable-2fa-btn');
+    var _twofaEnroll = null; // { secret_base32, otpauth_url, recovery_codes, password }
+
+    function show2FaModal(id) {
+        var el = document.getElementById(id);
+        if (el) el.style.display = 'flex';
+    }
+    function hide2FaModal(id) {
+        var el = document.getElementById(id);
+        if (el) el.style.display = 'none';
+    }
+
+    async function load2FaStatus() {
+        try {
+            var res = await authFetch('/api/2fa/status');
+            var data = await res.json();
+            var line = document.getElementById('twofa-status-line');
+            var on = !!(data && data.enabled);
+            if (line) line.textContent = 'Two-factor authentication: ' + (on ? 'ON' : 'OFF');
+            if (enable2faBtn) enable2faBtn.style.display = on ? 'none' : '';
+            if (disable2faBtn) disable2faBtn.style.display = on ? '' : 'none';
+        } catch (_) {}
+    }
+
+    // Close on overlay click + Esc for both 2FA modals.
+    [twofaEnrollModal, twofaDisableModal].forEach(function (modal) {
+        if (!modal) return;
+        modal.addEventListener('click', function (e) { if (e.target === modal) modal.style.display = 'none'; });
+    });
+    document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape') {
+            if (twofaEnrollModal && twofaEnrollModal.style.display === 'flex') twofaEnrollModal.style.display = 'none';
+            if (twofaDisableModal && twofaDisableModal.style.display === 'flex') twofaDisableModal.style.display = 'none';
+        }
+    });
+
+    if (enable2faBtn) {
+        enable2faBtn.addEventListener('click', function () {
+            _twofaEnroll = null;
+            document.getElementById('twofa-step-password').style.display = 'block';
+            document.getElementById('twofa-step-qr').style.display = 'none';
+            document.getElementById('twofa-password').value = '';
+            document.getElementById('twofa-password-error').style.display = 'none';
+            show2FaModal('twofa-enroll-modal');
+        });
+    }
+    var twofaToggleBtn = document.getElementById('toggle-twofa-password');
+    if (twofaToggleBtn) {
+        twofaToggleBtn.addEventListener('click', function () {
+            var inp = document.getElementById('twofa-password');
+            var visible = inp.type === 'text';
+            inp.type = visible ? 'password' : 'text';
+            twofaToggleBtn.innerHTML = visible ? '&#128065;' : '&#128064;';
+            twofaToggleBtn.classList.toggle('active', !visible);
+        });
+    }
+    var twofaEnrollCancel = document.getElementById('twofa-enroll-cancel');
+    if (twofaEnrollCancel) twofaEnrollCancel.addEventListener('click', function () { hide2FaModal('twofa-enroll-modal'); });
+
+    // Begin enrollment: confirm password → server mints secret + recovery codes.
+    var twofaStartBtn = document.getElementById('twofa-start-btn');
+    if (twofaStartBtn) {
+        twofaStartBtn.addEventListener('click', async function () {
+            var password = document.getElementById('twofa-password').value;
+            var errEl = document.getElementById('twofa-password-error');
+            if (!password) { errEl.textContent = 'Enter your password'; errEl.style.display = 'block'; return; }
+            var btn = this;
+            btn.disabled = true;
+            try {
+                var sendPassword;
+                try { sendPassword = await computeHashedPasswordGlobal(password); }
+                catch (_) { sendPassword = password; }
+                var res = await authFetch('/api/2fa/enroll', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password: sendPassword })
+                });
+                var data = await res.json();
+                if (!res.ok) {
+                    errEl.textContent = data.error || 'Enrollment failed';
+                    errEl.style.display = 'block';
+                    btn.disabled = false;
+                    return;
+                }
+                _twofaEnroll = { secret_base32: data.secret_base32, otpauth_url: data.otpauth_url, recovery_codes: data.recovery_codes, password: sendPassword };
+                var qrEl = document.getElementById('twofa-qr');
+                qrEl.innerHTML = '';
+                try {
+                    var qr = qrcode(0, 'M');
+                    qr.addData(data.otpauth_url);
+                    qr.make();
+                    qrEl.innerHTML = qr.createImgTag(4, 8);
+                } catch (qrErr) {
+                    qrEl.textContent = 'QR unavailable — enter the secret manually below.';
+                }
+                document.getElementById('twofa-secret-text').textContent = 'Secret: ' + data.secret_base32;
+                var codesEl = document.getElementById('twofa-recovery-codes');
+                codesEl.innerHTML = '';
+                data.recovery_codes.forEach(function (c) {
+                    var span = document.createElement('span');
+                    span.textContent = c;
+                    codesEl.appendChild(span);
+                });
+                document.getElementById('twofa-step-password').style.display = 'none';
+                document.getElementById('twofa-step-qr').style.display = 'block';
+                document.getElementById('twofa-verify-code').value = '';
+                document.getElementById('twofa-verify-error').style.display = 'none';
+            } catch (e) {
+                errEl.textContent = 'Server is not running';
+                errEl.style.display = 'block';
+            }
+            btn.disabled = false;
+        });
+    }
+
+    var twofaCopyBtn = document.getElementById('twofa-copy-codes');
+    if (twofaCopyBtn) {
+        twofaCopyBtn.addEventListener('click', function () {
+            if (!_twofaEnroll || !_twofaEnroll.recovery_codes) return;
+            var text = _twofaEnroll.recovery_codes.join('\n');
+            var ta = document.createElement('textarea');
+            ta.value = text;
+            document.body.appendChild(ta);
+            ta.select();
+            try { document.execCommand('copy'); } catch (_) {}
+            document.body.removeChild(ta);
+            var st = document.getElementById('twofa-copy-status');
+            if (st) { st.textContent = 'Copied!'; setTimeout(function () { st.textContent = ''; }, 2000); }
+        });
+    }
+
+    var twofaVerifyBtn = document.getElementById('twofa-verify-btn');
+    if (twofaVerifyBtn) {
+        twofaVerifyBtn.addEventListener('click', async function () {
+            var code = document.getElementById('twofa-verify-code').value.trim();
+            var errEl = document.getElementById('twofa-verify-error');
+            if (!_twofaEnroll || !code) { errEl.textContent = 'Enter the code'; errEl.style.display = 'block'; return; }
+            var btn = this;
+            btn.disabled = true;
+            try {
+                var res = await authFetch('/api/2fa/verify-enroll', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ code: code })
+                });
+                var data = await res.json();
+                if (!res.ok) {
+                    errEl.textContent = data.error || 'Invalid code';
+                    errEl.style.display = 'block';
+                    btn.disabled = false;
+                    return;
+                }
+                _twofaEnroll = null;
+                hide2FaModal('twofa-enroll-modal');
+                await load2FaStatus();
+            } catch (e) {
+                errEl.textContent = 'Server is not running';
+                errEl.style.display = 'block';
+            }
+            btn.disabled = false;
+        });
+    }
+
+    // Disable 2FA (requires a current TOTP code or a recovery code).
+    if (disable2faBtn) {
+        disable2faBtn.addEventListener('click', function () {
+            document.getElementById('twofa-disable-code').value = '';
+            document.getElementById('twofa-disable-error').style.display = 'none';
+            show2FaModal('twofa-disable-modal');
+        });
+    }
+    var twofaDisableCancel = document.getElementById('twofa-disable-cancel');
+    if (twofaDisableCancel) twofaDisableCancel.addEventListener('click', function () { hide2FaModal('twofa-disable-modal'); });
+    var twofaDisableConfirm = document.getElementById('twofa-disable-confirm');
+    if (twofaDisableConfirm) {
+        twofaDisableConfirm.addEventListener('click', async function () {
+            var code = document.getElementById('twofa-disable-code').value.trim();
+            var errEl = document.getElementById('twofa-disable-error');
+            if (!code) { errEl.textContent = 'Enter your code'; errEl.style.display = 'block'; return; }
+            var btn = this;
+            btn.disabled = true;
+            try {
+                var res = await authFetch('/api/2fa/disable', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ code: code })
+                });
+                var data = await res.json();
+                if (!res.ok) {
+                    errEl.textContent = data.error || 'Invalid code';
+                    errEl.style.display = 'block';
+                    btn.disabled = false;
+                    return;
+                }
+                hide2FaModal('twofa-disable-modal');
+                await load2FaStatus();
+            } catch (e) {
+                errEl.textContent = 'Server is not running';
+                errEl.style.display = 'block';
+            }
+            btn.disabled = false;
+        });
+    }
+
+    load2FaStatus();
+
     connectWebSocket(t);
     setupMessageActions();
     setupForwardModal();

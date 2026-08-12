@@ -239,142 +239,209 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
-            // Clear any friend code left over from a previous account on this
-            // browser so a stale code can never be shown for the logged-in user.
-            // The correct code is re-established below from the server's encrypted
-            // backup (or the key blob bundle), and loadMyFriendCode shows a
-            // 'recover with password' prompt if neither is available.
-            localStorage.removeItem('e2e_friend_code');
-
-            // Try to restore full key bundle from server (password-encrypted backup)
-            let identityKeyPair = E2ECrypto.getIdentityKeyPair(data.user.id);
-            let blobRestored = false;
-            try {
-                const blobRes = await fetch('/api/key-blob', {
-                    headers: { 'Authorization': 'Bearer ' + data.token }
-                });
-                if (blobRes.ok) {
-                    const blobData = await blobRes.json();
-                    if (blobData.encrypted_blob && blobData.salt && blobData.nonce) {
-                        const bundle = E2ECrypto.decryptKeyBundle(
-                            blobData.encrypted_blob, password, blobData.salt, blobData.nonce
-                        );
-                        if (bundle) {
-                            E2ECrypto.restoreKeyBundle(bundle);
-                            identityKeyPair = E2ECrypto.getIdentityKeyPair(data.user.id);
-                            blobRestored = true;
-                            // If the server flagged this blob as needing a rebuild
-                            // (missing profile_key_cache etc.), or the blob was saved
-                            // by an older client without the newest key types (lower
-                            // bundle version), the unconditional re-save at the end
-                            // of this handler rebuilds it with ALL current keys
-                            // (identity, server, file, invite, auth_key, ...).
-                            const blobVer = typeof bundle.v === 'number' ? bundle.v : 0;
-                            if (blobData.needs_rebuild || blobVer < (window._BUNDLE_VERSION || 2)) {
-                                console.log('auth: blob is stale (needs_rebuild=' + !!blobData.needs_rebuild +
-                                    ', bundle v' + blobVer + ') — will rebuild with complete key set');
-                            }
-                        }
-                    }
-                }
-            } catch (_) {}
-
-            // Store password encrypted at rest with a device-specific key
-            try {
-                var devKey = localStorage.getItem('e2e_device_key');
-                if (!devKey) {
-                    devKey = E2ECrypto.arrayBufferToBase64(E2ECrypto.randomBytes(32));
-                    localStorage.setItem('e2e_device_key', devKey);
-                }
-                var dk = new Uint8Array(E2ECrypto.base64ToArrayBuffer(devKey));
-                var encrypted = E2ECrypto.encodeEncryptedFileKey(btoa(password), dk);
-                localStorage.setItem('e2e_encrypted_password', encrypted);
-                localStorage.removeItem('e2e_password');
-            } catch (_) {}
-
-            // Re-key secure-storage from the now-available password so subsequent
-            // writes (token, user) use the password-derived key instead of the
-            // random fallback key from _secInit()'s pre-login run.
-            try { if (window._secReKey) window._secReKey(); } catch (_) {}
-
-            // Store auth_key AFTER rekey so it's encrypted with the right key
-            if (window._loginAuthKeyB64) {
-                localStorage.setItem('e2e_auth_key', window._loginAuthKeyB64);
-                delete window._loginAuthKeyB64;
+            // 2FA-enabled account: the password step earned a pending token; show
+            // the code step — the verified code completes login via /api/login/2fa.
+            if (data.two_factor_required) {
+                _pending2fa = { pending_token: data.pending_token, password: password, username: username };
+                show2FaLoginForm();
+                setLoading(loginForm, false);
+                return;
             }
 
-            localStorage.setItem('token', data.token);
-            localStorage.setItem('user', JSON.stringify(data.user));
-
-            // Try to recover encrypted friend code from server and decrypt with password
-            if (!blobRestored) {
-                try {
-                    const fcRes = await fetch('/api/friend-code', {
-                        headers: { 'Authorization': 'Bearer ' + data.token }
-                    });
-                    if (fcRes.ok) {
-                        const fcData = await fcRes.json();
-                        if (fcData.encrypted_friend_code && fcData.salt && fcData.nonce) {
-                            const decryptedFC = E2ECrypto.decryptWithPassword(
-                                fcData.encrypted_friend_code,
-                                password,
-                                fcData.salt,
-                                fcData.nonce
-                            );
-                            if (decryptedFC) {
-                                localStorage.setItem('e2e_friend_code', decryptedFC);
-                            }
-                        }
-                    }
-                } catch (_) {}
-            }
-
-            // Fetch HMAC key for hashing friend codes and invite codes
-            if (!blobRestored) {
-                try {
-                    const hmacRes = await fetch('/api/hmac-key', {
-                        headers: { 'Authorization': 'Bearer ' + data.token }
-                    });
-                    if (hmacRes.ok) {
-                        const hmacData = await hmacRes.json();
-                        if (hmacData.hmac_key) {
-                            localStorage.setItem('e2e_hmac_key', hmacData.hmac_key);
-                        }
-                    }
-                } catch (_) {}
-            }
-
-            // Save/update the key blob on the server (ensures backup is current)
-            try {
-                // Ensure profile_key_cache is present in localStorage before building the bundle,
-                // so the blob includes it for future recovery. Even an empty cache entry is better
-                // than a missing one — the empty entry seeds localStorage after restore, and
-                // subsequent WS profile_key_sync messages populate it.
-                if (!localStorage.getItem('profile_key_cache')) {
-                    localStorage.setItem('profile_key_cache', '{}');
-                }
-                const bundle = E2ECrypto.buildKeyBundle();
-                const enc = E2ECrypto.encryptKeyBundle(bundle, password);
-                await fetch('/api/key-blob', {
-                    method: 'PUT',
-                    headers: {
-                        'Authorization': 'Bearer ' + data.token,
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({
-                        encrypted_blob: enc.encrypted_private_key,
-                        salt: enc.salt,
-                        nonce: enc.nonce,
-                    })
-                });
-            } catch (_) {}
-
-            window.location.href = 'index.html';
+            await completeLogin(data, password);
         } catch (err) {
             showError('Server is not running');
             setLoading(loginForm, false);
         }
     });
+
+    // Pending 2FA state while the code step is shown (login + settings flows).
+    let _pending2fa = null;
+
+    // Show the 2FA code step and hide the password form.
+    function show2FaLoginForm() {
+        document.getElementById('login-form').style.display = 'none';
+        document.getElementById('login-2fa-form').style.display = 'block';
+        const codeInput = document.getElementById('login-2fa-code');
+        codeInput.value = '';
+        codeInput.focus();
+        document.getElementById('login-2fa-error').style.display = 'none';
+    }
+
+    // Finalize a successful login: restore keys from the server blob, persist
+    // the password/key material locally, and navigate to the app.
+    async function completeLogin(data, password) {
+        // Clear any friend code left over from a previous account on this
+        // browser so a stale code can never be shown for the logged-in user.
+        // The correct code is re-established below from the server's encrypted
+        // backup (or the key blob bundle), and loadMyFriendCode shows a
+        // 'recover with password' prompt if neither is available.
+        localStorage.removeItem('e2e_friend_code');
+
+        // Try to restore full key bundle from server (password-encrypted backup)
+        let identityKeyPair = E2ECrypto.getIdentityKeyPair(data.user.id);
+        let blobRestored = false;
+        try {
+            const blobRes = await fetch('/api/key-blob', {
+                headers: { 'Authorization': 'Bearer ' + data.token }
+            });
+            if (blobRes.ok) {
+                const blobData = await blobRes.json();
+                if (blobData.encrypted_blob && blobData.salt && blobData.nonce) {
+                    const bundle = E2ECrypto.decryptKeyBundle(
+                        blobData.encrypted_blob, password, blobData.salt, blobData.nonce
+                    );
+                    if (bundle) {
+                        E2ECrypto.restoreKeyBundle(bundle);
+                        identityKeyPair = E2ECrypto.getIdentityKeyPair(data.user.id);
+                        blobRestored = true;
+                        // If the server flagged this blob as needing a rebuild
+                        // (missing profile_key_cache etc.), or the blob was saved
+                        // by an older client without the newest key types (lower
+                        // bundle version), the unconditional re-save at the end
+                        // of this handler rebuilds it with ALL current keys
+                        // (identity, server, file, invite, auth_key, ...).
+                        const blobVer = typeof bundle.v === 'number' ? bundle.v : 0;
+                        if (blobData.needs_rebuild || blobVer < (window._BUNDLE_VERSION || 2)) {
+                            console.log('auth: blob is stale (needs_rebuild=' + !!blobData.needs_rebuild +
+                                ', bundle v' + blobVer + ') — will rebuild with complete key set');
+                        }
+                    }
+                }
+            }
+        } catch (_) {}
+
+        // Store password encrypted at rest with a device-specific key
+        try {
+            var devKey = localStorage.getItem('e2e_device_key');
+            if (!devKey) {
+                devKey = E2ECrypto.arrayBufferToBase64(E2ECrypto.randomBytes(32));
+                localStorage.setItem('e2e_device_key', devKey);
+            }
+            var dk = new Uint8Array(E2ECrypto.base64ToArrayBuffer(devKey));
+            var encrypted = E2ECrypto.encodeEncryptedFileKey(btoa(password), dk);
+            localStorage.setItem('e2e_encrypted_password', encrypted);
+            localStorage.removeItem('e2e_password');
+        } catch (_) {}
+
+        // Re-key secure-storage from the now-available password so subsequent
+        // writes (token, user) use the password-derived key instead of the
+        // random fallback key from _secInit()'s pre-login run.
+        try { if (window._secReKey) window._secReKey(); } catch (_) {}
+
+        // Store auth_key AFTER rekey so it's encrypted with the right key
+        if (window._loginAuthKeyB64) {
+            localStorage.setItem('e2e_auth_key', window._loginAuthKeyB64);
+            delete window._loginAuthKeyB64;
+        }
+
+        localStorage.setItem('token', data.token);
+        localStorage.setItem('user', JSON.stringify(data.user));
+
+        // Try to recover encrypted friend code from server and decrypt with password
+        if (!blobRestored) {
+            try {
+                const fcRes = await fetch('/api/friend-code', {
+                    headers: { 'Authorization': 'Bearer ' + data.token }
+                });
+                if (fcRes.ok) {
+                    const fcData = await fcRes.json();
+                    if (fcData.encrypted_friend_code && fcData.salt && fcData.nonce) {
+                        const decryptedFC = E2ECrypto.decryptWithPassword(
+                            fcData.encrypted_friend_code,
+                            password,
+                            fcData.salt,
+                            fcData.nonce
+                        );
+                        if (decryptedFC) {
+                            localStorage.setItem('e2e_friend_code', decryptedFC);
+                        }
+                    }
+                }
+            } catch (_) {}
+        }
+
+        // Fetch HMAC key for hashing friend codes and invite codes
+        if (!blobRestored) {
+            try {
+                const hmacRes = await fetch('/api/hmac-key', {
+                    headers: { 'Authorization': 'Bearer ' + data.token }
+                });
+                if (hmacRes.ok) {
+                    const hmacData = await hmacRes.json();
+                    if (hmacData.hmac_key) {
+                        localStorage.setItem('e2e_hmac_key', hmacData.hmac_key);
+                    }
+                }
+            } catch (_) {}
+        }
+
+        // Save/update the key blob on the server (ensures backup is current)
+        try {
+            // Ensure profile_key_cache is present in localStorage before building the bundle,
+            // so the blob includes it for future recovery. Even an empty cache entry is better
+            // than a missing one — the empty entry seeds localStorage after restore, and
+            // subsequent WS profile_key_sync messages populate it.
+            if (!localStorage.getItem('profile_key_cache')) {
+                localStorage.setItem('profile_key_cache', '{}');
+            }
+            const bundle = E2ECrypto.buildKeyBundle();
+            const enc = E2ECrypto.encryptKeyBundle(bundle, password);
+            await fetch('/api/key-blob', {
+                method: 'PUT',
+                headers: {
+                    'Authorization': 'Bearer ' + data.token,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    encrypted_blob: enc.encrypted_private_key,
+                    salt: enc.salt,
+                    nonce: enc.nonce,
+                })
+            });
+        } catch (_) {}
+
+        window.location.href = 'index.html';
+    }
+
+    // Two-factor code step: verify and complete the login.
+    const login2FaForm = document.getElementById('login-2fa-form');
+    if (login2FaForm) {
+        login2FaForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const code = document.getElementById('login-2fa-code').value.trim();
+            const errEl = document.getElementById('login-2fa-error');
+            if (!_pending2fa || !code) return;
+            const submitBtn = login2FaForm.querySelector('button[type="submit"]');
+            submitBtn.disabled = true;
+            try {
+                const res = await fetch('/api/login/2fa', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pending_token: _pending2fa.pending_token, code: code })
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                    errEl.textContent = data.error || 'Invalid code';
+                    errEl.style.display = 'block';
+                    submitBtn.disabled = false;
+                    return;
+                }
+                const pendingPassword = _pending2fa.password;
+                _pending2fa = null;
+                await completeLogin(data, pendingPassword);
+            } catch (err) {
+                errEl.textContent = 'Server is not running';
+                errEl.style.display = 'block';
+                submitBtn.disabled = false;
+            }
+        });
+        document.getElementById('login-2fa-back').addEventListener('click', () => {
+            _pending2fa = null;
+            document.getElementById('login-2fa-form').style.display = 'none';
+            document.getElementById('login-form').style.display = 'block';
+        });
+    }
 
     registerForm.addEventListener('submit', async (e) => {
         e.preventDefault();
