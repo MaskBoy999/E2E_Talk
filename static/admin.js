@@ -3,7 +3,8 @@ let rawData = {
     serverBans: [], dmChannels: [], dmMembers: [],
     dmMessages: [], friendRequests: [], friendships: [], files: [],
     adminConfig: [], pendingEvents: [], pendingNotifications: [],
-    voiceSessions: [], voiceParticipants: [], userMedia: [], userKeyBlobs: [], profileDataKeys: [], sharedProfileDataKeys: []
+    voiceSessions: [], voiceParticipants: [], userMedia: [], userKeyBlobs: [], profileDataKeys: [], sharedProfileDataKeys: [],
+    auditLog: []
 };
 
 const PAGE_SIZES = [25, 50, 100];
@@ -396,6 +397,7 @@ function filterTab(tab) {
         case 'user-key-blobs': filtered = rawData.userKeyBlobs.filter(b => !q || (b.username||'').toLowerCase().includes(q) || b.user_id.toLowerCase().includes(q)); tabFilteredCache['user-key-blobs'] = filtered; renderUserKeyBlobs(filtered); break;
         case 'profile-data-keys': filtered = rawData.profileDataKeys.filter(k => !q || (k.username||'').toLowerCase().includes(q) || k.user_id.toLowerCase().includes(q)); tabFilteredCache['profile-data-keys'] = filtered; renderProfileDataKeys(filtered); break;
         case 'shared-profile-data-keys': filtered = rawData.sharedProfileDataKeys.filter(k => !q || k.id.toLowerCase().includes(q) || (k.username||'').toLowerCase().includes(q) || (k.target_type||'').toLowerCase().includes(q) || (k.target_id||'').toLowerCase().includes(q)); tabFilteredCache['shared-profile-data-keys'] = filtered; renderSharedProfileDataKeys(filtered); break;
+        case 'audit-log': filtered = rawData.auditLog.filter(a => !q || (a.action||'').toLowerCase().includes(q) || (a.target||'').toLowerCase().includes(q) || (a.ip||'').toLowerCase().includes(q) || (a.actor||'').toLowerCase().includes(q)); tabFilteredCache['audit-log'] = filtered; renderAuditLog(filtered); break;
     }
 }
 
@@ -434,6 +436,7 @@ async function loadAllData() {
         loadUserKeyBlobs(),
         loadProfileDataKeys(),
         loadSharedProfileDataKeys(),
+        loadAuditLog(),
     ]);
 }
 
@@ -1059,4 +1062,23 @@ async function importDB() {
         }
     };
     input.click();
+}
+
+// --- Audit Log (G4) ---
+async function loadAuditLog() { await loadTabData("/api/admin/audit-log", "auditLog", renderAuditLog); }
+
+function renderAuditLog(rows) {
+    tabTotals['audit-log'] = rows.length;
+    const p = paginate(rows, 'audit-log');
+    updateCount('audit-log-count', p.total);
+    renderTable('audit-log-list', 5,
+        p.items.map(a =>
+            '<td class="ts-cell">' + escapeHtml(a.timestamp || '') + '</td>' +
+            '<td>' + escapeHtml(a.actor || '') + '</td>' +
+            '<td>' + escapeHtml(a.action || '') + '</td>' +
+            '<td class="id-cell" title="' + escapeHtml(a.target || '') + '">' + escapeHtml(truncate(a.target || '', 24)) + '</td>' +
+            '<td>' + escapeHtml(a.ip || '') + '</td>'
+        ),
+        'No admin actions logged yet');
+    renderPaginationControls('audit-log');
 }

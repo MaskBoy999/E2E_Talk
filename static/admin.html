@@ -114,6 +114,7 @@
                 <button class="tab-btn" data-tab="user-key-blobs">Key Blobs</button>
                 <button class="tab-btn" data-tab="profile-data-keys">Profile Data Keys</button>
                 <button class="tab-btn" data-tab="shared-profile-data-keys">Shared Profile Keys</button>
+                <button class="tab-btn" data-tab="audit-log">Audit Log</button>
             </div>
 
             <!-- Users Tab -->
@@ -474,6 +475,23 @@
             </div>
 
             <!-- Shared Profile Data Keys Tab -->
+            <!-- Audit Log Tab (G4) -->
+            <div class="tab-content" id="tab-audit-log">
+                <div class="table-header">
+                    <div class="search-bar">
+                        <input type="text" id="search-audit-log" placeholder="Search by action, target or IP..." oninput="searchTab('audit-log')">
+                        <span class="record-count" id="audit-log-count"></span>
+                    </div>
+                </div>
+                <div class="table-scroll">
+                    <table class="data-table">
+                        <thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Target</th><th>IP</th></tr></thead>
+                        <tbody id="audit-log-list"><tr><td colspan="5" class="empty-state">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+                <div id="audit-log-pagination" class="pagination-container"></div>
+            </div>
+
             <div class="tab-content" id="tab-shared-profile-data-keys">
                 <div class="table-header">
                     <div class="search-bar">

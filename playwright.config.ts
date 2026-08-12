@@ -30,6 +30,11 @@ export default defineConfig({
             LOGIN_USER_MAX: '100000',
             AUTH_PARAMS_IP_MAX: '100000',
             HMAC_KEY_IP_MAX: '100000',
+            // G2: the suite makes many authed mutations per user/IP from one
+            // machine — raise the per-user + per-IP budgets and storage quota.
+            MUTATION_USER_MAX: '100000',
+            MUTATION_IP_MAX: '100000',
+            FILE_STORAGE_QUOTA_BYTES: '100000000000',
         },
     },
 });

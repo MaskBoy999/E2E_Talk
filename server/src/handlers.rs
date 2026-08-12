@@ -84,6 +84,64 @@ static CREATE_SERVER_RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(|| Rate
 
 static ADMIN_TOKENS: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
 
+/// Per-user + per-IP limiter for authenticated state-changing API calls (G2).
+/// Env-overridable for test suites (same pattern as LOGIN_IP_MAX/LOGIN_USER_MAX):
+/// MUTATION_USER_MAX (default 120 req/10s per user) and MUTATION_IP_MAX
+/// (default 1000 req/10s per IP). File-chunk uploads are excluded (a large
+/// file legitimately needs thousands of chunk requests) and instead bounded by
+/// the per-user storage quota.
+static MUTATION_USER_RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(|| RateLimiter {
+    attempts: Mutex::new(HashMap::new()),
+});
+
+static MUTATION_IP_RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(|| RateLimiter {
+    attempts: Mutex::new(HashMap::new()),
+});
+
+/// Check the per-user + per-IP budget for an authenticated mutation.
+/// Returns the HTTP status to return on a hit (429), or None if allowed.
+pub(crate) fn check_mutation_rate_limit(
+    headers: &HeaderMap,
+    state: &AppState,
+) -> Option<(StatusCode, Json<serde_json::Value>)> {
+    let user_id = match extract_user(headers, state) {
+        Ok(id) => id,
+        // Unauthenticated requests fall through to the handler, which will 401.
+        Err(_) => return None,
+    };
+
+    let user_max: u32 = std::env::var("MUTATION_USER_MAX")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(120);
+    let key = format!("mut_user:{}", user_id);
+    if user_max > 0
+        && !MUTATION_USER_RATE_LIMITER.check_and_increment(&key, user_max, Duration::from_secs(10))
+    {
+        return Some((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "Too many requests. Slow down."})),
+        ));
+    }
+
+    let ip = get_client_ip(headers);
+    let ip_max: u32 = std::env::var("MUTATION_IP_MAX")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1000);
+    let ip_key = format!("mut_ip:{}", ip);
+    if ip_max > 0
+        && !MUTATION_IP_RATE_LIMITER.check_and_increment(&ip_key, ip_max, Duration::from_secs(10))
+    {
+        return Some((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "Too many requests. Slow down."})),
+        ));
+    }
+
+    None
+}
+
 fn get_admin_tokens() -> std::sync::MutexGuard<'static, Option<HashMap<String, Instant>>> {
     ADMIN_TOKENS.lock().unwrap()
 }
@@ -94,7 +152,7 @@ fn store_admin_token(token: String) {
     map.insert(token, Instant::now() + Duration::from_secs(24 * 3600));
 }
 
-fn extract_user(headers: &HeaderMap, state: &AppState) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
+pub(crate) fn extract_user(headers: &HeaderMap, state: &AppState) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
     // Prefer the Authorization: Bearer header over the HttpOnly cookie.
     // A stale/expired HttpOnly cookie from a previous login session can
     // persist even after logout (JS can't clear HttpOnly cookies). By
@@ -2818,6 +2876,7 @@ pub async fn update_channel_name(
 
 pub async fn admin_logout(
     headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     // Extract the admin token from the Authorization header
     let token = headers
@@ -2831,6 +2890,8 @@ pub async fn admin_logout(
             map.remove(&t);
         }
     }
+
+    log_admin_action(&state, "admin_logout", None, &headers);
 
     (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
 }
@@ -2882,6 +2943,7 @@ pub async fn admin_login(
         state.setup_complete.store(true, std::sync::atomic::Ordering::Relaxed);
         let admin_token = uuid::Uuid::new_v4().to_string();
         store_admin_token(admin_token.clone());
+        log_admin_action(&state, "admin_setup", None, &headers);
         return (StatusCode::OK, Json(serde_json::json!({"ok": true, "setup_complete": true, "token": admin_token}))).into_response();
     }
 
@@ -2910,6 +2972,7 @@ pub async fn admin_login(
     if valid {
         let admin_token = uuid::Uuid::new_v4().to_string();
         store_admin_token(admin_token.clone());
+        log_admin_action(&state, "admin_login", None, &headers);
         (StatusCode::OK, Json(serde_json::json!({"ok": true, "token": admin_token})))
             .into_response()
     } else {
@@ -2984,10 +3047,13 @@ pub async fn admin_delete_user(
     }
 
     match state.db.delete_user(&user_id) {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"ok": true})),
-        ),
+        Ok(()) => {
+            log_admin_action(&state, "admin_delete_user", Some(&user_id), &headers);
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"ok": true})),
+            )
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e})),
@@ -3338,7 +3404,10 @@ pub async fn admin_delete_server(
     }
 
     match state.db.delete_server_admin(&server_id) {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Ok(()) => {
+            log_admin_action(&state, "admin_delete_server", Some(&server_id), &headers);
+            (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
 }
@@ -3353,7 +3422,10 @@ pub async fn admin_delete_channel(
     }
 
     match state.db.delete_channel_admin(&channel_id) {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Ok(()) => {
+            log_admin_action(&state, "admin_delete_channel", Some(&channel_id), &headers);
+            (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
 }
@@ -3522,6 +3594,46 @@ pub async fn admin_list_user_device_escrow(
 }
 
 
+/// GET /api/admin/audit-log — append-only record of admin actions (G4).
+/// Never contains tokens or passwords. Newest first.
+pub async fn admin_audit_log(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) {
+        return e.into_response();
+    }
+    let rows = match state.db.list_admin_audit(1000) {
+        Ok(r) => r,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
+        }
+    };
+    let result: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|(id, ts, actor, action, target, ip)| {
+            serde_json::json!({
+                "id": id,
+                "timestamp": ts,
+                "actor": actor,
+                "action": action,
+                "target": target,
+                "ip": ip,
+            })
+        })
+        .collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
+/// Append an admin action to the audit log. Best-effort: an audit-log failure
+/// never fails the admin request itself.
+fn log_admin_action(state: &AppState, action: &str, target: Option<&str>, headers: &HeaderMap) {
+    let ip = get_client_ip(headers);
+    if let Err(e) = state.db.log_admin_action("admin", action, target, &ip) {
+        tracing::warn!("Failed to write admin audit entry ({}): {}", action, e);
+    }
+}
+
 pub async fn admin_clear_all(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
@@ -3532,6 +3644,7 @@ pub async fn admin_clear_all(
 
     match state.db.clear_all("uploads") {
         Ok(()) => {
+            log_admin_action(&state, "admin_clear_all", None, &headers);
             // Invalidate all in-memory admin tokens so the admin must re-login
             // after the database is wiped.
             let mut guard = ADMIN_TOKENS.lock().unwrap();
@@ -3679,6 +3792,7 @@ pub async fn admin_export_db(
     }
     match tokio::fs::read(db_path).await {
         Ok(data) => {
+            log_admin_action(&state, "admin_export_db", None, &headers);
             let mut resp_headers = HeaderMap::new();
             resp_headers.insert("content-type", HeaderValue::from_static("application/x-sqlite3"));
             resp_headers.insert("content-disposition", HeaderValue::from_str("attachment; filename=\"e2e_chat.db\"").unwrap());
@@ -3731,6 +3845,7 @@ pub async fn admin_import_db(
             // Step 4: Reconnect to the new database
             match state.db.reconnect(&db_path) {
                 Ok(()) => {
+                    log_admin_action(&state, "admin_import_db", None, &headers);
                     state.setup_complete.store(true, std::sync::atomic::Ordering::Relaxed);
                     let mut guard = get_admin_tokens();
                     *guard = None;
@@ -3779,6 +3894,44 @@ pub async fn init_file_upload(
             Json(serde_json::json!({"error": "File too large"})),
         )
             .into_response();
+    }
+
+    // G2 storage quota: reject the init if the user would exceed their cap.
+    // Env-overridable for tests: FILE_STORAGE_QUOTA_BYTES (0 disables).
+    let quota: i64 = std::env::var("FILE_STORAGE_QUOTA_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1024 * 1024 * 1024); // 1 GiB default
+    if quota > 0 {
+        let used = state.db.get_user_storage_usage(&user_id).unwrap_or(0);
+        if used + req.size > quota {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(serde_json::json!({"error": "Storage quota exceeded"})),
+            )
+                .into_response();
+        }
+    }
+
+    // G5: the encrypted mime blob + nonce are small ciphertexts; cap their
+    // decoded size so a garbage payload can't bloat the files table.
+    if let Some(s) = &req.encrypted_mime {
+        if let Ok(b) = base64::engine::general_purpose::STANDARD.decode(s) {
+            if b.len() > 1024 {
+                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "encrypted_mime too large"}))).into_response();
+            }
+        } else {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid encrypted_mime"}))).into_response();
+        }
+    }
+    if let Some(s) = &req.mime_nonce {
+        if let Ok(b) = base64::engine::general_purpose::STANDARD.decode(s) {
+            if b.len() > 64 {
+                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "mime_nonce too large"}))).into_response();
+            }
+        } else {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid mime_nonce"}))).into_response();
+        }
     }
 
     // Decode optional encrypted mime type

@@ -4888,8 +4888,9 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // Drag and drop support for file uploads
+    // Drag and drop + paste support for file uploads
     setupDragAndDrop();
+    setupPasteUpload();
     document.getElementById('confirm-upload').addEventListener('click', startFileUpload);
 
     // "Add More Files" button in upload modal
@@ -16497,6 +16498,73 @@ function handleFileSelect(e) {
     e.target.value = '';
 }
 
+// ===== Paste to Upload =====
+// Pasting an image/screenshot/file from the clipboard into the composer opens
+// the same encrypted upload pipeline as drag & drop / the + button. We accept
+// whatever the browser exposes as a file on the clipboard (clipboardData.items
+// of kind 'file', falling back to clipboardData.files) — screenshots, copied
+// images, and files the OS copies to the clipboard all arrive this way.
+function setupPasteUpload() {
+    // Listen on the composer itself, and on the whole document so a paste that
+    // lands elsewhere in the chat view (e.g. while scrolled) still works. Only
+    // non-text pastes with real file items are intercepted — plain text pasting
+    // is untouched, and paste inside other inputs/modals is left alone.
+    const isIgnorableTarget = (t) => {
+        if (!t) return true;
+        const tag = (t.tagName || '').toLowerCase();
+        return tag === 'input' || tag === 'textarea' || t.isContentEditable;
+    };
+
+    const handler = (e) => {
+        // If focus is in another input/textarea (search bar, profile edit,
+        // settings, etc.) never hijack the paste.
+        const target = e.target;
+        const composer = document.getElementById('message-input');
+        if (target !== composer && isIgnorableTarget(target)) return;
+
+        const items = (e.clipboardData && e.clipboardData.items) || [];
+        const files = [];
+        for (let i = 0; i < items.length; i++) {
+            if (items[i].kind === 'file' && items[i].getAsFile) {
+                const f = items[i].getAsFile();
+                if (f) files.push(f);
+            }
+        }
+        // Fallback: some browsers only expose clipboardData.files.
+        if (files.length === 0 && e.clipboardData && e.clipboardData.files) {
+            for (let i = 0; i < e.clipboardData.files.length; i++) {
+                files.push(e.clipboardData.files[i]);
+            }
+        }
+        if (files.length === 0) return; // plain text paste — let it through
+
+        if (!currentChannelId && !currentDmChannelId) return;
+        if (isUploading) return;
+
+        // Don't steal the paste if the upload modal is already open — let the
+        // modal's own input handle it (the user can still use + Add More Files).
+        const modal = document.getElementById('upload-modal');
+        if (modal && modal.style.display === 'flex') return;
+
+        e.preventDefault();
+        e.stopPropagation();
+
+        const oversized = files.find(f => f.size > 10 * 1024 * 1024 * 1024);
+        if (oversized) {
+            alert('File too large: ' + oversized.name + '. Maximum file size is 10 GB.');
+            return;
+        }
+
+        selectedFiles = files;
+        currentFileIndex = 0;
+        showUploadModal();
+    };
+
+    const composer = document.getElementById('message-input');
+    if (composer) composer.addEventListener('paste', handler);
+    document.addEventListener('paste', handler);
+}
+
 function showUploadModal() {
     const modal = document.getElementById('upload-modal');
     const info = document.getElementById('upload-file-info');
@@ -16629,7 +16697,70 @@ function closeUploadModal() {
     if (addMoreBtn) addMoreBtn.style.display = '';
 }
 
+// G5 — client-side magic-byte validation. The server stores every upload as
+// client-encrypted ciphertext, so it cannot sniff content; the client is the
+// only place plaintext exists, so type checks happen HERE before encryption.
+// Known signatures for common media types; anything unrecognized passes
+// (arbitrary files are legal — we only reject a declared type that provably
+// does not match its own bytes).
+const UPLOAD_MAGIC_SIGNATURES = [
+    { mime: 'image/png', sig: [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] },
+    { mime: 'image/jpeg', sig: [0xFF, 0xD8, 0xFF] },
+    { mime: 'image/gif', sig: [0x47, 0x49, 0x46, 0x38] },
+    { mime: 'image/webp', sig: [0x52, 0x49, 0x46, 0x46] }, // RIFF....WEBP (checked below)
+    { mime: 'image/avif', sig: [0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70] }, // ftyp
+    { mime: 'audio/wav', sig: [0x52, 0x49, 0x46, 0x46] }, // RIFF....WAVE (checked below)
+    { mime: 'audio/mpeg', sig: [0x49, 0x44, 0x33] }, // ID3
+    { mime: 'audio/ogg', sig: [0x4F, 0x67, 0x67, 0x53] },
+    { mime: 'video/mp4', sig: [0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70] },
+    { mime: 'video/webm', sig: [0x1A, 0x45, 0xDF, 0xA3] },
+    { mime: 'application/pdf', sig: [0x25, 0x50, 0x44, 0x46] }, // %PDF
+    { mime: 'application/zip', sig: [0x50, 0x4B, 0x03, 0x04] },
+];
+
+function matchesMagic(bytes, sig) {
+    if (bytes.length < sig.length) return false;
+    for (var i = 0; i < sig.length; i++) {
+        if (bytes[i] !== sig[i]) return false;
+    }
+    return true;
+}
+
+// Returns an error string if the file's declared type does NOT match its
+// leading bytes, or null when it's fine. Unrecognized types are always fine.
+async function checkUploadMagic(file) {
+    var mime = (getCorrectMimeType(file.name, file.type) || '').toLowerCase();
+    if (!mime || mime === 'application/octet-stream') return null;
+    var candidate = null;
+    for (var i = 0; i < UPLOAD_MAGIC_SIGNATURES.length; i++) {
+        if (UPLOAD_MAGIC_SIGNATURES[i].mime === mime) {
+            candidate = UPLOAD_MAGIC_SIGNATURES[i];
+            break;
+        }
+    }
+    if (!candidate) return null; // not a known-checked type
+    var head = new Uint8Array(await file.slice(0, 16).arrayBuffer());
+    var ok = matchesMagic(head, candidate.sig);
+    // RIFF containers need the 8-byte form tag too (WEBP / WAVE).
+    if (ok && (mime === 'image/webp')) {
+        ok = head[8] === 0x57 && head[9] === 0x45 && head[10] === 0x42 && head[11] === 0x50; // 'WEBP'
+    }
+    if (ok && (mime === 'audio/wav')) {
+        ok = head[8] === 0x57 && head[9] === 0x41 && head[10] === 0x56 && head[11] === 0x45; // 'WAVE'
+    }
+    if (!ok) {
+        return 'File type mismatch: the file is not a valid ' + mime + ' (magic bytes do not match).';
+    }
+    return null;
+}
+
 async function uploadFileToServer(file) {
+    // G5: refuse to encrypt a file whose declared type contradicts its content.
+    var magicErr = await checkUploadMagic(file);
+    if (magicErr) {
+        throw new Error(magicErr);
+    }
+
     const fileKey = E2ECrypto.generateFileKey();
     const fileKeyB64 = E2ECrypto.arrayBufferToBase64(fileKey);
 

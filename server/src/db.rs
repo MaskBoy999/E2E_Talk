@@ -1071,6 +1071,10 @@ impl Database {
         // (banner/PFP) a previous upload (or the users table) already carries.
         let _ = conn.execute_batch(include_str!("../migrations/054_conv_profile_meta.sql"));
 
+        // Migration 055: Append-only admin audit log (G4) — who did what in
+        // the admin panel, when, to which target, from which IP.
+        let _ = conn.execute_batch(include_str!("../migrations/055_admin_audit.sql"));
+
         // Data migration: normalize legacy space-separated CURRENT_TIMESTAMP values
         // ("YYYY-MM-DD HH:MM:SS") to fixed-width RFC3339 ("YYYY-MM-DDTHH:MM:SS.000000Z")
         // so lexicographic ordering is consistent with newly-inserted messages.
@@ -4626,6 +4630,62 @@ impl Database {
             )
             .map_err(|e| e.to_string())?;
         Ok(count > 0)
+    }
+
+    /// Append to the admin audit log (G4). Tokens/passwords are never logged.
+    pub fn log_admin_action(
+        &self,
+        actor: &str,
+        action: &str,
+        target: Option<&str>,
+        ip: &str,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO admin_audit (actor, action, target, ip) VALUES (?1, ?2, ?3, ?4)",
+            params![actor, action, target, ip],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Read the admin audit log, newest first.
+    pub fn list_admin_audit(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<(i64, String, String, String, Option<String>, String)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, timestamp, actor, action, target, ip FROM admin_audit ORDER BY id DESC LIMIT ?1",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![limit], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(rows)
+    }
+
+    /// Total bytes of files uploaded by a user (G2 storage quota).
+    pub fn get_user_storage_usage(&self, uploader_id: &str) -> Result<i64, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT COALESCE(SUM(original_size), 0) FROM files WHERE uploader_id = ?1",
+            params![uploader_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())
     }
 
     pub fn list_all_users(

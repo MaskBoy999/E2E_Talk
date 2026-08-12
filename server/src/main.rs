@@ -2,9 +2,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use axum::{
-    extract::State,
-    http::{HeaderMap, HeaderValue, StatusCode},
-    response::IntoResponse,
+    extract::{Request, State},
+    http::{HeaderMap, HeaderValue, Method, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{get, post, put, delete, patch},
     Router,
 };
@@ -28,6 +29,125 @@ pub struct AppState {
     /// Starts as false on a fresh DB; set to true once admin password is set
     /// or the first user registers. Used to redirect visitors to admin setup.
     pub setup_complete: AtomicBool,
+}
+
+/// G1 — Security headers on EVERY response (static pages AND API).
+/// The static-file handler also sets these for HTML/JS/CSS; this middleware
+/// guarantees the same protections for JSON/error responses too. HSTS is
+/// emitted unconditionally: per RFC 6797 the browser ignores it on plain-HTTP
+/// responses (the app also serves a dev HTTP port), so this is safe and matches
+/// the static-file handler's behavior.
+async fn security_headers_mw(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        "content-security-policy",
+        HeaderValue::from_static(
+            "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+        ),
+    );
+    headers.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
+    headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
+    headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
+    headers.insert(
+        "strict-transport-security",
+        HeaderValue::from_static("max-age=31536000; includeSubDomains; preload"),
+    );
+    response
+}
+
+/// G2 — Per-user + per-IP rate limit on authenticated state-changing /api calls.
+/// Skips the endpoints that have their own limiters (login/register/reauth,
+/// admin, friend-request, WS) and file-chunk uploads (bounded by quota instead).
+async fn mutation_rate_limit_mw(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    let is_state_changing = matches!(
+        method,
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    );
+    if is_state_changing && path.starts_with("/api/") {
+        let skip = path.starts_with("/api/login")
+            || path.starts_with("/api/register")
+            || path.starts_with("/api/reauth")
+            || path.starts_with("/api/admin/")
+            || path.starts_with("/api/friends/request")
+            || path.contains("/chunk/");
+        if !skip {
+            if let Some((status, json)) =
+                handlers::check_mutation_rate_limit(request.headers(), &state)
+            {
+                return (status, json).into_response();
+            }
+        }
+    }
+    next.run(request).await
+}
+
+/// G3 — Same-origin check on state-changing endpoints. Browsers always send
+/// Origin on POST/PUT/PATCH/DELETE; a mismatched host (DNS rebinding, CSRF via
+/// cookie fallback) is rejected. Non-browser clients without Origin are allowed
+/// (Bearer auth still applies).
+async fn origin_check_mw(request: Request, next: Next) -> Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    let is_state_changing = matches!(
+        method,
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    );
+    if is_state_changing && path.starts_with("/api/") {
+        let origin = request
+            .headers()
+            .get("origin")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let host = request
+            .headers()
+            .get("host")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        if let (Some(origin), Some(host)) = (origin, host) {
+            if !origin_host_matches(&origin, &host) {
+                return (
+                    StatusCode::FORBIDDEN,
+                    axum::Json(serde_json::json!({"error": "Cross-origin request blocked"})),
+                )
+                    .into_response();
+            }
+        }
+    }
+    next.run(request).await
+}
+
+/// Compare an Origin header (e.g. "https://localhost:3443") with the Host
+/// header ("localhost:3443"). Ignores the scheme; compares host+port
+/// case-insensitively. Accepts the "null" origin (sandboxed/file contexts).
+fn origin_host_matches(origin: &str, host: &str) -> bool {
+    if origin == "null" {
+        return true;
+    }
+    let origin_host = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+        .unwrap_or(origin)
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    let host_lower = host.to_lowercase();
+    // Normalize default ports so https://example.com matches Host: example.com
+    let origin_host = if origin_host.ends_with(":80") && origin.starts_with("http://") {
+        origin_host.trim_end_matches(":80").to_string()
+    } else if origin_host.ends_with(":443") && origin.starts_with("https://") {
+        origin_host.trim_end_matches(":443").to_string()
+    } else {
+        origin_host
+    };
+    origin_host == host_lower
 }
 
 async fn serve_static(
@@ -312,6 +432,7 @@ async fn main() {
         .route("/api/admin/export-db", get(handlers::admin_export_db))
         .route("/api/admin/import-db", post(handlers::admin_import_db))
         .route("/api/admin/clear", post(handlers::admin_clear_all))
+        .route("/api/admin/audit-log", get(handlers::admin_audit_log))
         // Phase 4: Friends + DMs
         .route("/api/me", get(handlers::get_me).delete(handlers::delete_me))
         .route("/api/hmac-key", get(handlers::get_hmac_key))
@@ -353,6 +474,13 @@ async fn main() {
         // 2MB Json limit. Raise it to 32MB (still way below any DoS concern
         // since payloads are per-authenticated-user and rate-limited).
         .layer(DefaultBodyLimit::max(32 * 1024 * 1024))
+        // G1/G2/G3 hardening layers. Order (last layer = outermost): the
+        // security headers wrap everything; the origin check and mutation
+        // rate limit run before handlers. File-chunk uploads are exempt from
+        // the mutation limiter (bounded by the storage quota instead).
+        .layer(middleware::from_fn_with_state(state.clone(), mutation_rate_limit_mw))
+        .layer(middleware::from_fn(origin_check_mw))
+        .layer(middleware::from_fn(security_headers_mw))
         .with_state(state);
 
     let addr = format!("0.0.0.0:{}", config.port);

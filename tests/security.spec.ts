@@ -213,13 +213,16 @@ await page2.click('#register-form button[type="submit"]');
 
     test('duplicate username registration is rejected', async ({ request }) => {
         const username = 'dup_test_' + Date.now();
+        // The register endpoint requires a 64+ char client-side HMAC hash (the
+        // server never sees the raw password) — send a valid-length hash.
+        const pwHash = 'h'.repeat(64);
         const res1 = await request.post(`${BASE}/api/register`, {
-            data: { username, password: 'password123' },
+            data: { username, password: pwHash },
         });
         expect(res1.ok()).toBeTruthy();
 
         const res2 = await request.post(`${BASE}/api/register`, {
-            data: { username, password: 'password123' },
+            data: { username, password: pwHash },
         });
         expect(res2.ok()).toBeFalsy();
     });
@@ -239,6 +242,7 @@ await page2.click('#register-form button[type="submit"]');
             await p.click('#show-register');
             await p.fill('#register-username', uname);
             await p.fill('#register-password', 'password123');
+            await p.fill('#register-confirm-password', 'password123');
             await p.click('#register-form button[type="submit"]');
             await p.waitForURL('**/index.html', { timeout: 10000 });
             return await p.evaluate(() => ({
