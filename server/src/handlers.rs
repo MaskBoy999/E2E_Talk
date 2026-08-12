@@ -36,6 +36,20 @@ impl RateLimiter {
         }
         true
     }
+
+    /// Snapshot live buckets: (key, count, seconds_remaining_in_window).
+    /// Expired buckets are dropped first so the view only shows active windows.
+    fn snapshot(&self, window: Duration) -> Vec<(String, u32, u64)> {
+        let mut map = self.attempts.lock().unwrap();
+        let now = Instant::now();
+        map.retain(|_, &mut (_, first)| now.duration_since(first) <= window);
+        let mut out = Vec::with_capacity(map.len());
+        for (k, &(count, first)) in map.iter() {
+            let elapsed = now.duration_since(first).as_secs();
+            out.push((k.clone(), count, window.as_secs().saturating_sub(elapsed)));
+        }
+        out
+    }
 }
 
 static LOGIN_RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(|| RateLimiter {
@@ -84,6 +98,35 @@ static CREATE_SERVER_RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(|| Rate
 
 static ADMIN_TOKENS: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
 
+/// Bounded log of recent mutation-limit 429s (for the admin usage view).
+/// Cap prevents unbounded growth; only the most recent entries are kept.
+struct RateLimitHit {
+    user_id: Option<String>,
+    ip: String,
+    ts: i64, // unix seconds
+}
+
+static MUTATION_429_HITS: LazyLock<Mutex<std::collections::VecDeque<RateLimitHit>>> =
+    LazyLock::new(|| Mutex::new(std::collections::VecDeque::new()));
+
+const MUTATION_429_HITS_CAP: usize = 100;
+
+fn record_mutation_429(user_id: Option<&str>, ip: &str) {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let mut q = MUTATION_429_HITS.lock().unwrap();
+    if q.len() >= MUTATION_429_HITS_CAP {
+        q.pop_front();
+    }
+    q.push_back(RateLimitHit {
+        user_id: user_id.map(|s| s.to_string()),
+        ip: ip.to_string(),
+        ts,
+    });
+}
+
 /// Per-user + per-IP limiter for authenticated state-changing API calls (G2).
 /// Env-overridable for test suites (same pattern as LOGIN_IP_MAX/LOGIN_USER_MAX):
 /// MUTATION_USER_MAX (default 120 req/10s per user) and MUTATION_IP_MAX
@@ -110,14 +153,17 @@ pub(crate) fn check_mutation_rate_limit(
         Err(_) => return None,
     };
 
-    let user_max: u32 = std::env::var("MUTATION_USER_MAX")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(120);
+    // Limits come from the runtime-tunable admin config (DB → env → default),
+    // so a host can adjust them live from the admin panel without a restart.
+    let (user_max, ip_max) = {
+        let tuning = state.runtime_tuning.read().unwrap();
+        (tuning.mutation_user_max, tuning.mutation_ip_max)
+    };
     let key = format!("mut_user:{}", user_id);
     if user_max > 0
         && !MUTATION_USER_RATE_LIMITER.check_and_increment(&key, user_max, Duration::from_secs(10))
     {
+        record_mutation_429(Some(&user_id), &get_client_ip(headers));
         return Some((
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": "Too many requests. Slow down."})),
@@ -125,14 +171,11 @@ pub(crate) fn check_mutation_rate_limit(
     }
 
     let ip = get_client_ip(headers);
-    let ip_max: u32 = std::env::var("MUTATION_IP_MAX")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1000);
     let ip_key = format!("mut_ip:{}", ip);
     if ip_max > 0
         && !MUTATION_IP_RATE_LIMITER.check_and_increment(&ip_key, ip_max, Duration::from_secs(10))
     {
+        record_mutation_429(Some(&user_id), &ip);
         return Some((
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": "Too many requests. Slow down."})),
@@ -2901,10 +2944,20 @@ pub async fn admin_login(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AdminLoginRequest>,
 ) -> impl IntoResponse {
-    // Per-IP rate limiting: 10 attempts per 5 minutes
+    // Per-IP rate limiting: 10 attempts per 5 minutes. Env-overridable for test
+    // suites (ADMIN_LOGIN_IP_MAX / ADMIN_LOGIN_IP_WINDOW_SECS), same pattern as
+    // the login/friend-request limiters.
     let ip = get_client_ip(&headers);
     let ip_rate_key = format!("admin_login_ip:{}", ip);
-    if !ADMIN_LOGIN_IP_RATE_LIMITER.check_and_increment(&ip_rate_key, 10, Duration::from_secs(300)) {
+    let admin_ip_max: u32 = std::env::var("ADMIN_LOGIN_IP_MAX")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10);
+    let admin_ip_window: u64 = std::env::var("ADMIN_LOGIN_IP_WINDOW_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(300);
+    if !ADMIN_LOGIN_IP_RATE_LIMITER.check_and_increment(&ip_rate_key, admin_ip_max, Duration::from_secs(admin_ip_window)) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": "Too many admin login attempts. Try again in 5 minutes."})),
@@ -3493,6 +3546,215 @@ pub async fn admin_list_admin_config(
     (StatusCode::OK, Json(serde_json::json!(result))).into_response()
 }
 
+/// Effective G2 runtime limits + where each value came from ("db"|"env"|"default").
+pub async fn admin_get_runtime_config(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) {
+        return e.into_response();
+    }
+    let tuning = state.runtime_tuning.read().unwrap();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "mutation_user_max": tuning.mutation_user_max,
+            "mutation_ip_max": tuning.mutation_ip_max,
+            "file_storage_quota_bytes": tuning.file_storage_quota_bytes,
+            "sources": {
+                "mutation_user_max": tuning.sources[0],
+                "mutation_ip_max": tuning.sources[1],
+                "file_storage_quota_bytes": tuning.sources[2],
+            },
+        })),
+    )
+        .into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub struct AdminSetRuntimeConfigRequest {
+    #[serde(default)]
+    pub mutation_user_max: Option<u64>,
+    #[serde(default)]
+    pub mutation_ip_max: Option<u64>,
+    #[serde(default)]
+    pub file_storage_quota_bytes: Option<i64>,
+}
+
+/// Persist new G2 limits in admin_config and apply them live (no restart).
+/// Every field is optional; only the provided ones are changed. `0` disables
+/// the limit. The mutation budgets are u32; anything larger is rejected.
+pub async fn admin_set_runtime_config(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AdminSetRuntimeConfigRequest>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) {
+        return e.into_response();
+    }
+
+    if req.mutation_user_max.is_none() && req.mutation_ip_max.is_none() && req.file_storage_quota_bytes.is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Provide at least one value to update"})),
+        )
+            .into_response();
+    }
+
+    if let Some(v) = req.mutation_user_max {
+        if u32::try_from(v).is_err() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "mutation_user_max must fit in u32 (0 = unlimited)"})),
+            )
+                .into_response();
+        }
+    }
+    if let Some(v) = req.mutation_ip_max {
+        if u32::try_from(v).is_err() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "mutation_ip_max must fit in u32 (0 = unlimited)"})),
+            )
+                .into_response();
+        }
+    }
+    if let Some(v) = req.file_storage_quota_bytes {
+        if v < 0 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "file_storage_quota_bytes must be >= 0 (0 = unlimited)"})),
+            )
+                .into_response();
+        }
+    }
+
+    let mut summary = Vec::new();
+    {
+        let mut tuning = state.runtime_tuning.write().unwrap();
+        if let Some(v) = req.mutation_user_max {
+            tuning.mutation_user_max = v as u32;
+            tuning.sources[0] = "db";
+            let _ = state.db.set_config_value("mutation_user_max", &v.to_string());
+            summary.push(format!("mutation_user_max={}", v));
+        }
+        if let Some(v) = req.mutation_ip_max {
+            tuning.mutation_ip_max = v as u32;
+            tuning.sources[1] = "db";
+            let _ = state.db.set_config_value("mutation_ip_max", &v.to_string());
+            summary.push(format!("mutation_ip_max={}", v));
+        }
+        if let Some(v) = req.file_storage_quota_bytes {
+            tuning.file_storage_quota_bytes = v;
+            tuning.sources[2] = "db";
+            let _ = state.db.set_config_value("file_storage_quota_bytes", &v.to_string());
+            summary.push(format!("file_storage_quota_bytes={}", v));
+        }
+    }
+    log_admin_action(&state, "admin_set_runtime_config", Some(&summary.join(", ")), &headers);
+
+    let tuning = state.runtime_tuning.read().unwrap();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "ok": true,
+            "mutation_user_max": tuning.mutation_user_max,
+            "mutation_ip_max": tuning.mutation_ip_max,
+            "file_storage_quota_bytes": tuning.file_storage_quota_bytes,
+        })),
+    )
+        .into_response()
+}
+
+/// Live mutation-limit usage for the admin panel: top per-user + per-IP buckets
+/// (count, current limit, seconds left in the 10s window) and the most recent
+/// 429s, with usernames resolved so hosts can spot abusive accounts at a glance.
+pub async fn admin_get_rate_limit_usage(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) {
+        return e.into_response();
+    }
+
+    let window = Duration::from_secs(10);
+    let (user_limit, ip_limit) = {
+        let tuning = state.runtime_tuning.read().unwrap();
+        (tuning.mutation_user_max, tuning.mutation_ip_max)
+    };
+
+    let mut users: Vec<(String, u32, u64)> = MUTATION_USER_RATE_LIMITER
+        .snapshot(window)
+        .into_iter()
+        .filter_map(|(k, c, r)| k.strip_prefix("mut_user:").map(|id| (id.to_string(), c, r)))
+        .collect();
+    users.sort_by(|a, b| b.1.cmp(&a.1));
+    users.truncate(10);
+    let user_rows: Vec<serde_json::Value> = users
+        .into_iter()
+        .map(|(id, count, remaining)| {
+            let username = state
+                .db
+                .get_username_by_id(&id)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| id.clone());
+            serde_json::json!({
+                "user_id": id, "username": username, "count": count,
+                "limit": user_limit, "window_remaining_s": remaining,
+            })
+        })
+        .collect();
+
+    let mut ips: Vec<(String, u32, u64)> = MUTATION_IP_RATE_LIMITER
+        .snapshot(window)
+        .into_iter()
+        .filter_map(|(k, c, r)| k.strip_prefix("mut_ip:").map(|ip| (ip.to_string(), c, r)))
+        .collect();
+    ips.sort_by(|a, b| b.1.cmp(&a.1));
+    ips.truncate(10);
+    let ip_rows: Vec<serde_json::Value> = ips
+        .into_iter()
+        .map(|(ip, count, remaining)| {
+            serde_json::json!({
+                "ip": ip, "count": count,
+                "limit": ip_limit, "window_remaining_s": remaining,
+            })
+        })
+        .collect();
+
+    let hits: Vec<serde_json::Value> = {
+        let q = MUTATION_429_HITS.lock().unwrap();
+        q.iter().rev().take(50).map(|h| {
+            let username = h
+                .user_id
+                .as_ref()
+                .and_then(|id| state.db.get_username_by_id(id).ok().flatten());
+            serde_json::json!({
+                "user_id": h.user_id.clone().unwrap_or_default(),
+                "username": username.unwrap_or_else(|| "—".to_string()),
+                "ip": h.ip,
+                "ts": h.ts,
+            })
+        }).collect()
+    };
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "window_seconds": 10,
+            "users": user_rows,
+            "ips": ip_rows,
+            "recent_429s": hits,
+            "last_updated": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0),
+        })),
+    )
+        .into_response()
+}
+
 pub async fn admin_list_prekey_bundles(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
@@ -3897,11 +4159,8 @@ pub async fn init_file_upload(
     }
 
     // G2 storage quota: reject the init if the user would exceed their cap.
-    // Env-overridable for tests: FILE_STORAGE_QUOTA_BYTES (0 disables).
-    let quota: i64 = std::env::var("FILE_STORAGE_QUOTA_BYTES")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1024 * 1024 * 1024); // 1 GiB default
+    // Runtime-tunable from the admin panel (DB → env → 1 GiB default). 0 disables.
+    let quota: i64 = state.runtime_tuning.read().unwrap().file_storage_quota_bytes;
     if quota > 0 {
         let used = state.db.get_user_storage_usage(&user_id).unwrap_or(0);
         if used + req.size > quota {

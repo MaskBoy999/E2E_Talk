@@ -1163,6 +1163,20 @@ impl Database {
         })
     }
 
+    /// Username lookup for admin views (rate-limit usage). None when unknown.
+    pub fn get_username_by_id(&self, user_id: &str) -> Result<Option<String>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        match conn.query_row(
+            "SELECT username FROM users WHERE id = ?1",
+            params![user_id],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(u) => Ok(Some(u)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
     pub fn get_user_by_username(&self, username: &str) -> Result<User, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.query_row(
@@ -4632,6 +4646,31 @@ impl Database {
         Ok(count > 0)
     }
 
+    /// Generic admin_config accessor (used for G2 runtime-tunable limits).
+    pub fn get_config_value(&self, key: &str) -> Result<Option<String>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        match conn.query_row(
+            "SELECT value FROM admin_config WHERE key = ?1",
+            params![key],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// Generic admin_config upsert (used for G2 runtime-tunable limits).
+    pub fn set_config_value(&self, key: &str, value: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT OR REPLACE INTO admin_config (key, value) VALUES (?1, ?2)",
+            params![key, value],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     /// Append to the admin audit log (G4). Tokens/passwords are never logged.
     pub fn log_admin_action(
         &self,
@@ -5504,7 +5543,10 @@ impl Database {
 
     pub fn list_all_config_admin(&self) -> Result<Vec<(String, String)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let mut stmt = conn.prepare("SELECT key, value FROM admin_config ORDER BY key").map_err(|e| e.to_string())?;
+        // Never expose the password hash in the panel — it is write-only here.
+        let mut stmt = conn
+            .prepare("SELECT key, value FROM admin_config WHERE key != 'password_hash' ORDER BY key")
+            .map_err(|e| e.to_string())?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         }).map_err(|e| e.to_string())?;

@@ -428,6 +428,7 @@ async function loadAllData() {
         loadFriendships(),
         loadFiles(),
         loadAdminConfig(),
+        loadRuntimeConfig(),
         loadPendingEvents(),
         loadPendingNotifications(),
         loadVoiceSessions(),
@@ -739,6 +740,147 @@ function renderFiles(rows) {
 
 // --- Admin Config ---
 async function loadAdminConfig() { await loadTabData("/api/admin/admin-config", "adminConfig", renderAdminConfig); }
+
+// --- Runtime limits (G2) — live-tunable without a restart ---
+async function loadRuntimeConfig() {
+    try {
+        const res = await fetch('/api/admin/runtime-config', { headers: { 'Authorization': 'Bearer ' + sessionStorage.getItem('admin_token') } });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const cfg = await res.json();
+        document.getElementById('rt-mutation-user-max').value = cfg.mutation_user_max;
+        document.getElementById('rt-mutation-ip-max').value = cfg.mutation_ip_max;
+        document.getElementById('rt-quota-bytes').value = cfg.file_storage_quota_bytes;
+        const src = cfg.sources || {};
+        document.getElementById('rt-src-user').textContent = '(' + (src.mutation_user_max || 'db') + ')';
+        document.getElementById('rt-src-ip').textContent = '(' + (src.mutation_ip_max || 'db') + ')';
+        document.getElementById('rt-src-quota').textContent = '(' + (src.file_storage_quota_bytes || 'db') + ')';
+        setRtStatus('Loaded');
+    } catch (e) {
+        setRtStatus('Load failed: ' + e.message, true);
+    }
+}
+
+function setRtStatus(msg, isError) {
+    const el = document.getElementById('rt-save-status');
+    if (!el) return;
+    el.textContent = msg;
+    el.style.color = isError ? '#f04747' : '#2ecc71';
+}
+
+async function saveRuntimeConfig() {
+    const payload = {
+        mutation_user_max: parseInt(document.getElementById('rt-mutation-user-max').value, 10) || 0,
+        mutation_ip_max: parseInt(document.getElementById('rt-mutation-ip-max').value, 10) || 0,
+        file_storage_quota_bytes: parseInt(document.getElementById('rt-quota-bytes').value, 10) || 0,
+    };
+    try {
+        const res = await fetch('/api/admin/runtime-config', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + sessionStorage.getItem('admin_token') },
+            body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+        setRtStatus('Saved & applied live');
+        // Refresh the generic config table too (new keys now appear there).
+        loadAdminConfig();
+        loadAuditLog();
+        return true;
+    } catch (e) {
+        setRtStatus('Save failed: ' + e.message, true);
+        return false;
+    }
+}
+
+(function wireRtModal() {
+    const modal = document.getElementById('runtime-limits-modal');
+    const openBtn = document.getElementById('runtime-limits-btn');
+    const cancelBtn = document.getElementById('rt-cancel-btn');
+    const saveBtn = document.getElementById('rt-save-btn');
+    const refreshBtn = document.getElementById('rt-usage-refresh');
+    if (!modal || !openBtn) return;
+    let usageTimer = null;
+    function openModal() {
+        modal.style.display = 'flex';
+        loadRuntimeConfig();
+        loadRateLimitUsage();
+        if (usageTimer) clearInterval(usageTimer);
+        usageTimer = setInterval(loadRateLimitUsage, 5000);
+    }
+    function closeModal() {
+        modal.style.display = 'none';
+        if (usageTimer) { clearInterval(usageTimer); usageTimer = null; }
+    }
+    openBtn.addEventListener('click', openModal);
+    if (cancelBtn) cancelBtn.addEventListener('click', closeModal);
+    // Click on the dark overlay (outside the card) closes the modal.
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal) closeModal();
+    });
+    if (saveBtn) {
+        saveBtn.addEventListener('click', async () => {
+            const ok = await saveRuntimeConfig();
+            if (ok) setTimeout(closeModal, 700);
+        });
+    }
+    if (refreshBtn) refreshBtn.addEventListener('click', loadRateLimitUsage);
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && modal.style.display === 'flex') closeModal();
+    });
+})();
+
+// --- Live mutation-limit usage (G2) ---
+function rtTimeAgo(unixTs) {
+    if (!unixTs) return '';
+    const s = Math.max(0, Math.floor(Date.now() / 1000) - unixTs);
+    if (s < 5) return 'just now';
+    if (s < 60) return s + 's ago';
+    const m = Math.floor(s / 60);
+    if (m < 60) return m + 'm ago';
+    return Math.floor(m / 60) + 'h ago';
+}
+
+function renderUsageBucket(el, rows, limit, nameKey) {
+    if (!rows || rows.length === 0) {
+        el.innerHTML = '<span style="color:var(--text-muted);opacity:.6">No active buckets</span>';
+        return;
+    }
+    el.innerHTML = rows.map((r) => {
+        const name = r[nameKey] || r.username || r.user_id || '?';
+        const pct = limit > 0 ? Math.round((r.count / limit) * 100) : 100;
+        const color = pct >= 90 ? '#f04747' : (pct >= 60 ? '#faa61a' : 'inherit');
+        return '<div style="display:flex;justify-content:space-between;gap:8px;padding:2px 0;border-bottom:1px solid var(--border,#2a2a3a);">' +
+            '<span title="' + escapeHtml(r.user_id || '') + '" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:130px;">' + escapeHtml(name) + '</span>' +
+            '<span style="color:' + color + ';white-space:nowrap;">' + r.count + '/' + limit + ' · ' + r.window_remaining_s + 's</span></div>';
+    }).join('');
+}
+
+async function loadRateLimitUsage() {
+    const usersEl = document.getElementById('rt-usage-users');
+    const ipsEl = document.getElementById('rt-usage-ips');
+    const hitsEl = document.getElementById('rt-usage-429s');
+    const updatedEl = document.getElementById('rt-usage-updated');
+    try {
+        const res = await fetch('/api/admin/rate-limit-usage', { headers: { 'Authorization': 'Bearer ' + sessionStorage.getItem('admin_token') } });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        renderUsageBucket(usersEl, data.users, data.users && data.users.length ? data.users[0].limit : 0, 'username');
+        renderUsageBucket(ipsEl, data.ips, data.ips && data.ips.length ? data.ips[0].limit : 0, 'ip');
+        if (!data.recent_429s || data.recent_429s.length === 0) {
+            hitsEl.innerHTML = '<span style="color:var(--text-muted);opacity:.6">No 429s in the last ' + data.window_seconds + 's window</span>';
+        } else {
+            hitsEl.innerHTML = data.recent_429s.map((h) =>
+                '<div style="display:flex;justify-content:space-between;gap:8px;padding:2px 0;border-bottom:1px solid var(--border,#2a2a3a);">' +
+                '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:150px;">' + escapeHtml(h.username) + '</span>' +
+                '<span style="color:#8a8fa3;white-space:nowrap;">' + escapeHtml(h.ip) + ' · ' + rtTimeAgo(h.ts) + '</span></div>'
+            ).join('');
+        }
+        if (updatedEl) updatedEl.textContent = 'updated ' + rtTimeAgo(data.last_updated);
+    } catch (e) {
+        usersEl.innerHTML = 'Usage load failed: ' + escapeHtml(e.message);
+        if (updatedEl) updatedEl.textContent = 'error';
+    }
+}
 function renderAdminConfig(rows) {
     tabTotals['admin-config'] = rows.length;
     const p = paginate(rows, 'admin-config');

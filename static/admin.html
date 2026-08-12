@@ -60,6 +60,7 @@
         .pag-size-select { background: #1a1a2e; color: #aaa; border: 1px solid #333; border-radius: 4px; padding: 3px 6px; font-size: 12px; cursor: pointer; outline: none; }
         .pag-size-select:hover { border-color: #555; color: #fff; }
         .pag-size-select:focus { border-color: #4fc3f7; }
+        .rt-source { display:inline-block; font-size:11px; color:#8a8fa3; background:#1a1a2e; border:1px solid #333; border-radius:4px; padding:1px 6px; margin-left:4px; }
     </style>
 </head>
 <body>
@@ -83,7 +84,8 @@
         <div id="admin-panel" class="admin-card" style="display: none;">
             <div class="admin-header">
                 <h1>Admin Panel</h1>
-                <div style="display:flex;gap:8px;align-items:center">
+                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                    <button id="runtime-limits-btn" class="btn-download" style="font-size:12px;padding:8px 14px;background:#5865F2;color:#fff;border:none;border-radius:4px;cursor:pointer">⚙ Runtime Limits</button>
                     <button id="export-db-btn" class="btn-download" style="font-size:12px;padding:8px 14px;background:#1565c0;color:#fff;border:none;border-radius:4px;cursor:pointer">📥 Export DB</button>
                     <button id="import-db-btn" class="btn-upload" style="font-size:12px;padding:8px 14px;background:#2e7d32;color:#fff;border:none;border-radius:4px;cursor:pointer">📤 Import DB</button>
                     <button id="clear-all-btn" class="btn-delete" style="font-size:13px;padding:8px 16px;background:#7b1fa2;border-color:#9c27b0">&#9888; Wipe Everything</button>
@@ -535,6 +537,63 @@
             <div class="modal-actions">
                 <button class="btn-cancel" id="cancel-export-db">Cancel</button>
                 <button class="btn-invite" id="confirm-export-db" style="background:#1565c0;border-color:#1565c0;">&#128190; Export</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Runtime Limits Modal (G2 — live-tunable, no restart) -->
+    <div class="modal" id="runtime-limits-modal" style="display:none">
+        <div class="modal-content" style="max-width:560px">
+            <h3 style="margin-bottom:4px;color:var(--accent)">⚙ Runtime Limits (G2)</h3>
+            <p style="margin-bottom:16px;color:var(--text-muted);font-size:13px">
+                Applied live — no restart needed. <code>0</code> disables a limit.
+                Values are stored in the DB and take precedence over env vars.
+            </p>
+            <div class="rt-config-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;">
+                <div>
+                    <label for="rt-mutation-user-max" style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">
+                        Mutations / user / 10s <span id="rt-src-user" class="rt-source"></span>
+                    </label>
+                    <input type="number" id="rt-mutation-user-max" min="0" class="modal-input" style="width:100%;box-sizing:border-box;" />
+                </div>
+                <div>
+                    <label for="rt-mutation-ip-max" style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">
+                        Mutations / IP / 10s <span id="rt-src-ip" class="rt-source"></span>
+                    </label>
+                    <input type="number" id="rt-mutation-ip-max" min="0" class="modal-input" style="width:100%;box-sizing:border-box;" />
+                </div>
+                <div>
+                    <label for="rt-quota-bytes" style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">
+                        Per-user storage quota (bytes) <span id="rt-src-quota" class="rt-source"></span>
+                    </label>
+                    <input type="number" id="rt-quota-bytes" min="0" class="modal-input" style="width:100%;box-sizing:border-box;" />
+                </div>
+            </div>
+            <div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--border,#2a2a3a);">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+                    <h3 style="margin:0;color:var(--accent);font-size:14px;">Live usage (mutation limiter)</h3>
+                    <div style="display:flex;align-items:center;gap:8px;">
+                        <span id="rt-usage-updated" style="font-size:11px;color:var(--text-muted);"></span>
+                        <button id="rt-usage-refresh" style="font-size:11px;padding:4px 10px;background:#1a1a2e;color:#aaa;border:1px solid #333;border-radius:4px;cursor:pointer;">&#8635; Refresh</button>
+                    </div>
+                </div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:10px;">
+                    <div>
+                        <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px;">Top users (requests in 10s window)</div>
+                        <div id="rt-usage-users" style="font-size:12px;color:var(--text-muted);min-height:22px;">Loading…</div>
+                    </div>
+                    <div>
+                        <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px;">Top IPs (requests in 10s window)</div>
+                        <div id="rt-usage-ips" style="font-size:12px;color:var(--text-muted);min-height:22px;">Loading…</div>
+                    </div>
+                </div>
+                <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px;">Recent 429s</div>
+                <div id="rt-usage-429s" style="font-size:12px;color:var(--text-muted);min-height:22px;max-height:120px;overflow-y:auto;">Loading…</div>
+            </div>
+            <div id="rt-save-status" style="color:var(--text-muted);margin-top:14px;font-size:13px;min-height:18px"></div>
+            <div class="modal-actions">
+                <button class="btn-cancel" id="rt-cancel-btn">Cancel</button>
+                <button class="btn-invite" id="rt-save-btn" style="background:#5865F2;border-color:#5865F2;">Save runtime limits</button>
             </div>
         </div>
     </div>

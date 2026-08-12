@@ -29,6 +29,62 @@ pub struct AppState {
     /// Starts as false on a fresh DB; set to true once admin password is set
     /// or the first user registers. Used to redirect visitors to admin setup.
     pub setup_complete: AtomicBool,
+    /// G2 runtime-tunable limits, editable live from the admin panel (the
+    /// admin-config tab) without a restart. Cached in memory so the hot path
+    /// (every authenticated mutation + every file-upload init) never touches
+    /// the DB. Precedence per value: admin_config DB row → env var → default.
+    pub runtime_tuning: std::sync::Arc<std::sync::RwLock<RuntimeTuning>>,
+}
+
+/// G2 limits that can be tuned at runtime from the admin panel.
+/// `0` means "unlimited" for every field.
+#[derive(Clone, Debug)]
+pub struct RuntimeTuning {
+    /// Per-user mutation budget per 10s window (default 120).
+    pub mutation_user_max: u32,
+    /// Per-IP mutation budget per 10s window (default 1000).
+    pub mutation_ip_max: u32,
+    /// Per-user file-storage cap in bytes (default 1 GiB).
+    pub file_storage_quota_bytes: i64,
+    /// Where each value came from: "db" | "env" | "default" (for the admin UI).
+    pub sources: [&'static str; 3],
+}
+
+impl RuntimeTuning {
+    /// Load the tuning, honoring admin_config DB rows, then env vars, then defaults.
+    pub fn load(db: &db::Database) -> Self {
+        // Returns (db_value, env_value, default) as Option<u64>.
+        let resolve = |key: &str, env: &str, default: u64| -> (Option<u64>, Option<u64>, u64) {
+            let db_val = db.get_config_value(key).ok().flatten().and_then(|v| v.trim().parse::<u64>().ok());
+            let env_val = std::env::var(env).ok().and_then(|v| v.trim().parse::<u64>().ok());
+            (db_val, env_val, default)
+        };
+
+        let (db_user, env_user, def_user) = resolve("mutation_user_max", "MUTATION_USER_MAX", 120);
+        let (db_ip, env_ip, def_ip) = resolve("mutation_ip_max", "MUTATION_IP_MAX", 1000);
+        let (db_quota, env_quota, def_quota) = resolve("file_storage_quota_bytes", "FILE_STORAGE_QUOTA_BYTES", 1024 * 1024 * 1024);
+
+        let pick = |db: Option<u64>, env: Option<u64>, def: u64| -> (u64, &'static str) {
+            if let Some(v) = db {
+                (v, "db")
+            } else if let Some(v) = env {
+                (v, "env")
+            } else {
+                (def, "default")
+            }
+        };
+
+        let (user, src_user) = pick(db_user, env_user, def_user);
+        let (ip, src_ip) = pick(db_ip, env_ip, def_ip);
+        let (quota, src_quota) = pick(db_quota, env_quota, def_quota);
+
+        RuntimeTuning {
+            mutation_user_max: user as u32,
+            mutation_ip_max: ip as u32,
+            file_storage_quota_bytes: quota as i64,
+            sources: [src_user, src_ip, src_quota],
+        }
+    }
 }
 
 /// G1 — Security headers on EVERY response (static pages AND API).
@@ -298,12 +354,14 @@ async fn main() {
 
     let fresh = db.is_fresh_db().unwrap_or(true);
     tracing::info!("Database setup status: {}", if fresh { "fresh — redirecting to admin setup" } else { "configured" });
+    let runtime_tuning = std::sync::Arc::new(std::sync::RwLock::new(RuntimeTuning::load(&db)));
     let state = Arc::new(AppState {
         setup_complete: AtomicBool::new(!fresh),
         db,
         config: config.clone(),
         ws_manager,
         voice_rooms: std::sync::RwLock::new(std::collections::HashMap::new()),
+        runtime_tuning,
     });
 
     // Run orphan file cleanup on startup, then periodically every hour
@@ -433,6 +491,11 @@ async fn main() {
         .route("/api/admin/import-db", post(handlers::admin_import_db))
         .route("/api/admin/clear", post(handlers::admin_clear_all))
         .route("/api/admin/audit-log", get(handlers::admin_audit_log))
+        .route(
+            "/api/admin/runtime-config",
+            get(handlers::admin_get_runtime_config).put(handlers::admin_set_runtime_config),
+        )
+        .route("/api/admin/rate-limit-usage", get(handlers::admin_get_rate_limit_usage))
         // Phase 4: Friends + DMs
         .route("/api/me", get(handlers::get_me).delete(handlers::delete_me))
         .route("/api/hmac-key", get(handlers::get_hmac_key))

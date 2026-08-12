@@ -79,18 +79,23 @@ test.describe('G3 — Origin check on state-changing endpoints', () => {
 
 test.describe('G2 — Mutation rate limit + storage quota (isolated server)', () => {
   let child: ChildProcess;
+  let tmpDb: string;
   const ALT = 'https://localhost:3451';
 
   test.beforeAll(async () => {
     const serverDir = path.join(__dirname, '..', 'server');
     const bin = path.join(serverDir, 'target', 'debug', process.platform === 'win32' ? 'e2e-chat.exe' : 'e2e-chat');
     if (!fs.existsSync(bin)) throw new Error('server binary not found at ' + bin);
+    // Dedicated temp DB so env overrides (which DB rows now take precedence over)
+    // always apply — the isolated server must never share the dev DB.
+    tmpDb = path.join(serverDir, `hardening-test-${Date.now()}.db`);
     child = spawn(bin, [], {
       cwd: serverDir,
       env: {
         ...process.env,
         PORT: '3450',
         HTTPS_PORT: '3451',
+        DATABASE_URL: tmpDb,
         LOGIN_IP_MAX: '100000',
         LOGIN_USER_MAX: '100000',
         AUTH_PARAMS_IP_MAX: '100000',
@@ -113,8 +118,20 @@ test.describe('G2 — Mutation rate limit + storage quota (isolated server)', ()
     expect(up, 'isolated server came up').toBe(true);
   });
 
+  // A fresh DB redirects non-admin pages to the admin setup. Setting the admin
+  // password (first-time setup) flips setup_complete so login.html is reachable
+  // for the UI registrations below.
+  test.beforeAll(async ({ request }) => {
+    const res = await request.post(`${ALT}/api/admin/login`, { data: { password: 'hardening' } });
+    expect(res.ok(), 'admin setup login on isolated server').toBeTruthy();
+  });
+
   test.afterAll(async () => {
     if (child) child.kill();
+    await new Promise((r) => setTimeout(r, 500));
+    if (tmpDb) {
+      try { fs.unlinkSync(tmpDb); } catch (_) {}
+    }
   });
 
   test('authed mutations over the budget get 429; GETs are not limited', async ({ page }) => {
