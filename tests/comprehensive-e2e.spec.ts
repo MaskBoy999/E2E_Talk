@@ -139,44 +139,47 @@ test.describe('Comprehensive E2E — All Features', () => {
         const msgOn2 = await page2.locator('.text').first().textContent();
         expect(msgOn2).toContain('Hello from Alice');
 
-        // User2 edits the message via WS
-        // IMPORTANT: Use user1's (the original sender's) identity key for encryption
-        // For DM edit, encrypt with user2's private key + user1's public key
-        const body1Id = body1.user.id;
-        const user1PubRes = await page.request.get(`${BASE}/api/identity/${body1Id}`, {
+        // User1 (the AUTHOR) edits the message via WS — the server's
+        // edit_dm_message only lets the author edit, so the editor must be the
+        // original sender (mirrors the server-channel test 02 below).
+        // Encryption matches the client's real DM edit path: the editor's
+        // private key + the OTHER participant's public key, so user2 can decrypt.
+        const dmMsgs = await (await page.request.get(`${BASE}/api/dm/${dmId}/messages?limit=10`, {
+            headers: { Authorization: `Bearer ${body1.token}` },
+        })).json();
+        const authMsgId = dmMsgs && dmMsgs[0] ? dmMsgs[0].id : null;
+        expect(authMsgId).toBeTruthy();
+
+        const user2PubRes = await page.request.get(`${BASE}/api/identity/${body2.user.id}`, {
             headers: { Authorization: `Bearer ${body1.token}` },
         });
-        const user1PubData = await user1PubRes.json();
-        const user1PubKeyB64 = user1PubData.identity_public_key;
+        const user2PubData = await user2PubRes.json();
+        const user2PubKeyB64 = user2PubData.identity_public_key;
 
-        const editSent = await page2.evaluate(async ({ dmId, user1PubKeyB64 }) => {
+        const editSent = await page.evaluate(async ({ dmId, authMsgId, user2PubKeyB64 }) => {
             const kp = E2ECrypto.getIdentityKeyPair();
             if (!kp) { return 'no keypair'; }
             try {
-                const msgEl = document.querySelector('[data-message-id]');
-                if (!msgEl) { return 'no message element'; }
-                const msgId = msgEl.getAttribute('data-message-id');
-                const user1PubKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(user1PubKeyB64));
+                const user2PubKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(user2PubKeyB64));
                 const payload = { type: 'text', text: 'EDITED: This DM was changed!' };
-                const enc = E2ECrypto.encryptDm(JSON.stringify(payload), dmId, kp.privateKey, user1PubKey);
+                const enc = E2ECrypto.encryptDm(JSON.stringify(payload), dmId, kp.privateKey, user2PubKey);
                 ws.send(JSON.stringify({
                     type: 'dm_edit',
-                    message_id: msgId,
+                    message_id: authMsgId,
                     encrypted_content: enc.ciphertext,
                     nonce: enc.nonce,
                     message_nonce: enc.messageNonce || null,
                 }));
-                return 'edit sent: ' + msgId;
+                return 'edit sent: ' + authMsgId;
             } catch (e) {
                 return 'error: ' + e.message;
             }
-        }, { dmId, user1PubKeyB64 });
+        }, { dmId, authMsgId, user2PubKeyB64 });
         expect(editSent).toContain('edit sent');
-        await page2.waitForTimeout(3000);
+        await page.waitForTimeout(3000);
 
-        // User1 should see the edit (THE BUG FIX)
-        await page.waitForTimeout(2000);
-        const editStatus = await page.evaluate(() => {
+        // User2 (in the DM view with the message rendered) should see the edit live
+        const editStatus = await page2.evaluate(() => {
             const label = document.querySelector('.edited-label');
             if (label) { return 'edited_label:' + label.textContent; }
             const textEl = document.querySelector('.text');
@@ -186,11 +189,11 @@ test.describe('Comprehensive E2E — All Features', () => {
             }
             return 'no_text';
         });
-        // It may take a moment for user1 to receive + process the edit
+        // It may take a moment for user2 to receive + process the edit
         let finalStatus = editStatus;
-        for (let i = 0; i < 20 && finalStatus === 'no_text'; i++) {
-            await page.waitForTimeout(500);
-            finalStatus = await page.evaluate(() => {
+        for (let i = 0; i < 20 && finalStatus.startsWith('no_'); i++) {
+            await page2.waitForTimeout(500);
+            finalStatus = await page2.evaluate(() => {
                 const label = document.querySelector('.edited-label');
                 if (label) { return 'edited_label:' + label.textContent; }
                 const textEl = document.querySelector('.text');
@@ -201,7 +204,7 @@ test.describe('Comprehensive E2E — All Features', () => {
                 return 'no_text';
             });
         }
-        expect(finalStatus).not.toBe('no_text');
+        expect(finalStatus).not.toMatch(/^no_/);
         // The edit should be detected as either an edited label or changed text
         const editDetected = finalStatus && (finalStatus.startsWith('edited_label') || finalStatus.startsWith('text_changed'));
         expect(editDetected).toBeTruthy();
@@ -223,10 +226,6 @@ test.describe('Comprehensive E2E — All Features', () => {
 
         // Create server
         const inviteCode = 'SEP' + ts;
-        const hash = await page.evaluate((code) => {
-            const key = localStorage.getItem('e2e_hmac_key');
-            return key ? E2ECrypto.hmacHex(key, code) : E2ECrypto.sha256Hex(code);
-        }, inviteCode);
 
         const srv = await (await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${body1.token}`, 'Content-Type': 'application/json' },
@@ -261,14 +260,10 @@ test.describe('Comprehensive E2E — All Features', () => {
         }, { serverId });
         expect(keyOk).toBe('ok');
 
-        // User2 joins
-        const hash2 = await page2.evaluate((code) => {
-            const key = localStorage.getItem('e2e_hmac_key');
-            return key ? E2ECrypto.hmacHex(key, code) : E2ECrypto.sha256Hex(code);
-        }, inviteCode);
+        // User2 joins with the RAW invite code (the server salts + hashes it)
         const join = await page2.request.post(`${BASE}/api/invites/join`, {
             headers: { Authorization: `Bearer ${body2.token}`, 'Content-Type': 'application/json' },
-            data: { code: hash2 },
+            data: { code: inviteCode },
         });
         expect(join.ok()).toBeTruthy();
 
@@ -298,6 +293,13 @@ test.describe('Comprehensive E2E — All Features', () => {
             return res.ok ? 'ok' : 'upload failed';
         }, { serverId, u2PubKeyB64: u2KeyData.identity_public_key, user2Id: body2.user.id });
         expect(keyOk2).toBe('ok');
+
+        // Page2 joined via API — reload so its sidebar picks up the new server
+        // (the client refreshes the server list on page load; the live
+        // member_joined event only updates the member list, not the sidebar).
+        await page2.goto(`${BASE}/index.html`);
+        await page2.waitForSelector('#settings-btn', { timeout: 15000 });
+        await page2.waitForTimeout(1500);
 
         // Get channel ID
         const channels = await (await page.request.get(`${BASE}/api/servers/${serverId}/channels`, {
@@ -385,29 +387,33 @@ test.describe('Comprehensive E2E — All Features', () => {
         const msgOn2 = await page2.locator('.text').first().textContent();
         expect(msgOn2).toContain('Original server message');
 
-        // User1 edits via WS
+        // User1 edits via WS — the message id comes from the API, not the DOM
+        // (page1 never rendered the channel view in this test).
         await page.waitForTimeout(1000);
-        const editOk = await page.evaluate(async ({ channelId, serverId }) => {
+        const chMsgs = await (await page.request.get(`${BASE}/api/channels/${channelId}/messages?limit=10`, {
+            headers: { Authorization: `Bearer ${body1.token}` },
+        })).json();
+        const authChMsgId = chMsgs && chMsgs[0] ? chMsgs[0].id : null;
+        expect(authChMsgId).toBeTruthy();
+
+        const editOk = await page.evaluate(async ({ channelId, serverId, authChMsgId }) => {
             const key = E2ECrypto.getServerKey(serverId);
             if (!key) { return 'no key'; }
             try {
                 const payload = { type: 'text', text: 'EDITED: Server message changed!' };
                 const enc = E2ECrypto.encryptMessage(JSON.stringify(payload), key);
-                const msgEl = document.querySelector('[data-message-id]');
-                if (!msgEl) { return 'no msg element'; }
-                const msgId = msgEl.getAttribute('data-message-id');
                 ws.send(JSON.stringify({
                     type: 'message_edit',
-                    message_id: msgId,
+                    message_id: authChMsgId,
                     encrypted_content: enc.ciphertext,
                     nonce: enc.nonce,
                     message_nonce: enc.messageNonce || null,
                 }));
-                return 'edit sent: ' + msgId;
+                return 'edit sent: ' + authChMsgId;
             } catch (e) {
                 return 'error: ' + e.message;
             }
-        }, { channelId, serverId });
+        }, { channelId, serverId, authChMsgId });
         expect(editOk).toContain('edit sent');
         await page.waitForTimeout(3000);
 
@@ -530,10 +536,6 @@ test.describe('Comprehensive E2E — All Features', () => {
         const body1 = await registerUser(page, user1);
 
         const inviteCode = 'SKT' + ts;
-        const hash = await page.evaluate((code) => {
-            const key = localStorage.getItem('e2e_hmac_key');
-            return key ? E2ECrypto.hmacHex(key, code) : E2ECrypto.sha256Hex(code);
-        }, inviteCode);
 
         const srv = await (await page.request.post(`${BASE}/api/servers`, {
             headers: { Authorization: `Bearer ${body1.token}`, 'Content-Type': 'application/json' },

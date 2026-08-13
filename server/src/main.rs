@@ -100,7 +100,7 @@ async fn security_headers_mw(request: Request, next: Next) -> Response {
     headers.insert(
         "content-security-policy",
         HeaderValue::from_static(
-            "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+            "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; media-src 'self' blob:; object-src 'none'; frame-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
         ),
     );
     headers.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
@@ -183,7 +183,8 @@ async fn origin_check_mw(request: Request, next: Next) -> Response {
 /// Compare an Origin header (e.g. "https://localhost:3443") with the Host
 /// header ("localhost:3443"). Ignores the scheme; compares host+port
 /// case-insensitively. Accepts the "null" origin (sandboxed/file contexts).
-fn origin_host_matches(origin: &str, host: &str) -> bool {
+/// Also used by the WS handler (F6 — cross-site WebSocket hijacking guard).
+pub(crate) fn origin_host_matches(origin: &str, host: &str) -> bool {
     if origin == "null" {
         return true;
     }
@@ -207,11 +208,61 @@ fn origin_host_matches(origin: &str, host: &str) -> bool {
     origin_host == host_lower
 }
 
+/// F1 — 301-redirect every plaintext-HTTP request to the HTTPS listener,
+/// preserving the hostname (Tailscale IP / domain) and path.
+async fn http_to_https_redirect(
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+    State(https_port): State<u16>,
+) -> Response {
+    let host = headers
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "localhost".to_string());
+    // Strip any port from the Host so the redirect lands on the HTTPS port.
+    let host_no_port = match host.rfind(':') {
+        Some(idx) if host[idx + 1..].chars().all(|c| c.is_ascii_digit()) => host[..idx].to_string(),
+        _ => host,
+    };
+    let target = format!(
+        "https://{}:{}{}",
+        host_no_port,
+        https_port,
+        uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/")
+    );
+    let mut response = Response::new(axum::body::Body::empty());
+    *response.status_mut() = StatusCode::MOVED_PERMANENTLY;
+    response
+        .headers_mut()
+        .insert("location", HeaderValue::from_str(&target).unwrap());
+    response.headers_mut().insert("cache-control", HeaderValue::from_static("no-store"));
+    response
+}
+
 async fn serve_static(
     uri: axum::http::Uri,
     State(state): State<Arc<AppState>>,
 ) -> axum::response::Response {
-    let path = format!("../static{}", uri.path());
+    // F9 — hard-block parent-directory traversal BEFORE touching the filesystem.
+    // Percent-decode first ("%2e%2e" must not bypass the check), then reject any
+    // path whose segments contain ".." or ".". This closes the real leak where
+    // "/../server/.env" resolved through ../static back into the server dir and
+    // served the live JWT_SECRET / HMAC_KEY.
+    let raw_path = uri.path();
+    let decoded_probe = raw_path.replace("%2e", ".").replace("%2E", ".");
+    let has_traversal = decoded_probe.split('/').any(|seg| seg == ".." || seg == ".");
+    if has_traversal {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", HeaderValue::from_static("text/plain"));
+        return (
+            StatusCode::NOT_FOUND,
+            headers,
+            b"404 Not Found".to_vec(),
+        )
+            .into_response();
+    }
+    let path = format!("../static{}", raw_path);
     let path = if std::path::Path::new(&path).is_dir() {
         format!("{}index.html", path)
     } else {
@@ -259,7 +310,7 @@ async fn serve_static(
             headers.insert("pragma", HeaderValue::from_static("no-cache"));
             headers.insert("expires", HeaderValue::from_static("0"));
             headers.insert("content-security-policy", HeaderValue::from_static(
-                "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+                "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; media-src 'self' blob:; object-src 'none'; frame-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
             ));
             headers.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
             headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
@@ -271,9 +322,16 @@ async fn serve_static(
             (headers, contents).into_response()
         }
         Err(_) => {
+            // F9 — a missing (or path-traversed) file must return a REAL 404
+            // status, not 200 with a "404 Not Found" body.
             let mut headers = HeaderMap::new();
             headers.insert("content-type", HeaderValue::from_static("text/plain"));
-            (headers, b"404 Not Found".to_vec()).into_response()
+            (
+                StatusCode::NOT_FOUND,
+                headers,
+                b"404 Not Found".to_vec(),
+            )
+                .into_response()
         }
     }
 }
@@ -482,9 +540,6 @@ async fn main() {
 .route("/api/admin/files", get(handlers::admin_list_files)).route("/api/admin/user-stickers", get(handlers::admin_list_user_stickers))
         .route("/api/admin/notification-sounds", get(handlers::admin_list_notification_sounds))
         .route("/api/admin/admin-config", get(handlers::admin_list_admin_config))
-        .route("/api/admin/prekey-bundles", get(handlers::admin_list_prekey_bundles))
-        .route("/api/admin/sessions", get(handlers::admin_list_sessions))
-        .route("/api/admin/user-public-keys", get(handlers::admin_list_user_public_keys))
         .route("/api/admin/user-key-escrow", get(handlers::admin_list_user_key_escrow))
         .route("/api/admin/user-device-escrow", get(handlers::admin_list_user_device_escrow))
         .route("/api/admin/pending-events", get(handlers::admin_list_pending_events))
@@ -598,15 +653,28 @@ async fn main() {
                 .unwrap_or(3443u16);
             let https_addr: std::net::SocketAddr = format!("0.0.0.0:{}", https_port).parse().unwrap();
             tracing::info!("HTTPS available on https://localhost:{}", https_port);
-            tracing::info!("HTTP available on http://localhost:{}", config.port);
 
-            // Serve HTTP on the main port
-            let http_addr = addr.clone();
-            let app_clone = app.clone();
-            tokio::spawn(async move {
-                let listener = tokio::net::TcpListener::bind(&http_addr).await.unwrap();
-                axum::serve(listener, app_clone).await.unwrap();
-            });
+            // F1 — the plaintext port NEVER serves the app. When TLS is on it
+            // only issues a 301 redirect to the HTTPS listener (same host),
+            // so credentials / keys are never exposed in the clear. Set
+            // PORT=0 to disable the plaintext port entirely.
+            if config.port != 0 {
+                tracing::info!(
+                    "HTTP on http://localhost:{} redirects to HTTPS :{}",
+                    config.port,
+                    https_port
+                );
+                let http_addr = addr.clone();
+                let redirect_router = Router::new()
+                    .fallback(http_to_https_redirect)
+                    .with_state(https_port);
+                tokio::spawn(async move {
+                    let listener = tokio::net::TcpListener::bind(&http_addr).await.unwrap();
+                    axum::serve(listener, redirect_router).await.unwrap();
+                });
+            } else {
+                tracing::info!("Plaintext HTTP listener disabled (PORT=0)");
+            }
 
             // Serve HTTPS on port+1
             axum_server::bind_rustls(https_addr, tls_config)

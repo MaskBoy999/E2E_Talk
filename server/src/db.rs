@@ -1120,6 +1120,9 @@ impl Database {
         let _ = conn.execute_batch(include_str!("../migrations/055_admin_audit.sql"));
         // Migration 056: TOTP 2FA (encrypted secret) + one-time recovery codes.
         let _ = conn.execute_batch(include_str!("../migrations/056_2fa.sql"));
+        // Migration 057 (F4): drop dead X3DH-era tables (sessions / user_devices /
+        // prekey_bundles) — 0 rows, no code references left.
+        let _ = conn.execute_batch(include_str!("../migrations/057_drop_legacy_x3dh.sql"));
 
         // Data migration: normalize legacy space-separated CURRENT_TIMESTAMP values
         // ("YYYY-MM-DD HH:MM:SS") to fixed-width RFC3339 ("YYYY-MM-DDTHH:MM:SS.000000Z")
@@ -5742,78 +5745,8 @@ impl Database {
         }).map_err(|e| e.to_string())?;
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
     }
-    pub fn list_all_prekey_bundles_admin(&self) -> Result<Vec<(String, String, String, String, Option<String>, Option<i32>, String)>, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let sql = "SELECT p.user_id, p.identity_key_public, p.signed_prekey_public, p.signed_prekey_signature, p.one_time_prekey_public, p.one_time_prekey_id, COALESCE(p.created_at, '')
-             FROM prekey_bundles p
-             ORDER BY p.created_at";
-        let Some(mut stmt) = Self::prepare_optional(&conn, sql)? else {
-            return Ok(Vec::new());
-        };
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<i32>>(5)?,
-                row.get::<_, String>(6)?,
-            ))
-        }).map_err(|e| e.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
-    }
-
-    pub fn list_all_sessions_admin(&self) -> Result<Vec<(String, String, String, String, String, i32, String)>, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let sql = "SELECT COALESCE(u1.username, s.our_user_id), s.our_user_id, COALESCE(u2.username, s.their_user_id), s.their_user_id,
-                    s.session_data, COALESCE(s.ratchet_counter, 0), COALESCE(s.created_at, '')
-             FROM sessions s
-             LEFT JOIN users u1 ON s.our_user_id = u1.id
-             LEFT JOIN users u2 ON s.their_user_id = u2.id
-             ORDER BY s.created_at";
-        let Some(mut stmt) = Self::prepare_optional(&conn, sql)? else {
-            return Ok(Vec::new());
-        };
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, i32>(5)?,
-                row.get::<_, String>(6)?,
-            ))
-        }).map_err(|e| e.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
-    }
-
-    pub fn list_all_user_devices_admin(&self) -> Result<Vec<(String, String, String, String, String, Option<String>, Option<String>, Option<String>, String)>, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let sql = "SELECT COALESCE(u.username, d.user_id), d.user_id, d.device_id, COALESCE(d.device_name, ''),
-                    d.identity_key, d.signed_prekey, d.signed_prekey_signature, d.last_active_at, COALESCE(d.created_at, '')
-             FROM user_devices d
-             LEFT JOIN users u ON d.user_id = u.id
-             ORDER BY d.created_at";
-        let Some(mut stmt) = Self::prepare_optional(&conn, sql)? else {
-            return Ok(Vec::new());
-        };
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, Option<String>>(6)?,
-                row.get::<_, Option<String>>(7)?,
-                row.get::<_, String>(8)?,
-            ))
-        }).map_err(|e| e.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
-    }
+    // F4 — legacy X3DH admin listers removed with migration 057 (the tables
+    // sessions / user_devices / prekey_bundles no longer exist).
 
     pub fn list_all_user_key_escrow_admin(&self) -> Result<Vec<(String, String, String, String, String, String, String)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;

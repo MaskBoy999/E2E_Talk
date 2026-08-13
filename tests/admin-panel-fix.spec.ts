@@ -1,16 +1,13 @@
 import { test, expect } from '@playwright/test';
 
-test.describe('Admin Panel - Sessions & DM Keys tabs', () => {
+test.describe('Admin Panel - data endpoints return 200, not 500', () => {
 
-  test('Sessions and DM Keys endpoints return 200, not 500', async ({ page }) => {
-    // Track HTTP responses with status >= 400
+  test('Admin endpoints return 200, not 500', async ({ page }) => {
+    // Track HTTP responses with status >= 400 on ANY admin endpoint
     const badResponses: { url: string; status: number }[] = [];
     page.on('response', response => {
-      if (response.status() >= 400) {
-        const url = response.url();
-        if (url.includes('/api/admin/sessions') || url.includes('/api/admin/dm-keys')) {
-          badResponses.push({ url, status: response.status() });
-        }
+      if (response.status() >= 400 && response.url().includes('/api/admin/')) {
+        badResponses.push({ url: response.url(), status: response.status() });
       }
     });
 
@@ -55,20 +52,22 @@ test.describe('Admin Panel - Sessions & DM Keys tabs', () => {
     await expect(page.locator('#admin-panel')).toBeVisible({ timeout: 5000 });
     await page.waitForLoadState('networkidle');
 
-    // Verify no 400+ errors on sessions or dm-keys endpoints
+    // No admin endpoint may 400+ (regression: dm-keys used to 500)
     expect(badResponses.length,
-      `No 400+ responses for sessions/dm-keys. Got: ${JSON.stringify(badResponses)}`).toBe(0);
+      `No 400+ responses on admin endpoints. Got: ${JSON.stringify(badResponses)}`).toBe(0);
 
-    // Click Sessions tab and verify table renders
-    await page.locator('.tab-btn[data-tab="sessions"]').click();
-    await expect(page.locator('#session-list')).toBeVisible();
+    // Directly verify the dm-keys endpoint (it has no tab in the panel)
+    const adminToken = await page.evaluate(() => sessionStorage.getItem('admin_token'));
+    const dmKeysRes = await page.request.get('/api/admin/dm-keys', {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    });
+    expect(dmKeysRes.status()).toBe(200);
 
-    // Wait for sessions data fetch
-    await page.waitForTimeout(500);
-
-    // Click DM Keys tab and verify table renders
-    await page.locator('.tab-btn[data-tab="dm-keys"]').click();
-    await expect(page.locator('#dm-key-list')).toBeVisible();
+    // Click real data tabs and verify the tables render
+    await page.locator('.tab-btn[data-tab="server-keys"]').click();
+    await expect(page.locator('#server-key-list')).toBeVisible();
+    await page.locator('.tab-btn[data-tab="dm-channels"]').click();
+    await expect(page.locator('#dm-channel-list')).toBeVisible();
   });
 
 });

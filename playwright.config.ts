@@ -28,6 +28,9 @@ export default defineConfig({
             FRIEND_REQUEST_USER_MAX: '100000',
             LOGIN_IP_MAX: '100000',
             LOGIN_USER_MAX: '100000',
+            // F2: registration is now per-IP limited (account spam) — the suite
+            // registers dozens of users from one IP, so raise the budget.
+            REGISTER_IP_MAX: '100000',
             // 2FA code-verification shares the login limiter space; raise it so
             // the twofa suite's repeated code attempts never 429 mid-suite.
             LOGIN_2FA_IP_MAX: '100000',

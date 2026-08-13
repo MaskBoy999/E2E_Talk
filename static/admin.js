@@ -783,6 +783,8 @@ async function loadRuntimeConfig() {
         document.getElementById('rt-src-user').textContent = '(' + (src.mutation_user_max || 'db') + ')';
         document.getElementById('rt-src-ip').textContent = '(' + (src.mutation_ip_max || 'db') + ')';
         document.getElementById('rt-src-quota').textContent = '(' + (src.file_storage_quota_bytes || 'db') + ')';
+        const redactEl = document.getElementById('rt-redact-ips');
+        if (redactEl) redactEl.checked = !!cfg.admin_audit_redact_ips;
         setRtStatus('Loaded');
     } catch (e) {
         setRtStatus('Load failed: ' + e.message, true);
@@ -797,10 +799,12 @@ function setRtStatus(msg, isError) {
 }
 
 async function saveRuntimeConfig() {
+    const redactEl = document.getElementById('rt-redact-ips');
     const payload = {
         mutation_user_max: parseInt(document.getElementById('rt-mutation-user-max').value, 10) || 0,
         mutation_ip_max: parseInt(document.getElementById('rt-mutation-ip-max').value, 10) || 0,
         file_storage_quota_bytes: parseInt(document.getElementById('rt-quota-bytes').value, 10) || 0,
+        ...(redactEl ? { admin_audit_redact_ips: redactEl.checked } : {}),
     };
     try {
         const res = await fetch('/api/admin/runtime-config', {

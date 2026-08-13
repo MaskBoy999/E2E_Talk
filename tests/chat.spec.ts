@@ -669,15 +669,24 @@ await page.click('#register-form button[type="submit"]');
             data: { name: 'Admin Test Server ' + ts, invite_code: generateCode(8) },
         });
 
-        // Go to admin panel — on fresh DB: setup_required (1st), setup_complete (2nd), login (3rd)
+        // Go to admin panel — the shared test DB may have any of the passwords
+        // used by the admin suites; try each until the panel appears.
         await page.goto(`${BASE}/admin.html`);
-        // Submit up to 3 times until the admin panel appears
-        for (let i = 0; i < 3; i++) {
-            await page.fill('#admin-password', 'admin');
-            await page.click('#admin-login-form button[type="submit"]');
-            await page.waitForTimeout(1500);
-            const visible = await page.locator('#admin-panel').isVisible().catch(() => false);
-            if (visible) break;
+        const pwField = page.locator('#admin-password');
+        const loginBtn = page.locator('#admin-login-btn, #admin-login-form button[type="submit"]').first();
+        for (const pw of ['admin', 'admin123']) {
+            await pwField.fill(pw);
+            await loginBtn.click();
+            await page.waitForTimeout(1200);
+            if (await page.locator('#admin-panel').isVisible().catch(() => false)) break;
+            // Fresh-DB path: first submit SETS the password, second verifies it.
+            const subtitle = await page.textContent('#admin-login-subtitle').catch(() => '');
+            if (subtitle && subtitle.toLowerCase().includes('set')) {
+                await pwField.fill(pw);
+                await loginBtn.click();
+                await page.waitForTimeout(1200);
+                if (await page.locator('#admin-panel').isVisible().catch(() => false)) break;
+            }
         }
         await page.waitForSelector('#admin-panel', { state: 'visible', timeout: 10000 });
         await page.waitForTimeout(2000);
@@ -941,12 +950,14 @@ await page2.click('#register-form button[type="submit"]');
             });
         }, { serverId: server.id, user2Id: body2.user.id, user2PubKey });
 
-        // User1 creates a second channel
+        // User1 creates a second channel (names are E2E-encrypted — API contract)
         await page.evaluate(async (serverId) => {
+            const serverKey = E2ECrypto.getServerKey(serverId);
+            const enc = E2ECrypto.aeadEncrypt('delete-me', serverKey);
             await fetch(`/api/servers/${serverId}/channels`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + localStorage.getItem('token') },
-                body: JSON.stringify({ name: 'delete-me' }),
+                body: JSON.stringify({ encrypted_name: enc.ciphertext, name_nonce: enc.nonce, channel_type: 'text' }),
             });
         }, server.id);
         await page.waitForTimeout(500);
@@ -964,7 +975,18 @@ await page2.click('#register-form button[type="submit"]');
             headers: { Authorization: `Bearer ${body1.token}` },
         });
         const channels = await chRes.json();
-        const deleteMe = channels.find(c => c.name === 'delete-me');
+        // The API returns encrypted channel names — decrypt client-side to find it.
+        const deleteMe = await page.evaluate(({ chs, sid }) => {
+            const serverKey = E2ECrypto.getServerKey(sid);
+            for (const c of chs) {
+                if (!c.encrypted_name || !c.name_nonce) continue;
+                try {
+                    const dec = E2ECrypto.aeadDecrypt(c.encrypted_name, serverKey, c.name_nonce);
+                    if (new TextDecoder().decode(dec) === 'delete-me') return c;
+                } catch (_) { /* wrong key / not ours */ }
+            }
+            return null;
+        }, { chs: channels, sid: server.id });
         expect(deleteMe).toBeTruthy();
 
         const delRes = await page.request.delete(`${BASE}/api/channels/${deleteMe.id}`, {

@@ -10,7 +10,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         State,
     },
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
 use futures::{SinkExt, StreamExt};
@@ -361,6 +361,17 @@ pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
+    // F6 — Cross-Site WebSocket Hijacking guard: browsers always send an
+    // Origin on WS handshakes. If present and it does not match the Host
+    // (scheme ignored), refuse the upgrade. Clients without an Origin header
+    // (native apps, headless tools) are allowed — Bearer auth still applies.
+    if let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok()) {
+        if let Some(host) = headers.get("host").and_then(|v| v.to_str().ok()) {
+            if origin != "null" && !crate::origin_host_matches(origin, host) {
+                return StatusCode::FORBIDDEN.into_response();
+            }
+        }
+    }
     let client_ip = get_client_ip(&headers);
     ws.on_upgrade(move |socket| handle_socket(socket, state, client_ip))
 }

@@ -2,6 +2,20 @@ import { test, expect } from '@playwright/test';
 import { spawn, ChildProcess } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as https from 'https';
+
+// F1: the plaintext-HTTP listener now 301-redirects to HTTPS, so liveness
+// must probe the HTTPS port (self-signed cert → rejectUnauthorized: false).
+function httpsProbe(url: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const req = https.get(url, { rejectUnauthorized: false }, (res) => {
+      res.resume();
+      resolve(res.statusCode !== undefined && res.statusCode < 500);
+    });
+    req.on('error', () => resolve(false));
+    req.setTimeout(1500, () => { req.destroy(); resolve(false); });
+  });
+}
 
 // Runtime-tunable G2 limits (admin-config tab): the admin can read and change
 // the mutation rate limits + storage quota live, without a server restart.
@@ -65,10 +79,7 @@ test.describe('Admin runtime config (G2) — isolated server + temp DB', () => {
     });
     let up = false;
     for (let i = 0; i < 60; i++) {
-      try {
-        const r = await fetch(HTTP + '/').catch(() => null);
-        if (r) { up = true; break; }
-      } catch (_) { /* not up yet */ }
+      if (await httpsProbe(ALT + '/')) { up = true; break; }
       await new Promise((r) => setTimeout(r, 300));
     }
     expect(up, 'isolated server came up').toBe(true);

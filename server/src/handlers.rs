@@ -57,6 +57,13 @@ static LOGIN_RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(|| RateLimiter 
     attempts: Mutex::new(HashMap::new()),
 });
 
+/// F2 — Per-IP registration limiter (account spam). Env-overridable for test
+/// suites (same pattern as LOGIN_IP_MAX): set REGISTER_IP_MAX=0 to disable,
+/// or a number to raise the budget.
+static REGISTER_IP_RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(|| RateLimiter {
+    attempts: Mutex::new(HashMap::new()),
+});
+
 static JOIN_SERVER_RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(|| RateLimiter {
     attempts: Mutex::new(HashMap::new()),
 });
@@ -651,6 +658,7 @@ pub struct AdminLoginRequest {
 }
 
 pub async fn register(
+    headers: HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(req): Json<RegisterRequest>,
 ) -> impl IntoResponse {
@@ -659,6 +667,22 @@ pub async fn register(
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": "Too many registration attempts. Try again in 5 minutes."})),
+        )
+            .into_response();
+    }
+
+    // F2 — Per-IP account-spam budget (default 5 accounts / 10 min per IP).
+    // Automated suites that register many users from one IP can raise or
+    // disable it with REGISTER_IP_MAX (same pattern as LOGIN_IP_MAX).
+    let reg_ip = get_client_ip(&headers);
+    let reg_ip_key = format!("register_ip:{}", reg_ip);
+    let reg_ip_max: u32 = std::env::var("REGISTER_IP_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(5);
+    if reg_ip_max > 0
+        && !REGISTER_IP_RATE_LIMITER.check_and_increment(&reg_ip_key, reg_ip_max, Duration::from_secs(600))
+    {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "Too many accounts created from this IP. Try again later."})),
         )
             .into_response();
     }
@@ -4146,12 +4170,25 @@ pub async fn admin_get_runtime_config(
         return e.into_response();
     }
     let tuning = state.runtime_tuning.read().unwrap();
+    // F5 — include the live IP-redaction toggle (env or admin_config).
+    let redact = std::env::var("ADMIN_AUDIT_REDACT_IPS")
+        .ok()
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+        || state
+            .db
+            .get_config_value("admin_audit_redact_ips")
+            .ok()
+            .flatten()
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "mutation_user_max": tuning.mutation_user_max,
             "mutation_ip_max": tuning.mutation_ip_max,
             "file_storage_quota_bytes": tuning.file_storage_quota_bytes,
+            "admin_audit_redact_ips": redact,
             "sources": {
                 "mutation_user_max": tuning.sources[0],
                 "mutation_ip_max": tuning.sources[1],
@@ -4170,6 +4207,10 @@ pub struct AdminSetRuntimeConfigRequest {
     pub mutation_ip_max: Option<u64>,
     #[serde(default)]
     pub file_storage_quota_bytes: Option<i64>,
+    /// F5 — when true, admin audit entries store a redacted placeholder
+    /// instead of the raw client IP (privacy toggle, live-applied).
+    #[serde(default)]
+    pub admin_audit_redact_ips: Option<bool>,
 }
 
 /// Persist new G2 limits in admin_config and apply them live (no restart).
@@ -4184,7 +4225,11 @@ pub async fn admin_set_runtime_config(
         return e.into_response();
     }
 
-    if req.mutation_user_max.is_none() && req.mutation_ip_max.is_none() && req.file_storage_quota_bytes.is_none() {
+    if req.mutation_user_max.is_none()
+        && req.mutation_ip_max.is_none()
+        && req.file_storage_quota_bytes.is_none()
+        && req.admin_audit_redact_ips.is_none()
+    {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": "Provide at least one value to update"})),
@@ -4240,6 +4285,11 @@ pub async fn admin_set_runtime_config(
             tuning.sources[2] = "db";
             let _ = state.db.set_config_value("file_storage_quota_bytes", &v.to_string());
             summary.push(format!("file_storage_quota_bytes={}", v));
+        }
+        // F5 — IP redaction toggle (live-applied; read on every audit write).
+        if let Some(v) = req.admin_audit_redact_ips {
+            let _ = state.db.set_config_value("admin_audit_redact_ips", if v { "1" } else { "0" });
+            summary.push(format!("admin_audit_redact_ips={}", v));
         }
     }
     log_admin_action(&state, "admin_set_runtime_config", Some(&summary.join(", ")), &headers);
@@ -4346,66 +4396,8 @@ pub async fn admin_get_rate_limit_usage(
         .into_response()
 }
 
-pub async fn admin_list_prekey_bundles(
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
-    let rows = match state.db.list_all_prekey_bundles_admin() {
-        Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-    };
-    let result: Vec<serde_json::Value> = rows.iter().map(|(user_id, identity_key_public, signed_prekey_public, signed_prekey_signature, one_time_prekey_public, one_time_prekey_id, created_at)| {
-        serde_json::json!({
-            "user_id": user_id, "identity_key_public": identity_key_public,
-            "signed_prekey_public": signed_prekey_public, "signed_prekey_signature": signed_prekey_signature,
-            "one_time_prekey_public": one_time_prekey_public, "one_time_prekey_id": one_time_prekey_id,
-            "created_at": created_at,
-        })
-    }).collect();
-    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
-}
-
-pub async fn admin_list_sessions(
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
-    let rows = match state.db.list_all_sessions_admin() {
-        Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-    };
-    let result: Vec<serde_json::Value> = rows.iter().map(|(our_username, our_user_id, their_username, their_user_id, session_data, ratchet_counter, created_at)| {
-        serde_json::json!({
-            "our_username": our_username, "our_user_id": our_user_id,
-            "their_username": their_username, "their_user_id": their_user_id,
-            "session_data": session_data, "ratchet_counter": ratchet_counter,
-            "created_at": created_at,
-        })
-    }).collect();
-    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
-}
-
-pub async fn admin_list_user_public_keys(
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    if let Err(e) = extract_admin_token(&headers) { return e.into_response(); }
-    let rows = match state.db.list_all_user_devices_admin() {
-        Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-    };
-    let result: Vec<serde_json::Value> = rows.iter().map(|(username, user_id, device_id, device_name, identity_key, signed_prekey, signed_prekey_signature, last_active_at, created_at)| {
-        serde_json::json!({
-            "username": username, "user_id": user_id,
-            "device_id": device_id, "device_name": device_name,
-            "identity_key": identity_key, "signed_prekey": signed_prekey,
-            "signed_prekey_signature": signed_prekey_signature,
-            "last_active_at": last_active_at, "created_at": created_at,
-        })
-    }).collect();
-    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
-}
+// F4 — legacy X3DH admin listers (prekey-bundles / sessions / user-public-keys)
+// removed with migration 057; the tables no longer exist.
 
 pub async fn admin_list_user_key_escrow(
     headers: HeaderMap,
@@ -4480,9 +4472,24 @@ pub async fn admin_audit_log(
 
 /// Append an admin action to the audit log. Best-effort: an audit-log failure
 /// never fails the admin request itself.
+/// F5 — IP redaction toggle: when the admin_config row `admin_audit_redact_ips`
+/// is "1" (admin-config tab, live) or the ADMIN_AUDIT_REDACT_IPS env var is
+/// set to 1/true, the raw client IP is replaced by a placeholder in the log.
 fn log_admin_action(state: &AppState, action: &str, target: Option<&str>, headers: &HeaderMap) {
     let ip = get_client_ip(headers);
-    if let Err(e) = state.db.log_admin_action("admin", action, target, &ip) {
+    let redact = std::env::var("ADMIN_AUDIT_REDACT_IPS")
+        .ok()
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+        || state
+            .db
+            .get_config_value("admin_audit_redact_ips")
+            .ok()
+            .flatten()
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+    let stored_ip = if redact { "*.*.*.*" } else { ip.as_str() };
+    if let Err(e) = state.db.log_admin_action("admin", action, target, stored_ip) {
         tracing::warn!("Failed to write admin audit entry ({}): {}", action, e);
     }
 }

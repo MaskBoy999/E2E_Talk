@@ -7647,6 +7647,11 @@ function connectWebSocket(t) {
                 // refetch so waiting indicators appear or disappear WITHOUT
                 // needing a manual conversation reload.
                 try { await refreshDmWaitingState(); } catch (_) {}
+                // Boot-time profile prefetch (belt & braces): if conversations
+                // were already populated by the time refreshDmWaitingState ran
+                // (or its fresh-boot kick raced), this still ensures every
+                // DM-list avatar renders immediately on a fresh device.
+                try { prefetchDmConversationProfiles().catch(function () {}); } catch (_) {}
                 // Broadcast profile keys after a short delay (DMs already loaded during init)
                 setTimeout(async function() {
                     if (myProfile && dmConversations && dmConversations.length > 0) {
@@ -12291,6 +12296,17 @@ async function loadDmConversations() {
     updateDmWaitingBanner();
     // After DMs are loaded, broadcast our profile keys to all DM conversations
     broadcastProfileKeySyncToAllDms();
+    // Prefetch identity keys + conversation profiles for every DM partner so
+    // display names, colors and PFPs render immediately.
+    await prefetchDmConversationProfiles();
+}
+
+// Prefetch identity keys + conversation profiles for ALL DM partners, then
+// re-render the sidebar. Extracted from loadDmConversations() so it can ALSO
+// run at page boot (auth_ok / refreshDmWaitingState) — on a fresh device the
+// DM list must render avatars WITHOUT requiring a conversation click.
+async function prefetchDmConversationProfiles() {
+    if (!dmConversations || dmConversations.length === 0) return;
     // Pre-fetch identity keys for all conversations that lack them, so fetchDmConversationProfile
     // can immediately derive the DM key without an additional serialized round-trip.
     var _idFetches = [];
@@ -12325,10 +12341,14 @@ async function loadDmConversations() {
         }
     }
     await Promise.allSettled(profileFetches);
-    // Re-render sidebar after all profile data is fetched
-    renderDmSidebar();
-    // Re-bind friend code panel buttons (they use .onclick which is lost on DOM recreation)
-    loadMyFriendCode();
+    // Re-render sidebar after all profile data is fetched. Only rebuild
+    // #channel-list when actually in DM view — in server view that node holds
+    // the server channel items and must not be overwritten.
+    if (viewMode === 'dms') {
+        renderDmSidebar();
+        // Re-bind friend code panel buttons (they use .onclick which is lost on DOM recreation)
+        loadMyFriendCode();
+    }
 }
 
 // Light update: refresh just one DM sidebar item by user_id without rebuilding the entire list.
@@ -12719,6 +12739,9 @@ async function refreshDmWaitingState() {
         if (!Array.isArray(convs)) return;
         if (!dmConversations || dmConversations.length === 0) {
             dmConversations = convs;
+            // Fresh page load: kick the profile prefetch so every DM-list
+            // avatar / display name renders WITHOUT a conversation click.
+            prefetchDmConversationProfiles().catch(function () {});
         } else {
             var byId = {};
             convs.forEach(function (c) { if (c && c.dm_channel_id) byId[c.dm_channel_id] = c; });
@@ -22544,7 +22567,11 @@ function renderEditGlowOptions(baseColor) {
     var glowInput = document.getElementById('profile-edit-glow-color');
     var glowPreview = document.getElementById('profile-edit-glow-preview');
     if (!glowInput) return;
-    var currentBorder = (profileOriginalData && profileOriginalData.data && profileOriginalData.data.username_border_color) || '';
+    // Read the DECRYPTED profile (profileOriginalData.decrypted) for the saved
+    // border color — the raw API response (profileOriginalData.data) carries
+    // only encrypted_profile_data and never includes plaintext color fields.
+    var currentBorder = (profileOriginalData && profileOriginalData.decrypted && profileOriginalData.decrypted.username_border_color)
+        || (profileOriginalData && profileOriginalData.data && profileOriginalData.data.username_border_color) || '';
     // Preserve the user's currently selected glow if one was picked (don't overwrite
     // on every base-color change unless the contrast becomes unreadable).
     var glowInputVal = glowInput.value;
