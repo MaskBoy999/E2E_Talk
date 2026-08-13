@@ -8326,6 +8326,7 @@ function connectWebSocket(t) {
                         // Refresh existing messages and DM sidebar with updated display name/colors
                         updateExistingMessageStyles(data.user_id);
                         updateMemberListItem(data.user_id);
+                        refreshVoiceMemberProfile(data.user_id);
                         // Re-render DM sidebar with updated profile data from cache
                         if (viewMode === 'dms') {
                             var _activeDmId = currentDmChannelId;
@@ -8691,6 +8692,8 @@ function connectWebSocket(t) {
 
                     // Update existing message DOM elements instead of reloading all messages
                     updateExistingMessageStyles(data.user_id);
+                    // Live-refresh this member's identity in DM call / voice channel views.
+                    refreshVoiceMemberProfile(data.user_id);
                 }
                 break;
             case 'profile_key_sync':
@@ -15235,6 +15238,21 @@ function applyThemeMode(mode) {
 
 // Update existing message DOM elements (display-name styles and avatars) when a user's
 // profile changes (color, glow, display name, profile pic), without reloading all messages.
+// After a decrypted profile update refreshes userDisplayNameCache, tell the
+// voice layer to re-render that member's identity (PFP + display name +
+// color/glow) in DM call / voice channel views WITHOUT touching the video
+// tiles (a rebuild would restart the decoders → black flash).
+function refreshVoiceMemberProfile(uid) {
+    if (!uid) return;
+    try {
+        if (typeof VoiceManager !== 'undefined' && VoiceManager.refreshMemberProfile) {
+            VoiceManager.refreshMemberProfile(uid);
+        }
+    } catch (e) {
+        console.warn('refreshVoiceMemberProfile failed:', e);
+    }
+}
+
 function updateExistingMessageStyles(userId) {
     if (!userId) return;
     var cache = userDisplayNameCache[userId];

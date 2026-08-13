@@ -250,6 +250,84 @@
             updateChannelChips();
             updateSelfUI();
         },
+        // Re-render ONE member's identity (PFP + display name + color/glow)
+        // in every voice surface — server popup rows, DM call tiles, the
+        // mini-bar and incoming-call bar — WITHOUT rebuilding the video tiles
+        // (a rebuild restarts the <video> decoders → black flash). Called from
+        // chat.js when a decrypted profile update lands (profile_updated /
+        // profile_key_sync) so a name/PFP change shows up in calls instantly.
+        refreshMemberProfile: function (uid) {
+            if (!uid) return;
+            var m = S.members[uid];
+            var isSelf = uid === getSelfId();
+            if (!m && !isSelf) return;
+            var local = isSelf ? Object.assign({}, m || {}, {
+                camera: S.cameraOn,
+                screen: S.screenOn,
+                muted: S.muted,
+                deafened: S.deafened,
+                speaking: S.speaking,
+            }) : m;
+            var name = memberDisplayName(uid, local);
+            var nameStyle = memberNameStyle(uid);
+            var selfMark = (local.is_owner ? ' 👑' : '') + (isSelf ? ' (you)' : '');
+            // Server voice popup rows
+            document.querySelectorAll('.voice-member-row[data-uid="' + uid + '"]').forEach(function (row) {
+                var av = row.querySelector('.voice-member-avatar');
+                if (av) {
+                    var holder = document.createElement('div');
+                    holder.innerHTML = memberAvatarHtml(uid, local, name, 'voice-member-avatar');
+                    var newAv = holder.firstChild;
+                    if (newAv) {
+                        if (av.classList.contains('speaking')) newAv.classList.add('speaking');
+                        av.replaceWith(newAv);
+                        // Re-bind PFP click → profile modal (the replace killed it).
+                        newAv.addEventListener('click', function () {
+                            if (typeof openProfileModal === 'function') openProfileModal(uid);
+                        });
+                    }
+                }
+                var nameEl = row.querySelector('.voice-member-name');
+                if (nameEl) {
+                    nameEl.textContent = name + selfMark;
+                    nameEl.style.cssText = nameStyle || '';
+                }
+            });
+            // DM call tiles
+            document.querySelectorAll('.dm-call-tile[data-uid="' + uid + '"]').forEach(function (tile) {
+                var av = tile.querySelector('.dm-call-avatar');
+                if (av) {
+                    var holder = document.createElement('div');
+                    holder.innerHTML = memberAvatarHtml(uid, local, name, 'dm-call-avatar');
+                    var newAv = holder.firstChild;
+                    if (newAv) {
+                        if (av.classList.contains('speaking')) newAv.classList.add('speaking');
+                        av.replaceWith(newAv);
+                        newAv.addEventListener('click', function () {
+                            if (typeof openProfileModal === 'function') openProfileModal(uid);
+                        });
+                    }
+                }
+                var info = tile.querySelector('.dm-call-tile-info');
+                if (info) {
+                    // The name is the first non-whitespace node (badges follow).
+                    var nameNode = info.firstChild;
+                    while (nameNode && nameNode.nodeType === 3 && !nameNode.nodeValue.trim()) nameNode = nameNode.nextSibling;
+                    if (nameNode) {
+                        var span = document.createElement('span');
+                        span.textContent = name;
+                        span.style.cssText = nameStyle || '';
+                        nameNode.replaceWith(span);
+                    }
+                }
+            });
+            // Mini-bar ("In call with X…") + incoming bar ("X is calling…").
+            if (S.dmCallPartner && S.dmCallPartner.id === uid) showMiniBar();
+            if (S.incomingCall && S.incomingCall.callerId === uid) showIncomingCall(S.incomingCall);
+            // Server strip chips + own footer row.
+            updateChannelChips();
+            if (isSelf) updateSelfUI();
+        },
         resetDmPanelOpen: function () { S.dmPanelOpen = undefined; },
         testRingtone: testRingtone,
         playRingtone: playRingtone,
@@ -1879,12 +1957,22 @@
         }
         var member = S.members[uid];
         var want = !(member && member.deafened);
+        // Is this the screen-share audio sender? Only the sender whose held
+        // track belongs to the current screen stream (mic audio lives in
+        // localStreams.mic/processedMic, so it can never match here).
+        var screenAudioTrack = (S.localStreams.screen && S.localStreams.screen.getAudioTracks()[0]) || null;
         pc.getSenders().forEach(function (s) {
             // Re-evaluate gated (nulled) senders too so a deafened receiver's
             // audio resumes the moment they undeafen.
             var held = s.track || s._voiceNulled;
             if (!held || held.kind !== 'audio') return;
-            applySenderGate(s, want);
+            var wantThis = want;
+            if (screenAudioTrack && held.id === screenAudioTrack.id) {
+                // A receiver who unloaded the screen feed doesn't get its
+                // audio either — pure bitrate waste to keep encoding it.
+                wantThis = want && feedWanted(member, 'screen');
+            }
+            applySenderGate(s, wantThis);
         });
     }
 
@@ -2049,7 +2137,9 @@
             if (slot === 'audio') {
                 playRemoteAudio(uid);
             } else {
-                playRemoteScreenAudio(uid);
+                // Respect the screen feed's load state — a share that is
+                // unloaded (or held behind Load) must stay silent.
+                applyScreenAudioGate(uid);
             }
             e.track.onended = function () {
                 var st = S.remoteStreams[uid];
@@ -2436,6 +2526,21 @@
             });
             applyRemoteScreenVolume(uid);
         } catch (_) {}
+    }
+
+    // Screen-share audio is only audible while the screen feed is LOADED.
+    // Unloading a share must silence its tab/system audio too on the receiver
+    // (the sender side is gated separately in tuneAudioSenders). Reloading
+    // resumes playback without any renegotiation.
+    function applyScreenAudioGate(uid) {
+        if (!uid) return;
+        if (!isFeedLoaded(uid, 'screen')) {
+            removeRemoteScreenAudioEls(uid);
+            return;
+        }
+        if (S.remoteStreams[uid] && S.remoteStreams[uid].screenAudio) {
+            playRemoteScreenAudio(uid);
+        }
     }
 
     function setScreenVolume(uid, pct) {
@@ -5034,6 +5139,8 @@
         var v = document.querySelector('.remote-video-tile[data-uid="' + uid + '"][data-kind="' + kind + '"]');
         if (v) { try { v.srcObject = null; } catch (_) {} }
         applyFeedPlaceholders();
+        // Unloading the screen also silences its tab/system audio (receiver side).
+        applyScreenAudioGate(uid);
         if (S.connected) sendVoiceState();
     }
 
@@ -5139,6 +5246,8 @@
                         v.play().catch(function () {});
                     }
                     applyFeedPlaceholders();
+                    // Reloading the screen resumes its tab/system audio (receiver side).
+                    applyScreenAudioGate(uid);
                     // The receiver now wants this feed — tell senders to resume.
                     if (S.connected) sendVoiceState();
                 });
@@ -5209,6 +5318,10 @@
             var kind = video.dataset.kind;
             var stream = S.remoteStreams[uid] ? S.remoteStreams[uid][kind] : null;
             attachRemoteVideo(video, uid, kind, stream);
+        });
+        // Keep every member's screen-share audio in sync with its load state.
+        Object.keys(S.remoteStreams).forEach(function (uid) {
+            applyScreenAudioGate(uid);
         });
     }
 
