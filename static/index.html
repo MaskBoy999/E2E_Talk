@@ -608,6 +608,27 @@
                     </div>
                 </div>
                 <div class="settings-group">
+                    <h4>Change Password</h4>
+                    <p class="settings-hint">Change the password you use to sign in. Your identity, messages, and data are unaffected — the password just unlocks the same keys. All other devices are signed out immediately and will need the new password to sign in again; this device stays signed in.</p>
+                    <button class="btn-reauth" id="change-pw-btn" style="margin-top:8px;">Change Password</button>
+                    <div id="password-change-section" style="display:none;margin-top:10px;">
+                        <div class="auth-input-row" style="margin-bottom:8px;">
+                            <input type="password" id="change-pw-current" placeholder="Current password" class="modal-input auth-code-input" autocomplete="current-password" style="flex:1;" />
+                            <button type="button" class="toggle-visibility-btn" id="toggle-change-pw-current" title="Show/Hide">&#128065;</button>
+                        </div>
+                        <div class="auth-input-row" style="margin-bottom:8px;">
+                            <input type="password" id="change-pw-new" placeholder="New password (min 8 characters)" class="modal-input auth-code-input" autocomplete="new-password" style="flex:1;" />
+                            <button type="button" class="toggle-visibility-btn" id="toggle-change-pw-new" title="Show/Hide">&#128065;</button>
+                        </div>
+                        <div class="auth-input-row" style="margin-bottom:8px;">
+                            <input type="password" id="change-pw-confirm" placeholder="Confirm new password" class="modal-input auth-code-input" autocomplete="new-password" style="flex:1;" />
+                            <button type="button" class="toggle-visibility-btn" id="toggle-change-pw-confirm" title="Show/Hide">&#128065;</button>
+                        </div>
+                        <button class="btn-reauth-confirm" id="change-pw-confirm-btn" style="font-size:13px;padding:8px 16px;">Change Password</button>
+                    </div>
+                    <p id="change-pw-status" style="margin-top:8px;font-size:13px;"></p>
+                </div>
+                <div class="settings-group">
                     <h4>Two-Factor Authentication (2FA)</h4>
                     <p class="settings-hint">Protect your account with a one-time code from an authenticator app (Google Authenticator, Authy, 1Password, &hellip;). You&rsquo;ll need it at every login, or one of your 8 one-time recovery codes.</p>
                     <p class="settings-hint" id="twofa-status-line" style="font-weight:600;">Checking&hellip;</p>
@@ -1402,6 +1423,35 @@
             <div class="modal-actions">
                 <button class="btn-cancel" id="twofa-disable-cancel">Cancel</button>
                 <button class="btn-invite" id="twofa-disable-confirm" style="background:#ed4245;border-color:#ed4245;">Disable 2FA</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Password change confirmation: shown after the form validates, before
+         anything is sent. A password change signs out every other device, so
+         it must never fire on a single stray click. Cancel-only like the 2FA
+         modals (no backdrop/Escape dismissal). -->
+    <div class="modal" id="change-pw-confirm-modal" style="display:none">
+        <div class="modal-content" style="max-width:440px">
+            <h3 style="margin-bottom:8px;color:var(--danger)">Change Password?</h3>
+            <p style="color:var(--text-muted);font-size:13px;margin-bottom:6px;">This signs out <strong>every other device</strong> on your account immediately &mdash; they will need the new password to sign in again. This device stays signed in.</p>
+            <p style="color:var(--text-muted);font-size:13px;margin-bottom:10px;">Your identity, messages, and data are not affected &mdash; the new password just unlocks the same keys.</p>
+            <div class="modal-actions">
+                <button class="btn-cancel" id="change-pw-confirm-cancel">Cancel</button>
+                <button class="btn-invite" id="change-pw-confirm-yes" style="background:#ed4245;border-color:#ed4245;">Yes, Change Password</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Sign-out-all confirmation: shown before kicking every other device.
+         Cancel-only like the password-change / 2FA modals. -->
+    <div class="modal" id="kick-all-confirm-modal" style="display:none">
+        <div class="modal-content" style="max-width:440px">
+            <h3 style="margin-bottom:8px;color:var(--danger)">Sign out all other devices?</h3>
+            <p style="color:var(--text-muted);font-size:13px;margin-bottom:10px;">This device stays signed in. Every other device is signed out immediately &mdash; including from voice channels and calls &mdash; and will need to sign in again.</p>
+            <div class="modal-actions">
+                <button class="btn-cancel" id="kick-all-confirm-cancel">Cancel</button>
+                <button class="btn-invite" id="kick-all-confirm-yes" style="background:#ed4245;border-color:#ed4245;">Yes, Sign Out</button>
             </div>
         </div>
     </div>

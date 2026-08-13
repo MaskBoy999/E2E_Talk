@@ -1038,13 +1038,23 @@ function kickDevice(sid) {
 }
 
 function kickAllDevices() {
-    if (!confirm('Sign out ALL other devices? You will stay signed in here. Other devices are disconnected from voice channels and calls too.')) return;
+    // Styled confirmation first — signing out every other device is
+    // destructive, so it must never fire on a single stray click. Replaces the
+    // old native confirm() (consistent with the password-change modal).
+    showModal('kick-all-confirm-modal');
+}
+
+function confirmKickAllDevices() {
+    var yesBtn = document.getElementById('kick-all-confirm-yes');
+    if (yesBtn) yesBtn.disabled = true;
     fetch('/api/auth/sessions/kick-all', {
         method: 'POST',
         headers: { 'Authorization': 'Bearer ' + token() }
     })
         .then(function (r) { return r.json(); })
         .then(function (data) {
+            hideModal('kick-all-confirm-modal');
+            if (yesBtn) yesBtn.disabled = false;
             if (data && data.ok) {
                 renderDevicesPanel();
                 flashToast('All other devices signed out.', 'success');
@@ -1053,6 +1063,8 @@ function kickAllDevices() {
             }
         })
         .catch(function () {
+            hideModal('kick-all-confirm-modal');
+            if (yesBtn) yesBtn.disabled = false;
             flashToast('Server is not running.', 'error');
         });
 }
@@ -2965,6 +2977,10 @@ document.addEventListener('DOMContentLoaded', () => {
     // freshly rendered rows work without re-binding).
     var kickAllBtn = document.getElementById('kick-all-devices-btn');
     if (kickAllBtn) kickAllBtn.addEventListener('click', kickAllDevices);
+    var kickAllYes = document.getElementById('kick-all-confirm-yes');
+    if (kickAllYes) kickAllYes.addEventListener('click', confirmKickAllDevices);
+    var kickAllCancel = document.getElementById('kick-all-confirm-cancel');
+    if (kickAllCancel) kickAllCancel.addEventListener('click', function () { hideModal('kick-all-confirm-modal'); });
     var devicesList = document.getElementById('devices-list');
     if (devicesList) {
         devicesList.addEventListener('click', function (e) {
@@ -3051,6 +3067,175 @@ document.addEventListener('DOMContentLoaded', () => {
                 reauthError.textContent = 'Server is not running';
                 reauthError.style.display = 'block';
             }
+        });
+    }
+
+    // --- Change password (Settings → Security) ---
+    var changePwBtn = document.getElementById('change-pw-btn');
+    var changePwSection = document.getElementById('password-change-section');
+    var changePwStatus = document.getElementById('change-pw-status');
+    var changePwConfirmBtn = document.getElementById('change-pw-confirm-btn');
+    // Pending { cur, nw } awaiting the confirmation modal's "Yes" — cleared on
+    // cancel or once the change is submitted.
+    var _pendingChangePw = null;
+
+    function resetChangePwInputs() {
+        ['change-pw-current', 'change-pw-new', 'change-pw-confirm'].forEach(function (id) {
+            var inp = document.getElementById(id);
+            if (inp) { inp.type = 'password'; inp.value = ''; }
+            var tgl = document.getElementById('toggle-' + id);
+            if (tgl) { tgl.innerHTML = '&#128065;'; tgl.classList.remove('active'); }
+        });
+    }
+    function setChangePwStatus(msg, kind) {
+        if (!changePwStatus) return;
+        changePwStatus.textContent = msg;
+        changePwStatus.style.color = kind === 'error' ? 'var(--danger)' : (kind === 'success' ? '#43b581' : 'var(--text-muted)');
+    }
+
+    if (changePwBtn) {
+        changePwBtn.addEventListener('click', function () {
+            var open = changePwSection.style.display !== 'block';
+            changePwSection.style.display = open ? 'block' : 'none';
+            if (open) { resetChangePwInputs(); setChangePwStatus('', ''); }
+        });
+    }
+    ['toggle-change-pw-current', 'toggle-change-pw-new', 'toggle-change-pw-confirm'].forEach(function (tid) {
+        var tgl = document.getElementById(tid);
+        if (!tgl) return;
+        tgl.addEventListener('click', function () {
+            var inp = document.getElementById(tid.replace('toggle-', ''));
+            if (!inp) return;
+            var visible = inp.type === 'text';
+            inp.type = visible ? 'password' : 'text';
+            tgl.innerHTML = visible ? '&#128065;' : '&#128064;';
+            tgl.classList.toggle('active', !visible);
+        });
+    });
+
+    // Core change flow: the raw password is the master key, so the client
+    // re-wraps every password-encrypted blob (hash_key, identity escrow,
+    // friend code, key blob) with the NEW password. The keys themselves never
+    // change, so nothing else is affected.
+    async function performPasswordChange(oldPw, newPw) {
+        var currentUser = null;
+        try { currentUser = JSON.parse(localStorage.getItem('user') || 'null'); } catch (_) {}
+        if (!currentUser || !currentUser.username || !currentUser.id) throw new Error('Not signed in');
+        // 1. Fetch the password-wrapped hash_key and decrypt it with the old
+        //    password — this doubles as the "is the current password right?" check.
+        var paramsRes = await fetch('/api/auth-params/' + encodeURIComponent(currentUser.username));
+        if (!paramsRes.ok) throw new Error('Could not load account credentials');
+        var params = await paramsRes.json();
+        if (!params.encrypted_hash_key || !params.hash_key_salt || !params.hash_key_nonce) throw new Error('Account credentials unavailable on server');
+        var hashKeyB64 = E2ECrypto.decryptWithPassword(params.encrypted_hash_key, oldPw, params.hash_key_salt, params.hash_key_nonce);
+        if (!hashKeyB64) throw new Error('Current password is incorrect');
+        var hashKeyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(hashKeyB64));
+
+        // 2. Same hash_key → hashes for old (verify) and new (store) password.
+        var payload = {
+            old_password: E2ECrypto.hmacHex(hashKeyBytes, oldPw),
+            new_password: E2ECrypto.hmacHex(hashKeyBytes, newPw)
+        };
+
+        // 3. Re-encrypt everything with the NEW password.
+        var encHashKey = E2ECrypto.encryptWithPassword(hashKeyB64, newPw);
+        payload.encrypted_hash_key = encHashKey.encrypted_private_key;
+        payload.hash_key_salt = encHashKey.salt;
+        payload.hash_key_nonce = encHashKey.nonce;
+        // Identity key escrow (best effort — only if the local key is present).
+        var idPrivB64 = localStorage.getItem('e2e_identity_private_' + currentUser.id);
+        if (idPrivB64) {
+            var esc = E2ECrypto.encryptWithPassword(idPrivB64, newPw);
+            payload.encrypted_identity_priv = esc.encrypted_private_key;
+            payload.escrow_salt = esc.salt;
+            payload.escrow_nonce = esc.nonce;
+        }
+        // Friend code (best effort).
+        var fc = localStorage.getItem('e2e_friend_code');
+        if (fc) {
+            var fcEnc = E2ECrypto.encryptWithPassword(fc, newPw);
+            payload.encrypted_friend_code = fcEnc.encrypted_private_key;
+            payload.friend_code_salt = fcEnc.salt;
+            payload.friend_code_nonce = fcEnc.nonce;
+        }
+        // Key blob (identity + message keys) — sent in the SAME request so the
+        // server can never end up with a blob encrypted by a different password.
+        if (typeof E2ECrypto.buildKeyBundle === 'function' && typeof E2ECrypto.encryptKeyBundle === 'function') {
+            var blob = E2ECrypto.encryptKeyBundle(E2ECrypto.buildKeyBundle(), newPw);
+            payload.encrypted_blob = blob.encrypted_private_key;
+            payload.blob_salt = blob.salt;
+            payload.blob_nonce = blob.nonce;
+        }
+
+        // 4. Submit — the server verifies the old hash (constant-time) and
+        //    swaps every blob in one go.
+        var res = await authFetch('/api/password/change', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        var data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Password change failed');
+
+        // 5. Local housekeeping — swap the stored password and re-key the
+        //    at-rest secure storage to the new password-derived key, so this
+        //    device keeps auto-hashing with the new password.
+        try {
+            if (window._secRekeyToPassword) {
+                window._secRekeyToPassword(newPw);
+            } else {
+                var devKey = localStorage.getItem('e2e_device_key');
+                if (devKey) {
+                    var dk = new Uint8Array(E2ECrypto.base64ToArrayBuffer(devKey));
+                    localStorage.setItem('e2e_encrypted_password', E2ECrypto.encodeEncryptedFileKey(btoa(newPw), dk));
+                }
+            }
+        } catch (_) {}
+    }
+
+    if (changePwConfirmBtn) {
+        changePwConfirmBtn.addEventListener('click', function () {
+            var cur = document.getElementById('change-pw-current').value;
+            var nw = document.getElementById('change-pw-new').value;
+            var cf = document.getElementById('change-pw-confirm').value;
+            if (!cur || !nw || !cf) { setChangePwStatus('Fill in all three fields.', 'error'); return; }
+            if (nw !== cf) { setChangePwStatus('New passwords do not match.', 'error'); return; }
+            if (nw.length < 8) { setChangePwStatus('New password must be at least 8 characters.', 'error'); return; }
+            // Validation passed — ask for confirmation before doing anything:
+            // a password change signs out every other device, so it must never
+            // fire on a single stray click. The actual change runs only when
+            // the user confirms in the modal.
+            _pendingChangePw = { cur: cur, nw: nw };
+            showModal('change-pw-confirm-modal');
+        });
+    }
+    var changePwConfirmYes = document.getElementById('change-pw-confirm-yes');
+    var changePwConfirmCancel = document.getElementById('change-pw-confirm-cancel');
+    if (changePwConfirmYes) {
+        changePwConfirmYes.addEventListener('click', async function () {
+            var pending = _pendingChangePw;
+            if (!pending) return;
+            _pendingChangePw = null;
+            var btn = this;
+            btn.disabled = true;
+            setChangePwStatus('Changing password…', '');
+            try {
+                await performPasswordChange(pending.cur, pending.nw);
+                hideModal('change-pw-confirm-modal');
+                resetChangePwInputs();
+                changePwSection.style.display = 'none';
+                setChangePwStatus('✅ Password changed. All other devices were signed out and will need the new password to sign in again.', 'success');
+            } catch (e) {
+                hideModal('change-pw-confirm-modal');
+                setChangePwStatus(e.message || 'Failed to change password.', 'error');
+            }
+            btn.disabled = false;
+        });
+    }
+    if (changePwConfirmCancel) {
+        changePwConfirmCancel.addEventListener('click', function () {
+            _pendingChangePw = null;
+            hideModal('change-pw-confirm-modal');
         });
     }
 
@@ -5305,13 +5490,17 @@ document.addEventListener('DOMContentLoaded', () => {
     // Global Escape key closes the topmost visible modal
     document.addEventListener('keydown', function (e) {
         if (e.key !== 'Escape') return;
-        // 2FA flows are Cancel-only: while one of these security-sensitive
-        // modals is open, Escape must not close anything underneath (e.g. the
-        // settings modal behind the enrollment popup).
+        // Security-sensitive flows are Cancel-only: while one of these modals
+        // is open, Escape must not close anything underneath (e.g. the
+        // settings modal behind the enrollment/confirmation popup).
         var enroll2fa = document.getElementById('twofa-enroll-modal');
         var disable2fa = document.getElementById('twofa-disable-modal');
+        var changePwConfirm = document.getElementById('change-pw-confirm-modal');
+        var kickAllConfirm = document.getElementById('kick-all-confirm-modal');
         if ((enroll2fa && enroll2fa.style.display !== 'none' && enroll2fa.style.display !== '') ||
-            (disable2fa && disable2fa.style.display !== 'none' && disable2fa.style.display !== '')) {
+            (disable2fa && disable2fa.style.display !== 'none' && disable2fa.style.display !== '') ||
+            (changePwConfirm && changePwConfirm.style.display !== 'none' && changePwConfirm.style.display !== '') ||
+            (kickAllConfirm && kickAllConfirm.style.display !== 'none' && kickAllConfirm.style.display !== '')) {
             return;
         }
         // Find the first (topmost) visible modal and close it
@@ -7481,9 +7670,13 @@ function connectWebSocket(t) {
                 window.location.href = 'login.html';
                 break;
             case 'session_revoked':
-                // Force-kicked from Settings → Security → Devices (this device
-                // or all others). Show why, then sign out.
-                flashToast('This device was signed out from another device.', 'error');
+                // Force-kicked from Settings → Security → Devices, or a password
+                // change elsewhere revoked this session. Show why, then sign out.
+                if (data.reason === 'password_changed') {
+                    flashToast('Your password was changed on another device. Sign in again with the new password.', 'error');
+                } else {
+                    flashToast('This device was signed out from another device.', 'error');
+                }
                 localStorage.removeItem('token');
                 localStorage.removeItem('user');
                 setTimeout(function () { window.location.href = 'login.html'; }, 1500);

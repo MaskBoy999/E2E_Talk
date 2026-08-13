@@ -51,6 +51,50 @@ pub fn hmac_sha256_hex(key: &[u8], data: &str) -> String {
     result.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
+/// Insert-or-update the user's encrypted key blob (identity + message keys).
+/// Shared by the key-blob endpoint and the password-change flow so the blob
+/// always lands encrypted with the CURRENT password. needs_rebuild=0 clears
+/// the stale-rebuild flag whenever the client re-saves the blob.
+fn upsert_user_key_blob(conn: &Connection, user_id: &str, encrypted_blob: &str, salt: &str, nonce: &str) -> Result<(), String> {
+    // Include needs_rebuild=0 in the insert/update so the flag is cleared
+    // when the client re-saves the blob after a rebuild.
+    let col_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('user_key_blobs') WHERE name = 'needs_rebuild'",
+            [],
+            |row| row.get::<_, i32>(0),
+        )
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if col_exists {
+        conn.execute(
+            "INSERT INTO user_key_blobs (user_id, encrypted_blob, salt, nonce, updated_at, needs_rebuild)
+             VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP, 0)
+             ON CONFLICT(user_id) DO UPDATE SET
+                encrypted_blob = excluded.encrypted_blob,
+                salt = excluded.salt,
+                nonce = excluded.nonce,
+                updated_at = CURRENT_TIMESTAMP,
+                needs_rebuild = 0",
+            params![user_id, encrypted_blob, salt, nonce],
+        )
+        .map_err(|e| e.to_string())?;
+    } else {
+        conn.execute(
+            "INSERT INTO user_key_blobs (user_id, encrypted_blob, salt, nonce, updated_at)
+             VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)
+             ON CONFLICT(user_id) DO UPDATE SET
+                encrypted_blob = excluded.encrypted_blob,
+                salt = excluded.salt,
+                nonce = excluded.nonce,
+                updated_at = CURRENT_TIMESTAMP",
+            params![user_id, encrypted_blob, salt, nonce],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 pub struct Database {
     conn: Mutex<Connection>,
 }
@@ -2662,43 +2706,88 @@ impl Database {
 
     pub fn save_user_key_blob(&self, user_id: &str, encrypted_blob: &str, salt: &str, nonce: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        // Include needs_rebuild=0 in the insert/update so the flag is cleared
-        // when the client re-saves the blob after a rebuild.
-        let col_exists: bool = conn
-            .query_row(
-                "SELECT COUNT(*) > 0 FROM pragma_table_info('user_key_blobs') WHERE name = 'needs_rebuild'",
-                [],
-                |row| row.get::<_, i32>(0),
-            )
-            .map(|c| c > 0)
-            .unwrap_or(false);
-        if col_exists {
-            conn.execute(
-                "INSERT INTO user_key_blobs (user_id, encrypted_blob, salt, nonce, updated_at, needs_rebuild)
-                 VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP, 0)
-                 ON CONFLICT(user_id) DO UPDATE SET
-                    encrypted_blob = excluded.encrypted_blob,
-                    salt = excluded.salt,
-                    nonce = excluded.nonce,
-                    updated_at = CURRENT_TIMESTAMP,
-                    needs_rebuild = 0",
-                params![user_id, encrypted_blob, salt, nonce],
-            )
-            .map_err(|e| e.to_string())?;
-        } else {
-            conn.execute(
-                "INSERT INTO user_key_blobs (user_id, encrypted_blob, salt, nonce, updated_at)
+        upsert_user_key_blob(&conn, user_id, encrypted_blob, salt, nonce)
+    }
+
+    /// Password change: swap the client-side password hash and every
+    /// password-wrapped credential blob (hash_key, identity escrow, friend
+    /// code) plus the key blob — all produced client-side with the NEW
+    /// password. The identity keys themselves never change, so messages,
+    /// profile data and other devices are unaffected.
+    pub fn change_password_credentials(
+        &self,
+        user_id: &str,
+        keep_session_id: &str,
+        password_hash: &str,
+        encrypted_hash_key: &str,
+        hash_key_salt: &str,
+        hash_key_nonce: &str,
+        encrypted_identity_priv: Option<&[u8]>,
+        escrow_salt: Option<&[u8]>,
+        escrow_nonce: Option<&[u8]>,
+        encrypted_friend_code: Option<&str>,
+        friend_code_salt: Option<&str>,
+        friend_code_nonce: Option<&str>,
+        encrypted_blob: Option<&str>,
+        blob_salt: Option<&str>,
+        blob_nonce: Option<&str>,
+    ) -> Result<(), String> {
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        // All writes land in ONE transaction: a partial password change (new
+        // hash stored but blobs still wrapped with the old password) would
+        // otherwise leave other devices unable to decrypt anything.
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        // Omitted trios are set to NULL rather than kept: a value left over
+        // from the OLD password can never be decrypted again, so a clean NULL
+        // beats a dead blob that fails with a confusing "wrong password".
+        tx.execute(
+            "UPDATE users SET password_hash = ?1, encrypted_hash_key = ?2,
+             hash_key_salt = ?3, hash_key_nonce = ?4,
+             encrypted_friend_code = ?5,
+             friend_code_salt = ?6,
+             friend_code_nonce = ?7
+             WHERE id = ?8",
+            params![
+                password_hash,
+                encrypted_hash_key,
+                hash_key_salt,
+                hash_key_nonce,
+                encrypted_friend_code,
+                friend_code_salt,
+                friend_code_nonce,
+                user_id
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+
+        if let (Some(k), Some(s), Some(n)) = (encrypted_identity_priv, escrow_salt, escrow_nonce) {
+            tx.execute(
+                "INSERT INTO user_key_escrow (user_id, encrypted_private_key, salt, nonce, updated_at)
                  VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)
                  ON CONFLICT(user_id) DO UPDATE SET
-                    encrypted_blob = excluded.encrypted_blob,
+                    encrypted_private_key = excluded.encrypted_private_key,
                     salt = excluded.salt,
                     nonce = excluded.nonce,
                     updated_at = CURRENT_TIMESTAMP",
-                params![user_id, encrypted_blob, salt, nonce],
+                params![user_id, k, s, n],
             )
             .map_err(|e| e.to_string())?;
         }
-        Ok(())
+
+        if let (Some(b), Some(s), Some(n)) = (encrypted_blob, blob_salt, blob_nonce) {
+            upsert_user_key_blob(&tx, user_id, b, s, n)?;
+        }
+        // A password change revokes EVERY other signed-in session in the same
+        // transaction: the new password may be required to re-enter, so old
+        // sessions must not keep running. The current device (keep_session_id)
+        // stays signed in, matching the Devices-panel "sign out all others".
+        tx.execute(
+            "UPDATE auth_sessions SET revoked = 1, revoked_at = CURRENT_TIMESTAMP
+             WHERE user_id = ?1 AND id != ?2 AND revoked = 0",
+            params![user_id, keep_session_id],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())
     }
 
     pub fn get_user_key_blob(&self, user_id: &str) -> Result<Option<(String, String, String, bool)>, String> {

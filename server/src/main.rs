@@ -416,6 +416,7 @@ async fn main() {
         .route("/api/2fa/verify-enroll", post(handlers::verify_enroll_2fa))
         .route("/api/2fa/disable", post(handlers::disable_2fa))
         .route("/api/2fa/status", get(handlers::get_2fa_status))
+        .route("/api/password/change", post(handlers::change_password))
         .route("/api/servers", get(handlers::list_servers).post(handlers::create_server))
         .route("/api/servers/{server_id}/channels", get(handlers::list_channels).post(handlers::create_channel))
         .route("/api/servers/{server_id}/members", get(handlers::list_server_members))

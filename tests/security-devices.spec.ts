@@ -158,6 +158,55 @@ test('kick-all signs out every other device and their tokens die', async ({ brow
     await ctx2.close();
 });
 
+test('kick-all confirmation modal: cancel aborts, confirm signs out all other devices', async ({ browser }) => {
+    const ctx1 = await browser.newContext();
+    const ctx2 = await browser.newContext();
+    const page1 = await ctx1.newPage();
+    const page2 = await ctx2.newPage();
+
+    const u = 'dev2ui_' + Date.now();
+    await registerUser(page1, u);
+    const other = await loginUser(page2, u);
+    await waitForWs(page1);
+    await waitForWs(page2);
+    const otherToken = other.token;
+
+    // Device 1 opens Settings → Security → Devices.
+    await openDevices(page1, 2);
+
+    // Clicking the button shows the confirmation modal (not a native dialog).
+    await page1.click('#kick-all-devices-btn');
+    await page1.waitForSelector('#kick-all-confirm-modal', { state: 'visible', timeout: 5000 });
+
+    // Cancel: modal closes, nothing happens — device 2's token still works.
+    await page1.click('#kick-all-confirm-cancel');
+    await page1.waitForSelector('#kick-all-confirm-modal', { state: 'hidden', timeout: 5000 });
+    let status = await ctx2.request.get(`${BASE}/api/auth/sessions`, {
+        headers: { Authorization: 'Bearer ' + otherToken },
+    });
+    expect(status.status()).toBe(200);
+
+    // Confirm: modal closes and every other device is signed out.
+    await page1.click('#kick-all-devices-btn');
+    await page1.waitForSelector('#kick-all-confirm-modal', { state: 'visible', timeout: 5000 });
+    await page1.click('#kick-all-confirm-yes');
+    await page1.waitForSelector('#kick-all-confirm-modal', { state: 'hidden', timeout: 5000 });
+
+    // Device 2 is redirected to login and its token is dead.
+    await page2.waitForURL('**/login.html', { timeout: 12000 });
+    status = await ctx2.request.get(`${BASE}/api/auth/sessions`, {
+        headers: { Authorization: 'Bearer ' + otherToken },
+    });
+    expect(status.status()).toBe(401);
+
+    // Device 1's own session still works.
+    const alive = await page1.evaluate(() => fetch('/api/auth/sessions', { headers: { Authorization: 'Bearer ' + localStorage.getItem('token') } }).then((r) => r.status));
+    expect(alive).toBe(200);
+
+    await ctx1.close();
+    await ctx2.close();
+});
+
 test('logout revokes the server-side session (token cannot be replayed)', async ({ browser }) => {
     const ctx = await browser.newContext();
     const page = await ctx.newPage();

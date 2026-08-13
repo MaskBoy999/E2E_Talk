@@ -435,24 +435,31 @@ pub async fn kick_all_auth_sessions(
         }
     };
 
-    // Live-kick every revoked session's device.
-    if let Ok(rows) = state.db.list_auth_sessions(&user_id) {
+    live_kick_other_devices(&state, &user_id, &current_sid, "kicked").await;
+
+    (StatusCode::OK, Json(serde_json::json!({"ok": true, "revoked": n}))).into_response()
+}
+
+/// Send a live `session_revoked` WS message to every session of `user_id`
+/// except `keep_sid` that is currently revoked, and drop those devices from
+/// any voice room they occupy. Used after force-kicks and password changes so
+/// kicked devices are told immediately rather than only at their next request.
+async fn live_kick_other_devices(state: &Arc<AppState>, user_id: &str, keep_sid: &str, reason: &str) {
+    if let Ok(rows) = state.db.list_auth_sessions(user_id) {
         let kick_msg = serde_json::json!({
             "type": "session_revoked",
-            "reason": "kicked",
+            "reason": reason,
         });
         for (sid, device_id, _, _, _, _, revoked) in rows {
-            if sid == current_sid || revoked == 0 {
+            if sid == keep_sid || revoked == 0 {
                 continue;
             }
             if !device_id.is_empty() {
-                state.ws_manager.broadcast_to_device(&user_id, &device_id, &kick_msg.to_string()).await;
-                crate::ws::voice_remove_user_all_for_device(&state, &user_id, &device_id).await;
+                state.ws_manager.broadcast_to_device(user_id, &device_id, &kick_msg.to_string()).await;
+                crate::ws::voice_remove_user_all_for_device(state, user_id, &device_id).await;
             }
         }
     }
-
-    (StatusCode::OK, Json(serde_json::json!({"ok": true, "revoked": n}))).into_response()
 }
 
 /// Validate the Bearer token and return its claims (sid included). Reuses the
@@ -1328,6 +1335,138 @@ pub async fn get_auth_params(
             (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "User not found"}))).into_response()
         }
     }
+}
+
+// --- Password change ---
+
+#[derive(Deserialize)]
+pub struct ChangePasswordRequest {
+    /// Client-computed hash of the CURRENT password: HMAC-SHA256(hash_key, raw).
+    pub old_password: String,
+    /// Client-computed hash of the NEW password: HMAC-SHA256(hash_key, raw).
+    pub new_password: String,
+    // hash_key re-encrypted with the NEW password (required — login depends on it).
+    pub encrypted_hash_key: String,
+    pub hash_key_salt: String,
+    pub hash_key_nonce: String,
+    // Identity key escrow re-encrypted with the NEW password (optional).
+    #[serde(default)]
+    pub encrypted_identity_priv: Option<String>,
+    #[serde(default)]
+    pub escrow_salt: Option<String>,
+    #[serde(default)]
+    pub escrow_nonce: Option<String>,
+    // Friend code re-encrypted with the NEW password (optional).
+    #[serde(default)]
+    pub encrypted_friend_code: Option<String>,
+    #[serde(default)]
+    pub friend_code_salt: Option<String>,
+    #[serde(default)]
+    pub friend_code_nonce: Option<String>,
+    // Key blob (identity + message keys) re-encrypted with the NEW password.
+    #[serde(default)]
+    pub encrypted_blob: Option<String>,
+    #[serde(default)]
+    pub blob_salt: Option<String>,
+    #[serde(default)]
+    pub blob_nonce: Option<String>,
+}
+
+/// POST /api/password/change — verifies the current password (client-computed
+/// hash, constant-time) and swaps every password-wrapped credential blob to the
+/// new password in one go. The identity keys themselves never change, so
+/// messages and profile data are unaffected. Every OTHER session is revoked in
+/// the same transaction, so all other devices must sign in again with the new
+/// password (the current device stays signed in).
+pub async fn change_password(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ChangePasswordRequest>,
+) -> impl IntoResponse {
+    let (user_id, current_sid) = match extract_claims(&headers, &state) {
+        Ok(c) => (c.sub, c.sid),
+        Err(r) => return r.into_response(),
+    };
+
+    // Mirrors the register rule: the client must send the pre-hashed password
+    // (HMAC-SHA256 hex, 64 chars).
+    if req.new_password.len() < 64 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "New password hash required (client-side hashing)"})),
+        )
+            .into_response();
+    }
+
+    let password_hash = match state.db.get_password_hash_by_id(&user_id) {
+        Ok(h) => h,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
+
+    // Client-computed hash (HMAC-SHA256) — constant-time comparison.
+    use subtle::ConstantTimeEq;
+    let valid: bool = req.old_password.as_bytes().ct_eq(password_hash.as_bytes()).into();
+    if !valid {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Wrong password"})),
+        )
+            .into_response();
+    }
+
+    // Decode the base64 escrow blobs (same as register). Skip if partial/malformed.
+    let escrow = if let (Some(k), Some(s), Some(n)) = (
+        &req.encrypted_identity_priv,
+        &req.escrow_salt,
+        &req.escrow_nonce,
+    ) {
+        match (
+            base64::engine::general_purpose::STANDARD.decode(k),
+            base64::engine::general_purpose::STANDARD.decode(s),
+            base64::engine::general_purpose::STANDARD.decode(n),
+        ) {
+            (Ok(k), Ok(s), Ok(n)) => Some((k, s, n)),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    if let Err(e) = state.db.change_password_credentials(
+        &user_id,
+        &current_sid,
+        &req.new_password,
+        &req.encrypted_hash_key,
+        &req.hash_key_salt,
+        &req.hash_key_nonce,
+        escrow.as_ref().map(|x| x.0.as_slice()),
+        escrow.as_ref().map(|x| x.1.as_slice()),
+        escrow.as_ref().map(|x| x.2.as_slice()),
+        req.encrypted_friend_code.as_deref(),
+        req.friend_code_salt.as_deref(),
+        req.friend_code_nonce.as_deref(),
+        req.encrypted_blob.as_deref(),
+        req.blob_salt.as_deref(),
+        req.blob_nonce.as_deref(),
+    ) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response();
+    }
+
+    // Every other session was revoked in the same transaction — tell those
+    // devices now so they sign out immediately instead of at their next call.
+    live_kick_other_devices(&state, &user_id, &current_sid, "password_changed").await;
+
+    (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
 }
 
 // --- Re-authenticate ---

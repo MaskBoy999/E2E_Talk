@@ -657,4 +657,62 @@
         return true;
     };
 
+    /**
+     * Re-key every sensitive localStorage value from the CURRENT key to a new
+     * password-derived key, then swap the stored password. Used by the
+     * password-change flow: old values are only decryptable with the OLD
+     * password, so plaintexts are collected BEFORE the stored password is
+     * replaced (unlike _secReKey, which is meant for same-password rekeys).
+     * Returns true on success.
+     */
+    window._secRekeyToPassword = function (newPassword) {
+        try {
+            // 1. Collect plaintexts with the CURRENT key (the old password is
+            //    still stored, so _ensureKey() still derives the old key).
+            var plaintexts = {};
+            for (var i = 0; i < localStorage.length; i++) {
+                var k = localStorage.key(i);
+                if (k && isSensitive(k)) {
+                    var raw = _realOrigGet.call(localStorage, k);
+                    if (raw !== null) {
+                        if (_isEncrypted(raw)) {
+                            try {
+                                var decrypted = _xorDecrypt(raw.substring(1));
+                                if (decrypted !== null) plaintexts[k] = decrypted;
+                            } catch (_) {}
+                        } else {
+                            plaintexts[k] = raw;
+                        }
+                    }
+                }
+            }
+
+            // 2. Swap the stored password to the new one (bootstrap key, plaintext).
+            var devKeyStr = _realOrigGet.call(localStorage, 'e2e_device_key');
+            if (!devKeyStr) return false;
+            var devKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(devKeyStr));
+            _realOrigSet.call(localStorage, 'e2e_encrypted_password',
+                E2ECrypto.encodeEncryptedFileKey(btoa(newPassword), devKey));
+
+            // 3. Derive the NEW key and drop the old caches.
+            _key = null;
+            sessionStorage.removeItem(SESSION_KEY_NAME);
+            if (!_tryDeriveFromEncryptedPassword()) return false;
+            try { _realOrigRemove.call(localStorage, LOCAL_KEY_NAME); } catch (_) {}
+
+            // 4. Re-write the collected plaintexts — _xorEncrypt() now uses the
+            //    NEW password-derived key via _ensureKey().
+            for (var key in plaintexts) {
+                if (plaintexts.hasOwnProperty(key)) {
+                    try {
+                        _realOrigSet.call(localStorage, key, MAGIC + _xorEncrypt(String(plaintexts[key])));
+                    } catch (_) {}
+                }
+            }
+            return true;
+        } catch (_) {
+            return false;
+        }
+    };
+
 })();
