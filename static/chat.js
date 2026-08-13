@@ -406,6 +406,15 @@ async function fetchAndCacheUserProfile(userId) {
         scheduleUserDisplayNameSave();
         updateExistingMessageStyles(userId);
         updateMemberListItem(userId);
+        // Live-refresh every surface that shows this user's identity (DM sidebar
+        // row + any open DM call / voice channel tiles) so a profile that lands
+        // through this fetch is visible immediately — no conversation click or
+        // view reopen required.
+        refreshDmSidebarItem(userId);
+        refreshVoiceMemberProfile(userId);
+        if (decrypted.profile_picture_file_id && decrypted.profile_picture_file_key) {
+            getProfilePicUrl(decrypted.profile_picture_file_id, userId);
+        }
     } catch (e) {
         // Silently ignore — will retry on next profile_key_sync or message
     }
@@ -438,6 +447,14 @@ async function fetchServerConversationProfile(userId, serverId, serverKey) {
         updateExistingMessageStyles(userId);
         updateMemberListItem(userId);
         refreshDmProfileDisplay(userId);
+        // Live-refresh the DM sidebar row + any open voice surfaces (server
+        // voice popup rows, DM call tiles) so this profile shows up immediately
+        // without a view reopen or conversation click.
+        refreshDmSidebarItem(userId);
+        refreshVoiceMemberProfile(userId);
+        if (decrypted.profile_picture_file_id && decrypted.profile_picture_file_key) {
+            getProfilePicUrl(decrypted.profile_picture_file_id, userId);
+        }
     } catch (e) {}
 }
 
@@ -492,6 +509,10 @@ async function fetchDmConversationProfile(userId, dmChannelId) {
         updateExistingMessageStyles(userId);
         updateMemberListItem(userId);
         refreshDmProfileDisplay(userId);
+        // Live-refresh the DM sidebar row + any open voice surfaces (DM call
+        // tiles, server voice popup rows) so the profile shows immediately.
+        refreshDmSidebarItem(userId);
+        refreshVoiceMemberProfile(userId);
         // Kick the async pic load NOW so ANY already-rendered placeholder rows
         // (DM list rendered before this fetch landed) get their image injected
         // when the decrypt completes — no conversation click required. Without
@@ -12339,13 +12360,24 @@ function refreshDmSidebarItem(userId) {
     if (picFileId) {
         var cacheKey = userId + ':' + picFileId;
         var picUrl = profilePicCache[cacheKey];
+        var avatarEl = dmItem.querySelector('.dm-avatar');
         if (picUrl) {
-            var avatarEl = dmItem.querySelector('.dm-avatar');
             if (avatarEl) {
                 avatarEl.innerHTML = '<img class="avatar-img" src="' + picUrl + '" alt="">';
+                avatarEl.removeAttribute('data-profile-pic-load');
             }
         } else {
-            // Not yet cached — trigger async fetch now that userDisplayNameCache has the key
+            // Not yet cached — put the avatar back into async-load state so the
+            // decrypt completion (querySelectorAll on [data-profile-pic-load])
+            // injects the new image WITHOUT a sidebar re-render or a conversation
+            // click. Without this, a live profile change left the STALE avatar on
+            // screen until the list happened to re-render.
+            if (avatarEl) {
+                avatarEl.innerHTML = displayName.charAt(0).toUpperCase();
+                avatarEl.style.background = '';
+                avatarEl.setAttribute('data-profile-pic-load', cacheKey);
+            }
+            // Trigger async fetch now that userDisplayNameCache has the key
             getProfilePicUrl(picFileId, userId);
         }
     }

@@ -268,6 +268,14 @@
                 deafened: S.deafened,
                 speaking: S.speaking,
             }) : m;
+            // A profile update may have changed the pic id — or a previous PFP
+            // fetch for this user failed before its key was cached. Drop stale
+            // in-flight guards so the re-renders below re-kick the fetch with
+            // the CURRENT pic id (the guard is keyed uid:picId and never clears
+            // on its own).
+            for (var _gk in S._pfpLoading) {
+                if (_gk.indexOf(uid + ':') === 0) delete S._pfpLoading[_gk];
+            }
             var name = memberDisplayName(uid, local);
             var nameStyle = memberNameStyle(uid);
             var selfMark = (local.is_owner ? ' 👑' : '') + (isSelf ? ' (you)' : '');
