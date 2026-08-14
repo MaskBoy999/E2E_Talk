@@ -8805,7 +8805,9 @@ function connectWebSocket(t) {
                 if (decryptedJson) {
                     try {
                         var notifData = JSON.parse(decryptedJson);
-                        var notifType = data.notification_type || notifData.type;
+                        // B4: the envelope's notification_type is blinded (HMAC) —
+                        // dispatch from the decrypted payload's type instead.
+                        var notifType = (notifData && notifData.type) || data.notification_type;
                         if (notifType === 'mention_notification' || notifType === 'reply_notification' || notifType === 'dm_new' || notifType === 'friend_request_accepted' || notifType === 'friend_request_received') {
                             // Dispatch to decrypted notification handler
                             handleDecryptedNotification(notifData);

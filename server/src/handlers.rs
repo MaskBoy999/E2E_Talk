@@ -5981,7 +5981,7 @@ pub async fn send_friend_request(
                 .await;
             // Save for offline recipient
             if !state.ws_manager.is_user_connected(&target.id).await {
-                let _ = state.db.save_pending_notification(&target.id, "friend_request_received", &notify.to_string());
+                let _ = state.db.save_pending_notification(&target.id, "friend_request_received", &notify.to_string(), state.config.hmac_key.as_bytes());
             }
             (
                 StatusCode::OK,
@@ -6032,7 +6032,7 @@ pub async fn accept_friend_request(
                 .await;
             // Save for offline users
             if !state.ws_manager.is_user_connected(&from_id).await {
-                let _ = state.db.save_pending_notification(&from_id, "friend_request_accepted", &notify.to_string());
+                let _ = state.db.save_pending_notification(&from_id, "friend_request_accepted", &notify.to_string(), state.config.hmac_key.as_bytes());
             }
             (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
         }

@@ -505,16 +505,6 @@ impl Database {
         if !profile_pic_exists {
             conn.execute("ALTER TABLE users ADD COLUMN profile_picture_file_id TEXT REFERENCES files(id) ON DELETE SET NULL", [])?;
         }
-        let profile_key_exists: bool = conn
-            .query_row(
-                "SELECT COUNT(*) > 0 FROM pragma_table_info('users') WHERE name = 'profile_picture_file_key'",
-                [],
-                |row| row.get(0),
-            )?;
-        if !profile_key_exists {
-            conn.execute("ALTER TABLE users ADD COLUMN profile_picture_file_key TEXT", [])?;
-        }
-
         // Migration 015: username color
         let username_color_exists: bool = conn
             .query_row(
@@ -575,7 +565,6 @@ impl Database {
         // Migration 018: profile banner, description, nickname
         for (col, def) in [
             ("profile_banner_file_id", "TEXT REFERENCES files(id) ON DELETE SET NULL"),
-            ("profile_banner_file_key", "TEXT"),
             ("description", "TEXT DEFAULT ''"),
             ("nickname", "TEXT DEFAULT ''"),
         ] {
@@ -1123,6 +1112,13 @@ impl Database {
         // Migration 057 (F4): drop dead X3DH-era tables (sessions / user_devices /
         // prekey_bundles) — 0 rows, no code references left.
         let _ = conn.execute_batch(include_str!("../migrations/057_drop_legacy_x3dh.sql"));
+        // Migration 058 (B1): drop the last 3 dead plaintext columns. Run each
+        // ALTER separately so one "already dropped" failure can't block the rest
+        // (the 042/043/048 multi-statement batches silently aborted early on
+        // databases where an earlier statement in the batch had already applied).
+        let _ = conn.execute_batch("ALTER TABLE servers DROP COLUMN invite_code");
+        let _ = conn.execute_batch("ALTER TABLE users DROP COLUMN profile_picture_file_key");
+        let _ = conn.execute_batch("ALTER TABLE users DROP COLUMN profile_banner_file_key");
 
         // Data migration: normalize legacy space-separated CURRENT_TIMESTAMP values
         // ("YYYY-MM-DD HH:MM:SS") to fixed-width RFC3339 ("YYYY-MM-DDTHH:MM:SS.000000Z")
@@ -1583,19 +1579,34 @@ impl Database {
         Ok(format!("{}:{}:{}", epk_b64, nonce_b64, ct_b64))
     }
 
-    pub fn save_pending_notification(&self, user_id: &str, notification_type: &str, payload: &str) -> Result<(), String> {
+    pub fn save_pending_notification(&self, user_id: &str, notification_type: &str, payload: &str, hmac_key: &[u8]) -> Result<(), String> {
         // Fetch user's identity public key from DB
         let identity_pub = self.get_identity_public_key(user_id)
             .map_err(|_| "User has no identity public key".to_string())?;
         
         let encrypted_payload = Self::encrypt_notification_payload(payload, &identity_pub)?;
+        // B4: blind the notification_type column — the real type already rides
+        // inside the encrypted payload (mention/reply/friend payloads carry
+        // "type"; dm_new is wrapped with one at the save site), so the client
+        // dispatches from the decrypted payload, not this column.
+        let blind_type = hmac_sha256_hex(hmac_key, &format!("notif_type:{}", notification_type));
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
             "INSERT INTO pending_notifications (user_id, notification_type, payload) VALUES (?1, ?2, ?3)",
-            params![user_id, notification_type, encrypted_payload],
+            params![user_id, blind_type, encrypted_payload],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    /// B2: encrypt a plaintext notification payload for a specific user (ECDH +
+    /// XChaCha20, identical scheme to the offline queue) so the live WS relay can
+    /// deliver the same encrypted envelope the client already decrypts on the
+    /// offline path. Returns "epk_b64:nonce_b64:ciphertext_b64".
+    pub fn encrypt_notification_for_user(&self, user_id: &str, payload: &str) -> Result<String, String> {
+        let identity_pub = self.get_identity_public_key(user_id)
+            .map_err(|_| "User has no identity public key".to_string())?;
+        Self::encrypt_notification_payload(payload, &identity_pub)
     }
 
     pub fn get_and_delete_pending_notifications(&self, user_id: &str) -> Result<Vec<(String, String)>, String> {
@@ -5542,7 +5553,14 @@ impl Database {
 
     pub fn create_file_record(&self, uploader_id: &str, original_size: i64, encrypted_mime: Option<&[u8]>, mime_nonce: Option<&[u8]>) -> Result<(String, String), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let id = Uuid::new_v4().to_string();
+        // B3: never store the plaintext random UUID. The id IS the SHA-256 blind
+        // index of a one-time random UUID, so a file reference (message file_id,
+        // profile pic id, by-hash URL) can't be correlated back to the raw
+        // identity namespace. file_id_hash stays sha256(id) for the by-hash
+        // lookup path used by messages/profile pics (the client already serves
+        // 64-hex ids via /api/files/by-hash/).
+        let raw_uuid = Uuid::new_v4().to_string();
+        let id = sha256_hex(&raw_uuid);
         let hash = sha256_hex(&id);
         // Store only the encrypted MIME type (migration 038). The plaintext mime_type
         // column was dropped in migration 047 — the client receives the file's mime inside
@@ -5589,7 +5607,7 @@ impl Database {
     pub fn get_file_id_by_hash_from_files(&self, hash: &str) -> Result<String, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.query_row(
-            "SELECT id FROM files WHERE file_id_hash = ?1 LIMIT 1",
+            "SELECT id FROM files WHERE file_id_hash = ?1 OR id = ?1 LIMIT 1",
             params![hash],
             |row| row.get::<_, String>(0),
         )
@@ -5598,12 +5616,15 @@ impl Database {
 
     /// Given a SHA-256 hash of a file_id, look up the actual file_id from the users table.
     /// Searches both profile_picture_file_id_hash and profile_banner_file_id_hash columns.
+    /// B3: since new file ids ARE the blind SHA-256 index (id = sha256(random uuid),
+    /// file_id_hash = sha256(id)), match the stored id directly as well — the client
+    /// passes the file id itself to /api/files/by-hash/.
     pub fn get_file_id_by_hash(&self, hash: &str) -> Result<String, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         // Try profile picture hash first
         let result: Result<String, String> = conn
             .query_row(
-                "SELECT profile_picture_file_id FROM users WHERE profile_picture_file_id_hash = ?1 AND profile_picture_file_id IS NOT NULL LIMIT 1",
+                "SELECT profile_picture_file_id FROM users WHERE (profile_picture_file_id_hash = ?1 OR profile_picture_file_id = ?1) AND profile_picture_file_id IS NOT NULL LIMIT 1",
                 params![hash],
                 |row| row.get::<_, String>(0),
             )
@@ -5613,7 +5634,7 @@ impl Database {
             Err(_) => {
                 // Try banner hash
                 conn.query_row(
-                    "SELECT profile_banner_file_id FROM users WHERE profile_banner_file_id_hash = ?1 AND profile_banner_file_id IS NOT NULL LIMIT 1",
+                    "SELECT profile_banner_file_id FROM users WHERE (profile_banner_file_id_hash = ?1 OR profile_banner_file_id = ?1) AND profile_banner_file_id IS NOT NULL LIMIT 1",
                     params![hash],
                     |row| row.get::<_, String>(0),
                 )

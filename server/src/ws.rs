@@ -634,6 +634,37 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, client_ip: Strin
     }
 }
 
+/// B2: deliver a mention/reply notification to the given users. Connected
+/// users get a per-recipient ECDH-encrypted envelope — the exact
+/// `{"type":"encrypted_notification", ...}` shape the client already decrypts
+/// on the offline path — so the live relay no longer exposes
+/// channel_id/server_id/dm_channel_id/message_id in plaintext. Offline users
+/// get it queued (which encrypts with a fresh ephemeral key). The envelope's
+/// notification_type is blinded (B4); the real type rides inside the encrypted
+/// payload, which is what the client dispatches on.
+async fn deliver_encrypted_notification(
+    state: &Arc<AppState>,
+    user_ids: &[String],
+    notification_type: &str,
+    payload: &str,
+) {
+    let blind_type = crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &format!("notif_type:{}", notification_type));
+    for uid in user_ids {
+        if state.ws_manager.is_user_connected(uid).await {
+            if let Ok(enc) = state.db.encrypt_notification_for_user(uid, payload) {
+                let wrapper = serde_json::json!({
+                    "type": "encrypted_notification",
+                    "notification_type": blind_type,
+                    "encrypted_payload": enc,
+                });
+                state.ws_manager.broadcast_to_users(&[uid.clone()], &wrapper.to_string()).await;
+            }
+        } else {
+            let _ = state.db.save_pending_notification(uid, notification_type, payload, state.config.hmac_key.as_bytes());
+        }
+    }
+}
+
 async fn handle_ws_message(
     text: &str,
     state: &Arc<AppState>,
@@ -768,14 +799,10 @@ async fn handle_ws_message(
                         "sender_username_nonce": message.sender_username_nonce,
                         "message_id": msg_id
                     });
-                    state.ws_manager.broadcast_to_users(&mentioned_ids, &mention_notification.to_string()).await;
-                    // Save for offline mentioned users
+                    // B2: encrypt the live relay per recipient (offline users are
+                    // queued with the same encrypted scheme).
                     let notif_str = mention_notification.to_string();
-                    for mid in &mentioned_ids {
-                        if !state.ws_manager.is_user_connected(mid).await {
-                            let _ = state.db.save_pending_notification(mid, "mention_notification", &notif_str);
-                        }
-                    }
+                    deliver_encrypted_notification(state, &mentioned_ids, "mention_notification", &notif_str).await;
                 }
             }
 
@@ -800,10 +827,8 @@ async fn handle_ws_message(
                         "sender_username_nonce": message.sender_username_nonce,
                         "message_id": msg_id
                     });
-                    state.ws_manager.broadcast_to_users(&[reply_to_user_id.to_string()], &reply_notification.to_string()).await;
-                    if !state.ws_manager.is_user_connected(reply_to_user_id).await {
-                        let _ = state.db.save_pending_notification(reply_to_user_id, "reply_notification", &reply_notification.to_string());
-                    }
+                    let reply_str = reply_notification.to_string();
+                    deliver_encrypted_notification(state, &[reply_to_user_id.to_string()], "reply_notification", &reply_str).await;
                 }
             }
         }
@@ -904,11 +929,16 @@ async fn handle_ws_message(
             match state.db.get_dm_members(dm_channel_id) {
                 Ok(members) => {
                     state.ws_manager.broadcast_to_users(&members, &json).await;
-                    // Save notification for offline members
-                    let outgoing_str = serde_json::to_string(&outgoing).unwrap();
+                    // Save notification for offline members. B4: the payload is
+                    // wrapped with "type" so the client can dispatch it purely
+                    // from the decrypted payload (the DB/envelope type is blinded).
                     for member_id in &members {
                         if member_id != user_id && !state.ws_manager.is_user_connected(member_id).await {
-                            let _ = state.db.save_pending_notification(member_id, "dm_new", &outgoing_str);
+                            let dm_notif = serde_json::json!({
+                                "type": "dm_new",
+                                "dm_channel_id": dm_channel_id,
+                            });
+                            let _ = state.db.save_pending_notification(member_id, "dm_new", &dm_notif.to_string(), state.config.hmac_key.as_bytes());
                         }
                     }
                 }
@@ -932,13 +962,8 @@ async fn handle_ws_message(
                         "sender_username_nonce": message.sender_username_nonce,
                         "message_id": msg_id
                     });
-                    state.ws_manager.broadcast_to_users(&mentioned_ids, &mention_notification.to_string()).await;
                     let notif_str = mention_notification.to_string();
-                    for mid in &mentioned_ids {
-                        if !state.ws_manager.is_user_connected(mid).await {
-                            let _ = state.db.save_pending_notification(mid, "mention_notification", &notif_str);
-                        }
-                    }
+                    deliver_encrypted_notification(state, &mentioned_ids, "mention_notification", &notif_str).await;
                 }
             }
 
@@ -952,10 +977,8 @@ async fn handle_ws_message(
                         "sender_username_nonce": message.sender_username_nonce,
                         "message_id": msg_id
                     });
-                    state.ws_manager.broadcast_to_users(&[reply_to_user_id.to_string()], &reply_notification.to_string()).await;
-                    if !state.ws_manager.is_user_connected(reply_to_user_id).await {
-                        let _ = state.db.save_pending_notification(reply_to_user_id, "reply_notification", &reply_notification.to_string());
-                    }
+                    let reply_str = reply_notification.to_string();
+                    deliver_encrypted_notification(state, &[reply_to_user_id.to_string()], "reply_notification", &reply_str).await;
                 }
             }
         }
