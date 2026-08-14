@@ -4022,6 +4022,27 @@ body.show-msg-times-hover .message:hover .file-card .time-hover {
     border-radius: 6px;
 }
 
+.inline-loop-btn {
+    background: none;
+    border: 1px solid var(--bg-border);
+    color: var(--text-muted);
+    font-size: 15px;
+    cursor: pointer;
+    padding: 2px 8px;
+    border-radius: 6px;
+    flex-shrink: 0;
+    transition: background 0.15s, color 0.15s;
+}
+.inline-loop-btn:hover {
+    color: var(--text-primary);
+    border-color: var(--accent);
+}
+.inline-loop-btn.active {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: rgba(88, 101, 242, 0.15);
+}
+
 /* Audio file card - full-width player like the upload modal */
 .audio-file-card {
     margin-top: 4px;
@@ -4324,6 +4345,11 @@ body.show-msg-times-hover .message:hover .file-card .time-hover {
 
 .video-ctrl-btn:hover {
     background: rgba(255,255,255,0.15);
+}
+
+.video-ctrl-btn.active {
+    color: var(--accent, #4fc3f7);
+    background: rgba(88, 101, 242, 0.25);
 }
 
 .video-progress-wrap {

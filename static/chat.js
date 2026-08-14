@@ -1578,6 +1578,7 @@ document.addEventListener('DOMContentLoaded', () => {
         var themeColorHex = document.getElementById('theme-color-hex');
         if (themeColorHex) {
             if (savedTheme) themeColorHex.value = savedTheme;
+            else themeColorHex.value = themeColorPicker.value;
             themeColorHex.addEventListener('input', function () {
                 var val = this.value.trim();
                 if (/^#[0-9a-f]{6}$/i.test(val)) {
@@ -1636,6 +1637,7 @@ document.addEventListener('DOMContentLoaded', () => {
         var themeBgHex = document.getElementById('theme-bg-hex');
         if (themeBgHex) {
             if (savedBgTheme) themeBgHex.value = savedBgTheme;
+            else themeBgHex.value = themeBgPicker.value;
             themeBgHex.addEventListener('input', function () {
                 var val = this.value.trim();
                 if (/^#[0-9a-f]{6}$/i.test(val)) {
@@ -19406,7 +19408,22 @@ async function loadMediaPreview(container, fileData) {
                 console.warn('Audio preview failed:', blob.type, blob.size, 'file:', fileData.filename);
                 container.innerHTML = '<span style="font-size:24px">🎵</span><span style="color:var(--text-muted);font-size:13px">Audio preview unavailable</span>';
             };
-            container.appendChild(audio);
+            // Custom loop toggle next to the native player.
+            const audioWrap = document.createElement('div');
+            audioWrap.style.cssText = 'display:flex;align-items:center;gap:8px;width:100%;max-width:min(480px, 85vw)';
+            const loopBtn = document.createElement('button');
+            loopBtn.type = 'button';
+            loopBtn.className = 'inline-loop-btn';
+            loopBtn.innerHTML = '&#128257;';
+            loopBtn.title = 'Loop';
+            loopBtn.onclick = () => {
+                audio.loop = !audio.loop;
+                loopBtn.classList.toggle('active', audio.loop);
+                loopBtn.title = audio.loop ? 'Loop: On' : 'Loop';
+            };
+            audioWrap.appendChild(audio);
+            audioWrap.appendChild(loopBtn);
+            container.appendChild(audioWrap);
         } else if (isText) {
             try {
                 if (fileData.file_size > 512 * 1024) {
@@ -19934,10 +19951,23 @@ function setupVideoControls(video) {
     const seekInput = document.getElementById('vc-seek');
     const timeDisplay = document.getElementById('vc-time');
     const fullscreenBtn = document.getElementById('vc-fullscreen');
+    const loopBtn = document.getElementById('vc-loop');
     const playedBar = document.getElementById('vc-played');
     const bufferedBar = document.getElementById('vc-buffered');
     const volumeSlider = document.getElementById('vc-volume');
     const muteBtn = document.getElementById('vc-mute');
+
+    // Loop toggle
+    if (loopBtn) {
+        video.loop = false;
+        loopBtn.classList.remove('active');
+        loopBtn.title = 'Loop';
+        loopBtn.onclick = () => {
+            video.loop = !video.loop;
+            loopBtn.classList.toggle('active', video.loop);
+            loopBtn.title = video.loop ? 'Loop: On' : 'Loop';
+        };
+    }
 
     playPauseBtn.innerHTML = '▶';
 
@@ -20082,6 +20112,19 @@ function setupAudioControls(audio) {
     const bufferedBar = document.getElementById('ac-buffered');
     const volumeSlider = document.getElementById('ac-volume');
     const muteBtn = document.getElementById('ac-mute');
+    const loopBtn = document.getElementById('ac-loop');
+
+    // Loop toggle
+    if (loopBtn) {
+        audio.loop = false;
+        loopBtn.classList.remove('active');
+        loopBtn.title = 'Loop';
+        loopBtn.onclick = () => {
+            audio.loop = !audio.loop;
+            loopBtn.classList.toggle('active', audio.loop);
+            loopBtn.title = audio.loop ? 'Loop: On' : 'Loop';
+        };
+    }
 
     playPauseBtn.innerHTML = '▶';
 

@@ -1993,4 +1993,72 @@ test.describe('Photo & Video Edit System', () => {
             await confirmUploadAndWait(page);
         });
     });
+
+    test.describe('Media Loop & Theme Settings', () => {
+
+        test('media viewer has a loop button that toggles video.loop', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestVideo(page);
+            await confirmUploadAndWait(page);
+            // Inline video preview renders; clicking opens the media viewer.
+            const inlineVideo = page.locator('.file-preview video').first();
+            await expect(inlineVideo).toBeVisible({ timeout: 20000 });
+            await inlineVideo.click();
+            await expect(page.locator('#media-viewer')).toBeVisible({ timeout: 5000 });
+            const viewerVideo = page.locator('#media-viewer-content video');
+            await expect(viewerVideo).toBeAttached();
+            const loopBtn = page.locator('#vc-loop');
+            await expect(loopBtn).toBeVisible();
+
+            // Loop starts off.
+            expect(await viewerVideo.evaluate((v: HTMLVideoElement) => v.loop)).toBe(false);
+
+            // Click -> on, button highlights.
+            await loopBtn.click();
+            expect(await viewerVideo.evaluate((v: HTMLVideoElement) => v.loop)).toBe(true);
+            await expect(loopBtn).toHaveClass(/active/);
+
+            // Click again -> off, highlight gone.
+            await loopBtn.click();
+            expect(await viewerVideo.evaluate((v: HTMLVideoElement) => v.loop)).toBe(false);
+            await expect(loopBtn).not.toHaveClass(/active/);
+        });
+
+        test('inline audio preview has a loop button that toggles audio.loop', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestAudio(page, wavBuffer(twoToneSamples(1)));
+            await confirmUploadAndWait(page);
+            const inlineAudio = page.locator('.file-preview audio').first();
+            await expect(inlineAudio).toBeVisible({ timeout: 20000 });
+            const loopBtn = page.locator('.file-preview .inline-loop-btn').first();
+            await expect(loopBtn).toBeVisible();
+
+            // Loop starts off.
+            expect(await inlineAudio.evaluate((a: HTMLAudioElement) => a.loop)).toBe(false);
+
+            // Click -> on, button highlights.
+            await loopBtn.click();
+            expect(await inlineAudio.evaluate((a: HTMLAudioElement) => a.loop)).toBe(true);
+            await expect(loopBtn).toHaveClass(/active/);
+
+            // Click again -> off, highlight gone.
+            await loopBtn.click();
+            expect(await inlineAudio.evaluate((a: HTMLAudioElement) => a.loop)).toBe(false);
+            await expect(loopBtn).not.toHaveClass(/active/);
+        });
+
+        test('theme hex inputs initialize to the current color on a fresh profile', async ({ page }) => {
+            await registerAndSetup(page);
+            await page.click('#settings-btn');
+            await expect(page.locator('#settings-modal')).toBeVisible({ timeout: 5000 });
+            await page.click('.settings-tab[data-tab="display-settings"]');
+            await expect(page.locator('#display-settings')).toBeVisible();
+
+            // Fresh user: hex inputs initialize to the default color (not empty).
+            expect(await page.inputValue('#theme-color-hex')).toBe('#4fc3f7');
+            expect(await page.inputValue('#theme-bg-hex')).toBe('#4fc3f7');
+            // Swatches remain passive previews (not interactive buttons).
+            expect(await page.evaluate(() => getComputedStyle(document.querySelector('#theme-color-preview .theme-swatch') as HTMLElement).cursor)).not.toBe('pointer');
+        });
+    });
 });
