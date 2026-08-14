@@ -3964,6 +3964,7 @@ document.addEventListener('DOMContentLoaded', () => {
         var file = selectedFiles[currentFileIndex];
         if (file.type.startsWith('image/')) openPhotoEditModal(file);
         else if (file.type.startsWith('video/')) openVideoEditModal(file);
+        else if (file.type.startsWith('audio/')) openAudioEditModal(file);
     });
     document.getElementById('upload-btn-mirror').addEventListener('click', _mirrorUploadFile);
     document.getElementById('upload-btn-rotate-left').addEventListener('click', function() { _rotateUploadFile(-90); });
@@ -4004,6 +4005,23 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('video-edit-confirm').addEventListener('click', _videoEditConfirm);
     document.getElementById('video-crop-confirm').addEventListener('click', _videoCropApply);
     document.getElementById('video-crop-cancel').addEventListener('click', _videoCropCancel);
+    document.getElementById('video-cut-play').addEventListener('click', _videoCutTogglePreview);
+
+    // Audio edit modal handlers
+    document.getElementById('audio-btn-mirror').addEventListener('click', _audioToggleMirror);
+    document.getElementById('audio-undo').addEventListener('click', _audioUndo);
+    document.getElementById('audio-redo').addEventListener('click', _audioRedo);
+    document.getElementById('audio-edit-cancel').addEventListener('click', closeAudioEditModal);
+    document.getElementById('audio-edit-confirm').addEventListener('click', _audioEditConfirm);
+    document.getElementById('audio-cut-play').addEventListener('click', _audioCutTogglePreview);
+    document.getElementById('audio-vol-slider').addEventListener('input', function() {
+        audioEditState.gain = parseInt(this.value, 10) / 100;
+        var val = document.getElementById('audio-vol-val');
+        if (val) val.textContent = this.value + '%';
+    });
+    document.getElementById('audio-vol-slider').addEventListener('change', function() {
+        _audioPushHistory();
+    });
 
     // Camera capture via getUserMedia (opens actual camera, with timer, flash, preview)
     var _cameraCaptureStream = null;
@@ -17282,8 +17300,15 @@ function _showUploadQuickActions() {
     var qa = document.getElementById('upload-quick-actions');
     if (!qa || selectedFiles.length === 0) { if (qa) qa.style.display = 'none'; return; }
     var file = selectedFiles[currentFileIndex];
-    var isMedia = file && (file.type.startsWith('image/') || file.type.startsWith('video/'));
+    var isMedia = file && (file.type.startsWith('image/') || file.type.startsWith('video/') || file.type.startsWith('audio/'));
     qa.style.display = isMedia ? 'flex' : 'none';
+    // Audio gets Edit only: the mirror/rotate quick buttons transform
+    // image/video previews, while audio edits live inside the edit modal.
+    var isAudio = !!(file && file.type.startsWith('audio/'));
+    ['upload-btn-mirror', 'upload-btn-rotate-left', 'upload-btn-rotate-right'].forEach(function(id) {
+        var b = document.getElementById(id);
+        if (b) b.style.display = isAudio ? 'none' : '';
+    });
 }
 function _applyUploadTransformsToPreview() {
     var preview = document.getElementById('upload-preview');
@@ -17716,6 +17741,7 @@ function _videoRestore(idx) {
     s.rotations = snap.rotations; s.mirrored = snap.mirrored;
     s.cutStart = snap.cutStart; s.cutEnd = snap.cutEnd;
     s.crop = snap.crop ? { x: snap.crop.x, y: snap.crop.y, w: snap.crop.w, h: snap.crop.h } : null;
+    _videoCutStopPreview();
     _videoRenderFrame();
     if (s.tool === 'crop') _videoCropInit();
     _videoCutRefreshUI();
@@ -17747,6 +17773,7 @@ function _transformCropRect(crop, W, H, deg, mirror) {
 }
 function _videoApplyTransform(deg, mirror) {
     var s = videoEditState;
+    _videoCutStopPreview();
     if (!s.video || !s.video.videoWidth) return;
     var d = _videoFrameDims();
     if (s.crop) s.crop = _transformCropRect(s.crop, d.w, d.h, deg, mirror);
@@ -17805,6 +17832,7 @@ function _videoRenderFrame() {
     _videoUpdateCropPreview();
 }
 function _videoSetTool(tool) {
+    _videoCutStopPreview();
     videoEditState.tool = tool;
     document.querySelectorAll('#video-edit-modal .photo-tool-btn').forEach(function(b) { b.classList.remove('active'); });
     var btn = tool ? document.getElementById('video-tool-' + tool) : null;
@@ -17816,6 +17844,7 @@ function _videoSetTool(tool) {
     var cs = document.getElementById('video-crop-settings');
     if (cs) cs.style.display = tool === 'crop' ? 'flex' : 'none';
     if (tool === 'crop') _videoCropInit();
+    if (tool === 'cut') _videoBuildCutStrip();
     _videoUpdateCropPreview();
 }
 function _videoSyncOverlay() {
@@ -17988,6 +18017,7 @@ function _videoCutInit() {
         else if (id === 'video-cut-end') dragging = 'end';
         else if (e.target.closest && e.target.closest('#video-cut-range')) dragging = 'move';
         else return;
+        _videoCutStopPreview();
         startX = e.clientX || (e.touches && e.touches[0] ? e.touches[0].clientX : 0);
         startLeft = parseFloat(range.style.left) || 0;
         startWidth = parseFloat(range.style.width) || 100;
@@ -18022,15 +18052,167 @@ function _videoCutRefreshUI() {
     var range = document.getElementById('video-cut-range');
     var st = document.getElementById('video-cut-start-time');
     var et = document.getElementById('video-cut-end-time');
+    var total = document.getElementById('video-cut-total');
     if (range) { range.style.left = (s.cutStart * 100) + '%'; range.style.width = ((s.cutEnd - s.cutStart) * 100) + '%'; }
     var dur = (s.video && isFinite(s.video.duration) && s.video.duration > 0) ? s.video.duration : 1;
     if (st) st.textContent = _vFmt(s.cutStart * dur);
     if (et) et.textContent = _vFmt(s.cutEnd * dur);
+    if (total) total.textContent = 'of ' + _vFmt(dur);
+    _renderCutRuler(document.getElementById('video-cut-ruler'), dur);
+    // Build the frame-strip lazily: needs a visible track AND a resolved
+    // duration (webm reports Infinity until the far-seek fix-up runs).
+    _videoBuildCutStrip();
 }
-function _vFmt(sec) { var m = Math.floor(sec / 60), s = Math.floor(sec % 60); return m + ':' + (s < 10 ? '0' : '') + s; }
+function _vFmt(sec) { if (!isFinite(sec) || sec < 0) return '0:00'; var m = Math.floor(sec / 60), s = Math.floor(sec % 60); return m + ':' + (s < 10 ? '0' : '') + s; }
+
+// Frame-strip preview: samples frames across the whole video and draws them
+// into the cut track, so the user can see the content while trimming. Cells
+// fill in left-to-right as each seek lands; source frames are shown (it is a
+// scrubbing aid, not a WYSIWYG of the edited result).
+var _videoStripBusy = false;
+function _videoBuildCutStrip() {
+    var s = videoEditState;
+    var cv = document.getElementById('video-cut-strip');
+    if (!cv || !s.video || !s.video.videoWidth || _videoStripBusy || s._stripBuilt) return;
+    var dur = s.video.duration;
+    if (!isFinite(dur) || dur <= 0) return;
+    var tl = document.getElementById('video-cut-timeline');
+    var track = document.getElementById('video-cut-track');
+    if (!tl || !track || tl.style.display === 'none' || !track.offsetWidth) return;
+    _videoStripBusy = true;
+    s._stripBuilt = true;
+    var W = track.offsetWidth, H = track.offsetHeight;
+    if (cv.width !== W) cv.width = W;
+    if (cv.height !== H) cv.height = H;
+    var g = cv.getContext('2d');
+    g.fillStyle = '#000';
+    g.fillRect(0, 0, W, H);
+    g.fillStyle = 'rgba(255,255,255,0.45)';
+    g.font = '11px sans-serif';
+    g.textAlign = 'center';
+    g.fillText('loading frames…', W / 2, H / 2 + 4);
+    var vw = s.video.videoWidth, vh = s.video.videoHeight;
+    var cols = Math.max(6, Math.min(48, Math.round(W / 60)));
+    var cellW = W / cols, cellH = H;
+    var fr = vw / vh, cellR = cellW / cellH;
+    var dw, dh;
+    if (fr > cellR) { dw = Math.max(1, cellW - 2); dh = Math.max(1, dw / fr); }
+    else { dh = Math.max(1, cellH - 2); dw = Math.max(1, dh * fr); }
+    var lastKey = s._blobUrl;
+    var seq = Promise.resolve();
+    for (var i = 0; i < cols; i++) {
+        (function(i) {
+            seq = seq.then(function() {
+                if (!s.video || s._blobUrl !== lastKey) return;
+                var t = Math.max(0.001, Math.min(dur - 0.001, ((i + 0.5) / cols) * dur));
+                return _videoSeekTo(s.video, t).then(function() {
+                    if (!s.video || s._blobUrl !== lastKey || !s.video.videoWidth) return;
+                    var dx = i * cellW + (cellW - dw) / 2;
+                    var dy = (cellH - dh) / 2;
+                    g.drawImage(s.video, dx, dy, dw, dh);
+                });
+            });
+        })(i);
+    }
+    seq.then(function() {
+        _videoStripBusy = false;
+        if (!s.video || s._blobUrl !== lastKey) return;
+        // Park the source back at the cut start so the editor canvas shows the
+        // first selected frame again (not the last sampled strip frame).
+        var d2 = (isFinite(s.video.duration) && s.video.duration > 0) ? s.video.duration : 1;
+        s.video.currentTime = Math.max(0.001, Math.min(s.cutStart * d2, d2 - 0.001));
+    });
+}
+function _videoSeekTo(v, t) {
+    return new Promise(function(resolve) {
+        var done = false;
+        var timer = setTimeout(function() { fin(); }, 700);
+        function fin() {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            v.removeEventListener('seeked', fin);
+            resolve();
+        }
+        v.addEventListener('seeked', fin);
+        try { v.currentTime = t; } catch (e) { fin(); }
+    });
+}
+
+// Renders a seconds ruler (tick marks with m:ss labels) under a cut track so
+// the user can see where the selected range sits in the full duration.
+function _renderCutRuler(el, dur) {
+    if (!el) return;
+    var d = (isFinite(dur) && dur > 0) ? dur : 1;
+    var interval = 1;
+    if (d > 180) interval = 60;
+    else if (d > 90) interval = 30;
+    else if (d > 40) interval = 10;
+    else if (d > 20) interval = 5;
+    else if (d > 10) interval = 2;
+    var html = '';
+    for (var t = 0; t <= d + 0.0001; t += interval) {
+        var pct = (t / d) * 100;
+        html += '<div class="video-cut-tick" style="left:' + pct + '%"><span class="video-cut-tick-label">' + _vFmt(t) + '</span></div>';
+    }
+    el.innerHTML = html;
+}
+
+// Preview play: plays the source video inside the selected cut range (looping)
+// with the current edit view (rotation/mirror/crop) rendered to the canvas.
+var _videoPreviewPlaying = false;
+var _videoPreviewRAF = null;
+function _videoCutTogglePreview() {
+    var s = videoEditState;
+    var btn = document.getElementById('video-cut-play');
+    if (!s.video || !s.video.videoWidth) return;
+    if (_videoPreviewPlaying) { _videoCutStopPreview(); return; }
+    var dur = (isFinite(s.video.duration) && s.video.duration > 0) ? s.video.duration : 1;
+    var startT = Math.max(0.001, Math.min(s.cutStart * dur, dur - 0.001));
+    var endT = Math.max(startT + 0.001, Math.min(s.cutEnd * dur, dur));
+    _videoPreviewPlaying = true;
+    if (btn) { btn.textContent = '⏸ Stop Preview'; btn.classList.add('active'); }
+    s.video.muted = false;
+    var ph = document.getElementById('video-cut-playhead');
+    if (ph) ph.style.display = 'block';
+    s.video.currentTime = startT;
+    var p = s.video.play();
+    if (p && p.catch) p.catch(function() { _videoCutStopPreview(); });
+    var lastT = -1;
+    function tick() {
+        if (!_videoPreviewPlaying) return;
+        var t = s.video.currentTime;
+        if (t !== lastT) { lastT = t; _videoRenderFrame(); }
+        if (t >= endT - 0.02 || s.video.ended) s.video.currentTime = startT;
+        var posEl = document.getElementById('video-cut-pos');
+        if (posEl) posEl.textContent = _vFmt(t);
+        if (ph) ph.style.left = ((s.cutStart + (t - startT) / dur) * 100) + '%';
+        _videoPreviewRAF = requestAnimationFrame(tick);
+    }
+    _videoPreviewRAF = requestAnimationFrame(tick);
+}
+function _videoCutStopPreview() {
+    var s = videoEditState;
+    _videoPreviewPlaying = false;
+    if (_videoPreviewRAF) { cancelAnimationFrame(_videoPreviewRAF); _videoPreviewRAF = null; }
+    var btn = document.getElementById('video-cut-play');
+    if (btn) { btn.textContent = '▶ Preview'; btn.classList.remove('active'); }
+    var ph = document.getElementById('video-cut-playhead');
+    if (ph) ph.style.display = 'none';
+    if (!s.video) return;
+    try { s.video.pause(); } catch (e) {}
+    s.video.muted = true;
+    var dur = (isFinite(s.video.duration) && s.video.duration > 0) ? s.video.duration : 1;
+    var startT = Math.max(0.001, Math.min(s.cutStart * dur, dur - 0.001));
+    s.video.currentTime = startT;
+    var posEl = document.getElementById('video-cut-pos');
+    if (posEl) posEl.textContent = _vFmt(startT);
+    _videoRenderFrame();
+}
 function openVideoEditModal(file) {
     var s = videoEditState;
     s.rotations = 0; s.mirrored = false; s.cutStart = 0; s.cutEnd = 1; s.crop = null; s._ready = false;
+    s._stripBuilt = false;
     s.history = []; s.historyIdx = -1;
     s.video = document.getElementById('video-edit-source');
     if (s._blobUrl) URL.revokeObjectURL(s._blobUrl);
@@ -18064,9 +18246,34 @@ function _videoReadyToEdit() {
     document.getElementById('video-edit-modal').style.display = 'flex';
     // Open with no tool forced: the user picks Crop / Cut themselves.
     _videoSetTool(null);
+    // Must run AFTER the tool reset: _videoCutStopPreview (fired by
+    // _videoSetTool) seeks back to cutStart, which would clobber the pending
+    // far-seek that resolves the real duration of Infinity-duration webms.
+    _videoResolveDuration();
+}
+// MediaRecorder-produced webm often reports duration=Infinity until the file is
+// fully parsed; a far seek clamps currentTime to the real end and fires seeked
+// with the real duration. Until resolved, the cut ruler/playback would use a
+// bogus 1-second scale.
+function _videoResolveDuration() {
+    var s = videoEditState;
+    if (!s.video) return;
+    var dur = s.video.duration;
+    if (isFinite(dur) && dur > 0) {
+        _videoCutRefreshUI();
+        return;
+    }
+    s.video.currentTime = 1e7;
+    var prevSeeked = s.video.onseeked;
+    s.video.onseeked = function() {
+        s.video.onseeked = prevSeeked;
+        _videoCutRefreshUI();
+        if (prevSeeked) prevSeeked.call(s.video);
+    };
 }
 function closeVideoEditModal() {
     var s = videoEditState;
+    _videoCutStopPreview();
     if (s._blobUrl) { URL.revokeObjectURL(s._blobUrl); s._blobUrl = null; }
     if (s.video) { try { s.video.pause(); } catch (e) {} s.video.removeAttribute('src'); try { s.video.load(); } catch (e) {} }
     s.video = null; s.canvas = null; s.ctx = null; s._ready = false;
@@ -18232,6 +18439,485 @@ function _videoExport(file, cutStart, cutEnd, rotations, mirrored, cropBox) {
         };
     });
 }
+
+// ===== Audio Edit Modal =====
+// Edits are state-only until Confirm: the cut range (fractions), the reverse
+// flag, and the gain are all applied in one pass when the file is re-encoded
+// to a 16-bit PCM WAV, so intermediate edits never degrade the audio.
+var audioEditState = {
+    buffer: null, srcFile: null,
+    cutStart: 0, cutEnd: 1, reversed: false, gain: 1,
+    history: [], historyIdx: -1
+};
+var _audioCtx = null;
+var _audioPreviewPlaying = false;
+var _audioPreviewTimer = null;
+var _audioPreviewSource = null;
+function _audioGetCtx() {
+    if (_audioCtx) return _audioCtx;
+    var AC = window.AudioContext || window.webkitAudioContext;
+    if (AC) _audioCtx = new AC();
+    return _audioCtx;
+}
+function _audioPushHistory() {
+    var s = audioEditState;
+    s.historyIdx++;
+    s.history = s.history.slice(0, s.historyIdx);
+    s.history.push({ cutStart: s.cutStart, cutEnd: s.cutEnd, reversed: s.reversed, gain: s.gain });
+    if (s.history.length > 30) { s.history.shift(); s.historyIdx--; }
+    _audioUpdateHistoryBtns();
+}
+function _audioUpdateHistoryBtns() {
+    var s = audioEditState;
+    var u = document.getElementById('audio-undo');
+    var r = document.getElementById('audio-redo');
+    if (u) u.disabled = s.historyIdx <= 0;
+    if (r) r.disabled = s.historyIdx >= s.history.length - 1;
+}
+function _audioRestore(idx) {
+    var s = audioEditState;
+    if (idx < 0 || idx >= s.history.length) return;
+    s.historyIdx = idx;
+    var snap = s.history[idx];
+    s.cutStart = snap.cutStart; s.cutEnd = snap.cutEnd;
+    s.reversed = snap.reversed; s.gain = snap.gain;
+    _audioCutRefreshUI();
+    _audioVolSyncUI();
+    _audioMirrorUI();
+    _audioUpdateHistoryBtns();
+}
+function _audioUndo() { _audioRestore(audioEditState.historyIdx - 1); }
+function _audioRedo() { _audioRestore(audioEditState.historyIdx + 1); }
+function _audioToggleMirror() {
+    var s = audioEditState;
+    if (!s.buffer) return;
+    _audioCutStopPreview();
+    s.reversed = !s.reversed;
+    _audioPushHistory();
+    _audioMirrorUI();
+    _drawAudioWaveform();
+}
+function _audioMirrorUI() {
+    var btn = document.getElementById('audio-btn-mirror');
+    if (btn) btn.classList.toggle('active', !!audioEditState.reversed);
+}
+function _audioVolSyncUI() {
+    var s = audioEditState;
+    var sl = document.getElementById('audio-vol-slider');
+    var val = document.getElementById('audio-vol-val');
+    if (sl) sl.value = String(Math.round(s.gain * 100));
+    if (val) val.textContent = Math.round(s.gain * 100) + '%';
+}
+function _audioCutInit() {
+    var s = audioEditState;
+    var track = document.getElementById('audio-cut-track');
+    var range = document.getElementById('audio-cut-range');
+    if (!track || !range) return;
+    s.cutStart = 0; s.cutEnd = 1;
+    _audioCutRefreshUI();
+    var dragging = null, startX = 0, startLeft = 0, startWidth = 0;
+    function onDown(e) {
+        var id = e.target.id || '';
+        if (id === 'audio-cut-start') dragging = 'start';
+        else if (id === 'audio-cut-end') dragging = 'end';
+        else if (e.target.closest && e.target.closest('#audio-cut-range')) dragging = 'move';
+        else return;
+        _audioCutStopPreview();
+        startX = e.clientX || (e.touches && e.touches[0] ? e.touches[0].clientX : 0);
+        startLeft = parseFloat(range.style.left) || 0;
+        startWidth = parseFloat(range.style.width) || 100;
+        e.preventDefault();
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+        document.addEventListener('touchmove', onMove, { passive: false });
+        document.addEventListener('touchend', onUp);
+        document.addEventListener('touchcancel', onUp);
+    }
+    function onMove(e) {
+        var cx = e.clientX || (e.touches && e.touches[0] ? e.touches[0].clientX : 0);
+        var dx = (cx - startX) / Math.max(1, track.offsetWidth) * 100;
+        if (dragging === 'start') {
+            var nl = Math.max(0, Math.min(startLeft + dx, startLeft + startWidth - 3));
+            range.style.left = nl + '%'; s.cutStart = nl / 100;
+        } else if (dragging === 'end') {
+            var nw = Math.max(3, Math.min(100 - startLeft, startWidth + dx));
+            range.style.width = nw + '%'; s.cutEnd = (startLeft + nw) / 100;
+        } else if (dragging === 'move') {
+            var nl2 = Math.max(0, Math.min(100 - startWidth, startLeft + dx));
+            range.style.left = nl2 + '%'; s.cutStart = nl2 / 100; s.cutEnd = (nl2 + startWidth) / 100;
+        }
+        _audioCutRefreshUI();
+        e.preventDefault();
+    }
+    function onUp() {
+        dragging = null;
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        document.removeEventListener('touchmove', onMove);
+        document.removeEventListener('touchend', onUp);
+        document.removeEventListener('touchcancel', onUp);
+        _audioPushHistory();
+    }
+    track.onmousedown = onDown; track.ontouchstart = onDown;
+}
+function _audioCutRefreshUI() {
+    var s = audioEditState;
+    var range = document.getElementById('audio-cut-range');
+    var st = document.getElementById('audio-cut-start-time');
+    var et = document.getElementById('audio-cut-end-time');
+    var total = document.getElementById('audio-cut-total');
+    if (range) { range.style.left = (s.cutStart * 100) + '%'; range.style.width = ((s.cutEnd - s.cutStart) * 100) + '%'; }
+    var dur = (s.buffer && s.buffer.duration > 0) ? s.buffer.duration : 1;
+    if (st) st.textContent = _vFmt(s.cutStart * dur);
+    if (et) et.textContent = _vFmt(s.cutEnd * dur);
+    if (total) total.textContent = 'of ' + _vFmt(dur);
+    _renderCutRuler(document.getElementById('audio-cut-ruler'), dur);
+    _drawAudioWaveform();
+}
+// Draws a mono peak waveform; reversed audio is drawn right-to-left and the
+// currently selected cut range is highlighted so the cut is easy to eyeball.
+function _drawAudioWaveform() {
+    var s = audioEditState;
+    var cv = document.getElementById('audio-edit-waveform');
+    if (!cv || !s.buffer) return;
+    var buf = s.buffer;
+    var cols = Math.max(64, Math.floor(cv.clientWidth || 560));
+    var H = Math.max(40, cv.clientHeight || 90);
+    if (cv.width !== cols) cv.width = cols;
+    if (cv.height !== H) cv.height = H;
+    var g = cv.getContext('2d');
+    g.clearRect(0, 0, cols, H);
+    var data0 = buf.getChannelData(0);
+    g.fillStyle = '#4fc3f7';
+    for (var x = 0; x < cols; x++) {
+        var frac = s.reversed ? (1 - (x + 0.5) / cols) : ((x + 0.5) / cols);
+        var i0 = Math.floor(frac * data0.length);
+        var i1 = Math.min(data0.length, i0 + Math.max(1, Math.floor(data0.length / cols)));
+        var mn = 0, mx = 0;
+        for (var i = i0; i < i1; i++) {
+            var v = data0[i];
+            if (v < mn) mn = v;
+            if (v > mx) mx = v;
+        }
+        var yTop = (1 - Math.max(mx, 0)) / 2 * H;
+        var yBot = (1 - Math.min(mn, 0)) / 2 * H;
+        g.fillRect(x, Math.min(yTop, yBot), 1, Math.max(1, Math.abs(yBot - yTop)));
+    }
+    // Highlight the selected cut range.
+    g.fillStyle = 'rgba(79,195,247,0.18)';
+    g.fillRect(s.cutStart * cols, 0, Math.max(1, (s.cutEnd - s.cutStart) * cols), H);
+}
+// Preview: plays the cut range (reversed if mirrored) through the current gain.
+function _audioCutTogglePreview() {
+    var s = audioEditState;
+    var btn = document.getElementById('audio-cut-play');
+    if (!s.buffer) return;
+    if (_audioPreviewPlaying) { _audioCutStopPreview(); return; }
+    var ctx = _audioGetCtx();
+    if (!ctx) return;
+    if (ctx.state === 'suspended') ctx.resume().catch(function() {});
+    var dur = s.buffer.duration;
+    var start = Math.max(0, Math.min(s.cutStart * dur, dur - 0.001));
+    var len = Math.max(0.001, Math.min(s.cutEnd * dur, dur) - start);
+    var src = ctx.createBufferSource();
+    src.buffer = s.buffer;
+    var g = ctx.createGain();
+    g.gain.value = Math.max(0, s.gain);
+    src.connect(g); g.connect(ctx.destination);
+    if (s.reversed) {
+        src.playbackRate.value = -1;
+        src.start(0, start + len, len);
+    } else {
+        src.start(0, start, len);
+    }
+    _audioPreviewSource = src;
+    src.onended = function() { if (_audioPreviewPlaying) _audioCutStopPreview(); };
+    _audioPreviewPlaying = true;
+    if (btn) { btn.textContent = '⏸ Stop Preview'; btn.classList.add('active'); }
+    var ph = document.getElementById('audio-cut-playhead');
+    if (ph) ph.style.display = 'block';
+    var t0 = ctx.currentTime;
+    _audioPreviewTimer = setInterval(function() {
+        if (!_audioPreviewPlaying) return;
+        var t = ctx.currentTime - t0;
+        var pos = s.reversed ? (start + len - t) : (start + t);
+        var posEl = document.getElementById('audio-cut-pos');
+        if (posEl) posEl.textContent = _vFmt(Math.max(0, pos));
+        if (ph) ph.style.left = Math.max(0, Math.min(100, (pos / dur) * 100)) + '%';
+    }, 100);
+}
+function _audioCutStopPreview() {
+    var s = audioEditState;
+    _audioPreviewPlaying = false;
+    if (_audioPreviewTimer) { clearInterval(_audioPreviewTimer); _audioPreviewTimer = null; }
+    if (_audioPreviewSource) { try { _audioPreviewSource.stop(); } catch (e) {} _audioPreviewSource = null; }
+    var btn = document.getElementById('audio-cut-play');
+    if (btn) { btn.textContent = '▶ Preview'; btn.classList.remove('active'); }
+    var ph = document.getElementById('audio-cut-playhead');
+    if (ph) ph.style.display = 'none';
+    var dur = (s.buffer && s.buffer.duration > 0) ? s.buffer.duration : 1;
+    var posEl = document.getElementById('audio-cut-pos');
+    if (posEl) posEl.textContent = _vFmt(s.cutStart * dur);
+}
+// Re-encodes the cut range to a 16-bit PCM WAV, preserving channels, with
+// optional reverse and gain (clamped to [-1, 1]).
+function encodeEditedWav(buf, startFrac, endFrac, reversed, gain) {
+    var rate = buf.sampleRate;
+    var chans = buf.numberOfChannels;
+    var s0 = Math.max(0, Math.min(buf.length - 1, Math.round(startFrac * buf.length)));
+    var s1 = Math.max(s0 + 1, Math.min(buf.length, Math.round(endFrac * buf.length)));
+    var n = s1 - s0;
+    var blockAlign = chans * 2;
+    var dataSize = n * blockAlign;
+    var ab = new ArrayBuffer(44 + dataSize);
+    var dv = new DataView(ab);
+    function wstr(off, str) { for (var i = 0; i < str.length; i++) dv.setUint8(off + i, str.charCodeAt(i)); }
+    wstr(0, 'RIFF'); dv.setUint32(4, 36 + dataSize, true); wstr(8, 'WAVE');
+    wstr(12, 'fmt '); dv.setUint32(16, 16, true);
+    dv.setUint16(20, 1, true); dv.setUint16(22, chans, true);
+    dv.setUint32(24, rate, true); dv.setUint32(28, rate * blockAlign, true);
+    dv.setUint16(32, blockAlign, true); dv.setUint16(34, 16, true);
+    wstr(36, 'data'); dv.setUint32(40, dataSize, true);
+    var off = 44;
+    var g = (isFinite(gain) && gain >= 0) ? gain : 0;
+    for (var i = 0; i < n; i++) {
+        var srcIdx = reversed ? (s1 - 1 - i) : (s0 + i);
+        for (var c = 0; c < chans; c++) {
+            var v = buf.getChannelData(c)[srcIdx] * g;
+            v = Math.max(-1, Math.min(1, v));
+            dv.setInt16(off, v < 0 ? v * 0x8000 : v * 0x7FFF, true);
+            off += 2;
+        }
+    }
+    return ab;
+}
+// Re-encodes the edited audio, preserving the source format when the browser
+// can actually encode it, so an mp3/ogg/webm edit doesn't balloon into WAV:
+//   - webm → real-time re-encode via MediaRecorder (audio/webm, opus)
+//   - mp3  → WebCodecs AudioEncoder('mp3') where the browser implements it
+//            (Chrome registers the codec but rejects encoding in most builds,
+//            so this usually falls through to WAV); raw frames get an ID3v2
+//            header so the result is a complete, magic-valid mp3
+//   - ogg  → no in-browser encoder exists → WAV fallback
+//   - wav / anything else → WAV (unchanged)
+// Any encode failure degrades gracefully to WAV instead of blocking the upload.
+async function encodeEditedAudio(srcFile, buf, startFrac, endFrac, reversed, gain) {
+    var name = String((srcFile && srcFile.name) || 'audio');
+    var ext = name.split('.').pop().toLowerCase();
+    var base = name.replace(/\.[^.]+$/, '') || 'audio';
+    var mime = (getCorrectMimeType(name, srcFile ? srcFile.type : '') || '').toLowerCase();
+    var isWebm = ext === 'webm' || mime === 'audio/webm';
+    var isMp3 = ext === 'mp3' || mime === 'audio/mpeg';
+    if (isWebm) {
+        var wb = await encodeEditedWebm(buf, startFrac, endFrac, reversed, gain);
+        if (wb && wb.size > 300) return new File([wb], base + '.webm', { type: 'audio/webm' });
+    } else if (isMp3) {
+        var mp3 = await encodeEditedMp3(buf, startFrac, endFrac, reversed, gain);
+        if (mp3 && mp3.byteLength > 20) return new File([mp3], base + '.mp3', { type: 'audio/mpeg' });
+    }
+    var ab = encodeEditedWav(buf, startFrac, endFrac, reversed, gain);
+    return new File([ab], base + '.wav', { type: 'audio/wav' });
+}
+// Real-time re-encode of the edited range to opus-in-webm. Plays the buffer
+// through the AudioContext exactly like the preview does (reverse via
+// playbackRate, gain via createGain), so the recorded file reflects every
+// edit. Watchdog only guards against a suspended AudioContext hanging forever.
+function encodeEditedWebm(buf, startFrac, endFrac, reversed, gain) {
+    return new Promise(function(resolve) {
+        var AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC || !window.MediaRecorder) { resolve(null); return; }
+        var ctx = null, src = null, rec = null, timer = null;
+        var chunks = [];
+        var settled = false;
+        function cleanup() {
+            if (timer) { clearTimeout(timer); timer = null; }
+            if (src) { try { src.disconnect(); } catch (e) {} src = null; }
+            if (ctx) { try { ctx.close(); } catch (e) {} ctx = null; }
+        }
+        function finish(ok, blob) {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            resolve(ok && blob ? blob : null);
+        }
+        try {
+            ctx = new AC();
+            var dest = ctx.createMediaStreamDestination();
+            src = ctx.createBufferSource();
+            src.buffer = buf;
+            var g = ctx.createGain();
+            g.gain.value = Math.max(0, gain);
+            src.connect(g); g.connect(dest);
+            var opts = {};
+            if (MediaRecorder.isTypeSupported('audio/webm')) opts.mimeType = 'audio/webm';
+            rec = new MediaRecorder(dest.stream, opts);
+            rec.ondataavailable = function(e) { if (e.data && e.data.size > 0) chunks.push(e.data); };
+            rec.onstop = function() {
+                var blob = new Blob(chunks, { type: 'audio/webm' });
+                finish(chunks.length > 0 && blob.size > 300, blob);
+            };
+            rec.onerror = function() { finish(false); };
+            var dur = buf.duration;
+            var start = Math.max(0, Math.min(startFrac * dur, dur - 0.001));
+            var len = Math.max(0.001, Math.min(endFrac * dur, dur) - start);
+            if (reversed) { src.playbackRate.value = -1; src.start(0, start + len, len); }
+            else { src.start(0, start, len); }
+            src.onended = function() { try { rec.stop(); } catch (e) { finish(false); } };
+            rec.start(250);
+            // Real-time encode: the onended path normally finishes first. The
+            // watchdog is only a safety net so a stuck context can't hang.
+            timer = setTimeout(function() {
+                if (!settled) { try { rec.stop(); } catch (e) { finish(false); } }
+            }, Math.max(8000, dur * 3000 + 5000));
+            if (ctx.state === 'suspended') ctx.resume().catch(function() {});
+        } catch (e) {
+            finish(false);
+        }
+    });
+}
+// Offline mp3 encode via WebCodecs where the browser implements it. Returns
+// null when unsupported or the encode fails, so the caller falls back to WAV.
+function encodeEditedMp3(buf, startFrac, endFrac, reversed, gain) {
+    if (!window.AudioEncoder || !window.AudioData) return Promise.resolve(null);
+    var rate = buf.sampleRate;
+    var chans = buf.numberOfChannels;
+    if (chans !== 1 && chans !== 2) return Promise.resolve(null);
+    var s0 = Math.max(0, Math.min(buf.length - 1, Math.round(startFrac * buf.length)));
+    var s1 = Math.max(s0 + 1, Math.min(buf.length, Math.round(endFrac * buf.length)));
+    var n = s1 - s0;
+    return new Promise(function(resolve) {
+        var encoder = null, chunks = [], failed = false, done = false;
+        function bail() {
+            if (done) return;
+            done = true;
+            try { if (encoder) encoder.close(); } catch (e) {}
+            resolve(null);
+        }
+        try {
+            encoder = new AudioEncoder({
+                output: function(chunk) {
+                    var b = new Uint8Array(chunk.byteLength);
+                    chunk.copyTo(b);
+                    chunks.push(b);
+                },
+                error: function() { failed = true; bail(); }
+            });
+            encoder.configure({ codec: 'mp3', sampleRate: rate, numberOfChannels: chans });
+        } catch (e) { bail(); return; }
+        var g = (isFinite(gain) && gain >= 0) ? gain : 0;
+        var CHUNK = 8192, pos = 0;
+        function pump() {
+            if (done || failed || !encoder) { bail(); return; }
+            if (pos >= n) {
+                encoder.flush().then(function() {
+                    try { encoder.close(); } catch (e) {}
+                    if (done) return;
+                    done = true;
+                    resolve(_mp3WithId3(chunks));
+                }).catch(function() { bail(); });
+                return;
+            }
+            var cnt = Math.min(CHUNK, n - pos);
+            var planar = new Float32Array(cnt * chans);
+            for (var c = 0; c < chans; c++) {
+                var ch = buf.getChannelData(c);
+                var base = c * cnt;
+                for (var i = 0; i < cnt; i++) {
+                    var srcIdx = reversed ? (s1 - 1 - (pos + i)) : (s0 + pos + i);
+                    var v = ch[srcIdx] * g;
+                    if (v > 1) v = 1; else if (v < -1) v = -1;
+                    planar[base + i] = v;
+                }
+            }
+            var ad;
+            try {
+                ad = new AudioData({
+                    format: 'f32-planar', sampleRate: rate,
+                    numberOfFrames: cnt, numberOfChannels: chans,
+                    timestamp: Math.round((pos / rate) * 1e6), data: planar
+                });
+            } catch (e) { bail(); return; }
+            try { encoder.encode(ad); ad.close(); } catch (e) { bail(); return; }
+            pos += cnt;
+            setTimeout(pump, 0);
+        }
+        pump();
+    });
+}
+// Wraps raw MPEG frames in a minimal ID3v2.3 header (zero frames) so the
+// exported file is a complete mp3 that passes the client-side ID3 magic check.
+function _mp3WithId3(frames) {
+    var total = 0;
+    for (var i = 0; i < frames.length; i++) total += frames[i].length;
+    var out = new Uint8Array(10 + total);
+    out[0] = 0x49; out[1] = 0x44; out[2] = 0x33; // 'ID3'
+    out[3] = 3; out[4] = 0; out[5] = 0; // v2.3, no flags
+    // syncsafe size = 0 (no frames or padding in the tag body)
+    var off = 10;
+    for (var j = 0; j < frames.length; j++) { out.set(frames[j], off); off += frames[j].length; }
+    return out.buffer;
+}
+function openAudioEditModal(file) {
+    var s = audioEditState;
+    var err = document.getElementById('audio-edit-error');
+    if (err) err.style.display = 'none';
+    var reader = new FileReader();
+    reader.onerror = function() {
+        if (err) { err.textContent = 'Could not read that audio file.'; err.style.display = 'block'; }
+    };
+    reader.onload = function() {
+        var ctx = _audioGetCtx();
+        if (!ctx) {
+            if (err) { err.textContent = 'Audio editing is not supported in this browser.'; err.style.display = 'block'; }
+            return;
+        }
+        ctx.decodeAudioData(reader.result).then(function(buf) {
+            s.buffer = buf;
+            s.srcFile = file;
+            s.cutStart = 0; s.cutEnd = 1; s.reversed = false; s.gain = 1;
+            s.history = []; s.historyIdx = -1;
+            _audioPushHistory();
+            _drawAudioWaveform();
+            _audioCutRefreshUI();
+            _audioVolSyncUI();
+            _audioMirrorUI();
+            _audioUpdateHistoryBtns();
+            _audioCutInit();
+            document.getElementById('audio-edit-modal').style.display = 'flex';
+        }).catch(function() {
+            if (err) { err.textContent = 'Could not decode that audio file.'; err.style.display = 'block'; }
+        });
+    };
+    reader.readAsArrayBuffer(file);
+}
+function closeAudioEditModal() {
+    var s = audioEditState;
+    _audioCutStopPreview();
+    if (_audioCtx) { try { _audioCtx.close(); } catch (e) {} _audioCtx = null; }
+    s.buffer = null; s.srcFile = null;
+    s.history = []; s.historyIdx = -1;
+    s.cutStart = 0; s.cutEnd = 1; s.reversed = false; s.gain = 1;
+    document.getElementById('audio-edit-modal').style.display = 'none';
+}
+async function _audioEditConfirm() {
+    var s = audioEditState;
+    if (!s.buffer || !s.srcFile) return;
+    var err = document.getElementById('audio-edit-error');
+    if (err) err.style.display = 'none';
+    _audioCutStopPreview();
+    try {
+        var out = await encodeEditedAudio(s.srcFile, s.buffer, s.cutStart, s.cutEnd, s.reversed, s.gain);
+        if (!out || out.size < 45) throw new Error('Export produced an empty file');
+        selectedFiles[currentFileIndex] = out;
+        _clearUploadEditState(currentFileIndex);
+        closeAudioEditModal();
+        renderUploadPreview();
+        _showUploadQuickActions();
+    } catch (ex) {
+        console.error('Audio export failed:', ex);
+        if (err) { err.textContent = 'Audio export failed: ' + (ex && ex.message ? ex.message : ex); err.style.display = 'block'; }
+    }
+}
 // G5 — client-side magic-byte validation. The server stores every upload as
 // client-encrypted ciphertext, so it cannot sniff content; the client is the
 // only place plaintext exists, so type checks happen HERE before encryption.
@@ -18247,6 +18933,7 @@ const UPLOAD_MAGIC_SIGNATURES = [
     { mime: 'audio/wav', sig: [0x52, 0x49, 0x46, 0x46] }, // RIFF....WAVE (checked below)
     { mime: 'audio/mpeg', sig: [0x49, 0x44, 0x33] }, // ID3
     { mime: 'audio/ogg', sig: [0x4F, 0x67, 0x67, 0x53] },
+    { mime: 'audio/webm', sig: [0x1A, 0x45, 0xDF, 0xA3] }, // EBML (opus webm)
     { mime: 'video/mp4', sig: [0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70] },
     { mime: 'video/webm', sig: [0x1A, 0x45, 0xDF, 0xA3] },
     { mime: 'application/pdf', sig: [0x25, 0x50, 0x44, 0x46] }, // %PDF

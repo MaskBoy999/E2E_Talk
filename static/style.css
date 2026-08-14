@@ -4838,6 +4838,21 @@ body.show-msg-times-hover .message:hover .file-card .time-hover {
     border: 1px solid var(--bg-border);
     overflow: hidden;
 }
+/* The video cut track is taller and shows a frame-strip preview (the audio
+   track keeps the compact height and uses a waveform above it instead). */
+#video-cut-track {
+    height: 52px;
+}
+.video-cut-strip {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: #000;
+    pointer-events: none;
+    z-index: 1;
+}
 .video-cut-range {
     position: absolute;
     top: 0;
@@ -4845,6 +4860,7 @@ body.show-msg-times-hover .message:hover .file-card .time-hover {
     background: rgba(79,195,247,0.2);
     border: 2px solid var(--accent);
     border-radius: 4px;
+    z-index: 2;
 }
 .video-cut-handle {
     position: absolute;
@@ -4862,6 +4878,174 @@ body.show-msg-times-hover .message:hover .file-card .time-hover {
     justify-content: space-between;
     margin-top: 6px;
     font-size: 12px;
+    color: var(--text-muted);
+}
+.video-cut-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+}
+.video-cut-play-btn {
+    border: 1px solid var(--accent);
+    background: rgba(79, 195, 247, 0.12);
+    color: var(--accent);
+    border-radius: 8px;
+    padding: 5px 12px;
+    font-size: 12px;
+    cursor: pointer;
+    transition: background 0.15s;
+    flex-shrink: 0;
+}
+.video-cut-play-btn:hover {
+    background: rgba(79, 195, 247, 0.25);
+}
+.video-cut-play-btn.active {
+    background: var(--accent);
+    color: #fff;
+}
+.video-cut-pos {
+    font-size: 12px;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+    min-width: 34px;
+    flex-shrink: 0;
+}
+.video-cut-hint {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-left: auto;
+}
+.video-cut-playhead {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: var(--accent);
+    z-index: 6;
+    pointer-events: none;
+    display: none;
+}
+.video-cut-ruler {
+    position: relative;
+    height: 18px;
+    margin-top: 4px;
+    pointer-events: none;
+    user-select: none;
+}
+.video-cut-tick {
+    position: absolute;
+    top: 0;
+    width: 1px;
+    height: 5px;
+    background: rgba(255, 255, 255, 0.35);
+}
+.video-cut-tick-label {
+    position: absolute;
+    top: 6px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 10px;
+    color: rgba(255, 255, 255, 0.55);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+
+/* ===== Audio Edit Modal ===== */
+.audio-edit-container {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: var(--bg-primary);
+    display: flex;
+    flex-direction: column;
+    z-index: 10001;
+    padding: 0;
+}
+.audio-edit-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--bg-border);
+    flex-shrink: 0;
+    flex-wrap: wrap;
+}
+.audio-edit-title {
+    font-weight: 600;
+    color: var(--accent);
+    font-size: 15px;
+    margin-right: auto;
+}
+.audio-edit-tools {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+}
+.audio-edit-actions {
+    display: flex;
+    gap: 8px;
+}
+.audio-edit-actions .btn-cancel,
+.audio-edit-actions .btn-invite {
+    font-size: 13px;
+    padding: 6px 14px;
+}
+.audio-edit-error {
+    color: var(--danger);
+    font-size: 13px;
+    padding: 8px 16px;
+    background: var(--bg-secondary);
+}
+.audio-edit-body {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 14px;
+    padding: 18px 24px;
+    min-height: 0;
+    overflow-y: auto;
+}
+.audio-edit-waveform-wrap {
+    background: var(--bg-secondary);
+    border: 1px solid var(--bg-border);
+    border-radius: 8px;
+    padding: 10px;
+}
+.audio-edit-waveform {
+    display: block;
+    width: 100%;
+    height: 90px;
+}
+.audio-cut-timeline {
+    background: var(--bg-secondary);
+    border: 1px solid var(--bg-border);
+    border-radius: 8px;
+    padding: 12px 16px;
+}
+.audio-vol-control {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    flex-wrap: wrap;
+}
+.audio-vol-label {
+    font-size: 13px;
+    color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.audio-vol-label input[type="range"] {
+    width: 180px;
+    accent-color: var(--accent);
+}
+.audio-vol-val {
+    font-variant-numeric: tabular-nums;
+}
+.audio-vol-hint {
+    font-size: 11px;
     color: var(--text-muted);
 }
 

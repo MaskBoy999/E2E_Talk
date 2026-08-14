@@ -243,14 +243,204 @@ async function cropBoxBounds(page: Page, prefix: 'photo' | 'video') {
     }, prefix);
 }
 
-async function dragCutEndTo(page: Page, fraction: number) {
-    const track = await page.locator('#video-cut-track').boundingBox();
-    const end = await page.locator('#video-cut-end').boundingBox();
+async function dragCutEndToPrefix(page: Page, prefix: 'video' | 'audio', fraction: number) {
+    const track = await page.locator(`#${prefix}-cut-track`).boundingBox();
+    const end = await page.locator(`#${prefix}-cut-end`).boundingBox();
     if (!track || !end) throw new Error('cut track not visible');
     await page.mouse.move(end.x + end.width / 2, end.y + end.height / 2);
     await page.mouse.down();
     await page.mouse.move(end.x + end.width / 2 - track.width * (1 - fraction), end.y + end.height / 2, { steps: 8 });
     await page.mouse.up();
+}
+
+async function dragCutStartToPrefix(page: Page, prefix: 'video' | 'audio', fraction: number) {
+    const track = await page.locator(`#${prefix}-cut-track`).boundingBox();
+    const start = await page.locator(`#${prefix}-cut-start`).boundingBox();
+    if (!track || !start) throw new Error('cut track not visible');
+    await page.mouse.move(start.x + start.width / 2, start.y + start.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(start.x + start.width / 2 + track.width * fraction, start.y + start.height / 2, { steps: 8 });
+    await page.mouse.up();
+}
+
+async function dragCutEndTo(page: Page, fraction: number) {
+    await dragCutEndToPrefix(page, 'video', fraction);
+}
+
+// ── Audio helpers ───────────────────────────────────────────────────────────
+
+function wavBuffer(samples: Float32Array, rate = 44100): Buffer {
+    const n = samples.length;
+    const dataSize = n * 2;
+    const buf = Buffer.alloc(44 + dataSize);
+    buf.write('RIFF', 0, 'ascii');
+    buf.writeUInt32LE(36 + dataSize, 4);
+    buf.write('WAVE', 8, 'ascii');
+    buf.write('fmt ', 12, 'ascii');
+    buf.writeUInt32LE(16, 16);
+    buf.writeUInt16LE(1, 20);
+    buf.writeUInt16LE(1, 22);
+    buf.writeUInt32LE(rate, 24);
+    buf.writeUInt32LE(rate * 2, 28);
+    buf.writeUInt16LE(2, 32);
+    buf.writeUInt16LE(16, 34);
+    buf.write('data', 36, 'ascii');
+    buf.writeUInt32LE(dataSize, 40);
+    for (let i = 0; i < n; i++) {
+        const v = Math.max(-1, Math.min(1, samples[i]));
+        buf.writeInt16LE(v < 0 ? Math.round(v * 0x8000) : Math.round(v * 0x7fff), 44 + i * 2);
+    }
+    return buf;
+}
+
+function sineSamples(seconds: number, freq: number, amp: number, rate = 44100): Float32Array {
+    const n = Math.round(seconds * rate);
+    const out = new Float32Array(n);
+    for (let i = 0; i < n; i++) out[i] = amp * Math.sin(2 * Math.PI * freq * i / rate);
+    return out;
+}
+
+// 2s total: first half 440Hz, second half 880Hz (distinguishable by ZCR).
+function twoToneSamples(secondsPer: number, rate = 44100): Float32Array {
+    const a = sineSamples(secondsPer, 440, 0.6, rate);
+    const b = sineSamples(secondsPer, 880, 0.6, rate);
+    const out = new Float32Array(a.length + b.length);
+    out.set(a, 0);
+    out.set(b, a.length);
+    return out;
+}
+
+// 1s total: 880Hz burst in the first 0.25s, then silence (reverse moves it to the tail).
+function burstSamples(rate = 44100): Float32Array {
+    const out = new Float32Array(rate);
+    out.set(sineSamples(0.25, 880, 0.7, rate), 0);
+    return out;
+}
+
+function parseWav(buf: Buffer) {
+    const rate = buf.readUInt32LE(24);
+    const chans = buf.readUInt16LE(22);
+    const dataSize = buf.readUInt32LE(40);
+    const n = dataSize / (chans * 2);
+    const samples = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+        samples[i] = buf.readInt16LE(44 + i * chans * 2) / 32768;
+    }
+    return { rate, chans, samples, duration: n / rate };
+}
+
+// Zero crossings per second in [from, to) seconds — distinguishes 440Hz (~880/s)
+// from 880Hz (~1760/s) and silence (~0/s).
+function zcr(samples: Float64Array, from: number, to: number, rate: number) {
+    const i0 = Math.max(1, Math.floor(from * rate));
+    const i1 = Math.min(samples.length, Math.floor(to * rate));
+    let crossings = 0;
+    for (let i = i0; i < i1; i++) {
+        if ((samples[i - 1] < 0 && samples[i] >= 0) || (samples[i - 1] >= 0 && samples[i] < 0)) crossings++;
+    }
+    return crossings / Math.max(0.001, (i1 - i0) / rate);
+}
+
+function rms(samples: Float64Array, from: number, to: number, rate: number) {
+    const i0 = Math.max(0, Math.floor(from * rate));
+    const i1 = Math.min(samples.length, Math.floor(to * rate));
+    let sum = 0;
+    let c = 0;
+    for (let i = i0; i < i1; i++) { sum += samples[i] * samples[i]; c++; }
+    return Math.sqrt(sum / Math.max(1, c));
+}
+
+function peak(samples: Float64Array) {
+    let mx = 0;
+    for (let i = 0; i < samples.length; i++) mx = Math.max(mx, Math.abs(samples[i]));
+    return mx;
+}
+
+async function uploadTestAudio(page: Page, buffer: Buffer, filename = 'test-audio.wav') {
+    await page.locator('#file-input').setInputFiles({ name: filename, mimeType: 'audio/wav', buffer });
+    await page.waitForSelector('#upload-modal', { state: 'visible', timeout: 5000 });
+}
+
+// Records a real opus webm in-page: 440Hz for the first half, 880Hz for the
+// second (distinguishable by ZCR after decoding), so webm-format preservation
+// can be verified with actual content.
+async function uploadTestWebm(page: Page, seconds = 1.2) {
+    const data = await page.evaluate(async ({ seconds }) => {
+        const AC = window.AudioContext || (window as any).webkitAudioContext;
+        const ctx = new AC();
+        if (ctx.state === 'suspended') await ctx.resume().catch(() => {});
+        const rate = 44100;
+        const n = Math.round(seconds * rate);
+        const buf = ctx.createBuffer(1, n, rate);
+        const ch = buf.getChannelData(0);
+        const half = Math.floor(n / 2);
+        for (let i = 0; i < n; i++) {
+            const f = i < half ? 440 : 880;
+            ch[i] = 0.6 * Math.sin(2 * Math.PI * f * i / rate);
+        }
+        const dest = ctx.createMediaStreamDestination();
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        src.connect(dest);
+        const rec = new MediaRecorder(dest.stream, { mimeType: 'audio/webm' });
+        const chunks: Blob[] = [];
+        rec.ondataavailable = (e: BlobEvent) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+        const done = new Promise<void>((res) => { rec.onstop = () => res(); });
+        rec.start(100);
+        src.start();
+        await new Promise((r) => setTimeout(r, seconds * 1000 + 300));
+        rec.stop();
+        await done;
+        await ctx.close();
+        const blob = new Blob(chunks, { type: 'audio/webm' });
+        const b = new Uint8Array(await blob.arrayBuffer());
+        let s = '';
+        for (let i = 0; i < b.length; i += 8192) s += String.fromCharCode.apply(null, Array.from(b.subarray(i, i + 8192)));
+        return { b64: btoa(s), size: blob.size };
+    }, { seconds });
+    expect(data.size).toBeGreaterThan(500);
+    await page.locator('#file-input').setInputFiles({ name: 'test-audio.webm', mimeType: 'audio/webm', buffer: Buffer.from(data.b64, 'base64') });
+    await page.waitForSelector('#upload-modal', { state: 'visible', timeout: 5000 });
+}
+
+// Decodes the currently selected file and reports duration + ZCR of channel 0.
+async function decodeAudioStats(page: Page) {
+    return page.evaluate(async () => {
+        const f = (0, eval)('selectedFiles[currentFileIndex]');
+        const ctx = new AudioContext();
+        const ab = await f.arrayBuffer();
+        const buf = await ctx.decodeAudioData(ab.slice(0));
+        const ch = buf.getChannelData(0);
+        let crossings = 0;
+        for (let i = 1; i < ch.length; i++) {
+            if ((ch[i - 1] < 0 && ch[i] >= 0) || (ch[i - 1] >= 0 && ch[i] < 0)) crossings++;
+        }
+        const dur = buf.duration || 0.001;
+        await ctx.close();
+        return { duration: buf.duration, zcr: crossings / dur, rate: buf.sampleRate };
+    });
+}
+
+async function openAudioEdit(page: Page) {
+    await page.click('#upload-btn-edit');
+    await expect(page.locator('#audio-edit-modal')).toBeVisible({ timeout: 8000 });
+    await page.waitForFunction(() => {
+        const s = (window as any).audioEditState;
+        return s && s.buffer && s.buffer.length > 0;
+    }, { timeout: 8000 });
+}
+
+async function currentAudioBytes(page: Page): Promise<Buffer> {
+    const b64 = await page.evaluate(async () => {
+        const f = (0, eval)('selectedFiles[currentFileIndex]');
+        const buf = new Uint8Array(await f.arrayBuffer());
+        let s = '';
+        for (let i = 0; i < buf.length; i += 8192) {
+            s += String.fromCharCode.apply(null, Array.from(buf.subarray(i, i + 8192)));
+        }
+        return btoa(s);
+    });
+    return Buffer.from(b64, 'base64');
 }
 
 async function confirmUploadAndWait(page: Page) {
@@ -1008,6 +1198,100 @@ test.describe('Photo & Video Edit System', () => {
             expect(cutEnd).toBeLessThan(0.9);
         });
 
+        test('cut timeline shows a seconds ruler with tick labels', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestVideo(page, 3.2);
+            await openVideoEdit(page);
+            await page.click('#video-tool-cut');
+            await expect(page.locator('#video-cut-timeline')).toBeVisible();
+            const ticks = await page.evaluate(() => {
+                const ruler = document.getElementById('video-cut-ruler')!;
+                const labels = Array.from(ruler.querySelectorAll('.video-cut-tick-label')).map((el) => el.textContent);
+                return { count: ruler.children.length, labels, total: (document.getElementById('video-cut-total') as HTMLElement).textContent };
+            });
+            expect(ticks.count).toBeGreaterThanOrEqual(3);
+            expect(ticks.labels[0]).toBe('0:00');
+            expect(ticks.total).toMatch(/^of 0:0\d$/);
+        });
+
+        test('cut track shows a frame strip with real content from the video', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestVideo(page);
+            await openVideoEdit(page);
+            await page.click('#video-tool-cut');
+            await expect(page.locator('#video-cut-timeline')).toBeVisible();
+            // The strip fills in progressively as frames are sampled; wait until
+            // the left edge samples red and the right edge blue (the test video
+            // is red left / blue right), sampled away from the moving white dot.
+            await page.waitForFunction(() => {
+                const cv = document.getElementById('video-cut-strip') as HTMLCanvasElement | null;
+                if (!cv || !cv.width || !cv.height) return false;
+                const g = cv.getContext('2d')!;
+                const W = cv.width, H = cv.height;
+                if (W < 200 || H < 30) return false;
+                let nonBlack = 0;
+                for (let x = 8; x < W; x += Math.max(8, Math.floor(W / 12))) {
+                    const d = g.getImageData(x, Math.floor(H * 0.3), 1, 1).data;
+                    if (d[0] > 100 || d[1] > 100 || d[2] > 100) nonBlack++;
+                }
+                if (nonBlack < 4) return false;
+                const l = g.getImageData(Math.floor(W * 0.15), Math.floor(H * 0.3), 1, 1).data;
+                const r = g.getImageData(Math.floor(W * 0.85), Math.floor(H * 0.3), 1, 1).data;
+                return l[0] > 120 && l[2] < 80 && r[2] > 120 && r[0] < 80;
+            }, { timeout: 10000 });
+            // The strip must survive trimming (dragging handles) unchanged.
+            const before = await page.evaluate(() => {
+                const cv = document.getElementById('video-cut-strip') as HTMLCanvasElement;
+                return { w: cv.width, h: cv.height, built: (window as any).videoEditState._stripBuilt };
+            });
+            expect(before.built).toBe(true);
+            await dragCutEndTo(page, 0.6);
+            const after = await page.evaluate(() => {
+                const cv = document.getElementById('video-cut-strip') as HTMLCanvasElement;
+                const g = cv.getContext('2d')!;
+                const d = g.getImageData(Math.floor(cv.width * 0.15), Math.floor(cv.height * 0.3), 1, 1).data;
+                return { w: cv.width, h: cv.height, r: d[0], b: d[2] };
+            });
+            expect(after.w).toBe(before.w);
+            expect(after.r).toBeGreaterThan(120);
+            expect(after.b).toBeLessThan(80);
+        });
+
+        test('cut preview plays inside the cut range (loops) and stops', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestVideo(page);
+            await openVideoEdit(page);
+            await page.click('#video-tool-cut');
+            await dragCutEndTo(page, 0.5);
+            const cutEnd = await page.evaluate(() => (window as any).videoEditState.cutEnd);
+            expect(cutEnd).toBeLessThan(0.6);
+            await page.click('#video-cut-play');
+            await expect(page.locator('#video-cut-play')).toHaveText('⏸ Stop Preview');
+            // Wait past the cut length: without looping, playback would exceed the
+            // cut end (0.6s). Staying inside proves the loop + the range clamp.
+            await page.waitForTimeout(900);
+            const during = await page.evaluate(() => {
+                const v = document.getElementById('video-edit-source') as HTMLVideoElement;
+                const s = (window as any).videoEditState;
+                const dur = isFinite(v.duration) && v.duration > 0 ? v.duration : 1;
+                return { t: v.currentTime, playing: (window as any)._videoPreviewPlaying, paused: v.paused, endT: s.cutEnd * dur };
+            });
+            expect(during.playing).toBe(true);
+            expect(during.paused).toBe(false);
+            expect(during.t).toBeGreaterThanOrEqual(0);
+            expect(during.t).toBeLessThan(during.endT + 0.1);
+            await page.click('#video-cut-play');
+            await expect(page.locator('#video-cut-play')).toHaveText('▶ Preview');
+            const stopped = await page.evaluate(() => ({
+                playing: (window as any)._videoPreviewPlaying,
+                paused: (document.getElementById('video-edit-source') as HTMLVideoElement).paused,
+                playhead: (document.getElementById('video-cut-playhead') as HTMLElement).style.display,
+            }));
+            expect(stopped.playing).toBe(false);
+            expect(stopped.paused).toBe(true);
+            expect(stopped.playhead).toBe('none');
+        });
+
         test('undo/redo works after a transform', async ({ page }) => {
             await registerAndSetup(page);
             await uploadTestVideo(page);
@@ -1365,7 +1649,12 @@ test.describe('Photo & Video Edit System', () => {
             await uploadTestVideo(page, 1.2);
             await openVideoEdit(page);
             await page.click('#video-tool-cut');
-            await dragCutEndTo(page, 0.75);
+            // Cut to half (0.6s of content): the MediaRecorder timeslice padding
+            // inflates the resolved duration a little, so keep clear of 1.0s.
+            await dragCutEndTo(page, 0.5);
+            // Diagnostic: the cut must survive switching to the crop tool.
+            const cutEnd = await page.evaluate(() => (window as any).videoEditState.cutEnd);
+            expect(cutEnd).toBeLessThan(0.7);
             await page.click('#video-tool-crop');
             await page.fill('#video-crop-w', '80');
             await page.fill('#video-crop-h', '60');
@@ -1442,6 +1731,231 @@ test.describe('Photo & Video Edit System', () => {
             for (const s of sent.samples) {
                 expect(s.r + s.g + s.b, `sent frame at ${s.t}s went black`).toBeGreaterThan(20);
             }
+        });
+    });
+
+    test.describe('Audio Edit Modal', () => {
+
+        test('quick actions show Edit for audio files (mirror/rotate hidden)', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestAudio(page, wavBuffer(burstSamples()));
+            await expect(page.locator('#upload-quick-actions')).toBeVisible();
+            await expect(page.locator('#upload-btn-mirror')).toBeHidden();
+            await expect(page.locator('#upload-btn-rotate-left')).toBeHidden();
+            await page.click('#upload-btn-edit');
+            await expect(page.locator('#audio-edit-modal')).toBeVisible({ timeout: 8000 });
+        });
+
+        test('audio cut keeps only the selected range', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestAudio(page, wavBuffer(twoToneSamples(1)));
+            await openAudioEdit(page);
+            // Cut to keep the second half (880Hz) of the 2s two-tone file.
+            await dragCutStartToPrefix(page, 'audio', 0.5);
+            const st = await page.evaluate(() => (window as any).audioEditState.cutStart);
+            expect(st).toBeGreaterThan(0.4);
+            await page.click('#audio-edit-confirm');
+            await expect(page.locator('#audio-edit-modal')).toBeHidden({ timeout: 10000 });
+            const wav = parseWav(await currentAudioBytes(page));
+            expect(wav.duration).toBeGreaterThan(0.85);
+            expect(wav.duration).toBeLessThan(1.15);
+            // The exported start is the 880Hz tone (ZCR ~1760/s), not 440Hz (~880/s).
+            expect(zcr(wav.samples, 0, 0.2, wav.rate)).toBeGreaterThan(1300);
+            // Magic-byte check passes and it decodes as a playable file.
+            expect(await magicCheckCurrent(page)).toBeNull();
+            const decode = await page.evaluate(async () => {
+                const f = (0, eval)('selectedFiles[currentFileIndex]');
+                const ctx = new AudioContext();
+                const ab = await f.arrayBuffer();
+                const buf = await ctx.decodeAudioData(ab.slice(0));
+                const d = buf.duration;
+                await ctx.close();
+                return d;
+            });
+            expect(decode).toBeGreaterThan(0.85);
+            expect(decode).toBeLessThan(1.15);
+        });
+
+        test('webm source stays webm after editing (format + content preserved)', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestWebm(page);
+            await openAudioEdit(page);
+            // Keep the first half (440Hz) of the 440→880 two-tone webm.
+            await dragCutEndToPrefix(page, 'audio', 0.5);
+            await page.click('#audio-edit-confirm');
+            await expect(page.locator('#audio-edit-modal')).toBeHidden({ timeout: 15000 });
+            const meta = await page.evaluate(() => {
+                const f = (0, eval)('selectedFiles[currentFileIndex]');
+                return { name: f.name, type: f.type, size: f.size };
+            });
+            expect(meta.name).toBe('test-audio.webm');
+            expect(meta.type).toBe('audio/webm');
+            expect(meta.size).toBeGreaterThan(300);
+            // EBML magic bytes and the G5 check (audio/webm is now validated).
+            expect((await currentAudioBytes(page)).subarray(0, 4).toString('hex')).toBe('1a45dfa3');
+            expect(await magicCheckCurrent(page)).toBeNull();
+            // Decodes and the cut range is the 440Hz half (ZCR ~880/s, ~0.6s).
+            const dec = await decodeAudioStats(page);
+            expect(dec.duration).toBeGreaterThan(0.4);
+            expect(dec.duration).toBeLessThan(0.75);
+            expect(dec.zcr).toBeGreaterThan(600);
+            expect(dec.zcr).toBeLessThan(1200);
+        });
+
+        test('mp3 source stays mp3 when encodable, else falls back to a valid WAV', async ({ page }) => {
+            await registerAndSetup(page);
+            // WAV bytes named .mp3 — decodeAudioData sniffs the container, so
+            // the edit flow runs; the dispatch is keyed off the source name.
+            await uploadTestAudio(page, wavBuffer(twoToneSamples(1)), 'test-audio.mp3');
+            await openAudioEdit(page);
+            await dragCutStartToPrefix(page, 'audio', 0.5); // keep the 880Hz half
+            await page.click('#audio-edit-confirm');
+            await expect(page.locator('#audio-edit-modal')).toBeHidden({ timeout: 15000 });
+            const meta = await page.evaluate(() => {
+                const f = (0, eval)('selectedFiles[currentFileIndex]');
+                return { name: f.name, type: f.type };
+            });
+            // Chromium cannot encode mp3 today → WAV fallback. Where a browser
+            // does support mp3, the export must be a valid ID3 mp3 instead.
+            expect(['test-audio.mp3', 'test-audio.wav']).toContain(meta.name);
+            if (meta.name.endsWith('.mp3')) {
+                expect(meta.type).toBe('audio/mpeg');
+                expect((await currentAudioBytes(page)).subarray(0, 3).toString('ascii')).toBe('ID3');
+            } else {
+                expect(meta.type).toBe('audio/wav');
+                const wav = parseWav(await currentAudioBytes(page));
+                // The exported start is the 880Hz tone.
+                expect(zcr(wav.samples, 0, 0.2, wav.rate)).toBeGreaterThan(1300);
+            }
+            expect(await magicCheckCurrent(page)).toBeNull();
+        });
+
+        test('ogg source falls back to a valid WAV (no browser ogg encoder)', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestAudio(page, wavBuffer(twoToneSamples(1)), 'test-audio.ogg');
+            await openAudioEdit(page);
+            await dragCutStartToPrefix(page, 'audio', 0.5);
+            await page.click('#audio-edit-confirm');
+            await expect(page.locator('#audio-edit-modal')).toBeHidden({ timeout: 15000 });
+            const meta = await page.evaluate(() => {
+                const f = (0, eval)('selectedFiles[currentFileIndex]');
+                return { name: f.name, type: f.type };
+            });
+            expect(meta.name).toBe('test-audio.wav');
+            expect(meta.type).toBe('audio/wav');
+            expect(await magicCheckCurrent(page)).toBeNull();
+            const wav = parseWav(await currentAudioBytes(page));
+            expect(zcr(wav.samples, 0, 0.2, wav.rate)).toBeGreaterThan(1300);
+        });
+
+        test('mp3 ID3 wrapper produces a magic-valid mp3 header', async ({ page }) => {
+            // chat.js (with the editor code) only loads on index.html.
+            await registerAndSetup(page);
+            const res = await page.evaluate(() => {
+                const frames = [new Uint8Array([0xff, 0xfb, 0x90, 0x64]), new Uint8Array([0xff, 0xfb, 0x90, 0x64])];
+                const u8 = new Uint8Array((window as any)._mp3WithId3(frames));
+                return { first3: String.fromCharCode(u8[0], u8[1], u8[2]), len: u8.length, sizeBytes: Array.from(u8.slice(6, 10)) };
+            });
+            expect(res.first3).toBe('ID3');
+            expect(res.len).toBe(10 + 8);
+            expect(res.sizeBytes).toEqual([0, 0, 0, 0]);
+        });
+
+        test('uploading an edited webm audio succeeds end-to-end', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestWebm(page);
+            await openAudioEdit(page);
+            await page.click('#audio-edit-confirm');
+            await expect(page.locator('#audio-edit-modal')).toBeHidden({ timeout: 15000 });
+            await confirmUploadAndWait(page);
+        });
+
+        test('audio mirror reverses the audio (burst moves to the tail)', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestAudio(page, wavBuffer(burstSamples()));
+            await openAudioEdit(page);
+            await page.click('#audio-btn-mirror');
+            expect(await page.evaluate(() => (window as any).audioEditState.reversed)).toBe(true);
+            await page.click('#audio-edit-confirm');
+            await expect(page.locator('#audio-edit-modal')).toBeHidden({ timeout: 10000 });
+            const wav = parseWav(await currentAudioBytes(page));
+            // The 880Hz burst that started at t=0 is now at the END.
+            expect(rms(wav.samples, 0.75, 0.95, wav.rate)).toBeGreaterThan(0.05);
+            expect(rms(wav.samples, 0, 0.2, wav.rate)).toBeLessThan(0.02);
+            expect(zcr(wav.samples, 0.75, 0.95, wav.rate)).toBeGreaterThan(1300);
+            expect(await magicCheckCurrent(page)).toBeNull();
+        });
+
+        test('audio volume amplification boosts the samples', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestAudio(page, wavBuffer(sineSamples(1, 440, 0.5)));
+            await openAudioEdit(page);
+            await page.locator('#audio-vol-slider').fill('200');
+            await page.click('#audio-edit-confirm');
+            await expect(page.locator('#audio-edit-modal')).toBeHidden({ timeout: 10000 });
+            const wav = parseWav(await currentAudioBytes(page));
+            // 0.5 amp x 2.0 gain = 1.0 (clamped) — near full scale.
+            expect(peak(wav.samples)).toBeGreaterThan(0.9);
+        });
+
+        test('audio volume deamplification quiets the samples', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestAudio(page, wavBuffer(sineSamples(1, 440, 0.5)));
+            await openAudioEdit(page);
+            await page.locator('#audio-vol-slider').fill('50');
+            await page.click('#audio-edit-confirm');
+            await expect(page.locator('#audio-edit-modal')).toBeHidden({ timeout: 10000 });
+            const wav = parseWav(await currentAudioBytes(page));
+            // 0.5 amp x 0.5 gain = 0.25.
+            expect(peak(wav.samples)).toBeGreaterThan(0.18);
+            expect(peak(wav.samples)).toBeLessThan(0.32);
+        });
+
+        test('audio undo/redo restores the reverse state', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestAudio(page, wavBuffer(burstSamples()));
+            await openAudioEdit(page);
+            await page.click('#audio-btn-mirror');
+            expect(await page.evaluate(() => (window as any).audioEditState.reversed)).toBe(true);
+            await page.click('#audio-undo');
+            expect(await page.evaluate(() => (window as any).audioEditState.reversed)).toBe(false);
+            await page.click('#audio-redo');
+            expect(await page.evaluate(() => (window as any).audioEditState.reversed)).toBe(true);
+        });
+
+        test('audio preview plays and stops', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestAudio(page, wavBuffer(burstSamples()));
+            await openAudioEdit(page);
+            await page.click('#audio-cut-play');
+            await expect(page.locator('#audio-cut-play')).toHaveText('⏸ Stop Preview');
+            expect(await page.evaluate(() => (window as any)._audioPreviewPlaying)).toBe(true);
+            await page.click('#audio-cut-play');
+            await expect(page.locator('#audio-cut-play')).toHaveText('▶ Preview');
+            expect(await page.evaluate(() => (window as any)._audioPreviewPlaying)).toBe(false);
+        });
+
+        test('audio cut timeline shows a seconds ruler', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestAudio(page, wavBuffer(twoToneSamples(1)));
+            await openAudioEdit(page);
+            const ticks = await page.evaluate(() => ({
+                count: document.getElementById('audio-cut-ruler')!.children.length,
+                total: (document.getElementById('audio-cut-total') as HTMLElement).textContent,
+            }));
+            expect(ticks.count).toBeGreaterThanOrEqual(2);
+            expect(ticks.total).toBe('of 0:02');
+        });
+
+        test('uploading an edited audio file succeeds end-to-end (no magic-byte error)', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestAudio(page, wavBuffer(burstSamples()));
+            await openAudioEdit(page);
+            await page.click('#audio-btn-mirror');
+            await dragCutEndToPrefix(page, 'audio', 0.75);
+            await page.click('#audio-edit-confirm');
+            await expect(page.locator('#audio-edit-modal')).toBeHidden({ timeout: 10000 });
+            await confirmUploadAndWait(page);
         });
     });
 

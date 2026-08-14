@@ -1019,14 +1019,23 @@
                 </div>
             </div>
             <div id="video-cut-timeline" class="video-cut-timeline" style="display:none">
+                <div class="video-cut-toolbar">
+                    <button class="video-cut-play-btn" id="video-cut-play" title="Preview the selected cut">▶ Preview</button>
+                    <span class="video-cut-pos" id="video-cut-pos">0:00</span>
+                    <span class="video-cut-hint">Drag the handles to choose which part to keep</span>
+                </div>
                 <div class="video-cut-track" id="video-cut-track">
+                    <canvas id="video-cut-strip" class="video-cut-strip"></canvas>
                     <div class="video-cut-range" id="video-cut-range">
                         <div class="video-cut-handle video-cut-handle-start" id="video-cut-start"></div>
                         <div class="video-cut-handle video-cut-handle-end" id="video-cut-end"></div>
                     </div>
+                    <div class="video-cut-playhead" id="video-cut-playhead"></div>
                 </div>
+                <div class="video-cut-ruler" id="video-cut-ruler"></div>
                 <div class="video-cut-times">
                     <span id="video-cut-start-time">0:00</span>
+                    <span id="video-cut-total"></span>
                     <span id="video-cut-end-time">0:00</span>
                 </div>
             </div>
@@ -1036,6 +1045,54 @@
                 <div style="margin-left:auto;display:flex;gap:6px">
                     <button class="btn-cancel" id="video-crop-cancel" style="font-size:12px">Cancel Crop</button>
                     <button class="btn-invite" id="video-crop-confirm" style="font-size:12px">Apply Crop</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Audio Edit Modal -->
+    <div class="modal" id="audio-edit-modal" style="display:none;z-index:10001">
+        <div class="audio-edit-container">
+            <div class="audio-edit-header">
+                <span class="audio-edit-title">Edit Audio</span>
+                <div class="audio-edit-tools">
+                    <button class="photo-tool-btn" id="audio-btn-mirror" title="Reverse (mirror) the audio">🔁</button>
+                    <button class="photo-history-btn" id="audio-undo" title="Undo" disabled>↶</button>
+                    <button class="photo-history-btn" id="audio-redo" title="Redo" disabled>↷</button>
+                </div>
+                <div class="audio-edit-actions">
+                    <button class="btn-cancel" id="audio-edit-cancel">Cancel</button>
+                    <button class="btn-invite" id="audio-edit-confirm">Confirm</button>
+                </div>
+            </div>
+            <div id="audio-edit-error" class="audio-edit-error" style="display:none"></div>
+            <div class="audio-edit-body">
+                <div class="audio-edit-waveform-wrap">
+                    <canvas id="audio-edit-waveform" class="audio-edit-waveform"></canvas>
+                </div>
+                <div class="audio-cut-timeline">
+                    <div class="video-cut-toolbar">
+                        <button class="video-cut-play-btn" id="audio-cut-play" title="Preview the edited audio">▶ Preview</button>
+                        <span class="video-cut-pos" id="audio-cut-pos">0:00</span>
+                        <span class="video-cut-hint">Drag the handles to choose which part to keep</span>
+                    </div>
+                    <div class="video-cut-track" id="audio-cut-track">
+                        <div class="video-cut-range" id="audio-cut-range">
+                            <div class="video-cut-handle video-cut-handle-start" id="audio-cut-start"></div>
+                            <div class="video-cut-handle video-cut-handle-end" id="audio-cut-end"></div>
+                        </div>
+                        <div class="video-cut-playhead" id="audio-cut-playhead"></div>
+                    </div>
+                    <div class="video-cut-ruler" id="audio-cut-ruler"></div>
+                    <div class="video-cut-times">
+                        <span id="audio-cut-start-time">0:00</span>
+                        <span id="audio-cut-total"></span>
+                        <span id="audio-cut-end-time">0:00</span>
+                    </div>
+                </div>
+                <div class="audio-vol-control">
+                    <label class="audio-vol-label">Volume: <input type="range" id="audio-vol-slider" min="0" max="300" value="100"> <span id="audio-vol-val">100%</span></label>
+                    <span class="audio-vol-hint">25% = quieter · 100% = original · 300% = louder</span>
                 </div>
             </div>
         </div>
