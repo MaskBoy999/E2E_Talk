@@ -3957,7 +3957,54 @@ document.addEventListener('DOMContentLoaded', () => {
     
     document.getElementById('file-input').addEventListener('change', handleFileSelect);
     document.getElementById('cancel-upload').addEventListener('click', closeUploadModal);
-    
+
+    // Upload quick action buttons
+    document.getElementById('upload-btn-edit').addEventListener('click', function() {
+        if (selectedFiles.length === 0) return;
+        var file = selectedFiles[currentFileIndex];
+        if (file.type.startsWith('image/')) openPhotoEditModal(file);
+        else if (file.type.startsWith('video/')) openVideoEditModal(file);
+    });
+    document.getElementById('upload-btn-mirror').addEventListener('click', _mirrorUploadFile);
+    document.getElementById('upload-btn-rotate-left').addEventListener('click', function() { _rotateUploadFile(-90); });
+    document.getElementById('upload-btn-rotate-right').addEventListener('click', function() { _rotateUploadFile(90); });
+
+    // Photo edit modal handlers
+    document.getElementById('photo-tool-brush').addEventListener('click', function() { _photoSetTool('brush'); });
+    document.getElementById('photo-tool-airbrush').addEventListener('click', function() { _photoSetTool('airbrush'); });
+    document.getElementById('photo-tool-crop').addEventListener('click', function() { _photoSetTool('crop'); });
+    document.getElementById('photo-btn-mirror').addEventListener('click', function() { _photoApplyTransform(0, true); });
+    document.getElementById('photo-btn-rotate-left').addEventListener('click', function() { _photoApplyTransform(-90, false); });
+    document.getElementById('photo-btn-rotate-right').addEventListener('click', function() { _photoApplyTransform(90, false); });
+    document.getElementById('photo-brush-size').addEventListener('input', function() {
+        photoEditState.brushSize = parseInt(this.value);
+        document.getElementById('photo-brush-size-val').textContent = this.value;
+    });
+    document.getElementById('photo-brush-color').addEventListener('input', function() {
+        photoEditState.brushColor = this.value;
+    });
+    document.getElementById('photo-undo').addEventListener('click', _photoUndo);
+    document.getElementById('photo-redo').addEventListener('click', _photoRedo);
+    document.getElementById('photo-edit-cancel').addEventListener('click', closePhotoEditModal);
+    document.getElementById('photo-edit-confirm').addEventListener('click', _photoEditConfirm);
+    document.getElementById('photo-crop-confirm') && document.getElementById('photo-crop-confirm').addEventListener('click', _photoCropApply);
+    document.getElementById('photo-crop-cancel') && document.getElementById('photo-crop-cancel').addEventListener('click', function() { _photoSetTool('brush'); });
+    document.getElementById('photo-draw-cancel').addEventListener('click', _photoDiscardDrawing);
+    document.getElementById('photo-draw-confirm').addEventListener('click', _photoCommitDrawing);
+
+    // Video edit modal handlers
+    document.getElementById('video-tool-crop').addEventListener('click', function() { _videoSetTool('crop'); });
+    document.getElementById('video-tool-cut').addEventListener('click', function() { _videoSetTool('cut'); });
+    document.getElementById('video-btn-mirror').addEventListener('click', function() { _videoApplyTransform(0, true); });
+    document.getElementById('video-btn-rotate-left').addEventListener('click', function() { _videoApplyTransform(-90, false); });
+    document.getElementById('video-btn-rotate-right').addEventListener('click', function() { _videoApplyTransform(90, false); });
+    document.getElementById('video-undo').addEventListener('click', _videoUndo);
+    document.getElementById('video-redo').addEventListener('click', _videoRedo);
+    document.getElementById('video-edit-cancel').addEventListener('click', closeVideoEditModal);
+    document.getElementById('video-edit-confirm').addEventListener('click', _videoEditConfirm);
+    document.getElementById('video-crop-confirm').addEventListener('click', _videoCropApply);
+    document.getElementById('video-crop-cancel').addEventListener('click', _videoCropCancel);
+
     // Camera capture via getUserMedia (opens actual camera, with timer, flash, preview)
     var _cameraCaptureStream = null;
     var _cameraCaptureFacing = 'environment';
@@ -17095,6 +17142,7 @@ function showUploadModal() {
     confirmBtn.textContent = selectedFiles.length > 1 ? 'Upload All (' + selectedFiles.length + ')' : 'Upload';
 
     renderUploadPreview();
+    _showUploadQuickActions();
     modal.style.display = 'flex';
 }
 
@@ -17144,8 +17192,8 @@ function renderUploadPreview() {
             '<button class="gallery-nav-btn" id="gallery-next" ' + (currentFileIndex === selectedFiles.length - 1 ? 'disabled' : '') + '>&#8250;</button>' +
             '</div>';
         preview.insertAdjacentHTML('beforebegin', navHtml);
-        document.getElementById('gallery-prev').addEventListener('click', () => { if (currentFileIndex > 0) { currentFileIndex--; renderUploadPreview(); } });
-        document.getElementById('gallery-next').addEventListener('click', () => { if (currentFileIndex < selectedFiles.length - 1) { currentFileIndex++; renderUploadPreview(); } });
+        document.getElementById('gallery-prev').addEventListener('click', () => { if (currentFileIndex > 0) { currentFileIndex--; renderUploadPreview(); _showUploadQuickActions(); } });
+        document.getElementById('gallery-next').addEventListener('click', () => { if (currentFileIndex < selectedFiles.length - 1) { currentFileIndex++; renderUploadPreview(); _showUploadQuickActions(); } });
     }
 
     // File list click/removal
@@ -17154,6 +17202,7 @@ function renderUploadPreview() {
             if (e.target.closest('.ufi-remove')) return;
             currentFileIndex = parseInt(item.dataset.idx);
             renderUploadPreview();
+            _showUploadQuickActions();
         });
     });
     info.querySelectorAll('.ufi-remove').forEach(btn => {
@@ -17172,14 +17221,16 @@ function renderUploadPreview() {
     if (file.type && file.type.startsWith('image/')) {
         const img = document.createElement('img');
         img.src = URL.createObjectURL(file);
+        img.onload = function() { _applyUploadTransformsToPreview(); };
         preview.appendChild(img);
     } else if (file.type && file.type.startsWith('video/')) {
         const video = document.createElement('video');
         video.src = URL.createObjectURL(file);
         video.controls = true;
-        video.style.maxWidth = '100%';
-        video.style.maxHeight = '200px';
+        video.muted = true;
+        video.playsInline = true;
         video.style.borderRadius = '8px';
+        video.onloadeddata = function() { _applyUploadTransformsToPreview(); };
         preview.appendChild(video);
     } else if (file.type && file.type.startsWith('audio/')) {
         const audio = document.createElement('audio');
@@ -17189,6 +17240,7 @@ function renderUploadPreview() {
         audio.style.width = '100%';
         preview.appendChild(audio);
     }
+    _applyUploadTransformsToPreview();
 }
 
 function closeUploadModal() {
@@ -17207,12 +17259,979 @@ function closeUploadModal() {
     selectedFiles = [];
     currentFileIndex = 0;
     isUploading = false;
+    _resetUploadEditState();
     const addMoreInput = document.getElementById('add-more-file-input');
     if (addMoreInput) addMoreInput.value = '';
     const addMoreBtn = document.getElementById('add-more-files');
     if (addMoreBtn) addMoreBtn.style.display = '';
+    const qa = document.getElementById('upload-quick-actions');
+    if (qa) qa.style.display = 'none';
 }
 
+// ===== Upload Quick Actions (Edit / Mirror / Rotate) =====
+const _uploadEdits = {};
+function _getUploadEditState(idx) {
+    if (!_uploadEdits[idx]) _uploadEdits[idx] = { rotations: 0, mirrored: false };
+    return _uploadEdits[idx];
+}
+function _clearUploadEditState(idx) {
+    if (idx != null) delete _uploadEdits[idx];
+    else Object.keys(_uploadEdits).forEach(function(k) { delete _uploadEdits[k]; });
+}
+function _showUploadQuickActions() {
+    var qa = document.getElementById('upload-quick-actions');
+    if (!qa || selectedFiles.length === 0) { if (qa) qa.style.display = 'none'; return; }
+    var file = selectedFiles[currentFileIndex];
+    var isMedia = file && (file.type.startsWith('image/') || file.type.startsWith('video/'));
+    qa.style.display = isMedia ? 'flex' : 'none';
+}
+function _applyUploadTransformsToPreview() {
+    var preview = document.getElementById('upload-preview');
+    if (!preview) return;
+    var el = preview.querySelector('img') || preview.querySelector('video');
+    if (!el) return;
+    var s = _getUploadEditState(currentFileIndex);
+    var deg = (s.rotations % 4) * 90;
+    var sx = s.mirrored ? -1 : 1;
+    el.style.transform = 'rotate(' + deg + 'deg) scaleX(' + sx + ')';
+    var swapped = s.rotations % 2 === 1;
+    var natW = el.naturalWidth || el.videoWidth || 0;
+    var natH = el.naturalHeight || el.videoHeight || 0;
+    if (natW > 0 && natH > 0) {
+        var maxW = Math.max(1, preview.clientWidth - 8);
+        var maxH = 200;
+        var scale = swapped
+            ? Math.min(maxW / natH, maxH / natW, 1)
+            : Math.min(maxW / natW, maxH / natH, 1);
+        el.style.maxWidth = 'none';
+        el.style.maxHeight = 'none';
+        el.style.width = Math.max(1, Math.round(natW * scale)) + 'px';
+        el.style.height = Math.max(1, Math.round(natH * scale)) + 'px';
+    }
+}
+function _rotateUploadFile(deg) {
+    if (selectedFiles.length === 0) return;
+    var file = selectedFiles[currentFileIndex];
+    if (!file || (!file.type.startsWith('image/') && !file.type.startsWith('video/'))) return;
+    var s = _getUploadEditState(currentFileIndex);
+    s.rotations = (s.rotations + (deg > 0 ? 1 : 3)) % 4;
+    _applyUploadTransformsToPreview();
+}
+function _mirrorUploadFile() {
+    if (selectedFiles.length === 0) return;
+    var file = selectedFiles[currentFileIndex];
+    if (!file || (!file.type.startsWith('image/') && !file.type.startsWith('video/'))) return;
+    var s = _getUploadEditState(currentFileIndex);
+    s.mirrored = !s.mirrored;
+    _applyUploadTransformsToPreview();
+}
+function _canvasToFile(canvas, type, name) {
+    return new Promise(function(resolve) {
+        canvas.toBlob(function(blob) { resolve(new File([blob], name, { type: type })); }, type, 0.92);
+    });
+}
+async function _applyUploadTransformsToFile(file, idx) {
+    var s = _getUploadEditState(idx);
+    if (!s || (s.rotations === 0 && !s.mirrored)) return file;
+    if (file.type.startsWith('image/')) {
+        var img = new Image();
+        img.src = URL.createObjectURL(file);
+        await new Promise(function(r) { img.onload = r; });
+        var rad = (s.rotations % 4) * Math.PI / 2;
+        var w = img.naturalWidth, h = img.naturalHeight;
+        var swap = s.rotations % 2 === 1;
+        var cw = swap ? h : w, ch = swap ? w : h;
+        var c = document.createElement('canvas');
+        c.width = cw; c.height = ch;
+        var ctx = c.getContext('2d');
+        ctx.translate(cw / 2, ch / 2);
+        ctx.rotate(rad);
+        ctx.scale(s.mirrored ? -1 : 1, 1);
+        ctx.drawImage(img, -w / 2, -h / 2);
+        URL.revokeObjectURL(img.src);
+        return _canvasToFile(c, file.type, file.name);
+    }
+    if (file.type.startsWith('video/')) {
+        return await _videoExport(file, 0, 1, s.rotations, s.mirrored, null);
+    }
+    return file;
+}
+function _resetUploadEditState() {
+    _clearUploadEditState();
+}
+
+// ===== Photo Edit Modal =====
+var photoEditState = {
+    canvas: null, ctx: null, img: null,
+    tool: 'brush', brushSize: 8, brushColor: '#ff0000',
+    drawing: false, lastX: 0, lastY: 0, _rect: null,
+    history: [], historyIdx: -1,
+    drawStartIdx: -1
+};
+function _photoCommitHistory() {
+    var s = photoEditState;
+    if (!s.canvas) return;
+    s.historyIdx++;
+    s.history = s.history.slice(0, s.historyIdx);
+    s.history.push({ data: s.ctx.getImageData(0, 0, s.canvas.width, s.canvas.height), w: s.canvas.width, h: s.canvas.height });
+    if (s.history.length > 30) { s.history.shift(); s.historyIdx--; }
+    _photoUpdateHistoryBtns();
+}
+function _photoUpdateHistoryBtns() {
+    var s = photoEditState;
+    var u = document.getElementById('photo-undo');
+    var r = document.getElementById('photo-redo');
+    if (u) u.disabled = s.historyIdx <= 0;
+    if (r) r.disabled = s.historyIdx >= s.history.length - 1;
+}
+function _photoRestore(idx) {
+    var s = photoEditState;
+    if (idx < 0 || idx >= s.history.length) return;
+    s.historyIdx = idx;
+    var snap = s.history[idx];
+    s.canvas.width = snap.w; s.canvas.height = snap.h;
+    s.ctx.putImageData(snap.data, 0, 0);
+    _photoUpdateHistoryBtns();
+}
+function _photoHasPendingDraw() {
+    var s = photoEditState;
+    if (s.drawStartIdx < 0) return false;
+    var da = document.getElementById('photo-draw-actions');
+    return !!da && da.style.display !== 'none';
+}
+function _photoDiscardDrawing() {
+    var s = photoEditState;
+    if (s.drawStartIdx >= 0 && s.drawStartIdx < s.history.length) _photoRestore(s.drawStartIdx);
+    s.drawing = false; s.drawStartIdx = -1;
+    var da = document.getElementById('photo-draw-actions');
+    if (da) da.style.display = 'none';
+}
+function _photoCommitDrawing() {
+    var s = photoEditState;
+    s.drawing = false; s.drawStartIdx = -1;
+    var da = document.getElementById('photo-draw-actions');
+    if (da) da.style.display = 'none';
+    _photoCommitHistory();
+}
+function _photoUndo() {
+    var s = photoEditState;
+    if (_photoHasPendingDraw()) { _photoDiscardDrawing(); return; }
+    _photoRestore(s.historyIdx - 1);
+}
+function _photoRedo() {
+    var s = photoEditState;
+    if (_photoHasPendingDraw()) { _photoDiscardDrawing(); return; }
+    _photoRestore(s.historyIdx + 1);
+}
+function _photoApplyTransform(deg, mirror) {
+    var s = photoEditState;
+    if (!s.canvas) return;
+    if (_photoHasPendingDraw()) _photoDiscardDrawing();
+    var W = s.canvas.width, H = s.canvas.height;
+    if (W < 1 || H < 1) return;
+    var oldData = s.ctx.getImageData(0, 0, W, H);
+    var tmp = document.createElement('canvas');
+    tmp.width = W; tmp.height = H;
+    tmp.getContext('2d').putImageData(oldData, 0, 0);
+    var swap = Math.abs(deg) === 90 || Math.abs(deg) === 270;
+    var NW = swap ? H : W, NH = swap ? W : H;
+    s.canvas.width = NW; s.canvas.height = NH;
+    s.ctx.save();
+    s.ctx.translate(NW / 2, NH / 2);
+    s.ctx.rotate(deg * Math.PI / 180);
+    if (mirror) s.ctx.scale(-1, 1);
+    s.ctx.drawImage(tmp, -W / 2, -H / 2);
+    s.ctx.restore();
+    _photoCommitHistory();
+    if (s.tool === 'crop') _photoCropInit();
+}
+function _photoSetTool(tool) {
+    var s = photoEditState;
+    if (tool !== 'brush' && tool !== 'airbrush' && _photoHasPendingDraw()) _photoDiscardDrawing();
+    s.tool = tool;
+    document.querySelectorAll('#photo-edit-modal .photo-tool-btn').forEach(function(b) { b.classList.remove('active'); });
+    var btn = document.getElementById('photo-tool-' + tool);
+    if (btn) btn.classList.add('active');
+    var isDraw = tool === 'brush' || tool === 'airbrush';
+    var bs = document.getElementById('photo-brush-settings');
+    if (bs) bs.style.display = isDraw ? 'flex' : 'none';
+    var cs = document.getElementById('photo-crop-settings');
+    if (cs) cs.style.display = tool === 'crop' ? 'flex' : 'none';
+    var ov = document.getElementById('photo-crop-overlay');
+    if (tool === 'crop') { if (ov) ov.style.display = 'block'; _photoCropInit(); }
+    else if (ov) ov.style.display = 'none';
+}
+function _photoSyncOverlay() {
+    var s = photoEditState;
+    var wrap = document.getElementById('photo-edit-wrap');
+    var ov = document.getElementById('photo-crop-overlay');
+    if (!wrap || !ov || !s.canvas) return false;
+    var cRect = s.canvas.getBoundingClientRect();
+    var wRect = wrap.getBoundingClientRect();
+    if (!cRect.width || !cRect.height) return false;
+    ov.style.left = Math.round(cRect.left - wRect.left) + 'px';
+    ov.style.top = Math.round(cRect.top - wRect.top) + 'px';
+    ov.style.width = Math.round(cRect.width) + 'px';
+    ov.style.height = Math.round(cRect.height) + 'px';
+    return true;
+}
+function _photoCropInit() {
+    var s = photoEditState;
+    if (!_photoSyncOverlay()) {
+        setTimeout(_photoCropInit, 50);
+        return;
+    }
+    var ov = document.getElementById('photo-crop-overlay');
+    var box = document.getElementById('photo-crop-box');
+    if (!ov || !box) return;
+    var cw = ov.clientWidth || s.canvas.width, ch = ov.clientHeight || s.canvas.height;
+    var size = Math.max(20, Math.min(cw, ch) * 0.8);
+    var x = Math.round((cw - size) / 2), y = Math.round((ch - size) / 2);
+    _photoSetCropBox(x, y, Math.round(size), Math.round(size));
+    _photoCropBind();
+}
+function _photoSetCropBox(l, t, w, h) {
+    var ov = document.getElementById('photo-crop-overlay');
+    var box = document.getElementById('photo-crop-box');
+    if (!ov || !box) return;
+    var OVW = ov.clientWidth, OVH = ov.clientHeight;
+    if (!OVW || !OVH) return;
+    var MIN = Math.min(20, OVW, OVH);
+    w = Math.max(MIN, Math.min(w, OVW - l));
+    h = Math.max(MIN, Math.min(h, OVH - t));
+    l = Math.max(0, Math.min(l, OVW - w));
+    t = Math.max(0, Math.min(t, OVH - h));
+    box.style.left = l + 'px'; box.style.top = t + 'px';
+    box.style.width = w + 'px'; box.style.height = h + 'px';
+    var wi = document.getElementById('photo-crop-w');
+    var hi = document.getElementById('photo-crop-h');
+    if (wi) wi.value = Math.round(w);
+    if (hi) hi.value = Math.round(h);
+}
+function _photoCropBind() {
+    var box = document.getElementById('photo-crop-box');
+    var ov = document.getElementById('photo-crop-overlay');
+    if (!box || !ov) return;
+    var drag = false, res = null, sx = 0, sy = 0, sl = 0, st = 0, sw = 0, sh = 0;
+    function pt(e) { var t = e.touches ? e.touches[0] || e.changedTouches[0] : e; return { x: t.clientX, y: t.clientY }; }
+    function onDown(e) {
+        var cls = e.target.className || '';
+        if (typeof cls === 'string' && cls.indexOf('photo-crop-handle') > -1) {
+            res = cls.indexOf('tl') > -1 ? 'tl' : cls.indexOf('tr') > -1 ? 'tr' : cls.indexOf('bl') > -1 ? 'bl' : 'br';
+        } else if (e.target === box) { drag = true; }
+        else return;
+        var p = pt(e); sx = p.x; sy = p.y;
+        sl = parseInt(box.style.left); st = parseInt(box.style.top);
+        sw = parseInt(box.style.width); sh = parseInt(box.style.height);
+        e.preventDefault(); e.stopPropagation();
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+        document.addEventListener('touchmove', onMove, { passive: false });
+        document.addEventListener('touchend', onUp);
+        document.addEventListener('touchcancel', onUp);
+    }
+    function onMove(e) {
+        var p = pt(e); var dx = p.x - sx, dy = p.y - sy;
+        var OVW = ov.clientWidth, OVH = ov.clientHeight;
+        var MIN = Math.min(20, OVW, OVH);
+        var nl = sl, nt = st, nw = sw, nh = sh;
+        if (drag) {
+            nl = sl + dx; nt = st + dy;
+        } else if (res) {
+            if (res === 'br') { nw = sw + dx; nh = sh + dy; }
+            else if (res === 'bl') { nw = sw - dx; nl = sl + dx; nh = sh + dy; }
+            else if (res === 'tr') { nw = sw + dx; nh = sh - dy; nt = st + dy; }
+            else if (res === 'tl') { nw = sw - dx; nl = sl + dx; nh = sh - dy; nt = st + dy; }
+        } else return;
+        nw = Math.max(MIN, Math.min(nw, OVW - nl));
+        nh = Math.max(MIN, Math.min(nh, OVH - nt));
+        nl = Math.max(0, Math.min(nl, OVW - nw));
+        nt = Math.max(0, Math.min(nt, OVH - nh));
+        _photoSetCropBox(Math.round(nl), Math.round(nt), Math.round(nw), Math.round(nh));
+        e.preventDefault();
+    }
+    function onUp() { drag = false; res = null; document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); document.removeEventListener('touchmove', onMove); document.removeEventListener('touchend', onUp); document.removeEventListener('touchcancel', onUp); }
+    ov.onmousedown = onDown; ov.ontouchstart = onDown;
+    var wi = document.getElementById('photo-crop-w');
+    var hi = document.getElementById('photo-crop-h');
+    if (wi) wi.oninput = function() {
+        _photoSetCropBox(parseInt(box.style.left), parseInt(box.style.top), parseInt(this.value) || 0, parseInt(box.style.height));
+    };
+    if (hi) hi.oninput = function() {
+        _photoSetCropBox(parseInt(box.style.left), parseInt(box.style.top), parseInt(box.style.width), parseInt(this.value) || 0);
+    };
+}
+function _photoCropApply() {
+    var s = photoEditState;
+    var ov = document.getElementById('photo-crop-overlay');
+    var box = document.getElementById('photo-crop-box');
+    if (!ov || !box || !s.canvas || !ov.clientWidth || !ov.clientHeight) return;
+    var l = parseInt(box.style.left), t = parseInt(box.style.top);
+    var w = parseInt(box.style.width), h = parseInt(box.style.height);
+    if (isNaN(l) || isNaN(t) || isNaN(w) || isNaN(h)) return;
+    var scX = s.canvas.width / ov.clientWidth;
+    var scY = s.canvas.height / ov.clientHeight;
+    var x = Math.max(0, Math.min(Math.round(l * scX), s.canvas.width - 2));
+    var y = Math.max(0, Math.min(Math.round(t * scY), s.canvas.height - 2));
+    var cw = Math.max(2, Math.min(Math.round(w * scX), s.canvas.width - x));
+    var ch = Math.max(2, Math.min(Math.round(h * scY), s.canvas.height - y));
+    var imgData = s.ctx.getImageData(x, y, cw, ch);
+    s.canvas.width = cw; s.canvas.height = ch;
+    s.ctx.putImageData(imgData, 0, 0);
+    _photoCommitHistory();
+    _photoSetTool('brush');
+}
+function _photoDrawInit() {
+    var s = photoEditState;
+    var canvas = s.canvas;
+    function getPos(e) {
+        // Use the rect captured at stroke start: the draw-actions bar appears on
+        // mousedown and can shift the canvas mid-stroke, which would otherwise
+        // desync the rest of the stroke's coordinates.
+        var r = s._rect || canvas.getBoundingClientRect();
+        var t = e.touches ? e.touches[0] || e.changedTouches[0] : e;
+        return { x: (t.clientX - r.left) * (canvas.width / r.width), y: (t.clientY - r.top) * (canvas.height / r.height) };
+    }
+    function onDown(e) {
+        if (s.tool !== 'brush' && s.tool !== 'airbrush') return;
+        if (s.drawStartIdx < 0) s.drawStartIdx = s.historyIdx;
+        s.drawing = true;
+        s._rect = canvas.getBoundingClientRect();
+        var p = getPos(e); s.lastX = p.x; s.lastY = p.y;
+        s.ctx.beginPath(); s.ctx.moveTo(p.x, p.y); s.ctx.lineTo(p.x + 0.1, p.y + 0.1);
+        _photoApplyStrokeStyle();
+        s.ctx.stroke(); s.ctx.globalAlpha = 1; s.ctx.shadowBlur = 0;
+        var da = document.getElementById('photo-draw-actions');
+        if (da) da.style.display = 'flex';
+        e.preventDefault();
+    }
+    function onMove(e) {
+        if (!s.drawing) return;
+        var p = getPos(e);
+        s.ctx.beginPath(); s.ctx.moveTo(s.lastX, s.lastY); s.ctx.lineTo(p.x, p.y);
+        _photoApplyStrokeStyle();
+        s.ctx.stroke(); s.ctx.globalAlpha = 1; s.ctx.shadowBlur = 0;
+        s.lastX = p.x; s.lastY = p.y;
+        e.preventDefault();
+    }
+    function onUp() {
+        if (!s.drawing) return;
+        s.drawing = false; s.ctx.globalAlpha = 1; s.ctx.shadowBlur = 0;
+    }
+    canvas.addEventListener('mousedown', onDown);
+    canvas.addEventListener('mousemove', onMove);
+    canvas.addEventListener('mouseup', onUp);
+    canvas.addEventListener('mouseleave', onUp);
+    canvas.addEventListener('touchstart', onDown, { passive: false });
+    canvas.addEventListener('touchmove', onMove, { passive: false });
+    canvas.addEventListener('touchend', onUp);
+    canvas.addEventListener('touchcancel', onUp);
+}
+function _photoApplyStrokeStyle() {
+    var s = photoEditState;
+    s.ctx.strokeStyle = s.brushColor; s.ctx.lineWidth = s.brushSize;
+    s.ctx.lineCap = 'round'; s.ctx.lineJoin = 'round';
+    if (s.tool === 'airbrush') { s.ctx.globalAlpha = 0.35; s.ctx.shadowBlur = s.brushSize * 1.5; s.ctx.shadowColor = s.brushColor; }
+}
+var _photoDrawInited = false;
+function openPhotoEditModal(file) {
+    var s = photoEditState;
+    s.history = []; s.historyIdx = -1; s.drawing = false; s.drawStartIdx = -1;
+    var da = document.getElementById('photo-draw-actions');
+    if (da) da.style.display = 'none';
+    var img = new Image();
+    img.src = URL.createObjectURL(file);
+    img.onload = function() {
+        s.img = img;
+        s.canvas = document.getElementById('photo-edit-canvas');
+        s.ctx = s.canvas.getContext('2d');
+        s.canvas.width = img.naturalWidth; s.canvas.height = img.naturalHeight;
+        s.ctx.drawImage(img, 0, 0);
+        _photoCommitHistory();
+        if (!_photoDrawInited) { _photoDrawInit(); _photoDrawInited = true; }
+        document.getElementById('photo-edit-modal').style.display = 'flex';
+        _photoSetTool('brush');
+    };
+}
+function closePhotoEditModal() {
+    var s = photoEditState;
+    if (s.img && s.img.src) URL.revokeObjectURL(s.img.src);
+    s.img = null; s.canvas = null; s.ctx = null;
+    s.history = []; s.historyIdx = -1; s.drawStartIdx = -1; s.drawing = false; s._rect = null;
+    var da = document.getElementById('photo-draw-actions');
+    if (da) da.style.display = 'none';
+    document.getElementById('photo-edit-modal').style.display = 'none';
+}
+async function _photoEditConfirm() {
+    var s = photoEditState;
+    if (!s.canvas) return;
+    if (s.tool === 'crop') {
+        var ov = document.getElementById('photo-crop-overlay');
+        if (ov && ov.style.display !== 'none') _photoCropApply();
+    } else if (_photoHasPendingDraw()) {
+        _photoCommitDrawing();
+    }
+    var cur = selectedFiles[currentFileIndex];
+    var type = (cur.type && cur.type.indexOf('image/') === 0 &&
+        (cur.type === 'image/png' || cur.type === 'image/jpeg' || cur.type === 'image/webp')) ? cur.type : 'image/png';
+    var blob = await new Promise(function(r) { s.canvas.toBlob(r, type, 0.92); });
+    selectedFiles[currentFileIndex] = new File([blob], cur.name, { type: type });
+    _clearUploadEditState(currentFileIndex);
+    closePhotoEditModal();
+    renderUploadPreview();
+    _showUploadQuickActions();
+}
+
+// ===== Video Edit Modal =====
+var videoEditState = {
+    canvas: null, ctx: null, video: null, _blobUrl: null, _ready: false,
+    rotations: 0, mirrored: false, cutStart: 0, cutEnd: 1,
+    crop: null, tool: 'crop',
+    history: [], historyIdx: -1
+};
+function _videoPushHistory() {
+    var s = videoEditState;
+    s.historyIdx++;
+    s.history = s.history.slice(0, s.historyIdx);
+    s.history.push({
+        rotations: s.rotations, mirrored: s.mirrored,
+        cutStart: s.cutStart, cutEnd: s.cutEnd,
+        crop: s.crop ? { x: s.crop.x, y: s.crop.y, w: s.crop.w, h: s.crop.h } : null
+    });
+    if (s.history.length > 30) { s.history.shift(); s.historyIdx--; }
+    _videoUpdateHistoryBtns();
+}
+function _videoUpdateHistoryBtns() {
+    var s = videoEditState;
+    var u = document.getElementById('video-undo');
+    var r = document.getElementById('video-redo');
+    if (u) u.disabled = s.historyIdx <= 0;
+    if (r) r.disabled = s.historyIdx >= s.history.length - 1;
+}
+function _videoRestore(idx) {
+    var s = videoEditState;
+    if (idx < 0 || idx >= s.history.length) return;
+    s.historyIdx = idx;
+    var snap = s.history[idx];
+    s.rotations = snap.rotations; s.mirrored = snap.mirrored;
+    s.cutStart = snap.cutStart; s.cutEnd = snap.cutEnd;
+    s.crop = snap.crop ? { x: snap.crop.x, y: snap.crop.y, w: snap.crop.w, h: snap.crop.h } : null;
+    _videoRenderFrame();
+    if (s.tool === 'crop') _videoCropInit();
+    _videoCutRefreshUI();
+    _videoUpdateHistoryBtns();
+}
+function _videoUndo() { _videoRestore(videoEditState.historyIdx - 1); }
+function _videoRedo() { _videoRestore(videoEditState.historyIdx + 1); }
+function _videoFrameDims() {
+    var s = videoEditState;
+    var vw = (s.video && s.video.videoWidth) || 0, vh = (s.video && s.video.videoHeight) || 0;
+    var swap = s.rotations % 2 === 1;
+    return { w: swap ? vh : vw, h: swap ? vw : vh };
+}
+function _transformCropRect(crop, W, H, deg, mirror) {
+    var x = crop.x, y = crop.y, w = crop.w, h = crop.h;
+    var n;
+    var swap = Math.abs(deg) === 90 || Math.abs(deg) === 270;
+    if (deg === 90 || deg === -270) n = { x: H - y - h, y: x, w: h, h: w };
+    else if (deg === -90 || deg === 270) n = { x: y, y: W - x - w, w: h, h: w };
+    else if (deg === 180 || deg === -180) n = { x: W - x - w, y: H - y - h, w: w, h: h };
+    else n = { x: x, y: y, w: w, h: h };
+    var FW = swap ? H : W, FH = swap ? W : H;
+    if (mirror) n.x = FW - n.x - n.w;
+    n.x = Math.max(0, Math.min(n.x, FW - n.w));
+    n.y = Math.max(0, Math.min(n.y, FH - n.h));
+    n.w = Math.min(n.w, FW - n.x);
+    n.h = Math.min(n.h, FH - n.y);
+    return n;
+}
+function _videoApplyTransform(deg, mirror) {
+    var s = videoEditState;
+    if (!s.video || !s.video.videoWidth) return;
+    var d = _videoFrameDims();
+    if (s.crop) s.crop = _transformCropRect(s.crop, d.w, d.h, deg, mirror);
+    if (deg) s.rotations = (s.rotations + (deg > 0 ? 1 : 3)) % 4;
+    if (mirror) s.mirrored = !s.mirrored;
+    _videoRenderFrame();
+    _videoPushHistory();
+    if (s.tool === 'crop') _videoCropInit();
+}
+// Draws the (rotated+mirrored) video frame into ctx. With a crop, render the
+// full rotated frame into an offscreen canvas first, then extract the crop
+// region 1:1. The old single-draw offset math shifted the crop by the centering
+// term ((frame-crop)/2), so off-center crops showed/exported the wrong region
+// and could go entirely black near the edges.
+var _videoFullFrameCanvas = null;
+function _videoGetFullFrameCanvas(w, h) {
+    if (!_videoFullFrameCanvas) _videoFullFrameCanvas = document.createElement('canvas');
+    if (_videoFullFrameCanvas.width !== w || _videoFullFrameCanvas.height !== h) {
+        _videoFullFrameCanvas.width = w; _videoFullFrameCanvas.height = h;
+    }
+    return _videoFullFrameCanvas;
+}
+function _videoDrawFrame(ctx, v, vw, vh, fw, fh, rotations, mirrored, cropBox) {
+    var rad = (rotations % 4) * Math.PI / 2;
+    if (!cropBox) {
+        ctx.clearRect(0, 0, fw, fh);
+        ctx.save();
+        ctx.translate(fw / 2, fh / 2);
+        ctx.rotate(rad);
+        ctx.scale(mirrored ? -1 : 1, 1);
+        ctx.drawImage(v, -vw / 2, -vh / 2);
+        ctx.restore();
+        return;
+    }
+    var full = _videoGetFullFrameCanvas(fw, fh);
+    var fctx = full.getContext('2d');
+    fctx.clearRect(0, 0, fw, fh);
+    fctx.save();
+    fctx.translate(fw / 2, fh / 2);
+    fctx.rotate(rad);
+    fctx.scale(mirrored ? -1 : 1, 1);
+    fctx.drawImage(v, -vw / 2, -vh / 2);
+    fctx.restore();
+    ctx.clearRect(0, 0, cropBox.w, cropBox.h);
+    ctx.drawImage(full, cropBox.x, cropBox.y, cropBox.w, cropBox.h, 0, 0, cropBox.w, cropBox.h);
+}
+function _videoRenderFrame() {
+    var s = videoEditState;
+    var v = s.video;
+    if (!v || !v.videoWidth || !s.canvas) return;
+    var vw = v.videoWidth, vh = v.videoHeight;
+    var d = _videoFrameDims();
+    var cw = s.crop ? s.crop.w : d.w, ch = s.crop ? s.crop.h : d.h;
+    s.canvas.width = cw; s.canvas.height = ch;
+    _videoDrawFrame(s.ctx, v, vw, vh, d.w, d.h, s.rotations, s.mirrored, s.crop);
+    _videoUpdateCropPreview();
+}
+function _videoSetTool(tool) {
+    videoEditState.tool = tool;
+    document.querySelectorAll('#video-edit-modal .photo-tool-btn').forEach(function(b) { b.classList.remove('active'); });
+    var btn = tool ? document.getElementById('video-tool-' + tool) : null;
+    if (btn) btn.classList.add('active');
+    var ov = document.getElementById('video-crop-overlay');
+    if (ov) ov.style.display = tool === 'crop' ? 'block' : 'none';
+    var tl = document.getElementById('video-cut-timeline');
+    if (tl) tl.style.display = tool === 'cut' ? 'block' : 'none';
+    var cs = document.getElementById('video-crop-settings');
+    if (cs) cs.style.display = tool === 'crop' ? 'flex' : 'none';
+    if (tool === 'crop') _videoCropInit();
+    _videoUpdateCropPreview();
+}
+function _videoSyncOverlay() {
+    var s = videoEditState;
+    var wrap = document.getElementById('video-edit-wrap');
+    var ov = document.getElementById('video-crop-overlay');
+    if (!wrap || !ov || !s.canvas) return false;
+    var cRect = s.canvas.getBoundingClientRect();
+    var wRect = wrap.getBoundingClientRect();
+    if (!cRect.width || !cRect.height) return false;
+    ov.style.left = Math.round(cRect.left - wRect.left) + 'px';
+    ov.style.top = Math.round(cRect.top - wRect.top) + 'px';
+    ov.style.width = Math.round(cRect.width) + 'px';
+    ov.style.height = Math.round(cRect.height) + 'px';
+    return true;
+}
+function _videoCropInit() {
+    var s = videoEditState;
+    if (!_videoSyncOverlay()) {
+        setTimeout(_videoCropInit, 50);
+        return;
+    }
+    var ov = document.getElementById('video-crop-overlay');
+    var box = document.getElementById('video-crop-box');
+    if (!ov || !box) return;
+    var cw = ov.clientWidth || s.canvas.width, ch = ov.clientHeight || s.canvas.height;
+    var size = Math.max(20, Math.min(cw, ch) * 0.8);
+    var x = Math.round((cw - size) / 2), y = Math.round((ch - size) / 2);
+    _videoSetCropBox(x, y, Math.round(size), Math.round(size));
+    _videoCropBind();
+}
+function _videoSetCropBox(l, t, w, h) {
+    var ov = document.getElementById('video-crop-overlay');
+    var box = document.getElementById('video-crop-box');
+    if (!ov || !box) return;
+    var OVW = ov.clientWidth, OVH = ov.clientHeight;
+    if (!OVW || !OVH) return;
+    var MIN = Math.min(20, OVW, OVH);
+    w = Math.max(MIN, Math.min(w, OVW - l));
+    h = Math.max(MIN, Math.min(h, OVH - t));
+    l = Math.max(0, Math.min(l, OVW - w));
+    t = Math.max(0, Math.min(t, OVH - h));
+    box.style.left = l + 'px'; box.style.top = t + 'px';
+    box.style.width = w + 'px'; box.style.height = h + 'px';
+    var wi = document.getElementById('video-crop-w');
+    var hi = document.getElementById('video-crop-h');
+    if (wi) wi.value = Math.round(w);
+    if (hi) hi.value = Math.round(h);
+    _videoUpdateCropPreview();
+}
+function _videoUpdateCropPreview() {
+    var s = videoEditState;
+    var panel = document.getElementById('video-crop-preview');
+    var pv = document.getElementById('video-crop-preview-canvas');
+    var ov = document.getElementById('video-crop-overlay');
+    var box = document.getElementById('video-crop-box');
+    if (!panel || !pv || !ov || !box || !s.canvas || !s.ctx) return;
+    if (s.tool !== 'crop' || ov.style.display === 'none') { panel.style.display = 'none'; return; }
+    var l = parseInt(box.style.left), t = parseInt(box.style.top);
+    var w = parseInt(box.style.width), h = parseInt(box.style.height);
+    var OVW = ov.clientWidth, OVH = ov.clientHeight;
+    if (isNaN(l) || isNaN(t) || isNaN(w) || isNaN(h) || !OVW || !OVH) return;
+    var scX = s.canvas.width / OVW;
+    var scY = s.canvas.height / OVH;
+    var x = Math.max(0, Math.round(l * scX));
+    var y = Math.max(0, Math.round(t * scY));
+    var cw = Math.max(2, Math.min(Math.round(w * scX), s.canvas.width - x));
+    var ch = Math.max(2, Math.min(Math.round(h * scY), s.canvas.height - y));
+    var pctx = pv.getContext('2d');
+    var scale = Math.min(pv.width / cw, pv.height / ch);
+    var dw = Math.max(1, Math.round(cw * scale)), dh = Math.max(1, Math.round(ch * scale));
+    pctx.imageSmoothingEnabled = true;
+    pctx.clearRect(0, 0, pv.width, pv.height);
+    pctx.drawImage(s.canvas, x, y, cw, ch, 0, 0, dw, dh);
+    panel.style.display = 'block';
+}
+function _videoCropBind() {
+    var box = document.getElementById('video-crop-box');
+    var ov = document.getElementById('video-crop-overlay');
+    if (!box || !ov) return;
+    var drag = false, res = null, sx = 0, sy = 0, sl = 0, st = 0, sw = 0, sh = 0;
+    function pt(e) { var t = e.touches ? e.touches[0] || e.changedTouches[0] : e; return { x: t.clientX, y: t.clientY }; }
+    function onDown(e) {
+        var cls = e.target.className || '';
+        if (typeof cls === 'string' && cls.indexOf('photo-crop-handle') > -1) {
+            res = cls.indexOf('tl') > -1 ? 'tl' : cls.indexOf('tr') > -1 ? 'tr' : cls.indexOf('bl') > -1 ? 'bl' : 'br';
+        } else if (e.target === box) { drag = true; }
+        else return;
+        var p = pt(e); sx = p.x; sy = p.y;
+        sl = parseInt(box.style.left); st = parseInt(box.style.top);
+        sw = parseInt(box.style.width); sh = parseInt(box.style.height);
+        e.preventDefault(); e.stopPropagation();
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+        document.addEventListener('touchmove', onMove, { passive: false });
+        document.addEventListener('touchend', onUp);
+        document.addEventListener('touchcancel', onUp);
+    }
+    function onMove(e) {
+        var p = pt(e); var dx = p.x - sx, dy = p.y - sy;
+        var OVW = ov.clientWidth, OVH = ov.clientHeight;
+        var MIN = Math.min(20, OVW, OVH);
+        var nl = sl, nt = st, nw = sw, nh = sh;
+        if (drag) {
+            nl = sl + dx; nt = st + dy;
+        } else if (res) {
+            if (res === 'br') { nw = sw + dx; nh = sh + dy; }
+            else if (res === 'bl') { nw = sw - dx; nl = sl + dx; nh = sh + dy; }
+            else if (res === 'tr') { nw = sw + dx; nh = sh - dy; nt = st + dy; }
+            else if (res === 'tl') { nw = sw - dx; nl = sl + dx; nh = sh - dy; nt = st + dy; }
+        } else return;
+        nw = Math.max(MIN, Math.min(nw, OVW - nl));
+        nh = Math.max(MIN, Math.min(nh, OVH - nt));
+        nl = Math.max(0, Math.min(nl, OVW - nw));
+        nt = Math.max(0, Math.min(nt, OVH - nh));
+        _videoSetCropBox(Math.round(nl), Math.round(nt), Math.round(nw), Math.round(nh));
+        e.preventDefault();
+    }
+    function onUp() { drag = false; res = null; document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); document.removeEventListener('touchmove', onMove); document.removeEventListener('touchend', onUp); document.removeEventListener('touchcancel', onUp); }
+    ov.onmousedown = onDown; ov.ontouchstart = onDown;
+    var wi = document.getElementById('video-crop-w');
+    var hi = document.getElementById('video-crop-h');
+    if (wi) wi.oninput = function() {
+        _videoSetCropBox(parseInt(box.style.left), parseInt(box.style.top), parseInt(this.value) || 0, parseInt(box.style.height));
+    };
+    if (hi) hi.oninput = function() {
+        _videoSetCropBox(parseInt(box.style.left), parseInt(box.style.top), parseInt(box.style.width), parseInt(this.value) || 0);
+    };
+}
+function _videoCropApply() {
+    var s = videoEditState;
+    var ov = document.getElementById('video-crop-overlay');
+    var box = document.getElementById('video-crop-box');
+    if (!ov || !box || !s.canvas || !ov.clientWidth || !ov.clientHeight) return;
+    var l = parseInt(box.style.left), t = parseInt(box.style.top);
+    var w = parseInt(box.style.width), h = parseInt(box.style.height);
+    if (isNaN(l) || isNaN(t) || isNaN(w) || isNaN(h)) return;
+    var scX = s.canvas.width / ov.clientWidth;
+    var scY = s.canvas.height / ov.clientHeight;
+    var x = Math.max(0, Math.round(l * scX));
+    var y = Math.max(0, Math.round(t * scY));
+    var cw = Math.max(2, Math.min(Math.round(w * scX), s.canvas.width - x));
+    var ch = Math.max(2, Math.min(Math.round(h * scY), s.canvas.height - y));
+    var base = s.crop ? { x: s.crop.x, y: s.crop.y, w: s.crop.w, h: s.crop.h } : { x: 0, y: 0, w: s.canvas.width, h: s.canvas.height };
+    s.crop = { x: base.x + x, y: base.y + y, w: cw, h: ch };
+    _videoRenderFrame();
+    _videoPushHistory();
+    // Leave crop mode after applying: never re-arm a fresh crop box (a second
+    // unrequested crop is confusing and crops from an unexpected position).
+    _videoSetTool(null);
+}
+function _videoCropCancel() {
+    var ov = document.getElementById('video-crop-overlay');
+    if (ov) ov.style.display = 'none';
+    var cs = document.getElementById('video-crop-settings');
+    if (cs) cs.style.display = 'none';
+    _videoSetTool(null);
+}
+function _videoCutInit() {
+    var s = videoEditState;
+    var track = document.getElementById('video-cut-track');
+    var range = document.getElementById('video-cut-range');
+    if (!track || !range) return;
+    s.cutStart = 0; s.cutEnd = 1;
+    _videoCutRefreshUI();
+    var dragging = null, startX = 0, startLeft = 0, startWidth = 0;
+    function onDown(e) {
+        var id = e.target.id || '';
+        if (id === 'video-cut-start') dragging = 'start';
+        else if (id === 'video-cut-end') dragging = 'end';
+        else if (e.target.closest && e.target.closest('#video-cut-range')) dragging = 'move';
+        else return;
+        startX = e.clientX || (e.touches && e.touches[0] ? e.touches[0].clientX : 0);
+        startLeft = parseFloat(range.style.left) || 0;
+        startWidth = parseFloat(range.style.width) || 100;
+        e.preventDefault();
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+        document.addEventListener('touchmove', onMove, { passive: false });
+        document.addEventListener('touchend', onUp);
+        document.addEventListener('touchcancel', onUp);
+    }
+    function onMove(e) {
+        var cx = e.clientX || (e.touches && e.touches[0] ? e.touches[0].clientX : 0);
+        var dx = (cx - startX) / Math.max(1, track.offsetWidth) * 100;
+        if (dragging === 'start') {
+            var nl = Math.max(0, Math.min(startLeft + dx, startLeft + startWidth - 3));
+            range.style.left = nl + '%'; s.cutStart = nl / 100;
+        } else if (dragging === 'end') {
+            var nw = Math.max(3, Math.min(100 - startLeft, startWidth + dx));
+            range.style.width = nw + '%'; s.cutEnd = (startLeft + nw) / 100;
+        } else if (dragging === 'move') {
+            var nl2 = Math.max(0, Math.min(100 - startWidth, startLeft + dx));
+            range.style.left = nl2 + '%'; s.cutStart = nl2 / 100; s.cutEnd = (nl2 + startWidth) / 100;
+        }
+        _videoCutRefreshUI();
+        e.preventDefault();
+    }
+    function onUp() { dragging = null; document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); document.removeEventListener('touchmove', onMove); document.removeEventListener('touchend', onUp); document.removeEventListener('touchcancel', onUp); }
+    track.onmousedown = onDown; track.ontouchstart = onDown;
+}
+function _videoCutRefreshUI() {
+    var s = videoEditState;
+    var range = document.getElementById('video-cut-range');
+    var st = document.getElementById('video-cut-start-time');
+    var et = document.getElementById('video-cut-end-time');
+    if (range) { range.style.left = (s.cutStart * 100) + '%'; range.style.width = ((s.cutEnd - s.cutStart) * 100) + '%'; }
+    var dur = (s.video && isFinite(s.video.duration) && s.video.duration > 0) ? s.video.duration : 1;
+    if (st) st.textContent = _vFmt(s.cutStart * dur);
+    if (et) et.textContent = _vFmt(s.cutEnd * dur);
+}
+function _vFmt(sec) { var m = Math.floor(sec / 60), s = Math.floor(sec % 60); return m + ':' + (s < 10 ? '0' : '') + s; }
+function openVideoEditModal(file) {
+    var s = videoEditState;
+    s.rotations = 0; s.mirrored = false; s.cutStart = 0; s.cutEnd = 1; s.crop = null; s._ready = false;
+    s.history = []; s.historyIdx = -1;
+    s.video = document.getElementById('video-edit-source');
+    if (s._blobUrl) URL.revokeObjectURL(s._blobUrl);
+    s._blobUrl = URL.createObjectURL(file);
+    var err = document.getElementById('video-edit-error');
+    if (err) { err.style.display = 'none'; }
+    s.video.muted = true; s.video.playsInline = true; s.video.preload = 'auto';
+    s.video.src = s._blobUrl;
+    s.video.onloadedmetadata = function() {
+        var dur = s.video.duration;
+        if (isFinite(dur) && dur > 0 && dur < Infinity) s.video.currentTime = Math.min(0.001, dur / 2);
+    };
+    s.video.onloadeddata = function() { if (!s._ready) _videoReadyToEdit(); };
+    s.video.onseeked = function() { if (s.canvas) _videoRenderFrame(); if (!s._ready) _videoReadyToEdit(); };
+    s.video.onerror = function() {
+        var err = document.getElementById('video-edit-error');
+        if (err) { err.textContent = 'Failed to load video for editing.'; err.style.display = 'block'; }
+    };
+}
+function _videoReadyToEdit() {
+    var s = videoEditState;
+    if (!s.canvas) {
+        s.canvas = document.getElementById('video-edit-canvas');
+        s.ctx = s.canvas.getContext('2d');
+    }
+    if (!s.canvas || !s.video || !s.video.videoWidth) return;
+    s._ready = true;
+    _videoRenderFrame();
+    _videoPushHistory();
+    _videoCutInit();
+    document.getElementById('video-edit-modal').style.display = 'flex';
+    // Open with no tool forced: the user picks Crop / Cut themselves.
+    _videoSetTool(null);
+}
+function closeVideoEditModal() {
+    var s = videoEditState;
+    if (s._blobUrl) { URL.revokeObjectURL(s._blobUrl); s._blobUrl = null; }
+    if (s.video) { try { s.video.pause(); } catch (e) {} s.video.removeAttribute('src'); try { s.video.load(); } catch (e) {} }
+    s.video = null; s.canvas = null; s.ctx = null; s._ready = false;
+    s.crop = null; s.history = []; s.historyIdx = -1;
+    var pp = document.getElementById('video-crop-preview');
+    if (pp) pp.style.display = 'none';
+    document.getElementById('video-edit-modal').style.display = 'none';
+}
+async function _videoEditConfirm() {
+    var s = videoEditState;
+    if (!s.video || !s.video.videoWidth) return;
+    var err = document.getElementById('video-edit-error');
+    if (err) err.style.display = 'none';
+    // WYSIWYG: if the crop box is open, apply it so the upload matches what
+    // the user sees in the editor.
+    var ov = document.getElementById('video-crop-overlay');
+    if (s.tool === 'crop' && ov && ov.style.display !== 'none') _videoCropApply();
+    var file = selectedFiles[currentFileIndex];
+    try {
+        var out = await _videoExport(file, s.cutStart, s.cutEnd, s.rotations, s.mirrored, s.crop);
+        if (!out || out.size < 1) throw new Error('Export produced an empty file');
+        selectedFiles[currentFileIndex] = out;
+        _clearUploadEditState(currentFileIndex);
+        closeVideoEditModal(); renderUploadPreview(); _showUploadQuickActions();
+    } catch (ex) {
+        console.error('Video export failed:', ex);
+        if (err) { err.textContent = 'Video export failed: ' + (ex && ex.message ? ex.message : ex); err.style.display = 'block'; }
+    }
+}
+function _videoExport(file, cutStart, cutEnd, rotations, mirrored, cropBox) {
+    return new Promise(function(resolve, reject) {
+        var v = document.createElement('video');
+        v.preload = 'auto'; v.muted = true; v.playsInline = true;
+        var blobUrl = URL.createObjectURL(file);
+        v.src = blobUrl;
+        var settled = false;
+        function cleanup() {
+            try { v.pause(); v.removeAttribute('src'); v.load(); } catch (e) {}
+            URL.revokeObjectURL(blobUrl);
+        }
+        function fail(msg) {
+            if (settled) return; settled = true;
+            cleanup();
+            reject(new Error(msg));
+        }
+        v.onerror = function() { fail('Failed to load video for export'); };
+        function proceed(dur) {
+            var startTime = Math.max(0, Math.min(cutStart * dur, dur - 0.001));
+            var endTime = Math.max(startTime + 0.001, Math.min(cutEnd * dur, dur));
+            var vw = v.videoWidth, vh = v.videoHeight;
+            if (!vw || !vh) { fail('Video has no frames'); return; }
+            var swap = rotations % 2 === 1;
+            var fw = swap ? vh : vw, fh = swap ? vw : vh;
+            var outW = cropBox ? cropBox.w : fw;
+            var outH = cropBox ? cropBox.h : fh;
+            if (outW < 2 || outH < 2) { fail('Crop region too small'); return; }
+            var c = document.createElement('canvas');
+            c.width = outW; c.height = outH;
+            var ctx = c.getContext('2d');
+            var stream = c.captureStream(30);
+            var recOpts = {};
+            if (window.MediaRecorder && MediaRecorder.isTypeSupported('video/webm;codecs=vp9')) recOpts.mimeType = 'video/webm;codecs=vp9';
+            else if (window.MediaRecorder && MediaRecorder.isTypeSupported('video/webm')) recOpts.mimeType = 'video/webm';
+            var recorder;
+            try { recorder = new MediaRecorder(stream, recOpts); }
+            catch (e) { fail('MediaRecorder unavailable: ' + e.message); return; }
+            var chunks = [];
+            var stopped = false;
+            recorder.ondataavailable = function(e) { if (e.data && e.data.size > 0) chunks.push(e.data); };
+            recorder.onstop = function() {
+                if (settled) return; settled = true;
+                cleanup();
+                if (!chunks.length) { reject(new Error('Export produced no data')); return; }
+                var blob = new Blob(chunks, { type: 'video/webm' });
+                var base = String(file.name || 'video').replace(/\.[^.]+$/, '');
+                resolve(new File([blob], base + '.webm', { type: 'video/webm' }));
+            };
+            recorder.onerror = function(e) { fail('Recorder error: ' + (e && e.error && e.error.message ? e.error.message : 'unknown')); };
+            // rAF-driven polling is more reliable than requestVideoFrameCallback
+            // (which can stall on detached video elements); draw a new frame only
+            // when the playback position actually advanced.
+            var lastDrawnTime = -1;
+            function drawToCanvas() {
+                _videoDrawFrame(ctx, v, vw, vh, fw, fh, rotations, mirrored, cropBox || null);
+            }
+            // Transparent canvas = drawImage drew nothing (frame not decoded yet).
+            // Only opaque pixels (even a genuinely black frame) count as content;
+            // this is what lets us refuse to start the recorder on an empty canvas.
+            function canvasHasContent() {
+                try {
+                    var d = ctx.getImageData(0, 0, outW, outH).data;
+                    for (var i = 3; i < d.length; i += 4) {
+                        if (d[i] > 0) return true;
+                    }
+                } catch (e) {}
+                return false;
+            }
+            function drawFrame() {
+                if (settled || stopped) return;
+                if (v.currentTime >= endTime || v.ended || v.currentTime >= dur - 0.01) {
+                    stopped = true;
+                    try { recorder.stop(); } catch (e) { fail('Recorder stop failed'); }
+                    return;
+                }
+                if (v.currentTime !== lastDrawnTime) {
+                    lastDrawnTime = v.currentTime;
+                    drawToCanvas();
+                }
+                requestAnimationFrame(drawFrame);
+            }
+            // Watchdog: exports are real-time, so budget generously from the cut
+            // length, but never let a stalled pipeline hang forever.
+            var watchdogMs = Math.max(15000, (endTime - startTime) * 2000 + 10000);
+            setTimeout(function() {
+                if (!settled && !stopped) { stopped = true; fail('Video export timed out'); }
+            }, watchdogMs);
+            var started = false;
+            function beginRecording() {
+                if (started || settled) return;
+                // Never let the recorder capture black frames: keep drawing the
+                // first frame until the detached video element has decoded it,
+                // and only then start recording + playback.
+                drawToCanvas();
+                if (!canvasHasContent()) {
+                    requestAnimationFrame(beginRecording);
+                    return;
+                }
+                started = true;
+                try { recorder.start(250); }
+                catch (e) { fail('Could not start recorder: ' + e.message); return; }
+                var p = v.play();
+                if (p && p.catch) p.catch(function() { fail('Could not play video for export'); });
+                drawFrame();
+            }
+            v.currentTime = startTime;
+            function waitSeek() {
+                if (settled) return;
+                if (v.currentTime >= startTime - 0.0001 && v.currentTime <= startTime + 0.01 && !v.seeking) {
+                    beginRecording();
+                    return;
+                }
+                requestAnimationFrame(waitSeek);
+            }
+            setTimeout(waitSeek, 30);
+        }
+        v.onloadedmetadata = function() {
+            var dur = v.duration;
+            if (isFinite(dur) && dur > 0) { proceed(dur); return; }
+            // MediaRecorder-produced webm often reports duration=Infinity until
+            // the file is fully parsed; seek far to force the browser to resolve
+            // the real duration (currentTime gets clamped to the actual end).
+            v.currentTime = 1e7;
+            v.onseeked = function() {
+                v.onseeked = null;
+                var d2 = v.duration;
+                if (!isFinite(d2) || d2 <= 0) d2 = v.currentTime;
+                if (!isFinite(d2) || d2 <= 0) { fail('Video duration is unknown; cannot cut'); return; }
+                proceed(d2);
+            };
+            setTimeout(function() {
+                if (typeof v.onseeked === 'function') fail('Could not determine video duration');
+            }, 5000);
+        };
+    });
+}
 // G5 — client-side magic-byte validation. The server stores every upload as
 // client-encrypted ciphertext, so it cannot sniff content; the client is the
 // only place plaintext exists, so type checks happen HERE before encryption.
@@ -17351,10 +18370,12 @@ async function startFileUpload() {
     const filePayloads = [];
 
     try {
-        for (const file of selectedFiles) {
+        for (var fi = 0; fi < selectedFiles.length; fi++) {
+            var file = selectedFiles[fi];
             progressText.textContent = 'File ' + (uploadedFiles + 1) + '/' + totalFiles + ': ' + file.name;
             progressFill.style.width = Math.round(((uploadedFiles) / totalFiles) * 100) + '%';
-            const payload = await uploadFileToServer(file);
+            var transformedFile = await _applyUploadTransformsToFile(file, fi);
+            const payload = await uploadFileToServer(transformedFile);
             filePayloads.push(payload);
             uploadedFiles++;
             progressFill.style.width = Math.round((uploadedFiles / totalFiles) * 100) + '%';

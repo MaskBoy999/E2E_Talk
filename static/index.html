@@ -911,6 +911,12 @@
                 <div id="upload-progress-text" class="progress-text">0%</div>
             </div>
             <div id="upload-error" style="color:var(--danger);margin-bottom:12px;display:none;font-size:13px"></div>
+            <div id="upload-quick-actions" class="upload-quick-actions" style="display:none">
+                <button class="upload-action-btn" id="upload-btn-edit" title="Edit">✏️</button>
+                <button class="upload-action-btn" id="upload-btn-mirror" title="Mirror">🪞</button>
+                <button class="upload-action-btn" id="upload-btn-rotate-left" title="Rotate Left">↺</button>
+                <button class="upload-action-btn" id="upload-btn-rotate-right" title="Rotate Right">↻</button>
+            </div>
             <div class="modal-actions" style="gap:8px;flex-wrap:wrap;justify-content:space-between">
                 <button class="btn-cancel" id="add-more-files" style="border-color:var(--accent);color:var(--accent)">+ Add Files</button>
                 <div style="display:flex;gap:8px">
@@ -919,6 +925,119 @@
                 </div>
             </div>
             <input type="file" id="add-more-file-input" style="display:none" multiple>
+        </div>
+    </div>
+
+    <!-- Photo Edit Modal -->
+    <div class="modal" id="photo-edit-modal" style="display:none;z-index:10001">
+        <div class="photo-edit-container">
+            <div class="photo-edit-header">
+                <span class="photo-edit-title">Edit Photo</span>
+                <div class="photo-edit-tools">
+                    <button class="photo-tool-btn active" id="photo-tool-brush" title="Brush">🖌️</button>
+                    <button class="photo-tool-btn" id="photo-tool-airbrush" title="Airbrush">💨</button>
+                    <button class="photo-tool-btn" id="photo-tool-crop" title="Crop">⬔</button>
+                    <button class="photo-tool-btn" id="photo-btn-mirror" title="Mirror">🪞</button>
+                    <button class="photo-tool-btn" id="photo-btn-rotate-left" title="Rotate Left">↺</button>
+                    <button class="photo-tool-btn" id="photo-btn-rotate-right" title="Rotate Right">↻</button>
+                </div>
+                <div class="photo-edit-history">
+                    <button class="photo-history-btn" id="photo-undo" title="Undo" disabled>↶</button>
+                    <button class="photo-history-btn" id="photo-redo" title="Redo" disabled>↷</button>
+                </div>
+                <div class="photo-edit-actions">
+                    <button class="btn-cancel" id="photo-edit-cancel">Cancel</button>
+                    <button class="btn-invite" id="photo-edit-confirm">Confirm</button>
+                </div>
+            </div>
+            <div class="photo-edit-canvas-wrap" id="photo-edit-wrap">
+                <canvas id="photo-edit-canvas"></canvas>
+                <div id="photo-crop-overlay" class="photo-crop-overlay" style="display:none">
+                    <div id="photo-crop-box" class="photo-crop-box">
+                        <div id="photo-crop-handle-tl" class="photo-crop-handle photo-crop-handle-tl"></div>
+                        <div id="photo-crop-handle-tr" class="photo-crop-handle photo-crop-handle-tr"></div>
+                        <div id="photo-crop-handle-bl" class="photo-crop-handle photo-crop-handle-bl"></div>
+                        <div id="photo-crop-handle-br" class="photo-crop-handle photo-crop-handle-br"></div>
+                    </div>
+                </div>
+            </div>
+            <div id="photo-brush-settings" class="photo-brush-settings">
+                <label class="photo-bs-label">Size: <input type="range" id="photo-brush-size" min="2" max="80" value="8"> <span id="photo-brush-size-val">8</span></label>
+                <label class="photo-bs-label">Color: <input type="color" id="photo-brush-color" value="#ff0000"></label>
+            </div>
+            <div id="photo-crop-settings" class="photo-brush-settings" style="display:none">
+                <label class="photo-bs-label">Width: <input type="number" id="photo-crop-w" min="10" value="100"> px</label>
+                <label class="photo-bs-label">Height: <input type="number" id="photo-crop-h" min="10" value="100"> px</label>
+                <div style="margin-left:auto;display:flex;gap:6px">
+                    <button class="btn-cancel" id="photo-crop-cancel" style="font-size:12px">Cancel Crop</button>
+                    <button class="btn-invite" id="photo-crop-confirm" style="font-size:12px">Apply Crop</button>
+                </div>
+            </div>
+            <div class="photo-edit-draw-actions" id="photo-draw-actions" style="display:none">
+                <button class="btn-cancel" id="photo-draw-cancel">Discard Drawing</button>
+                <button class="btn-invite" id="photo-draw-confirm">Confirm Drawing</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Video Edit Modal -->
+    <div class="modal" id="video-edit-modal" style="display:none;z-index:10001">
+        <div class="video-edit-container">
+            <div class="video-edit-header">
+                <span class="video-edit-title">Edit Video</span>
+                <div class="video-edit-tools">
+                    <button class="photo-tool-btn" id="video-tool-crop" title="Crop">⬔</button>
+                    <button class="photo-tool-btn" id="video-tool-cut" title="Cut">✂️</button>
+                    <button class="photo-tool-btn" id="video-btn-mirror" title="Mirror">🪞</button>
+                    <button class="photo-tool-btn" id="video-btn-rotate-left" title="Rotate Left">↺</button>
+                    <button class="photo-tool-btn" id="video-btn-rotate-right" title="Rotate Right">↻</button>
+                </div>
+                <div class="photo-edit-history">
+                    <button class="photo-history-btn" id="video-undo" title="Undo" disabled>↶</button>
+                    <button class="photo-history-btn" id="video-redo" title="Redo" disabled>↷</button>
+                </div>
+                <div class="video-edit-actions">
+                    <button class="btn-cancel" id="video-edit-cancel">Cancel</button>
+                    <button class="btn-invite" id="video-edit-confirm">Confirm</button>
+                </div>
+            </div>
+            <div id="video-edit-error" style="display:none;color:var(--danger);font-size:13px;padding:8px 16px;background:var(--bg-secondary)"></div>
+            <div class="video-edit-canvas-wrap" id="video-edit-wrap">
+                <canvas id="video-edit-canvas"></canvas>
+                <video id="video-edit-source" style="display:none"></video>
+                <div id="video-crop-overlay" class="photo-crop-overlay" style="display:none">
+                    <div id="video-crop-box" class="photo-crop-box">
+                        <div class="photo-crop-handle photo-crop-handle-tl"></div>
+                        <div class="photo-crop-handle photo-crop-handle-tr"></div>
+                        <div class="photo-crop-handle photo-crop-handle-bl"></div>
+                        <div class="photo-crop-handle photo-crop-handle-br"></div>
+                    </div>
+                </div>
+                <div id="video-crop-preview" class="video-crop-preview" style="display:none">
+                    <div class="video-crop-preview-label">Crop preview</div>
+                    <canvas id="video-crop-preview-canvas" width="160" height="120"></canvas>
+                </div>
+            </div>
+            <div id="video-cut-timeline" class="video-cut-timeline" style="display:none">
+                <div class="video-cut-track" id="video-cut-track">
+                    <div class="video-cut-range" id="video-cut-range">
+                        <div class="video-cut-handle video-cut-handle-start" id="video-cut-start"></div>
+                        <div class="video-cut-handle video-cut-handle-end" id="video-cut-end"></div>
+                    </div>
+                </div>
+                <div class="video-cut-times">
+                    <span id="video-cut-start-time">0:00</span>
+                    <span id="video-cut-end-time">0:00</span>
+                </div>
+            </div>
+            <div id="video-crop-settings" class="photo-brush-settings" style="display:none">
+                <label class="photo-bs-label">Width: <input type="number" id="video-crop-w" min="10" value="100"> px</label>
+                <label class="photo-bs-label">Height: <input type="number" id="video-crop-h" min="10" value="100"> px</label>
+                <div style="margin-left:auto;display:flex;gap:6px">
+                    <button class="btn-cancel" id="video-crop-cancel" style="font-size:12px">Cancel Crop</button>
+                    <button class="btn-invite" id="video-crop-confirm" style="font-size:12px">Apply Crop</button>
+                </div>
+            </div>
         </div>
     </div>
 

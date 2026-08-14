@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 
 // Helper: register a user and return credentials
 async function registerUser(page: any, username: string, password: string) {
+    username = username + '_' + Date.now().toString(36);
     await page.goto('https://localhost:3443/login.html');
     await page.waitForSelector('#show-register');
     await page.click('#show-register');

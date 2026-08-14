@@ -1,0 +1,1482 @@
+import { test, expect, type Page } from '@playwright/test';
+
+const BASE = 'https://localhost:3443';
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+async function registerAndSetup(page: Page) {
+    const ts = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    const username = `edit_${ts}`;
+    await page.goto(`${BASE}/login.html`);
+    await page.waitForSelector('#show-register');
+    await page.click('#show-register');
+    await page.fill('#register-username', username);
+    await page.fill('#register-password', 'TestPass123!');
+    await page.fill('#register-confirm-password', 'TestPass123!');
+    await page.click('#register-form button[type="submit"]');
+    await page.waitForURL('**/index.html', { timeout: 15000 });
+
+    await page.click('#add-server-btn');
+    await page.waitForSelector('#server-choice-modal', { state: 'visible', timeout: 5000 });
+    await page.click('#choice-create-server');
+    await page.waitForSelector('#create-server-modal', { state: 'visible', timeout: 5000 });
+    await page.fill('#new-server-name', 'Test Server');
+    await page.click('#confirm-create-server');
+    await page.waitForSelector('#create-server-modal', { state: 'hidden', timeout: 10000 });
+    await page.waitForTimeout(1000);
+
+    const serverIcon = page.locator('.server-icon').filter({ hasText: 'T' });
+    await serverIcon.click({ timeout: 5000 });
+    await page.waitForTimeout(1000);
+    await page.waitForSelector('.channel-item', { timeout: 5000 });
+    await page.click('.channel-item >> nth=0');
+    await page.waitForTimeout(500);
+}
+
+async function uploadTestImage(page: Page, filename = 'test-photo.png') {
+    // 200x150 image: left half red (#ff0000), right half blue (#0000ff)
+    const pngData = await page.evaluate(() => {
+        const canvas = document.createElement('canvas');
+        canvas.width = 200;
+        canvas.height = 150;
+        const ctx = canvas.getContext('2d')!;
+        ctx.fillStyle = '#ff0000';
+        ctx.fillRect(0, 0, 100, 150);
+        ctx.fillStyle = '#0000ff';
+        ctx.fillRect(100, 0, 100, 150);
+        return canvas.toDataURL('image/png').split(',')[1];
+    });
+    const buffer = Buffer.from(pngData, 'base64');
+    await page.locator('#file-input').setInputFiles({ name: filename, mimeType: 'image/png', buffer });
+    await page.waitForSelector('#upload-modal', { state: 'visible', timeout: 5000 });
+}
+
+async function uploadTestText(page: Page) {
+    await page.locator('#file-input').setInputFiles({ name: 'test.txt', mimeType: 'text/plain', buffer: Buffer.from('hello world') });
+    await page.waitForSelector('#upload-modal', { state: 'visible', timeout: 5000 });
+}
+
+// Generates a small webm in-page (colored animation, white dot moving) and uploads it.
+async function uploadTestVideo(page: Page, seconds = 1.2, w = 160, h = 120) {
+    const data = await page.evaluate(async ({ seconds, w, h }) => {
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        const ctx = c.getContext('2d')!;
+        const stream = c.captureStream(30);
+        const rec = new MediaRecorder(stream, { mimeType: 'video/webm' });
+        const chunks: Blob[] = [];
+        rec.ondataavailable = (e: BlobEvent) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+        const done = new Promise<void>((res) => { rec.onstop = () => res(); });
+        rec.start(100);
+        const frames = Math.max(1, Math.round(seconds * 30));
+        for (let i = 0; i < frames; i++) {
+            // Every frame: left half red, right half blue (positional marker) + moving white dot.
+            ctx.fillStyle = '#ff0000';
+            ctx.fillRect(0, 0, w / 2, h);
+            ctx.fillStyle = '#0000ff';
+            ctx.fillRect(w / 2, 0, w / 2, h);
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect((i * 3) % w, h / 2, 5, 5);
+            await new Promise((r) => setTimeout(r, 33));
+        }
+        rec.stop();
+        await done;
+        const blob = new Blob(chunks, { type: 'video/webm' });
+        const buf = new Uint8Array(await blob.arrayBuffer());
+        let s = '';
+        for (let i = 0; i < buf.length; i += 8192) {
+            s += String.fromCharCode.apply(null, Array.from(buf.subarray(i, i + 8192)));
+        }
+        return { b64: btoa(s), size: blob.size };
+    }, { seconds, w, h });
+    await page.locator('#file-input').setInputFiles({ name: 'test-video.webm', mimeType: 'video/webm', buffer: Buffer.from(data.b64, 'base64') });
+    await page.waitForSelector('#upload-modal', { state: 'visible', timeout: 5000 });
+}
+
+async function openPhotoEdit(page: Page) {
+    await page.click('#upload-btn-edit');
+    await expect(page.locator('#photo-edit-modal')).toBeVisible({ timeout: 5000 });
+    await page.waitForFunction(() => {
+        const c = document.getElementById('photo-edit-canvas') as HTMLCanvasElement;
+        return c && c.width > 0 && c.height > 0 && (c.width !== 300 || c.height !== 150);
+    }, { timeout: 5000 });
+}
+
+async function openVideoEdit(page: Page) {
+    await page.click('#upload-btn-edit');
+    await expect(page.locator('#video-edit-modal')).toBeVisible({ timeout: 8000 });
+    await page.waitForFunction(() => {
+        const c = document.getElementById('video-edit-canvas') as HTMLCanvasElement;
+        return c && c.width > 0 && c.height > 0;
+    }, { timeout: 8000 });
+}
+
+async function canvasDims(page: Page, id = 'photo-edit-canvas') {
+    return page.evaluate((canvasId) => {
+        const c = document.getElementById(canvasId) as HTMLCanvasElement;
+        return { w: c.width, h: c.height };
+    }, id);
+}
+
+async function pixelAt(page: Page, canvasId: string, x: number, y: number) {
+    return page.evaluate(({ canvasId, x, y }) => {
+        const c = document.getElementById(canvasId) as HTMLCanvasElement;
+        const d = c.getContext('2d')!.getImageData(x, y, 1, 1).data;
+        return { r: d[0], g: d[1], b: d[2] };
+    }, { canvasId, x, y });
+}
+
+async function drawLine(page: Page, x1: number, y1: number, x2: number, y2: number) {
+    const canvas = page.locator('#photo-edit-canvas');
+    const box = await canvas.boundingBox();
+    if (!box) throw new Error('Canvas not visible');
+    await page.mouse.move(box.x + x1, box.y + y1);
+    await page.mouse.down();
+    await page.mouse.move(box.x + x2, box.y + y2, { steps: 8 });
+    await page.mouse.up();
+}
+
+// selectedFiles / currentFileIndex are top-level `let` bindings, so they are
+// NOT reachable via window.* — indirect eval reads them from the global scope.
+async function getSelectedFile(page: Page): Promise<any> {
+    return page.evaluate(() => (0, eval)('selectedFiles[currentFileIndex]'));
+}
+
+// Read the currently selected file as an image and return its natural dims.
+async function currentImageInfo(page: Page) {
+    return page.evaluate(async () => {
+        const f = (0, eval)('selectedFiles[currentFileIndex]');
+        const url = URL.createObjectURL(f);
+        return await new Promise<{ w: number; h: number; size: number; type: string }>((resolve) => {
+            const img = new Image();
+            img.onload = () => { URL.revokeObjectURL(url); resolve({ w: img.naturalWidth, h: img.naturalHeight, size: f.size, type: f.type }); };
+            img.onerror = () => { URL.revokeObjectURL(url); resolve({ w: -1, h: -1, size: f.size, type: f.type }); };
+            img.src = url;
+        });
+    });
+}
+
+// Read the currently selected file as a video (dims / duration / size / type).
+async function currentVideoInfo(page: Page) {
+    return page.evaluate(async () => {
+        const f = (0, eval)('selectedFiles[currentFileIndex]');
+        const url = URL.createObjectURL(f);
+        return await new Promise<any>((resolve) => {
+            const v = document.createElement('video');
+            v.preload = 'auto';
+            v.muted = true;
+            v.onloadedmetadata = () => {
+                URL.revokeObjectURL(url);
+                resolve({ w: v.videoWidth, h: v.videoHeight, dur: v.duration, size: f.size, type: f.type, name: f.name });
+            };
+            v.onerror = () => { URL.revokeObjectURL(url); resolve({ w: -1, h: -1, dur: 0, size: f.size, type: f.type, name: f.name }); };
+            v.src = url;
+        });
+    });
+}
+
+async function currentVideoDuration(page: Page) {
+    return page.evaluate(async () => {
+        const f = (0, eval)('selectedFiles[currentFileIndex]');
+        const url = URL.createObjectURL(f);
+        return await new Promise<number>((resolve) => {
+            const v = document.createElement('video');
+            v.preload = 'auto';
+            v.muted = true;
+            v.onloadedmetadata = () => {
+                // MediaRecorder webm often reports duration=Infinity; force the
+                // browser to resolve the real end by seeking far.
+                if (isFinite(v.duration) && v.duration > 0) { URL.revokeObjectURL(url); resolve(v.duration); return; }
+                v.currentTime = 1e7;
+                v.onseeked = () => {
+                    URL.revokeObjectURL(url);
+                    resolve(isFinite(v.duration) && v.duration > 0 ? v.duration : (v.currentTime || 0));
+                };
+            };
+            v.onerror = () => { URL.revokeObjectURL(url); resolve(0); };
+            v.src = url;
+        });
+    });
+}
+
+// Client-side magic-byte validation: returns null when the declared type matches.
+// Sample a pixel from the FIRST frame of the currently selected video file.
+async function firstFramePixel(page: Page, x: number, y: number) {
+    return page.evaluate(async ({ x, y }) => {
+        const f = (0, eval)('selectedFiles[currentFileIndex]');
+        const url = URL.createObjectURL(f);
+        return await new Promise<any>((resolve) => {
+            const v = document.createElement('video');
+            v.preload = 'auto';
+            v.muted = true;
+            v.playsInline = true;
+            v.onloadeddata = () => {
+                const c = document.createElement('canvas');
+                c.width = v.videoWidth;
+                c.height = v.videoHeight;
+                const ctx = c.getContext('2d')!;
+                ctx.drawImage(v, 0, 0);
+                const d = ctx.getImageData(x, y, 1, 1).data;
+                URL.revokeObjectURL(url);
+                resolve({ r: d[0], g: d[1], b: d[2], w: v.videoWidth, h: v.videoHeight });
+            };
+            v.onerror = () => { URL.revokeObjectURL(url); resolve({ r: -1, g: -1, b: -1, w: 0, h: 0 }); };
+            v.src = url;
+        });
+    }, { x, y });
+}
+
+async function magicCheckCurrent(page: Page) {
+    return page.evaluate(async () => {
+        const f = (0, eval)('selectedFiles[currentFileIndex]');
+        try { return await (window as any).checkUploadMagic(f); } catch (e) { return String(e); }
+    });
+}
+
+async function cropBoxBounds(page: Page, prefix: 'photo' | 'video') {
+    return page.evaluate((prefix) => {
+        const box = document.getElementById(prefix + '-crop-box') as HTMLElement;
+        const ov = document.getElementById(prefix + '-crop-overlay') as HTMLElement;
+        const l = parseInt(box.style.left), t = parseInt(box.style.top);
+        const w = parseInt(box.style.width), h = parseInt(box.style.height);
+        return { l, t, w, h, ovW: ov.clientWidth, ovH: ov.clientHeight };
+    }, prefix);
+}
+
+async function dragCutEndTo(page: Page, fraction: number) {
+    const track = await page.locator('#video-cut-track').boundingBox();
+    const end = await page.locator('#video-cut-end').boundingBox();
+    if (!track || !end) throw new Error('cut track not visible');
+    await page.mouse.move(end.x + end.width / 2, end.y + end.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(end.x + end.width / 2 - track.width * (1 - fraction), end.y + end.height / 2, { steps: 8 });
+    await page.mouse.up();
+}
+
+async function confirmUploadAndWait(page: Page) {
+    await page.click('#confirm-upload');
+    await expect(page.locator('#upload-modal')).not.toBeVisible({ timeout: 30000 });
+    await expect(page.locator('#upload-error')).not.toBeVisible({ timeout: 2000 });
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+test.describe('Photo & Video Edit System', () => {
+
+    test.describe('Upload Modal Quick Actions', () => {
+
+        test('quick action buttons appear for image files', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await expect(page.locator('#upload-quick-actions')).toBeVisible();
+        });
+
+        test('quick action buttons appear for video files', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestVideo(page);
+            await expect(page.locator('#upload-quick-actions')).toBeVisible();
+        });
+
+        test('quick action buttons hidden for non-media files', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestText(page);
+            await expect(page.locator('#upload-quick-actions')).toBeHidden();
+        });
+
+        test('edit button opens photo edit modal for images', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await openPhotoEdit(page);
+            await expect(page.locator('#photo-edit-canvas')).toBeAttached();
+        });
+
+        test('edit button opens video edit modal for videos', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestVideo(page);
+            await openVideoEdit(page);
+            await expect(page.locator('#video-edit-canvas')).toBeAttached();
+        });
+
+        test('rotate right button applies CSS transform to preview', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await page.click('#upload-btn-rotate-right');
+            const transform = await page.locator('#upload-preview img').evaluate((el: HTMLElement) => el.style.transform);
+            expect(transform).toContain('rotate');
+        });
+
+        test('mirror button applies scaleX to preview', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await page.click('#upload-btn-mirror');
+            const transform = await page.locator('#upload-preview img').evaluate((el: HTMLElement) => el.style.transform);
+            expect(transform).toContain('scaleX');
+        });
+
+        test('rotating twice returns the preview transform to neutral', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await page.click('#upload-btn-rotate-right');
+            await page.click('#upload-btn-rotate-right');
+            const transform = await page.locator('#upload-preview img').evaluate((el: HTMLElement) => el.style.transform);
+            expect(transform).toContain('rotate(180deg)');
+        });
+
+        test('quick-action rotate transforms the actual image file (not cosmetic)', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await page.click('#upload-btn-rotate-right');
+            const out = await page.evaluate(async () => {
+                const f = (0, eval)('selectedFiles[currentFileIndex]');
+                const idx = (0, eval)('currentFileIndex');
+                const outFile = await (window as any)._applyUploadTransformsToFile(f, idx);
+                const url = URL.createObjectURL(outFile);
+                return await new Promise<any>((resolve) => {
+                    const img = new Image();
+                    img.onload = () => { URL.revokeObjectURL(url); resolve({ w: img.naturalWidth, h: img.naturalHeight }); };
+                    img.onerror = () => resolve({ w: -1, h: -1 });
+                    img.src = url;
+                });
+            });
+            // 200x150 rotated 90° -> 150x200
+            expect(out.w).toBe(150);
+            expect(out.h).toBe(200);
+        });
+
+        test('uploading a quick-rotated image succeeds end-to-end', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await page.click('#upload-btn-rotate-right');
+            await page.click('#upload-btn-mirror');
+            await confirmUploadAndWait(page);
+        });
+    });
+
+    test.describe('Photo Edit Modal - Basic', () => {
+
+        test('photo edit modal opens with canvas', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await openPhotoEdit(page);
+            await expect(page.locator('#photo-edit-canvas')).toBeAttached();
+        });
+
+        test('photo edit modal has all tool buttons', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await openPhotoEdit(page);
+            await expect(page.locator('#photo-tool-brush')).toBeVisible();
+            await expect(page.locator('#photo-tool-airbrush')).toBeVisible();
+            await expect(page.locator('#photo-tool-crop')).toBeVisible();
+            await expect(page.locator('#photo-btn-mirror')).toBeVisible();
+            await expect(page.locator('#photo-btn-rotate-left')).toBeVisible();
+            await expect(page.locator('#photo-btn-rotate-right')).toBeVisible();
+        });
+
+        test('photo edit modal has undo/redo buttons', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await openPhotoEdit(page);
+            await expect(page.locator('#photo-undo')).toBeAttached();
+            await expect(page.locator('#photo-redo')).toBeAttached();
+        });
+
+        test('photo edit cancel closes modal', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await openPhotoEdit(page);
+            await expect(page.locator('#photo-edit-modal')).toBeVisible();
+            await page.click('#photo-edit-cancel');
+            await expect(page.locator('#photo-edit-modal')).toBeHidden();
+        });
+
+        test('brush tool is active by default', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await openPhotoEdit(page);
+            await expect(page.locator('#photo-tool-brush')).toHaveClass(/active/);
+        });
+    });
+
+    test.describe('Photo Edit - Drawing', () => {
+
+        test('placing a simple dot shows the confirm/discard buttons', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await openPhotoEdit(page);
+            const canvas = page.locator('#photo-edit-canvas');
+            const box = await canvas.boundingBox();
+            if (!box) throw new Error('Canvas not visible');
+            await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+            await page.mouse.down();
+            await page.mouse.up();
+            await expect(page.locator('#photo-draw-actions')).toBeVisible({ timeout: 2000 });
+        });
+
+        test('confirm drawing saves the state', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await openPhotoEdit(page);
+            await page.fill('#photo-brush-color', '#00ff00');
+            await drawLine(page, 150, 20, 150, 80); // over the blue half
+            await expect(page.locator('#photo-draw-actions')).toBeVisible();
+            await page.click('#photo-draw-confirm');
+            await expect(page.locator('#photo-draw-actions')).toBeHidden();
+            const px = await pixelAt(page, 'photo-edit-canvas', 150, 50);
+            expect(px.g).toBeGreaterThan(100);
+            expect(px.b).toBeLessThan(100);
+        });
+
+        test('airbrush drawing works and can be confirmed', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await openPhotoEdit(page);
+            await page.click('#photo-tool-airbrush');
+            await page.fill('#photo-brush-color', '#00ff00');
+            await drawLine(page, 150, 20, 150, 80); // over the blue half
+            await expect(page.locator('#photo-draw-actions')).toBeVisible();
+            await page.click('#photo-draw-confirm');
+            const px = await pixelAt(page, 'photo-edit-canvas', 150, 50);
+            expect(px.g).toBeGreaterThan(100);
+        });
+
+        test('discard drawing reverts to pre-draw state', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await openPhotoEdit(page);
+            const pixelsBefore = await pixelAt(page, 'photo-edit-canvas', 150, 50);
+            await page.fill('#photo-brush-color', '#00ff00');
+            await drawLine(page, 140, 40, 160, 60);
+            await expect(page.locator('#photo-draw-actions')).toBeVisible();
+            await page.click('#photo-draw-cancel');
+            await expect(page.locator('#photo-draw-actions')).toBeHidden();
+            const pixelsAfter = await pixelAt(page, 'photo-edit-canvas', 150, 50);
+            expect(pixelsAfter).toEqual(pixelsBefore);
+        });
+
+        test('discard removes only the current unconfirmed stroke, not previous edits', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await openPhotoEdit(page);
+            await page.fill('#photo-brush-color', '#00ff00');
+            // Stroke 1: confirm it.
+            await drawLine(page, 10, 10, 30, 30);
+            await page.click('#photo-draw-confirm');
+            // Stroke 2: leave unconfirmed, then discard.
+            await drawLine(page, 150, 50, 150, 90);
+            await page.click('#photo-draw-cancel');
+            // Stroke 1 remains (green over the red half).
+            const s1 = await pixelAt(page, 'photo-edit-canvas', 20, 20);
+            expect(s1.g).toBeGreaterThan(150);
+            expect(s1.r).toBeLessThan(100);
+            // Stroke 2 is gone (back to blue over the blue half).
+            const s2 = await pixelAt(page, 'photo-edit-canvas', 150, 70);
+            expect(s2.b).toBeGreaterThan(150);
+        });
+
+        test('switching from draw to crop voids the unconfirmed drawing', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await openPhotoEdit(page);
+            const before = await pixelAt(page, 'photo-edit-canvas', 150, 50);
+            await page.fill('#photo-brush-color', '#00ff00');
+            await drawLine(page, 140, 40, 160, 60);
+            await expect(page.locator('#photo-draw-actions')).toBeVisible();
+            await page.click('#photo-tool-crop');
+            await expect(page.locator('#photo-draw-actions')).toBeHidden();
+            const after = await pixelAt(page, 'photo-edit-canvas', 150, 50);
+            expect(after).toEqual(before);
+        });
+
+        test('undo/redo works for committed drawings', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await openPhotoEdit(page);
+            const before = await pixelAt(page, 'photo-edit-canvas', 150, 50);
+            await page.fill('#photo-brush-color', '#00ff00');
+            await drawLine(page, 140, 40, 160, 60);
+            await page.click('#photo-draw-confirm');
+            const afterDraw = await pixelAt(page, 'photo-edit-canvas', 150, 50);
+            expect(afterDraw.g).toBeGreaterThan(100);
+            await page.click('#photo-undo');
+            const afterUndo = await pixelAt(page, 'photo-edit-canvas', 150, 50);
+            expect(afterUndo).toEqual(before);
+            await page.click('#photo-redo');
+            const afterRedo = await pixelAt(page, 'photo-edit-canvas', 150, 50);
+            expect(afterRedo.g).toBeGreaterThan(100);
+        });
+    });
+
+    test.describe('Photo Edit - Mirror & Rotate', () => {
+
+        test('undo button is disabled initially', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await openPhotoEdit(page);
+            await expect(page.locator('#photo-undo')).toBeDisabled();
+        });
+
+        test('undo becomes enabled after a transform', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await openPhotoEdit(page);
+            await page.click('#photo-btn-mirror');
+            await expect(page.locator('#photo-undo')).toBeEnabled();
+        });
+
+        test('undo restores previous state after transform', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await openPhotoEdit(page);
+            const dimsBefore = await canvasDims(page);
+            await page.click('#photo-btn-rotate-right');
+            const dimsAfterRotate = await canvasDims(page);
+            expect(dimsAfterRotate.w).toBe(dimsBefore.h);
+            expect(dimsAfterRotate.h).toBe(dimsBefore.w);
+            await page.click('#photo-undo');
+            const dimsAfterUndo = await canvasDims(page);
+            expect(dimsAfterUndo.w).toBe(dimsBefore.w);
+            expect(dimsAfterUndo.h).toBe(dimsBefore.h);
+        });
+
+        test('redo re-applies undone transform', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await openPhotoEdit(page);
+            const dimsBefore = await canvasDims(page);
+            await page.click('#photo-btn-rotate-right');
+            await page.click('#photo-undo');
+            await page.click('#photo-redo');
+            const dimsAfterRedo = await canvasDims(page);
+            expect(dimsAfterRedo.w).toBe(dimsBefore.h);
+            expect(dimsAfterRedo.h).toBe(dimsBefore.w);
+        });
+
+        test('mirror is baked into the canvas (not cosmetic)', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await openPhotoEdit(page);
+            // Original: left half red, right half blue.
+            const before = await pixelAt(page, 'photo-edit-canvas', 150, 75);
+            expect(before.b).toBeGreaterThan(150);
+            expect(before.r).toBeLessThan(100);
+            await page.click('#photo-btn-mirror');
+            // After horizontal flip: the red half moved to the right.
+            const after = await pixelAt(page, 'photo-edit-canvas', 150, 75);
+            expect(after.r).toBeGreaterThan(150);
+            expect(after.b).toBeLessThan(100);
+            const left = await pixelAt(page, 'photo-edit-canvas', 50, 75);
+            expect(left.b).toBeGreaterThan(150);
+        });
+
+        test('rotate is baked into the canvas (not cosmetic)', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await openPhotoEdit(page);
+            await page.click('#photo-btn-rotate-right');
+            // 90° CW: the original top row (red left / blue right) maps to the right column.
+            const pxTopRed = await pixelAt(page, 'photo-edit-canvas', 149, 50);
+            expect(pxTopRed.r).toBeGreaterThan(150);
+            expect(pxTopRed.b).toBeLessThan(100);
+            const pxTopBlue = await pixelAt(page, 'photo-edit-canvas', 149, 150);
+            expect(pxTopBlue.b).toBeGreaterThan(150);
+        });
+
+        test('mirror preserves drawn content', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await openPhotoEdit(page);
+            await page.fill('#photo-brush-color', '#00ff00');
+            await drawLine(page, 10, 10, 30, 30);
+            await page.click('#photo-draw-confirm');
+            await page.click('#photo-btn-mirror');
+            // Green line (drawn at x 10..30) moved to x 170..190 after the flip.
+            const px = await pixelAt(page, 'photo-edit-canvas', 180, 20);
+            expect(px.g).toBeGreaterThan(150);
+        });
+
+        test('rotate preserves previous transforms', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await openPhotoEdit(page);
+            const dimsOrig = await canvasDims(page);
+            await page.click('#photo-btn-mirror');
+            await page.click('#photo-btn-rotate-right');
+            const dimsAfter = await canvasDims(page);
+            expect(dimsAfter.w).toBe(dimsOrig.h);
+            expect(dimsAfter.h).toBe(dimsOrig.w);
+            await page.click('#photo-undo');
+            const dimsUndo = await canvasDims(page);
+            expect(dimsUndo.w).toBe(dimsOrig.w);
+            expect(dimsUndo.h).toBe(dimsOrig.h);
+        });
+
+        test('undo twice then redo twice restores the full chain', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await openPhotoEdit(page);
+            const orig = await canvasDims(page);
+            await page.click('#photo-btn-mirror');
+            await page.click('#photo-btn-rotate-right');
+            const swapped = await canvasDims(page);
+            expect(swapped.w).toBe(orig.h);
+            await page.click('#photo-undo');
+            await page.click('#photo-undo');
+            expect(await canvasDims(page)).toEqual(orig);
+            await page.click('#photo-redo');
+            await page.click('#photo-redo');
+            expect(await canvasDims(page)).toEqual(swapped);
+        });
+    });
+
+    test.describe('Photo Edit - Crop', () => {
+
+        test('crop tool shows overlay and settings', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await openPhotoEdit(page);
+            await page.click('#photo-tool-crop');
+            await expect(page.locator('#photo-crop-overlay')).toBeVisible();
+            await expect(page.locator('#photo-crop-settings')).toBeVisible();
+        });
+
+        test('crop box is inside canvas bounds', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await openPhotoEdit(page);
+            await page.click('#photo-tool-crop');
+            const bounds = await cropBoxBounds(page, 'photo');
+            expect(bounds.l).toBeGreaterThanOrEqual(0);
+            expect(bounds.t).toBeGreaterThanOrEqual(0);
+            expect(bounds.l + bounds.w).toBeLessThanOrEqual(bounds.ovW);
+            expect(bounds.t + bounds.h).toBeLessThanOrEqual(bounds.ovH);
+        });
+
+        test('apply crop changes canvas dimensions', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await openPhotoEdit(page);
+            const dimsBefore = await canvasDims(page);
+            await page.click('#photo-tool-crop');
+            await page.fill('#photo-crop-w', String(Math.round(dimsBefore.w / 2)));
+            await page.fill('#photo-crop-h', String(Math.round(dimsBefore.h / 2)));
+            await page.click('#photo-crop-confirm');
+            const dimsAfter = await canvasDims(page);
+            expect(dimsAfter.w).toBeLessThan(dimsBefore.w);
+            expect(dimsAfter.h).toBeLessThan(dimsBefore.h);
+        });
+
+        test('crop width input larger than the canvas is clamped inside', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await openPhotoEdit(page);
+            await page.click('#photo-tool-crop');
+            await page.fill('#photo-crop-w', '99999');
+            await page.fill('#photo-crop-h', '99999');
+            const bounds = await cropBoxBounds(page, 'photo');
+            expect(bounds.l).toBeGreaterThanOrEqual(0);
+            expect(bounds.t).toBeGreaterThanOrEqual(0);
+            expect(bounds.l + bounds.w).toBeLessThanOrEqual(bounds.ovW);
+            expect(bounds.t + bounds.h).toBeLessThanOrEqual(bounds.ovH);
+        });
+
+        test('crop after rotation stays inside the canvas', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await openPhotoEdit(page);
+            await page.click('#photo-btn-rotate-right');
+            const rotated = await canvasDims(page);
+            expect(rotated.w).toBe(150);
+            expect(rotated.h).toBe(200);
+            await page.click('#photo-tool-crop');
+            await page.fill('#photo-crop-w', '99999');
+            await page.fill('#photo-crop-h', '99999');
+            const bounds = await cropBoxBounds(page, 'photo');
+            expect(bounds.l).toBeGreaterThanOrEqual(0);
+            expect(bounds.t).toBeGreaterThanOrEqual(0);
+            expect(bounds.l + bounds.w).toBeLessThanOrEqual(bounds.ovW);
+            expect(bounds.t + bounds.h).toBeLessThanOrEqual(bounds.ovH);
+            await page.click('#photo-crop-confirm');
+            const cropped = await canvasDims(page);
+            expect(cropped.w).toBeLessThanOrEqual(rotated.w);
+            expect(cropped.h).toBeLessThanOrEqual(rotated.h);
+        });
+
+        test('crop then rotate keeps the crop region', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await openPhotoEdit(page);
+            await page.click('#photo-tool-crop');
+            await page.fill('#photo-crop-w', '100');
+            await page.fill('#photo-crop-h', '75');
+            await page.click('#photo-crop-confirm');
+            const cropped = await canvasDims(page);
+            expect(cropped.w).toBe(100);
+            expect(cropped.h).toBe(75);
+            await page.click('#photo-btn-rotate-right');
+            const afterRotate = await canvasDims(page);
+            expect(afterRotate.w).toBe(75);
+            expect(afterRotate.h).toBe(100);
+        });
+
+        test('crop then undo restores the full canvas', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await openPhotoEdit(page);
+            const orig = await canvasDims(page);
+            await page.click('#photo-tool-crop');
+            await page.fill('#photo-crop-w', '80');
+            await page.fill('#photo-crop-h', '60');
+            await page.click('#photo-crop-confirm');
+            expect(await canvasDims(page)).not.toEqual(orig);
+            await page.click('#photo-undo');
+            expect(await canvasDims(page)).toEqual(orig);
+            await page.click('#photo-redo');
+            const re = await canvasDims(page);
+            expect(re.w).toBeLessThan(orig.w);
+            expect(re.h).toBeLessThan(orig.h);
+        });
+    });
+
+    test.describe('Photo Edit - Confirm replaces file', () => {
+
+        test('confirm edit applies transform and closes modal', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await openPhotoEdit(page);
+            await page.click('#photo-btn-rotate-right');
+            await page.click('#photo-edit-confirm');
+            await expect(page.locator('#photo-edit-modal')).toBeHidden({ timeout: 3000 });
+            await expect(page.locator('#upload-modal')).toBeVisible();
+        });
+
+        test('confirmed rotation replaces the file with swapped dimensions', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await openPhotoEdit(page);
+            await page.click('#photo-btn-rotate-right');
+            await page.click('#photo-edit-confirm');
+            await expect(page.locator('#photo-edit-modal')).toBeHidden({ timeout: 5000 });
+            const info = await currentImageInfo(page);
+            expect(info.w).toBe(150);
+            expect(info.h).toBe(200);
+            expect(info.type).toBe('image/png');
+        });
+
+        test('confirmed crop produces a cropped file', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await openPhotoEdit(page);
+            await page.click('#photo-tool-crop');
+            await page.fill('#photo-crop-w', '100');
+            await page.fill('#photo-crop-h', '75');
+            await page.click('#photo-crop-confirm');
+            await page.click('#photo-edit-confirm');
+            await expect(page.locator('#photo-edit-modal')).toBeHidden({ timeout: 5000 });
+            const info = await currentImageInfo(page);
+            expect(info.w).toBe(100);
+            expect(info.h).toBe(75);
+        });
+
+        test('edited image passes client-side magic-byte validation', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await openPhotoEdit(page);
+            await page.click('#photo-btn-rotate-right');
+            await page.click('#photo-btn-mirror');
+            await page.click('#photo-edit-confirm');
+            expect(await magicCheckCurrent(page)).toBeNull();
+        });
+
+        test('full permutation: draw, rotate, crop, mirror with undo/redo, then confirm', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await openPhotoEdit(page);
+            // 1. Draw + confirm
+            await page.fill('#photo-brush-color', '#00ff00');
+            await drawLine(page, 10, 10, 30, 30);
+            await page.click('#photo-draw-confirm');
+            // 2. Rotate right -> 150x200
+            await page.click('#photo-btn-rotate-right');
+            expect(await canvasDims(page)).toEqual({ w: 150, h: 200 });
+            // 3. Crop to half (75x100)
+            await page.click('#photo-tool-crop');
+            await page.fill('#photo-crop-w', '75');
+            await page.fill('#photo-crop-h', '100');
+            await page.click('#photo-crop-confirm');
+            expect(await canvasDims(page)).toEqual({ w: 75, h: 100 });
+            // 4. Mirror (dims unchanged)
+            await page.click('#photo-btn-mirror');
+            expect(await canvasDims(page)).toEqual({ w: 75, h: 100 });
+            // 5. Undo the mirror -> crop still applied
+            await page.click('#photo-undo');
+            expect(await canvasDims(page)).toEqual({ w: 75, h: 100 });
+            // 6. Undo the crop -> rotation still applied
+            await page.click('#photo-undo');
+            expect(await canvasDims(page)).toEqual({ w: 150, h: 200 });
+            // 7. Redo the crop -> 75x100 again
+            await page.click('#photo-redo');
+            expect(await canvasDims(page)).toEqual({ w: 75, h: 100 });
+            // 8. Confirm -> file replaced with the final state
+            await page.click('#photo-edit-confirm');
+            await expect(page.locator('#photo-edit-modal')).toBeHidden({ timeout: 5000 });
+            const info = await currentImageInfo(page);
+            expect(info.w).toBe(75);
+            expect(info.h).toBe(100);
+            expect(await magicCheckCurrent(page)).toBeNull();
+        });
+
+        test('uploading the edited image succeeds end-to-end', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestImage(page);
+            await openPhotoEdit(page);
+            await page.click('#photo-btn-rotate-right');
+            await page.click('#photo-edit-confirm');
+            await confirmUploadAndWait(page);
+        });
+    });
+
+    test.describe('Video Edit Modal', () => {
+
+        test('modal opens with canvas at video dimensions', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestVideo(page);
+            await openVideoEdit(page);
+            const dims = await canvasDims(page, 'video-edit-canvas');
+            expect(dims.w).toBe(160);
+            expect(dims.h).toBe(120);
+        });
+
+        test('modal opens without forcing the crop overlay', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestVideo(page);
+            await openVideoEdit(page);
+            await expect(page.locator('#video-crop-overlay')).toBeHidden();
+            await expect(page.locator('#video-cut-timeline')).toBeHidden();
+        });
+
+        test('rotate right swaps the canvas dimensions', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestVideo(page);
+            await openVideoEdit(page);
+            await page.click('#video-btn-rotate-right');
+            const dims = await canvasDims(page, 'video-edit-canvas');
+            expect(dims.w).toBe(120);
+            expect(dims.h).toBe(160);
+        });
+
+        test('rotate left swaps the canvas dimensions too', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestVideo(page);
+            await openVideoEdit(page);
+            await page.click('#video-btn-rotate-left');
+            const dims = await canvasDims(page, 'video-edit-canvas');
+            expect(dims.w).toBe(120);
+            expect(dims.h).toBe(160);
+        });
+
+        test('mirror keeps dimensions and renders frame content', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestVideo(page);
+            await openVideoEdit(page);
+            await page.click('#video-btn-mirror');
+            const dims = await canvasDims(page, 'video-edit-canvas');
+            expect(dims.w).toBe(160);
+            expect(dims.h).toBe(120);
+            const content = await page.evaluate(() => {
+                const c = document.getElementById('video-edit-canvas') as HTMLCanvasElement;
+                const data = c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data;
+                let nonZero = 0;
+                for (let i = 0; i < data.length; i += 4) {
+                    if (data[i] > 0 || data[i + 1] > 0 || data[i + 2] > 0) nonZero++;
+                }
+                return nonZero;
+            });
+            expect(content).toBeGreaterThan(0);
+        });
+
+        test('crop stays inside the canvas and shrinks it after apply', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestVideo(page);
+            await openVideoEdit(page);
+            await page.click('#video-tool-crop');
+            await page.fill('#video-crop-w', '99999');
+            await page.fill('#video-crop-h', '99999');
+            const bounds = await cropBoxBounds(page, 'video');
+            expect(bounds.l).toBeGreaterThanOrEqual(0);
+            expect(bounds.t).toBeGreaterThanOrEqual(0);
+            expect(bounds.l + bounds.w).toBeLessThanOrEqual(bounds.ovW);
+            expect(bounds.t + bounds.h).toBeLessThanOrEqual(bounds.ovH);
+        });
+
+        test('applying a crop does not re-arm a second crop box', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestVideo(page);
+            await openVideoEdit(page);
+            await page.click('#video-tool-crop');
+            await page.fill('#video-crop-w', '80');
+            await page.fill('#video-crop-h', '60');
+            await page.click('#video-crop-confirm');
+            // After applying, crop mode exits: no overlay, no new box to dismiss.
+            await expect(page.locator('#video-crop-overlay')).toBeHidden();
+            const tool = await page.evaluate(() => (window as any).videoEditState.tool);
+            expect(tool).toBeNull();
+            const dims = await canvasDims(page, 'video-edit-canvas');
+            expect(dims.w).toBe(80);
+            expect(dims.h).toBe(60);
+        });
+
+        test('live crop preview appears with the crop tool and hides when crop mode exits', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestVideo(page);
+            await openVideoEdit(page);
+            await expect(page.locator('#video-crop-preview')).toBeHidden();
+            await page.click('#video-tool-crop');
+            await expect(page.locator('#video-crop-preview')).toBeVisible();
+            // Non-blank: the preview canvas actually drew the boxed region.
+            const drawn = await page.evaluate(() => {
+                const c = document.getElementById('video-crop-preview-canvas') as HTMLCanvasElement;
+                const data = c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data;
+                let nonZero = 0;
+                for (let i = 0; i < data.length; i += 4) {
+                    if (data[i] > 0 || data[i + 1] > 0 || data[i + 2] > 0) nonZero++;
+                }
+                return nonZero;
+            });
+            expect(drawn).toBeGreaterThan(0);
+            await page.click('#video-crop-confirm');
+            await expect(page.locator('#video-crop-preview')).toBeHidden();
+        });
+
+        test('live crop preview shows the exact boxed region and follows the box', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestVideo(page);
+            await openVideoEdit(page);
+            await page.click('#video-tool-crop');
+            // Box over the RIGHT (blue) half of the 160x120 video (scale 1).
+            await page.evaluate(() => {
+                (window as any)._videoSetCropBox(80, 0, 80, 120);
+            });
+            const blue = await page.evaluate(() => {
+                const c = document.getElementById('video-crop-preview-canvas') as HTMLCanvasElement;
+                const d = c.getContext('2d')!.getImageData(40, 60, 1, 1).data;
+                return { r: d[0], g: d[1], b: d[2] };
+            });
+            expect(blue.b).toBeGreaterThan(150);
+            expect(blue.r).toBeLessThan(100);
+            // Move the box over the LEFT (red) half — the preview must follow live.
+            await page.evaluate(() => {
+                (window as any)._videoSetCropBox(0, 0, 80, 120);
+            });
+            const red = await page.evaluate(() => {
+                const c = document.getElementById('video-crop-preview-canvas') as HTMLCanvasElement;
+                const d = c.getContext('2d')!.getImageData(40, 60, 1, 1).data;
+                return { r: d[0], g: d[1], b: d[2] };
+            });
+            expect(red.r).toBeGreaterThan(150);
+            expect(red.b).toBeLessThan(100);
+        });
+
+        test('crop after rotation stays inside and shrinks the canvas', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestVideo(page);
+            await openVideoEdit(page);
+            await page.click('#video-btn-rotate-right');
+            const rotated = await canvasDims(page, 'video-edit-canvas');
+            expect(rotated.w).toBe(120);
+            expect(rotated.h).toBe(160);
+            await page.click('#video-tool-crop');
+            await page.fill('#video-crop-w', '60');
+            await page.fill('#video-crop-h', '80');
+            await page.click('#video-crop-confirm');
+            const cropped = await canvasDims(page, 'video-edit-canvas');
+            expect(cropped.w).toBeLessThanOrEqual(rotated.w);
+            expect(cropped.h).toBeLessThanOrEqual(rotated.h);
+            expect(cropped.w).toBe(60);
+            expect(cropped.h).toBe(80);
+        });
+
+        test('cut drag updates the cut range', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestVideo(page);
+            await openVideoEdit(page);
+            await page.click('#video-tool-cut');
+            await expect(page.locator('#video-cut-timeline')).toBeVisible();
+            await dragCutEndTo(page, 0.75);
+            const cutEnd = await page.evaluate(() => (window as any).videoEditState.cutEnd);
+            expect(cutEnd).toBeGreaterThan(0.6);
+            expect(cutEnd).toBeLessThan(0.9);
+        });
+
+        test('undo/redo works after a transform', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestVideo(page);
+            await openVideoEdit(page);
+            const orig = await canvasDims(page, 'video-edit-canvas');
+            await page.click('#video-btn-rotate-right');
+            const rotated = await canvasDims(page, 'video-edit-canvas');
+            expect(rotated.w).toBe(orig.h);
+            await page.click('#video-undo');
+            expect(await canvasDims(page, 'video-edit-canvas')).toEqual(orig);
+            await page.click('#video-redo');
+            expect(await canvasDims(page, 'video-edit-canvas')).toEqual(rotated);
+        });
+
+        test('cancel leaves the original file untouched', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestVideo(page);
+            const before = await currentVideoInfo(page);
+            await openVideoEdit(page);
+            await page.click('#video-btn-rotate-right');
+            await page.click('#video-btn-mirror');
+            await page.click('#video-edit-cancel');
+            await expect(page.locator('#video-edit-modal')).toBeHidden();
+            const after = await currentVideoInfo(page);
+            expect(after.size).toBe(before.size);
+            expect(after.type).toBe('video/webm');
+            expect(after.name).toBe('test-video.webm');
+        });
+    });
+
+    test.describe('Video Edit - Confirm export', () => {
+
+        test('confirm with rotation produces a non-empty webm with swapped dimensions', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestVideo(page);
+            await openVideoEdit(page);
+            await page.click('#video-btn-rotate-right');
+            await page.click('#video-edit-confirm');
+            await expect(page.locator('#video-edit-modal')).toBeHidden({ timeout: 15000 });
+            const info = await currentVideoInfo(page);
+            expect(info.type).toBe('video/webm');
+            expect(info.name).toBe('test-video.webm');
+            expect(info.size).toBeGreaterThan(0);
+            expect(info.w).toBe(120);
+            expect(info.h).toBe(160);
+        });
+
+        test('confirm with crop produces a cropped webm', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestVideo(page);
+            await openVideoEdit(page);
+            await page.click('#video-tool-crop');
+            await page.fill('#video-crop-w', '80');
+            await page.fill('#video-crop-h', '60');
+            await page.click('#video-crop-confirm');
+            await page.click('#video-edit-confirm');
+            await expect(page.locator('#video-edit-modal')).toBeHidden({ timeout: 15000 });
+            const info = await currentVideoInfo(page);
+            expect(info.size).toBeGreaterThan(0);
+            expect(info.w).toBe(80);
+            expect(info.h).toBe(60);
+        });
+
+        test('crop lands at the exact position in the uploaded video (not just size)', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestVideo(page);
+            await openVideoEdit(page);
+            await page.click('#video-tool-crop');
+            // Position the crop box over the RIGHT half of the 160x120 video (scale 1).
+            await page.evaluate(() => {
+                const box = document.getElementById('video-crop-box') as HTMLElement;
+                box.style.left = '80px';
+                box.style.top = '0px';
+                box.style.width = '80px';
+                box.style.height = '120px';
+            });
+            await page.click('#video-crop-confirm');
+            await page.click('#video-edit-confirm');
+            await expect(page.locator('#video-edit-modal')).toBeHidden({ timeout: 15000 });
+            const px = await firstFramePixel(page, 40, 60);
+            expect(px.w).toBe(80);
+            expect(px.h).toBe(120);
+            // The right half of every source frame is blue.
+            expect(px.b).toBeGreaterThan(150);
+            expect(px.r).toBeLessThan(100);
+        });
+
+        test('confirm with a cut shortens the video duration', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestVideo(page, 1.2);
+            const srcDur = await currentVideoDuration(page);
+            expect(srcDur).toBeGreaterThan(0.5);
+            await openVideoEdit(page);
+            await page.click('#video-tool-cut');
+            await dragCutEndTo(page, 0.75);
+            await page.click('#video-edit-confirm');
+            await expect(page.locator('#video-edit-modal')).toBeHidden({ timeout: 15000 });
+            const outDur = await currentVideoDuration(page);
+            expect(outDur).toBeGreaterThan(0);
+            expect(outDur).toBeLessThan(srcDur * 0.9 + 0.1);
+        });
+
+        test('exported video passes client-side magic-byte validation', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestVideo(page);
+            await openVideoEdit(page);
+            await page.click('#video-btn-rotate-right');
+            await page.click('#video-btn-mirror');
+            await page.click('#video-edit-confirm');
+            await expect(page.locator('#video-edit-modal')).toBeHidden({ timeout: 15000 });
+            expect(await magicCheckCurrent(page)).toBeNull();
+        });
+
+        test('full permutation: rotate, mirror, crop, undo/redo, confirm produces valid webm', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestVideo(page);
+            await openVideoEdit(page);
+            // Rotate right -> 120x160
+            await page.click('#video-btn-rotate-right');
+            // Mirror (dims unchanged)
+            await page.click('#video-btn-mirror');
+            // Crop to 60x80
+            await page.click('#video-tool-crop');
+            await page.fill('#video-crop-w', '60');
+            await page.fill('#video-crop-h', '80');
+            await page.click('#video-crop-confirm');
+            expect(await canvasDims(page, 'video-edit-canvas')).toEqual({ w: 60, h: 80 });
+            // Undo crop -> 120x160, redo -> 60x80
+            await page.click('#video-undo');
+            expect(await canvasDims(page, 'video-edit-canvas')).toEqual({ w: 120, h: 160 });
+            await page.click('#video-redo');
+            expect(await canvasDims(page, 'video-edit-canvas')).toEqual({ w: 60, h: 80 });
+            // Confirm -> exported webm matches
+            await page.click('#video-edit-confirm');
+            await expect(page.locator('#video-edit-modal')).toBeHidden({ timeout: 15000 });
+            const info = await currentVideoInfo(page);
+            expect(info.size).toBeGreaterThan(0);
+            expect(info.type).toBe('video/webm');
+            expect(info.w).toBe(60);
+            expect(info.h).toBe(80);
+            expect(await magicCheckCurrent(page)).toBeNull();
+        });
+
+        test('uploading the edited video succeeds end-to-end', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestVideo(page);
+            await openVideoEdit(page);
+            await page.click('#video-btn-rotate-right');
+            await page.click('#video-edit-confirm');
+            await expect(page.locator('#video-edit-modal')).toBeHidden({ timeout: 15000 });
+            await confirmUploadAndWait(page);
+        });
+    });
+
+    test.describe('Video Edit - Export plays correctly', () => {
+
+        // Sample a pixel of the current selected file at several times across its
+        // duration. Proves the export is a real, playable video with visible
+        // content from start to end (never a black or empty file).
+        async function sampleVideoFrames(page: Page, x: number, y: number, fractions: number[] = [0.05, 0.35, 0.65, 0.95]) {
+            return page.evaluate(async ({ x, y, fractions }) => {
+                const f = (0, eval)('selectedFiles[currentFileIndex]');
+                const url = URL.createObjectURL(f);
+                const v = document.createElement('video');
+                v.preload = 'auto'; v.muted = true; v.playsInline = true;
+                await new Promise<void>((res, rej) => { v.onloadedmetadata = () => res(); v.onerror = () => rej(new Error('load failed')); v.src = url; });
+                if (!isFinite(v.duration) || v.duration <= 0) {
+                    v.currentTime = 1e7;
+                    await new Promise<void>((res) => { v.onseeked = () => res(); });
+                }
+                const dur = isFinite(v.duration) && v.duration > 0 ? v.duration : v.currentTime;
+                const samples: any[] = [];
+                for (const frac of fractions) {
+                    const t = Math.min(dur - 0.01, Math.max(0, dur * frac));
+                    v.currentTime = t;
+                    await new Promise<void>((res) => { v.onseeked = () => res(); setTimeout(res, 250); });
+                    const c = document.createElement('canvas');
+                    c.width = v.videoWidth; c.height = v.videoHeight;
+                    const ctx = c.getContext('2d')!;
+                    ctx.drawImage(v, 0, 0);
+                    const d = ctx.getImageData(x, y, 1, 1).data;
+                    samples.push({ t: Math.round(t * 100) / 100, r: d[0], g: d[1], b: d[2] });
+                }
+                URL.revokeObjectURL(url);
+                return { w: v.videoWidth, h: v.videoHeight, dur, samples };
+            }, { x, y, fractions });
+        }
+
+        // Column of the brightest pixel — the test video has a white dot moving
+        // right 3px/frame, so a real export shows the dot at different columns at
+        // different times. A frozen or black export would never move.
+        async function brightestColumn(page: Page, t: number) {
+            return page.evaluate(async ({ t }) => {
+                const f = (0, eval)('selectedFiles[currentFileIndex]');
+                const url = URL.createObjectURL(f);
+                const v = document.createElement('video');
+                v.preload = 'auto'; v.muted = true; v.playsInline = true;
+                await new Promise<void>((res, rej) => { v.onloadedmetadata = () => res(); v.onerror = () => rej(new Error('load failed')); v.src = url; });
+                if (!isFinite(v.duration) || v.duration <= 0) {
+                    v.currentTime = 1e7;
+                    await new Promise<void>((res) => { v.onseeked = () => res(); });
+                }
+                const dur = isFinite(v.duration) && v.duration > 0 ? v.duration : v.currentTime;
+                v.currentTime = Math.min(dur - 0.01, Math.max(0, t));
+                await new Promise<void>((res) => { v.onseeked = () => res(); setTimeout(res, 250); });
+                const c = document.createElement('canvas');
+                c.width = v.videoWidth; c.height = v.videoHeight;
+                const ctx = c.getContext('2d')!;
+                ctx.drawImage(v, 0, 0);
+                const img = ctx.getImageData(0, 0, c.width, c.height);
+                let bestX = -1, best = 0;
+                for (let x = 0; x < c.width; x++) {
+                    let sum = 0;
+                    for (let y = 0; y < c.height; y++) {
+                        const i = (y * c.width + x) * 4;
+                        sum += img.data[i] + img.data[i + 1] + img.data[i + 2];
+                    }
+                    if (sum > best) { best = sum; bestX = x; }
+                }
+                URL.revokeObjectURL(url);
+                return { t: Math.round(t * 100) / 100, bestX };
+            }, { t });
+        }
+
+        // Stub uploadFileToServer to capture the exact bytes startFileUpload sends,
+        // click confirm-upload, then analyze the captured file.
+        async function analyzeSentFile(page: Page) {
+            await page.evaluate(() => {
+                const w = window as any;
+                w.__sentFile = null;
+                w.uploadFileToServer = async (file: File) => {
+                    w.__sentFile = file;
+                    return { file_id: 'captured-test', file_key: 'k', url: '' };
+                };
+            });
+            await page.click('#confirm-upload');
+            await page.waitForFunction(() => (window as any).__sentFile !== null, { timeout: 30000 });
+            return page.evaluate(async () => {
+                const f = (window as any).__sentFile as File;
+                const url = URL.createObjectURL(f);
+                const v = document.createElement('video');
+                v.preload = 'auto'; v.muted = true; v.playsInline = true;
+                await new Promise<void>((res, rej) => { v.onloadedmetadata = () => res(); v.onerror = () => rej(new Error('load failed')); v.src = url; });
+                if (!isFinite(v.duration) || v.duration <= 0) {
+                    v.currentTime = 1e7;
+                    await new Promise<void>((res) => { v.onseeked = () => res(); });
+                }
+                const dur = isFinite(v.duration) && v.duration > 0 ? v.duration : v.currentTime;
+                const samples: any[] = [];
+                for (const frac of [0.05, 0.5, 0.95]) {
+                    const t = Math.min(dur - 0.01, Math.max(0, dur * frac));
+                    v.currentTime = t;
+                    await new Promise<void>((res) => { v.onseeked = () => res(); setTimeout(res, 250); });
+                    const c = document.createElement('canvas');
+                    c.width = v.videoWidth; c.height = v.videoHeight;
+                    const ctx = c.getContext('2d')!;
+                    ctx.drawImage(v, 0, 0);
+                    const d = ctx.getImageData(40, 30, 1, 1).data;
+                    samples.push({ t: Math.round(t * 100) / 100, r: d[0], g: d[1], b: d[2] });
+                }
+                URL.revokeObjectURL(url);
+                return { name: f.name, type: f.type, size: f.size, w: v.videoWidth, h: v.videoHeight, dur, samples };
+            });
+        }
+
+        test('cropped export plays with visible frames across the whole duration', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestVideo(page);
+            await openVideoEdit(page);
+            await page.click('#video-tool-crop');
+            await page.fill('#video-crop-w', '80');
+            await page.fill('#video-crop-h', '60');
+            await page.click('#video-crop-confirm');
+            await page.click('#video-edit-confirm');
+            await expect(page.locator('#video-edit-modal')).toBeHidden({ timeout: 20000 });
+            const res = await sampleVideoFrames(page, 20, 30);
+            expect(res.w).toBe(80);
+            expect(res.h).toBe(60);
+            expect(res.dur).toBeGreaterThan(0.5);
+            expect(res.samples.length).toBe(4);
+            for (const s of res.samples) {
+                // Red half of the crop stays red through the whole duration.
+                expect(s.r, `frame at ${s.t}s went black`).toBeGreaterThan(150);
+            }
+            const blue = await sampleVideoFrames(page, 60, 30);
+            for (const s of blue.samples) {
+                expect(s.b, `frame at ${s.t}s went black`).toBeGreaterThan(150);
+            }
+        });
+
+        test('rotated and cropped export plays with visible frames', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestVideo(page);
+            await openVideoEdit(page);
+            await page.click('#video-btn-rotate-right');
+            await page.click('#video-tool-crop');
+            await page.fill('#video-crop-w', '80');
+            await page.fill('#video-crop-h', '60');
+            await page.click('#video-crop-confirm');
+            await page.click('#video-edit-confirm');
+            await expect(page.locator('#video-edit-modal')).toBeHidden({ timeout: 20000 });
+            const res = await sampleVideoFrames(page, 40, 30);
+            expect(res.w).toBe(80);
+            expect(res.h).toBe(60);
+            expect(res.dur).toBeGreaterThan(0.5);
+            for (const s of res.samples) {
+                expect(s.r + s.g + s.b, `frame at ${s.t}s went black`).toBeGreaterThan(20);
+            }
+        });
+
+        test('mirrored and cropped export plays with visible frames', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestVideo(page);
+            await openVideoEdit(page);
+            await page.click('#video-btn-mirror');
+            await page.click('#video-tool-crop');
+            await page.fill('#video-crop-w', '80');
+            await page.fill('#video-crop-h', '60');
+            await page.click('#video-crop-confirm');
+            await page.click('#video-edit-confirm');
+            await expect(page.locator('#video-edit-modal')).toBeHidden({ timeout: 20000 });
+            const res = await sampleVideoFrames(page, 40, 30);
+            expect(res.w).toBe(80);
+            expect(res.h).toBe(60);
+            expect(res.dur).toBeGreaterThan(0.5);
+            for (const s of res.samples) {
+                // Mirrored crop shows the blue (formerly right) half at x=40.
+                expect(s.b, `frame at ${s.t}s went black`).toBeGreaterThan(150);
+            }
+        });
+
+        test('rotated, mirrored and cropped export plays with visible frames', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestVideo(page);
+            await openVideoEdit(page);
+            await page.click('#video-btn-rotate-right');
+            await page.click('#video-btn-mirror');
+            await page.click('#video-tool-crop');
+            await page.fill('#video-crop-w', '80');
+            await page.fill('#video-crop-h', '60');
+            await page.click('#video-crop-confirm');
+            await page.click('#video-edit-confirm');
+            await expect(page.locator('#video-edit-modal')).toBeHidden({ timeout: 20000 });
+            const res = await sampleVideoFrames(page, 40, 30);
+            expect(res.w).toBe(80);
+            expect(res.h).toBe(60);
+            expect(res.dur).toBeGreaterThan(0.5);
+            for (const s of res.samples) {
+                expect(s.r + s.g + s.b, `frame at ${s.t}s went black`).toBeGreaterThan(20);
+            }
+        });
+
+        test('cut + crop export plays with visible frames', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestVideo(page, 1.2);
+            await openVideoEdit(page);
+            await page.click('#video-tool-cut');
+            await dragCutEndTo(page, 0.75);
+            await page.click('#video-tool-crop');
+            await page.fill('#video-crop-w', '80');
+            await page.fill('#video-crop-h', '60');
+            await page.click('#video-crop-confirm');
+            await page.click('#video-edit-confirm');
+            await expect(page.locator('#video-edit-modal')).toBeHidden({ timeout: 20000 });
+            const res = await sampleVideoFrames(page, 20, 30);
+            expect(res.w).toBe(80);
+            expect(res.h).toBe(60);
+            expect(res.dur).toBeGreaterThan(0.4);
+            expect(res.dur).toBeLessThan(1.0);
+            for (const s of res.samples) {
+                expect(s.r, `frame at ${s.t}s went black`).toBeGreaterThan(150);
+            }
+        });
+
+        test('exported video really plays: frames change over time (moving dot)', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestVideo(page);
+            await openVideoEdit(page);
+            await page.click('#video-tool-crop');
+            await page.fill('#video-crop-w', '80');
+            await page.fill('#video-crop-h', '60');
+            await page.click('#video-crop-confirm');
+            await page.click('#video-edit-confirm');
+            await expect(page.locator('#video-edit-modal')).toBeHidden({ timeout: 20000 });
+            const a = await brightestColumn(page, 0.55);
+            const b = await brightestColumn(page, 1.05);
+            // The white dot moves 3px/frame at ~30fps: t=0.55 → x≈48, t=1.05 → x≈93.
+            expect(Math.abs(b.bestX - a.bestX)).toBeGreaterThan(20);
+        });
+
+        test('crop at the corner never exports a black video (regression)', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestVideo(page);
+            await openVideoEdit(page);
+            await page.click('#video-tool-crop');
+            // Box pinned to the TOP-LEFT corner, 40x30. The old offset math drew
+            // the region shifted left/up by (frame-crop)/2, which for corner crops
+            // landed entirely outside the video -> black export.
+            await page.evaluate(() => {
+                (window as any)._videoSetCropBox(0, 0, 40, 30);
+            });
+            await page.click('#video-crop-confirm');
+            await page.click('#video-edit-confirm');
+            await expect(page.locator('#video-edit-modal')).toBeHidden({ timeout: 20000 });
+            const res = await sampleVideoFrames(page, 10, 10);
+            expect(res.w).toBe(40);
+            expect(res.h).toBe(30);
+            for (const s of res.samples) {
+                // Top-left corner of the source is the red half: never black.
+                expect(s.r, `corner frame at ${s.t}s went black`).toBeGreaterThan(150);
+            }
+        });
+
+        test('the file actually sent to the server is a playable cropped video', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestVideo(page);
+            await openVideoEdit(page);
+            await page.click('#video-btn-rotate-right');
+            await page.click('#video-tool-crop');
+            await page.fill('#video-crop-w', '80');
+            await page.fill('#video-crop-h', '60');
+            await page.click('#video-crop-confirm');
+            await page.click('#video-edit-confirm');
+            await expect(page.locator('#video-edit-modal')).toBeHidden({ timeout: 20000 });
+            const sent = await analyzeSentFile(page);
+            expect(sent.name).toBe('test-video.webm');
+            expect(sent.type).toBe('video/webm');
+            expect(sent.size).toBeGreaterThan(0);
+            expect(sent.w).toBe(80);
+            expect(sent.h).toBe(60);
+            expect(sent.dur).toBeGreaterThan(0.5);
+            for (const s of sent.samples) {
+                expect(s.r + s.g + s.b, `sent frame at ${s.t}s went black`).toBeGreaterThan(20);
+            }
+        });
+    });
+
+    test.describe('Video Quick Actions', () => {
+
+        test('quick rotate transforms the actual video file (not cosmetic)', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestVideo(page);
+            await page.click('#upload-btn-rotate-right');
+            const out = await page.evaluate(async () => {
+                const f = (0, eval)('selectedFiles[currentFileIndex]');
+                const idx = (0, eval)('currentFileIndex');
+                const outFile = await (window as any)._applyUploadTransformsToFile(f, idx);
+                const url = URL.createObjectURL(outFile);
+                return await new Promise<any>((resolve) => {
+                    const v = document.createElement('video');
+                    v.preload = 'auto';
+                    v.muted = true;
+                    v.onloadedmetadata = () => { URL.revokeObjectURL(url); resolve({ w: v.videoWidth, h: v.videoHeight, size: outFile.size, type: outFile.type }); };
+                    v.onerror = () => resolve({ w: -1, h: -1, size: outFile.size, type: outFile.type });
+                    v.src = url;
+                });
+            });
+            expect(out.type).toBe('video/webm');
+            expect(out.size).toBeGreaterThan(0);
+            expect(out.w).toBe(120);
+            expect(out.h).toBe(160);
+        });
+
+        test('uploading a quick-transformed video succeeds end-to-end (no magic-byte error)', async ({ page }) => {
+            await registerAndSetup(page);
+            await uploadTestVideo(page);
+            await page.click('#upload-btn-mirror');
+            await page.click('#upload-btn-rotate-right');
+            await confirmUploadAndWait(page);
+        });
+    });
+});
