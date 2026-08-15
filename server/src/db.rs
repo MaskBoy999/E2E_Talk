@@ -9,6 +9,47 @@ use base64::Engine;
 use std::sync::Mutex;
 use uuid::Uuid;
 
+/// Map a `messages` row (the 14-column shape used by list_messages and the
+/// search functions) to a Message.
+fn message_from_row(row: &rusqlite::Row) -> rusqlite::Result<Message> {
+    Ok(Message {
+        id: row.get(0)?,
+        channel_id: row.get(1)?,
+        sender_id: row.get(2)?,
+        encrypted_content: row.get(3)?,
+        nonce: row.get(4)?,
+        timestamp: row.get(5)?,
+        edited_at: row.get(6)?,
+        key_version: row.get(7)?,
+        encrypted_profile_snapshot: row.get(8)?,
+        profile_snapshot_nonce: row.get(9)?,
+        encrypted_sender_username: row.get(10)?,
+        sender_username_nonce: row.get(11)?,
+        sender_id_hash: row.get(12)?,
+        file_id: row.get(13)?,
+    })
+}
+
+/// Map a `dm_messages` row (the same 14-column shape) to a DmMessage.
+fn dm_message_from_row(row: &rusqlite::Row) -> rusqlite::Result<DmMessage> {
+    Ok(DmMessage {
+        id: row.get(0)?,
+        dm_channel_id: row.get(1)?,
+        sender_id: row.get(2)?,
+        encrypted_content: row.get(3)?,
+        nonce: row.get(4)?,
+        timestamp: row.get(5)?,
+        edited_at: row.get(6)?,
+        key_version: row.get(7)?,
+        encrypted_profile_snapshot: row.get(8)?,
+        profile_snapshot_nonce: row.get(9)?,
+        encrypted_sender_username: row.get(10)?,
+        sender_username_nonce: row.get(11)?,
+        sender_id_hash: row.get(12)?,
+        file_id: row.get(13)?,
+    })
+}
+
 pub fn sha256_hex(data: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data.as_bytes());
@@ -167,6 +208,18 @@ pub struct DmMessage {
     pub sender_username_nonce: Option<String>,
     pub sender_id_hash: Option<String>,
     pub file_id: Option<String>,
+}
+
+/// One reaction row (ciphertext + blind emoji token). The emoji payload is
+/// encrypted with the channel/DM key; only members can decrypt it. Counts are
+/// never stored — every client computes them from the decrypted rows.
+#[derive(Debug, Clone)]
+pub struct ReactionRow {
+    pub reactor_id: String,
+    pub emoji_token: String,
+    pub encrypted_emoji: String,
+    pub emoji_nonce: String,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1128,6 +1181,13 @@ impl Database {
         for col in ["kill_switch_verifier_encrypted", "kill_switch_wrap_salt", "kill_switch_wrap_nonce", "kill_switch_salt", "kill_switch_check"] {
             let _ = conn.execute_batch(&format!("ALTER TABLE users ADD COLUMN {} TEXT", col));
         }
+
+        // Migration 060: E2E blind-index message search tokens (metadata only —
+        // content stays encrypted; the HMAC key never leaves the client).
+        let _ = conn.execute_batch(include_str!("../migrations/060_search_index.sql"));
+        // Migration 061: E2E-encrypted message reactions (ciphertext + blind
+        // emoji token per reactor; counts are computed client-side).
+        let _ = conn.execute_batch(include_str!("../migrations/061_reactions.sql"));
 
         // Data migration: normalize legacy space-separated CURRENT_TIMESTAMP values
         // ("YYYY-MM-DD HH:MM:SS") to fixed-width RFC3339 ("YYYY-MM-DDTHH:MM:SS.000000Z")
@@ -4383,6 +4443,337 @@ impl Database {
     }
 
     /// Get the sender_user_id (raw UUID) of a server message.
+    // --- E2E message search (blind index) ---
+    // Clients store HMAC-SHA256 tokens per searchable keyword, keyed by a key
+    // derived from the server/DM encryption key that the server never sees. The
+    // server matches keyword queries against these tokens without ever seeing
+    // plaintext (and cannot run a dictionary attack — it lacks the HMAC key).
+    // Tokens are insert-only metadata; message content stays fully encrypted.
+
+    pub fn index_message_tokens(&self, message_id: &str, tokens: &[String]) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        for t in tokens {
+            let _ = conn.execute(
+                "INSERT OR IGNORE INTO message_search_tokens (message_id, token) VALUES (?1, ?2)",
+                params![message_id, t],
+            );
+        }
+        Ok(())
+    }
+
+    pub fn index_dm_message_tokens(&self, message_id: &str, tokens: &[String]) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        for t in tokens {
+            let _ = conn.execute(
+                "INSERT OR IGNORE INTO dm_message_search_tokens (message_id, token) VALUES (?1, ?2)",
+                params![message_id, t],
+            );
+        }
+        Ok(())
+    }
+
+    /// Replace a message's search tokens (used after an edit — the new
+    /// plaintext has a new token set). DELETE + INSERT in one lock hold.
+    pub fn replace_message_tokens(&self, message_id: &str, tokens: &[String]) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM message_search_tokens WHERE message_id = ?1", params![message_id])
+            .map_err(|e| e.to_string())?;
+        for t in tokens {
+            let _ = conn.execute(
+                "INSERT OR IGNORE INTO message_search_tokens (message_id, token) VALUES (?1, ?2)",
+                params![message_id, t],
+            );
+        }
+        Ok(())
+    }
+
+    pub fn replace_dm_message_tokens(&self, message_id: &str, tokens: &[String]) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM dm_message_search_tokens WHERE message_id = ?1", params![message_id])
+            .map_err(|e| e.to_string())?;
+        for t in tokens {
+            let _ = conn.execute(
+                "INSERT OR IGNORE INTO dm_message_search_tokens (message_id, token) VALUES (?1, ?2)",
+                params![message_id, t],
+            );
+        }
+        Ok(())
+    }
+
+    /// Search server-channel messages by blind-index tokens (AND semantics — a
+    /// message must contain every token). Empty tokens matches by sender only
+    /// (the "filter by user" mode). Membership is checked by the caller.
+    pub fn search_messages(&self, channel_id: &str, tokens: &[String], sender_id: Option<&str>, limit: i64) -> Result<Vec<Message>, String> {
+        let mut sql = String::from(
+            "SELECT m.id, m.channel_id, m.sender_id, m.encrypted_content, m.nonce, m.timestamp, m.edited_at,
+                    m.key_version, m.encrypted_profile_snapshot, m.profile_snapshot_nonce,
+                    m.encrypted_sender_username, m.sender_username_nonce, m.sender_id_hash, m.file_id
+             FROM messages m
+             INNER JOIN users u ON m.sender_id = u.id
+             WHERE m.channel_id = ?1",
+        );
+        let mut values: Vec<rusqlite::types::Value> = vec![rusqlite::types::Value::Text(channel_id.to_string())];
+        if !tokens.is_empty() {
+            sql.push_str(" AND m.id IN (SELECT message_id FROM message_search_tokens WHERE token IN (");
+            for (i, t) in tokens.iter().enumerate() {
+                if i > 0 { sql.push_str(", "); }
+                sql.push_str(&format!("?{}", values.len() + 1));
+                values.push(rusqlite::types::Value::Text(t.clone()));
+            }
+            sql.push_str(&format!(") GROUP BY message_id HAVING COUNT(DISTINCT token) = ?{})", values.len() + 1));
+            values.push(rusqlite::types::Value::Integer(tokens.len() as i64));
+        }
+        if let Some(sid) = sender_id {
+            sql.push_str(&format!(" AND m.sender_id = ?{}", values.len() + 1));
+            values.push(rusqlite::types::Value::Text(sid.to_string()));
+        }
+        sql.push_str(&format!(" ORDER BY m.timestamp DESC, m.id DESC LIMIT ?{}", values.len() + 1));
+        values.push(rusqlite::types::Value::Integer(limit));
+
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(values), |row| message_from_row(row))
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// Global channel search: every channel of every server the user belongs to.
+    pub fn search_messages_global(&self, user_id: &str, tokens: &[String], sender_id: Option<&str>, limit: i64) -> Result<Vec<Message>, String> {
+        let mut sql = String::from(
+            "SELECT m.id, m.channel_id, m.sender_id, m.encrypted_content, m.nonce, m.timestamp, m.edited_at,
+                    m.key_version, m.encrypted_profile_snapshot, m.profile_snapshot_nonce,
+                    m.encrypted_sender_username, m.sender_username_nonce, m.sender_id_hash, m.file_id
+             FROM messages m
+             INNER JOIN message_search_tokens t ON t.message_id = m.id
+             INNER JOIN channels c ON c.id = m.channel_id
+             INNER JOIN server_members sm ON sm.server_id = c.server_id
+             WHERE sm.user_id = ?1",
+        );
+        let mut values: Vec<rusqlite::types::Value> = vec![rusqlite::types::Value::Text(user_id.to_string())];
+        if !tokens.is_empty() {
+            sql.push_str(" AND t.token IN (");
+            for (i, t) in tokens.iter().enumerate() {
+                if i > 0 { sql.push_str(", "); }
+                sql.push_str(&format!("?{}", values.len() + 1));
+                values.push(rusqlite::types::Value::Text(t.clone()));
+            }
+            sql.push_str(&format!(") GROUP BY m.id HAVING COUNT(DISTINCT t.token) = ?{}", values.len() + 1));
+            values.push(rusqlite::types::Value::Integer(tokens.len() as i64));
+        }
+        if let Some(sid) = sender_id {
+            sql.push_str(&format!(" AND m.sender_id = ?{}", values.len() + 1));
+            values.push(rusqlite::types::Value::Text(sid.to_string()));
+        }
+        sql.push_str(&format!(" ORDER BY m.timestamp DESC, m.id DESC LIMIT ?{}", values.len() + 1));
+        values.push(rusqlite::types::Value::Integer(limit));
+
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(values), |row| message_from_row(row))
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    pub fn search_dm_messages(&self, dm_channel_id: &str, tokens: &[String], sender_id: Option<&str>, limit: i64) -> Result<Vec<DmMessage>, String> {
+        let mut sql = String::from(
+            "SELECT m.id, m.dm_channel_id, m.sender_id, m.encrypted_content, m.nonce, m.timestamp, m.edited_at,
+                    m.key_version, m.encrypted_profile_snapshot, m.profile_snapshot_nonce,
+                    m.encrypted_sender_username, m.sender_username_nonce, m.sender_id_hash, m.file_id
+             FROM dm_messages m
+             WHERE m.dm_channel_id = ?1",
+        );
+        let mut values: Vec<rusqlite::types::Value> = vec![rusqlite::types::Value::Text(dm_channel_id.to_string())];
+        if !tokens.is_empty() {
+            sql.push_str(" AND m.id IN (SELECT message_id FROM dm_message_search_tokens WHERE token IN (");
+            for (i, t) in tokens.iter().enumerate() {
+                if i > 0 { sql.push_str(", "); }
+                sql.push_str(&format!("?{}", values.len() + 1));
+                values.push(rusqlite::types::Value::Text(t.clone()));
+            }
+            sql.push_str(&format!(") GROUP BY message_id HAVING COUNT(DISTINCT token) = ?{})", values.len() + 1));
+            values.push(rusqlite::types::Value::Integer(tokens.len() as i64));
+        }
+        if let Some(sid) = sender_id {
+            sql.push_str(&format!(" AND m.sender_id = ?{}", values.len() + 1));
+            values.push(rusqlite::types::Value::Text(sid.to_string()));
+        }
+        sql.push_str(&format!(" ORDER BY m.timestamp DESC, m.id DESC LIMIT ?{}", values.len() + 1));
+        values.push(rusqlite::types::Value::Integer(limit));
+
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(values), |row| dm_message_from_row(row))
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// Global DM search: every DM channel the user is a member of.
+    pub fn search_dm_messages_global(&self, user_id: &str, tokens: &[String], sender_id: Option<&str>, limit: i64) -> Result<Vec<DmMessage>, String> {
+        let mut sql = String::from(
+            "SELECT m.id, m.dm_channel_id, m.sender_id, m.encrypted_content, m.nonce, m.timestamp, m.edited_at,
+                    m.key_version, m.encrypted_profile_snapshot, m.profile_snapshot_nonce,
+                    m.encrypted_sender_username, m.sender_username_nonce, m.sender_id_hash, m.file_id
+             FROM dm_messages m
+             INNER JOIN dm_message_search_tokens t ON t.message_id = m.id
+             INNER JOIN dm_members dm ON dm.dm_channel_id = m.dm_channel_id
+             WHERE dm.user_id = ?1",
+        );
+        let mut values: Vec<rusqlite::types::Value> = vec![rusqlite::types::Value::Text(user_id.to_string())];
+        if !tokens.is_empty() {
+            sql.push_str(" AND t.token IN (");
+            for (i, t) in tokens.iter().enumerate() {
+                if i > 0 { sql.push_str(", "); }
+                sql.push_str(&format!("?{}", values.len() + 1));
+                values.push(rusqlite::types::Value::Text(t.clone()));
+            }
+            sql.push_str(&format!(") GROUP BY m.id HAVING COUNT(DISTINCT t.token) = ?{}", values.len() + 1));
+            values.push(rusqlite::types::Value::Integer(tokens.len() as i64));
+        }
+        if let Some(sid) = sender_id {
+            sql.push_str(&format!(" AND m.sender_id = ?{}", values.len() + 1));
+            values.push(rusqlite::types::Value::Text(sid.to_string()));
+        }
+        sql.push_str(&format!(" ORDER BY m.timestamp DESC, m.id DESC LIMIT ?{}", values.len() + 1));
+        values.push(rusqlite::types::Value::Integer(limit));
+
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(values), |row| dm_message_from_row(row))
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    // --- Message reactions (E2E-encrypted) ---
+    // Each row is an emoji payload encrypted with the channel/DM key plus a
+    // blind HMAC emoji_token (UNIQUE per message/reactor/emoji) so identical
+    // emoji from one reactor are deduped and can be toggled off without the
+    // server ever reading the emoji. Counts are computed client-side.
+
+    /// Insert a reaction. Returns true if newly added, false if the exact
+    /// (message, reactor, emoji) already exists (the caller toggles it off).
+    pub fn add_reaction(&self, message_id: &str, reactor_id: &str, emoji_token: &str, encrypted_emoji: &str, emoji_nonce: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let id = Uuid::new_v4().to_string();
+        let n = conn
+            .execute(
+                "INSERT OR IGNORE INTO message_reactions (id, message_id, reactor_id, emoji_token, encrypted_emoji, emoji_nonce) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![id, message_id, reactor_id, emoji_token, encrypted_emoji, emoji_nonce],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(n > 0)
+    }
+
+    pub fn add_dm_reaction(&self, message_id: &str, reactor_id: &str, emoji_token: &str, encrypted_emoji: &str, emoji_nonce: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let id = Uuid::new_v4().to_string();
+        let n = conn
+            .execute(
+                "INSERT OR IGNORE INTO dm_message_reactions (id, message_id, reactor_id, emoji_token, encrypted_emoji, emoji_nonce) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![id, message_id, reactor_id, emoji_token, encrypted_emoji, emoji_nonce],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(n > 0)
+    }
+
+    /// Remove the reactor's reaction for one emoji. Returns true if removed.
+    pub fn remove_reaction(&self, message_id: &str, reactor_id: &str, emoji_token: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let n = conn
+            .execute(
+                "DELETE FROM message_reactions WHERE message_id = ?1 AND reactor_id = ?2 AND emoji_token = ?3",
+                params![message_id, reactor_id, emoji_token],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(n > 0)
+    }
+
+    pub fn remove_dm_reaction(&self, message_id: &str, reactor_id: &str, emoji_token: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let n = conn
+            .execute(
+                "DELETE FROM dm_message_reactions WHERE message_id = ?1 AND reactor_id = ?2 AND emoji_token = ?3",
+                params![message_id, reactor_id, emoji_token],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(n > 0)
+    }
+
+    /// Fetch reactions for a batch of message ids (for message-list loading,
+    /// infinite scroll, pins, and around-message jumps).
+    pub fn get_message_reactions(&self, message_ids: &[String]) -> Result<std::collections::HashMap<String, Vec<ReactionRow>>, String> {
+        if message_ids.is_empty() { return Ok(std::collections::HashMap::new()); }
+        let placeholders: Vec<String> = (1..=message_ids.len()).map(|i| format!("?{}", i)).collect();
+        let sql = format!(
+            "SELECT message_id, reactor_id, emoji_token, encrypted_emoji, emoji_nonce, created_at FROM message_reactions WHERE message_id IN ({})",
+            placeholders.join(",")
+        );
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let values: Vec<rusqlite::types::Value> = message_ids.iter().map(|s| rusqlite::types::Value::Text(s.clone())).collect();
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let mut out: std::collections::HashMap<String, Vec<ReactionRow>> = std::collections::HashMap::new();
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(values), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    ReactionRow {
+                        reactor_id: row.get(1)?,
+                        emoji_token: row.get(2)?,
+                        encrypted_emoji: row.get(3)?,
+                        emoji_nonce: row.get(4)?,
+                        created_at: row.get(5)?,
+                    },
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        for r in rows.flatten() {
+            out.entry(r.0).or_default().push(r.1);
+        }
+        Ok(out)
+    }
+
+    pub fn get_dm_message_reactions(&self, message_ids: &[String]) -> Result<std::collections::HashMap<String, Vec<ReactionRow>>, String> {
+        if message_ids.is_empty() { return Ok(std::collections::HashMap::new()); }
+        let placeholders: Vec<String> = (1..=message_ids.len()).map(|i| format!("?{}", i)).collect();
+        let sql = format!(
+            "SELECT message_id, reactor_id, emoji_token, encrypted_emoji, emoji_nonce, created_at FROM dm_message_reactions WHERE message_id IN ({})",
+            placeholders.join(",")
+        );
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let values: Vec<rusqlite::types::Value> = message_ids.iter().map(|s| rusqlite::types::Value::Text(s.clone())).collect();
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let mut out: std::collections::HashMap<String, Vec<ReactionRow>> = std::collections::HashMap::new();
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(values), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    ReactionRow {
+                        reactor_id: row.get(1)?,
+                        emoji_token: row.get(2)?,
+                        encrypted_emoji: row.get(3)?,
+                        emoji_nonce: row.get(4)?,
+                        created_at: row.get(5)?,
+                    },
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        for r in rows.flatten() {
+            out.entry(r.0).or_default().push(r.1);
+        }
+        Ok(out)
+    }
+
     pub fn get_message_sender_user_id(&self, message_id: &str) -> Result<String, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.query_row(
@@ -5626,6 +6017,13 @@ impl Database {
 
         // 4c. Clean up files owned by user (files.uploader_id has no ON DELETE CASCADE)
         conn.execute("DELETE FROM files WHERE uploader_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+
+        // 4c2. Clean up the user's reactions on other people's messages
+        //      (message rows cascade their own reactions via message_id FK).
+        conn.execute("DELETE FROM message_reactions WHERE reactor_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM dm_message_reactions WHERE reactor_id = ?1", params![user_id])
             .map_err(|e| e.to_string())?;
 
         // 4f. Clean up server_bans where user is the banned user

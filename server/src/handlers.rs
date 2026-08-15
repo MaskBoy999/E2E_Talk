@@ -96,6 +96,13 @@ static CLIENT_CONFIG_IP_RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(|| R
     attempts: Mutex::new(HashMap::new()),
 });
 
+/// Per-IP throttle for the E2E message-search endpoints (both the search query
+/// and the client-side token-index backfill). Env-overridable for test suites
+/// (same pattern as HMAC_KEY_IP_MAX): set SEARCH_IP_MAX=0 to disable.
+static SEARCH_IP_RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(|| RateLimiter {
+    attempts: Mutex::new(HashMap::new()),
+});
+
 static FRIEND_REQUEST_IP_RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(|| RateLimiter {
     attempts: Mutex::new(HashMap::new()),
 });
@@ -3127,6 +3134,8 @@ pub async fn list_messages(
 
     // Pinned message ids for this channel (metadata only — content stays encrypted)
     let pinned_ids = state.db.get_pinned_message_ids(&channel_id).unwrap_or_default();
+    let msg_ids: Vec<String> = messages.iter().map(|m| m.id.clone()).collect();
+    let reactions = state.db.get_message_reactions(&msg_ids).unwrap_or_default();
 
     let message_infos: Vec<serde_json::Value> = messages
         .iter()
@@ -3148,6 +3157,7 @@ pub async fn list_messages(
                 "profile_snapshot_nonce": m.profile_snapshot_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
 
                 "pinned": pinned_ids.iter().any(|pid| pid == &m.id),
+                "reactions": reactions_json(&state, reactions.get(&m.id)),
 
                 "conversation_profile": conv_profiles.get(&m.sender_id).map(|(data, nonce)| serde_json::json!({
                     "encrypted_profile_data": data,
@@ -3186,6 +3196,8 @@ pub async fn list_channel_pins(
     let mut sender_ids: Vec<&str> = messages.iter().map(|m| m.sender_id.as_str()).collect();
     sender_ids.dedup();
     let conv_profiles = state.db.get_conversation_profiles_batch("channel", &server_id, &sender_ids).unwrap_or_default();
+    let msg_ids: Vec<String> = messages.iter().map(|m| m.id.clone()).collect();
+    let reactions = state.db.get_message_reactions(&msg_ids).unwrap_or_default();
     let message_infos: Vec<serde_json::Value> = messages
         .iter()
         .map(|m| {
@@ -3204,6 +3216,7 @@ pub async fn list_channel_pins(
                 "encrypted_profile_snapshot": m.encrypted_profile_snapshot.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                 "profile_snapshot_nonce": m.profile_snapshot_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                 "pinned": true,
+                "reactions": reactions_json(&state, reactions.get(&m.id)),
                 "conversation_profile": conv_profiles.get(&m.sender_id).map(|(data, nonce)| serde_json::json!({
                     "encrypted_profile_data": data,
                     "nonce": nonce,
@@ -3256,11 +3269,11 @@ pub async fn list_messages_around(
 
     let mut sender_ids2: Vec<&str> = messages.iter().map(|m| m.sender_id.as_str()).collect();
     sender_ids2.dedup();
-    let conv_profiles2 = state.db.get_conversation_profiles_batch("channel", &server_id, &sender_ids2).unwrap_or_default();
-
-    // Pinned ids so a jump-to-pin (which loads messages around a target) still
+    let conv_profiles2 = state.db.get_conversation_profiles_batch("channel", &server_id, &sender_ids2).unwrap_or_default();    // Pinned ids so a jump-to-pin (which loads messages around a target) still
     // renders the 📌 badge on the pinned message.
     let pinned_ids2 = state.db.get_pinned_message_ids(&channel_id).unwrap_or_default();
+    let msg_ids2: Vec<String> = messages.iter().map(|m| m.id.clone()).collect();
+    let reactions2 = state.db.get_message_reactions(&msg_ids2).unwrap_or_default();
 
     let message_infos: Vec<serde_json::Value> = messages
         .iter()
@@ -3280,9 +3293,8 @@ pub async fn list_messages_around(
                 "key_version": m.key_version,
                 "encrypted_profile_snapshot": m.encrypted_profile_snapshot.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                 "profile_snapshot_nonce": m.profile_snapshot_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
-
                 "pinned": pinned_ids2.iter().any(|pid| pid == &m.id),
-
+                "reactions": reactions_json(&state, reactions2.get(&m.id)),
                 "conversation_profile": conv_profiles2.get(&m.sender_id).map(|(data, nonce)| serde_json::json!({
                     "encrypted_profile_data": data,
                     "nonce": nonce,
@@ -6116,6 +6128,277 @@ pub async fn client_config(
     }))).into_response()
 }
 
+/// Serialize a server-channel search result in the same encrypted shape as
+/// list_messages, plus the context the client needs to render + jump
+/// (server/channel ids and encrypted names for the context line).
+fn channel_search_json(
+    state: &Arc<AppState>,
+    m: &crate::db::Message,
+    server_id: &str,
+    ch_enc: Option<&(Vec<u8>, Vec<u8>)>,
+    sv_enc: Option<&(Vec<u8>, Vec<u8>)>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": m.id,
+        "channel_id": m.channel_id,
+        "server_id": server_id,
+        "dm_channel_id": null,
+        "sender_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &m.sender_id),
+        "sender_user_id": m.sender_id,
+        "sender_id_hash": m.sender_id_hash,
+        "encrypted_sender_username": m.encrypted_sender_username,
+        "sender_username_nonce": m.sender_username_nonce,
+        "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
+        "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
+        "timestamp": m.timestamp,
+        "edited_at": m.edited_at,
+        "key_version": m.key_version,
+        "encrypted_profile_snapshot": m.encrypted_profile_snapshot.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+        "profile_snapshot_nonce": m.profile_snapshot_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+        "channel_encrypted_name": ch_enc.map(|(n, _)| base64::engine::general_purpose::STANDARD.encode(n)),
+        "channel_name_nonce": ch_enc.map(|(_, nn)| base64::engine::general_purpose::STANDARD.encode(nn)),
+        "server_encrypted_name": sv_enc.map(|(n, _)| base64::engine::general_purpose::STANDARD.encode(n)),
+        "server_name_nonce": sv_enc.map(|(_, nn)| base64::engine::general_purpose::STANDARD.encode(nn)),
+    })
+}
+
+/// Serialize the reaction rows of one message (ciphertext + blind emoji token
+/// + reactor ids — same metadata treatment as message sender ids). The client
+/// decrypts the emoji payloads and computes counts locally.
+fn reactions_json(state: &Arc<AppState>, rows: Option<&Vec<crate::db::ReactionRow>>) -> serde_json::Value {
+    match rows {
+        Some(rs) => serde_json::json!(rs
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "reactor_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &r.reactor_id),
+                    "reactor_user_id": r.reactor_id,
+                    "emoji_token": r.emoji_token,
+                    "encrypted_emoji": r.encrypted_emoji,
+                    "emoji_nonce": r.emoji_nonce,
+                    "created_at": r.created_at,
+                })
+            })
+            .collect::<Vec<_>>()),
+        None => serde_json::json!([]),
+    }
+}
+
+/// GET /api/search — E2E blind-index message search.
+/// Query params: `q` (repeatable HMAC token, one per keyword, AND semantics),
+/// `sender_id` (filter to one sender), `channel_id` / `dm_channel_id` (scope;
+/// omitted = search every channel/DM the user can read), `limit` (cap 100).
+/// The server never sees plaintext: tokens are HMACs keyed by the channel/DM
+/// key, which only clients hold.
+pub async fn search_messages_handler(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    let ip = get_client_ip(&headers);
+    let rate_key = format!("search_ip:{}", ip);
+    let ip_max: u32 = std::env::var("SEARCH_IP_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(300);
+    if ip_max > 0 && !SEARCH_IP_RATE_LIMITER.check_and_increment(&rate_key, ip_max, Duration::from_secs(60)) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "Too many requests. Try again later."})),
+        )
+            .into_response();
+    }
+
+    // Tokens arrive comma-joined in one `q` param (each token is hex, so no
+    // commas can appear inside). One token per keyword, AND semantics.
+    // Dedupe identical tokens (a client with duplicate rotation-history keys
+    // could otherwise send the same token twice, breaking the
+    // COUNT(DISTINCT token) = #tokens match).
+    let mut tokens: Vec<String> = params
+        .get("q")
+        .map(|q| {
+            // Substring tokens are HMAC'd with the conversation key (blind
+            // index) and can be as short as 2 chars; the host cannot read
+            // them, so the old >= 8 length floor (for full-word tokens) is
+            // dropped to allow "ligh" -> "lighthouse" contains-matching.
+            q.split(',')
+                .filter(|t| t.len() >= 2 && t.len() <= 64)
+                .take(8)
+                .map(|s| s.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    tokens.sort();
+    tokens.dedup();
+    let sender_id = params.get("sender_id").filter(|s| !s.is_empty()).map(|s| s.as_str());
+    let limit: i64 = params.get("limit").and_then(|v| v.parse().ok()).unwrap_or(50).min(100);
+
+    if let Some(channel_id) = params.get("channel_id") {
+        let server_id = match state.db.get_server_id_for_channel(channel_id) {
+            Ok(id) => id,
+            Err(_) => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Channel not found"}))).into_response(),
+        };
+        if !state.db.is_member_of_server(&user_id, &server_id).unwrap_or(false) {
+            return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Not a member of this server"}))).into_response();
+        }
+        let msgs = match state.db.search_messages(channel_id, &tokens, sender_id, limit) {
+            Ok(m) => m,
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+        };
+        let ch_enc = state.db.get_channel_encrypted_name(channel_id).ok();
+        let sv_enc = state.db.get_server_encrypted_name(&server_id).ok();
+        let results: Vec<serde_json::Value> = msgs.iter().map(|m| channel_search_json(&state, m, &server_id, ch_enc.as_ref(), sv_enc.as_ref())).collect();
+        return (StatusCode::OK, Json(serde_json::json!({"results": results, "scope": "channel"}))).into_response();
+    }
+
+    if let Some(dm_channel_id) = params.get("dm_channel_id") {
+        if !state.db.is_dm_member(dm_channel_id, &user_id).unwrap_or(false) {
+            return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Not a member of this DM"}))).into_response();
+        }
+        let msgs = match state.db.search_dm_messages(dm_channel_id, &tokens, sender_id, limit) {
+            Ok(m) => m,
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+        };
+        let results: Vec<serde_json::Value> = msgs
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "id": m.id,
+                    "dm_channel_id": m.dm_channel_id,
+                    "channel_id": null,
+                    "server_id": null,
+                    "sender_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &m.sender_id),
+                    "sender_user_id": m.sender_id,
+                    "sender_id_hash": m.sender_id_hash,
+                    "encrypted_sender_username": m.encrypted_sender_username,
+                    "sender_username_nonce": m.sender_username_nonce,
+                    "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
+                    "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
+                    "timestamp": m.timestamp,
+                    "edited_at": m.edited_at,
+                    "key_version": m.key_version,
+                    "encrypted_profile_snapshot": m.encrypted_profile_snapshot.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+                    "profile_snapshot_nonce": m.profile_snapshot_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+                })
+            })
+            .collect();
+        return (StatusCode::OK, Json(serde_json::json!({"results": results, "scope": "dm"}))).into_response();
+    }
+
+    // Global: every server channel + DM the user can read.
+    let ch_msgs = state.db.search_messages_global(&user_id, &tokens, sender_id, limit).unwrap_or_default();
+    let dm_msgs = state.db.search_dm_messages_global(&user_id, &tokens, sender_id, limit).unwrap_or_default();
+    let mut ch_names: std::collections::HashMap<String, Option<(Vec<u8>, Vec<u8>)>> = std::collections::HashMap::new();
+    let mut sv_names: std::collections::HashMap<String, Option<(Vec<u8>, Vec<u8>)>> = std::collections::HashMap::new();
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    for m in &ch_msgs {
+        let server_id = state.db.get_server_id_for_channel(&m.channel_id).unwrap_or_default();
+        let ch_enc = ch_names.entry(m.channel_id.clone()).or_insert_with(|| state.db.get_channel_encrypted_name(&m.channel_id).ok()).as_ref().cloned();
+        let sv_enc = sv_names.entry(server_id.clone()).or_insert_with(|| state.db.get_server_encrypted_name(&server_id).ok()).as_ref().cloned();
+        results.push(channel_search_json(&state, m, &server_id, ch_enc.as_ref(), sv_enc.as_ref()));
+    }
+    for m in &dm_msgs {
+        results.push(serde_json::json!({
+            "id": m.id,
+            "dm_channel_id": m.dm_channel_id,
+            "channel_id": null,
+            "server_id": null,
+            "sender_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &m.sender_id),
+            "sender_user_id": m.sender_id,
+            "sender_id_hash": m.sender_id_hash,
+            "encrypted_sender_username": m.encrypted_sender_username,
+            "sender_username_nonce": m.sender_username_nonce,
+            "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
+            "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
+            "timestamp": m.timestamp,
+            "edited_at": m.edited_at,
+            "key_version": m.key_version,
+            "encrypted_profile_snapshot": m.encrypted_profile_snapshot.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+            "profile_snapshot_nonce": m.profile_snapshot_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+        }));
+    }
+    // Merge channel + DM results, newest first.
+    results.sort_by(|a, b| b["timestamp"].as_str().unwrap_or("").cmp(a["timestamp"].as_str().unwrap_or("")));
+    results.truncate(limit as usize);
+    (StatusCode::OK, Json(serde_json::json!({"results": results, "scope": "global"}))).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct SearchIndexEntry {
+    pub message_id: String,
+    #[serde(default)]
+    pub tokens: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct SearchIndexRequest {
+    #[serde(default)]
+    pub channel_id: Option<String>,
+    #[serde(default)]
+    pub dm_channel_id: Option<String>,
+    pub entries: Vec<SearchIndexEntry>,
+}
+
+/// POST /api/search/index — client-side backfill of the E2E search blind index.
+/// The client computes HMAC tokens for messages it has already decrypted (e.g.
+/// while scrolling history) and submits them in batches; the server only
+/// INSERT-OR-IGNOREs them (idempotent). Ownership is validated per entry.
+pub async fn index_search_tokens(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SearchIndexRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    let ip = get_client_ip(&headers);
+    let rate_key = format!("search_index_ip:{}", ip);
+    let ip_max: u32 = std::env::var("SEARCH_IP_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(300);
+    if ip_max > 0 && !SEARCH_IP_RATE_LIMITER.check_and_increment(&rate_key, ip_max, Duration::from_secs(60)) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "Too many requests. Try again later."})),
+        )
+            .into_response();
+    }
+
+    let mut indexed = 0usize;
+    for entry in req.entries.iter().take(300) {
+        let toks: Vec<String> = entry.tokens.iter().filter(|t| t.len() >= 2 && t.len() <= 64).take(400).cloned().collect();
+        if toks.is_empty() { continue; }
+        if let Some(channel_id) = &req.channel_id {
+            // Validate: message must live in this channel and the user must be
+            // a member of the channel's server.
+            if state.db.get_message_channel_id(&entry.message_id).ok().as_deref() != Some(channel_id.as_str()) {
+                continue;
+            }
+            let server_id = match state.db.get_server_id_for_channel(channel_id) {
+                Ok(id) => id,
+                Err(_) => continue,
+            };
+            if !state.db.is_member_of_server(&user_id, &server_id).unwrap_or(false) {
+                continue;
+            }
+            if state.db.index_message_tokens(&entry.message_id, &toks).is_ok() {
+                indexed += 1;
+            }
+        } else if let Some(dm_channel_id) = &req.dm_channel_id {
+            if state.db.get_dm_message_channel_id(&entry.message_id).ok().as_deref() != Some(dm_channel_id.as_str()) {
+                continue;
+            }
+            if !state.db.is_dm_member(dm_channel_id, &user_id).unwrap_or(false) {
+                continue;
+            }
+            if state.db.index_dm_message_tokens(&entry.message_id, &toks).is_ok() {
+                indexed += 1;
+            }
+        }
+    }
+    (StatusCode::OK, Json(serde_json::json!({"ok": true, "indexed": indexed}))).into_response()
+}
+
 pub async fn get_my_friend_code(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
@@ -6789,6 +7072,8 @@ pub async fn list_dm_messages(
             let dm_conv_profiles = state.db.get_conversation_profiles_batch("dm", &dm_channel_id, &dm_sender_ids).unwrap_or_default();
 
             let dm_pinned_ids = state.db.get_pinned_dm_message_ids(&dm_channel_id).unwrap_or_default();
+            let dm_msg_ids: Vec<String> = msgs.iter().map(|m| m.id.clone()).collect();
+            let dm_reactions = state.db.get_dm_message_reactions(&dm_msg_ids).unwrap_or_default();
 
             let result: Vec<serde_json::Value> = msgs
                 .iter()
@@ -6809,6 +7094,7 @@ pub async fn list_dm_messages(
                         "encrypted_sender_username": m.encrypted_sender_username,
                         "sender_username_nonce": m.sender_username_nonce,
                         "pinned": dm_pinned_ids.iter().any(|pid| pid == &m.id),
+                        "reactions": reactions_json(&state, dm_reactions.get(&m.id)),
                         "conversation_profile": dm_conv_profiles.get(&m.sender_id).map(|(data, nonce)| serde_json::json!({
                             "encrypted_profile_data": data,
                             "nonce": nonce,
@@ -6840,6 +7126,8 @@ pub async fn list_dm_pins(
     let mut dm_sender_ids: Vec<&str> = msgs.iter().map(|m| m.sender_id.as_str()).collect();
     dm_sender_ids.dedup();
     let dm_conv_profiles = state.db.get_conversation_profiles_batch("dm", &dm_channel_id, &dm_sender_ids).unwrap_or_default();
+    let dm_msg_ids: Vec<String> = msgs.iter().map(|m| m.id.clone()).collect();
+    let dm_reactions = state.db.get_dm_message_reactions(&dm_msg_ids).unwrap_or_default();
     let result: Vec<serde_json::Value> = msgs
         .iter()
         .map(|m| {
@@ -6859,6 +7147,7 @@ pub async fn list_dm_pins(
                 "encrypted_sender_username": m.encrypted_sender_username,
                 "sender_username_nonce": m.sender_username_nonce,
                 "pinned": true,
+                "reactions": reactions_json(&state, dm_reactions.get(&m.id)),
                 "conversation_profile": dm_conv_profiles.get(&m.sender_id).map(|(data, nonce)| serde_json::json!({
                     "encrypted_profile_data": data,
                     "nonce": nonce,

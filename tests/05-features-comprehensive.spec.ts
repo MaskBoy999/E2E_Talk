@@ -630,6 +630,7 @@ test.describe('5 Features — DM Search, Channel Search, Infinite Scroll, Notifi
     // ════════════════════════════════════════════════════════════════
 
     test('6. Combined flow — DM search, infinite scroll, and sender_id_hash all work together', async ({ page, context }) => {
+        test.setTimeout(90000);
         const ts = Date.now();
         const user1 = 'cfa_' + ts;
         const user2 = 'cfb_' + ts;

@@ -82,6 +82,17 @@ document.addEventListener('DOMContentLoaded', () => {
                 // identity data) that users shouldn't have to re-enter on every
                 // login. It survives the wipe and is sent with login/register.
                 if (wipeKey === 'session_duration_seconds' || wipeKey === 'reauth_duration_seconds') continue;
+                // Preserve the MEDIA caches (fkc_* file keys + user display-name
+                // cache) so a forced re-login — session expiry, a server restart
+                // that invalidates the token, a remote sign-out — doesn't wipe
+                // profile pictures, banners, emojis and stickers. These keys are
+                // useless without server-side download authorization (downloads
+                // are gated by uploader/friend/server membership), so keeping
+                // them leaks no file content to a new account; it only avoids
+                // re-deriving/refetching what the previous session already had.
+                // Identity keys, server keys, and account state are still wiped.
+                if (wipeKey === 'user_display_name_cache') continue;
+                if (wipeKey.indexOf('fkc_') === 0) continue;
                 Storage.prototype.removeItem.call(localStorage, wipeKey);
             }
         } catch (_) {}

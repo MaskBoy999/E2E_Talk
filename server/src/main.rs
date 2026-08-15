@@ -499,6 +499,8 @@ async fn main() {
         .route("/api/channels/{channel_id}/messages/around/{message_id}", get(handlers::list_messages_around))
         .route("/api/channels/{channel_id}/pins", get(handlers::list_channel_pins))
         .route("/api/channels/{channel_id}", delete(handlers::delete_channel))
+        // E2E blind-index message search (GET query + client token-index backfill)
+        .route("/api/search", get(handlers::search_messages_handler).post(handlers::index_search_tokens))
         .route("/api/invites/join", post(handlers::join_server))
         .route("/api/identity/{user_id}", get(handlers::get_identity_key))
         // Voice: TURN server config for WebRTC calls (strict NAT traversal)

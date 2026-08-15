@@ -751,6 +751,16 @@ async fn handle_ws_message(
                 }
             };
 
+            // E2E search blind index: the sender's client includes HMAC tokens
+            // for each keyword (keyed by the server key the host never sees).
+            // Stored insert-only; content stays encrypted.
+            if let Some(tokens) = parsed.get("search_tokens").and_then(|t| t.as_array()) {
+                let toks: Vec<String> = tokens.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).take(400).collect();
+                if !toks.is_empty() {
+                    let _ = state.db.index_message_tokens(&message.id, &toks);
+                }
+            }
+
             let server_id_clone = server_id.clone();
             let msg_id = message.id.clone();
             let outgoing = OutgoingMessage {
@@ -913,6 +923,14 @@ async fn handle_ws_message(
                 }
             };
 
+            // E2E search blind index for DMs (same scheme as channel messages).
+            if let Some(tokens) = parsed.get("search_tokens").and_then(|t| t.as_array()) {
+                let toks: Vec<String> = tokens.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).take(400).collect();
+                if !toks.is_empty() {
+                    let _ = state.db.index_dm_message_tokens(&message.id, &toks);
+                }
+            }
+
             let msg_id = message.id.clone();
             let _msg_sender_username = state.db.get_user_by_id(&user_id).map(|u| u.username).unwrap_or_default();
             let outgoing = OutgoingMessage {
@@ -1033,6 +1051,12 @@ async fn handle_ws_message(
                 }
             };
 
+            // Edited messages get a fresh token set (the plaintext changed).
+            if let Some(tokens) = parsed.get("search_tokens").and_then(|t| t.as_array()) {
+                let toks: Vec<String> = tokens.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).take(400).collect();
+                let _ = state.db.replace_message_tokens(&message.id, &toks);
+            }
+
             let server_id = match state.db.get_server_id_for_channel(&message.channel_id) {
                 Ok(id) => id,
                 Err(_) => return,
@@ -1144,6 +1168,11 @@ async fn handle_ws_message(
                     return;
                 }
             };
+            // Edited DM messages get a fresh token set (the plaintext changed).
+            if let Some(tokens) = parsed.get("search_tokens").and_then(|t| t.as_array()) {
+                let toks: Vec<String> = tokens.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).take(400).collect();
+                let _ = state.db.replace_dm_message_tokens(&message.id, &toks);
+            }
             let outgoing = OutgoingMessage {                    msg_type: "dm_edited".to_string(),
                 channel_id: None,
                 server_id: None,
@@ -1408,6 +1437,96 @@ async fn handle_ws_message(
                     state.ws_manager.broadcast_to_users(&members, &outgoing.to_string()).await;
                 }
                 Err(_) => {}
+            }
+        }
+        "message_reaction" | "dm_reaction" => {
+            // E2E-encrypted reaction toggle. The emoji payload arrives encrypted
+            // with the channel/DM key (the server never sees it); emoji_token is
+            // a blind HMAC used only to dedupe + toggle. Reacting again with the
+            // same emoji removes it. Reactor is always the authed user.
+            let message_id = match parsed.get("message_id").and_then(|c| c.as_str()) {
+                Some(c) => c.to_string(),
+                None => return,
+            };
+            let emoji_token = match parsed.get("emoji_token").and_then(|c| c.as_str()) {
+                Some(c) => c.to_string(),
+                None => return,
+            };
+            let encrypted_emoji = match parsed.get("encrypted_emoji").and_then(|c| c.as_str()) {
+                Some(c) => c.to_string(),
+                None => return,
+            };
+            let emoji_nonce = match parsed.get("emoji_nonce").and_then(|c| c.as_str()) {
+                Some(c) => c.to_string(),
+                None => return,
+            };
+            if msg_type == "message_reaction" {
+                let channel_id = match parsed.get("channel_id").and_then(|c| c.as_str()) {
+                    Some(c) => c.to_string(),
+                    None => return,
+                };
+                let server_id = match state.db.get_server_id_for_channel(&channel_id) {
+                    Ok(id) => id,
+                    Err(_) => return,
+                };
+                if !state.db.is_member_of_server(user_id, &server_id).unwrap_or(false) {
+                    return;
+                }
+                if state.db.get_message_channel_id(&message_id).ok().as_deref() != Some(channel_id.as_str()) {
+                    return;
+                }
+                let added = match state.db.add_reaction(&message_id, user_id, &emoji_token, &encrypted_emoji, &emoji_nonce) {
+                    Ok(a) => a,
+                    Err(_) => false,
+                };
+                if !added {
+                    // Already reacted with this emoji → toggle it off.
+                    let _ = state.db.remove_reaction(&message_id, user_id, &emoji_token);
+                }
+                let outgoing = serde_json::json!({
+                    "type": if added { "reaction_added" } else { "reaction_removed" },
+                    "channel_id": channel_id,
+                    "message_id": message_id,
+                    "user_id": user_id,
+                    "emoji_token": emoji_token,
+                    "encrypted_emoji": encrypted_emoji,
+                    "emoji_nonce": emoji_nonce,
+                });
+                match state.db.get_server_members(&server_id) {
+                    Ok(members) => { state.ws_manager.broadcast_to_users(&members, &outgoing.to_string()).await; }
+                    Err(_) => {}
+                }
+            } else {
+                let dm_channel_id = match parsed.get("dm_channel_id").and_then(|c| c.as_str()) {
+                    Some(c) => c.to_string(),
+                    None => return,
+                };
+                if !state.db.is_dm_member(&dm_channel_id, user_id).unwrap_or(false) {
+                    return;
+                }
+                if state.db.get_dm_message_channel_id(&message_id).ok().as_deref() != Some(dm_channel_id.as_str()) {
+                    return;
+                }
+                let added = match state.db.add_dm_reaction(&message_id, user_id, &emoji_token, &encrypted_emoji, &emoji_nonce) {
+                    Ok(a) => a,
+                    Err(_) => false,
+                };
+                if !added {
+                    let _ = state.db.remove_dm_reaction(&message_id, user_id, &emoji_token);
+                }
+                let outgoing = serde_json::json!({
+                    "type": if added { "dm_reaction_added" } else { "dm_reaction_removed" },
+                    "dm_channel_id": dm_channel_id,
+                    "message_id": message_id,
+                    "user_id": user_id,
+                    "emoji_token": emoji_token,
+                    "encrypted_emoji": encrypted_emoji,
+                    "emoji_nonce": emoji_nonce,
+                });
+                match state.db.get_dm_members(&dm_channel_id) {
+                    Ok(members) => { state.ws_manager.broadcast_to_users(&members, &outgoing.to_string()).await; }
+                    Err(_) => {}
+                }
             }
         }
         "key_heartbeat" => {

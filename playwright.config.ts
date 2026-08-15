@@ -40,6 +40,9 @@ export default defineConfig({
             AUTH_PARAMS_IP_MAX: '100000',
             HMAC_KEY_IP_MAX: '100000',
             CLIENT_CONFIG_IP_MAX: '100000',
+            // E2E message search + token-index backfill share a per-IP budget;
+            // raise it so the search suite's queries never 429 mid-suite.
+            SEARCH_IP_MAX: '100000',
             // Admin-login attempts share a per-IP budget; raise it for the suite
             // (admin tests + probes log in repeatedly from one machine).
             ADMIN_LOGIN_IP_MAX: '100000',

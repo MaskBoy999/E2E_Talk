@@ -65,6 +65,7 @@
                 <button class="hamburger" id="hamburger">&#9776;</button>
                 <h3 id="channel-name">Select a channel</h3>
                 <button class="pins-btn" id="pins-btn" style="display:none" title="Pinned messages">&#128204;</button>
+                <button class="search-header-btn" id="search-header-btn" style="display:none" title="Search this conversation (Ctrl+K for all)">&#128269;</button>
                 <button class="server-settings-btn" id="server-settings-btn" style="display:none" title="Server Settings">&#9881;</button>
                 <button class="members-toggle" id="members-toggle" title="Members">&#9776;</button>
             </div>
@@ -1656,6 +1657,25 @@
         </div>
     </div>
 
+    <!-- E2E message search palette (Ctrl+K = global; the header button scopes
+         it to the current channel/DM). Results are decrypted client-side; the
+         server only ever sees HMAC tokens. -->
+    <div class="modal-overlay" id="search-panel" style="display:none">
+        <div class="modal-content search-panel-content">
+            <div class="search-panel-header">
+                <span id="search-panel-title">Search</span>
+                <button id="close-search-panel" style="background:none;border:none;color:#aaa;font-size:20px;cursor:pointer">&times;</button>
+            </div>
+            <div class="auth-input-row" style="margin-bottom:8px;">
+                <input type="text" id="search-input" placeholder="Search messages…" class="modal-input auth-code-input" style="flex:1;" autocomplete="off" />
+                <button type="button" id="search-clear-btn" class="toggle-visibility-btn" title="Clear">&times;</button>
+            </div>
+            <div id="search-user-chips" class="search-user-chips" style="display:none"></div>
+            <div id="search-results" class="search-results-list"></div>
+            <div class="search-panel-hint" id="search-hint">Type to search this conversation. Click a person below to see only their messages — combine both to find a specific message from them.</div>
+        </div>
+    </div>
+
     <!-- Sign-out confirmation: shown before kicking a single device or every
          other device (per-device sign-out is password-gated like kick-all so a
          stolen session can't sign out devices one at a time). Cancel-only like
@@ -1678,6 +1698,6 @@
 
     <script src="secure-storage.js?v=1"></script>
     <script src="voice.js?v=2"></script>
-    <script src="chat.js?v=39"></script>
+    <script src="chat.js?v=40"></script>
 </body>
 </html>

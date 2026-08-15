@@ -271,6 +271,80 @@ var E2ECrypto = (() => {
         return hex;
     }
 
+    // ---- E2E search blind-index tokens ----
+    // Each searchable keyword of a message becomes HMAC-SHA256(key, "search-index-v1:" + word),
+    // keyed by the channel/DM encryption key (or its rotation history). The
+    // server stores these tokens but never sees the key, so it can match
+    // keyword queries without reading plaintext and cannot dictionary-attack
+    // them. Tokens are hex (safe for query strings).
+    // Query-side tokens: ONE token per query word (the full word), so multi-word
+    // AND semantics survive the server's per-query token budget. Substring
+    // matching still works: the index stores every substring of every word, so
+    // hmac("ligh") exists in a message's token set whenever any word in it
+    // contains "ligh" — the query just needs that single token to hit.
+    function searchQueryTokens(query, keys) {
+        var words = String(query || '').toLowerCase().match(/[\p{L}\p{N}_]+/gu);
+        if (!words || !words.length || !keys || !keys.length) return [];
+        var seen = {};
+        var out = [];
+        for (var i = 0; i < words.length && out.length < 8; i++) {
+            var w = words[i];
+            if (w.length < 2 || w.length > 64) continue;
+            if (seen[w]) continue;
+            seen[w] = true;
+            for (var k = 0; k < keys.length; k++) {
+                var t = hmacHex(keys[k], 'search-index-v1:' + w);
+                if (seen[t]) continue;
+                seen[t] = true;
+                out.push(t);
+            }
+        }
+        return out;
+    }
+
+    function searchTokensForText(text, keys) {
+        var words = String(text || '').toLowerCase().match(/[\p{L}\p{N}_]+/gu);
+        if (!words || !words.length || !keys || !keys.length) return [];
+        var seenWords = {};
+        var seenSubs = {};
+        var seenTokens = {};
+        var out = [];
+        for (var i = 0; i < words.length && out.length < 400; i++) {
+            var w = words[i];
+            if (seenWords[w]) continue;
+            seenWords[w] = true;
+            // Substring (contains) search: index EVERY substring of length >= 2
+            // up to the full word, so typing "ligh" finds "lighthouse". Tokens
+            // are HMAC'd with the conversation key the server never sees, so
+            // short substrings are no more readable to the host than full words.
+            // Cap per word (120) so a pathological long word can't bloat the index.
+            var subs = [];
+            var L = w.length;
+            for (var start = 0; start < L; start++) {
+                for (var len = 2; len <= L - start; len++) {
+                    var sub = w.substring(start, start + len);
+                    if (seenSubs[sub]) continue;
+                    seenSubs[sub] = true;
+                    subs.push(sub);
+                    if (subs.length >= 120) break;
+                }
+                if (subs.length >= 120) break;
+            }
+            for (var s = 0; s < subs.length; s++) {
+                for (var k = 0; k < keys.length; k++) {
+                    // Dedupe identical tokens (e.g. duplicate history keys) — the
+                    // server matches with COUNT(DISTINCT token) = #tokens, so
+                    // sending the same token twice would break AND semantics.
+                    var t = hmacHex(keys[k], 'search-index-v1:' + subs[s]);
+                    if (seenTokens[t]) continue;
+                    seenTokens[t] = true;
+                    out.push(t);
+                }
+            }
+        }
+        return out;
+    }
+
     // ---- Message Padding (P3 — hide plaintext length) ----
     // Pads plaintext to nearest 256 bytes so ciphertext size doesn't
     // reveal message content length. Prepends a 2-byte original length
@@ -577,6 +651,8 @@ var E2ECrypto = (() => {
         decryptWithPassword: decryptWithPassword,
         hmacHex: hmacHex,
         sha256Hex: sha256Hex,
+        searchTokensForText: searchTokensForText,
+        searchQueryTokens: searchQueryTokens,
 
         // Key Bundle (password-encrypted key backup)
         buildKeyBundle: buildKeyBundle,

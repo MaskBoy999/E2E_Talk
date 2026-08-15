@@ -1148,6 +1148,792 @@ function encodeTrimmedWav(buf, start, len) {
     return ab;
 }
 
+// ========================= E2E message search =========================
+// Blind-index search: clients store HMAC-SHA256 tokens per keyword, keyed by
+// the channel/DM encryption key (or its rotation history) that the server
+// never sees. The server matches queries against tokens without ever reading
+// plaintext and cannot dictionary-attack them (it lacks the key).
+//
+// Two paths feed the index:
+//  1. Sender-side: sendMessage/sendDmMessage include `search_tokens` in the
+//     WS payload so every new message is instantly searchable.
+//  2. Backfill: every message the client decrypts while rendering (history
+//     loads, WS echoes, edits) is tokenized locally and batched to
+//     POST /api/search/index — so scrolling makes older history searchable.
+var _searchScope = null;       // {type:'channel'|'dm'|'global', ...}
+var _searchUserFilter = null;  // raw sender user id (null = everyone)
+var _searchTimer = null;
+var _searchSeq = 0;
+var _searchIndexPending = {};  // bucketKey -> {channelId, dmChannelId, entries}
+var _searchIndexFlushTimer = null;
+
+// Keys available to tokenize/decrypt a given scope. Channel scopes use the
+// server key + its rotation history; DMs derive the per-DM key from the
+// stored other-party public key; global unions everything the client holds.
+function collectSearchKeys(scope) {
+    var keys = [];
+    if (!scope) return keys;
+    if (scope.type === 'channel') {
+        var sk = E2ECrypto.getAllServerKeys(scope.serverId) || [];
+        for (var i = 0; i < sk.length; i++) keys.push(sk[i]);
+        return keys;
+    }
+    if (scope.type === 'dm') {
+        var dk = dmSearchKey(scope.dmChannelId);
+        if (dk) keys.push(dk);
+        return keys;
+    }
+    var seenSrv = {};
+    for (var s = 0; s < servers.length; s++) {
+        var sid = servers[s].id;
+        if (!sid || seenSrv[sid]) continue;
+        seenSrv[sid] = true;
+        var ks = E2ECrypto.getAllServerKeys(sid) || [];
+        for (var j = 0; j < ks.length; j++) keys.push(ks[j]);
+    }
+    var idp = E2ECrypto.getIdentityKeyPair();
+    if (idp) {
+        for (var d = 0; d < dmConversations.length; d++) {
+            var conv = dmConversations[d];
+            if (!conv || !conv.dm_channel_id || !conv.other_public_key) continue;
+            try {
+                keys.push(E2ECrypto.getDmKey(conv.dm_channel_id, idp.privateKey, new Uint8Array(E2ECrypto.base64ToArrayBuffer(conv.other_public_key))));
+            } catch (_) {}
+        }
+    }
+    return keys;
+}
+
+function dmSearchKey(dmChannelId) {
+    var idp = E2ECrypto.getIdentityKeyPair();
+    if (!idp) return null;
+    // Conversation objects key their channel id under dm_channel_id (not `id`).
+    var conv = dmConversations.find(function (c) { return c.dm_channel_id === dmChannelId; });
+    if (!conv || !conv.other_public_key) return null;
+    try {
+        return E2ECrypto.getDmKey(dmChannelId, idp.privateKey, new Uint8Array(E2ECrypto.base64ToArrayBuffer(conv.other_public_key)));
+    } catch (_) { return null; }
+}
+
+// Pull the searchable text out of a message plaintext (a plain string, or a
+// {type:'text', text:...} payload — files/stickers/gifs/forwards are '').
+function extractSearchableText(plaintext) {
+    if (!plaintext) return '';
+    var text = plaintext;
+    try {
+        var p = JSON.parse(plaintext);
+        if (p && typeof p === 'object') {
+            text = (p.type === 'text' && typeof p.text === 'string') ? p.text : '';
+        }
+    } catch (_) {}
+    return text;
+}
+
+function computeSearchTokens(query, scope) {
+    var keys = collectSearchKeys(scope);
+    if (!keys.length) return [];
+    // Query side: one full-word token per query word (substring matching is
+    // handled by the index, which stores every substring of every word).
+    return E2ECrypto.searchQueryTokens(query, keys);
+}
+
+function queueSearchIndex(channelId, dmChannelId, messageId, plaintext) {
+    if (!messageId || !plaintext) return;
+    var text = extractSearchableText(plaintext);
+    if (!text) return;
+    var keys = null;
+    if (channelId && currentServerId) {
+        keys = E2ECrypto.getAllServerKeys(currentServerId) || [];
+    } else if (dmChannelId) {
+        var k = dmSearchKey(dmChannelId);
+        if (k) keys = [k];
+    }
+    if (!keys || !keys.length) return;
+    var tokens = E2ECrypto.searchTokensForText(text, keys);
+    if (!tokens.length) return;
+    var bucketKey = channelId ? 'ch:' + channelId : 'dm:' + dmChannelId;
+    if (!_searchIndexPending[bucketKey]) {
+        _searchIndexPending[bucketKey] = { channelId: channelId, dmChannelId: dmChannelId, entries: [] };
+    }
+    var bucket = _searchIndexPending[bucketKey];
+    for (var i = 0; i < bucket.entries.length; i++) {
+        if (bucket.entries[i].message_id === messageId) return;
+    }
+    bucket.entries.push({ message_id: messageId, tokens: tokens });
+    if (bucket.entries.length >= 100) { flushSearchIndex(); return; }
+    if (_searchIndexFlushTimer) clearTimeout(_searchIndexFlushTimer);
+    _searchIndexFlushTimer = setTimeout(flushSearchIndex, 800);
+}
+
+function flushSearchIndex() {
+    _searchIndexFlushTimer = null;
+    var pending = _searchIndexPending;
+    _searchIndexPending = {};
+    for (var bucketKey in pending) {
+        var bucket = pending[bucketKey];
+        if (!bucket.entries.length) continue;
+        var body = { entries: bucket.entries };
+        if (bucket.channelId) body.channel_id = bucket.channelId;
+        if (bucket.dmChannelId) body.dm_channel_id = bucket.dmChannelId;
+        authFetch('/api/search', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        }).catch(function () {});
+    }
+}
+
+// ---- Search palette ----
+function openSearchPanel(scope) {
+    _searchScope = scope || { type: 'global' };
+    _searchUserFilter = null;
+    var panel = document.getElementById('search-panel');
+    var input = document.getElementById('search-input');
+    var title = document.getElementById('search-panel-title');
+    if (input) input.value = '';
+    if (title) {
+        if (_searchScope.type === 'channel') title.textContent = 'Search this channel';
+        else if (_searchScope.type === 'dm') title.textContent = 'Search this conversation';
+        else title.textContent = 'Search all messages';
+    }
+    if (panel) panel.style.display = 'flex';
+    renderSearchUserChips();
+    var results = document.getElementById('search-results');
+    if (results) results.innerHTML = '';
+    var hint = document.getElementById('search-hint');
+    if (hint) hint.style.display = '';
+    if (input) setTimeout(function () { input.focus(); }, 50);
+}
+
+function closeSearchPanel() {
+    var panel = document.getElementById('search-panel');
+    if (panel) panel.style.display = 'none';
+    _searchScope = null;
+    _searchUserFilter = null;
+    if (_searchTimer) { clearTimeout(_searchTimer); _searchTimer = null; }
+    _searchSeq++;
+}
+
+// --- E2E Reactions ---
+
+// Quick-reaction palette (unicode). Custom emojis from the user's registry are
+// appended dynamically when the picker opens.
+const REACTION_QUICK_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🔥', '🎉', '👀', '🙏', '💯', '✅', '❌'];
+
+// Decrypted reaction payloads per message, keyed by canonical emoji, so a
+// pill click can re-encrypt with the exact original payload (custom emojis
+// need their file_id/file_key to be shareable). The stored emoji_token of MY
+// row is cached too: toggling off must send the exact token the server holds
+// (a fresh HMAC with the current key would miss rows stored under an old key
+// version after a server-key rotation).
+let _reactionPayloadCache = {}; // messageId -> { canonical -> { payload, token } }
+
+// The open picker popover (at most one at a time).
+let _reactionPickerEl = null;
+
+// Compute the blind HMAC token for one canonical emoji in a conversation.
+// Mirrors the server's dedupe: HMAC-SHA256(channelKey, "reaction-v1:" + canonical).
+// canonical is the unicode emoji itself or ":name:" for custom emojis.
+function reactionToken(key, canonical) {
+    return E2ECrypto.hmacHex(key, 'reaction-v1:' + canonical);
+}
+
+// Encrypt the reaction payload JSON with the conversation key (server or DM key).
+function encryptReactionPayload(payload, key) {
+    return E2ECrypto.encryptMessage(JSON.stringify(payload), key);
+}
+
+// Decrypt one reaction row with one key. Returns the parsed payload or null.
+function decryptReactionRow(row, key) {
+    if (!row || !row.encrypted_emoji || !row.emoji_nonce || !key) return null;
+    try {
+        var dec = E2ECrypto.decryptMessage(row.encrypted_emoji, row.emoji_nonce, key);
+        if (!dec) return null;
+        return JSON.parse(dec);
+    } catch (_) { return null; }
+}
+
+// Decrypt one reaction row trying every candidate key (single key or array —
+// server-key rotation history). Returns the parsed payload or null.
+function decryptReactionRowAny(row, keys) {
+    if (!keys) return null;
+    var arr = Array.isArray(keys) ? keys : [keys];
+    for (var i = 0; i < arr.length; i++) {
+        var p = decryptReactionRow(row, arr[i]);
+        if (p) return p;
+    }
+    return null;
+}
+
+// Decrypt every reaction row of a message and cache the payloads by canonical
+// emoji for later re-encryption (pill toggle), along with MY row's stored
+// emoji_token so a toggle-off sends the exact server token (key-rotation safe).
+function cacheMessageReactions(msg, keys, myUserId) {
+    if (!msg || !msg.id || !msg.reactions || !keys) return;
+    var cache = {};
+    for (var i = 0; i < msg.reactions.length; i++) {
+        var row = msg.reactions[i];
+        var payload = decryptReactionRowAny(row, keys);
+        if (!payload || !payload.e) continue;
+        if (!cache[payload.e]) cache[payload.e] = { payload: payload, token: null };
+        var reactor = row.reactor_user_id || row.reactor_id;
+        // Prefer MY row's token (that's the row a toggle-off must remove).
+        if (myUserId && reactor && reactor === myUserId) {
+            cache[payload.e].token = row.emoji_token || null;
+        }
+    }
+    _reactionPayloadCache[msg.id] = cache;
+}
+
+// HTML for a reaction's emoji glyph: unicode emoji renders directly; custom
+// emojis render through the shared emoji machinery (img/loading span).
+function reactionEmojiHtml(payload, canonical) {
+    if (payload && payload.f && payload.k && canonical && canonical.charAt(0) === ':') {
+        var name = canonical.slice(1, -1);
+        var refs = {};
+        refs[name] = { file_id: payload.f, file_key: payload.k, mime_type: payload.m || 'image/png' };
+        return renderEmojiText(':' + name + ':', refs);
+    }
+    return '<span class="reaction-emoji">' + escapeHtml(canonical || '') + '</span>';
+}
+
+// Build the reactions pill row HTML for a message ('' when there are none).
+function buildReactionsHtml(msg, keys, myUserId) {
+    if (!msg || !msg.reactions || !msg.reactions.length || !keys) return '';
+    var groups = {}; // canonical -> { count, mine, payload }
+    for (var i = 0; i < msg.reactions.length; i++) {
+        var row = msg.reactions[i];
+        var payload = decryptReactionRowAny(row, keys);
+        if (!payload || !payload.e) continue;
+        var canonical = payload.e;
+        if (!groups[canonical]) groups[canonical] = { count: 0, mine: false, payload: payload };
+        groups[canonical].count++;
+        var reactor = row.reactor_user_id || row.reactor_id;
+        if (reactor && reactor === myUserId) groups[canonical].mine = true;
+    }
+    var canonicals = Object.keys(groups);
+    if (!canonicals.length) return '';
+    var html = '<div class="message-reactions">';
+    for (var j = 0; j < canonicals.length; j++) {
+        var g = groups[canonicals[j]];
+        html += '<button class="reaction-pill' + (g.mine ? ' mine' : '') + '" data-canonical="' + escapeAttr(canonicals[j]) + '" data-count="' + g.count + '" title="React">' +
+            reactionEmojiHtml(g.payload, canonicals[j]) + '<span class="reaction-count">' + g.count + '</span></button>';
+    }
+    html += '</div>';
+    return html;
+}
+
+// Send (or toggle) one reaction on a message. The server dedupes by
+// (message, reactor, emoji_token): sending the same emoji again removes it.
+// `storedToken` (optional) is MY row's original emoji_token from the server —
+// when toggling off, sending it exactly matches the stored row even after a
+// server-key rotation (a fresh HMAC with the current key would not).
+function sendReaction(msgDiv, canonical, payload, storedToken) {
+    if (!msgDiv || !canonical) return;
+    var messageId = msgDiv.getAttribute('data-message-id');
+    if (!messageId) return;
+    var dmChannelId = msgDiv.getAttribute('data-dm-channel-id');
+    var channelId = msgDiv.getAttribute('data-channel-id');
+    var key = null;
+    var type = null;
+    var extra = {};
+    if (dmChannelId) {
+        key = dmSearchKey(dmChannelId);
+        type = 'dm_reaction';
+        extra.dm_channel_id = dmChannelId;
+    } else {
+        key = E2ECrypto.getServerKey(currentServerId);
+        type = 'message_reaction';
+        extra.channel_id = channelId || currentChannelId;
+    }
+    if (!key || !type) return;
+    var enc = encryptReactionPayload(payload, key);
+    // Toggle-off: reuse the exact stored token so the server removes MY row.
+    // Fresh reactions still compute the token with the current conversation key.
+    var token = storedToken || reactionToken(key, canonical);
+    if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify(Object.assign({ type: type, message_id: messageId, emoji_token: token, encrypted_emoji: enc.ciphertext, emoji_nonce: enc.nonce }, extra)));
+    }
+}
+
+// Update the pill row of a rendered message in place after a live WS event.
+function updateReactionPill(msgEl, canonical, payload, mine, added) {
+    if (!msgEl || !canonical) return;
+    var row = msgEl.querySelector('.message-reactions');
+    if (!row) {
+        // Live reactions must live INSIDE the message's .content block (under
+        // the text), exactly where the initial render puts them — appending to
+        // the .message flex container made the row a horizontal flex sibling
+        // that sat to the RIGHT of the content and squeezed the layout.
+        var contentEl = msgEl.querySelector('.content');
+        row = document.createElement('div');
+        row.className = 'message-reactions';
+        if (contentEl) contentEl.appendChild(row);
+        else msgEl.appendChild(row);
+    }
+    var pill = row.querySelector('.reaction-pill[data-canonical="' + CSS.escape(canonical) + '"]');
+    if (added) {
+        if (pill) {
+            var count = parseInt(pill.getAttribute('data-count'), 10) || 0;
+            pill.setAttribute('data-count', count + 1);
+            var countEl = pill.querySelector('.reaction-count');
+            if (countEl) countEl.textContent = count + 1;
+            if (mine) pill.classList.add('mine');
+        } else {
+            var newPill = document.createElement('button');
+            newPill.className = 'reaction-pill' + (mine ? ' mine' : '');
+            newPill.setAttribute('data-canonical', canonical);
+            newPill.setAttribute('data-count', '1');
+            newPill.title = 'React';
+            newPill.innerHTML = reactionEmojiHtml(payload, canonical) + '<span class="reaction-count">1</span>';
+            row.appendChild(newPill);
+        }
+    } else {
+        if (pill) {
+            var count2 = parseInt(pill.getAttribute('data-count'), 10) || 1;
+            if (count2 <= 1) {
+                pill.remove();
+            } else {
+                pill.setAttribute('data-count', count2 - 1);
+                var countEl2 = pill.querySelector('.reaction-count');
+                if (countEl2) countEl2.textContent = count2 - 1;
+            }
+            if (mine) pill.classList.remove('mine');
+        }
+    }
+    // Clean up: drop the container when the last pill disappears.
+    if (row && !row.querySelector('.reaction-pill')) row.remove();
+}
+
+// Apply a live WS reaction event to a rendered message (no full re-render).
+function applyReactionEvent(data) {
+    if (!data || !data.message_id) return;
+    var isDm = data.type === 'dm_reaction_added' || data.type === 'dm_reaction_removed';
+    var added = data.type === 'reaction_added' || data.type === 'dm_reaction_added';
+    // Only touch messages in the current view.
+    if (isDm) {
+        if (data.dm_channel_id !== currentDmChannelId) return;
+    } else {
+        if (data.channel_id !== currentChannelId) return;
+    }
+    var list = document.getElementById('message-list');
+    if (!list) return;
+    var msgEl = list.querySelector('.message[data-message-id="' + CSS.escape(data.message_id) + '"]');
+    if (!msgEl) return;
+    var keys = isDm ? dmSearchKey(currentDmChannelId) : (E2ECrypto.getAllServerKeys(currentServerId) || []);
+    var payload = decryptReactionRowAny({ encrypted_emoji: data.encrypted_emoji, emoji_nonce: data.emoji_nonce }, keys);
+    if (!payload || !payload.e) return;
+    var myUserIdNow = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')).id : '';
+    var mine = !!data.user_id && data.user_id === myUserIdNow;
+    // Remember MY stored token so a later toggle-off sends the exact server
+    // token (key-rotation safe) even when the message was never re-rendered.
+    if (mine && data.emoji_token) {
+        if (!_reactionPayloadCache[data.message_id]) _reactionPayloadCache[data.message_id] = {};
+        if (!_reactionPayloadCache[data.message_id][payload.e]) {
+            _reactionPayloadCache[data.message_id][payload.e] = { payload: payload, token: null };
+        }
+        _reactionPayloadCache[data.message_id][payload.e].token = data.emoji_token;
+    }
+    updateReactionPill(msgEl, payload.e, payload, mine, added);
+}
+
+// The emoji-reaction picker popover: a search box on top, then custom emojis
+// first, the quick row, and EVERY unicode emoji (grouped by category) in a
+// scrollable grid. Typing filters custom emojis by shortcode and unicode
+// emojis by name.
+function openReactionPicker(anchorBtn, msgDiv) {
+    closeReactionPicker();
+    var el = document.createElement('div');
+    el.className = 'reaction-picker reaction-picker-full';
+    el.innerHTML = '<input type="text" class="reaction-picker-search" placeholder="Search emojis..." autocomplete="off" spellcheck="false">' +
+        '<div class="reaction-picker-body"></div>';
+    document.body.appendChild(el);
+    var body = el.querySelector('.reaction-picker-body');
+    var searchInput = el.querySelector('.reaction-picker-search');
+
+    function emojiButtonHtml(emoji, title, cls, payloadAttr) {
+        return '<button class="reaction-pick' + (cls || '') + '" data-emoji="' + escapeAttr(emoji) + '"' +
+            (payloadAttr ? ' data-payload="' + escapeAttr(payloadAttr) + '"' : '') +
+            ' title="' + escapeAttr(title) + '">' + emoji + '</button>';
+    }
+
+    function renderPicker() {
+        var q = searchInput.value.trim().toLowerCase();
+        var html = '';
+        // 1. Custom emojis at the top (filtered by shortcode when searching).
+        var names = Object.keys(emojiCache || {});
+        var customHtml = '';
+        var customCount = 0;
+        for (var j = 0; j < names.length; j++) {
+            var entry = emojiCache[names[j]];
+            if (!entry || !entry.file_id) continue;
+            if (q && names[j].toLowerCase().indexOf(q) === -1) continue;
+            var refs = {};
+            refs[names[j]] = { file_id: entry.file_id, file_key: entry.file_key || '', mime_type: entry.mime_type || 'image/png' };
+            var payload = { e: ':' + names[j] + ':', f: entry.file_id, k: entry.file_key || '', m: entry.mime_type || 'image/png' };
+            customHtml += '<button class="reaction-pick reaction-pick-custom" data-emoji="' + escapeAttr(':' + names[j] + ':') + '" data-payload="' + escapeAttr(JSON.stringify(payload)) + '" title=":' + escapeAttr(names[j]) + ':">' + renderEmojiText(':' + names[j] + ':', refs) + '</button>';
+            customCount++;
+        }
+        if (customCount) html += '<div class="reaction-picker-section">Custom</div>' + customHtml + '<div class="reaction-picker-divider"></div>';
+        if (!q) {
+            // 2. The quick row (most-used reactions) — only in the unfiltered view.
+            for (var i = 0; i < REACTION_QUICK_EMOJIS.length; i++) {
+                html += emojiButtonHtml(REACTION_QUICK_EMOJIS[i], REACTION_QUICK_EMOJIS[i], '', '');
+            }
+            // 3. Every unicode emoji, grouped by category.
+            for (var g = 0; g < EMOJI_DATA.length; g++) {
+                var cat = EMOJI_DATA[g];
+                if (!cat || !cat.emojis || !cat.emojis.length) continue;
+                html += '<div class="reaction-picker-section">' + escapeHtml(cat.cat) + '</div>';
+                for (var e = 0; e < cat.emojis.length; e++) {
+                    html += emojiButtonHtml(cat.emojis[e], cat.emojis[e], '', '');
+                }
+            }
+        } else {
+            // 4. Search results: unicode emojis matching the query by name.
+            var results = searchEmojis(q) || [];
+            if (results.length) {
+                var byCat = {};
+                for (var r = 0; r < results.length; r++) {
+                    if (!byCat[results[r].cat]) byCat[results[r].cat] = [];
+                    byCat[results[r].cat].push(results[r].emoji);
+                }
+                var cats = Object.keys(byCat);
+                for (var ci = 0; ci < cats.length; ci++) {
+                    html += '<div class="reaction-picker-section">' + escapeHtml(cats[ci]) + '</div>';
+                    for (var e2 = 0; e2 < byCat[cats[ci]].length; e2++) {
+                        html += emojiButtonHtml(byCat[cats[ci]][e2], byCat[cats[ci]][e2], '', '');
+                    }
+                }
+            } else {
+                html += '<div class="reaction-picker-section">No emojis found</div>';
+            }
+        }
+        body.innerHTML = html;
+    }
+    renderPicker();
+    searchInput.addEventListener('input', renderPicker);
+
+    var rect = anchorBtn.getBoundingClientRect();
+    el.style.position = 'fixed';
+    el.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - el.offsetWidth - 8)) + 'px';
+    // Flip above the button when there isn't room below (the grid scrolls).
+    var spaceBelow = window.innerHeight - rect.bottom - 6;
+    if (spaceBelow < Math.min(el.offsetHeight, 320) && rect.top - 6 > el.offsetHeight) {
+        el.style.top = Math.max(8, rect.top - el.offsetHeight - 6) + 'px';
+    } else {
+        el.style.top = (rect.bottom + 6) + 'px';
+    }
+    el.addEventListener('click', function (e) {
+        var btn = e.target.closest('.reaction-pick');
+        if (!btn) return;
+        var canonical = btn.getAttribute('data-emoji');
+        var payload = btn.getAttribute('data-payload') ? JSON.parse(btn.getAttribute('data-payload')) : { e: canonical };
+        closeReactionPicker();
+        sendReaction(msgDiv, canonical, payload);
+    });
+    _reactionPickerEl = el;
+    setTimeout(function () {
+        searchInput.focus();
+        document.addEventListener('click', _reactionPickerOutsideHandler, true);
+        document.addEventListener('keydown', _reactionPickerEscHandler, true);
+    }, 0);
+}
+
+function closeReactionPicker() {
+    if (_reactionPickerEl) {
+        _reactionPickerEl.remove();
+        _reactionPickerEl = null;
+    }
+    document.removeEventListener('click', _reactionPickerOutsideHandler, true);
+    document.removeEventListener('keydown', _reactionPickerEscHandler, true);
+}
+
+function _reactionPickerOutsideHandler(e) {
+    if (_reactionPickerEl && !_reactionPickerEl.contains(e.target)) {
+        closeReactionPicker();
+    }
+}
+
+function _reactionPickerEscHandler(e) {
+    if (e.key === 'Escape') closeReactionPicker();
+}
+
+function runSearch() {
+    if (!_searchScope) return;
+    var input = document.getElementById('search-input');
+    var query = input ? input.value.trim() : '';
+    if (_searchTimer) { clearTimeout(_searchTimer); _searchTimer = null; }
+    if (!query && !_searchUserFilter) {
+        _searchSeq++;
+        var results = document.getElementById('search-results');
+        if (results) results.innerHTML = '';
+        var hint = document.getElementById('search-hint');
+        if (hint) hint.style.display = '';
+        return;
+    }
+    _searchTimer = setTimeout(function () { doSearch(query); }, 250);
+}
+
+async function doSearch(query) {
+    var seq = ++_searchSeq;
+    var params = [];
+    if (_searchScope.type === 'channel') params.push('channel_id=' + encodeURIComponent(_searchScope.channelId));
+    else if (_searchScope.type === 'dm') params.push('dm_channel_id=' + encodeURIComponent(_searchScope.dmChannelId));
+    if (_searchUserFilter) params.push('sender_id=' + encodeURIComponent(_searchUserFilter));
+    var tokens = query ? computeSearchTokens(query, _searchScope) : [];
+    if (query) {
+        if (query.trim().length < 2) { renderSearchResults({ empty: true, reason: 'Type at least 2 characters to search' }); return; }
+        if (!tokens.length) { renderSearchResults({ empty: true, reason: 'Encryption key unavailable for search' }); return; }
+    }
+    if (tokens.length) params.push('q=' + tokens.join(','));
+    if (!params.length) { renderSearchResults([]); return; }
+    try {
+        var res = await authFetch('/api/search?' + params.join('&'));
+        if (seq !== _searchSeq) return;
+        var data = res.ok ? await res.json() : null;
+        if (seq !== _searchSeq) return;
+        renderSearchResults(data && Array.isArray(data.results) ? data.results : []);
+    } catch (_) {
+        if (seq === _searchSeq) renderSearchResults({ empty: true, reason: 'Search failed' });
+    }
+}
+
+// Sender chips for the user filter (profile-rendered, mention-tab style).
+function renderSearchUserChips() {
+    var chipsEl = document.getElementById('search-user-chips');
+    if (!chipsEl) return;
+    var members = [];
+    if (_searchScope && _searchScope.type === 'channel') {
+        members = (currentServerMemberList || []).slice();
+    } else if (_searchScope && _searchScope.type === 'dm') {
+        var conv = dmConversations.find(function (c) { return c.dm_channel_id === _searchScope.dmChannelId; });
+        if (conv && conv.other_user_id) {
+            members.push({ id: conv.other_user_id, username: conv.other_username, display_name: conv.other_display_name, profile_picture_file_id: conv.other_profile_picture_file_id });
+        }
+        if (user && user.id) {
+            members.push({ id: user.id, username: user.username, display_name: (myProfile && myProfile.display_name) || user.display_name, profile_picture_file_id: (myProfile && myProfile.profile_picture_file_id) || null, self: true });
+        }
+    } else {
+        chipsEl.innerHTML = '';
+        chipsEl.style.display = 'none';
+        return;
+    }
+    chipsEl.style.display = '';
+    var html = '';
+    for (var i = 0; i < members.length; i++) {
+        var m = members[i];
+        var uid = m.id || m.user_id;
+        if (!uid) continue;
+        var name = m.display_name || m.username || (userDisplayNameCache[uid] && userDisplayNameCache[uid].display_name) || 'User';
+        var picId = m.profile_picture_file_id || (userDisplayNameCache[uid] && userDisplayNameCache[uid].profile_picture_file_id);
+        var active = _searchUserFilter === uid ? ' search-chip-active' : '';
+        var avatar = '';
+        if (picId) {
+            var ck = uid + ':' + picId;
+            if (profilePicCache[ck]) {
+                avatar = '<img src="' + profilePicCache[ck] + '" class="search-chip-avatar">';
+            } else {
+                avatar = '<div class="search-chip-avatar search-chip-avatar-load" data-profile-pic-load="' + ck + '">' + escapeHtml(name.charAt(0).toUpperCase()) + '</div>';
+                getProfilePicUrl(picId, uid);
+            }
+        } else {
+            avatar = '<div class="search-chip-avatar">' + escapeHtml(name.charAt(0).toUpperCase()) + '</div>';
+        }
+        html += '<button type="button" class="search-chip' + active + '" data-uid="' + escapeAttr(uid) + '">' + avatar + '<span>' + escapeHtml(name) + (m.self ? ' (you)' : '') + '</span></button>';
+    }
+    chipsEl.innerHTML = html;
+}
+
+function searchTime(ts) {
+    try {
+        var d = new Date(ts);
+        var diffMin = Math.floor((Date.now() - d) / 60000);
+        if (diffMin < 1) return 'now';
+        if (diffMin < 60) return diffMin + 'm';
+        if (diffMin < 1440) return Math.floor(diffMin / 60) + 'h';
+        return Math.floor(diffMin / 1440) + 'd';
+    } catch (_) { return ''; }
+}
+
+function resolveSearchSenderName(r, senderId) {
+    var cache = userDisplayNameCache[senderId];
+    if (cache && cache.display_name) return cache.display_name;
+    if (r.sender_display_name) return r.sender_display_name;
+    if (r.encrypted_sender_username && r.sender_username_nonce) {
+        if (r.server_id) {
+            try {
+                var _d = tryDecryptWithAllKeysRaw(r.server_id, r.encrypted_sender_username, r.sender_username_nonce);
+                if (_d) return _d;
+            } catch (_) {}
+        } else if (r.dm_channel_id) {
+            try {
+                var k = dmSearchKey(r.dm_channel_id);
+                if (k) {
+                    var _dd = E2ECrypto.decryptMessage(r.encrypted_sender_username, r.sender_username_nonce, k);
+                    if (_dd) return _dd;
+                }
+            } catch (_) {}
+        }
+    }
+    if (cache && cache.username) return cache.username;
+    if (senderId === (user && user.id)) return (user && (user.display_name || user.username)) || 'You';
+    return 'User';
+}
+
+async function decryptSearchDm(r) {
+    var k = dmSearchKey(r.dm_channel_id);
+    if (!k) return null;
+    try { return E2ECrypto.decryptMessage(r.encrypted_content, r.nonce, k); } catch (_) { return null; }
+}
+
+async function renderSearchResults(results) {
+    var list = document.getElementById('search-results');
+    if (!list) return;
+    var hint = document.getElementById('search-hint');
+    if (!results) {
+        list.innerHTML = '';
+        if (hint) hint.style.display = '';
+        return;
+    }
+    if (results.empty) {
+        list.innerHTML = '<div class="search-results-empty">' + escapeHtml(results.reason || 'No results') + '</div>';
+        if (hint) hint.style.display = 'none';
+        return;
+    }
+    if (!results.length) {
+        list.innerHTML = '<div class="search-results-empty">No messages found' + (_searchUserFilter ? ' from this user' : '') + '</div>';
+        if (hint) hint.style.display = 'none';
+        return;
+    }
+    if (hint) hint.style.display = 'none';
+    var html = '';
+    for (var i = 0; i < results.length; i++) {
+        var r = results[i];
+        var senderId = r.sender_user_id || r.sender_id;
+        var name = resolveSearchSenderName(r, senderId);
+        var picId = (userDisplayNameCache[senderId] && userDisplayNameCache[senderId].profile_picture_file_id) || null;
+        var avatar = '';
+        if (picId) {
+            var ck = senderId + ':' + picId;
+            if (profilePicCache[ck]) {
+                avatar = '<img src="' + profilePicCache[ck] + '" class="search-result-avatar">';
+            } else {
+                avatar = '<div class="search-result-avatar search-result-avatar-load" data-profile-pic-load="' + ck + '">' + escapeHtml(name.charAt(0).toUpperCase()) + '</div>';
+                getProfilePicUrl(picId, senderId);
+            }
+        } else {
+            avatar = '<div class="search-result-avatar">' + escapeHtml(name.charAt(0).toUpperCase()) + '</div>';
+        }
+        var context = '';
+        if (r.dm_channel_id) {
+            var conv = dmConversations.find(function (c) { return c.dm_channel_id === r.dm_channel_id; });
+            context = conv ? escapeHtml(conv.other_display_name || conv.other_username || 'DM') : 'Direct message';
+        } else if (r.server_id) {
+            var srvName = '';
+            if (r.server_encrypted_name && r.server_name_nonce) {
+                try { srvName = tryDecryptWithAllKeys(r.server_id, r.server_encrypted_name, r.server_name_nonce) || ''; } catch (_) {}
+            }
+            var chName = '';
+            if (r.channel_encrypted_name && r.channel_name_nonce) {
+                try { chName = tryDecryptWithAllKeys(r.server_id, r.channel_encrypted_name, r.channel_name_nonce) || ''; } catch (_) {}
+            }
+            context = (srvName ? escapeHtml(srvName) + ' ' : '') + (chName ? '#' + escapeHtml(chName) : '');
+        }
+        var snippet = '';
+        var dec = null;
+        if (r.dm_channel_id) dec = await decryptSearchDm(r);
+        else if (r.server_id) { try { dec = tryDecryptWithAllKeys(r.server_id, r.encrypted_content, r.nonce); } catch (_) {} }
+        if (dec) {
+            snippet = extractSearchableText(dec).replace(/\s+/g, ' ').trim();
+            if (snippet.length > 140) snippet = snippet.substring(0, 140) + '…';
+            snippet = escapeHtml(snippet);
+        } else {
+            snippet = '<span style="color:#888">[encrypted]</span>';
+        }
+        var timeStr = searchTime(r.timestamp);
+        html += '<div class="search-result-item" data-mid="' + escapeAttr(r.id) + '" data-dm="' + (r.dm_channel_id ? escapeAttr(r.dm_channel_id) : '') + '" data-cid="' + (r.channel_id ? escapeAttr(r.channel_id) : '') + '" data-sid="' + (r.server_id ? escapeAttr(r.server_id) : '') + '">' +
+            avatar +
+            '<div class="search-result-body">' +
+                '<div class="search-result-head"><span class="search-result-name">' + escapeHtml(name) + '</span><span class="search-result-context">' + context + '</span><span class="search-result-time">' + timeStr + '</span></div>' +
+                '<div class="search-result-snippet">' + snippet + '</div>' +
+            '</div>' +
+        '</div>';
+    }
+    list.innerHTML = html;
+}
+
+function setupSearchEvents() {
+    var closeBtn = document.getElementById('close-search-panel');
+    if (closeBtn) closeBtn.addEventListener('click', closeSearchPanel);
+    var input = document.getElementById('search-input');
+    if (input) {
+        input.addEventListener('input', runSearch);
+        input.addEventListener('keydown', function (e) {
+            if (e.key === 'Escape') closeSearchPanel();
+        });
+    }
+    var clearBtn = document.getElementById('search-clear-btn');
+    if (clearBtn) clearBtn.addEventListener('click', function () {
+        if (input) { input.value = ''; }
+        runSearch();
+        if (input) input.focus();
+    });
+    var results = document.getElementById('search-results');
+    if (results) {
+        results.addEventListener('click', function (e) {
+            var item = e.target.closest('.search-result-item');
+            if (!item) return;
+            var mid = item.dataset.mid;
+            if (!mid) return;
+            var sid = item.dataset.sid || null;
+            var cid = item.dataset.cid || null;
+            var dmid = item.dataset.dm || null;
+            closeSearchPanel();
+            navigateToMessage(sid, cid, dmid, mid);
+        });
+    }
+    var chips = document.getElementById('search-user-chips');
+    if (chips) {
+        chips.addEventListener('click', function (e) {
+            var chip = e.target.closest('.search-chip');
+            if (!chip) return;
+            var uid = chip.dataset.uid;
+            if (!uid) return;
+            _searchUserFilter = _searchUserFilter === uid ? null : uid;
+            renderSearchUserChips();
+            runSearch();
+        });
+    }
+    var panel = document.getElementById('search-panel');
+    if (panel) {
+        panel.addEventListener('click', function (e) {
+            if (e.target === panel) closeSearchPanel();
+        });
+    }
+    // Escape closes the palette from anywhere while it is open.
+    document.addEventListener('keydown', function (e) {
+        if (e.key !== 'Escape') return;
+        var sp = document.getElementById('search-panel');
+        if (sp && sp.style.display !== 'none' && sp.style.display !== '') closeSearchPanel();
+    });
+    var headerBtn = document.getElementById('search-header-btn');
+    if (headerBtn) {
+        headerBtn.addEventListener('click', function () {
+            if (currentChannelId && currentServerId) openSearchPanel({ type: 'channel', channelId: currentChannelId, serverId: currentServerId });
+            else if (currentDmChannelId) openSearchPanel({ type: 'dm', dmChannelId: currentDmChannelId });
+            else openSearchPanel({ type: 'global' });
+        });
+    }
+    // Ctrl+K (or Cmd+K) opens the GLOBAL search palette from anywhere.
+    document.addEventListener('keydown', function (e) {
+        if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {
+            e.preventDefault();
+            openSearchPanel({ type: 'global' });
+        }
+    });
+}
+
 // ========================= Typing indicators =========================
 // Ephemeral: the client sends a `typing` WS message at most once per 2s
 // while the composer has new input. The server relays user_id + channel/dm
@@ -1504,6 +2290,9 @@ document.addEventListener('DOMContentLoaded', () => {
         // channel or DM conversation is open (same condition as the composer).
         var pinsBtn = document.getElementById('pins-btn');
         if (pinsBtn) pinsBtn.style.display = (!input.disabled && !inVoiceView) ? '' : 'none';
+        // The channel/DM search button follows the same visibility rule.
+        var searchHeaderBtn = document.getElementById('search-header-btn');
+        if (searchHeaderBtn) searchHeaderBtn.style.display = (!input.disabled && !inVoiceView) ? '' : 'none';
     }
     (function initComposerVisibility() {
         var composerInput = document.getElementById('message-input');
@@ -3776,6 +4565,7 @@ document.addEventListener('DOMContentLoaded', () => {
     requestNotificationPermission();
     setupMentionAutocomplete();
     initMentionsInbox();
+    setupSearchEvents();
     // Restore muted UI after servers/channels render
     setTimeout(function () {
         updateServerMutedUI();
@@ -8019,6 +8809,12 @@ function connectWebSocket(t) {
                     setMessagePinned(data.message_id, false);
                 }
                 break;
+            case 'reaction_added':
+            case 'reaction_removed':
+            case 'dm_reaction_added':
+            case 'dm_reaction_removed':
+                applyReactionEvent(data);
+                break;
             case 'message_new':
                 if (data.channel_id && data.message) {
                     // A message arrived in the channel we're viewing — whoever was
@@ -8203,9 +8999,15 @@ function connectWebSocket(t) {
                     // which only reflects the currently selected server)
                     const ownedByMe = servers.some(s => s.id === data.server_id && s.is_owner);
                     if (ownedByMe) {
-                        // Upload the CURRENT server key for the new member instead of rotating.
-                        // Rotating would overwrite the key and break decryption of existing
-                        // server/channel names that were encrypted with the old key.
+                        // Share the FULL key history with the new member instead of rotating.
+                        // This is deliberate: a server is Discord-style shared history — a new
+                        // member should be able to read what was said before they joined, so
+                        // uploadServerKeyForUser uploads every key version, not just the current
+                        // one. Rotating here would gain nothing (rotateServerKey hands every
+                        // member ALL versions, including the new one) and would only add churn.
+                        // (The old comment said rotation would break server/channel-name
+                        // decryption — that's no longer true; rotateServerKey re-encrypts names
+                        // with the new key. The real reason is history visibility.)
                         // Use raw_user_id (raw UUID) for API calls — user_id is HMAC'd
                         await uploadServerKeyForUser(data.server_id, data.raw_user_id || data.user_id);
                     } else {
@@ -10562,6 +11364,7 @@ async function appendMessage(msg) {
     if (msg.sender_id) div.setAttribute('data-sender-id', msg.sender_id);
     if (msg.sender_user_id) div.setAttribute('data-sender-user-id', msg.sender_user_id);
     if (msg.timestamp) div.setAttribute('data-ts', new Date(msg.timestamp).getTime());
+    if (msg.channel_id || currentChannelId) div.setAttribute('data-channel-id', msg.channel_id || currentChannelId);
 
     var senderIdForCache = msg.sender_user_id || msg.sender_id;
     const myUserId = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')).id : '';
@@ -10775,6 +11578,9 @@ async function appendMessage(msg) {
         }
     }
 
+    // Backfill the E2E search index for history we've just decrypted.
+    queueSearchIndex(currentChannelId, null, msg.id, textContent);
+
     // Break message grouping for file messages so they have their own header
     if (fileData || filesData) {
         div.classList.remove('grouped');
@@ -10885,12 +11691,19 @@ async function appendMessage(msg) {
     var canPin = !!isOwner;
     const actionsHtml = '<div class="message-actions">' +
         (canPin ? pinButtonHtml(isPinned) : '') +
+        '<button class="msg-action-btn" data-action="react" title="React">&#x1F642;</button>' +
         '<button class="msg-action-btn" data-action="reply" title="Reply">&#x21A9;</button>' +
         '<button class="msg-action-btn" data-action="forward" title="Forward to channel">&#x21AA;</button>' +
         '<button class="msg-action-btn" data-action="forward-dm" title="Forward to DM">&#x1F4AC;</button>' +
         (isOwn ? '<button class="msg-action-btn" data-action="edit" title="Edit">&#x270E;</button>' : '') +
         (isOwn ? '<button class="msg-action-btn" data-action="delete" title="Delete">&#x2715;</button>' : '') +
         '</div>';
+
+    // E2E reactions: decrypt each reaction row with the server key (or its
+    // rotation history) and render the pill row. Canonical groups are counted
+    // locally; 'mine' is the reactor matching the current user.
+    var reactionsHtml = buildReactionsHtml(msg, E2ECrypto.getAllServerKeys(currentServerId), myUserId);
+    cacheMessageReactions(msg, E2ECrypto.getAllServerKeys(currentServerId), myUserId);
 
     div.innerHTML =
         (senderPicUrl ?
@@ -10904,6 +11717,7 @@ async function appendMessage(msg) {
                 (isPinned ? '<span class="pin-badge" title="Pinned message">&#128204;</span>' : '') +
             '</div>' +
             wrappedContent +
+            reactionsHtml +
         '</div>' +
         actionsHtml;
 
@@ -11183,6 +11997,23 @@ function setupMessageActions() {
             openMediaViewer(url, 'image', null, [{ url: url, type: 'image' }]);
             return;
         }
+        // Reaction pill click → toggle my reaction (server dedupes + broadcasts).
+        const pill = e.target.closest('.reaction-pill');
+        if (pill) {
+            const pillMsg = pill.closest('.message');
+            if (pillMsg) {
+                const mid = pillMsg.getAttribute('data-message-id');
+                const canonical = pill.getAttribute('data-canonical');
+                if (mid && canonical) {
+                    const entry = (_reactionPayloadCache[mid] && _reactionPayloadCache[mid][canonical]) || null;
+                    const payload = (entry && entry.payload) || { e: canonical };
+                    // Toggling OFF? Reuse MY row's stored token (key-rotation safe).
+                    const storedToken = (entry && entry.token) || null;
+                    sendReaction(pillMsg, canonical, payload, storedToken);
+                }
+            }
+            return;
+        }
         const btn = e.target.closest('.msg-action-btn');
         if (!btn) return;
         const msgDiv = btn.closest('.message');
@@ -11191,7 +12022,9 @@ function setupMessageActions() {
         const senderId = msgDiv.getAttribute('data-sender-id');
         const action = btn.getAttribute('data-action');
 
-        if (action === 'reply') {
+        if (action === 'react') {
+            openReactionPicker(btn, msgDiv);
+        } else if (action === 'reply') {
             handleReply(messageId, msgDiv);
         } else if (action === 'forward') {
             handleForward(messageId, msgDiv);
@@ -11719,6 +12552,14 @@ function handleEdit(messageId, msgDiv) {
                     nonce: encrypted.nonce,
                     message_nonce: encrypted.messageNonce || null,
                 };
+                // Edited text gets a fresh search token set.
+                try {
+                    var _dk2 = dmSearchKey(currentDmChannelId);
+                    if (_dk2) {
+                        var _detoks = E2ECrypto.searchTokensForText(extractSearchableText(plaintext), [_dk2]);
+                        if (_detoks.length) dmEditPayload.search_tokens = _detoks;
+                    }
+                } catch (_) {}
                 ws.send(JSON.stringify(dmEditPayload));
             } catch (e) {
                 console.error('DM edit encrypt failed:', e);
@@ -11769,6 +12610,11 @@ function handleEdit(messageId, msgDiv) {
                     nonce: encrypted.nonce,
                     message_nonce: encrypted.messageNonce || null,
                 };
+                // Edited text gets a fresh search token set.
+                try {
+                    var _etoks = E2ECrypto.searchTokensForText(extractSearchableText(plaintext), [editChannelKey]);
+                    if (_etoks.length) channelEditPayload.search_tokens = _etoks;
+                } catch (_) {}
                 ws.send(JSON.stringify(channelEditPayload));
             } catch (e) {
                 console.error('Edit encrypt failed:', e);
@@ -12418,6 +13264,12 @@ async function sendMessage() {
         nonce: encrypted.nonce,
         message_nonce: encrypted.messageNonce || null,
     };
+    // E2E search blind index: tokenize the plaintext with the server key.
+    try {
+        var _tokKeys = E2ECrypto.getAllServerKeys(currentServerId) || [];
+        var _toks = E2ECrypto.searchTokensForText(extractSearchableText(plaintext), _tokKeys);
+        if (_toks.length) msgPayload.search_tokens = _toks;
+    } catch (_) {}
     if (mentionIds.length > 0) msgPayload.mentions = mentionIds;
     if (pendingReply && pendingReply.sender_id) msgPayload.reply_to_user_id = pendingReply.sender_id;
 
@@ -13288,6 +14140,7 @@ async function appendDmMessage(msg, kp, otherPublicKey) {
     div.className = 'message';
     if (msg.id) div.setAttribute('data-message-id', msg.id);
     if (msg.sender_id) div.setAttribute('data-sender-id', msg.sender_id);
+    if (msg.dm_channel_id || currentDmChannelId) div.setAttribute('data-dm-channel-id', msg.dm_channel_id || currentDmChannelId);
     // Always set data-sender-user-id so the profile click handler can use the raw UUID.
     // senderIdForCache prioritizes msg.sender_user_id (raw UUID) but falls back to msg.sender_id (HMAC hash).
     // The delegation handler will check if the value is an HMAC hash and fall back to currentDmOtherUser.id.
@@ -13509,6 +14362,9 @@ async function appendDmMessage(msg, kp, otherPublicKey) {
         }
     }
 
+    // Backfill the E2E search index for DM history we've just decrypted.
+    queueSearchIndex(null, currentDmChannelId, msg.id, textContent);
+
     // Break message grouping for file messages so they have their own header
     if (fileData || filesData) {
         div.classList.remove('grouped');
@@ -13598,12 +14454,18 @@ async function appendDmMessage(msg, kp, otherPublicKey) {
     // enforces owner-only for server channels, never for DMs).
     const actionsHtml = '<div class="message-actions">' +
         pinButtonHtml(isPinned) +
+        '<button class="msg-action-btn" data-action="react" title="React">&#x1F642;</button>' +
         '<button class="msg-action-btn" data-action="reply" title="Reply">&#x21A9;</button>' +
         '<button class="msg-action-btn" data-action="dm-forward" title="Forward to channel">&#x21AA;</button>' +
         '<button class="msg-action-btn" data-action="dm-forward-dm" title="Forward to DM">&#x1F4AC;</button>' +
         (isOwn ? '<button class="msg-action-btn" data-action="edit" title="Edit">&#x270E;</button>' : '') +
         (isOwn ? '<button class="msg-action-btn" data-action="delete" title="Delete">&#x2715;</button>' : '') +
         '</div>';
+
+    // E2E reactions: decrypt with the DM key; render the pill row.
+    var _reactionDmId = msg.dm_channel_id || currentDmChannelId;
+    var reactionsHtml = buildReactionsHtml(msg, dmSearchKey(_reactionDmId), myUserId);
+    cacheMessageReactions(msg, dmSearchKey(_reactionDmId), myUserId);
 
     var isStreamer = localStorage.getItem('streamerMode') === 'true';
     var hasContent = contentHtml && contentHtml.length > 0;
@@ -13628,6 +14490,7 @@ async function appendDmMessage(msg, kp, otherPublicKey) {
             '</div>' +
             wrappedContent +
             editedHtml +
+            reactionsHtml +
         '</div>' +
         actionsHtml;
 
@@ -13800,6 +14663,12 @@ async function sendDmMessage() {
         nonce: encrypted.nonce,
         message_nonce: encrypted.messageNonce || null,
     };
+    // E2E search blind index: tokenize the plaintext with the DM key.
+    try {
+        var _dmk = dmSearchKey(currentDmChannelId);
+        var _dmtoks = _dmk ? E2ECrypto.searchTokensForText(extractSearchableText(plaintext), [_dmk]) : [];
+        if (_dmtoks.length) msgPayload.search_tokens = _dmtoks;
+    } catch (_) {}
     if (mentionIds.length > 0) msgPayload.mentions = mentionIds;
     if (pendingReply && pendingReply.sender_id) msgPayload.reply_to_user_id = pendingReply.sender_id;
 
