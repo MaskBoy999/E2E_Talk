@@ -87,3 +87,7 @@ security.md
 progress.md.bak
 reg.json
 NUL
+
+# Agent skill customizations (local)
+.agents/
+AGENTS.md
