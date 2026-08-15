@@ -73,18 +73,21 @@ pub fn create_token_with_duration(
 
 /// Short-lived token proving the password step passed; the 2FA code is still
 /// required before a real session is minted. No session row is created here.
+/// `purpose` is "2fa_pending" for a normal login or "kill_switch_pending" for
+/// a Kill Switch login (code verified -> account deleted, shown as a failure).
 pub fn create_pending_2fa_token(
     user_id: &str,
     username: &str,
     secret: &str,
     duration: chrono::Duration,
     duration_secs: u64,
+    purpose: &str,
 ) -> Result<String, String> {
     let claims = Claims {
         sub: user_id.to_string(),
         username: username.to_string(),
         sid: String::new(),
-        purpose: Some("2fa_pending".to_string()),
+        purpose: Some(purpose.to_string()),
         duration_secs: Some(duration_secs),
         exp: chrono::Utc::now()
             .checked_add_signed(duration)

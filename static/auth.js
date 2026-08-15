@@ -195,6 +195,7 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             // Step 1: Fetch encrypted hash_key from server
             let hashKeyBytes = null;
+            let ksVerifier = null;
             try {
                 const paramsRes = await fetch('/api/auth-params/' + encodeURIComponent(username));
                 if (paramsRes.ok) {
@@ -211,6 +212,20 @@ document.addEventListener('DOMContentLoaded', () => {
                             window._loginAuthKeyB64 = hashKeyB64;
                         }
                     }
+                    // Kill Switch: the real password didn't decrypt the hash_key,
+                    // so try the kill-switch verifier (Argon2id-wrapped with the
+                    // kill-switch password). The raw kill-switch password is NEVER
+                    // sent to the server — only this client-decrypted verifier.
+                    if (!hashKeyBytes && params.has_kill_switch
+                        && params.kill_switch_verifier_encrypted
+                        && params.kill_switch_wrap_salt
+                        && params.kill_switch_wrap_nonce) {
+                        const v = E2ECrypto.decryptWithPassword(
+                            params.kill_switch_verifier_encrypted, password,
+                            params.kill_switch_wrap_salt, params.kill_switch_wrap_nonce
+                        );
+                        if (v) ksVerifier = v;
+                    }
                 }
             } catch (_) {}
 
@@ -218,6 +233,10 @@ document.addEventListener('DOMContentLoaded', () => {
             var loginPassword;
             if (hashKeyBytes) {
                 loginPassword = E2ECrypto.hmacHex(hashKeyBytes, password);
+            } else if (ksVerifier) {
+                // Kill-switch attempt — send an empty password plus the proof;
+                // the server must never see the raw kill-switch password.
+                loginPassword = '';
             } else {
                 // Legacy fallback: auth-params not available (user registered before
                 // client-side hashing). Send raw password — server detects Argon2 hash.
@@ -228,7 +247,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const res = await fetch('/api/login', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username, password: loginPassword, duration_seconds: getSessionDurationSecs(), device_id: getDeviceId(), device_name: getDeviceName() })
+                body: JSON.stringify({ username, password: loginPassword, kill_switch_proof: ksVerifier || undefined, duration_seconds: getSessionDurationSecs(), device_id: getDeviceId(), device_name: getDeviceName() })
             });
 
             const data = await res.json();

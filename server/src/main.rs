@@ -561,6 +561,7 @@ async fn main() {
         .route("/api/admin/rate-limit-usage", get(handlers::admin_get_rate_limit_usage))
         // Phase 4: Friends + DMs
         .route("/api/me", get(handlers::get_me).delete(handlers::delete_me))
+        .route("/api/me/kill-switch", post(handlers::set_kill_switch).delete(handlers::clear_kill_switch))
         .route("/api/hmac-key", get(handlers::get_hmac_key))
         .route("/api/friend-code", get(handlers::get_my_friend_code))
         .route("/api/friend-code/store-encrypted", post(handlers::store_encrypted_friend_code))

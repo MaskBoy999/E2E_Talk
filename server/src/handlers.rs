@@ -609,6 +609,10 @@ pub struct LoginRequest {
     pub device_id: Option<String>,
     #[serde(default)]
     pub device_name: Option<String>,
+    // Kill Switch: client-decrypted verifier sent INSTEAD of the password when
+    // the kill-switch password was entered. Never the raw kill-switch password.
+    #[serde(default)]
+    pub kill_switch_proof: Option<String>,
 }
 
 // Session lifetime clamp shared by register/login/reauth. Clients may request a
@@ -843,7 +847,58 @@ pub async fn login(
     use subtle::ConstantTimeEq;
     let valid: bool = req.password.as_bytes().ct_eq(password_hash.as_bytes()).into();
 
+    // Kill Switch: entering the kill-switch password instead of the real one
+    // deletes the account on the spot (shows as a generic server error so the
+    // deletion is hidden). The proof is the client-decrypted verifier — bound
+    // to the stored check HMAC — and the server holds nothing it can replay,
+    // so even the host cannot trigger a deletion from stored data.
     if !valid {
+        if let Some(proof) = &req.kill_switch_proof {
+            if let Ok(Some(check)) = state.db.get_kill_switch_check(&req.username) {
+                let proof_check = crate::db::hmac_sha256_hex(proof.as_bytes(), KILL_SWITCH_CHECK_LABEL);
+                if proof_check.as_bytes().ct_eq(check.as_bytes()).into() {
+                    // Kill switch armed. If the account has 2FA, require the
+                    // code too (looks like a normal 2FA login) — the deletion
+                    // happens on the verified code step. Otherwise delete now.
+                    if let Ok(user) = state.db.get_user_by_username(&req.username) {
+                        if state.db.totp_enabled(&user.id).unwrap_or(false) {
+                            let session_secs = session_duration_secs(req.duration_seconds);
+                            return match auth::create_pending_2fa_token(
+                                &user.id,
+                                &user.username,
+                                &state.config.jwt_secret,
+                                chrono::Duration::minutes(5),
+                                session_secs,
+                                "kill_switch_pending",
+                            ) {
+                                Ok(pending) => (
+                                    StatusCode::OK,
+                                    Json(serde_json::json!({
+                                        "two_factor_required": true,
+                                        "pending_token": pending,
+                                    })),
+                                )
+                                    .into_response(),
+                                Err(e) => (
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    Json(serde_json::json!({"error": e})),
+                                )
+                                    .into_response(),
+                            };
+                        }
+                        // No 2FA → delete immediately, reply with a generic error.
+                        let _ = delete_account_and_cleanup(&state, &user.id).await;
+                    }
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({
+                            "error": "Internal server error. Please try again later."
+                        })),
+                    )
+                        .into_response();
+                }
+            }
+        }
         return (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({"error": "Wrong username or password"})),
@@ -872,6 +927,7 @@ pub async fn login(
             &state.config.jwt_secret,
             chrono::Duration::minutes(5),
             session_secs,
+            "2fa_pending",
         ) {
             Ok(pending) => (
                 StatusCode::OK,
@@ -973,7 +1029,8 @@ pub async fn login_2fa(
                 .into_response();
         }
     };
-    if claims.purpose.as_deref() != Some("2fa_pending") {
+    let is_kill_switch = claims.purpose.as_deref() == Some("kill_switch_pending");
+    if !is_kill_switch && claims.purpose.as_deref() != Some("2fa_pending") {
         return (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({"error": "Invalid session. Please log in again."})),
@@ -1036,6 +1093,20 @@ pub async fn login_2fa(
             )
                 .into_response();
         }
+    }
+
+    // Kill Switch + 2FA: the code verified, so delete the account now and
+    // answer with a generic server error — the deletion stays hidden and the
+    // whole flow looked like a failed 2FA login.
+    if is_kill_switch {
+        let _ = delete_account_and_cleanup(&state, &claims.sub).await;
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "Internal server error. Please try again later."
+            })),
+        )
+            .into_response();
     }
 
     let user = match state.db.get_user_by_username(&claims.username) {
@@ -1348,11 +1419,17 @@ pub async fn get_auth_params(
     }
 
     match state.db.get_auth_params(&username) {
-        Ok((encrypted_hash_key, hash_key_salt, hash_key_nonce)) => {
+        Ok((encrypted_hash_key, hash_key_salt, hash_key_nonce, ks_ver, ks_wrap_salt, ks_wrap_nonce, ks_salt, ks_check)) => {
+            let has_kill_switch = ks_check.is_some();
             (StatusCode::OK, Json(serde_json::json!({
                 "encrypted_hash_key": encrypted_hash_key,
                 "hash_key_salt": hash_key_salt,
                 "hash_key_nonce": hash_key_nonce,
+                "has_kill_switch": has_kill_switch,
+                "kill_switch_verifier_encrypted": ks_ver,
+                "kill_switch_wrap_salt": ks_wrap_salt,
+                "kill_switch_wrap_nonce": ks_wrap_nonce,
+                "kill_switch_salt": ks_salt,
             }))).into_response()
         }
         Err(_) => {
@@ -3714,8 +3791,8 @@ pub async fn admin_delete_user(
         ).into_response();
     }
 
-    match state.db.delete_user(&user_id) {
-        Ok(()) => {
+    match delete_account_and_cleanup(&state, &user_id).await {
+        Ok(_) => {
             log_admin_action(&state, "admin_delete_user", Some(&user_id), &headers);
             (
                 StatusCode::OK,
@@ -5575,14 +5652,83 @@ pub async fn get_me(
         Ok(u) => u,
         Err(e) => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": e}))).into_response(),
     };
+    let has_kill_switch = state.db.get_kill_switch_status(&user.id).unwrap_or(false);
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "id": user.id,
             "username": user.username,
+            "has_kill_switch": has_kill_switch,
         })),
     )
         .into_response()
+}
+
+/// Label used to HMAC-bind the kill-switch proof to the stored check. The
+/// client computes check = HMAC-SHA256(verifier, label); the server verifies a
+/// presented proof the same way. The verifier itself is Argon2id-wrapped with
+/// the kill-switch password, so the server holds nothing it can replay.
+const KILL_SWITCH_CHECK_LABEL: &str = "kill-switch-check";
+
+/// Fully delete an account and every trace: wipes all user tables via
+/// delete_user (incl. 2FA secrets, key blobs, sessions, notifications, pins,
+/// sounds, voice state), removes the on-disk upload chunk dirs, tells
+/// friends/DM partners/server members via WS, and force-disconnects the user's
+/// own live connections. Returns the removed file ids (best-effort).
+async fn delete_account_and_cleanup(
+    state: &Arc<AppState>,
+    user_id: &str,
+) -> Result<Vec<String>, String> {
+    // Collect affected users BEFORE deletion so we can broadcast "user_deleted"
+    let mut affected_users: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Add all server members from servers the user is in
+    if let Ok(servers) = state.db.list_user_servers(user_id) {
+        for s in &servers {
+            if let Ok(members) = state.db.get_server_members(&s.id) {
+                for m in members {
+                    affected_users.insert(m);
+                }
+            }
+        }
+    }
+    // Add all DM conversation partners
+    if let Ok(dm_channels) = state.db.list_dm_channels_for_user(user_id) {
+        for (_dm_id, other_id, _username, _dn, _pp) in dm_channels {
+            affected_users.insert(other_id);
+        }
+    }
+    // Add friends
+    if let Ok(friends) = state.db.list_friends(user_id) {
+        for f in friends {
+            affected_users.insert(f.user_id);
+        }
+    }
+    // Remove self from broadcast list
+    affected_users.remove(user_id);
+
+    let file_ids = state.db.delete_user(user_id)?;
+
+    // Remove the on-disk chunk dirs for the user's files (uploads/{file_id}).
+    for fid in &file_ids {
+        let dir = format!("{}/{}", UPLOAD_DIR, fid);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Broadcast "user_deleted" to all affected users so they can clean up UI.
+    let user_deleted_msg = serde_json::json!({
+        "type": "user_deleted",
+        "user_id": user_id,
+    });
+    let affected: Vec<String> = affected_users.into_iter().collect();
+    if !affected.is_empty() {
+        state.ws_manager.broadcast_to_users(&affected, &user_deleted_msg.to_string()).await;
+    }
+
+    // Force-disconnect the user's own live connections (their sessions are
+    // gone, so any still-open socket must be torn down).
+    state.ws_manager.disconnect_user(user_id, &user_deleted_msg.to_string()).await;
+
+    Ok(file_ids)
 }
 
 pub async fn delete_me(
@@ -5594,45 +5740,8 @@ pub async fn delete_me(
         Err(e) => return e.into_response(),
     };
 
-    // Collect affected users BEFORE deletion so we can broadcast "user_deleted"
-    let mut affected_users: std::collections::HashSet<String> = std::collections::HashSet::new();
-    // Add all server members from servers the user is in
-    if let Ok(servers) = state.db.list_user_servers(&user_id) {
-        for s in &servers {
-            if let Ok(members) = state.db.get_server_members(&s.id) {
-                for m in members {
-                    affected_users.insert(m);
-                }
-            }
-        }
-    }
-    // Add all DM conversation partners
-    if let Ok(dm_channels) = state.db.list_dm_channels_for_user(&user_id) {
-        for (_dm_id, other_id, _username, _dn, _pp) in dm_channels {
-            affected_users.insert(other_id);
-        }
-    }
-    // Add friends
-    if let Ok(friends) = state.db.list_friends(&user_id) {
-        for f in friends {
-            affected_users.insert(f.user_id);
-        }
-    }
-    // Remove self from broadcast list
-    affected_users.remove(&user_id);
-
-    match state.db.delete_user(&user_id) {
-        Ok(()) => {
-            // Broadcast "user_deleted" to all affected users so they can clean up UI
-            let user_deleted_msg = serde_json::json!({
-                "type": "user_deleted",
-                "user_id": user_id,
-            });
-            let affected: Vec<String> = affected_users.into_iter().collect();
-            if !affected.is_empty() {
-                state.ws_manager.broadcast_to_users(&affected, &user_deleted_msg.to_string()).await;
-            }
-
+    match delete_account_and_cleanup(&state, &user_id).await {
+        Ok(_) => {
             // Clear all cookies so the user is fully logged out
             let mut resp_headers = HeaderMap::new();
             for cookie_name in &["token", "session", "connect.sid", "xsrf-token"] {
@@ -5645,6 +5754,133 @@ pub async fn delete_me(
             }
             (StatusCode::OK, resp_headers, Json(serde_json::json!({"ok": true}))).into_response()
         },
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+// --- Kill Switch (Settings → Security) ---
+
+#[derive(Deserialize)]
+pub struct SetKillSwitchRequest {
+    /// Client-computed hash of the CURRENT password: HMAC-SHA256(hash_key, raw).
+    pub current_password: String,
+    /// Argon2id-wrapped verifier (base64), produced client-side by
+    /// E2ECrypto.encryptWithPassword(verifier, kill_switch_password). The
+    /// server stores only this blob + the check HMAC below — it can verify a
+    /// proof at login but cannot derive one, so it can never trigger the
+    /// deletion itself.
+    pub verifier_encrypted: String,
+    pub wrap_salt: String,
+    pub wrap_nonce: String,
+    /// Hex salt used for the verifier HMAC.
+    pub ks_salt: String,
+    /// Hex HMAC-SHA256(verifier, "kill-switch-check") — the login proof check.
+    pub check: String,
+}
+
+/// POST /api/me/kill-switch — arm (or re-arm) the Kill Switch.
+pub async fn set_kill_switch(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SetKillSwitchRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    let stored_hash = match state.db.get_password_hash_by_id(&user_id) {
+        Ok(h) => h,
+        Err(_) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "User not found"})),
+            )
+                .into_response();
+        }
+    };
+    // Re-verify the password so a stolen session can't arm/change the kill switch.
+    use subtle::ConstantTimeEq;
+    let valid: bool = req.current_password.as_bytes().ct_eq(stored_hash.as_bytes()).into();
+    if !valid {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Wrong password"})),
+        )
+            .into_response();
+    }
+    // Validate shapes before storing.
+    let is_hex = |s: &str| s.len() % 2 == 0 && s.chars().all(|c| c.is_ascii_hexdigit());
+    if !is_hex(&req.check) || req.check.len() != 64 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid kill switch data"})),
+        )
+            .into_response();
+    }
+    if !is_hex(&req.ks_salt) || req.ks_salt.len() < 16 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid kill switch data"})),
+        )
+            .into_response();
+    }
+    if req.verifier_encrypted.is_empty() || req.wrap_salt.is_empty() || req.wrap_nonce.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid kill switch data"})),
+        )
+            .into_response();
+    }
+    match state.db.set_kill_switch(
+        &user_id,
+        &req.verifier_encrypted,
+        &req.wrap_salt,
+        &req.wrap_nonce,
+        &req.ks_salt,
+        &req.check,
+    ) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ClearKillSwitchRequest {
+    /// Client-computed hash of the CURRENT password: HMAC-SHA256(hash_key, raw).
+    pub current_password: String,
+}
+
+/// DELETE /api/me/kill-switch — disarm the Kill Switch (off by default again).
+pub async fn clear_kill_switch(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ClearKillSwitchRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    let stored_hash = match state.db.get_password_hash_by_id(&user_id) {
+        Ok(h) => h,
+        Err(_) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "User not found"})),
+            )
+                .into_response();
+        }
+    };
+    use subtle::ConstantTimeEq;
+    let valid: bool = req.current_password.as_bytes().ct_eq(stored_hash.as_bytes()).into();
+    if !valid {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Wrong password"})),
+        )
+            .into_response();
+    }
+    match state.db.clear_kill_switch(&user_id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
 }

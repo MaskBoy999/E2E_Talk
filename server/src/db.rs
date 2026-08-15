@@ -1119,6 +1119,15 @@ impl Database {
         let _ = conn.execute_batch("ALTER TABLE servers DROP COLUMN invite_code");
         let _ = conn.execute_batch("ALTER TABLE users DROP COLUMN profile_picture_file_key");
         let _ = conn.execute_batch("ALTER TABLE users DROP COLUMN profile_banner_file_key");
+        // Migration 059 (Kill Switch): second password that deletes the account
+        // when entered at login. Verifier is Argon2id-wrapped client-side with
+        // the kill-switch password itself — the server stores no replayable
+        // credential, only the wrapped blob + a check HMAC. Each ALTER runs
+        // separately so a restart can't block the batch on the first duplicate
+        // column (same pattern as 058).
+        for col in ["kill_switch_verifier_encrypted", "kill_switch_wrap_salt", "kill_switch_wrap_nonce", "kill_switch_salt", "kill_switch_check"] {
+            let _ = conn.execute_batch(&format!("ALTER TABLE users ADD COLUMN {} TEXT", col));
+        }
 
         // Data migration: normalize legacy space-separated CURRENT_TIMESTAMP values
         // ("YYYY-MM-DD HH:MM:SS") to fixed-width RFC3339 ("YYYY-MM-DDTHH:MM:SS.000000Z")
@@ -1630,14 +1639,86 @@ impl Database {
         Ok(notifs)
     }
 
-    pub fn get_auth_params(&self, username: &str) -> Result<(String, String, String), String> {
+    /// Returns (encrypted_hash_key, hash_key_salt, hash_key_nonce) plus the
+    /// Kill Switch blob (verifier_encrypted, wrap_salt, wrap_nonce, ks_salt,
+    /// check) — each an Option for the 5 kill-switch fields (NULL when unset).
+    pub fn get_auth_params(&self, username: &str) -> Result<(String, String, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.query_row(
-            "SELECT encrypted_hash_key, hash_key_salt, hash_key_nonce FROM users WHERE username = ?1",
+            "SELECT encrypted_hash_key, hash_key_salt, hash_key_nonce, \
+                    kill_switch_verifier_encrypted, kill_switch_wrap_salt, kill_switch_wrap_nonce, \
+                    kill_switch_salt, kill_switch_check \
+             FROM users WHERE username = ?1",
             params![username],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
+            |row| Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
+            )),
         )
         .map_err(|_| "User not found".to_string())
+    }
+
+    /// Kill Switch columns for the account owner (used by the settings UI status).
+    pub fn get_kill_switch_status(&self, user_id: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT kill_switch_check IS NOT NULL FROM users WHERE id = ?1",
+            params![user_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|_| "User not found".to_string())
+    }
+
+    /// Kill Switch check HMAC for the LOGIN path (username lookup). Returns
+    /// None when no kill switch is configured.
+    pub fn get_kill_switch_check(&self, username: &str) -> Result<Option<String>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT kill_switch_check FROM users WHERE username = ?1",
+            params![username],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .map_err(|_| "User not found".to_string())
+    }
+
+    /// Store the client-computed Kill Switch blob. The verifier itself is
+    /// Argon2id-wrapped with the kill-switch password, so the server never
+    /// holds a credential it could replay.
+    pub fn set_kill_switch(
+        &self,
+        user_id: &str,
+        verifier_encrypted: &str,
+        wrap_salt: &str,
+        wrap_nonce: &str,
+        ks_salt: &str,
+        check: &str,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE users SET kill_switch_verifier_encrypted = ?1, kill_switch_wrap_salt = ?2, \
+             kill_switch_wrap_nonce = ?3, kill_switch_salt = ?4, kill_switch_check = ?5 WHERE id = ?6",
+            params![verifier_encrypted, wrap_salt, wrap_nonce, ks_salt, check, user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Remove the Kill Switch (off by default — no kill-switch columns = disabled).
+    pub fn clear_kill_switch(&self, user_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE users SET kill_switch_verifier_encrypted = NULL, kill_switch_wrap_salt = NULL, \
+             kill_switch_wrap_nonce = NULL, kill_switch_salt = NULL, kill_switch_check = NULL WHERE id = ?1",
+            params![user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     // --- Servers ---
@@ -5449,8 +5530,24 @@ impl Database {
         Ok(())
     }
 
-    pub fn delete_user(&self, user_id: &str) -> Result<(), String> {
+    /// Deletes every trace of the user and returns the list of their file ids
+    /// so the caller can remove the on-disk chunk dirs (uploads/{file_id}).
+    pub fn delete_user(&self, user_id: &str) -> Result<Vec<String>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
+
+        // 0. Collect the user's file ids BEFORE deleting the rows so the caller
+        //    can clean up the on-disk chunks (uploads/{file_id}/).
+        let user_file_ids: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT id FROM files WHERE uploader_id = ?1")
+                .map_err(|e| e.to_string())?;
+            let rows: Vec<String> = stmt
+                .query_map(params![user_id], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?
+                .filter_map(|r| r.ok())
+                .collect();
+            rows
+        };
 
         // 1. Delete messages sent by user (messages.sender_id -> users(id) has NO CASCADE)
         conn.execute("DELETE FROM messages WHERE sender_id = ?1", params![user_id])
@@ -5543,10 +5640,50 @@ impl Database {
         conn.execute("DELETE FROM user_stickers WHERE user_id = ?1", params![user_id])
             .map_err(|e| e.to_string())?;
 
+        // 4h. 2FA, recovery codes, key blobs/escrow, profile-data keys.
+        conn.execute("DELETE FROM totp_secrets WHERE user_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM recovery_codes WHERE user_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM user_key_blobs WHERE user_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM user_key_escrow WHERE user_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM profile_data_keys WHERE user_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM shared_profile_data_keys WHERE owner_user_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+
+        // 4i. Notifications, pending events, pins, sounds.
+        conn.execute("DELETE FROM pending_notifications WHERE user_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM pending_events WHERE user_id = ?1 OR affected_user_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM message_pins WHERE pinned_by = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM dm_message_pins WHERE pinned_by = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM notification_sounds WHERE user_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM ringtones WHERE user_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+
+        // 4j. Voice + call state.
+        conn.execute("DELETE FROM voice_participants WHERE user_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM voice_sanctions WHERE user_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM dm_call_waiting WHERE waiting_user_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+
+        // 4k. Active auth sessions — every device is signed out immediately.
+        conn.execute("DELETE FROM auth_sessions WHERE user_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+
         // 5. Delete the user
         conn.execute("DELETE FROM users WHERE id = ?1", params![user_id])
             .map_err(|e| e.to_string())?;
-        Ok(())
+        Ok(user_file_ids)
     }
 
     // --- Files (Phase 5) ---

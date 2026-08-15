@@ -230,6 +230,25 @@ impl WsManager {
         self.connections.write().await.remove(&conn_id);
     }
 
+    /// Force-disconnect every live connection of a user (account deleted).
+    /// Sends the message first (while the senders are still registered), then
+    /// drops the connections so each socket's send task ends and the WS
+    /// cleanup path (voice rooms, presence) runs normally.
+    pub async fn disconnect_user(&self, user_id: &str, message: &str) {
+        let conns = self.connections.read().await;
+        let mut ids = Vec::new();
+        for (id, (uid, _did, sender)) in conns.iter() {
+            if uid == user_id {
+                let _ = sender.send(message.to_string());
+                ids.push(*id);
+            }
+        }
+        drop(conns);
+        for id in ids {
+            self.remove_connection(id).await;
+        }
+    }
+
     pub async fn is_user_connected(&self, user_id: &str) -> bool {
         let conns = self.connections.read().await;
         conns.values().any(|(uid, _, _)| uid == user_id)

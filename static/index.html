@@ -638,6 +638,31 @@
                     </div>
                 </div>
                 <div class="settings-group">
+                    <h4>Kill Switch</h4>
+                    <p class="settings-hint">Set a second password. If anyone enters it instead of your real password at the login page, your account is deleted on the spot — with all its data. If you have 2FA enabled, the 2FA code is required too, and the login just looks like a failed attempt. Off by default.</p>
+                    <p class="settings-hint" id="kill-switch-status-line" style="font-weight:600;">Checking&hellip;</p>
+                    <div style="display:flex;gap:10px;margin-top:6px;flex-wrap:wrap;">
+                        <button class="btn-reauth" id="kill-switch-set-btn">Set Kill Switch</button>
+                        <button class="btn-delete-account" id="kill-switch-remove-btn" style="background:var(--danger,#ed4245);color:#fff;display:none;">Remove Kill Switch</button>
+                    </div>
+                    <div id="kill-switch-set-section" style="display:none;margin-top:10px;">
+                        <div class="auth-input-row" style="margin-bottom:8px;">
+                            <input type="password" id="kill-switch-pw" placeholder="Kill switch password (min 8 characters)" class="modal-input auth-code-input" style="flex:1;" autocomplete="new-password" />
+                            <button type="button" class="toggle-visibility-btn" id="toggle-kill-switch-pw" title="Show/Hide">&#128065;</button>
+                        </div>
+                        <div class="auth-input-row" style="margin-bottom:8px;">
+                            <input type="password" id="kill-switch-pw-confirm" placeholder="Confirm kill switch password" class="modal-input auth-code-input" style="flex:1;" autocomplete="new-password" />
+                            <button type="button" class="toggle-visibility-btn" id="toggle-kill-switch-pw-confirm" title="Show/Hide">&#128065;</button>
+                        </div>
+                        <div class="auth-input-row" style="margin-bottom:8px;">
+                            <input type="password" id="kill-switch-current" placeholder="Current password (to confirm)" class="modal-input auth-code-input" style="flex:1;" autocomplete="current-password" />
+                            <button type="button" class="toggle-visibility-btn" id="toggle-kill-switch-current" title="Show/Hide">&#128065;</button>
+                        </div>
+                        <button class="btn-reauth-confirm" id="kill-switch-save-btn" style="font-size:13px;padding:8px 16px;">Arm Kill Switch</button>
+                    </div>
+                    <p id="kill-switch-status" style="margin-top:8px;font-size:13px;"></p>
+                </div>
+                <div class="settings-group">
                     <h4>Devices</h4>
                     <p class="settings-hint">Every device currently signed in to your account. You can force-sign-out any of them — they are kicked immediately, everywhere (including voice channels and calls).</p>
                     <div id="devices-list" class="session-log-list">

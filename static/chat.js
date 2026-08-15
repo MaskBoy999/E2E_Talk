@@ -3503,6 +3503,136 @@ document.addEventListener('DOMContentLoaded', () => {
 
     load2FaStatus();
 
+    // --- Kill Switch (Settings → Security) ---
+    function randomHexBytes(len) {
+        var bytes = new Uint8Array(len);
+        (window.crypto || window.msCrypto).getRandomValues(bytes);
+        var hex = '';
+        for (var i = 0; i < len; i++) hex += (bytes[i] < 16 ? '0' : '') + bytes[i].toString(16);
+        return hex;
+    }
+    // Build the client-side kill-switch blob. The verifier is HMAC-SHA256 of
+    // the password with a fresh random salt, then Argon2id-wrapped with the
+    // password itself — so the server stores only this blob + a check HMAC and
+    // can never derive a login proof from it (even the host can't delete the
+    // account using stored data; only someone typing the kill-switch password
+    // produces the decrypted verifier).
+    function buildKillSwitchPayload(ksPassword) {
+        var ksSalt = randomHexBytes(16); // 32 hex chars
+        var verifier = E2ECrypto.hmacHex(ksSalt, ksPassword);
+        var check = E2ECrypto.hmacHex(verifier, 'kill-switch-check');
+        var wrapped = E2ECrypto.encryptWithPassword(verifier, ksPassword);
+        return {
+            verifier_encrypted: wrapped.encrypted_private_key,
+            wrap_salt: wrapped.salt,
+            wrap_nonce: wrapped.nonce,
+            ks_salt: ksSalt,
+            check: check
+        };
+    }
+    var ksStatusLine = document.getElementById('kill-switch-status-line');
+    var ksSetBtn = document.getElementById('kill-switch-set-btn');
+    var ksRemoveBtn = document.getElementById('kill-switch-remove-btn');
+    var ksSetSection = document.getElementById('kill-switch-set-section');
+    var ksStatusEl = document.getElementById('kill-switch-status');
+    function setKsStatus(msg, kind) {
+        if (!ksStatusEl) return;
+        ksStatusEl.textContent = msg;
+        ksStatusEl.style.color = kind === 'error' ? 'var(--danger)' : (kind === 'success' ? '#43b581' : 'var(--text-muted)');
+    }
+    function resetKsInputs() {
+        ['kill-switch-pw', 'kill-switch-pw-confirm', 'kill-switch-current'].forEach(function (id) {
+            var inp = document.getElementById(id);
+            if (inp) { inp.type = 'password'; inp.value = ''; }
+            var tgl = document.getElementById('toggle-' + id);
+            if (tgl) { tgl.innerHTML = '&#128065;'; tgl.classList.remove('active'); }
+        });
+    }
+    async function loadKillSwitchStatus() {
+        try {
+            var res = await authFetch('/api/me');
+            var data = await res.json();
+            var on = !!(data && data.has_kill_switch);
+            if (ksStatusLine) ksStatusLine.textContent = on
+                ? 'Kill switch: ON — entering this password at login deletes the account'
+                : 'Kill switch: OFF (disabled by default)';
+            if (ksSetBtn) ksSetBtn.style.display = on ? 'none' : '';
+            if (ksRemoveBtn) ksRemoveBtn.style.display = on ? '' : 'none';
+        } catch (_) {}
+    }
+    if (ksSetBtn) {
+        ksSetBtn.addEventListener('click', function () {
+            var open = ksSetSection.style.display !== 'block';
+            ksSetSection.style.display = open ? 'block' : 'none';
+            if (open) { resetKsInputs(); setKsStatus('', ''); }
+        });
+    }
+    ['toggle-kill-switch-pw', 'toggle-kill-switch-pw-confirm', 'toggle-kill-switch-current'].forEach(function (tid) {
+        var tgl = document.getElementById(tid);
+        if (!tgl) return;
+        tgl.addEventListener('click', function () {
+            var inp = document.getElementById(tid.replace('toggle-', ''));
+            if (!inp) return;
+            var visible = inp.type === 'text';
+            inp.type = visible ? 'password' : 'text';
+            tgl.innerHTML = visible ? '&#128065;' : '&#128064;';
+            tgl.classList.toggle('active', !visible);
+        });
+    });
+    var ksSaveBtn = document.getElementById('kill-switch-save-btn');
+    if (ksSaveBtn) {
+        ksSaveBtn.addEventListener('click', async function () {
+            var pw = document.getElementById('kill-switch-pw').value;
+            var pw2 = document.getElementById('kill-switch-pw-confirm').value;
+            var cur = document.getElementById('kill-switch-current').value;
+            if (!pw || pw.length < 8) { setKsStatus('Kill switch password must be at least 8 characters', 'error'); return; }
+            if (pw !== pw2) { setKsStatus('Passwords do not match', 'error'); return; }
+            if (!cur) { setKsStatus('Enter your current password to confirm', 'error'); return; }
+            try {
+                // The kill-switch password must differ from the real password
+                // (both hashed with the same hash_key).
+                var realHash = await computeHashedPasswordGlobal(cur);
+                var ksHash = await computeHashedPasswordGlobal(pw);
+                if (realHash === ksHash) { setKsStatus('Kill switch password must be different from your real password', 'error'); return; }
+                var payload = buildKillSwitchPayload(pw);
+                payload.current_password = realHash;
+                var res = await authFetch('/api/me/kill-switch', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                var data = await res.json();
+                if (!res.ok) { setKsStatus(data.error || 'Failed to arm kill switch', 'error'); return; }
+                setKsStatus('Kill switch armed. Entering this password at login will delete the account.', 'success');
+                ksSetSection.style.display = 'none';
+                resetKsInputs();
+                await loadKillSwitchStatus();
+            } catch (e) {
+                setKsStatus('Server is not running', 'error');
+            }
+        });
+    }
+    if (ksRemoveBtn) {
+        ksRemoveBtn.addEventListener('click', async function () {
+            if (!confirm('Remove the kill switch? Login returns to normal password-only.')) return;
+            var cur = prompt('Enter your current password to remove the kill switch:');
+            if (!cur) return;
+            try {
+                var payload = { current_password: await computeHashedPasswordGlobal(cur) };
+                var res = await authFetch('/api/me/kill-switch', {
+                    method: 'DELETE',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                var data = await res.json();
+                if (!res.ok) { setKsStatus(data.error || 'Failed to remove kill switch', 'error'); return; }
+                setKsStatus('Kill switch removed.', 'success');
+                await loadKillSwitchStatus();
+            } catch (e) { setKsStatus('Server is not running', 'error'); }
+        });
+    }
+    loadKillSwitchStatus();
+
     connectWebSocket(t);
     setupMessageActions();
     setupForwardModal();
