@@ -47,8 +47,10 @@ pub struct RuntimeTuning {
     pub mutation_ip_max: u32,
     /// Per-user file-storage cap in bytes (default 1 GiB).
     pub file_storage_quota_bytes: i64,
+    /// Max single-file upload size in MB (default 1024 = 1 GiB; 0 = unlimited).
+    pub max_file_size_mb: i64,
     /// Where each value came from: "db" | "env" | "default" (for the admin UI).
-    pub sources: [&'static str; 3],
+    pub sources: [&'static str; 4],
 }
 
 impl RuntimeTuning {
@@ -64,6 +66,7 @@ impl RuntimeTuning {
         let (db_user, env_user, def_user) = resolve("mutation_user_max", "MUTATION_USER_MAX", 120);
         let (db_ip, env_ip, def_ip) = resolve("mutation_ip_max", "MUTATION_IP_MAX", 1000);
         let (db_quota, env_quota, def_quota) = resolve("file_storage_quota_bytes", "FILE_STORAGE_QUOTA_BYTES", 1024 * 1024 * 1024);
+        let (db_mfs, env_mfs, def_mfs) = resolve("max_file_size_mb", "MAX_FILE_SIZE_MB", 1024);
 
         let pick = |db: Option<u64>, env: Option<u64>, def: u64| -> (u64, &'static str) {
             if let Some(v) = db {
@@ -78,12 +81,14 @@ impl RuntimeTuning {
         let (user, src_user) = pick(db_user, env_user, def_user);
         let (ip, src_ip) = pick(db_ip, env_ip, def_ip);
         let (quota, src_quota) = pick(db_quota, env_quota, def_quota);
+        let (mfs, src_mfs) = pick(db_mfs, env_mfs, def_mfs);
 
         RuntimeTuning {
             mutation_user_max: user as u32,
             mutation_ip_max: ip as u32,
             file_storage_quota_bytes: quota as i64,
-            sources: [src_user, src_ip, src_quota],
+            max_file_size_mb: mfs as i64,
+            sources: [src_user, src_ip, src_quota, src_mfs],
         }
     }
 }
@@ -563,6 +568,7 @@ async fn main() {
         .route("/api/me", get(handlers::get_me).delete(handlers::delete_me))
         .route("/api/me/kill-switch", post(handlers::set_kill_switch).delete(handlers::clear_kill_switch))
         .route("/api/hmac-key", get(handlers::get_hmac_key))
+        .route("/api/client-config", get(handlers::client_config))
         .route("/api/friend-code", get(handlers::get_my_friend_code))
         .route("/api/friend-code/store-encrypted", post(handlers::store_encrypted_friend_code))
         .route("/api/friend-code/regenerate", post(handlers::server_regenerate_friend_code))

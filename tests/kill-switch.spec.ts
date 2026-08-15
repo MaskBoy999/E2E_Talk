@@ -1,5 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
-import { execSync } from 'child_process';
+import { spawn, execSync, type ChildProcess } from 'child_process';
+import * as path from 'path';
+import * as fs from 'fs';
 
 const BASE = 'https://localhost:3443';
 const DB = 'server/e2e_chat.db';
@@ -169,6 +171,54 @@ test.describe('Kill Switch', () => {
         expect(ok.status()).toBe(200);
     });
 
+    test('arming the kill switch force-signs-out every other session; the arming device stays signed in', async ({ page }) => {
+        test.setTimeout(120000);
+        const ts = Date.now();
+        const uname = 'ks_kick_' + ts;
+        const { token, user } = await registerUser(page, uname);
+
+        // Create a SECOND session by logging in as a distinct device.
+        const hash = await loginHash(page, uname, 'password123');
+        const loginRes = await page.request.post(`${BASE}/api/login`, {
+            headers: { 'Content-Type': 'application/json' },
+            data: { username: uname, password: hash, device_id: 'device-b', device_name: 'Device B', duration_seconds: 3600 },
+        });
+        expect(loginRes.status()).toBe(200);
+        const tokenB = (await loginRes.json()).token;
+        expect(tokenB).toBeTruthy();
+
+        // Both sessions are live before arming.
+        const meA = await page.request.get(`${BASE}/api/me`, { headers: { Authorization: `Bearer ${token}` } });
+        const meB = await page.request.get(`${BASE}/api/me`, { headers: { Authorization: `Bearer ${tokenB}` } });
+        expect(meA.status()).toBe(200);
+        expect(meB.status()).toBe(200);
+        expect(dbQuery('SELECT COUNT(*) FROM auth_sessions WHERE user_id = ?1 AND revoked = 0', [user.id])[0][0]).toBe(2);
+
+        // Arm the kill switch with session A.
+        expect(await armKillSwitchApi(page, token, 'password123', 'killpass99')).toBe(true);
+
+        // Session B was force-signed-out: its token is rejected and its
+        // auth_sessions row is revoked.
+        const meBAfter = await page.request.get(`${BASE}/api/me`, { headers: { Authorization: `Bearer ${tokenB}` } });
+        expect(meBAfter.status()).toBe(401);
+        const rows = dbQuery('SELECT revoked FROM auth_sessions WHERE user_id = ?1', [user.id]) as any[];
+        expect(rows).toHaveLength(2);
+        expect(rows.map(r => r[0]).sort()).toEqual([0, 1]);
+
+        // Session A (the arming device) is untouched.
+        const meAAfter = await page.request.get(`${BASE}/api/me`, { headers: { Authorization: `Bearer ${token}` } });
+        expect(meAAfter.status()).toBe(200);
+
+        // The kill switch still works end-to-end: its password deletes the account.
+        const proof = await killSwitchProof(page, uname, 'killpass99');
+        const delRes = await page.request.post(`${BASE}/api/login`, {
+            headers: { 'Content-Type': 'application/json' },
+            data: { username: uname, password: '', kill_switch_proof: proof },
+        });
+        expect(delRes.status()).toBe(500);
+        expect(dbQuery('SELECT COUNT(*) FROM users WHERE id = ?1', [user.id])[0][0]).toBe(0);
+    });
+
     test('kill-switch login (no 2FA) deletes the account, hidden as a generic server error', async ({ page, browser }) => {
         test.setTimeout(120000);
         const ts = Date.now();
@@ -259,6 +309,67 @@ test.describe('Kill Switch', () => {
         expect(dbQuery('SELECT COUNT(*) FROM users WHERE id = ?1', [user.id])[0][0]).toBe(0);
         const authParams = await page.request.get(`${BASE}/api/auth-params/${uname}`);
         expect(authParams.status()).toBe(404);
+
+        // Replaying the same code/token (e.g. submitting the 2FA form twice)
+        // must NOT reveal the deletion — it answers with the SAME generic
+        // server error, never "2FA is not enabled for this account".
+        const replay = await page.request.post(`${BASE}/api/login/2fa`, {
+            headers: { 'Content-Type': 'application/json' },
+            data: { pending_token: pwData.pending_token, code: await totpCode(enrollData.secret_base32) },
+        });
+        expect(replay.status()).toBe(500);
+        const replayErr = await replay.json();
+        expect(replayErr.error).toContain('Internal server error');
+        expect(replayErr.error).not.toContain('2FA');
+    });
+
+    test('2FA kill-switch via the real login UI stays hidden as the same generic error', async ({ page, browser }) => {
+        test.setTimeout(180000);
+        const ts = Date.now();
+        const uname = 'ks_ui_2fa_' + ts;
+        const { token, user } = await registerUser(page, uname);
+        const hash = await loginHash(page, uname, 'password123');
+
+        // Enable 2FA via the API, then arm the kill switch.
+        const enrollRes = await page.request.post(`${BASE}/api/2fa/enroll`, {
+            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+            data: { password: hash },
+        });
+        expect(enrollRes.status()).toBe(200);
+        const enrollData = await enrollRes.json();
+        const verifyRes = await page.request.post(`${BASE}/api/2fa/verify-enroll`, {
+            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+            data: { code: await totpCode(enrollData.secret_base32) },
+        });
+        expect(verifyRes.status()).toBe(200);
+        expect(await armKillSwitchApi(page, token, 'password123', 'killpass99')).toBe(true);
+
+        // Fresh context: log in with the kill-switch password through the real UI.
+        const ctx = await browser.newContext();
+        const lp = await ctx.newPage();
+        await lp.goto(`${BASE}/login.html`);
+        await lp.fill('#login-username', uname);
+        await lp.fill('#login-password', 'killpass99');
+        await lp.click('#login-form button[type="submit"]');
+        // Looks like a normal 2FA login — the code form appears.
+        await lp.waitForSelector('#login-2fa-form', { state: 'visible', timeout: 15000 });
+
+        // Correct code → the client clears the pending token and returns to the
+        // password form with the SAME generic server error surfaced there.
+        await lp.fill('#login-2fa-code', await totpCode(enrollData.secret_base32));
+        await lp.click('#login-2fa-form button[type="submit"]');
+        await lp.waitForSelector('#login-form', { state: 'visible', timeout: 15000 });
+        await lp.waitForFunction(() => {
+            const err = document.getElementById('error-message');
+            return err && err.style.display === 'block' && err.textContent.indexOf('Internal server error') !== -1;
+        }, { timeout: 15000 });
+        // Nothing on the page reveals 2FA-specific state that would hint the
+        // account was deleted.
+        const bodyText = await lp.evaluate(() => document.body.textContent || '');
+        expect(bodyText).not.toContain('2FA is not enabled');
+        await ctx.close();
+
+        expect(dbQuery('SELECT COUNT(*) FROM users WHERE id = ?1', [user.id])[0][0]).toBe(0);
     });
 
     test('settings UI arms and removes the kill switch; disarm makes the kill-switch login a plain failure', async ({ page }) => {
@@ -367,8 +478,15 @@ test.describe('Kill Switch', () => {
         dbExec("INSERT OR IGNORE INTO server_bans (server_id, user_id) VALUES (?1, ?2)", [sid, uid]);
 
         // Delete the account via the settings button flow (DELETE /api/me).
+        // Password-gated now — send the client-computed current-password hash.
+        const delPw = await page.evaluate(async () => {
+            const authKeyB64 = localStorage.getItem('e2e_auth_key');
+            const key = new Uint8Array(E2ECrypto.base64ToArrayBuffer(authKeyB64));
+            return E2ECrypto.hmacHex(key, 'password123');
+        });
         const del = await page.request.delete(`${BASE}/api/me`, {
-            headers: { Authorization: `Bearer ${token}` },
+            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+            data: { current_password: delPw },
         });
         expect(del.status()).toBe(200);
 
@@ -410,5 +528,153 @@ test.describe('Kill Switch', () => {
             const n = dbQuery(`SELECT COUNT(*) FROM ${table} WHERE ${where}`, args)[0][0] as number;
             expect(n, `${table} still references the deleted user`).toBe(0);
         }
+    });
+
+    test('delete-account requires the current password; wrong password leaves the account intact', async ({ page }) => {
+        test.setTimeout(120000);
+        const ts = Date.now();
+        const uname = 'ks_del_pw_' + ts;
+        const { token, user } = await registerUser(page, uname);
+
+        // Wrong password → rejected, account still exists.
+        const wrong = await page.request.delete(`${BASE}/api/me`, {
+            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+            data: { current_password: 'a'.repeat(64) },
+        });
+        expect(wrong.status()).toBe(401);
+        expect(dbQuery('SELECT COUNT(*) FROM users WHERE id = ?1', [user.id])[0][0]).toBe(1);
+
+        // Correct password → deleted.
+        const delPw = await page.evaluate(async () => {
+            const authKeyB64 = localStorage.getItem('e2e_auth_key');
+            const key = new Uint8Array(E2ECrypto.base64ToArrayBuffer(authKeyB64));
+            return E2ECrypto.hmacHex(key, 'password123');
+        });
+        const ok = await page.request.delete(`${BASE}/api/me`, {
+            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+            data: { current_password: delPw },
+        });
+        expect(ok.status()).toBe(200);
+        expect(dbQuery('SELECT COUNT(*) FROM users WHERE id = ?1', [user.id])[0][0]).toBe(0);
+
+        // The deleted account can no longer log in at all.
+        const login = await page.request.post(`${BASE}/api/login`, {
+            headers: { 'Content-Type': 'application/json' },
+            data: { username: uname, password: delPw },
+        });
+        expect(login.status()).toBe(401);
+    });
+
+    test('settings UI deletes the account through the password-gated form', async ({ page }) => {
+        test.setTimeout(120000);
+        const ts = Date.now();
+        const uname = 'ks_ui_del_' + ts;
+        const { token, user } = await registerUser(page, uname);
+
+        await page.click('#settings-btn');
+        await page.waitForSelector('#settings-modal', { timeout: 5000 });
+        await page.click('.settings-tab[data-tab="security-settings"]');
+        await page.waitForSelector('#delete-account-btn', { timeout: 5000 });
+
+        // Open the section, fill a wrong password, cancel (clears the input).
+        await page.click('#delete-account-btn');
+        await page.waitForSelector('#delete-account-section', { state: 'visible', timeout: 5000 });
+        await page.fill('#delete-account-password', 'wrongpass');
+        await page.click('#delete-account-cancel-btn');
+        await page.waitForSelector('#delete-account-section', { state: 'hidden', timeout: 5000 });
+
+        // Reopen, fill the real password, confirm (dismiss the two confirm dialogs).
+        page.on('dialog', async (d) => d.accept());
+        await page.click('#delete-account-btn');
+        await page.fill('#delete-account-password', 'password123');
+        await page.click('#delete-account-confirm-btn');
+        await page.waitForURL('**/login.html', { timeout: 15000 });
+        expect(dbQuery('SELECT COUNT(*) FROM users WHERE id = ?1', [user.id])[0][0]).toBe(0);
+    });
+});
+
+test.describe('Kill Switch rate limiting (isolated server)', () => {
+    let child: ChildProcess;
+    let tmpDb: string;
+    // Ports 3454/3455 (G2 uses 3450/3451, admin-runtime-config uses
+    // 3452/3453) so isolated suites can run side by side.
+    const ALT = 'https://127.0.0.1:3455';
+
+    test.beforeAll(async ({ request }) => {
+        const serverDir = path.join(__dirname, '..', 'server');
+        const bin = path.join(serverDir, 'target', 'debug', process.platform === 'win32' ? 'e2e-chat.exe' : 'e2e-chat');
+        if (!fs.existsSync(bin)) throw new Error('server binary not found at ' + bin);
+        tmpDb = path.join(serverDir, `ks-rl-${Date.now()}.db`);
+        child = spawn(bin, [], {
+            cwd: serverDir,
+            env: {
+                ...process.env,
+                PORT: '3454',
+                HTTPS_PORT: '3455',
+                DATABASE_URL: tmpDb,
+                // Tiny kill-switch budget so the throttle trips deterministically.
+                KILL_SWITCH_IP_MAX: '3',
+                // Everything else raised so only the kill-switch limiter fires.
+                LOGIN_IP_MAX: '100000',
+                LOGIN_USER_MAX: '100000',
+                AUTH_PARAMS_IP_MAX: '100000',
+                HMAC_KEY_IP_MAX: '100000',
+                REGISTER_IP_MAX: '100000',
+                LOGIN_2FA_IP_MAX: '100000',
+            },
+            stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        let up = false;
+        for (let i = 0; i < 60; i++) {
+            try {
+                const r = await request.get(`${ALT}/`);
+                if (r.status() < 500) { up = true; break; }
+            } catch (_) { /* not up yet */ }
+            await new Promise((r2) => setTimeout(r2, 300));
+        }
+        expect(up, 'isolated server came up').toBe(true);
+    });
+
+    test.afterAll(async () => {
+        if (child) child.kill();
+        await new Promise((r) => setTimeout(r, 500));
+        if (tmpDb) {
+            try { fs.unlinkSync(tmpDb); } catch (_) {}
+        }
+    });
+
+    test('kill-switch proof attempts are throttled per IP, indistinguishable from a normal login rate-limit', async ({ request }) => {
+        test.setTimeout(120000);
+        // Fresh DB → the first admin login sets up the admin password.
+        const setup = await request.post(`${ALT}/api/admin/login`, { data: { password: 'hardening' } });
+        expect(setup.ok(), 'admin setup on isolated server').toBeTruthy();
+
+        const proof = 'a'.repeat(64);
+        // First 3 proof attempts are allowed — each is just a plain failed login.
+        for (let i = 0; i < 3; i++) {
+            const r = await request.post(`${ALT}/api/login`, {
+                headers: { 'Content-Type': 'application/json' },
+                data: { username: 'nobody', password: '', kill_switch_proof: proof },
+            });
+            expect(r.status(), `proof attempt ${i + 1} should be a plain 401`).toBe(401);
+        }
+        // The 4th trips the kill-switch budget with EXACTLY the same response
+        // as the general login rate-limit — nothing reveals a kill switch.
+        const blocked = await request.post(`${ALT}/api/login`, {
+            headers: { 'Content-Type': 'application/json' },
+            data: { username: 'nobody', password: '', kill_switch_proof: proof },
+        });
+        expect(blocked.status()).toBe(429);
+        const err = await blocked.json();
+        expect(err.error).toBe('Too many login attempts. Try again in 5 minutes.');
+
+        // The throttle only gates proof-carrying requests: a normal login from
+        // the same client still reaches the server (a plain 401 for a bogus
+        // user) instead of being blocked.
+        const normal = await request.post(`${ALT}/api/login`, {
+            headers: { 'Content-Type': 'application/json' },
+            data: { username: 'nobody2', password: 'whatever' },
+        });
+        expect(normal.status()).toBe(401);
     });
 });

@@ -103,7 +103,9 @@ test.describe('Admin runtime config (G2) — isolated server + temp DB', () => {
     expect(cfg.mutation_user_max).toBe(100000); // env override
     expect(cfg.mutation_ip_max).toBe(100000);
     expect(cfg.file_storage_quota_bytes).toBe(100000000000);
+    expect(cfg.max_file_size_mb).toBe(1024); // default 1024 MB (1 GB)
     expect(cfg.sources.mutation_user_max).toBe('env');
+    expect(cfg.sources.max_file_size_mb).toBe('default');
   });
 
   test('admin can tighten the per-user mutation budget live (no restart)', async ({ page }) => {
@@ -176,6 +178,89 @@ test.describe('Admin runtime config (G2) — isolated server + temp DB', () => {
       data: { file_storage_quota_bytes: 100000000000 },
     });
     expect(putBack.status()).toBe(200);
+  });
+
+  test('admin can change the max file size live (413 on the next upload init)', async ({ page }) => {
+    const adminToken = await adminLogin(page, 'rtadmin');
+    const token = await registerUser(page, 'rtfilesize_' + Date.now());
+
+    // Tighten to 1 MB.
+    const put = await page.request.put(`${ALT}/api/admin/runtime-config`, {
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+      data: { max_file_size_mb: 1 },
+    });
+    expect(put.status()).toBe(200);
+
+    const small = await page.request.post(`${ALT}/api/files/init`, {
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      data: { size: 500 * 1024 }, // 500 KB — under 1 MB
+    });
+    expect(small.status()).toBe(200);
+
+    const big = await page.request.post(`${ALT}/api/files/init`, {
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      data: { size: 2 * 1024 * 1024 }, // 2 MB — over 1 MB
+    });
+    expect(big.status()).toBe(413);
+
+    // The cap is PER FILE, not accumulated: four 500 KB files (2 MB total,
+    // well over the 1 MB limit in aggregate) are all accepted, because each
+    // individual file is under the cap. Users can upload as many files as
+    // they want up to the per-file limit (the separate per-user storage
+    // quota is what caps the total).
+    for (let i = 0; i < 4; i++) {
+      const multi = await page.request.post(`${ALT}/api/files/init`, {
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        data: { size: 500 * 1024 },
+      });
+      expect(multi.status(), `multi-upload file ${i + 1} should be accepted`).toBe(200);
+    }
+
+    // 0 = unlimited: even the oversized file is accepted once unset.
+    const unlimited = await page.request.put(`${ALT}/api/admin/runtime-config`, {
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+      data: { max_file_size_mb: 0 },
+    });
+    expect(unlimited.status()).toBe(200);
+    const afterUnlimited = await page.request.post(`${ALT}/api/files/init`, {
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      data: { size: 2 * 1024 * 1024 },
+    });
+    expect(afterUnlimited.status()).toBe(200);
+
+    // Restore the 1024 MB default.
+    const putBack = await page.request.put(`${ALT}/api/admin/runtime-config`, {
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+      data: { max_file_size_mb: 1024 },
+    });
+    expect(putBack.status()).toBe(200);
+  });
+
+  test('public /api/client-config exposes the effective max file size (no auth)', async ({ page }) => {
+    const adminToken = await adminLogin(page, 'rtadmin');
+
+    // Default first: 1024 MB = 1 GiB in bytes.
+    let res = await page.request.get(`${ALT}/api/client-config`);
+    expect(res.status()).toBe(200);
+    let cfg = await res.json();
+    expect(cfg.max_file_size_mb).toBe(1024);
+    expect(cfg.max_file_size_bytes).toBe(1024 * 1024 * 1024);
+
+    // Live change via admin → the public endpoint reflects it immediately.
+    await page.request.put(`${ALT}/api/admin/runtime-config`, {
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+      data: { max_file_size_mb: 3 },
+    });
+    res = await page.request.get(`${ALT}/api/client-config`);
+    cfg = await res.json();
+    expect(cfg.max_file_size_mb).toBe(3);
+    expect(cfg.max_file_size_bytes).toBe(3 * 1024 * 1024);
+
+    // Restore.
+    await page.request.put(`${ALT}/api/admin/runtime-config`, {
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+      data: { max_file_size_mb: 1024 },
+    });
   });
 
   test('saved values flip source to db, persist in admin_config, and hash is hidden', async ({ page }) => {
@@ -269,6 +354,11 @@ test.describe('Admin runtime config (G2) — isolated server + temp DB', () => {
       data: { file_storage_quota_bytes: -5 },
     });
     expect(negative.status()).toBe(400);
+    const negativeSize = await page.request.put(`${ALT}/api/admin/runtime-config`, {
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+      data: { max_file_size_mb: -1 },
+    });
+    expect(negativeSize.status()).toBe(400);
     const empty = await page.request.put(`${ALT}/api/admin/runtime-config`, {
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
       data: {},

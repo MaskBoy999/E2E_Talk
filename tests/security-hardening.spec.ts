@@ -110,7 +110,11 @@ test.describe('G2 — Mutation rate limit + storage quota (isolated server)', ()
     let up = false;
     for (let i = 0; i < 60; i++) {
       try {
-        const r = await fetch('http://localhost:3450/').catch(() => null);
+        // redirect:'manual' stops the HTTP→HTTPS redirect, so the check never
+        // follows it into TLS validation. The default follows the 301 to the
+        // self-signed HTTPS port and dies with DEPTH_ZERO_SELF_SIGNED_CERT,
+        // which made the isolated server never look "up" in this environment.
+        const r = await fetch('http://localhost:3450/', { redirect: 'manual' }).catch(() => null);
         if (r) { up = true; break; }
       } catch (_) { /* not up yet */ }
       await new Promise((r) => setTimeout(r, 300));

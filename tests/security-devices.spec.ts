@@ -91,9 +91,28 @@ test('list + force-kick one device from the Security > Devices panel', async ({ 
     const nameText = summary.names.join(' ');
     expect(nameText.length).toBeGreaterThan(0);
 
-    // Force-kick device 2 from device 1's panel.
-    page1.once('dialog', (d) => d.accept());
+    // Force-kick device 2 from device 1's panel — the styled, password-gated
+    // confirm modal now opens (NOT a native dialog).
     await page1.click('#devices-list .device-kick-btn');
+    await page1.waitForSelector('#kick-all-confirm-modal', { state: 'visible', timeout: 5000 });
+    const modalTitle = await page1.evaluate(() => document.getElementById('kick-all-confirm-title')!.textContent || '');
+    expect(modalTitle).toContain('Sign out this device?');
+
+    // Wrong password: inline error, modal stays open, device 2 untouched.
+    await page1.fill('#kick-all-password', 'wrongpass');
+    await page1.click('#kick-all-confirm-yes');
+    await page1.waitForSelector('#kick-all-error', { state: 'visible', timeout: 5000 });
+    const errText = await page1.evaluate(() => document.getElementById('kick-all-error')!.textContent || '');
+    expect(errText).toContain('Wrong password');
+    let stillAlive = await ctx2.request.get(`${BASE}/api/auth/sessions`, {
+        headers: { Authorization: 'Bearer ' + kickedToken },
+    });
+    expect(stillAlive.status()).toBe(200); // spamming the kick didn't work
+
+    // Correct password: device 2 is signed out everywhere.
+    await page1.fill('#kick-all-password', 'password123');
+    await page1.click('#kick-all-confirm-yes');
+    await page1.waitForSelector('#kick-all-confirm-modal', { state: 'hidden', timeout: 5000 });
 
     // Device 2 is signed out everywhere: WS session_revoked → login page.
     await page2.waitForURL('**/login.html', { timeout: 12000 });
@@ -107,10 +126,12 @@ test('list + force-kick one device from the Security > Devices panel', async ({ 
     const alive = await page1.evaluate(() => fetch('/api/auth/sessions', { headers: { Authorization: 'Bearer ' + localStorage.getItem('token') } }).then((r) => r.status));
     expect(alive).toBe(200);
 
-    // Device 1's panel now marks the kicked session as Signed out.
+    // Device 1's panel no longer lists the kicked device at all — signed-out
+    // sessions disappear from "signed in devices" instead of piling up as
+    // "Signed out" entries. Only this device remains.
     await page1.waitForFunction(() => {
         const items = Array.from(document.querySelectorAll('#devices-list .device-item'));
-        return items.some((el) => el.textContent!.includes('Signed out'));
+        return items.length === 1 && items[0].textContent!.includes('This device');
     }, undefined, { timeout: 8000 });
 
     await ctx1.close();
@@ -132,13 +153,17 @@ test('kick-all signs out every other device and their tokens die', async ({ brow
     // Capture device 2's token BEFORE the kick (it gets cleared client-side).
     const otherToken = other.token;
 
-    // Device 1 signs out all other devices (API directly).
-    const kickAll = await page1.evaluate(() =>
-        fetch('/api/auth/sessions/kick-all', {
+    // Device 1 signs out all other devices (API directly) — password-gated now.
+    const kickAll = await page1.evaluate(async () => {
+        const authKeyB64 = localStorage.getItem('e2e_auth_key');
+        const key = new Uint8Array(E2ECrypto.base64ToArrayBuffer(authKeyB64));
+        const current_password = E2ECrypto.hmacHex(key, 'password123');
+        return fetch('/api/auth/sessions/kick-all', {
             method: 'POST',
-            headers: { Authorization: 'Bearer ' + localStorage.getItem('token') },
-        }).then((r) => r.json())
-    );
+            headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + localStorage.getItem('token') },
+            body: JSON.stringify({ current_password }),
+        }).then((r) => r.json());
+    });
     expect(kickAll.ok).toBe(true);
 
     // Device 2 is redirected to login.
@@ -186,9 +211,21 @@ test('kick-all confirmation modal: cancel aborts, confirm signs out all other de
     });
     expect(status.status()).toBe(200);
 
-    // Confirm: modal closes and every other device is signed out.
+    // Wrong password → inline error, modal stays open, nothing is signed out.
     await page1.click('#kick-all-devices-btn');
     await page1.waitForSelector('#kick-all-confirm-modal', { state: 'visible', timeout: 5000 });
+    await page1.fill('#kick-all-password', 'wrongpass');
+    await page1.click('#kick-all-confirm-yes');
+    await page1.waitForSelector('#kick-all-error', { state: 'visible', timeout: 5000 });
+    const errText = await page1.evaluate(() => document.getElementById('kick-all-error')!.textContent || '');
+    expect(errText).toContain('Wrong password');
+    status = await ctx2.request.get(`${BASE}/api/auth/sessions`, {
+        headers: { Authorization: 'Bearer ' + otherToken },
+    });
+    expect(status.status()).toBe(200); // device 2 still signed in
+
+    // Correct password: modal closes and every other device is signed out.
+    await page1.fill('#kick-all-password', 'password123');
     await page1.click('#kick-all-confirm-yes');
     await page1.waitForSelector('#kick-all-confirm-modal', { state: 'hidden', timeout: 5000 });
 
@@ -230,8 +267,41 @@ test('logout revokes the server-side session (token cannot be replayed)', async 
     });
     const data = await list.json();
     expect(Array.isArray(data.sessions)).toBe(true);
-    expect(data.sessions.filter((s: any) => !s.revoked).length).toBe(1);
-    expect(data.sessions.find((s: any) => !s.revoked).is_current).toBe(true);
+    // The signed-out session is NOT in the list — only the fresh, active one.
+    expect(data.sessions.length).toBe(1);
+    expect(data.sessions[0].revoked).toBe(false);
+    expect(data.sessions[0].is_current).toBe(true);
+
+    await ctx.close();
+});
+
+test('repeated sign-in/out does not accumulate signed-out devices in the panel', async ({ browser }) => {
+    const ctx = await browser.newContext();
+    const page = await ctx.newPage();
+    const u = 'dev_cycle_' + Date.now();
+    await registerUser(page, u);
+
+    // Sign out and back in several times — each login mints a NEW server-side
+    // session row, so without filtering the panel would fill up with stale
+    // "Signed out" entries.
+    for (let i = 0; i < 3; i++) {
+        await page.evaluate(() => fetch('/api/logout', { method: 'POST', headers: { Authorization: 'Bearer ' + localStorage.getItem('token') } }));
+        await page.evaluate(() => { localStorage.removeItem('token'); localStorage.removeItem('user'); });
+        await loginUser(page, u);
+    }
+
+    // The panel lists ONLY the current session.
+    await openDevices(page, 1);
+    const count = await page.evaluate(() => document.querySelectorAll('#devices-list .device-item').length);
+    expect(count).toBe(1);
+    const text = await page.evaluate(() => document.querySelector('#devices-list .device-item')!.textContent || '');
+    expect(text).toContain('This device');
+
+    // Same via the raw API: every returned row is active, none signed-out.
+    const list = await page.evaluate(() => fetch('/api/auth/sessions', { headers: { Authorization: 'Bearer ' + localStorage.getItem('token') } }).then((r) => r.json()));
+    expect(list.sessions.length).toBe(1);
+    expect(list.sessions[0].revoked).toBe(false);
+    expect(list.sessions[0].is_current).toBe(true);
 
     await ctx.close();
 });
@@ -255,9 +325,27 @@ test('WS auth rejects a kicked session after a full page refresh', async ({ brow
     const target = sessData.sessions.find((s: any) => s.id !== sessData.sessions.find((x: any) => x.is_current).id);
     expect(target).toBeTruthy();
 
-    const kick = await ctx1.request.post(`${BASE}/api/auth/sessions/kick`, {
+    // Per-device kick is password-gated now: a kick without the current
+    // password is rejected, so a stolen session can't spam individual
+    // sign-outs. Compute the client-side hash exactly like the UI does.
+    const badKick = await ctx1.request.post(`${BASE}/api/auth/sessions/kick`, {
         headers: { Authorization: 'Bearer ' + (await page1.evaluate(() => localStorage.getItem('token'))) },
         data: { session_id: target.id },
+    });
+    expect(badKick.status()).toBe(422); // missing current_password
+    const stillAlive = await ctx2.request.get(`${BASE}/api/auth/sessions`, {
+        headers: { Authorization: 'Bearer ' + kicked.token },
+    });
+    expect(stillAlive.status()).toBe(200);
+
+    const current_password = await page1.evaluate(() => {
+        const authKeyB64 = localStorage.getItem('e2e_auth_key');
+        const key = new Uint8Array(E2ECrypto.base64ToArrayBuffer(authKeyB64));
+        return E2ECrypto.hmacHex(key, 'password123');
+    });
+    const kick = await ctx1.request.post(`${BASE}/api/auth/sessions/kick`, {
+        headers: { Authorization: 'Bearer ' + (await page1.evaluate(() => localStorage.getItem('token'))) },
+        data: { session_id: target.id, current_password },
     });
     expect((await kick.json()).ok).toBe(true);
 

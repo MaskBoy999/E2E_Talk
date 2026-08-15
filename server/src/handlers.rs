@@ -80,6 +80,22 @@ static LOGIN_IP_RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(|| RateLimit
     attempts: Mutex::new(HashMap::new()),
 });
 
+/// Kill-switch proof attempts get a dedicated, tighter per-IP budget so an
+/// attacker can't brute-force kill-switch passwords through /api/login even
+/// if the general login limits are raised. Env-overridable for test suites
+/// (same pattern as LOGIN_IP_MAX): set KILL_SWITCH_IP_MAX=0 to disable, or a
+/// number to raise the budget.
+static KILL_SWITCH_IP_RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(|| RateLimiter {
+    attempts: Mutex::new(HashMap::new()),
+});
+
+/// Per-IP throttle for the public /api/client-config endpoint (the value is
+/// public, but the endpoint shouldn't be hammerable). Env-overridable for
+/// test suites (same pattern as HMAC_KEY_IP_MAX).
+static CLIENT_CONFIG_IP_RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(|| RateLimiter {
+    attempts: Mutex::new(HashMap::new()),
+});
+
 static FRIEND_REQUEST_IP_RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(|| RateLimiter {
     attempts: Mutex::new(HashMap::new()),
 });
@@ -346,8 +362,26 @@ pub async fn list_auth_sessions(
         }
     };
 
+    // Only ACTIVE sessions belong in the "signed in devices" list. Revoked
+    // (signed-out) and naturally-expired sessions are dropped so the panel
+    // never fills up with stale "Signed out" entries — every listed device is
+    // one that can actually still be used.
+    let now = chrono::Utc::now();
     let sessions: Vec<serde_json::Value> = rows
         .into_iter()
+        .filter(|(_, _, _, _, _, expires_at, revoked)| {
+            if *revoked != 0 {
+                return false;
+            }
+            if !expires_at.is_empty() {
+                if let Ok(exp) = chrono::DateTime::parse_from_rfc3339(expires_at) {
+                    if exp.with_timezone(&chrono::Utc) <= now {
+                        return false;
+                    }
+                }
+            }
+            true
+        })
         .map(|(id, device_id, device_name, created_at, last_active_at, expires_at, revoked)| {
             let short_id = if device_id.len() > 8 {
                 format!("…{}", &device_id[device_id.len() - 8..])
@@ -373,12 +407,17 @@ pub async fn list_auth_sessions(
 #[derive(Deserialize)]
 pub struct KickSessionRequest {
     pub session_id: String,
+    /// Client-computed hash of the CURRENT password: HMAC-SHA256(hash_key, raw).
+    /// Per-device sign-out is password-gated exactly like kick-all, so a stolen
+    /// session can't sign out the real user's devices one at a time.
+    pub current_password: String,
 }
 
 /// POST /api/auth/sessions/kick — revoke one session. If that device is
 /// currently connected over WebSocket it is told immediately (session_revoked)
 /// and dropped from any voice room it occupies; otherwise the next time its
 /// token is validated (API call or WS auth) it is rejected.
+/// Password-gated like every other destructive/permanent action.
 pub async fn kick_auth_session(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
@@ -388,6 +427,25 @@ pub async fn kick_auth_session(
         Ok(c) => (c.sub, c.sid),
         Err(r) => return r.into_response(),
     };
+    let stored_hash = match state.db.get_password_hash_by_id(&user_id) {
+        Ok(h) => h,
+        Err(_) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "User not found"})),
+            )
+                .into_response();
+        }
+    };
+    use subtle::ConstantTimeEq;
+    let valid: bool = req.current_password.as_bytes().ct_eq(stored_hash.as_bytes()).into();
+    if !valid {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Wrong password"})),
+        )
+            .into_response();
+    }
 
     let revoked = match state.db.revoke_auth_session(&req.session_id, &user_id) {
         Ok(r) => r,
@@ -421,15 +479,43 @@ pub async fn kick_auth_session(
 }
 
 /// POST /api/auth/sessions/kick-all — revoke every session except the current
-/// one ("log out everywhere else" button).
+/// one ("log out everywhere else" button). Password-gated like every other
+/// destructive/permanent action, so a stolen session can't sign out the real
+/// user's other devices.
+#[derive(Deserialize)]
+pub struct KickAllSessionsRequest {
+    /// Client-computed hash of the CURRENT password: HMAC-SHA256(hash_key, raw).
+    pub current_password: String,
+}
+
 pub async fn kick_all_auth_sessions(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
+    Json(req): Json<KickAllSessionsRequest>,
 ) -> impl IntoResponse {
     let (user_id, current_sid) = match extract_claims(&headers, &state) {
         Ok(c) => (c.sub, c.sid),
         Err(r) => return r.into_response(),
     };
+    let stored_hash = match state.db.get_password_hash_by_id(&user_id) {
+        Ok(h) => h,
+        Err(_) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "User not found"})),
+            )
+                .into_response();
+        }
+    };
+    use subtle::ConstantTimeEq;
+    let valid: bool = req.current_password.as_bytes().ct_eq(stored_hash.as_bytes()).into();
+    if !valid {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Wrong password"})),
+        )
+            .into_response();
+    }
 
     let n = match state.db.revoke_auth_sessions_except(&user_id, &current_sid) {
         Ok(n) => n,
@@ -832,6 +918,23 @@ pub async fn login(
             .into_response();
     }
 
+    // Kill-switch proof attempts get their own tighter per-IP budget (default
+    // 5/5min vs the general 10/5min) so a brute-force of kill-switch passwords
+    // is throttled even if LOGIN_IP_MAX is raised. The response is byte-identical
+    // to the general login rate-limit (same status + message), so hitting this
+    // throttle never reveals whether an account has a kill switch.
+    if req.kill_switch_proof.is_some() {
+        let ks_ip_key = format!("login_ks_ip:{}", ip);
+        let ks_ip_max: u32 = std::env::var("KILL_SWITCH_IP_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(5);
+        if ks_ip_max > 0 && !KILL_SWITCH_IP_RATE_LIMITER.check_and_increment(&ks_ip_key, ks_ip_max, Duration::from_secs(300)) {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({"error": "Too many login attempts. Try again in 5 minutes."})),
+            )
+                .into_response();
+        }
+    }
+
     let password_hash = match state.db.get_password_hash(&req.username) {
         Ok(h) => h,
         Err(_) => {
@@ -1041,6 +1144,19 @@ pub async fn login_2fa(
     let secret_row = match state.db.get_totp_secret(&claims.sub) {
         Ok(Some(r)) => r,
         _ => {
+            // Kill-switch path: a replayed pending token hits this after the
+            // account was already deleted by a previous verified code. Answer
+            // with the same generic server error so the deletion stays hidden
+            // (a normal 2FA login keeps the specific message).
+            if is_kill_switch {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": "Internal server error. Please try again later."
+                    })),
+                )
+                    .into_response();
+            }
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({"error": "2FA is not enabled for this account"})),
@@ -4265,11 +4381,13 @@ pub async fn admin_get_runtime_config(
             "mutation_user_max": tuning.mutation_user_max,
             "mutation_ip_max": tuning.mutation_ip_max,
             "file_storage_quota_bytes": tuning.file_storage_quota_bytes,
+            "max_file_size_mb": tuning.max_file_size_mb,
             "admin_audit_redact_ips": redact,
             "sources": {
                 "mutation_user_max": tuning.sources[0],
                 "mutation_ip_max": tuning.sources[1],
                 "file_storage_quota_bytes": tuning.sources[2],
+                "max_file_size_mb": tuning.sources[3],
             },
         })),
     )
@@ -4284,6 +4402,9 @@ pub struct AdminSetRuntimeConfigRequest {
     pub mutation_ip_max: Option<u64>,
     #[serde(default)]
     pub file_storage_quota_bytes: Option<i64>,
+    /// Max single-file upload size in MB (0 = unlimited, default 1024).
+    #[serde(default)]
+    pub max_file_size_mb: Option<i64>,
     /// F5 — when true, admin audit entries store a redacted placeholder
     /// instead of the raw client IP (privacy toggle, live-applied).
     #[serde(default)]
@@ -4305,6 +4426,7 @@ pub async fn admin_set_runtime_config(
     if req.mutation_user_max.is_none()
         && req.mutation_ip_max.is_none()
         && req.file_storage_quota_bytes.is_none()
+        && req.max_file_size_mb.is_none()
         && req.admin_audit_redact_ips.is_none()
     {
         return (
@@ -4341,6 +4463,15 @@ pub async fn admin_set_runtime_config(
                 .into_response();
         }
     }
+    if let Some(v) = req.max_file_size_mb {
+        if v < 0 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "max_file_size_mb must be >= 0 (0 = unlimited)"})),
+            )
+                .into_response();
+        }
+    }
 
     let mut summary = Vec::new();
     {
@@ -4363,6 +4494,12 @@ pub async fn admin_set_runtime_config(
             let _ = state.db.set_config_value("file_storage_quota_bytes", &v.to_string());
             summary.push(format!("file_storage_quota_bytes={}", v));
         }
+        if let Some(v) = req.max_file_size_mb {
+            tuning.max_file_size_mb = v;
+            tuning.sources[3] = "db";
+            let _ = state.db.set_config_value("max_file_size_mb", &v.to_string());
+            summary.push(format!("max_file_size_mb={}", v));
+        }
         // F5 — IP redaction toggle (live-applied; read on every audit write).
         if let Some(v) = req.admin_audit_redact_ips {
             let _ = state.db.set_config_value("admin_audit_redact_ips", if v { "1" } else { "0" });
@@ -4379,6 +4516,7 @@ pub async fn admin_set_runtime_config(
             "mutation_user_max": tuning.mutation_user_max,
             "mutation_ip_max": tuning.mutation_ip_max,
             "file_storage_quota_bytes": tuning.file_storage_quota_bytes,
+            "max_file_size_mb": tuning.max_file_size_mb,
         })),
     )
         .into_response()
@@ -4797,7 +4935,6 @@ pub async fn admin_import_db(
 
 // ===== Phase 5: File Sharing =====
 
-const MAX_FILE_SIZE: i64 = 10 * 1024 * 1024 * 1024; // 10 GB
 const UPLOAD_DIR: &str = "uploads";
 
 #[derive(Deserialize)]
@@ -4825,7 +4962,10 @@ pub async fn init_file_upload(
             .into_response();
     }
 
-    if req.size > MAX_FILE_SIZE {
+    // Max single-file size, runtime-tunable from the admin panel (MB; DB →
+    // env MAX_FILE_SIZE_MB → 1024 MB default). 0 disables the cap.
+    let max_file_bytes = state.runtime_tuning.read().unwrap().max_file_size_mb * 1024 * 1024;
+    if max_file_bytes > 0 && req.size > max_file_bytes {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
             Json(serde_json::json!({"error": "File too large"})),
@@ -5731,14 +5871,42 @@ async fn delete_account_and_cleanup(
     Ok(file_ids)
 }
 
+#[derive(Deserialize)]
+pub struct DeleteMeRequest {
+    /// Client-computed hash of the CURRENT password: HMAC-SHA256(hash_key, raw).
+    pub current_password: String,
+}
+
 pub async fn delete_me(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
+    Json(req): Json<DeleteMeRequest>,
 ) -> impl IntoResponse {
     let user_id = match extract_user(&headers, &state) {
         Ok(id) => id,
         Err(e) => return e.into_response(),
     };
+    let stored_hash = match state.db.get_password_hash_by_id(&user_id) {
+        Ok(h) => h,
+        Err(_) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "User not found"})),
+            )
+                .into_response();
+        }
+    };
+    // Deleting is permanent — require the password so a stolen session can't
+    // nuke the account (same rule as 2FA, password change, and kill switch).
+    use subtle::ConstantTimeEq;
+    let valid: bool = req.current_password.as_bytes().ct_eq(stored_hash.as_bytes()).into();
+    if !valid {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Wrong password"})),
+        )
+            .into_response();
+    }
 
     match delete_account_and_cleanup(&state, &user_id).await {
         Ok(_) => {
@@ -5778,15 +5946,18 @@ pub struct SetKillSwitchRequest {
     pub check: String,
 }
 
-/// POST /api/me/kill-switch — arm (or re-arm) the Kill Switch.
+/// POST /api/me/kill-switch — arm (or re-arm) the Kill Switch. Arming is a
+/// security event: every OTHER session is force-signed-out (the arming device
+/// stays logged in) so the kill-switch password isn't competing with live
+/// sessions on other devices.
 pub async fn set_kill_switch(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(req): Json<SetKillSwitchRequest>,
 ) -> impl IntoResponse {
-    let user_id = match extract_user(&headers, &state) {
-        Ok(id) => id,
-        Err(e) => return e.into_response(),
+    let (user_id, current_sid) = match extract_claims(&headers, &state) {
+        Ok(c) => (c.sub, c.sid),
+        Err(r) => return r.into_response(),
     };
     let stored_hash = match state.db.get_password_hash_by_id(&user_id) {
         Ok(h) => h,
@@ -5839,7 +6010,14 @@ pub async fn set_kill_switch(
         &req.ks_salt,
         &req.check,
     ) {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Ok(()) => {
+            // Force-sign-out every other session (same semantics as the
+            // Devices panel's "Sign out all other devices") and live-kick the
+            // now-revoked devices so they're told immediately.
+            let n = state.db.revoke_auth_sessions_except(&user_id, &current_sid).unwrap_or(0);
+            live_kick_other_devices(&state, &user_id, &current_sid, "kill_switch_armed").await;
+            (StatusCode::OK, Json(serde_json::json!({"ok": true, "revoked": n}))).into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
 }
@@ -5910,6 +6088,31 @@ pub async fn get_hmac_key(
     }
     (StatusCode::OK, Json(serde_json::json!({
         "hmac_key": state.config.hmac_key,
+    }))).into_response()
+}
+
+/// GET /api/client-config — public, unauthenticated. Tells clients the
+/// currently-configured upload limits so their pre-upload checks match the
+/// server. Values are runtime-tunable from the admin panel (Runtime Limits).
+pub async fn client_config(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let ip = get_client_ip(&headers);
+    let rate_key = format!("client_config_ip:{}", ip);
+    let ip_max: u32 = std::env::var("CLIENT_CONFIG_IP_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
+    if ip_max > 0 && !CLIENT_CONFIG_IP_RATE_LIMITER.check_and_increment(&rate_key, ip_max, Duration::from_secs(60)) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "Too many requests. Try again later."})),
+        )
+            .into_response();
+    }
+    let tuning = state.runtime_tuning.read().unwrap();
+    let max_mb = tuning.max_file_size_mb;
+    (StatusCode::OK, Json(serde_json::json!({
+        "max_file_size_mb": max_mb,
+        "max_file_size_bytes": max_mb * 1024 * 1024,
     }))).into_response()
 }
 

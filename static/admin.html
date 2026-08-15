@@ -544,7 +544,7 @@
     <!-- Runtime Limits Modal (G2 — live-tunable, no restart) -->
     <div class="modal" id="runtime-limits-modal" style="display:none">
         <div class="modal-content" style="max-width:560px">
-            <h3 style="margin-bottom:4px;color:var(--accent)">⚙ Runtime Limits (G2)</h3>
+            <h3 style="margin-bottom:4px;color:var(--accent)">⚙ Runtime Limits</h3>
             <p style="margin-bottom:16px;color:var(--text-muted);font-size:13px">
                 Applied live — no restart needed. <code>0</code> disables a limit.
                 Values are stored in the DB and take precedence over env vars.
@@ -567,6 +567,13 @@
                         Per-user storage quota (bytes) <span id="rt-src-quota" class="rt-source"></span>
                     </label>
                     <input type="number" id="rt-quota-bytes" min="0" class="modal-input" style="width:100%;box-sizing:border-box;" />
+                </div>
+                <div>
+                    <label for="rt-max-file-size-mb" style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">
+                        Max file size per file (MB) <span id="rt-src-file-size" class="rt-source"></span>
+                    </label>
+                    <input type="number" id="rt-max-file-size-mb" min="0" class="modal-input" style="width:100%;box-sizing:border-box;" />
+                    <div style="font-size:11px;color:var(--text-muted);margin-top:4px">Per-file cap — users may upload any number of files, each up to this size. The per-user storage quota above caps the total. Default 1024 (1&nbsp;GB). <code>0</code> = unlimited.</div>
                 </div>
                 <div>
                     <label for="rt-redact-ips" style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">

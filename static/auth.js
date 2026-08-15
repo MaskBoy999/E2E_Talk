@@ -444,6 +444,15 @@ document.addEventListener('DOMContentLoaded', () => {
                     errEl.textContent = data.error || 'Invalid code';
                     errEl.style.display = 'block';
                     submitBtn.disabled = false;
+                    // A server-side failure (e.g. a kill-switch deletion just
+                    // completed) must not leave the pending token replayable —
+                    // the next attempt starts a fresh login instead.
+                    if (res.status >= 500 && _pending2fa) {
+                        _pending2fa = null;
+                        document.getElementById('login-2fa-form').style.display = 'none';
+                        document.getElementById('login-form').style.display = 'block';
+                        showError(data.error || 'Internal server error');
+                    }
                     return;
                 }
                 const pendingPassword = _pending2fa.password;

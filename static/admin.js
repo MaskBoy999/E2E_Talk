@@ -779,10 +779,12 @@ async function loadRuntimeConfig() {
         document.getElementById('rt-mutation-user-max').value = cfg.mutation_user_max;
         document.getElementById('rt-mutation-ip-max').value = cfg.mutation_ip_max;
         document.getElementById('rt-quota-bytes').value = cfg.file_storage_quota_bytes;
+        document.getElementById('rt-max-file-size-mb').value = cfg.max_file_size_mb;
         const src = cfg.sources || {};
         document.getElementById('rt-src-user').textContent = '(' + (src.mutation_user_max || 'db') + ')';
         document.getElementById('rt-src-ip').textContent = '(' + (src.mutation_ip_max || 'db') + ')';
         document.getElementById('rt-src-quota').textContent = '(' + (src.file_storage_quota_bytes || 'db') + ')';
+        document.getElementById('rt-src-file-size').textContent = '(' + (src.max_file_size_mb || 'db') + ')';
         const redactEl = document.getElementById('rt-redact-ips');
         if (redactEl) redactEl.checked = !!cfg.admin_audit_redact_ips;
         setRtStatus('Loaded');
@@ -804,6 +806,7 @@ async function saveRuntimeConfig() {
         mutation_user_max: parseInt(document.getElementById('rt-mutation-user-max').value, 10) || 0,
         mutation_ip_max: parseInt(document.getElementById('rt-mutation-ip-max').value, 10) || 0,
         file_storage_quota_bytes: parseInt(document.getElementById('rt-quota-bytes').value, 10) || 0,
+        max_file_size_mb: parseInt(document.getElementById('rt-max-file-size-mb').value, 10) || 0,
         ...(redactEl ? { admin_audit_redact_ips: redactEl.checked } : {}),
     };
     try {

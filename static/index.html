@@ -681,6 +681,16 @@
                     <h4>Danger Zone</h4>
                     <p class="settings-hint">Permanently delete your account and all associated data. This cannot be undone.</p>
                     <button class="btn-delete-account" id="delete-account-btn">Delete Account</button>
+                    <div id="delete-account-section" style="display:none;margin-top:10px;">
+                        <div class="auth-input-row" style="margin-bottom:8px;">
+                            <input type="password" id="delete-account-password" placeholder="Enter your password to confirm deletion" class="modal-input auth-code-input" style="flex:1;" autocomplete="current-password" />
+                            <button type="button" class="toggle-visibility-btn" id="toggle-delete-account-password" title="Show/Hide">&#128065;</button>
+                        </div>
+                        <p class="settings-hint" style="color:var(--danger,#ed4245);margin-bottom:8px;">This permanently deletes your account, all messages, servers, files, and keys. It cannot be undone.</p>
+                        <button class="btn-reauth-confirm" id="delete-account-confirm-btn" style="background:var(--danger,#ed4245);color:#fff;">Permanently Delete</button>
+                        <button class="btn-reauth" id="delete-account-cancel-btn" style="margin-left:8px;">Cancel</button>
+                    </div>
+                    <p id="delete-account-status" style="margin-top:8px;font-size:13px;"></p>
                 </div>
             </div>
 
@@ -1646,12 +1656,19 @@
         </div>
     </div>
 
-    <!-- Sign-out-all confirmation: shown before kicking every other device.
-         Cancel-only like the password-change / 2FA modals. -->
+    <!-- Sign-out confirmation: shown before kicking a single device or every
+         other device (per-device sign-out is password-gated like kick-all so a
+         stolen session can't sign out devices one at a time). Cancel-only like
+         the password-change / 2FA modals; title/description are set by JS. -->
     <div class="modal" id="kick-all-confirm-modal" style="display:none">
         <div class="modal-content" style="max-width:440px">
-            <h3 style="margin-bottom:8px;color:var(--danger)">Sign out all other devices?</h3>
-            <p style="color:var(--text-muted);font-size:13px;margin-bottom:10px;">This device stays signed in. Every other device is signed out immediately &mdash; including from voice channels and calls &mdash; and will need to sign in again.</p>
+            <h3 style="margin-bottom:8px;color:var(--danger)" id="kick-all-confirm-title">Sign out all other devices?</h3>
+            <p style="color:var(--text-muted);font-size:13px;margin-bottom:10px;" id="kick-all-confirm-desc">This device stays signed in. Every other device is signed out immediately &mdash; including from voice channels and calls &mdash; and will need to sign in again.</p>
+            <div class="auth-input-row" style="margin-bottom:10px;">
+                <input type="password" id="kick-all-password" placeholder="Enter your password to confirm" class="modal-input auth-code-input" style="flex:1;" autocomplete="current-password" />
+                <button type="button" class="toggle-visibility-btn" id="toggle-kick-all-password" title="Show/Hide">&#128065;</button>
+            </div>
+            <p id="kick-all-error" style="color:var(--danger,#ed4245);font-size:13px;margin-bottom:10px;display:none;"></p>
             <div class="modal-actions">
                 <button class="btn-cancel" id="kick-all-confirm-cancel">Cancel</button>
                 <button class="btn-invite" id="kick-all-confirm-yes" style="background:#ed4245;border-color:#ed4245;">Yes, Sign Out</button>
@@ -1661,6 +1678,6 @@
 
     <script src="secure-storage.js?v=1"></script>
     <script src="voice.js?v=2"></script>
-    <script src="chat.js?v=38"></script>
+    <script src="chat.js?v=39"></script>
 </body>
 </html>

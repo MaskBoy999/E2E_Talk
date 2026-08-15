@@ -28,6 +28,9 @@ export default defineConfig({
             FRIEND_REQUEST_USER_MAX: '100000',
             LOGIN_IP_MAX: '100000',
             LOGIN_USER_MAX: '100000',
+            // Kill-switch proof attempts have their own tighter per-IP budget;
+            // raise it so the kill-switch suite's logins never 429 mid-suite.
+            KILL_SWITCH_IP_MAX: '100000',
             // F2: registration is now per-IP limited (account spam) — the suite
             // registers dozens of users from one IP, so raise the budget.
             REGISTER_IP_MAX: '100000',
@@ -36,6 +39,7 @@ export default defineConfig({
             LOGIN_2FA_IP_MAX: '100000',
             AUTH_PARAMS_IP_MAX: '100000',
             HMAC_KEY_IP_MAX: '100000',
+            CLIENT_CONFIG_IP_MAX: '100000',
             // Admin-login attempts share a per-IP budget; raise it for the suite
             // (admin tests + probes log in repeatedly from one machine).
             ADMIN_LOGIN_IP_MAX: '100000',

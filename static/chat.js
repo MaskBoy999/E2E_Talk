@@ -1036,51 +1036,76 @@ function renderDevicesPanel() {
         });
 }
 
+// The confirm modal below is shared by per-device sign-out and kick-all. When
+// _kickPendingSid is set, confirming signs out that ONE session (password-gated
+// like kick-all so a stolen session can't sign out devices one at a time); when
+// null it signs out every other device.
+var _kickPendingSid = null;
+
+function prepareKickModal(title, desc) {
+    var t = document.getElementById('kick-all-confirm-title');
+    if (t) t.textContent = title;
+    var d = document.getElementById('kick-all-confirm-desc');
+    if (d) d.textContent = desc;
+    var pwEl = document.getElementById('kick-all-password');
+    if (pwEl) { pwEl.type = 'password'; pwEl.value = ''; }
+    var tgl = document.getElementById('toggle-kick-all-password');
+    if (tgl) { tgl.innerHTML = '&#128065;'; tgl.classList.remove('active'); }
+    var errEl = document.getElementById('kick-all-error');
+    if (errEl) errEl.style.display = 'none';
+}
+
 function kickDevice(sid) {
     if (!sid) return;
-    if (!confirm('Sign this device out of your account everywhere? It will be disconnected from voice channels and calls too.')) return;
-    fetch('/api/auth/sessions/kick', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token() },
-        body: JSON.stringify({ session_id: sid })
-    })
-        .then(function (r) { return r.json(); })
-        .then(function (data) {
-            if (data && data.ok) {
-                renderDevicesPanel();
-                flashToast('Device signed out.', 'success');
-            } else {
-                flashToast((data && data.error) || 'Failed to sign out device.', 'error');
-            }
-        })
-        .catch(function () {
-            flashToast('Server is not running.', 'error');
-        });
+    _kickPendingSid = sid;
+    // Styled confirmation first (never a stray click): this is a permanent,
+    // destructive action, so it is password-gated like kick-all.
+    prepareKickModal('Sign out this device?', 'This device will be signed out immediately — including from voice channels and calls — and will need to sign in again.');
+    showModal('kick-all-confirm-modal');
 }
 
 function kickAllDevices() {
     // Styled confirmation first — signing out every other device is
     // destructive, so it must never fire on a single stray click. Replaces the
     // old native confirm() (consistent with the password-change modal).
+    _kickPendingSid = null;
+    prepareKickModal('Sign out all other devices?', 'This device stays signed in. Every other device is signed out immediately — including from voice channels and calls — and will need to sign in again.');
     showModal('kick-all-confirm-modal');
 }
 
 function confirmKickAllDevices() {
     var yesBtn = document.getElementById('kick-all-confirm-yes');
+    var pwEl = document.getElementById('kick-all-password');
+    var errEl = document.getElementById('kick-all-error');
+    var pw = pwEl ? pwEl.value : '';
+    if (!pw) {
+        if (errEl) { errEl.textContent = 'Enter your password to confirm'; errEl.style.display = 'block'; }
+        return;
+    }
     if (yesBtn) yesBtn.disabled = true;
-    fetch('/api/auth/sessions/kick-all', {
-        method: 'POST',
-        headers: { 'Authorization': 'Bearer ' + token() }
-    })
+    var endpoint = _kickPendingSid ? '/api/auth/sessions/kick' : '/api/auth/sessions/kick-all';
+    computeHashedPasswordGlobal(pw)
+        .then(function (current_password) {
+            var payload = { current_password: current_password };
+            if (_kickPendingSid) payload.session_id = _kickPendingSid;
+            return fetch(endpoint, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token() },
+                body: JSON.stringify(payload)
+            });
+        })
         .then(function (r) { return r.json(); })
         .then(function (data) {
-            hideModal('kick-all-confirm-modal');
-            if (yesBtn) yesBtn.disabled = false;
             if (data && data.ok) {
+                hideModal('kick-all-confirm-modal');
+                if (yesBtn) yesBtn.disabled = false;
                 renderDevicesPanel();
-                flashToast('All other devices signed out.', 'success');
+                flashToast(_kickPendingSid ? 'Device signed out.' : 'All other devices signed out.', 'success');
             } else {
-                flashToast((data && data.error) || 'Failed to sign out devices.', 'error');
+                // Wrong password or a server rejection: keep the modal open
+                // and surface the error inline so the user can retry.
+                if (errEl) { errEl.textContent = (data && data.error) || 'Failed to sign out.'; errEl.style.display = 'block'; }
+                if (yesBtn) yesBtn.disabled = false;
             }
         })
         .catch(function () {
@@ -2880,25 +2905,70 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (_) {}
     }
 
-    document.getElementById('delete-account-btn').addEventListener('click', async () => {
-        if (!confirm('Are you sure you want to delete your account? This cannot be undone.')) return;
-        if (!confirm('Really? All your messages, servers, and keys will be permanently lost.')) return;
-        try {
-            const res = await authFetch('/api/me', { method: 'DELETE' });
-            if (res.ok) {
-                clearAllClientData();
-                if (ws) ws.close();
-                // The server clears the HttpOnly cookie in the delete_me response,
-                // so we can redirect directly to login without the /api/logout roundtrip.
-                window.location.href = '/login.html';
-            } else {
+    // Delete Account — password-gated, like every other permanent action
+    // (2FA, password change, kill switch): a stolen session can't delete the
+    // account without the real password.
+    var deleteAcctBtn = document.getElementById('delete-account-btn');
+    var deleteAcctSection = document.getElementById('delete-account-section');
+    var deleteAcctStatus = document.getElementById('delete-account-status');
+    function setDeleteAcctStatus(msg, kind) {
+        if (!deleteAcctStatus) return;
+        deleteAcctStatus.textContent = msg;
+        deleteAcctStatus.style.color = kind === 'error' ? 'var(--danger)' : (kind === 'success' ? '#43b581' : 'var(--text-muted)');
+    }
+    function resetDeleteAcctInputs() {
+        var inp = document.getElementById('delete-account-password');
+        if (inp) { inp.type = 'password'; inp.value = ''; }
+        var tgl = document.getElementById('toggle-delete-account-password');
+        if (tgl) { tgl.innerHTML = '&#128065;'; tgl.classList.remove('active'); }
+    }
+    if (deleteAcctBtn && deleteAcctSection) {
+        deleteAcctBtn.addEventListener('click', function () {
+            var open = deleteAcctSection.style.display !== 'block';
+            deleteAcctSection.style.display = open ? 'block' : 'none';
+            if (open) { resetDeleteAcctInputs(); setDeleteAcctStatus('', ''); }
+        });
+        document.getElementById('delete-account-cancel-btn').addEventListener('click', function () {
+            deleteAcctSection.style.display = 'none';
+            resetDeleteAcctInputs();
+            setDeleteAcctStatus('', '');
+        });
+        document.getElementById('toggle-delete-account-password').addEventListener('click', function () {
+            var inp = document.getElementById('delete-account-password');
+            if (!inp) return;
+            var visible = inp.type === 'text';
+            inp.type = visible ? 'password' : 'text';
+            this.innerHTML = visible ? '&#128065;' : '&#128064;';
+            this.classList.toggle('active', !visible);
+        });
+        document.getElementById('delete-account-confirm-btn').addEventListener('click', async function () {
+            var pw = document.getElementById('delete-account-password').value;
+            if (!pw) { setDeleteAcctStatus('Enter your password to delete the account', 'error'); return; }
+            if (!confirm('Are you sure you want to delete your account? This cannot be undone.')) return;
+            if (!confirm('Really? All your messages, servers, files, and keys will be permanently lost.')) return;
+            setDeleteAcctStatus('Deleting account…', '');
+            try {
+                const current_password = await computeHashedPasswordGlobal(pw);
+                const res = await authFetch('/api/me', {
+                    method: 'DELETE',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ current_password })
+                });
+                if (res.ok) {
+                    clearAllClientData();
+                    if (ws) ws.close();
+                    // The server clears the HttpOnly cookie in the delete_me response,
+                    // so we can redirect directly to login without the /api/logout roundtrip.
+                    window.location.href = '/login.html';
+                    return;
+                }
                 const err = await res.json();
-                alert(err.error || 'Failed to delete account');
+                setDeleteAcctStatus(err.error || 'Failed to delete account', 'error');
+            } catch (e) {
+                setDeleteAcctStatus('Server is not running', 'error');
             }
-        } catch (e) {
-            alert('Failed to delete account');
-        }
-    });
+        });
+    }
 
     // Logout is handled in settings (Clear All Data / Sign Out)
 
@@ -3004,6 +3074,17 @@ document.addEventListener('DOMContentLoaded', () => {
     if (kickAllYes) kickAllYes.addEventListener('click', confirmKickAllDevices);
     var kickAllCancel = document.getElementById('kick-all-confirm-cancel');
     if (kickAllCancel) kickAllCancel.addEventListener('click', function () { hideModal('kick-all-confirm-modal'); });
+    var kickAllToggle = document.getElementById('toggle-kick-all-password');
+    if (kickAllToggle) {
+        kickAllToggle.addEventListener('click', function () {
+            var inp = document.getElementById('kick-all-password');
+            if (!inp) return;
+            var visible = inp.type === 'text';
+            inp.type = visible ? 'password' : 'text';
+            kickAllToggle.innerHTML = visible ? '&#128065;' : '&#128064;';
+            kickAllToggle.classList.toggle('active', !visible);
+        });
+    }
     var devicesList = document.getElementById('devices-list');
     if (devicesList) {
         devicesList.addEventListener('click', function (e) {
@@ -5544,9 +5625,9 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('add-more-file-input').addEventListener('change', (e) => {
         const newFiles = Array.from(e.target.files);
         if (newFiles.length === 0) return;
-        const oversized = newFiles.find(f => f.size > 10 * 1024 * 1024 * 1024);
+        const oversized = newFiles.find(f => f.size > getMaxFileSizeBytes());
         if (oversized) {
-            alert('File too large: ' + oversized.name + '. Maximum file size is 10 GB.');
+            alert('File too large: ' + oversized.name + '. Maximum file size is ' + formatMaxFileSize() + '.');
             e.target.value = '';
             return;
         }
@@ -15686,13 +15767,38 @@ async function decodeQrFromFile(file) {
     });
 }
 
+// ===== Client config (upload limits) =====
+// The admin panel can tune the max single-file size at runtime (Runtime
+// Limits → Max file size MB). Fetch it once so pre-upload checks match the
+// server; fall back to the 1024 MB default while loading or offline.
+let _maxFileSizeBytes = 1024 * 1024 * 1024;
+let _maxFileSizeMb = 1024;
+
+function getMaxFileSizeBytes() {
+    return _maxFileSizeBytes;
+}
+function formatMaxFileSize() {
+    return _maxFileSizeMb + ' MB';
+}
+async function loadClientConfig() {
+    try {
+        const res = await fetch('/api/client-config');
+        if (res.ok) {
+            const cfg = await res.json();
+            if (cfg.max_file_size_bytes > 0) _maxFileSizeBytes = cfg.max_file_size_bytes;
+            if (cfg.max_file_size_mb > 0) _maxFileSizeMb = cfg.max_file_size_mb;
+        }
+    } catch (_) {}
+}
+loadClientConfig();
+
 // ===== File Sharing =====
 
 function formatFileSize(bytes) {
     if (bytes < 1024) return bytes + ' B';
     if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
     if (bytes < 10 * 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
-    return (bytes / (10 * 1024 * 1024 * 1024)).toFixed(2) + ' GB';
+    return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
 }
 
 function isCodeFile(filename, mime) {
@@ -17125,9 +17231,9 @@ function setupDragAndDrop() {
         const files = Array.from(e.dataTransfer.files);
         if (files.length === 0) return;
 
-        const oversized = files.find(f => f.size > 10 * 1024 * 1024 * 1024);
+        const oversized = files.find(f => f.size > getMaxFileSizeBytes());
         if (oversized) {
-            alert('File too large: ' + oversized.name + '. Maximum file size is 10 GB.');
+            alert('File too large: ' + oversized.name + '. Maximum file size is ' + formatMaxFileSize() + '.');
             return;
         }
 
@@ -17179,9 +17285,9 @@ function setupModalDragAndDrop() {
         const files = Array.from(e.dataTransfer.files);
         if (files.length === 0) return;
 
-        const oversized = files.find(f => f.size > 10 * 1024 * 1024 * 1024);
+        const oversized = files.find(f => f.size > getMaxFileSizeBytes());
         if (oversized) {
-            alert('File too large: ' + oversized.name + '. Maximum file size is 10 GB.');
+            alert('File too large: ' + oversized.name + '. Maximum file size is ' + formatMaxFileSize() + '.');
             return;
         }
 
@@ -17201,9 +17307,9 @@ function setupModalDragAndDrop() {
 function handleFileSelect(e) {
     const files = Array.from(e.target.files);
     if (files.length === 0) return;
-    const oversized = files.find(f => f.size > 10 * 1024 * 1024 * 1024);
+    const oversized = files.find(f => f.size > getMaxFileSizeBytes());
     if (oversized) {
-        alert('File too large: ' + oversized.name + '. Maximum file size is 10 GB.');
+        alert('File too large: ' + oversized.name + '. Maximum file size is ' + formatMaxFileSize() + '.');
         e.target.value = '';
         return;
     }
@@ -17264,9 +17370,9 @@ function setupPasteUpload() {
         e.preventDefault();
         e.stopPropagation();
 
-        const oversized = files.find(f => f.size > 10 * 1024 * 1024 * 1024);
+        const oversized = files.find(f => f.size > getMaxFileSizeBytes());
         if (oversized) {
-            alert('File too large: ' + oversized.name + '. Maximum file size is 10 GB.');
+            alert('File too large: ' + oversized.name + '. Maximum file size is ' + formatMaxFileSize() + '.');
             return;
         }
 
