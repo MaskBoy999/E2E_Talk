@@ -5353,13 +5353,13 @@ body.show-msg-times-hover .message:hover .file-card .time-hover {
 .reaction-pill {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 6px;
     background: rgba(255,255,255,0.06);
     border: 1px solid rgba(255,255,255,0.12);
-    border-radius: 12px;
-    padding: 2px 9px;
+    border-radius: 13px;
+    padding: 3px 10px;
     color: #ccc;
-    font-size: 12.5px;
+    font-size: 13.5px;
     cursor: pointer;
     line-height: 1.4;
     transition: background 0.15s ease, border-color 0.15s ease;
@@ -5374,15 +5374,15 @@ body.show-msg-times-hover .message:hover .file-card .time-hover {
     color: #fff;
 }
 .reaction-emoji {
-    font-size: 14px;
+    font-size: 16px;
 }
 .reaction-pill .emoji-inline,
 .reaction-pill .emoji-inline.emoji-alone,
 .reaction-pill .emoji-loading,
 .reaction-pill .emoji-loading.emoji-alone {
-    width: 17px;
-    height: 17px;
-    font-size: 14px;
+    width: 19px;
+    height: 19px;
+    font-size: 16px;
     margin: 0;
     vertical-align: middle;
 }
@@ -5980,10 +5980,11 @@ body.show-msg-times .forward-preview .time-hover {
 }
 
 /* === Per-message delivery/read receipts ===
-   Display modes mirror the timestamp setting: always-on (body.show-msg-status-
-   always), hover-only (body.show-msg-status-hover), or off (base display:none).
-   The ✓✓ glyph is also a hover target that names the recipient(s) via a CSS
-   data-tooltip ("Read by Alice" in DMs, "Delivered to N members" in channels). */
+   Display modes mirror the timestamp setting: hover-only (body.show-msg-status-
+   hover, the default), always-on (body.show-msg-status-always), or off (base
+   display:none). The ✓✓ glyph is also a hover target that names the
+   recipient(s) via a CSS data-tooltip ("Read by Alice" in DMs, "Delivered to
+   N members" in channels). */
 .msg-status {
     display: none;
     float: right;

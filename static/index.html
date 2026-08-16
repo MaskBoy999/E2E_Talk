@@ -327,6 +327,21 @@
         </div>
     </div>
 
+    <!-- Emoji Download Confirm (clicking an emoji no longer downloads instantly) -->
+    <div class="modal" id="emoji-download-modal" style="display:none">
+        <div class="modal-content" style="max-width:300px;text-align:center">
+            <h3 style="color:var(--accent)">Download emoji?</h3>
+            <div style="font-size:48px;line-height:1;margin:12px 0 4px">
+                <img id="emoji-download-preview" alt="" style="width:48px;height:48px;object-fit:contain">
+            </div>
+            <p style="margin-bottom:16px"><code id="emoji-download-name"></code></p>
+            <div class="modal-actions">
+                <button class="btn-cancel" id="cancel-emoji-download">Cancel</button>
+                <button class="btn-invite" id="confirm-emoji-download">Download</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Friend Requests Modal -->
     <div class="modal" id="friend-requests-modal" style="display:none">
         <div class="modal-content" style="max-width:420px">
@@ -468,7 +483,7 @@
                         <option value="hover">Show on hover</option>
                         <option value="off">Off</option>
                     </select>
-                    <p class="settings-hint">Controls the ✓ / ✓✓ sent-delivered-read indicator on your own messages. “Always on” (default) shows it at the end of each message; “Show on hover” reveals it when you hover the message; “Off” hides it. Hovering the ✓✓ itself shows who it was delivered to / read by.</p>
+                    <p class="settings-hint">Controls the ✓ / ✓✓ sent-delivered-read indicator on your own messages. “Show on hover” (default) reveals it when you hover the message; “Always on” shows it at the end of each message; “Off” hides it. Hovering the ✓✓ itself shows who it was delivered to / read by.</p>
                 </div>
                 <div class="settings-group" style="padding-bottom:12px;border-bottom:1px solid var(--bg-border);margin-top:16px">
                     <h4>Streamer Mode</h4>

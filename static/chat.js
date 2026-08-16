@@ -1405,23 +1405,27 @@ function reactionEmojiHtml(payload, canonical) {
 // Build the reactions pill row HTML for a message ('' when there are none).
 function buildReactionsHtml(msg, keys, myUserId) {
     if (!msg || !msg.reactions || !msg.reactions.length || !keys) return '';
-    var groups = {}; // canonical -> { count, mine, payload }
+    var groups = {}; // canonical -> { count, mine, payload, reactors }
     for (var i = 0; i < msg.reactions.length; i++) {
         var row = msg.reactions[i];
         var payload = decryptReactionRowAny(row, keys);
         if (!payload || !payload.e) continue;
         var canonical = payload.e;
-        if (!groups[canonical]) groups[canonical] = { count: 0, mine: false, payload: payload };
+        if (!groups[canonical]) groups[canonical] = { count: 0, mine: false, payload: payload, reactors: [] };
         groups[canonical].count++;
         var reactor = row.reactor_user_id || row.reactor_id;
-        if (reactor && reactor === myUserId) groups[canonical].mine = true;
+        if (reactor) {
+            // A user can react once per emoji, so no duplicates are possible.
+            groups[canonical].reactors.push(reactor);
+            if (reactor === myUserId) groups[canonical].mine = true;
+        }
     }
     var canonicals = Object.keys(groups);
     if (!canonicals.length) return '';
     var html = '<div class="message-reactions">';
     for (var j = 0; j < canonicals.length; j++) {
         var g = groups[canonicals[j]];
-        html += '<button class="reaction-pill' + (g.mine ? ' mine' : '') + '" data-canonical="' + escapeAttr(canonicals[j]) + '" data-count="' + g.count + '" title="React">' +
+        html += '<button class="reaction-pill' + (g.mine ? ' mine' : '') + '" data-canonical="' + escapeAttr(canonicals[j]) + '" data-count="' + g.count + '" data-reactors="' + escapeAttr(g.reactors.join(',')) + '">' +
             reactionEmojiHtml(g.payload, canonicals[j]) + '<span class="reaction-count">' + g.count + '</span></button>';
     }
     html += '</div>';
@@ -1462,7 +1466,9 @@ function sendReaction(msgDiv, canonical, payload, storedToken) {
 }
 
 // Update the pill row of a rendered message in place after a live WS event.
-function updateReactionPill(msgEl, canonical, payload, mine, added) {
+// `reactorId` (optional) keeps the pill's data-reactors list in sync so the
+// hover card always reflects the current reactors.
+function updateReactionPill(msgEl, canonical, payload, mine, added, reactorId) {
     if (!msgEl || !canonical) return;
     var row = msgEl.querySelector('.message-reactions');
     if (!row) {
@@ -1477,6 +1483,9 @@ function updateReactionPill(msgEl, canonical, payload, mine, added) {
         else msgEl.appendChild(row);
     }
     var pill = row.querySelector('.reaction-pill[data-canonical="' + CSS.escape(canonical) + '"]');
+    var setReactors = function (el, ids) {
+        el.setAttribute('data-reactors', ids.join(','));
+    };
     if (added) {
         if (pill) {
             var count = parseInt(pill.getAttribute('data-count'), 10) || 0;
@@ -1484,12 +1493,17 @@ function updateReactionPill(msgEl, canonical, payload, mine, added) {
             var countEl = pill.querySelector('.reaction-count');
             if (countEl) countEl.textContent = count + 1;
             if (mine) pill.classList.add('mine');
+            if (reactorId) {
+                var cur = (pill.getAttribute('data-reactors') || '').split(',').filter(function (x) { return x; });
+                if (cur.indexOf(reactorId) === -1) cur.push(reactorId);
+                setReactors(pill, cur);
+            }
         } else {
             var newPill = document.createElement('button');
             newPill.className = 'reaction-pill' + (mine ? ' mine' : '');
             newPill.setAttribute('data-canonical', canonical);
             newPill.setAttribute('data-count', '1');
-            newPill.title = 'React';
+            newPill.setAttribute('data-reactors', reactorId || '');
             newPill.innerHTML = reactionEmojiHtml(payload, canonical) + '<span class="reaction-count">1</span>';
             row.appendChild(newPill);
         }
@@ -1502,6 +1516,12 @@ function updateReactionPill(msgEl, canonical, payload, mine, added) {
                 pill.setAttribute('data-count', count2 - 1);
                 var countEl2 = pill.querySelector('.reaction-count');
                 if (countEl2) countEl2.textContent = count2 - 1;
+                if (reactorId) {
+                    var cur2 = (pill.getAttribute('data-reactors') || '').split(',').filter(function (x) { return x; });
+                    var idx = cur2.indexOf(reactorId);
+                    if (idx !== -1) cur2.splice(idx, 1);
+                    setReactors(pill, cur2);
+                }
             }
             if (mine) pill.classList.remove('mine');
         }
@@ -1539,7 +1559,7 @@ function applyReactionEvent(data) {
         }
         _reactionPayloadCache[data.message_id][payload.e].token = data.emoji_token;
     }
-    updateReactionPill(msgEl, payload.e, payload, mine, added);
+    updateReactionPill(msgEl, payload.e, payload, mine, added, data.user_id);
 }
 
 // === E2E-encrypted polls ===
@@ -1866,13 +1886,25 @@ function msgStatusHtml(status, tooltip, ackers) {
 
 // Hover label for the author's own status glyph. DMs name the single recipient
 // ("Read by Alice"); channels resolve the acker ids into member-list rows.
+// Resolve a DM partner from the conversation cache (used by status tooltips
+// and hover cards so they never show "Unknown member" / "?").
+function findDmPartner(userId) {
+    if (currentDmOtherUser && currentDmOtherUser.id === userId) return currentDmOtherUser;
+    if (dmConversations) {
+        for (var i = 0; i < dmConversations.length; i++) {
+            if (dmConversations[i].other_user_id === userId) {
+                return { id: userId, username: dmConversations[i].other_username, display_name: dmConversations[i].other_display_name || dmConversations[i].other_username };
+            }
+        }
+    }
+    return null;
+}
+
 function msgStatusTooltip(status, msg, isDm) {
     if (status === 'sent' || !msg || !Array.isArray(msg.acks) || !msg.acks.length) return '';
     if (isDm) {
-        if (currentDmOtherUser) {
-            var nm = currentDmOtherUser.display_name || currentDmOtherUser.username || 'the recipient';
-            return (status === 'read' ? 'Read by ' : 'Delivered to ') + nm;
-        }
+        var nm = findDmPartner(msg.acks[0].acker_user_id);
+        if (nm) return (status === 'read' ? 'Read by ' : 'Delivered to ') + (nm.display_name || nm.username || 'the recipient');
         return '';
     }
     return ''; // channels use the rich data-ackers hover card instead
@@ -1901,21 +1933,33 @@ function hideStatusTip() {
 }
 
 // One member row inside the status hover card, styled like the member list.
+// DMs fall back to the cached conversation partner (currentDmOtherUser) so the
+// card never shows "Unknown member" for the recipient of a DM.
 function statusMemberRowHtml(userId) {
     var member = null;
     for (var i = 0; i < currentServerMemberList.length; i++) {
         if (currentServerMemberList[i].id === userId) { member = currentServerMemberList[i]; break; }
     }
     var cache = userDisplayNameCache[userId];
-    var displayName = (cache && cache.display_name) || (member && (member.display_name || member.username)) || (cache && cache.username) || 'Unknown member';
-    var color = (cache && cache.username_color) || (member && member.username_color) || null;
-    var borderColor = (cache && cache.username_border_color) || (member && member.username_border_color) || null;
-    var picFileId = (cache && cache.profile_picture_file_id) || (member && member.profile_picture_file_id) || null;
+    var dmOther = findDmPartner(userId);
+    var displayName = (cache && cache.display_name) || (member && (member.display_name || member.username)) || (dmOther && (dmOther.display_name || dmOther.username)) || (cache && cache.username) || '';
+    var color = (cache && cache.username_color) || (member && member.username_color) || (dmOther && dmOther.username_color) || null;
+    var borderColor = (cache && cache.username_border_color) || (member && member.username_border_color) || (dmOther && dmOther.username_border_color) || null;
+    var picFileId = (cache && cache.profile_picture_file_id) || (member && member.profile_picture_file_id) || (dmOther && dmOther.profile_picture_file_id) || null;
     var isOwner = !!(member && member.role === 'owner');
+    // Cold cache (unknown name or no avatar for a real user): fetch the
+    // profile on demand — DM conversation profile + profile-data key paths —
+    // and re-render the open card when it lands, so cards never sit on
+    // "Unknown member" / "?". One-shot per user (see ensureHoverProfile) so
+    // the completion re-render can't re-trigger an endless fetch loop.
+    if (user && userId !== user.id && (!displayName || !picFileId)) {
+        ensureHoverProfile(userId);
+    }
+    if (!displayName) displayName = 'Unknown member';
     var picUrl = picFileId ? getProfilePicUrl(picFileId, userId) : null;
     var avatarHtml = picUrl
         ? '<img class="mst-avatar-img" src="' + escapeAttr(picUrl) + '" alt="">'
-        : '<span class="mst-avatar-initial">' + escapeHtml((displayName.charAt(0) || '?').toUpperCase()) + '</span>';
+        : '<span class="mst-avatar-initial">' + escapeHtml(displayName.charAt(0).toUpperCase()) + '</span>';
     var nameStyle = color
         ? ' style="color:' + escapeAttr(color) + ';text-shadow:' + escapeAttr(getDisplayNameTextShadow(color, borderColor)) + '"'
         : '';
@@ -1926,6 +1970,20 @@ function statusMemberRowHtml(userId) {
         '</div>';
 }
 
+// Position the (already populated) hover card above its anchor, flipping
+// below on short screens and clamping to the viewport.
+function positionMemberTip(tip, anchorEl) {
+    tip.style.display = 'block';
+    var r = anchorEl.getBoundingClientRect();
+    var tw = tip.offsetWidth, th = tip.offsetHeight;
+    var left = Math.min(Math.max(r.right - tw, 8), Math.max(8, window.innerWidth - tw - 8));
+    var top = r.top - th - 6;
+    if (top < 8) top = r.bottom + 6;
+    if (top + th > window.innerHeight - 8) top = Math.max(8, window.innerHeight - th - 8);
+    tip.style.left = left + 'px';
+    tip.style.top = top + 'px';
+}
+
 // Render (and position) the hover card for one status glyph.
 function renderStatusTip(triggerEl) {
     var tip = ensureStatusTipEl();
@@ -1934,22 +1992,72 @@ function renderStatusTip(triggerEl) {
     if (ackers.length) {
         var rows = '';
         for (var i = 0; i < ackers.length; i++) rows += statusMemberRowHtml(ackers[i]);
-        tip.innerHTML = '<div class="mst-header">' + escapeHtml('Delivered to ' + ackers.length + ' member' + (ackers.length === 1 ? '' : 's')) + '</div>' + rows;
+        var isRead = triggerEl.getAttribute('data-status') === 'read';
+        tip.innerHTML = '<div class="mst-header">' + escapeHtml((isRead ? 'Read by ' : 'Delivered to ') + ackers.length + ' member' + (ackers.length === 1 ? '' : 's')) + '</div>' + rows;
     } else if (triggerEl.getAttribute('data-tooltip')) {
         tip.innerHTML = '<div class="mst-row mst-plain">' + escapeHtml(triggerEl.getAttribute('data-tooltip')) + '</div>';
     } else {
         hideStatusTip();
         return;
     }
-    tip.style.display = 'block';
-    var r = triggerEl.getBoundingClientRect();
-    var tw = tip.offsetWidth, th = tip.offsetHeight;
-    var left = Math.min(Math.max(r.right - tw, 8), Math.max(8, window.innerWidth - tw - 8));
-    var top = r.top - th - 6;
-    if (top < 8) top = r.bottom + 6;
-    if (top + th > window.innerHeight - 8) top = Math.max(8, window.innerHeight - th - 8);
-    tip.style.left = left + 'px';
-    tip.style.top = top + 'px';
+    positionMemberTip(tip, triggerEl);
+}
+
+// Hover card for a reaction pill — lists every member who reacted with that
+// emoji, rendered like the member list (avatar + glowing display name).
+function renderReactionTip(pill, reactors) {
+    var tip = ensureStatusTipEl();
+    tip._for = pill;
+    var rows = '';
+    for (var i = 0; i < reactors.length; i++) rows += statusMemberRowHtml(reactors[i]);
+    tip.innerHTML = '<div class="mst-header">' + escapeHtml('Reacted by ' + reactors.length + ' member' + (reactors.length === 1 ? '' : 's')) + '</div>' + rows;
+    positionMemberTip(tip, pill);
+}
+
+// === On-demand profile fetch for hover cards ===
+// Reaction/read cards fall back to an initial-circle avatar until the
+// person's profile has been fetched. When a card renders with an unknown
+// name or no cached PFP, fetch the profile on demand — the DM conversation
+// profile (DM-key encrypted, most reliable for DMs) and/or the
+// profile-data-key path — and re-render the open card once it lands so the
+// real name + avatar appear without a second hover.
+let _hoverProfileFetches = {};
+// One-shot guard: a completed fetch that didn't land data must not re-trigger
+// from the completion re-render (that would spin an endless async loop and
+// starve the page). Cleared when fresh profile key material arrives.
+let _hoverProfileAttempted = {};
+
+function ensureHoverProfile(userId) {
+    if (!userId || !user || userId === user.id) return;
+    if (_hoverProfileFetches[userId] || _hoverProfileAttempted[userId]) return;
+    var cache = userDisplayNameCache[userId];
+    if (cache && (cache.display_name || cache.username) && cache.profile_picture_file_id && cache.profile_picture_file_key) return;
+    var jobs = [];
+    if (currentDmChannelId) jobs.push(fetchDmConversationProfile(userId, currentDmChannelId));
+    if (profileKeyCache[userId + ':profile_data_key']) jobs.push(fetchAndCacheUserProfile(userId));
+    if (!jobs.length) return; // no key material yet — a later key sync will enable a retry
+    _hoverProfileFetches[userId] = true;
+    _hoverProfileAttempted[userId] = true;
+    Promise.all(jobs.map(function (j) { return Promise.resolve(j).catch(function () {}); }))
+        .then(function () {
+            delete _hoverProfileFetches[userId];
+            refreshHoverTip();
+        });
+}
+
+// Re-render the currently-open hover card (if any) so a freshly fetched
+// profile replaces the initial circle immediately.
+function refreshHoverTip() {
+    if (!_statusTipEl || _statusTipEl.style.display === 'none' || !_statusTipEl._for) return;
+    var forEl = _statusTipEl._for;
+    if (!forEl.isConnected) { hideStatusTip(); return; }
+    if (forEl.classList && forEl.classList.contains('reaction-pill')) {
+        var reactors = (forEl.getAttribute('data-reactors') || '').split(',').filter(function (x) { return x; });
+        if (reactors.length) renderReactionTip(forEl, reactors);
+        else hideStatusTip();
+    } else {
+        renderStatusTip(forEl);
+    }
 }
 
 // One delegated pair keeps the card open while the pointer is over the glyph
@@ -1960,6 +2068,15 @@ document.addEventListener('mouseover', function (e) {
     if (inStatus && inStatus.getAttribute('data-status') !== 'sent') {
         renderStatusTip(inStatus);
         return;
+    }
+    // Reaction pill hover → show who reacted with that emoji.
+    var inPill = e.target && e.target.closest ? e.target.closest('.reaction-pill') : null;
+    if (inPill) {
+        var reactors = (inPill.getAttribute('data-reactors') || '').split(',').filter(function (x) { return x; });
+        if (reactors.length) {
+            renderReactionTip(inPill, reactors);
+            return;
+        }
     }
     if (inTip) return;
     if (_statusTipEl && _statusTipEl.style.display !== 'none') hideStatusTip();
@@ -1988,18 +2105,18 @@ function applyAckEvent(data) {
     var el = msgEl.querySelector('.msg-status');
     if (!el) return;
     var cur = el.getAttribute('data-status');
-    // Channels cap the UI at delivered — read acks are recorded server-side
-    // but only DMs render the accent-colored read state (same as the render path).
-    var target = isDm ? data.status : 'delivered';
+    // Channels render the same three-state receipts as DMs (read acks were
+    // already recorded server-side; the glyph now reflects them live).
+    var target = data.status;
     if (target === 'read' || (target === 'delivered' && cur !== 'read')) {
         el.setAttribute('data-status', target);
         if (target === 'read') el.classList.add('read');
         el.textContent = '✓✓';
         // Keep the hover label in sync with the live status transition.
-        if (isDm && currentDmOtherUser) {
-            var _nm = currentDmOtherUser.display_name || currentDmOtherUser.username || 'the recipient';
-            el.setAttribute('data-tooltip', (target === 'read' ? 'Read by ' : 'Delivered to ') + _nm);
-        } else if (!isDm) {
+        if (isDm) {
+            var _p = findDmPartner(data.acker_id);
+            if (_p) el.setAttribute('data-tooltip', (target === 'read' ? 'Read by ' : 'Delivered to ') + (_p.display_name || _p.username || 'the recipient'));
+        } else {
             // Channel: track distinct ackers seen so far (render-time set + this
             // acker) so the hover card lists them without a re-render.
             if (!msgEl._ackIds) msgEl._ackIds = {};
@@ -2834,13 +2951,13 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     applyShowMsgTimes();
 
-    // Message-status (✓ sent / ✓✓ delivered / read) display mode: 'always'
-    // (default, current behavior), 'hover' (reveal on message hover), or 'off'.
+    // Message-status (✓ sent / ✓✓ delivered / read) display mode: 'always',
+    // 'hover' (reveal on message hover — the default), or 'off'.
     // Mirrors the timestamp modes via body classes.
     function getMsgStatusMode() {
         var stored = localStorage.getItem('show_msg_status');
-        var mode = stored || 'always';
-        if (['always', 'hover', 'off'].indexOf(mode) === -1) mode = 'always';
+        var mode = stored || 'hover';
+        if (['always', 'hover', 'off'].indexOf(mode) === -1) mode = 'hover';
         return mode;
     }
     function applyShowMsgStatus() {
@@ -7185,7 +7302,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
         // Find the first (topmost) visible modal and close it
-        var modals = ['friend-code-password-modal', 'sticker-upload-modal', 'upload-modal',
+        var modals = ['emoji-download-modal', 'friend-code-password-modal', 'sticker-upload-modal', 'upload-modal',
                       'settings-modal', 'server-settings-modal', 'friend-requests-modal',
                       'add-friend-modal', 'join-server-modal', 'create-server-modal', 'server-choice-modal'];
         for (var i = 0; i < modals.length; i++) {
@@ -7195,6 +7312,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (el.id === 'settings-modal') {
                     if (window._stopRingTrimPreview) window._stopRingTrimPreview();
                     if (window._stopNotifTrimPreview) window._stopNotifTrimPreview();
+                }
+                // Escaping the emoji-download confirm is a Cancel: drop the
+                // pending download so a later Confirm can't save a stale emoji.
+                if (el.id === 'emoji-download-modal') {
+                    _pendingEmojiDownload = null;
                 }
                 break;
             }
@@ -7329,6 +7451,19 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Friend listeners
     document.getElementById('cancel-add-friend').addEventListener('click', () => hideModal('add-friend-modal'));
+
+    // Emoji-download confirm modal: buttons + backdrop-cancel. Escape is
+    // handled in the global modal loop below (clears the pending download).
+    const emojiDlModal = document.getElementById('emoji-download-modal');
+    if (emojiDlModal) {
+        emojiDlModal.addEventListener('click', (e) => {
+            if (e.target === emojiDlModal) cancelEmojiDownload();
+        });
+    }
+    const emojiDlConfirm = document.getElementById('confirm-emoji-download');
+    if (emojiDlConfirm) emojiDlConfirm.addEventListener('click', confirmEmojiDownload);
+    const emojiDlCancel = document.getElementById('cancel-emoji-download');
+    if (emojiDlCancel) emojiDlCancel.addEventListener('click', cancelEmojiDownload);
     document.getElementById('confirm-add-friend').addEventListener('click', sendFriendRequest);
     document.getElementById('friend-code-input').addEventListener('keypress', (e) => {
         if (e.key === 'Enter') sendFriendRequest();
@@ -10562,6 +10697,16 @@ function connectWebSocket(t) {
     };
 
     ws.onclose = () => {
+        // The socket is gone (server restart/shutdown, network drop, or the
+        // remote side closed the tab) — stop showing stale presence. Everyone
+        // currently marked online is unknown until a fresh presence_update
+        // arrives after reconnect (the server broadcasts one on auth, and
+        // /api/online re-seeds it), so nobody is left "looking at" a
+        // conversation that is no longer being viewed.
+        if (onlineUsers.size) {
+            onlineUsers.clear();
+            updatePresenceDots();
+        }
         // Use the reconnection guard to avoid cascading reconnections
         // when multiple close events fire in quick succession.
         if (!_wsReconnectTimer) {
@@ -12330,11 +12475,11 @@ async function appendMessage(msg) {
         cachePollVotes(msg, pollData, E2ECrypto.getAllServerKeys(currentServerId), myUserId);
     }
 
-    // Per-message delivery/read status for the author: ✓ sent → ✓✓ delivered.
-    // Read acks in channels are recorded server-side but the UI caps at
-    // delivered (read receipts are a DM affordance; see appendDmMessage).
+    // Per-message delivery/read status for the author: ✓ sent → ✓✓ delivered
+    // → ✓✓ (accent) read — full three-state receipts in channels too; the
+    // hover card lists exactly who received/read it.
     if (isOwn) {
-        var _chStatus = messageReadStatus(msg, true);
+        var _chStatus = messageReadStatus(msg, false);
         // Channels: carry the acker ids on the glyph (data-ackers) so the
         // hover card can render member-list rows; a live ack event appends.
         var _ackers = [];
@@ -12673,11 +12818,13 @@ function setupMessageActions() {
             handleForwardLabelClick(forwardLabel);
             return;
         }
-        // Emoji click → download as PNG
+        // Emoji click → ask first (downloading instantly on every click was
+        // annoying); the confirm modal has Cancel / Download. Emojis INSIDE a
+        // reaction pill are excluded so the pill keeps toggling the reaction.
         const emojiImg = e.target.closest('.emoji-inline');
-        if (emojiImg) {
+        if (emojiImg && !e.target.closest('.reaction-pill')) {
             const name = (emojiImg.getAttribute('alt') || '').replace(/^:|:$/g, '') || 'emoji';
-            downloadBlobAs(emojiImg.src, name + '.png', 'image/png');
+            promptEmojiDownload(emojiImg, name);
             return;
         }
         // GIF image click → open media viewer
@@ -21452,6 +21599,133 @@ function downloadBlobAs(url, filename, mimeType) {
     a.click();
     document.body.removeChild(a);
 }
+
+// === Emoji download confirm ===
+// Clicking an emoji in a message used to download it instantly. Now it opens a
+// small modal previewing the emoji with Cancel / Download — downloading only
+// happens when the user explicitly confirms. Cancel (button, Escape, or
+// backdrop click) clears the pending download.
+let _pendingEmojiDownload = null;
+
+function promptEmojiDownload(imgEl, name) {
+    const src = imgEl.currentSrc || imgEl.src;
+    if (!src) return;
+    const preview = document.getElementById('emoji-download-preview');
+    const nameEl = document.getElementById('emoji-download-name');
+    if (preview) { preview.src = src; preview.alt = ':' + name + ':'; }
+    if (nameEl) nameEl.textContent = ':' + name + ':'; // textContent — never inject
+    // Sanitize the filename so a crafted emoji name can't break out of the
+    // download attribute or write to a weird path.
+    const safeName = (name || 'emoji').replace(/[^\w.-]+/g, '_').replace(/^\.+$/, 'emoji');
+    _pendingEmojiDownload = { src: src, name: safeName };
+    showModal('emoji-download-modal');
+}
+
+function confirmEmojiDownload() {
+    if (!_pendingEmojiDownload) return;
+    const d = _pendingEmojiDownload;
+    _pendingEmojiDownload = null;
+    downloadBlobAs(d.src, d.name + '.png', 'image/png');
+    hideModal('emoji-download-modal');
+}
+
+function cancelEmojiDownload() {
+    _pendingEmojiDownload = null;
+    hideModal('emoji-download-modal');
+}
+
+// Right-click download menu (message media). Right-click is a deliberate
+// gesture, so choosing the item downloads immediately (no confirm modal) — the
+// confirm modal stays for left-clicks on emojis. Covers: custom emojis (in
+// message text OR reaction pills), stickers, and GIFs. The hover ⬇ buttons on
+// stickers/GIFs are untouched.
+function safeDownloadName(name, fallback) {
+    return (name || fallback).replace(/[^\w.-]+/g, '_').replace(/^\.+$/, fallback);
+}
+
+function showContextDownloadMenu(e, src, label, filename, mimeType, onClick) {
+    if (!src) return;
+    e.preventDefault();
+    var existing = document.querySelector('.channel-context-menu');
+    if (existing) existing.remove();
+    var menu = document.createElement('div');
+    menu.className = 'channel-context-menu';
+    menu.style.left = e.clientX + 'px';
+    menu.style.top = e.clientY + 'px';
+    var item = document.createElement('div');
+    item.className = 'context-menu-item';
+    item.textContent = label; // textContent — never inject
+    item.addEventListener('click', function () {
+        if (onClick) onClick();
+        else downloadBlobAs(src, filename, mimeType);
+        menu.remove();
+    });
+    menu.appendChild(item);
+    document.body.appendChild(menu);
+    function closeMenu(e2) {
+        if (!menu.contains(e2.target)) {
+            menu.remove();
+            document.removeEventListener('click', closeMenu);
+        }
+    }
+    setTimeout(function () { document.addEventListener('click', closeMenu); }, 0);
+}
+
+// Fetch a remote URL (Giphy-style) and download as a blob — a plain <a
+// download> is ignored by browsers for cross-origin hrefs.
+function downloadRemoteAs(url, filename, mimeType) {
+    fetch(url)
+        .then(function (r) { return r.blob(); })
+        .then(function (blob) {
+            var blobUrl = URL.createObjectURL(blob);
+            downloadBlobAs(blobUrl, filename, blob.type || mimeType);
+            setTimeout(function () { URL.revokeObjectURL(blobUrl); }, 1000);
+        })
+        .catch(function () { window.open(url, '_blank'); });
+}
+
+document.addEventListener('contextmenu', function (e) {
+    if (!e.target || !e.target.closest) return;
+    var list = document.getElementById('message-list');
+    if (!list || !list.contains(e.target)) return;
+
+    // Custom emoji (message text OR reaction pill). Unicode emojis are spans
+    // (no img) and are not matched.
+    var emojiImg = e.target.closest('img.emoji-inline');
+    if (emojiImg) {
+        var name = (emojiImg.getAttribute('alt') || '').replace(/^:|:$/g, '') || 'emoji';
+        var src = emojiImg.currentSrc || emojiImg.src;
+        if (src) showContextDownloadMenu(e, src, '⬇ Download :' + name + ':', safeDownloadName(name, 'emoji') + '.png', 'image/png');
+        return;
+    }
+
+    // Sticker in a message.
+    var stickerContainer = e.target.closest('.sticker-message');
+    if (stickerContainer) {
+        var sImg = stickerContainer.querySelector('img');
+        var sUrl = sImg ? (sImg.currentSrc || sImg.src) : null;
+        var sName = (stickerContainer._stickerData && stickerContainer._stickerData.sticker_name) || 'sticker';
+        var sMime = stickerContainer.getAttribute('data-mime-type') || 'image/png';
+        if (sUrl) showContextDownloadMenu(e, sUrl, '⬇ Download ' + sName, safeDownloadName(sName, 'sticker'), sMime);
+        return;
+    }
+
+    // GIF in a message — mirror the hover ⬇ behavior (cross-origin → fetch to
+    // blob, then download).
+    var gifImg = e.target.closest('.gif-message img');
+    if (gifImg) {
+        var gifWrap = gifImg.closest('.gif-message');
+        var gifBtn = gifWrap ? gifWrap.querySelector('.media-download-btn') : null;
+        var gifUrl = gifBtn ? gifBtn.getAttribute('data-url') : (gifImg.currentSrc || gifImg.src);
+        var gifName = (gifBtn && gifBtn.getAttribute('data-filename')) || 'sticker.gif';
+        if (gifUrl) {
+            showContextDownloadMenu(e, gifUrl, '⬇ Download GIF', gifName, 'image/gif', function () {
+                downloadRemoteAs(gifUrl, gifName, 'image/gif');
+            });
+        }
+        return;
+    }
+});
 
 // ===== Fullscreen Media Viewer =====
 

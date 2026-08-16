@@ -165,6 +165,85 @@ async function sendDmReaction(page: any, dmChannelId: string, otherUserId: strin
     }, { dmChannelId, otherUserId, messageId, canonical });
 }
 
+// Build a tiny real PNG so the profile-picture upload passes the server's
+// image validation.
+function makeMinimalPng(width = 50, height = 50, r = 255, g = 0, b = 0): Buffer {
+    const zlib = require('zlib');
+    const raw = Buffer.alloc(1 + width * height * 3, 0);
+    for (let y = 0; y < height; y++) {
+        raw[y * (width * 3 + 1)] = 0;
+        for (let x = 0; x < width; x++) {
+            const idx = y * (width * 3 + 1) + 1 + x * 3;
+            raw[idx] = r; raw[idx + 1] = g; raw[idx + 2] = b;
+        }
+    }
+    const deflated = zlib.deflateSync(raw);
+    function crc32(buf: Buffer): number {
+        let crc = 0xFFFFFFFF;
+        for (let i = 0; i < buf.length; i++) {
+            crc ^= buf[i];
+            for (let j = 0; j < 8; j++) crc = (crc >>> 1) ^ (crc & 1 ? 0xEDB88320 : 0);
+        }
+        return (crc ^ 0xFFFFFFFF) >>> 0;
+    }
+    function u32(v: number): Buffer { const b = Buffer.alloc(4); b.writeUInt32BE(v); return b; }
+    const parts: Buffer[] = [];
+    parts.push(Buffer.from([0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A]));
+    const ihdr = Buffer.alloc(13);
+    ihdr.writeUInt32BE(width, 0); ihdr.writeUInt32BE(height, 4);
+    ihdr[8] = 8; ihdr[9] = 2; ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
+    const ihdrType = Buffer.from('IHDR');
+    parts.push(u32(13), ihdrType, ihdr, u32(crc32(Buffer.concat([ihdrType, ihdr]))));
+    const idatType = Buffer.from('IDAT');
+    parts.push(u32(deflated.length), idatType, deflated, u32(crc32(Buffer.concat([idatType, deflated]))));
+    const iendType = Buffer.from('IEND');
+    parts.push(u32(0), iendType, u32(crc32(iendType)));
+    return Buffer.concat(parts);
+}
+
+// Upload a real profile picture through the app's saveProfile() flow so the
+// DM conversation profile (encrypted with the DM key) carries the PFP file id
+// + key — exactly what the on-demand DM hover fetch needs to render the avatar.
+async function uploadProfilePicture(page: any, token: string, pngBytes: Buffer): Promise<string> {
+    const initRes = await page.request.post(`${BASE}/api/files/init`, {
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        data: { size: pngBytes.length, mime: 'image/png' },
+    });
+    expect(initRes.ok()).toBeTruthy();
+    const { file_id } = await initRes.json();
+
+    const fileKeyB64: string = await page.evaluate(async ({ fileId, pngBase64 }) => {
+        const rawBytes = Uint8Array.from(atob(pngBase64), (c) => c.charCodeAt(0));
+        const fileKey = E2ECrypto.generateFileKey();
+        const encrypted = E2ECrypto.encryptFileChunk(fileKey, rawBytes);
+        const blob = new Blob([encrypted], { type: 'application/octet-stream' });
+        await fetch(`/api/files/${fileId}/chunk/0`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/octet-stream', Authorization: 'Bearer ' + localStorage.getItem('token') },
+            body: blob,
+        });
+        await fetch(`/api/files/${fileId}/complete`, {
+            method: 'POST',
+            headers: { Authorization: 'Bearer ' + localStorage.getItem('token') },
+        });
+        return E2ECrypto.arrayBufferToBase64(fileKey);
+    }, { fileId: file_id, pngBase64: pngBytes.toString('base64') });
+
+    const status = await page.evaluate(async ({ fid, fk }) => {
+        (profilePfpFileId as any) = fid;
+        (profilePfpFileKey as any) = fk;
+        (_removePfpFlag as any) = false;
+        const statusEl = document.getElementById('profile-edit-status');
+        try {
+            await (saveProfile as any)();
+            return statusEl ? (statusEl.textContent || '') : 'no-status-el';
+        } catch (e) { return 'ERR ' + e; }
+    }, { fid: file_id, fk: fileKeyB64 });
+    expect(status).toContain('Profile saved');
+    await page.waitForTimeout(800);
+    return file_id;
+}
+
 // Fetch a channel message + its reactions via REST.
 async function getChannelMessage(page: any, channelId: string, serverId: string, messageId: string) {
     return await page.evaluate(async ({ channelId, serverId, messageId }) => {
@@ -477,6 +556,363 @@ test.describe('E2E-encrypted message reactions', () => {
         if (placement.textBottom !== null) {
             expect(placement.rowTop).toBeGreaterThanOrEqual(placement.textBottom - 2);
         }
+
+        await ctxA.close();
+        await ctxB.close();
+    });
+
+    test('clicking a message emoji asks before downloading; Cancel aborts, Download saves', async ({ page }) => {
+        const u = 'rcde_' + Date.now();
+        const body = await registerUser(page, u);
+        const { serverId, channelId } = await createServerAndKey(page, body.token, body.user.id);
+        await waitForWs(page);
+
+        // Upload a tiny custom emoji so a message can render a real <img class="emoji-inline">.
+        const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]); // png magic only — the client doesn't sniff
+        const initRes = await page.request.post(`${BASE}/api/files/init`, {
+            headers: { Authorization: `Bearer ${body.token}`, 'Content-Type': 'application/json' },
+            data: { size: pngBytes.length, mime: 'image/png' },
+        });
+        expect(initRes.ok()).toBeTruthy();
+        const { file_id } = await initRes.json();
+        const emojiUpload = await page.evaluate(async ({ fileId }) => {
+            const key = E2ECrypto.generateFileKey();
+            const encChunk = E2ECrypto.encryptFileChunk(key, new Uint8Array([0x89, 0x50, 0x4e, 0x47]));
+            await fetch(`/api/files/${fileId}/chunk/0`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/octet-stream', Authorization: 'Bearer ' + localStorage.getItem('token') },
+                body: new Blob([encChunk], { type: 'application/octet-stream' }),
+            });
+            await fetch(`/api/files/${fileId}/complete`, {
+                method: 'POST',
+                headers: { Authorization: 'Bearer ' + localStorage.getItem('token') },
+            });
+            const identity = E2ECrypto.getIdentityKeyPair();
+            const keyB64 = E2ECrypto.arrayBufferToBase64(key);
+            const encFileKey = E2ECrypto.encodeEncryptedFileKey(keyB64, identity.privateKey);
+            const parts = encFileKey.split(':');
+            const encMime = E2ECrypto.aeadEncrypt('image/emoji', key, null);
+            await fetch('/api/users/me/stickers', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + localStorage.getItem('token') },
+                body: JSON.stringify({
+                    file_id: fileId,
+                    encrypted_file_key: E2ECrypto.arrayBufferToBase64(E2ECrypto.base64ToArrayBuffer(parts[1])),
+                    file_key_nonce: parts[0],
+                    encrypted_mime_type: encMime.ciphertext,
+                    mime_nonce: encMime.nonce,
+                }),
+            });
+            return { fileId, fileKey: keyB64 };
+        }, { fileId: file_id });
+
+        // Open the channel view and send a message containing :pepe: with the
+        // shareable file refs so it renders as a real emoji image.
+        await page.goto(`${BASE}/index.html`);
+        await page.waitForSelector('.server-icon:not(.add-server)', { timeout: 10000 });
+        await page.click('.server-icon:not(.add-server)');
+        await page.waitForSelector('.channel-item', { timeout: 10000 });
+        await page.click('.channel-item >> nth=0');
+        await expect(page.locator('#message-input')).toBeEnabled({ timeout: 5000 });
+        await waitForWs(page);
+
+        await page.evaluate(async ({ channelId, serverId, emojiUpload }) => {
+            const key = E2ECrypto.getServerKey(serverId);
+            const payload = {
+                type: 'text',
+                text: ':pepe:',
+                emojis: [{ name: 'pepe', file_id: emojiUpload.fileId, file_key: emojiUpload.fileKey, mime_type: 'image/png' }],
+            };
+            const enc = E2ECrypto.encryptMessage(JSON.stringify(payload), key);
+            ws.send(JSON.stringify({
+                type: 'message_send',
+                channel_id: channelId,
+                encrypted_content: enc.ciphertext,
+                nonce: enc.nonce,
+                message_nonce: enc.messageNonce || null,
+            }));
+        }, { channelId, serverId, emojiUpload });
+        await page.waitForSelector('.message .emoji-inline', { timeout: 8000 });
+        const messageId = await page.evaluate(() => {
+            const el = document.querySelector('.message');
+            return el ? el.getAttribute('data-message-id') : null;
+        });
+        expect(messageId).toBeTruthy();
+
+        // Click → the confirm modal appears (no instant download), name shown.
+        const noInstantDl = page.waitForEvent('download', { timeout: 2500 }).catch(() => null);
+        await page.click('.message .emoji-inline');
+        await page.waitForSelector('#emoji-download-modal', { state: 'visible', timeout: 5000 });
+        const shownName = await page.evaluate(() => document.getElementById('emoji-download-name')?.textContent || '');
+        expect(shownName).toBe(':pepe:');
+        expect(await noInstantDl).toBeNull();
+
+        // Cancel → modal closes, still no download.
+        const afterCancelDl = page.waitForEvent('download', { timeout: 2500 }).catch(() => null);
+        await page.click('#cancel-emoji-download');
+        await page.waitForSelector('#emoji-download-modal', { state: 'hidden', timeout: 5000 });
+        expect(await afterCancelDl).toBeNull();
+
+        // Click again and Confirm → the emoji actually downloads.
+        await page.click('.message .emoji-inline');
+        await page.waitForSelector('#emoji-download-modal', { state: 'visible', timeout: 5000 });
+        const dl = page.waitForEvent('download');
+        await page.click('#confirm-emoji-download');
+        const download = await dl;
+        expect(download.suggestedFilename()).toContain('pepe');
+        await page.waitForSelector('#emoji-download-modal', { state: 'hidden', timeout: 5000 });
+
+        // Right-click a custom emoji inside a REACTION pill → context menu with
+        // a direct download item (no confirm modal — right-click is deliberate).
+        expect(await sendChannelReaction(page, channelId, serverId, messageId!, ':pepe:', {
+            f: emojiUpload.fileId,
+            k: emojiUpload.fileKey,
+            m: 'image/png',
+        })).toBe('sent');
+        await page.waitForSelector('.message .reaction-pill img.emoji-inline', { timeout: 8000 });
+        const reactionDl = page.waitForEvent('download');
+        await page.click('.message .reaction-pill img.emoji-inline', { button: 'right' });
+        await page.waitForSelector('.channel-context-menu', { state: 'visible', timeout: 5000 });
+        const menuText = await page.evaluate(() => document.querySelector('.channel-context-menu .context-menu-item')?.textContent || '');
+        expect(menuText).toContain(':pepe:');
+        await page.click('.channel-context-menu .context-menu-item');
+        const reactionDownload = await reactionDl;
+        expect(reactionDownload.suggestedFilename()).toContain('pepe');
+        await page.waitForSelector('.channel-context-menu', { state: 'detached', timeout: 5000 });
+
+        // Right-click a STICKER → the same context menu downloads it.
+        await page.evaluate(async ({ channelId, serverId, emojiUpload }) => {
+            const key = E2ECrypto.getServerKey(serverId);
+            const payload = {
+                type: 'sticker',
+                sticker_name: 'pepestick',
+                file_id: emojiUpload.fileId,
+                file_key: emojiUpload.fileKey,
+                mime_type: 'image/png',
+            };
+            const enc = E2ECrypto.encryptMessage(JSON.stringify(payload), key);
+            ws.send(JSON.stringify({
+                type: 'message_send',
+                channel_id: channelId,
+                encrypted_content: enc.ciphertext,
+                nonce: enc.nonce,
+                message_nonce: enc.messageNonce || null,
+            }));
+        }, { channelId, serverId, emojiUpload });
+        await page.waitForSelector('.message .sticker-message img', { timeout: 8000 });
+        const stickerDl = page.waitForEvent('download');
+        await page.click('.message .sticker-message img', { button: 'right' });
+        await page.waitForSelector('.channel-context-menu', { state: 'visible', timeout: 5000 });
+        const stickerMenuText = await page.evaluate(() => document.querySelector('.channel-context-menu .context-menu-item')?.textContent || '');
+        expect(stickerMenuText).toContain('pepestick');
+        await page.click('.channel-context-menu .context-menu-item');
+        const stickerDownload = await stickerDl;
+        expect(stickerDownload.suggestedFilename()).toContain('pepestick');
+        await page.waitForSelector('.channel-context-menu', { state: 'detached', timeout: 5000 });
+
+        // The hover ⬇ button on the sticker is untouched — still visible on hover.
+        await page.hover('.message .sticker-message');
+        await page.waitForSelector('.message .sticker-message .media-download-btn', { state: 'visible', timeout: 5000 });
+        expect(await page.evaluate(() => {
+            const btn = document.querySelector('.message .sticker-message .media-download-btn');
+            return btn ? getComputedStyle(btn).display : '';
+        })).toBe('block');
+    });
+
+    test('hovering a reaction pill shows the member card with who reacted', async ({ browser }) => {
+        const ctxA = await browser.newContext();
+        const ctxB = await browser.newContext();
+        const pageA = await ctxA.newPage();
+        const pageB = await ctxB.newPage();
+        const uA = 'rcth_' + Date.now();
+        const uB = 'rcth2_' + Date.now();
+        const bodyA = await registerUser(pageA, uA);
+        const bodyB = await registerUser(pageB, uB);
+        (pageB as any).token = bodyB.token;
+        const { serverId, channelId, inviteCode } = await createServerAndKey(pageA, bodyA.token, bodyA.user.id);
+        await joinServerAndLoadKey(pageA, pageB, bodyA.token, serverId, inviteCode, bodyB.user.id);
+
+        await pageA.goto(`${BASE}/index.html`);
+        await pageA.waitForSelector('.server-icon:not(.add-server)', { timeout: 10000 });
+        await pageA.click('.server-icon:not(.add-server)');
+        await pageA.waitForSelector('.channel-item', { timeout: 10000 });
+        await pageA.click('.channel-item >> nth=0');
+        await expect(pageA.locator('#message-input')).toBeEnabled({ timeout: 5000 });
+        await waitForWs(pageA);
+
+        expect(await sendServerMessageViaWs(pageA, channelId, serverId, 'who reacted to this')).toBe('sent');
+        await pageA.waitForTimeout(600);
+        const textMap = await pageA.evaluate(async ({ channelId, serverId }) => {
+            const res = await fetch(`/api/channels/${channelId}/messages?limit=100`, {
+                headers: { Authorization: 'Bearer ' + localStorage.getItem('token') },
+            });
+            const msgs = await res.json();
+            const key = E2ECrypto.getServerKey(serverId);
+            const map: Record<string, string> = {};
+            for (const m of msgs || []) {
+                try { map[m.id] = E2ECrypto.decryptMessage(m.encrypted_content, m.nonce, key); } catch (_) {}
+            }
+            return map;
+        }, { channelId, serverId });
+        const messageId = Object.keys(textMap)[0];
+        expect(messageId).toBeTruthy();
+
+        // Both A and B react with the same emoji → count 2, both ids on the pill.
+        expect(await sendChannelReaction(pageA, channelId, serverId, messageId, '👍', null)).toBe('sent');
+        expect(await sendChannelReaction(pageB, channelId, serverId, messageId, '👍', null)).toBe('sent');
+        await pageA.waitForTimeout(800);
+
+        const pillState = await pageA.evaluate((id) => {
+            const pill = document.querySelector(`.message[data-message-id="${id}"] .reaction-pill`);
+            if (!pill) return null;
+            return {
+                count: pill.getAttribute('data-count'),
+                reactors: (pill.getAttribute('data-reactors') || '').split(',').filter(Boolean),
+            };
+        }, messageId);
+        expect(pillState).not.toBeNull();
+        expect(pillState.count).toBe('2');
+        expect(pillState.reactors.slice().sort()).toEqual([bodyA.user.id, bodyB.user.id].sort());
+
+        // Hover the pill → the member card appears listing BOTH usernames.
+        await pageA.hover(`.message[data-message-id="${messageId}"] .reaction-pill`);
+        await pageA.waitForSelector('#msg-status-tooltip', { state: 'visible', timeout: 5000 });
+        const cardText = await pageA.evaluate(() => {
+            const tip = document.getElementById('msg-status-tooltip');
+            return tip ? tip.textContent || '' : '';
+        });
+        expect(cardText).toContain('Reacted by 2 members');
+        expect(cardText).toContain(uA);
+        expect(cardText).toContain(uB);
+
+        // Moving off the pill dismisses the card.
+        await pageA.hover('#message-input');
+        await pageA.waitForTimeout(200);
+        const hidden = await pageA.evaluate(() => {
+            const tip = document.getElementById('msg-status-tooltip');
+            return tip ? tip.style.display === 'none' : true;
+        });
+        expect(hidden).toBe(true);
+
+        await ctxA.close();
+        await ctxB.close();
+    });
+
+    test('DM hover card fetches the partner profile on demand and shows the real avatar', async ({ browser }) => {
+        const ctxA = await browser.newContext();
+        const ctxB = await browser.newContext();
+        const pageA = await ctxA.newPage();
+        const pageB = await ctxB.newPage();
+        const uA = 'rctpa_' + Date.now();
+        const uB = 'rctpb_' + Date.now();
+        const bodyA = await registerUser(pageA, uA);
+        const bodyB = await registerUser(pageB, uB);
+
+        // Friend A+B and create the DM channel.
+        const codeB = await pageB.evaluate(() => localStorage.getItem('e2e_friend_code'));
+        const fr = await pageA.request.post(`${BASE}/api/friends/request`, {
+            headers: { Authorization: `Bearer ${bodyA.token}`, 'Content-Type': 'application/json' },
+            data: { friend_code: codeB },
+        });
+        expect(fr.ok()).toBeTruthy();
+        const incoming = await (await pageB.request.get(`${BASE}/api/friends/requests/incoming`, {
+            headers: { Authorization: `Bearer ${bodyB.token}` },
+        })).json();
+        await pageB.request.post(`${BASE}/api/friends/requests/accept`, {
+            headers: { Authorization: `Bearer ${bodyB.token}`, 'Content-Type': 'application/json' },
+            data: { request_id: incoming[0].id },
+        });
+        const dm = await (await pageA.request.post(`${BASE}/api/dm/${bodyB.user.id}`, {
+            headers: { Authorization: `Bearer ${bodyA.token}` },
+        })).json();
+        const dmChannelId = dm.dm_channel_id || dm.id;
+
+        // Reload A so the app knows about the DM, then set a REAL profile
+        // picture — saveProfile uploads the DM conversation profile too.
+        await pageA.goto(`${BASE}/index.html`);
+        await pageA.waitForSelector('#settings-btn', { state: 'visible', timeout: 10000 });
+        await pageA.waitForFunction(() => typeof saveProfile === 'function' && typeof profilePfpFileId !== 'undefined', { timeout: 10000 });
+        await uploadProfilePicture(pageA, bodyA.token, makeMinimalPng(50, 50, 0, 150, 255));
+
+        // B loads fresh (cold userDisplayNameCache) and opens the DM.
+        await pageB.goto(`${BASE}/index.html`);
+        await pageB.waitForSelector('.dm-item', { timeout: 10000 });
+        await pageB.click('.dm-item >> nth=0');
+        await expect(pageB.locator('#message-input')).toBeEnabled({ timeout: 5000 });
+        await waitForWs(pageB);
+        await waitForWs(pageA);
+
+        // A sends a DM message; A reacts to it.
+        await pageA.evaluate(async ({ dmChannelId, otherUserId }) => {
+            const kp = E2ECrypto.getIdentityKeyPair();
+            const res = await fetch('/api/identity/' + otherUserId, {
+                headers: { Authorization: 'Bearer ' + localStorage.getItem('token') },
+            });
+            const data = await res.json();
+            const otherPub = new Uint8Array(E2ECrypto.base64ToArrayBuffer(data.identity_public_key));
+            const enc = E2ECrypto.encryptDm(JSON.stringify({ type: 'text', text: 'hover avatar target' }), dmChannelId, kp.privateKey, otherPub);
+            ws.send(JSON.stringify({
+                type: 'dm_send',
+                dm_channel_id: dmChannelId,
+                encrypted_content: enc.ciphertext,
+                nonce: enc.nonce,
+                message_nonce: enc.messageNonce || null,
+            }));
+        }, { dmChannelId, otherUserId: bodyB.user.id });
+        await pageA.waitForTimeout(600);
+        const dmMsgs = await (await pageA.request.get(`${BASE}/api/dm/${dmChannelId}/messages?limit=50`, {
+            headers: { Authorization: `Bearer ${bodyA.token}` },
+        })).json();
+        const dmMsg = (dmMsgs || []).find((m: any) => m.id);
+        expect(dmMsg).toBeTruthy();
+        expect(await sendDmReaction(pageA, dmChannelId, bodyB.user.id, dmMsg.id, '❤️')).toBe('sent');
+
+        // B sees the pill.
+        await pageB.waitForSelector(`.message[data-message-id="${dmMsg.id}"] .reaction-pill`, { timeout: 8000 });
+
+        // Simulate a cold/partial cache: drop A's cached PFP fields, then wrap
+        // the DM profile fetch with a delay so we can watch the card upgrade
+        // from an initial circle to the real avatar on demand.
+        await pageB.evaluate((uid) => {
+            const c = userDisplayNameCache[uid];
+            if (c) { c.profile_picture_file_id = null; c.profile_picture_file_key = null; }
+        }, bodyA.user.id);
+        await pageB.evaluate(() => {
+            (window as any).__dmProfileFetches = [];
+            const orig = (window as any).fetchDmConversationProfile;
+            (window as any).fetchDmConversationProfile = async function (uid: string, cid: string) {
+                (window as any).__dmProfileFetches.push([uid, cid]);
+                await new Promise((r) => setTimeout(r, 700));
+                return orig.call(this, uid, cid);
+            };
+        });
+
+        // Hover: the card first shows the initial circle (fetch pending)...
+        await pageB.hover(`.message[data-message-id="${dmMsg.id}"] .reaction-pill`);
+        await pageB.waitForSelector('#msg-status-tooltip', { state: 'visible', timeout: 5000 });
+        const initial = await pageB.evaluate(() => ({
+            initialCircle: !!document.querySelector('#msg-status-tooltip .mst-avatar-initial'),
+            img: !!document.querySelector('#msg-status-tooltip .mst-avatar-img'),
+        }));
+        expect(initial.initialCircle).toBe(true);
+        expect(initial.img).toBe(false);
+
+        // ...then the on-demand fetch lands and the real avatar replaces it.
+        await pageB.waitForSelector('#msg-status-tooltip .mst-avatar-img', { timeout: 10000 });
+        const after = await pageB.evaluate(() => {
+            const img = document.querySelector('#msg-status-tooltip .mst-avatar-img') as HTMLImageElement | null;
+            return {
+                fetches: (window as any).__dmProfileFetches || [],
+                src: img ? img.src : null,
+            };
+        });
+        expect(after.fetches.length).toBeGreaterThan(0);
+        expect(after.fetches[0][0]).toBe(bodyA.user.id);
+        expect(after.fetches[0][1]).toBe(dmChannelId);
+        // The avatar is a real decrypted image (blob URL served from the
+        // encrypted file), not an empty src or a placeholder.
+        expect(after.src).toMatch(/^blob:/);
+        expect(after.src.length).toBeGreaterThan(20);
 
         await ctxA.close();
         await ctxB.close();

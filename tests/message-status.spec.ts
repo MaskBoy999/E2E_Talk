@@ -362,7 +362,7 @@ test.describe('Per-message delivery/read status (E2E acks)', () => {
         await ctxB.close();
     });
 
-    test('channel: member viewing acks delivered; sender sees ✓✓ (capped, never read)', async ({ browser }) => {
+    test('channel: member viewing acks delivered then read; sender sees full three states', async ({ browser }) => {
         const ctxA = await browser.newContext();
         const ctxB = await browser.newContext();
         const pageA = await ctxA.newPage();
@@ -396,10 +396,13 @@ test.describe('Per-message delivery/read status (E2E acks)', () => {
         }, ownMessageId, { timeout: 10000 });
         expect(await msgStatus(pageA, ownMessageId!)).toEqual({ status: 'delivered', read: false, text: '✓✓' });
 
-        // Even a read ack keeps the channel UI at delivered (read is a DM affordance).
+        // A read ack upgrades the channel glyph to the accent read state live.
         expect(await sendChannelAck(pageB, channelId, serverId, ownMessageId!, 'read')).toBe('sent');
-        await pageA.waitForTimeout(800);
-        expect(await msgStatus(pageA, ownMessageId!)).toEqual({ status: 'delivered', read: false, text: '✓✓' });
+        await pageA.waitForFunction((mid) => {
+            const el = document.querySelector(`.message[data-message-id="${mid}"] .msg-status`) as HTMLElement | null;
+            return el && el.getAttribute('data-status') === 'read';
+        }, ownMessageId, { timeout: 10000 });
+        expect(await msgStatus(pageA, ownMessageId!)).toEqual({ status: 'read', read: true, text: '✓✓' });
 
         await ctxA.close();
         await ctxB.close();
@@ -466,7 +469,10 @@ test.describe('Per-message delivery/read status (E2E acks)', () => {
         tip = await pageA.evaluate((mid) => (document.querySelector(`.message[data-message-id="${mid}"] .msg-status`) as HTMLElement | null)?.getAttribute('data-tooltip') || '', ownMessageId!);
         expect(tip).toBe('Read by ' + uB);
 
-        // Hovering the glyph surfaces the label in the shared hover card.
+        // Hovering the glyph surfaces the label in the shared hover card (the
+        // default display mode is 'hover', so hover the message first to reveal
+        // the glyph, then hover the glyph itself).
+        await pageA.hover(`.message[data-message-id="${ownMessageId}"]`);
         await pageA.hover(`.message[data-message-id="${ownMessageId}"] .msg-status`);
         await pageA.waitForSelector('#msg-status-tooltip', { state: 'visible', timeout: 3000 });
         const shown = await pageA.evaluate(() => (document.getElementById('msg-status-tooltip') as HTMLElement | null)?.textContent || '');
@@ -492,9 +498,12 @@ test.describe('Per-message delivery/read status (E2E acks)', () => {
         await enterChannelView(pageB);
 
         expect(await sendChannelMessageViaWs(pageA, channelId, serverId, 'status modes')).toBe('sent');
+        // B is viewing, so the delivered ack lands immediately and the read ack
+        // ~600ms later — accept either state (the glyph may skip past delivered).
         await pageA.waitForFunction(() => {
             const el = document.querySelector('.message .msg-status') as HTMLElement | null;
-            return el && el.getAttribute('data-status') === 'delivered';
+            const s = el ? el.getAttribute('data-status') : null;
+            return s === 'delivered' || s === 'read';
         }, undefined, { timeout: 10000 });
         const ownMessageId = await pageA.evaluate(() => {
             const me = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user') || '{}').id : null;
@@ -506,22 +515,29 @@ test.describe('Per-message delivery/read status (E2E acks)', () => {
         // with B's avatar + display name resolved from the member cache.
         const ackers = await pageA.evaluate((mid) => (document.querySelector(`.message[data-message-id="${mid}"] .msg-status`) as HTMLElement | null)?.getAttribute('data-ackers') || '', ownMessageId!);
         expect(ackers.split(',')).toContain(bodyB.user.id);
-        await pageA.hover(`.message[data-message-id="${ownMessageId}"] .msg-status`);
-        await pageA.waitForSelector('#msg-status-tooltip', { state: 'visible', timeout: 3000 });
-        const tipText = await pageA.evaluate(() => (document.getElementById('msg-status-tooltip') as HTMLElement | null)?.textContent || '');
-        expect(tipText).toContain('Delivered to 1 member');
-        expect(tipText).toContain(uB);
-        const hasAvatar = await pageA.evaluate(() => !!document.querySelector('#msg-status-tooltip .mst-avatar'));
-        expect(hasAvatar).toBe(true);
 
         const statusDisplay = (mid: string) => pageA.evaluate((m) => {
             const el = document.querySelector(`.message[data-message-id="${m}"] .msg-status`) as HTMLElement | null;
             return el ? getComputedStyle(el).display : '';
         }, mid);
 
-        // Default mode is 'always' → the glyph is visible.
-        expect(await pageA.evaluate(() => document.body.classList.contains('show-msg-status-always'))).toBe(true);
-        expect(await statusDisplay(ownMessageId!)).toBe('block');
+        // Default mode is 'hover' → the glyph is hidden until the message is hovered.
+        expect(await pageA.evaluate(() => document.body.classList.contains('show-msg-status-hover'))).toBe(true);
+        expect(await statusDisplay(ownMessageId!)).toBe('none');
+
+        // Hover the message to reveal the glyph, then hover the glyph itself to
+        // open the member-list card.
+        await pageA.hover(`.message[data-message-id="${ownMessageId}"]`);
+        await expect.poll(async () => statusDisplay(ownMessageId!)).toBe('block');
+        await pageA.hover(`.message[data-message-id="${ownMessageId}"] .msg-status`);
+        await pageA.waitForSelector('#msg-status-tooltip', { state: 'visible', timeout: 3000 });
+        const tipText = await pageA.evaluate(() => (document.getElementById('msg-status-tooltip') as HTMLElement | null)?.textContent || '');
+        // B reads live, so the glyph is already in the read state → the card
+        // header says "Read by" (it would say "Delivered to" for unread only).
+        expect(tipText).toMatch(/Delivered to 1 member|Read by 1 member/);
+        expect(tipText).toContain(uB);
+        const hasAvatar = await pageA.evaluate(() => !!document.querySelector('#msg-status-tooltip .mst-avatar'));
+        expect(hasAvatar).toBe(true);
 
         // Settings → Display → set to Off → hidden immediately.
         await pageA.click('#settings-btn');
