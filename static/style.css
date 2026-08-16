@@ -907,9 +907,10 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     background: none;
     border: none;
     color: var(--text-muted);
-    font-size: clamp(16px, 2.5vw, 20px);
+    font-size: clamp(14px, 2vw, 18px);
     cursor: pointer;
-    padding: 0 8px;
+    padding: 2px 6px;
+    border-radius: 4px;
     line-height: 1;
 }
 
@@ -5417,6 +5418,28 @@ body.show-msg-times-hover .message:hover .file-card .time-hover {
     overflow-y: auto;
     scrollbar-width: thin;
 }
+/* On small screens (phones), shrink the reaction picker grid to fluid
+   columns so the ~1000-emoji popover fits the viewport width. */
+@media (max-width: 520px) {
+    .reaction-picker-full {
+        max-width: calc(100vw - 16px);
+    }
+    .reaction-picker-body {
+        grid-template-columns: repeat(6, 1fr);
+        gap: 2px;
+        max-height: 45vh;
+    }
+    .reaction-pick {
+        font-size: 18px;
+        padding: 3px;
+    }
+    .reaction-pick-custom .emoji-inline,
+    .reaction-pick-custom .emoji-inline.emoji-alone {
+        width: 18px;
+        height: 18px;
+        font-size: 18px;
+    }
+}
 .reaction-picker-section {
     grid-column: 1 / -1;
     font-size: 11px;
@@ -6022,6 +6045,27 @@ body.show-msg-times .forward-preview .time-hover {
 .emoji-search-clear:hover {
     background: #3d3d3d;
     color: #fff;
+}
+.sticker-search {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 8px;
+}
+.sticker-search input {
+    flex: 1;
+    background: #1e1e1e;
+    border: 1px solid #3d3d3d;
+    border-radius: 4px;
+    padding: 6px 10px;
+    color: #d4d4d4;
+    font-size: 13px;
+    outline: none;
+}
+.sticker-search input:focus {
+    border-color: #569cd6;
+}
+.sticker-search input::placeholder {
+    color: #666;
 }
 .sticker-panel-tabs {
     display: flex;

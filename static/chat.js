@@ -1617,13 +1617,42 @@ function openReactionPicker(anchorBtn, msgDiv) {
     var rect = anchorBtn.getBoundingClientRect();
     el.style.position = 'fixed';
     el.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - el.offsetWidth - 8)) + 'px';
-    // Flip above the button when there isn't room below (the grid scrolls).
-    var spaceBelow = window.innerHeight - rect.bottom - 6;
-    if (spaceBelow < Math.min(el.offsetHeight, 320) && rect.top - 6 > el.offsetHeight) {
-        el.style.top = Math.max(8, rect.top - el.offsetHeight - 6) + 'px';
+    // Size and position the popover against the space ACTUALLY available around
+    // the button instead of a flat cap: measure the fixed header (search box +
+    // padding) once, then cap the scrollable grid so the whole popover fits the
+    // side with the most room. The grid scrolls internally, so every emoji stays
+    // reachable no matter how small the viewport is.
+    var margin = 8;
+    var vh = window.innerHeight;
+    var cssCap = window.innerWidth <= 520 ? vh * 0.45 : vh * 0.5;
+    var headerH = el.offsetHeight - body.offsetHeight;
+    var belowTop = rect.bottom + 6;
+    var aboveTop = rect.top - 6;
+    var availBelow = (vh - belowTop - margin) - headerH;
+    var availAbove = (aboveTop - margin) - headerH;
+
+    var openBelow;
+    var gridMax;
+    if (availBelow >= availAbove && availBelow >= 120) {
+        openBelow = true;
+        gridMax = Math.min(cssCap, availBelow);
+    } else if (availAbove >= 120) {
+        openBelow = false;
+        gridMax = Math.min(cssCap, availAbove);
     } else {
-        el.style.top = (rect.bottom + 6) + 'px';
+        // Too little room on both sides: use whichever is bigger and let the
+        // final clamp keep the popover on-screen.
+        openBelow = availBelow >= availAbove;
+        gridMax = Math.max(60, openBelow ? availBelow : availAbove);
     }
+    body.style.maxHeight = gridMax + 'px';
+
+    var top = openBelow ? belowTop : aboveTop - el.offsetHeight;
+    // Safety clamp: never let the popover extend past the viewport.
+    if (top + el.offsetHeight > vh - margin) {
+        top = Math.max(margin, vh - el.offsetHeight - margin);
+    }
+    el.style.top = top + 'px';
     el.addEventListener('click', function (e) {
         var btn = e.target.closest('.reaction-pick');
         if (!btn) return;
@@ -22043,8 +22072,18 @@ function renderStickerGrid(container) {
             return;
         }
         const searchBar = document.createElement('div');
-        searchBar.style.cssText = 'padding:8px 12px;position:sticky;top:0;background:var(--bg-secondary);z-index:1;';
-        searchBar.innerHTML = '<input type="text" id="sticker-search-input" placeholder="Search stickers..." style="width:100%;padding:6px 10px;border-radius:6px;border:1px solid #2a2a4a;background:#1a1a2e;color:#e0e0e0;font-size:12px;box-sizing:border-box;">';
+        searchBar.className = 'sticker-search';
+        const searchInput = document.createElement('input');
+        searchInput.type = 'text';
+        searchInput.id = 'sticker-search-input';
+        searchInput.placeholder = 'Search stickers...';
+        const clearBtn = document.createElement('button');
+        clearBtn.className = 'emoji-search-clear';
+        clearBtn.textContent = '✕';
+        clearBtn.style.display = 'none';
+        clearBtn.title = 'Clear search';
+        searchBar.appendChild(searchInput);
+        searchBar.appendChild(clearBtn);
         container.appendChild(searchBar);
 
         const grid = document.createElement('div');
@@ -22060,13 +22099,21 @@ function renderStickerGrid(container) {
         });
         renderStickerItems(grid, filteredStickers);
 
-        document.getElementById('sticker-search-input')?.addEventListener('input', (e) => {
-            const q = e.target.value.toLowerCase();
-            var filtered = nonGifStickers.filter(s => s.sticker_name.toLowerCase().includes(q));
+        function filterStickerGrid(q) {
+            var filtered = nonGifStickers.filter(s => (s.sticker_name || '').toLowerCase().includes(q));
             // Also filter out emojis from search results
             filtered = filtered.filter(function(s) { return !emojiCache || !emojiCache[s.sticker_name]; });
             grid.innerHTML = '';
             renderStickerItems(grid, filtered);
+            if (clearBtn) clearBtn.style.display = q ? 'flex' : 'none';
+        }
+        searchInput.addEventListener('input', (e) => {
+            filterStickerGrid(e.target.value.toLowerCase());
+        });
+        clearBtn.addEventListener('click', () => {
+            searchInput.value = '';
+            filterStickerGrid('');
+            searchInput.focus();
         });
     });
 }
@@ -22134,12 +22181,23 @@ function renderGifPanel(container, searchQuery) {
         searchInput.addEventListener('input', function() {
             renderGifPanel(container, this.value);
         });
+        var clearBtn = document.createElement('button');
+        clearBtn.className = 'emoji-search-clear';
+        clearBtn.textContent = '✕';
+        clearBtn.style.display = 'none';
+        clearBtn.title = 'Clear search';
+        clearBtn.addEventListener('click', function() {
+            renderGifPanel(container, '');
+        });
         searchBar.appendChild(searchInput);
+        searchBar.appendChild(clearBtn);
         container.appendChild(searchBar);
     }
     // Update existing search input value without destroying it
     var searchInput = searchBar.querySelector('input');
     if (searchInput) searchInput.value = searchQuery || '';
+    var clearBtn = searchBar.querySelector('.emoji-search-clear');
+    if (clearBtn) clearBtn.style.display = searchQuery ? 'flex' : 'none';
 
     var query = searchQuery ? searchQuery.trim().toLowerCase() : '';
 
