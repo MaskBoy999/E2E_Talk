@@ -1223,7 +1223,12 @@ function extractSearchableText(plaintext) {
     try {
         var p = JSON.parse(plaintext);
         if (p && typeof p === 'object') {
-            text = (p.type === 'text' && typeof p.text === 'string') ? p.text : '';
+            if (p.type === 'text' && typeof p.text === 'string') {
+                text = p.text;
+            } else if (p.type === 'poll' && typeof p.question === 'string') {
+                // Index the question so polls are searchable like text messages.
+                text = p.question;
+            }
         }
     } catch (_) {}
     return text;
@@ -1535,6 +1540,534 @@ function applyReactionEvent(data) {
         _reactionPayloadCache[data.message_id][payload.e].token = data.emoji_token;
     }
     updateReactionPill(msgEl, payload.e, payload, mine, added);
+}
+
+// === E2E-encrypted polls ===
+// The poll question + options ride inside the message's encrypted content
+// ({ type: 'poll', question, options: [{id, text}], multiple }). Each VOTE is
+// stored server-side as ONLY a blind HMAC option token (keyed by the
+// conversation key the host never sees) + voter id — the host can never read
+// which option anyone chose. Clients match tokens to the option ids from the
+// decrypted poll message and compute counts locally.
+
+// Per-message cache of MY vote rows (optionId -> exact stored server token) so
+// toggling off sends the precise token even after a server-key rotation.
+let _pollVoteCache = {}; // messageId -> { optionId: { token } }
+
+// Compute the blind HMAC token for one poll option in a conversation.
+// Mirrors nothing server-side beyond storage: HMAC-SHA256(key, 'poll-v1:' + optionId).
+function pollOptionToken(key, optionId) {
+    return E2ECrypto.hmacHex(key, 'poll-v1:' + optionId);
+}
+
+// Every possible token for an option across the key rotation history, so rows
+// stored under an old key version still match after a server-key rotation.
+function pollOptionTokens(optionId, keys) {
+    if (!keys) return [];
+    var arr = Array.isArray(keys) ? keys : [keys];
+    var out = [];
+    for (var i = 0; i < arr.length; i++) {
+        if (arr[i]) out.push(pollOptionToken(arr[i], optionId));
+    }
+    return out;
+}
+
+// Which option id a stored token belongs to (try every candidate token per
+// option so old-key rows still match). Returns null when unmatchable.
+function pollOptionIdForToken(pollData, token, keys) {
+    if (!pollData || !Array.isArray(pollData.options) || !token) return null;
+    for (var i = 0; i < pollData.options.length; i++) {
+        if (pollOptionTokens(pollData.options[i].id, keys).indexOf(token) !== -1) {
+            return pollData.options[i].id;
+        }
+    }
+    return null;
+}
+
+// Tally the vote rows of one poll message: per-option { count, mine, tokens }
+// plus total rows. The server never sees any of this — it only relays tokens.
+function computePollTallies(pollData, votes, keys, myUserId) {
+    var t = { total: 0, byOption: {} };
+    if (!pollData || !Array.isArray(pollData.options)) return t;
+    for (var i = 0; i < pollData.options.length; i++) {
+        var oid = pollData.options[i].id;
+        t.byOption[oid] = { count: 0, mine: false, tokens: pollOptionTokens(oid, keys) };
+    }
+    if (!Array.isArray(votes)) return t;
+    for (var j = 0; j < votes.length; j++) {
+        var v = votes[j];
+        var voter = v.voter_user_id || v.voter_id;
+        var optionId = pollOptionIdForToken(pollData, v.option_token, keys);
+        if (!optionId) continue;
+        t.byOption[optionId].count++;
+        if (voter && myUserId && voter === myUserId) t.byOption[optionId].mine = true;
+        t.total++;
+    }
+    return t;
+}
+
+// Remember MY vote rows (optionId -> exact stored token) so a toggle-off sends
+// the exact server token (key-rotation safe), mirroring the reaction cache.
+function cachePollVotes(msg, pollData, keys, myUserId) {
+    if (!msg || !msg.id || !Array.isArray(msg.poll_votes) || !pollData || !myUserId) return;
+    var cache = {};
+    for (var i = 0; i < msg.poll_votes.length; i++) {
+        var v = msg.poll_votes[i];
+        var voter = v.voter_user_id || v.voter_id;
+        if (!voter || voter !== myUserId) continue;
+        var optionId = pollOptionIdForToken(pollData, v.option_token, keys);
+        if (optionId) cache[optionId] = { token: v.option_token };
+    }
+    _pollVoteCache[msg.id] = cache;
+}
+
+// Build the poll card HTML for a message ('' when the payload isn't a poll).
+function buildPollCardHtml(pollData, votes, keys, myUserId) {
+    if (!pollData || !Array.isArray(pollData.options) || !pollData.options.length) return '';
+    var t = computePollTallies(pollData, votes, keys, myUserId);
+    var html = '<div class="poll-card">';
+    html += '<div class="poll-question">' + renderEmojiText(escapeHtml(pollData.question || 'Poll')) + '</div>';
+    html += '<div class="poll-options">';
+    for (var i = 0; i < pollData.options.length; i++) {
+        var opt = pollData.options[i];
+        var o = t.byOption[opt.id] || { count: 0, mine: false };
+        var pct = t.total ? Math.round(o.count / t.total * 100) : 0;
+        html += '<button class="poll-option' + (o.mine ? ' mine' : '') + '" data-option-id="' + escapeAttr(opt.id) + '" data-count="' + o.count + '" title="Vote">' +
+            '<span class="poll-option-bar" style="width:' + pct + '%"></span>' +
+            '<span class="poll-option-text">' + renderEmojiText(escapeHtml(opt.text)) + '</span>' +
+            '<span class="poll-option-count">' + o.count + '</span>' +
+            '</button>';
+    }
+    html += '</div>';
+    html += '<div class="poll-footer">' +
+        '<span class="poll-votes-label">' + t.total + ' vote' + (t.total === 1 ? '' : 's') + '</span>' +
+        (pollData.multiple ? '<span class="poll-multi-label">Multiple choice</span>' : '') +
+        '</div>';
+    html += '</div>';
+    return html;
+}
+
+// Send (or toggle) my vote on one poll option. Single-choice polls first
+// remove my votes on OTHER options (their exact stored tokens, rotation-safe).
+function sendPollVote(msgDiv, optionId) {
+    if (!msgDiv || !optionId) return;
+    var messageId = msgDiv.getAttribute('data-message-id');
+    if (!messageId) return;
+    var dmChannelId = msgDiv.getAttribute('data-dm-channel-id');
+    var channelId = msgDiv.getAttribute('data-channel-id');
+    var key = null, type = null, extra = {};
+    if (dmChannelId) {
+        key = dmSearchKey(dmChannelId);
+        type = 'dm_poll_vote';
+        extra.dm_channel_id = dmChannelId;
+    } else {
+        key = E2ECrypto.getServerKey(currentServerId);
+        type = 'poll_vote';
+        extra.channel_id = channelId || currentChannelId;
+    }
+    if (!key || !type) return;
+    var keys = dmChannelId ? [key] : (E2ECrypto.getAllServerKeys(currentServerId) || [key]);
+    var payload = msgDiv._pollData;
+    var myUserId = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')).id : '';
+    var cached = (_pollVoteCache[messageId] && _pollVoteCache[messageId][optionId]) || null;
+    // Toggling OFF: reuse the exact stored token (key-rotation safe).
+    var token = (cached && cached.token) || pollOptionToken(keys && keys.length ? keys[0] : key, optionId);
+    var removeTokens = [];
+    // Single-choice: if I already voted a DIFFERENT option, remove those votes
+    // in the same request (server broadcasts each removal for live tallies).
+    if (payload && !payload.multiple && Array.isArray(payload.options)) {
+        for (var i = 0; i < payload.options.length; i++) {
+            var oid = payload.options[i].id;
+            if (oid === optionId) continue;
+            var myEntry = (_pollVoteCache[messageId] && _pollVoteCache[messageId][oid]) || null;
+            if (myEntry && myEntry.token) removeTokens.push(myEntry.token);
+        }
+    }
+    if (!token) return;
+    if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify(Object.assign({
+            type: type,
+            message_id: messageId,
+            option_token: token,
+            remove_option_tokens: removeTokens,
+        }, extra)));
+    }
+}
+
+// Recompute every option bar + the footer total from the DOM data-counts.
+function refreshPollBars(msgEl) {
+    var card = msgEl.querySelector('.poll-card');
+    if (!card) return;
+    var opts = card.querySelectorAll('.poll-option');
+    var total = 0;
+    for (var i = 0; i < opts.length; i++) total += parseInt(opts[i].getAttribute('data-count'), 10) || 0;
+    for (var j = 0; j < opts.length; j++) {
+        var c = parseInt(opts[j].getAttribute('data-count'), 10) || 0;
+        var pct = total ? Math.round(c / total * 100) : 0;
+        var bar = opts[j].querySelector('.poll-option-bar');
+        if (bar) bar.style.width = pct + '%';
+    }
+    var label = card.querySelector('.poll-votes-label');
+    if (label) label.textContent = total + ' vote' + (total === 1 ? '' : 's');
+}
+
+// Update one option in place after a live WS poll vote event.
+function updatePollOption(msgEl, optionId, mine, added) {
+    var btn = msgEl.querySelector('.poll-option[data-option-id="' + CSS.escape(optionId) + '"]');
+    if (!btn) return;
+    var count = parseInt(btn.getAttribute('data-count'), 10) || 0;
+    if (added) {
+        btn.setAttribute('data-count', count + 1);
+        var cEl = btn.querySelector('.poll-option-count');
+        if (cEl) cEl.textContent = count + 1;
+        if (mine) btn.classList.add('mine');
+    } else {
+        var n = Math.max(0, count - 1);
+        btn.setAttribute('data-count', n);
+        var cEl2 = btn.querySelector('.poll-option-count');
+        if (cEl2) cEl2.textContent = n;
+        if (mine) btn.classList.remove('mine');
+    }
+    refreshPollBars(msgEl);
+}
+
+// Apply a live WS poll-vote event to a rendered message (no full re-render).
+function applyPollVoteEvent(data) {
+    if (!data || !data.message_id || !data.option_token) return;
+    var isDm = data.type === 'dm_poll_vote_added' || data.type === 'dm_poll_vote_removed';
+    var added = data.type === 'poll_vote_added' || data.type === 'dm_poll_vote_added';
+    if (isDm) {
+        if (data.dm_channel_id !== currentDmChannelId) return;
+    } else {
+        if (data.channel_id !== currentChannelId) return;
+    }
+    var list = document.getElementById('message-list');
+    if (!list) return;
+    var msgEl = list.querySelector('.message[data-message-id="' + CSS.escape(data.message_id) + '"]');
+    if (!msgEl) return;
+    var pollData = msgEl._pollData;
+    if (!pollData) return;
+    var keys = isDm ? dmSearchKey(currentDmChannelId) : (E2ECrypto.getAllServerKeys(currentServerId) || []);
+    var optionId = pollOptionIdForToken(pollData, data.option_token, keys);
+    if (!optionId) return;
+    var myUserId = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')).id : '';
+    var mine = !!data.user_id && data.user_id === myUserId;
+    // Keep MY cached tokens exact (rotation-safe toggle-off).
+    if (mine) {
+        if (!_pollVoteCache[data.message_id]) _pollVoteCache[data.message_id] = {};
+        if (added) _pollVoteCache[data.message_id][optionId] = { token: data.option_token };
+        else delete _pollVoteCache[data.message_id][optionId];
+    }
+    updatePollOption(msgEl, optionId, mine, added);
+}
+
+// === Per-message delivery/read receipts (E2E blind-token acks) ===
+// The recipient's client acks each received message with a blind HMAC token
+// (HMAC-SHA256(conversationKey, 'ack-v1:' + messageId)) the host can't forge
+// (it never holds the key). The server records 'delivered' then upgrades to
+// 'read' and broadcasts, so the author's checkmark updates live: ✓ sent →
+// ✓✓ delivered → ✓✓ (accent) read. Only the author renders a status; the ack
+// rows returned with message lists are filtered server-side to author + self.
+
+// Which message ids this client already acked, per conversation, so a re-acked
+// delivery or reconnect never floods the server: convKey -> messageId -> status.
+let _ackState = {}; // 'ch:'+channelId | 'dm:'+dmChannelId -> { [messageId]: 'delivered'|'read' }
+
+// The blind HMAC proof token for one message ack in a conversation.
+function ackToken(key, messageId) {
+    return E2ECrypto.hmacHex(key, 'ack-v1:' + messageId);
+}
+
+// Send one delivery/read ack over WS (the token is the E2E proof of receipt).
+function sendMessageAck(messageId, status, isDm, convId) {
+    if (!messageId || !convId || !ws || ws.readyState !== 1) return false;
+    var key = isDm ? dmSearchKey(convId) : E2ECrypto.getServerKey(currentServerId);
+    if (!key) return false;
+    var frame = {
+        type: isDm ? 'dm_message_ack' : 'message_ack',
+        message_id: messageId,
+        status: status,
+        ack_token: ackToken(key, messageId),
+    };
+    if (isDm) frame.dm_channel_id = convId;
+    else frame.channel_id = convId;
+    ws.send(JSON.stringify(frame));
+    var convKey = (isDm ? 'dm:' : 'ch:') + convId;
+    if (!_ackState[convKey]) _ackState[convKey] = {};
+    _ackState[convKey][messageId] = status;
+    return true;
+}
+
+// Ack 'delivered' for a received message (skip if already acked at >= delivered).
+function ackDelivered(messageId, isDm, convId) {
+    if (!messageId) return;
+    var convKey = (isDm ? 'dm:' : 'ch:') + convId;
+    if (_ackState[convKey] && _ackState[convKey][messageId]) return; // already acked
+    sendMessageAck(messageId, 'delivered', isDm, convId);
+}
+
+// Ack 'read' for a received message after a short delay, only if the user is
+// still viewing that conversation and the tab is visible (so scrolling past
+// messages in a background tab doesn't send false reads).
+function scheduleReadAck(messageId, isDm, convId) {
+    if (!messageId) return;
+    setTimeout(function () {
+        if (document.hidden) return;
+        var stillViewing = isDm ? (currentDmChannelId === convId) : (currentChannelId === convId);
+        if (!stillViewing) return;
+        var convKey = (isDm ? 'dm:' : 'ch:') + convId;
+        if (_ackState[convKey] && _ackState[convKey][messageId] === 'read') return;
+        sendMessageAck(messageId, 'read', isDm, convId);
+    }, 600);
+}
+
+// Opening a conversation marks the received messages as read (E2E acks) so the
+// author's checkmark upgrades live even for messages that arrived while the
+// reader was elsewhere. Skips own messages; the server dedupes + upgrades, so
+// re-opening after a reload is a no-op burst.
+function ackOpenConversationRead(convId, isDm) {
+    if (!convId || !user) return;
+    var list = document.getElementById('message-list');
+    if (!list) return;
+    var msgs = list.querySelectorAll('.message[data-sender-user-id]');
+    var convKey = (isDm ? 'dm:' : 'ch:') + convId;
+    for (var i = 0; i < msgs.length; i++) {
+        var m = msgs[i];
+        if (m.getAttribute('data-sender-user-id') === user.id) continue;
+        var mid = m.getAttribute('data-message-id');
+        if (!mid) continue;
+        if (_ackState[convKey] && _ackState[convKey][mid] === 'read') continue;
+        sendMessageAck(mid, 'read', isDm, convId);
+    }
+}
+
+// Derive the rendered status of an own message from its ack rows.
+function messageReadStatus(msg, capAtDelivered) {
+    if (!msg || !Array.isArray(msg.acks) || !msg.acks.length) return 'sent';
+    var hasRead = false, hasDelivered = false;
+    for (var i = 0; i < msg.acks.length; i++) {
+        if (msg.acks[i].status === 'read') hasRead = true;
+        else if (msg.acks[i].status === 'delivered') hasDelivered = true;
+    }
+    if (capAtDelivered) return hasDelivered || hasRead ? 'delivered' : 'sent';
+    return hasRead ? 'read' : (hasDelivered ? 'delivered' : 'sent');
+}
+
+// The status glyph for an own message (✓ / ✓✓ / ✓✓ read). `tooltip` is an
+// optional plain-text hover label (DMs: "Read by Alice"); `ackers` is an
+// optional comma-separated list of user ids (channels) whose names + avatars
+// are rendered in a member-list-style hover card from the member cache.
+function msgStatusHtml(status, tooltip, ackers) {
+    return '<span class="msg-status' + (status === 'read' ? ' read' : '') + '" data-status="' + status + '"' +
+        (tooltip ? ' data-tooltip="' + escapeAttr(tooltip) + '"' : '') +
+        (ackers ? ' data-ackers="' + escapeAttr(ackers) + '"' : '') + '>' +
+        (status === 'sent' ? '✓' : '✓✓') + '</span>';
+}
+
+// Hover label for the author's own status glyph. DMs name the single recipient
+// ("Read by Alice"); channels resolve the acker ids into member-list rows.
+function msgStatusTooltip(status, msg, isDm) {
+    if (status === 'sent' || !msg || !Array.isArray(msg.acks) || !msg.acks.length) return '';
+    if (isDm) {
+        if (currentDmOtherUser) {
+            var nm = currentDmOtherUser.display_name || currentDmOtherUser.username || 'the recipient';
+            return (status === 'read' ? 'Read by ' : 'Delivered to ') + nm;
+        }
+        return '';
+    }
+    return ''; // channels use the rich data-ackers hover card instead
+}
+
+// === Status hover card (member-list rendering) ===
+// Channels: the ✓✓ glyph opens a small card listing every member who received
+// the message — avatar (PFP or initial), display name with the member's color
+// + glow, and an Owner badge — mirroring loadMembers(). DMs fall back to the
+// plain "Read by <name>" line. One shared, lazily-created tooltip element.
+let _statusTipEl = null;
+
+function ensureStatusTipEl() {
+    if (_statusTipEl && _statusTipEl.isConnected) return _statusTipEl;
+    var el = document.createElement('div');
+    el.className = 'msg-status-tooltip';
+    el.id = 'msg-status-tooltip';
+    el.style.display = 'none';
+    document.body.appendChild(el);
+    _statusTipEl = el;
+    return el;
+}
+
+function hideStatusTip() {
+    if (_statusTipEl) _statusTipEl.style.display = 'none';
+}
+
+// One member row inside the status hover card, styled like the member list.
+function statusMemberRowHtml(userId) {
+    var member = null;
+    for (var i = 0; i < currentServerMemberList.length; i++) {
+        if (currentServerMemberList[i].id === userId) { member = currentServerMemberList[i]; break; }
+    }
+    var cache = userDisplayNameCache[userId];
+    var displayName = (cache && cache.display_name) || (member && (member.display_name || member.username)) || (cache && cache.username) || 'Unknown member';
+    var color = (cache && cache.username_color) || (member && member.username_color) || null;
+    var borderColor = (cache && cache.username_border_color) || (member && member.username_border_color) || null;
+    var picFileId = (cache && cache.profile_picture_file_id) || (member && member.profile_picture_file_id) || null;
+    var isOwner = !!(member && member.role === 'owner');
+    var picUrl = picFileId ? getProfilePicUrl(picFileId, userId) : null;
+    var avatarHtml = picUrl
+        ? '<img class="mst-avatar-img" src="' + escapeAttr(picUrl) + '" alt="">'
+        : '<span class="mst-avatar-initial">' + escapeHtml((displayName.charAt(0) || '?').toUpperCase()) + '</span>';
+    var nameStyle = color
+        ? ' style="color:' + escapeAttr(color) + ';text-shadow:' + escapeAttr(getDisplayNameTextShadow(color, borderColor)) + '"'
+        : '';
+    return '<div class="mst-row">' +
+        '<span class="mst-avatar">' + avatarHtml + '</span>' +
+        '<span class="mst-name"' + nameStyle + '>' + escapeHtml(displayName) + '</span>' +
+        (isOwner ? '<span class="mst-owner">Owner</span>' : '') +
+        '</div>';
+}
+
+// Render (and position) the hover card for one status glyph.
+function renderStatusTip(triggerEl) {
+    var tip = ensureStatusTipEl();
+    tip._for = triggerEl;
+    var ackers = (triggerEl.getAttribute('data-ackers') || '').split(',').filter(function (x) { return x; });
+    if (ackers.length) {
+        var rows = '';
+        for (var i = 0; i < ackers.length; i++) rows += statusMemberRowHtml(ackers[i]);
+        tip.innerHTML = '<div class="mst-header">' + escapeHtml('Delivered to ' + ackers.length + ' member' + (ackers.length === 1 ? '' : 's')) + '</div>' + rows;
+    } else if (triggerEl.getAttribute('data-tooltip')) {
+        tip.innerHTML = '<div class="mst-row mst-plain">' + escapeHtml(triggerEl.getAttribute('data-tooltip')) + '</div>';
+    } else {
+        hideStatusTip();
+        return;
+    }
+    tip.style.display = 'block';
+    var r = triggerEl.getBoundingClientRect();
+    var tw = tip.offsetWidth, th = tip.offsetHeight;
+    var left = Math.min(Math.max(r.right - tw, 8), Math.max(8, window.innerWidth - tw - 8));
+    var top = r.top - th - 6;
+    if (top < 8) top = r.bottom + 6;
+    if (top + th > window.innerHeight - 8) top = Math.max(8, window.innerHeight - th - 8);
+    tip.style.left = left + 'px';
+    tip.style.top = top + 'px';
+}
+
+// One delegated pair keeps the card open while the pointer is over the glyph
+// OR the card itself (pointer-events: auto), and closes it anywhere else.
+document.addEventListener('mouseover', function (e) {
+    var inStatus = e.target && e.target.closest ? e.target.closest('.msg-status') : null;
+    var inTip = e.target && e.target.closest ? e.target.closest('.msg-status-tooltip') : null;
+    if (inStatus && inStatus.getAttribute('data-status') !== 'sent') {
+        renderStatusTip(inStatus);
+        return;
+    }
+    if (inTip) return;
+    if (_statusTipEl && _statusTipEl.style.display !== 'none') hideStatusTip();
+});
+
+// Scrolling or switching messages should dismiss the card.
+document.addEventListener('scroll', function () { hideStatusTip(); }, true);
+
+// Apply a live WS ack event to a rendered message (author-only).
+function applyAckEvent(data) {
+    if (!data || !data.message_id || !data.status) return;
+    var isDm = data.type === 'dm_message_ack';
+    if (isDm) {
+        if (data.dm_channel_id !== currentDmChannelId) return;
+    } else {
+        if (data.channel_id !== currentChannelId) return;
+    }
+    var list = document.getElementById('message-list');
+    if (!list) return;
+    var msgEl = list.querySelector('.message[data-message-id="' + CSS.escape(data.message_id) + '"]');
+    if (!msgEl) return;
+    // Only the author renders a status — ignore acks on other people's messages.
+    var myId = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')).id : '';
+    var senderId = msgEl.getAttribute('data-sender-user-id');
+    if (!senderId || senderId !== myId) return;
+    var el = msgEl.querySelector('.msg-status');
+    if (!el) return;
+    var cur = el.getAttribute('data-status');
+    // Channels cap the UI at delivered — read acks are recorded server-side
+    // but only DMs render the accent-colored read state (same as the render path).
+    var target = isDm ? data.status : 'delivered';
+    if (target === 'read' || (target === 'delivered' && cur !== 'read')) {
+        el.setAttribute('data-status', target);
+        if (target === 'read') el.classList.add('read');
+        el.textContent = '✓✓';
+        // Keep the hover label in sync with the live status transition.
+        if (isDm && currentDmOtherUser) {
+            var _nm = currentDmOtherUser.display_name || currentDmOtherUser.username || 'the recipient';
+            el.setAttribute('data-tooltip', (target === 'read' ? 'Read by ' : 'Delivered to ') + _nm);
+        } else if (!isDm) {
+            // Channel: track distinct ackers seen so far (render-time set + this
+            // acker) so the hover card lists them without a re-render.
+            if (!msgEl._ackIds) msgEl._ackIds = {};
+            if (data.acker_id) msgEl._ackIds[data.acker_id] = true;
+            el.setAttribute('data-ackers', Object.keys(msgEl._ackIds).join(','));
+            if (_statusTipEl && _statusTipEl._for === el && _statusTipEl.style.display !== 'none') {
+                renderStatusTip(el);
+            }
+        }
+    }
+}
+
+// === Disappearing messages (server-enforced TTL) ===
+// The server stores a wall-clock expires_at and shreds the row + file at
+// expiry (broadcasting `message_expired`). The client renders a countdown
+// banner and removes the element locally at 0 for snappy UX; the server event
+// is the authoritative removal (also covers other devices + offline reloads).
+let _disappearingTicker = null;
+// Composer disappearing-message TTL in seconds (0 = off). Included as
+// plaintext ttl_seconds on message_send / dm_send; the server enforces it.
+let _disappearingTtl = 0;
+
+// "123456" ms -> "0:04" / "1:05" (countdown label).
+function formatDisappearingTime(ms) {
+    var s = Math.max(0, Math.ceil(ms / 1000));
+    var m = Math.floor(s / 60);
+    s = s % 60;
+    return m > 0 ? m + ':' + String(s).padStart(2, '0') : '0:' + String(s).padStart(2, '0');
+}
+
+// One shared 250ms ticker for every rendered disappearing message: updates the
+// countdown labels and removes elements whose TTL has run out. Stops itself
+// when no disappearing messages remain.
+function ensureDisappearingTicker() {
+    if (_disappearingTicker) return;
+    _disappearingTicker = setInterval(function () {
+        var list = document.getElementById('message-list');
+        if (!list) return;
+        var els = list.querySelectorAll('.message[data-expires-at]');
+        if (!els.length) {
+            clearInterval(_disappearingTicker);
+            _disappearingTicker = null;
+            return;
+        }
+        for (var i = 0; i < els.length; i++) {
+            var el = els[i];
+            var exp = el.getAttribute('data-expires-at');
+            if (!exp) continue;
+            var t;
+            try { t = new Date(exp.replace(/\.(\d{3})\d*Z/, '.$1Z')).getTime() - Date.now(); }
+            catch (_) { continue; }
+            if (t <= 0) {
+                el.remove();
+                continue;
+            }
+            var label = el.querySelector('.disappearing-timer');
+            if (label) label.textContent = formatDisappearingTime(t);
+        }
+    }, 250);
+}
+
+// Authoritative removal when the server sweeper broadcasts an expiry.
+function removeDisappearedMessage(messageId) {
+    if (!messageId) return;
+    var list = document.getElementById('message-list');
+    if (!list) return;
+    var el = list.querySelector('.message[data-message-id="' + CSS.escape(messageId) + '"]');
+    if (el) el.remove();
 }
 
 // The emoji-reaction picker popover: a search box on top, then custom emojis
@@ -2300,6 +2833,30 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
     applyShowMsgTimes();
+
+    // Message-status (✓ sent / ✓✓ delivered / read) display mode: 'always'
+    // (default, current behavior), 'hover' (reveal on message hover), or 'off'.
+    // Mirrors the timestamp modes via body classes.
+    function getMsgStatusMode() {
+        var stored = localStorage.getItem('show_msg_status');
+        var mode = stored || 'always';
+        if (['always', 'hover', 'off'].indexOf(mode) === -1) mode = 'always';
+        return mode;
+    }
+    function applyShowMsgStatus() {
+        var mode = getMsgStatusMode();
+        document.body.classList.toggle('show-msg-status-always', mode === 'always');
+        document.body.classList.toggle('show-msg-status-hover', mode === 'hover');
+    }
+    const showMsgStatusSelect = document.getElementById('show-msg-status');
+    if (showMsgStatusSelect) {
+        showMsgStatusSelect.value = getMsgStatusMode();
+        showMsgStatusSelect.addEventListener('change', () => {
+            localStorage.setItem('show_msg_status', showMsgStatusSelect.value);
+            applyShowMsgStatus();
+        });
+    }
+    applyShowMsgStatus();
 
     // Composer (chat-input bar: + attach, emoji/sticker/gif, text box, send)
     // must only appear when a server TEXT channel or DM conversation is open.
@@ -4536,6 +5093,8 @@ document.addEventListener('DOMContentLoaded', () => {
     setupMessageActions();
     setupForwardModal();
     setupStickerPanel();
+    setupPollButton();
+    setupDisappearingButton();
     loadMutedState();
 
     // Event delegation on #channel-list for friend code panel buttons.
@@ -4943,6 +5502,8 @@ document.addEventListener('DOMContentLoaded', () => {
     
     function closeAttachPopup() {
         if (attachPopup) attachPopup.style.display = 'none';
+        var dmenu = document.getElementById('disappear-menu');
+        if (dmenu) dmenu.style.display = 'none';
     }
     
     function toggleAttachPopup() {
@@ -4973,6 +5534,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 openCameraCapture();
             } else if (action === 'record-video') {
                 startVideoRecording();
+            } else if (action === 'poll') {
+                if (window.openCreatePollModal) window.openCreatePollModal();
             }
             // 'record-audio' is handled by the record-audio click handler below
         });
@@ -8844,6 +9407,21 @@ function connectWebSocket(t) {
             case 'dm_reaction_removed':
                 applyReactionEvent(data);
                 break;
+            case 'poll_vote_added':
+            case 'poll_vote_removed':
+            case 'dm_poll_vote_added':
+            case 'dm_poll_vote_removed':
+                applyPollVoteEvent(data);
+                break;
+            case 'message_ack':
+            case 'dm_message_ack':
+                applyAckEvent(data);
+                break;
+            case 'message_expired':
+            case 'dm_message_expired':
+                // Server sweeper shredded the TTL'd message — remove it live.
+                removeDisappearedMessage(data.message_id);
+                break;
             case 'message_new':
                 if (data.channel_id && data.message) {
                     // A message arrived in the channel we're viewing — whoever was
@@ -8861,6 +9439,14 @@ function connectWebSocket(t) {
                     }
                     if (data.channel_id === currentChannelId) {
                         await appendMessage(data.message);
+                        // E2E delivery/read receipts: ack received messages with
+                        // the blind conversation-key token so the author's
+                        // checkmark moves to ✓✓ delivered, then ✓✓ read once
+                        // the current view has had it on screen.
+                        if (data.message.sender_user_id && data.message.sender_user_id !== user.id) {
+                            ackDelivered(data.message.id, false, data.channel_id);
+                            scheduleReadAck(data.message.id, false, data.channel_id);
+                        }
                         // Check if the newly appended message mentions the current user
                         var msgList = document.getElementById('message-list');
                         var lastMsg = msgList ? msgList.lastElementChild : null;
@@ -8911,6 +9497,13 @@ function connectWebSocket(t) {
                             await fetchDmConversationProfile(senderIdForFetch, data.dm_channel_id);
                         }
                         await appendDmMessage(data.message, kp, otherPubKey);
+                        // E2E delivery/read receipts: ack with the blind DM-key
+                        // token so the sender sees ✓✓ delivered, then ✓✓ read
+                        // while this DM stays open.
+                        if (data.message.sender_user_id && data.message.sender_user_id !== user.id) {
+                            ackDelivered(data.message.id, true, data.dm_channel_id);
+                            scheduleReadAck(data.message.id, true, data.dm_channel_id);
+                        }
                     } else {
                         // Message is for a different DM channel
                         // Don't notify self (e.g. when forwarding a message to own DM)
@@ -10954,6 +11547,9 @@ async function loadMessages(channelId, aroundMessageId, skipBottomScroll) {
         // redirect must go straight to the target, never flash the bottom first).
         if (!aroundMessageId && !skipBottomScroll) scrollMessageListToBottom();
         setupImageLoadRepin();
+        // E2E read receipts: opening a conversation marks its received messages
+        // as read (the author's checkmark upgrades live; the server dedupes).
+        ackOpenConversationRead(channelId, false);
     } catch (err) {
         console.error('Failed to load messages:', err);
         list.innerHTML = '<div class="welcome" style="color:#f44336">Failed to load messages</div>';
@@ -11524,6 +12120,7 @@ async function appendMessage(msg) {
     let forwardData = null;
     let gifData = null;
     let stickerData = null;
+    let pollData = null;
     let extraEmojis = null; // emoji refs embedded in message payload by sender
     if (msg.encrypted_content && msg.nonce && currentChannelId && currentServerId) {
         try {
@@ -11582,6 +12179,9 @@ async function appendMessage(msg) {
                 } else if (parsed && parsed.type === 'forward') {
                     forwardData = parsed;
                     textContent = '';
+                } else if (parsed && parsed.type === 'poll') {
+                    pollData = parsed;
+                    textContent = '';
                 } else if (parsed && parsed.type === 'text') {
                     textContent = parsed.text || '';
                 }
@@ -11608,7 +12208,23 @@ async function appendMessage(msg) {
     }
 
     // Backfill the E2E search index for history we've just decrypted.
-    queueSearchIndex(currentChannelId, null, msg.id, textContent);
+    // Polls index their question text so polls are searchable too.
+    if (pollData) {
+        queueSearchIndex(currentChannelId, null, msg.id, JSON.stringify({ type: 'text', text: pollData.question || '' }));
+    } else {
+        queueSearchIndex(currentChannelId, null, msg.id, textContent);
+    }
+
+    // Disappearing message: server-enforced wall-clock expiry. A row that
+    // already expired (race window between expiry and the next sweep) is never
+    // rendered — the server shreds it and broadcasts the authoritative removal.
+    var expiresAt = msg.expires_at || null;
+    if (expiresAt) {
+        try {
+            var _expT = new Date(expiresAt.replace(/\.(\d{3})\d*Z/, '.$1Z')).getTime();
+            if (_expT <= Date.now()) return;
+        } catch (_) { expiresAt = null; }
+    }
 
     // Break message grouping for file messages so they have their own header
     if (fileData || filesData) {
@@ -11705,6 +12321,41 @@ async function appendMessage(msg) {
         }
     }
 
+    // E2E polls: the question/options came from the decrypted content; the
+    // vote rows are blind option tokens the server relays. Counts + "my vote"
+    // are computed locally by matching tokens to option ids. MUST run before
+    // `wrappedContent` snapshots contentHtml (strings are immutable).
+    if (pollData) {
+        contentHtml += buildPollCardHtml(pollData, msg.poll_votes, E2ECrypto.getAllServerKeys(currentServerId), myUserId);
+        cachePollVotes(msg, pollData, E2ECrypto.getAllServerKeys(currentServerId), myUserId);
+    }
+
+    // Per-message delivery/read status for the author: ✓ sent → ✓✓ delivered.
+    // Read acks in channels are recorded server-side but the UI caps at
+    // delivered (read receipts are a DM affordance; see appendDmMessage).
+    if (isOwn) {
+        var _chStatus = messageReadStatus(msg, true);
+        // Channels: carry the acker ids on the glyph (data-ackers) so the
+        // hover card can render member-list rows; a live ack event appends.
+        var _ackers = [];
+        div._ackIds = {};
+        if (msg.acks) {
+            for (var _ai = 0; _ai < msg.acks.length; _ai++) {
+                var _aid = msg.acks[_ai].acker_user_id;
+                if (!div._ackIds[_aid]) { div._ackIds[_aid] = true; _ackers.push(_aid); }
+            }
+        }
+        contentHtml += msgStatusHtml(_chStatus, '', _ackers.join(','));
+    }
+
+    // Disappearing-message banner with a live countdown.
+    if (expiresAt) {
+        try {
+            var _expRemain = new Date(expiresAt.replace(/\.(\d{3})\d*Z/, '.$1Z')).getTime() - Date.now();
+            contentHtml = '<div class="disappearing-banner">🕐 <span class="disappearing-timer">' + formatDisappearingTime(_expRemain) + '</span></div>' + contentHtml;
+        } catch (_) {}
+    }
+
     var isStreamer = localStorage.getItem('streamerMode') === 'true';
     var hasContent = contentHtml && contentHtml.length > 0;
     var wrappedContent = contentHtml;
@@ -11717,10 +12368,10 @@ async function appendMessage(msg) {
     var isPinned = !!msg.pinned || msgElHasPin;
     // Server channels: ONLY the server owner may pin/unpin (enforced server-side
     // too). DMs have no owner — both members get the button (see appendDmMessage).
-    var canPin = !!isOwner;
-    const actionsHtml = '<div class="message-actions">' +
+    var canPin = !!isOwner;    const actionsHtml = '<div class="message-actions">' +
         (canPin ? pinButtonHtml(isPinned) : '') +
-        '<button class="msg-action-btn" data-action="react" title="React">&#x1F642;</button>' +
+        '<button class="msg-action-btn" data-action="react" title="React">&#x1F642;</button>'
+ +
         '<button class="msg-action-btn" data-action="reply" title="Reply">&#x21A9;</button>' +
         '<button class="msg-action-btn" data-action="forward" title="Forward to channel">&#x21AA;</button>' +
         '<button class="msg-action-btn" data-action="forward-dm" title="Forward to DM">&#x1F4AC;</button>' +
@@ -11749,6 +12400,16 @@ async function appendMessage(msg) {
             reactionsHtml +
         '</div>' +
         actionsHtml;
+    // Keep the parsed poll payload on the element for live vote updates and
+    // single-choice switching without a re-render.
+    div._pollData = pollData;
+    // Disappearing messages: record the expiry so the shared countdown ticker
+    // removes the element at 0 (the server's message_expired event is the
+    // authoritative removal).
+    if (expiresAt) {
+        div.setAttribute('data-expires-at', expiresAt);
+        ensureDisappearingTicker();
+    }
 
     // Load media preview if applicable (respect auto-load setting)
     const streamerOn = localStorage.getItem('streamerMode') === 'true';
@@ -12040,6 +12701,18 @@ function setupMessageActions() {
                     const storedToken = (entry && entry.token) || null;
                     sendReaction(pillMsg, canonical, payload, storedToken);
                 }
+            }
+            return;
+        }
+        // Poll option click → toggle my vote (server dedupes + broadcasts; the
+        // option is identified by its blind HMAC token, never by plaintext).
+        const pollOpt = e.target.closest('.poll-option');
+        if (pollOpt) {
+            const pollMsg = pollOpt.closest('.message');
+            if (pollMsg) {
+                const pMsgId = pollMsg.getAttribute('data-message-id');
+                const optionId = pollOpt.getAttribute('data-option-id');
+                if (pMsgId && optionId) sendPollVote(pollMsg, optionId);
             }
             return;
         }
@@ -13293,6 +13966,8 @@ async function sendMessage() {
         nonce: encrypted.nonce,
         message_nonce: encrypted.messageNonce || null,
     };
+    // Disappearing-message TTL (plaintext seconds the server enforces).
+    if (_disappearingTtl) msgPayload.ttl_seconds = _disappearingTtl;
     // E2E search blind index: tokenize the plaintext with the server key.
     try {
         var _tokKeys = E2ECrypto.getAllServerKeys(currentServerId) || [];
@@ -14151,6 +14826,8 @@ async function loadDmMessages(dmChannelId, otherUserId, skipBottomScroll) {
         // flash the bottom first).
         if (!skipBottomScroll) scrollMessageListToBottom();
         setupImageLoadRepin();
+        // E2E read receipts: opening a DM marks its received messages as read.
+        ackOpenConversationRead(dmChannelId, true);
     } catch (err) {
         console.error('Failed to load DM messages:', err);
         list.innerHTML = '<div class="welcome" style="color:#f44336">Failed to load messages</div>';
@@ -14305,6 +14982,7 @@ async function appendDmMessage(msg, kp, otherPublicKey) {
     let stickerData = null;
     let gifData = null;
     let forwardData = null;
+    let pollData = null;
     let replyTo = null;
     let extraEmojis = null; // emoji refs embedded in message payload by sender
     if (msg.encrypted_content && msg.nonce && kp && otherPublicKey) {
@@ -14367,6 +15045,9 @@ async function appendDmMessage(msg, kp, otherPublicKey) {
                 } else if (parsed && parsed.type === 'forward') {
                     forwardData = parsed;
                     textContent = '';
+                } else if (parsed && parsed.type === 'poll') {
+                    pollData = parsed;
+                    textContent = '';
                 } else if (parsed && parsed.type === 'text') {
                     textContent = parsed.text || '';
                 }
@@ -14392,7 +15073,21 @@ async function appendDmMessage(msg, kp, otherPublicKey) {
     }
 
     // Backfill the E2E search index for DM history we've just decrypted.
-    queueSearchIndex(null, currentDmChannelId, msg.id, textContent);
+    // Polls index their question text so polls are searchable too.
+    if (pollData) {
+        queueSearchIndex(null, currentDmChannelId, msg.id, JSON.stringify({ type: 'text', text: pollData.question || '' }));
+    } else {
+        queueSearchIndex(null, currentDmChannelId, msg.id, textContent);
+    }
+
+    // Disappearing message: server-enforced wall-clock expiry (see appendMessage).
+    var expiresAt = msg.expires_at || null;
+    if (expiresAt) {
+        try {
+            var _expT = new Date(expiresAt.replace(/\.(\d{3})\d*Z/, '.$1Z')).getTime();
+            if (_expT <= Date.now()) return;
+        } catch (_) { expiresAt = null; }
+    }
 
     // Break message grouping for file messages so they have their own header
     if (fileData || filesData) {
@@ -14496,6 +15191,30 @@ async function appendDmMessage(msg, kp, otherPublicKey) {
     var reactionsHtml = buildReactionsHtml(msg, dmSearchKey(_reactionDmId), myUserId);
     cacheMessageReactions(msg, dmSearchKey(_reactionDmId), myUserId);
 
+    // E2E polls: same blind-token vote tallies as channels, keyed by the DM key.
+    // MUST run before `wrappedContent` snapshots contentHtml (strings are
+    // immutable — the DM render path below reassigns wrappedContent anyway,
+    // but keep the ordering consistent).
+    if (pollData) {
+        contentHtml += buildPollCardHtml(pollData, msg.poll_votes, dmSearchKey(_reactionDmId), myUserId);
+        cachePollVotes(msg, pollData, dmSearchKey(_reactionDmId), myUserId);
+    }
+
+    // Per-message delivery/read status for the author: ✓ sent → ✓✓ delivered
+    // → ✓✓ (accent) read — full three-state receipts in DMs.
+    if (isOwn) {
+        var _dmStatus = messageReadStatus(msg, false);
+        contentHtml += msgStatusHtml(_dmStatus, msgStatusTooltip(_dmStatus, msg, true));
+    }
+
+    // Disappearing-message banner with a live countdown (see appendMessage).
+    if (expiresAt) {
+        try {
+            var _expRemain = new Date(expiresAt.replace(/\.(\d{3})\d*Z/, '.$1Z')).getTime() - Date.now();
+            contentHtml = '<div class="disappearing-banner">🕐 <span class="disappearing-timer">' + formatDisappearingTime(_expRemain) + '</span></div>' + contentHtml;
+        } catch (_) {}
+    }
+
     var isStreamer = localStorage.getItem('streamerMode') === 'true';
     var hasContent = contentHtml && contentHtml.length > 0;
     var wrappedContent = contentHtml;
@@ -14522,6 +15241,13 @@ async function appendDmMessage(msg, kp, otherPublicKey) {
             reactionsHtml +
         '</div>' +
         actionsHtml;
+    // Keep the parsed poll payload on the element for live vote updates.
+    div._pollData = pollData;
+    // Disappearing messages: record the expiry for the shared countdown ticker.
+    if (expiresAt) {
+        div.setAttribute('data-expires-at', expiresAt);
+        ensureDisappearingTicker();
+    }
 
     // Reply highlight: if this message replies to the current user, add yellow border
     if (replyTo && replyTo.author && user && replyTo.author === user.username) {
@@ -14692,6 +15418,8 @@ async function sendDmMessage() {
         nonce: encrypted.nonce,
         message_nonce: encrypted.messageNonce || null,
     };
+    // Disappearing-message TTL (plaintext seconds the server enforces).
+    if (_disappearingTtl) msgPayload.ttl_seconds = _disappearingTtl;
     // E2E search blind index: tokenize the plaintext with the DM key.
     try {
         var _dmk = dmSearchKey(currentDmChannelId);
@@ -21473,6 +22201,231 @@ function searchEmojis(query) {
 
 // Detect touch device globally for delete button behavior
 var isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+
+// === E2E poll creation ===
+// The poll payload ({ type: 'poll', question, options: [{id, text}], multiple })
+// is encrypted exactly like any other message content — the server only ever
+// stores/relays ciphertext. Votes are separate blind-HMAC rows (see the poll
+// helpers above), so the host can never read the question, options, or votes.
+
+// Attach the sender's encrypted profile snapshot to a poll message payload.
+function attachPollProfileSnapshot(msgPayload, encryptFn) {
+    if (!myProfile || !user) return;
+    try {
+        var snapshot = {
+            display_name: myProfile.display_name || user.display_name || user.username,
+            username_color: myProfile.username_color || user.username_color || null,
+            username_border_color: myProfile.username_border_color || null,
+            nickname: myProfile.nickname || null,
+            description: myProfile.description || null,
+            profile_background_color: myProfile.profile_background_color || null,
+            profile_picture_file_id: myProfile.profile_picture_file_id || null,
+            profile_picture_file_key: null
+        };
+        if (myProfile.profile_picture_file_id && myProfile.profile_picture_file_key) {
+            var identity = E2ECrypto.getIdentityKeyPair();
+            if (identity) {
+                var rawPicKey = myProfile.profile_picture_file_key;
+                if (rawPicKey.indexOf(':') > 0) {
+                    var dk = E2ECrypto.decodeEncryptedFileKey(rawPicKey, identity.privateKey);
+                    if (dk) rawPicKey = dk;
+                }
+                snapshot.profile_picture_file_key = rawPicKey;
+            }
+        }
+        var pdKeyB64 = profileKeyCache[user.id + ':profile_data_key'];
+        if (pdKeyB64) snapshot.profile_data_key = pdKeyB64;
+        var encSnapshot = encryptFn(JSON.stringify(snapshot));
+        if (encSnapshot) {
+            msgPayload.encrypted_profile_snapshot = encSnapshot.ciphertext;
+            msgPayload.profile_snapshot_nonce = encSnapshot.nonce;
+        }
+    } catch (e) { console.warn('Failed to encrypt profile snapshot:', e); }
+}
+
+// Send a poll message to the current conversation (channel or DM). Mirrors the
+// message_send / dm_send flows: E2E-encrypted content + search blind-index
+// tokens for the question + encrypted sender profile snapshot.
+async function sendPollMessage(payload) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    var kp = E2ECrypto.getIdentityKeyPair();
+    if (!kp) return false;
+    if (viewMode === 'dms') {
+        if (!currentDmChannelId || !currentDmOtherUser) return false;
+        var otherPublicKey;
+        try {
+            const res = await authFetch('/api/identity/' + currentDmOtherUser.id);
+            const data = await res.json();
+            otherPublicKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(data.identity_public_key));
+        } catch (e) { return false; }
+        var encrypted;
+        try { encrypted = E2ECrypto.encryptDm(JSON.stringify(payload), currentDmChannelId, kp.privateKey, otherPublicKey); }
+        catch (e) { return false; }
+        var msgPayload = {
+            type: 'dm_send',
+            dm_channel_id: currentDmChannelId,
+            encrypted_content: encrypted.ciphertext,
+            nonce: encrypted.nonce,
+            message_nonce: encrypted.messageNonce || null,
+        };
+        try {
+            var _dmk = dmSearchKey(currentDmChannelId);
+            var _dmtoks = _dmk ? E2ECrypto.searchTokensForText(payload.question || '', [_dmk]) : [];
+            if (_dmtoks.length) msgPayload.search_tokens = _dmtoks;
+        } catch (_) {}
+        attachPollProfileSnapshot(msgPayload, function (json) {
+            return E2ECrypto.encryptDm(json, currentDmChannelId, kp.privateKey, otherPublicKey);
+        });
+        ws.send(JSON.stringify(msgPayload));
+        return true;
+    }
+    if (!currentChannelId || !currentServerId) return false;
+    var encKey = E2ECrypto.getServerKey(currentServerId);
+    if (!encKey) return false;
+    var enc2;
+    try { enc2 = E2ECrypto.encryptMessage(JSON.stringify(payload), encKey); }
+    catch (e) { return false; }
+    var msgPayload2 = {
+        type: 'message_send',
+        channel_id: currentChannelId,
+        encrypted_content: enc2.ciphertext,
+        nonce: enc2.nonce,
+        message_nonce: enc2.messageNonce || null,
+    };
+    try {
+        var _toks = E2ECrypto.searchTokensForText(payload.question || '', E2ECrypto.getAllServerKeys(currentServerId) || []);
+        if (_toks.length) msgPayload2.search_tokens = _toks;
+    } catch (_) {}
+    attachPollProfileSnapshot(msgPayload2, function (json) { return E2ECrypto.encryptMessage(json, encKey); });
+    ws.send(JSON.stringify(msgPayload2));
+    return true;
+}
+
+// Composer control: pick how long the next message lives before the server
+// shreds it (Off / 5s / 1m / 1h / 24h). The button shows an active highlight
+// while armed so the sender can see it's on.
+function setupDisappearingButton() {
+    const btn = document.getElementById('disappear-btn');
+    const menu = document.getElementById('disappear-menu');
+    const attachBtn = document.getElementById('attach-btn');
+    if (!btn || !menu) return;
+
+    function setTtl(secs) {
+        _disappearingTtl = parseInt(secs, 10) || 0;
+        btn.classList.toggle('armed', _disappearingTtl > 0);
+        if (attachBtn) attachBtn.classList.toggle('disappear-armed', _disappearingTtl > 0);
+        btn.title = _disappearingTtl > 0 ? 'Disappearing messages: ' + (_disappearingTtl >= 86400 ? '24h' : _disappearingTtl >= 3600 ? '1h' : _disappearingTtl >= 60 ? '1m' : _disappearingTtl + 's') : 'Disappearing messages';
+        if (attachBtn) attachBtn.title = _disappearingTtl > 0 ? 'Attach file — disappearing ON (' + (_disappearingTtl >= 86400 ? '24h' : _disappearingTtl >= 3600 ? '1h' : _disappearingTtl >= 60 ? '1m' : _disappearingTtl + 's') + ')' : 'Attach file';
+        menu.style.display = 'none';
+        menu.querySelectorAll('.disappear-option').forEach(function (o) {
+            o.classList.toggle('active', parseInt(o.getAttribute('data-ttl'), 10) === _disappearingTtl);
+        });
+    }
+
+    btn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        menu.style.display = menu.style.display === 'none' ? 'flex' : 'none';
+    });
+    menu.querySelectorAll('.disappear-option').forEach(function (o) {
+        o.addEventListener('click', function () {
+            setTtl(o.getAttribute('data-ttl'));
+        });
+    });
+    document.addEventListener('click', function (e) {
+        if (!menu.contains(e.target) && !btn.contains(e.target)) menu.style.display = 'none';
+    });
+    setTtl(0);
+}
+
+function setupPollButton() {
+    const pollBtn = document.getElementById('poll-btn');
+    const modal = document.getElementById('create-poll-modal');
+    if (!modal) return;
+
+    const questionInput = document.getElementById('poll-question-input');
+    const optionsList = document.getElementById('poll-options-list');
+    const addOptionBtn = document.getElementById('poll-add-option-btn');
+    const multipleCheck = document.getElementById('poll-multiple-check');
+    const errorEl = document.getElementById('poll-create-error');
+
+    function flashPollError(msg) {
+        if (!errorEl) return;
+        errorEl.textContent = msg;
+        errorEl.style.display = 'block';
+        clearTimeout(errorEl._t);
+        errorEl._t = setTimeout(function () { errorEl.style.display = 'none'; }, 2600);
+    }
+
+    function makeOptionRow(value) {
+        const row = document.createElement('div');
+        row.className = 'poll-option-row';
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'poll-option-input';
+        input.placeholder = 'Option ' + (optionsList.querySelectorAll('.poll-option-row').length + 1);
+        input.maxLength = 200;
+        input.value = value || '';
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.className = 'poll-option-remove';
+        del.title = 'Remove option';
+        del.textContent = '✕';
+        del.addEventListener('click', function () {
+            if (optionsList.querySelectorAll('.poll-option-row').length <= 2) return;
+            row.remove();
+        });
+        row.appendChild(input);
+        row.appendChild(del);
+        return row;
+    }
+
+    function resetPollModal() {
+        questionInput.value = '';
+        multipleCheck.checked = false;
+        optionsList.innerHTML = '';
+        optionsList.appendChild(makeOptionRow(''));
+        optionsList.appendChild(makeOptionRow(''));
+        if (errorEl) errorEl.style.display = 'none';
+    }
+
+    function openPollModal() {
+        if (!currentChannelId && !currentDmChannelId) return;
+        resetPollModal();
+        modal.style.display = 'flex';
+        setTimeout(function () { questionInput.focus(); }, 60);
+    }
+
+    function closePollModal() { modal.style.display = 'none'; }
+
+    if (pollBtn) pollBtn.addEventListener('click', openPollModal);
+    window.openCreatePollModal = openPollModal;
+    addOptionBtn.addEventListener('click', function () {
+        if (optionsList.querySelectorAll('.poll-option-row').length >= 20) return;
+        optionsList.appendChild(makeOptionRow(''));
+    });
+    document.getElementById('cancel-create-poll').addEventListener('click', closePollModal);
+    document.getElementById('confirm-create-poll').addEventListener('click', async function () {
+        const question = questionInput.value.trim();
+        const optionTexts = [];
+        optionsList.querySelectorAll('.poll-option-row input').forEach(function (r) {
+            const t = r.value.trim();
+            if (t) optionTexts.push(t);
+        });
+        if (!question) { flashPollError('Enter a question.'); return; }
+        if (optionTexts.length < 2) { flashPollError('Add at least 2 options.'); return; }
+        const stamp = Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e9).toString(36);
+        const options = optionTexts.map(function (t, i) {
+            return { id: 'opt-' + stamp + '-' + i, text: t };
+        });
+        const payload = { type: 'poll', question: question, options: options, multiple: multipleCheck.checked };
+        const sent = await sendPollMessage(payload);
+        if (sent) closePollModal();
+        else flashPollError('Could not send — not connected.');
+    });
+    // Click on the backdrop (not the content) closes; Escape closes too.
+    modal.addEventListener('click', function (e) { if (e.target === modal) closePollModal(); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && modal.style.display === 'flex') closePollModal(); });
+}
 
 let stickerPanelOpen = false;
 let activePanelTab = 'emojis';

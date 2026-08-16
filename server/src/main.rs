@@ -470,6 +470,22 @@ async fn main() {
         });
     }
 
+    // Disappearing-message sweeper: every ~5s, shred messages whose TTL has
+    // passed and broadcast so clients remove them live. The TTL is plaintext
+    // metadata the server enforces; the content stays E2E-encrypted and the
+    // row + attached file are hard-deleted (cascading to tokens/reactions/
+    // poll votes/acks/pins), so expired ciphertext never lingers on the host.
+    {
+        let state_for_expiry = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                ws::sweep_expired_messages(&state_for_expiry).await;
+            }
+        });
+    }
+
     let app = Router::new()
         .route("/api/auth-params/{username}", get(handlers::get_auth_params))
         .route("/api/register", post(handlers::register))

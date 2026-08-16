@@ -18,8 +18,20 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use base64::Engine;
+use chrono::Utc;
 use crate::auth;
 use crate::AppState;
+
+/// Compute the fixed-width RFC3339 expiry for a disappearing-message TTL in
+/// seconds (same format as message timestamps so lexicographic comparison
+/// works). None when ttl_seconds is absent or outside the 5s..24h bounds.
+fn disappearing_expiry(parsed: &serde_json::Value) -> Option<String> {
+    let secs = parsed.get("ttl_seconds").and_then(|v| v.as_i64())?;
+    if !(5..=86400).contains(&secs) {
+        return None;
+    }
+    Some((Utc::now() + chrono::Duration::seconds(secs)).format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string())
+}
 
 static CONN_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -373,6 +385,10 @@ struct OutgoingChatMessage {
     encrypted_profile_snapshot: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     profile_snapshot_nonce: Option<String>,
+    // Disappearing-message wall-clock expiry (NULL = never). Plaintext
+    // metadata so the client can render the countdown immediately.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_at: Option<String>,
 }
 
 pub async fn ws_handler(
@@ -742,8 +758,11 @@ async fn handle_ws_message(
             let raw_file_id = parsed.get("file_id").and_then(|c| c.as_str()).map(|s| s.to_string());
             // Store SHA-256 hash instead of raw UUID so the host can't map message file_ids
             let file_id_hash = raw_file_id.as_ref().map(|fid| crate::db::sha256_hex(fid));
+            // Disappearing-message TTL: optional plaintext seconds (clamped to
+            // 5s..24h); the server enforces the countdown + shreds at expiry.
+            let expires_at = disappearing_expiry(&parsed);
 
-            let message = match state.db.save_encrypted_message(channel_id, user_id, &encrypted_content, &nonce, encrypted_profile_snapshot.as_deref(), profile_snapshot_nonce.as_deref(), encrypted_sender_username.as_deref(), sender_username_nonce.as_deref(), file_id_hash.as_deref()) {
+            let message = match state.db.save_encrypted_message(channel_id, user_id, &encrypted_content, &nonce, encrypted_profile_snapshot.as_deref(), profile_snapshot_nonce.as_deref(), encrypted_sender_username.as_deref(), sender_username_nonce.as_deref(), file_id_hash.as_deref(), expires_at.as_deref()) {
                 Ok(m) => m,
                 Err(e) => {
                     tracing::error!("Failed to save message: {}", e);
@@ -784,6 +803,7 @@ async fn handle_ws_message(
                     key_version: None,
                     encrypted_profile_snapshot: encrypted_profile_snapshot.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                     profile_snapshot_nonce: profile_snapshot_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+                    expires_at: expires_at.clone(),
                 }),
                 user_id: None,
                 username: None,
@@ -914,8 +934,10 @@ async fn handle_ws_message(
             let raw_file_id = parsed.get("file_id").and_then(|c| c.as_str()).map(|s| s.to_string());
             // Store SHA-256 hash instead of raw UUID so the host can't map message file_ids
             let file_id_hash = raw_file_id.as_ref().map(|fid| crate::db::sha256_hex(fid));
+            // Disappearing-message TTL (same bounds as channel messages).
+            let expires_at = disappearing_expiry(&parsed);
 
-            let message = match state.db.save_dm_message(dm_channel_id, user_id, &encrypted_content, &nonce, encrypted_profile_snapshot.as_deref(), profile_snapshot_nonce.as_deref(), encrypted_sender_username.as_deref(), sender_username_nonce.as_deref(), file_id_hash.as_deref()) {
+            let message = match state.db.save_dm_message(dm_channel_id, user_id, &encrypted_content, &nonce, encrypted_profile_snapshot.as_deref(), profile_snapshot_nonce.as_deref(), encrypted_sender_username.as_deref(), sender_username_nonce.as_deref(), file_id_hash.as_deref(), expires_at.as_deref()) {
                             Ok(m) => m,
                             Err(e) => {
                                 tracing::error!("Failed to save DM message: {}", e);
@@ -954,6 +976,7 @@ async fn handle_ws_message(
                     key_version: None,
                     encrypted_profile_snapshot: encrypted_profile_snapshot.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                     profile_snapshot_nonce: profile_snapshot_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+                    expires_at: expires_at.clone(),
                 }),
                 user_id: None,
                 username: None,
@@ -1081,6 +1104,7 @@ async fn handle_ws_message(
                     key_version: None,
                     encrypted_profile_snapshot: None,
                     profile_snapshot_nonce: None,
+                    expires_at: None,
                 }),
                 user_id: None,
                 username: None,
@@ -1193,6 +1217,7 @@ async fn handle_ws_message(
                     key_version: None,
                     encrypted_profile_snapshot: None,
                     profile_snapshot_nonce: None,
+                    expires_at: None,
                 }),
                 user_id: None,
                 username: None,
@@ -1522,6 +1547,197 @@ async fn handle_ws_message(
                     "emoji_token": emoji_token,
                     "encrypted_emoji": encrypted_emoji,
                     "emoji_nonce": emoji_nonce,
+                });
+                match state.db.get_dm_members(&dm_channel_id) {
+                    Ok(members) => { state.ws_manager.broadcast_to_users(&members, &outgoing.to_string()).await; }
+                    Err(_) => {}
+                }
+            }
+        }
+        "poll_vote" | "dm_poll_vote" => {
+            // E2E-encrypted poll vote. The poll question/options live inside the
+            // message's encrypted content; each vote arrives as ONLY a blind
+            // HMAC option token (keyed by the conversation key, never seen by
+            // the server) plus the voter. Sending the same token again toggles
+            // the vote off; `remove_option_tokens` (single-choice switch) drops
+            // the voter's existing votes on other options in the same request.
+            // The server relays the token and voter id to members for live
+            // tally updates; clients match tokens to option ids themselves.
+            let message_id = match parsed.get("message_id").and_then(|c| c.as_str()) {
+                Some(c) => c.to_string(),
+                None => return,
+            };
+            let option_token = match parsed.get("option_token").and_then(|c| c.as_str()) {
+                Some(c) => c.to_string(),
+                None => return,
+            };
+            let remove_tokens: Vec<String> = parsed
+                .get("remove_option_tokens")
+                .and_then(|t| t.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).take(50).collect())
+                .unwrap_or_default();
+
+            if msg_type == "poll_vote" {
+                let channel_id = match parsed.get("channel_id").and_then(|c| c.as_str()) {
+                    Some(c) => c.to_string(),
+                    None => return,
+                };
+                let server_id = match state.db.get_server_id_for_channel(&channel_id) {
+                    Ok(id) => id,
+                    Err(_) => return,
+                };
+                if !state.db.is_member_of_server(user_id, &server_id).unwrap_or(false) {
+                    return;
+                }
+                if state.db.get_message_channel_id(&message_id).ok().as_deref() != Some(channel_id.as_str()) {
+                    return;
+                }
+                // Single-choice switch: remove the voter's votes on the other
+                // options first (each removal is broadcast below).
+                let _ = state.db.remove_poll_votes(&message_id, user_id, &remove_tokens);
+                let added = match state.db.add_poll_vote(&message_id, user_id, &option_token) {
+                    Ok(a) => a,
+                    Err(_) => false,
+                };
+                if !added {
+                    // Already voted this option → toggle it off.
+                    let _ = state.db.remove_poll_vote(&message_id, user_id, &option_token);
+                }
+                let outgoing = serde_json::json!({
+                    "type": if added { "poll_vote_added" } else { "poll_vote_removed" },
+                    "channel_id": channel_id,
+                    "message_id": message_id,
+                    "user_id": user_id,
+                    "option_token": option_token,
+                });
+                let members = match state.db.get_server_members(&server_id) {
+                    Ok(m) => m,
+                    Err(_) => Vec::new(),
+                };
+                // Broadcast the removals (single-choice switch) first.
+                for rt in &remove_tokens {
+                    let rm_msg = serde_json::json!({
+                        "type": "poll_vote_removed",
+                        "channel_id": channel_id,
+                        "message_id": message_id,
+                        "user_id": user_id,
+                        "option_token": rt,
+                    });
+                    state.ws_manager.broadcast_to_users(&members, &rm_msg.to_string()).await;
+                }
+                state.ws_manager.broadcast_to_users(&members, &outgoing.to_string()).await;
+            } else {
+                let dm_channel_id = match parsed.get("dm_channel_id").and_then(|c| c.as_str()) {
+                    Some(c) => c.to_string(),
+                    None => return,
+                };
+                if !state.db.is_dm_member(&dm_channel_id, user_id).unwrap_or(false) {
+                    return;
+                }
+                if state.db.get_dm_message_channel_id(&message_id).ok().as_deref() != Some(dm_channel_id.as_str()) {
+                    return;
+                }
+                let _ = state.db.remove_dm_poll_votes(&message_id, user_id, &remove_tokens);
+                let added = match state.db.add_dm_poll_vote(&message_id, user_id, &option_token) {
+                    Ok(a) => a,
+                    Err(_) => false,
+                };
+                if !added {
+                    let _ = state.db.remove_dm_poll_vote(&message_id, user_id, &option_token);
+                }
+                let outgoing = serde_json::json!({
+                    "type": if added { "dm_poll_vote_added" } else { "dm_poll_vote_removed" },
+                    "dm_channel_id": dm_channel_id,
+                    "message_id": message_id,
+                    "user_id": user_id,
+                    "option_token": option_token,
+                });
+                let members = match state.db.get_dm_members(&dm_channel_id) {
+                    Ok(m) => m,
+                    Err(_) => Vec::new(),
+                };
+                for rt in &remove_tokens {
+                    let rm_msg = serde_json::json!({
+                        "type": "dm_poll_vote_removed",
+                        "dm_channel_id": dm_channel_id,
+                        "message_id": message_id,
+                        "user_id": user_id,
+                        "option_token": rt,
+                    });
+                    state.ws_manager.broadcast_to_users(&members, &rm_msg.to_string()).await;
+                }
+                state.ws_manager.broadcast_to_users(&members, &outgoing.to_string()).await;
+            }
+        }
+        "message_ack" | "dm_message_ack" => {
+            // E2E per-message delivery/read receipt. The ack carries a blind
+            // HMAC token (HMAC-SHA256(conversationKey, "ack-v1:" + message_id))
+            // proving the acker can decrypt the conversation — the host never
+            // holds the key, so it can never forge a receipt for ciphertext it
+            // can't read. `status` ('delivered' | 'read') is plaintext metadata
+            // the server must record; re-acking upgrades delivered -> read and
+            // never downgrades. The event is broadcast so the author's client
+            // (and the acker's own other devices) update the checkmark live;
+            // clients only render status on messages they sent.
+            let message_id = match parsed.get("message_id").and_then(|c| c.as_str()) {
+                Some(c) => c.to_string(),
+                None => return,
+            };
+            let status = match parsed.get("status").and_then(|c| c.as_str()) {
+                Some("delivered") => "delivered",
+                Some("read") => "read",
+                _ => return,
+            };
+            let ack_token = match parsed.get("ack_token").and_then(|c| c.as_str()) {
+                Some(t) if t.len() == 64 && t.chars().all(|ch| ch.is_ascii_hexdigit()) => t.to_string(),
+                _ => return,
+            };
+
+            if msg_type == "message_ack" {
+                let channel_id = match parsed.get("channel_id").and_then(|c| c.as_str()) {
+                    Some(c) => c.to_string(),
+                    None => return,
+                };
+                let server_id = match state.db.get_server_id_for_channel(&channel_id) {
+                    Ok(id) => id,
+                    Err(_) => return,
+                };
+                if !state.db.is_member_of_server(user_id, &server_id).unwrap_or(false) {
+                    return;
+                }
+                if state.db.get_message_channel_id(&message_id).ok().as_deref() != Some(channel_id.as_str()) {
+                    return;
+                }
+                let _ = state.db.record_message_ack(&message_id, user_id, status, &ack_token);
+                let outgoing = serde_json::json!({
+                    "type": "message_ack",
+                    "channel_id": channel_id,
+                    "message_id": message_id,
+                    "acker_id": user_id,
+                    "status": status,
+                });
+                match state.db.get_server_members(&server_id) {
+                    Ok(members) => { state.ws_manager.broadcast_to_users(&members, &outgoing.to_string()).await; }
+                    Err(_) => {}
+                }
+            } else {
+                let dm_channel_id = match parsed.get("dm_channel_id").and_then(|c| c.as_str()) {
+                    Some(c) => c.to_string(),
+                    None => return,
+                };
+                if !state.db.is_dm_member(&dm_channel_id, user_id).unwrap_or(false) {
+                    return;
+                }
+                if state.db.get_dm_message_channel_id(&message_id).ok().as_deref() != Some(dm_channel_id.as_str()) {
+                    return;
+                }
+                let _ = state.db.record_dm_message_ack(&message_id, user_id, status, &ack_token);
+                let outgoing = serde_json::json!({
+                    "type": "dm_message_ack",
+                    "dm_channel_id": dm_channel_id,
+                    "message_id": message_id,
+                    "acker_id": user_id,
+                    "status": status,
                 });
                 match state.db.get_dm_members(&dm_channel_id) {
                     Ok(members) => { state.ws_manager.broadcast_to_users(&members, &outgoing.to_string()).await; }
@@ -2033,6 +2249,55 @@ pub async fn sweep_stale_waiting(state: &Arc<AppState>) {
             });
             state.ws_manager.broadcast_to_users(&others, &msg.to_string()).await;
         }
+    }
+}
+
+/// Disappearing-message sweeper: shred every message whose `expires_at` has
+/// passed and tell the conversation members so clients remove it live. The
+/// delete cascades to search tokens, reactions, poll votes, acks, and pins
+/// (message_id FKs) and shreds any attached file record + chunks — after this
+/// runs, neither the ciphertext nor the file exists on the host.
+pub async fn sweep_expired_messages(state: &Arc<AppState>) {
+    let now = Utc::now().format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string();
+    // Channel messages.
+    match state.db.list_expired_messages(&now) {
+        Ok(expired) => {
+            for (message_id, channel_id, _file) in expired {
+                if state.db.shred_message(&message_id).is_err() {
+                    continue;
+                }
+                if let Ok(server_id) = state.db.get_server_id_for_channel(&channel_id) {
+                    let msg = serde_json::json!({
+                        "type": "message_expired",
+                        "channel_id": channel_id,
+                        "message_id": message_id,
+                    });
+                    if let Ok(members) = state.db.get_server_members(&server_id) {
+                        state.ws_manager.broadcast_to_users(&members, &msg.to_string()).await;
+                    }
+                }
+            }
+        }
+        Err(e) => tracing::warn!("Expired-message sweep (channel) failed: {}", e),
+    }
+    // DM messages.
+    match state.db.list_expired_dm_messages(&now) {
+        Ok(expired) => {
+            for (message_id, dm_channel_id, _file) in expired {
+                if state.db.shred_dm_message(&message_id).is_err() {
+                    continue;
+                }
+                let msg = serde_json::json!({
+                    "type": "dm_message_expired",
+                    "dm_channel_id": dm_channel_id,
+                    "message_id": message_id,
+                });
+                if let Ok(members) = state.db.get_dm_members(&dm_channel_id) {
+                    state.ws_manager.broadcast_to_users(&members, &msg.to_string()).await;
+                }
+            }
+        }
+        Err(e) => tracing::warn!("Expired-message sweep (dm) failed: {}", e),
     }
 }
 

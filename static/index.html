@@ -111,6 +111,17 @@
                         <button class="attach-popup-item" data-action="photo">📷 Take Photo</button>
                         <button class="attach-popup-item" data-action="record-video">🎥 Record Video</button>
                         <button class="attach-popup-item" data-action="record-audio">🎤 Record Audio</button>
+                        <button class="attach-popup-item" data-action="poll">&#x1F5F3;&#xFE0F; Create Poll</button>
+                        <div class="disappear-popup-wrap">
+                            <button class="attach-popup-item" id="disappear-btn" title="Disappearing messages">&#x23F1;&#xFE0F; Disappearing messages</button>
+                            <div class="disappear-menu" id="disappear-menu" style="display:none">
+                                <button class="disappear-option" data-ttl="0">Off</button>
+                                <button class="disappear-option" data-ttl="5">5 seconds</button>
+                                <button class="disappear-option" data-ttl="60">1 minute</button>
+                                <button class="disappear-option" data-ttl="3600">1 hour</button>
+                                <button class="disappear-option" data-ttl="86400">24 hours</button>
+                            </div>
+                        </div>
                     </div>
                 </div>
                 <button class="sticker-btn" id="sticker-btn" title="Emojis, Stickers, GIFs">&#x1F600;</button>
@@ -217,6 +228,24 @@
             <div class="modal-actions">
                 <button class="btn-cancel" id="cancel-create-channel">Cancel</button>
                 <button class="btn-invite" id="confirm-create-channel">Create</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Create Poll Modal -->
+    <div class="modal" id="create-poll-modal" style="display:none">
+        <div class="modal-content">
+            <h3 class="poll-modal-title">Create Poll</h3>
+            <input type="text" id="poll-question-input" class="poll-modal-input" placeholder="Question" maxlength="300" autocomplete="off" spellcheck="false">
+            <div id="poll-options-list"></div>
+            <button class="poll-add-option-btn" id="poll-add-option-btn">+ Add option</button>
+            <label class="poll-multiple-label">
+                <input type="checkbox" id="poll-multiple-check"> Allow multiple choices
+            </label>
+            <div id="poll-create-error" class="poll-create-error" style="display:none"></div>
+            <div class="modal-actions">
+                <button class="btn-cancel" id="cancel-create-poll">Cancel</button>
+                <button class="btn-invite" id="confirm-create-poll">Create</button>
             </div>
         </div>
     </div>
@@ -431,6 +460,15 @@
                         <option value="off">Off</option>
                     </select>
                     <p class="settings-hint">“Show on hover” (default) reveals each message's send time when you hover over it (no layout shift). “Always on” shows every message's time at its end. “Off” hides timestamps entirely.</p>
+                </div>
+                <div class="settings-group" style="padding-bottom:12px;border-bottom:1px solid var(--bg-border);margin-top:16px">
+                    <h4>Message Status</h4>
+                    <select id="show-msg-status" class="settings-select" style="max-width:260px">
+                        <option value="always">Always on</option>
+                        <option value="hover">Show on hover</option>
+                        <option value="off">Off</option>
+                    </select>
+                    <p class="settings-hint">Controls the ✓ / ✓✓ sent-delivered-read indicator on your own messages. “Always on” (default) shows it at the end of each message; “Show on hover” reveals it when you hover the message; “Off” hides it. Hovering the ✓✓ itself shows who it was delivered to / read by.</p>
                 </div>
                 <div class="settings-group" style="padding-bottom:12px;border-bottom:1px solid var(--bg-border);margin-top:16px">
                     <h4>Streamer Mode</h4>

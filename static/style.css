@@ -3660,6 +3660,7 @@ body.show-msg-times-hover .message:hover .file-card .time-hover {
 
 /* ===== Attach / File Upload ===== */
 .attach-btn {
+    position: relative;
     width: clamp(40px, 8vw, 44px);
     height: clamp(40px, 8vw, 44px);
     background: var(--bg-secondary);
@@ -3674,6 +3675,20 @@ body.show-msg-times-hover .message:hover .file-card .time-hover {
     flex-shrink: 0;
     transition: color 0.15s, border-color 0.15s, background 0.15s;
     line-height: 1;
+}
+
+/* Small yellow badge on the + button while disappearing messages are armed */
+.attach-btn.disappear-armed::after {
+    content: '';
+    position: absolute;
+    top: -3px;
+    right: -3px;
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    background: #f5c542;
+    border: 2px solid var(--bg-primary, #1e1e2e);
+    box-shadow: 0 0 4px rgba(245, 197, 66, 0.7);
 }
 
 .attach-btn:hover {
@@ -5911,6 +5926,365 @@ body.show-msg-times .forward-preview .time-hover {
 .sticker-upload-dropzone:hover {
     border-color: #4fc3f7 !important;
     background: rgba(79,195,247,0.05);
+}
+
+/* === Disappearing messages (server-enforced TTL) === */
+.disappearing-banner {
+    display: inline-block;
+    font-size: 11px;
+    color: #f5c542;
+    background: rgba(245, 197, 66, 0.1);
+    border: 1px solid rgba(245, 197, 66, 0.25);
+    border-radius: 8px;
+    padding: 2px 8px;
+    margin-bottom: 6px;
+    line-height: 1.5;
+}
+.disappear-popup-wrap {
+    position: relative;
+}
+#disappear-btn.armed {
+    background: rgba(245, 197, 66, 0.15);
+    color: #f5c542;
+}
+.disappear-menu {
+    position: absolute;
+    left: calc(100% + 4px);
+    bottom: 0;
+    z-index: 210;
+    background: var(--bg-secondary, #23233a);
+    border: 1px solid var(--bg-border, #2f2f4a);
+    border-radius: 10px;
+    padding: 4px;
+    display: flex;
+    flex-direction: column;
+    min-width: 130px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.45);
+}
+.disappear-option {
+    background: none;
+    border: none;
+    color: #ddd;
+    font-size: 12.5px;
+    text-align: left;
+    padding: 7px 12px;
+    border-radius: 7px;
+    cursor: pointer;
+}
+.disappear-option:hover {
+    background: rgba(255, 255, 255, 0.08);
+}
+.disappear-option.active {
+    color: #f5c542;
+    background: rgba(245, 197, 66, 0.12);
+}
+
+/* === Per-message delivery/read receipts ===
+   Display modes mirror the timestamp setting: always-on (body.show-msg-status-
+   always), hover-only (body.show-msg-status-hover), or off (base display:none).
+   The ✓✓ glyph is also a hover target that names the recipient(s) via a CSS
+   data-tooltip ("Read by Alice" in DMs, "Delivered to N members" in channels). */
+.msg-status {
+    display: none;
+    float: right;
+    position: relative;
+    margin-left: 8px;
+    font-size: 11px;
+    line-height: 1.7;
+    color: var(--text-muted, #9aa);
+    user-select: none;
+    cursor: help;
+}
+body.show-msg-status-always .message .content .msg-status,
+body.show-msg-status-hover .message:hover .content .msg-status {
+    display: block;
+}
+.msg-status.read {
+    color: var(--accent, #4fc3f7);
+}
+/* Status hover card — member-list rendering (avatar + glowing display name) */
+.msg-status-tooltip {
+    position: fixed;
+    z-index: 1000;
+    display: none;
+    background: rgba(17, 17, 27, 0.97);
+    border: 1px solid var(--bg-border, #2f2f4a);
+    border-radius: 10px;
+    padding: 8px;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+    max-width: 260px;
+    max-height: 240px;
+    overflow-y: auto;
+    pointer-events: auto;
+    font-size: 12px;
+}
+.mst-header {
+    color: var(--text-muted, #9aa);
+    font-size: 11px;
+    margin-bottom: 6px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.mst-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 2px;
+}
+.mst-avatar {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    background: var(--bg-primary, #1a1a2e);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    flex-shrink: 0;
+    font-size: 12px;
+    color: var(--text-muted, #9aa);
+}
+.mst-avatar-img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: 50%;
+}
+.mst-name {
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.mst-owner {
+    margin-left: auto;
+    font-size: 10px;
+    color: #f5c542;
+    background: rgba(245, 197, 66, 0.12);
+    padding: 1px 6px;
+    border-radius: 6px;
+    flex-shrink: 0;
+}
+.mst-plain {
+    color: #ddd;
+}
+
+/* === E2E Polls === */
+.poll-btn {
+    background: none;
+    border: none;
+    font-size: 17px;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 4px;
+    line-height: 1;
+}
+.poll-btn:hover { background: var(--bg-border); }
+
+.poll-card {
+    margin-top: 6px;
+    max-width: 420px;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 12px;
+    padding: 10px 12px;
+}
+.poll-question {
+    font-weight: 600;
+    font-size: 14px;
+    color: #eee;
+    margin-bottom: 8px;
+    word-break: break-word;
+}
+.poll-options {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.poll-option {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    width: 100%;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.14);
+    border-radius: 8px;
+    padding: 7px 10px;
+    color: #ddd;
+    font-size: 13px;
+    cursor: pointer;
+    overflow: hidden;
+    transition: background 0.15s ease, border-color 0.15s ease;
+}
+.poll-option:hover {
+    background: rgba(255,255,255,0.1);
+    border-color: rgba(255,255,255,0.28);
+}
+.poll-option.mine {
+    background: rgba(79, 195, 247, 0.16);
+    border-color: rgba(79, 195, 247, 0.55);
+    color: #fff;
+}
+.poll-option-bar {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    background: rgba(79, 195, 247, 0.12);
+    pointer-events: none;
+    transition: width 0.2s ease;
+}
+.poll-option.mine .poll-option-bar {
+    background: rgba(79, 195, 247, 0.22);
+}
+.poll-option-text {
+    position: relative;
+    z-index: 1;
+    word-break: break-word;
+    text-align: left;
+}
+.poll-option-count {
+    position: relative;
+    z-index: 1;
+    font-weight: 600;
+    opacity: 0.9;
+    font-size: 12.5px;
+    flex-shrink: 0;
+}
+.poll-footer {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 8px;
+    font-size: 11.5px;
+    color: var(--text-muted, #9aa);
+}
+.poll-votes-label {
+    font-weight: 600;
+}
+.poll-multi-label {
+    background: rgba(255,255,255,0.08);
+    border-radius: 8px;
+    padding: 1px 8px;
+}
+
+/* Create-poll modal (uses theme variables so it matches both dark and light modes) */
+#create-poll-modal .modal-content {
+    max-width: 460px;
+}
+#create-poll-modal h3.poll-modal-title {
+    color: var(--accent);
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 16px;
+}
+.poll-modal-input {
+    width: 100%;
+    padding: 11px 14px;
+    margin-bottom: 14px;
+    border: 1px solid var(--bg-border);
+    border-radius: 8px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: 15px;
+    outline: none;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.poll-modal-input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(79, 195, 247, 0.18);
+}
+.poll-modal-input::placeholder {
+    color: var(--text-faint);
+    opacity: 0.75;
+}
+#poll-options-list {
+    margin-bottom: 12px;
+}
+.poll-option-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+.poll-option-row .poll-option-input {
+    flex: 1;
+    padding: 10px 12px;
+    border: 1px solid var(--bg-border);
+    border-radius: 8px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: 14px;
+    outline: none;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.poll-option-row .poll-option-input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(79, 195, 247, 0.18);
+}
+.poll-option-row .poll-option-input::placeholder {
+    color: var(--text-faint);
+    opacity: 0.7;
+}
+.poll-option-remove {
+    background: none;
+    border: none;
+    color: var(--text-muted, #9aa);
+    font-size: 13px;
+    cursor: pointer;
+    padding: 4px 6px;
+    border-radius: 4px;
+    line-height: 1;
+    flex-shrink: 0;
+}
+.poll-option-remove:hover {
+    color: var(--danger, #ff6b6b);
+    background: rgba(255, 107, 107, 0.1);
+}
+.poll-add-option-btn {
+    display: block;
+    width: 100%;
+    padding: 9px;
+    margin-bottom: 14px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px dashed var(--bg-border);
+    border-radius: 8px;
+    color: var(--text-muted);
+    font-size: 13px;
+    cursor: pointer;
+    transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+.poll-add-option-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: rgba(79, 195, 247, 0.08);
+}
+.poll-multiple-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-muted);
+    font-size: 13px;
+    margin-bottom: 14px;
+    cursor: pointer;
+    user-select: none;
+}
+.poll-multiple-label input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    accent-color: var(--accent);
+    cursor: pointer;
+}
+.poll-create-error {
+    color: var(--danger);
+    font-size: 12px;
+    margin-bottom: 12px;
+    padding: 8px 10px;
+    background: rgba(244, 67, 54, 0.08);
+    border: 1px solid rgba(244, 67, 54, 0.25);
+    border-radius: 8px;
 }
 
 /* === Sticker/Emoji/GIF Panel === */

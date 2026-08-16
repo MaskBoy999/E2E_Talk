@@ -3136,6 +3136,9 @@ pub async fn list_messages(
     let pinned_ids = state.db.get_pinned_message_ids(&channel_id).unwrap_or_default();
     let msg_ids: Vec<String> = messages.iter().map(|m| m.id.clone()).collect();
     let reactions = state.db.get_message_reactions(&msg_ids).unwrap_or_default();
+    let poll_votes = state.db.get_message_poll_votes(&msg_ids).unwrap_or_default();
+    let acks = state.db.get_message_acks(&msg_ids).unwrap_or_default();
+    let expiries = state.db.get_message_expiries(&msg_ids).unwrap_or_default();
 
     let message_infos: Vec<serde_json::Value> = messages
         .iter()
@@ -3158,6 +3161,9 @@ pub async fn list_messages(
 
                 "pinned": pinned_ids.iter().any(|pid| pid == &m.id),
                 "reactions": reactions_json(&state, reactions.get(&m.id)),
+                "poll_votes": poll_votes_json(&state, poll_votes.get(&m.id)),
+                "acks": acks_json(&state, acks.get(&m.id), &user_id, &m.sender_id),
+                "expires_at": expiries.get(&m.id).cloned().flatten(),
 
                 "conversation_profile": conv_profiles.get(&m.sender_id).map(|(data, nonce)| serde_json::json!({
                     "encrypted_profile_data": data,
@@ -3195,13 +3201,17 @@ pub async fn list_channel_pins(
     };
     let mut sender_ids: Vec<&str> = messages.iter().map(|m| m.sender_id.as_str()).collect();
     sender_ids.dedup();
-    let conv_profiles = state.db.get_conversation_profiles_batch("channel", &server_id, &sender_ids).unwrap_or_default();
-    let msg_ids: Vec<String> = messages.iter().map(|m| m.id.clone()).collect();
+    let conv_profiles = state.db.get_conversation_profiles_batch("channel", &server_id, &sender_ids).unwrap_or_default();    let msg_ids: Vec<String> = messages.iter().map(|m| m.id.clone()).collect();
     let reactions = state.db.get_message_reactions(&msg_ids).unwrap_or_default();
+    let poll_votes = state.db.get_message_poll_votes(&msg_ids).unwrap_or_default();
+    let acks = state.db.get_message_acks(&msg_ids).unwrap_or_default();
+    let expiries = state.db.get_message_expiries(&msg_ids).unwrap_or_default();
+
     let message_infos: Vec<serde_json::Value> = messages
         .iter()
         .map(|m| {
             serde_json::json!({
+
                 "id": m.id,
                 "sender_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &m.sender_id),
                 "sender_user_id": m.sender_id,
@@ -3217,6 +3227,9 @@ pub async fn list_channel_pins(
                 "profile_snapshot_nonce": m.profile_snapshot_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                 "pinned": true,
                 "reactions": reactions_json(&state, reactions.get(&m.id)),
+                "poll_votes": poll_votes_json(&state, poll_votes.get(&m.id)),
+                "acks": acks_json(&state, acks.get(&m.id), &user_id, &m.sender_id),
+                "expires_at": expiries.get(&m.id).cloned().flatten(),
                 "conversation_profile": conv_profiles.get(&m.sender_id).map(|(data, nonce)| serde_json::json!({
                     "encrypted_profile_data": data,
                     "nonce": nonce,
@@ -3274,6 +3287,9 @@ pub async fn list_messages_around(
     let pinned_ids2 = state.db.get_pinned_message_ids(&channel_id).unwrap_or_default();
     let msg_ids2: Vec<String> = messages.iter().map(|m| m.id.clone()).collect();
     let reactions2 = state.db.get_message_reactions(&msg_ids2).unwrap_or_default();
+    let poll_votes2 = state.db.get_message_poll_votes(&msg_ids2).unwrap_or_default();
+    let acks2 = state.db.get_message_acks(&msg_ids2).unwrap_or_default();
+    let expiries2 = state.db.get_message_expiries(&msg_ids2).unwrap_or_default();
 
     let message_infos: Vec<serde_json::Value> = messages
         .iter()
@@ -3295,6 +3311,9 @@ pub async fn list_messages_around(
                 "profile_snapshot_nonce": m.profile_snapshot_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                 "pinned": pinned_ids2.iter().any(|pid| pid == &m.id),
                 "reactions": reactions_json(&state, reactions2.get(&m.id)),
+                "poll_votes": poll_votes_json(&state, poll_votes2.get(&m.id)),
+                "acks": acks_json(&state, acks2.get(&m.id), &user_id, &m.sender_id),
+                "expires_at": expiries2.get(&m.id).cloned().flatten(),
                 "conversation_profile": conv_profiles2.get(&m.sender_id).map(|(data, nonce)| serde_json::json!({
                     "encrypted_profile_data": data,
                     "nonce": nonce,
@@ -6184,6 +6203,50 @@ fn reactions_json(state: &Arc<AppState>, rows: Option<&Vec<crate::db::ReactionRo
     }
 }
 
+/// Serialize the poll vote rows of one message (blind option token + voter ids
+/// — the same metadata treatment as message sender ids). The client matches
+/// tokens to the option ids from the decrypted poll message and computes
+/// counts + "my vote" locally; the server never sees which option was chosen.
+fn poll_votes_json(state: &Arc<AppState>, rows: Option<&Vec<crate::db::PollVoteRow>>) -> serde_json::Value {
+    match rows {
+        Some(rs) => serde_json::json!(rs
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "voter_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &r.voter_id),
+                    "voter_user_id": r.voter_id,
+                    "option_token": r.option_token,
+                    "created_at": r.created_at,
+                })
+            })
+            .collect::<Vec<_>>()),
+        None => serde_json::json!([]),
+    }
+}
+
+/// Serialize the delivery/read ack rows of one message, showing them ONLY to
+/// the message author and to the acker themselves (read state is private to
+/// the sender/recipient pair — a third channel member must not learn who read
+/// what). The blind ack_token is never returned to clients. The author's
+/// client renders ✓ / ✓✓ / read from the returned statuses.
+fn acks_json(state: &Arc<AppState>, rows: Option<&Vec<crate::db::AckRow>>, requester_id: &str, sender_id: &str) -> serde_json::Value {
+    match rows {
+        Some(rs) => serde_json::json!(rs
+            .iter()
+            .filter(|r| r.acker_id == requester_id || sender_id == requester_id)
+            .map(|r| {
+                serde_json::json!({
+                    "acker_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &r.acker_id),
+                    "acker_user_id": r.acker_id,
+                    "status": r.status,
+                    "created_at": r.created_at,
+                })
+            })
+            .collect::<Vec<_>>()),
+        None => serde_json::json!([]),
+    }
+}
+
 /// GET /api/search — E2E blind-index message search.
 /// Query params: `q` (repeatable HMAC token, one per keyword, AND semantics),
 /// `sender_id` (filter to one sender), `channel_id` / `dm_channel_id` (scope;
@@ -7074,6 +7137,9 @@ pub async fn list_dm_messages(
             let dm_pinned_ids = state.db.get_pinned_dm_message_ids(&dm_channel_id).unwrap_or_default();
             let dm_msg_ids: Vec<String> = msgs.iter().map(|m| m.id.clone()).collect();
             let dm_reactions = state.db.get_dm_message_reactions(&dm_msg_ids).unwrap_or_default();
+            let dm_poll_votes = state.db.get_dm_message_poll_votes(&dm_msg_ids).unwrap_or_default();
+            let dm_acks = state.db.get_dm_message_acks(&dm_msg_ids).unwrap_or_default();
+            let dm_expiries = state.db.get_dm_message_expiries(&dm_msg_ids).unwrap_or_default();
 
             let result: Vec<serde_json::Value> = msgs
                 .iter()
@@ -7095,6 +7161,9 @@ pub async fn list_dm_messages(
                         "sender_username_nonce": m.sender_username_nonce,
                         "pinned": dm_pinned_ids.iter().any(|pid| pid == &m.id),
                         "reactions": reactions_json(&state, dm_reactions.get(&m.id)),
+                        "poll_votes": poll_votes_json(&state, dm_poll_votes.get(&m.id)),
+                        "acks": acks_json(&state, dm_acks.get(&m.id), &user_id, &m.sender_id),
+                        "expires_at": dm_expiries.get(&m.id).cloned().flatten(),
                         "conversation_profile": dm_conv_profiles.get(&m.sender_id).map(|(data, nonce)| serde_json::json!({
                             "encrypted_profile_data": data,
                             "nonce": nonce,
@@ -7128,6 +7197,9 @@ pub async fn list_dm_pins(
     let dm_conv_profiles = state.db.get_conversation_profiles_batch("dm", &dm_channel_id, &dm_sender_ids).unwrap_or_default();
     let dm_msg_ids: Vec<String> = msgs.iter().map(|m| m.id.clone()).collect();
     let dm_reactions = state.db.get_dm_message_reactions(&dm_msg_ids).unwrap_or_default();
+    let dm_poll_votes = state.db.get_dm_message_poll_votes(&dm_msg_ids).unwrap_or_default();
+    let dm_acks = state.db.get_dm_message_acks(&dm_msg_ids).unwrap_or_default();
+    let dm_expiries = state.db.get_dm_message_expiries(&dm_msg_ids).unwrap_or_default();
     let result: Vec<serde_json::Value> = msgs
         .iter()
         .map(|m| {
@@ -7148,6 +7220,9 @@ pub async fn list_dm_pins(
                 "sender_username_nonce": m.sender_username_nonce,
                 "pinned": true,
                 "reactions": reactions_json(&state, dm_reactions.get(&m.id)),
+                "poll_votes": poll_votes_json(&state, dm_poll_votes.get(&m.id)),
+                "acks": acks_json(&state, dm_acks.get(&m.id), &user_id, &m.sender_id),
+                "expires_at": dm_expiries.get(&m.id).cloned().flatten(),
                 "conversation_profile": dm_conv_profiles.get(&m.sender_id).map(|(data, nonce)| serde_json::json!({
                     "encrypted_profile_data": data,
                     "nonce": nonce,

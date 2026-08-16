@@ -476,6 +476,13 @@ test.describe('Kill Switch', () => {
         dbExec("INSERT OR IGNORE INTO user_media (user_id) VALUES (?1)", [uid]);
         dbExec("INSERT OR IGNORE INTO user_stickers (user_id) VALUES (?1)", [uid]);
         dbExec("INSERT OR IGNORE INTO server_bans (server_id, user_id) VALUES (?1, ?2)", [sid, uid]);
+        // Reactions / poll votes / read acks (channel + DM) on OTHER users' content.
+        dbExec("INSERT OR IGNORE INTO message_reactions (id, message_id, reactor_id, emoji_token, encrypted_emoji, emoji_nonce) VALUES (?1,?2,?3,'e','e','e')", ['seed_rx_' + ts, mid, uid]);
+        dbExec("INSERT OR IGNORE INTO dm_message_reactions (id, message_id, reactor_id, emoji_token, encrypted_emoji, emoji_nonce) VALUES (?1,?2,?3,'e','e','e')", ['seed_drx_' + ts, 'seed_dmm_' + ts, uid]);
+        dbExec("INSERT OR IGNORE INTO message_poll_votes (id, message_id, voter_id, option_token) VALUES (?1,?2,?3,'e')", ['seed_pv_' + ts, mid, uid]);
+        dbExec("INSERT OR IGNORE INTO dm_message_poll_votes (id, message_id, voter_id, option_token) VALUES (?1,?2,?3,'e')", ['seed_dpv_' + ts, 'seed_dmm_' + ts, uid]);
+        dbExec("INSERT OR IGNORE INTO message_acks (id, message_id, acker_id, status, ack_token) VALUES (?1,?2,?3,'read','e')", ['seed_ack_' + ts, mid, uid]);
+        dbExec("INSERT OR IGNORE INTO dm_message_acks (id, message_id, acker_id, status, ack_token) VALUES (?1,?2,?3,'read','e')", ['seed_dack_' + ts, 'seed_dmm_' + ts, uid]);
 
         // Delete the account via the settings button flow (DELETE /api/me).
         // Password-gated now — send the client-computed current-password hash.
@@ -523,6 +530,12 @@ test.describe('Kill Switch', () => {
             ['user_media', 'user_id = ?1', [uid]],
             ['user_stickers', 'user_id = ?1', [uid]],
             ['server_bans', 'user_id = ?1', [uid]],
+            ['message_reactions', 'reactor_id = ?1', [uid]],
+            ['dm_message_reactions', 'reactor_id = ?1', [uid]],
+            ['message_poll_votes', 'voter_id = ?1', [uid]],
+            ['dm_message_poll_votes', 'voter_id = ?1', [uid]],
+            ['message_acks', 'acker_id = ?1', [uid]],
+            ['dm_message_acks', 'acker_id = ?1', [uid]],
         ];
         for (const [table, where, args] of checks) {
             const n = dbQuery(`SELECT COUNT(*) FROM ${table} WHERE ${where}`, args)[0][0] as number;

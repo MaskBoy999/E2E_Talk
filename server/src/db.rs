@@ -222,6 +222,27 @@ pub struct ReactionRow {
     pub created_at: String,
 }
 
+/// One poll vote row (blind option token + voter). The poll question/options
+/// live inside the message's encrypted content; each vote stores ONLY the
+/// HMAC-SHA256 blind token of the option id, keyed by the conversation key the
+/// server never sees. Counts are computed client-side by matching tokens.
+#[derive(Debug, Clone)]
+pub struct PollVoteRow {
+    pub voter_id: String,
+    pub option_token: String,
+    pub created_at: String,
+}
+
+/// One delivery/read ack row. `status` is 'delivered' or 'read'; `ack_token`
+/// is the blind HMAC the recipient's client computed with the conversation key
+/// (the host can't forge receipts). The author's client renders the status.
+#[derive(Debug, Clone)]
+pub struct AckRow {
+    pub acker_id: String,
+    pub status: String,
+    pub created_at: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct FriendRequestRow {
     pub id: String,
@@ -1188,6 +1209,19 @@ impl Database {
         // Migration 061: E2E-encrypted message reactions (ciphertext + blind
         // emoji token per reactor; counts are computed client-side).
         let _ = conn.execute_batch(include_str!("../migrations/061_reactions.sql"));
+        // Migration 062: E2E-encrypted polls — the question/options ride in the
+        // message's encrypted content; each vote stores only a blind HMAC
+        // option token (keyed by the conversation key) so the host can never
+        // read which option was chosen.
+        let _ = conn.execute_batch(include_str!("../migrations/062_polls.sql"));
+        // Migration 063: E2E per-message delivery/read acks — each row stores
+        // the recipient + a blind HMAC proof token (conversation-keyed) so the
+        // host can store/relay receipts but never forge one for ciphertext it
+        // can't decrypt.
+        let _ = conn.execute_batch(include_str!("../migrations/063_message_acks.sql"));
+        // Migration 064: disappearing messages — expires_at (NULL = never) on
+        // messages + dm_messages; the sweeper shreds expired rows + files.
+        let _ = conn.execute_batch(include_str!("../migrations/064_disappearing.sql"));
 
         // Data migration: normalize legacy space-separated CURRENT_TIMESTAMP values
         // ("YYYY-MM-DD HH:MM:SS") to fixed-width RFC3339 ("YYYY-MM-DDTHH:MM:SS.000000Z")
@@ -2196,7 +2230,12 @@ impl Database {
         let is_owner = Self::is_server_owner_c(&conn, user_id, server_id)?;
 
         if is_owner {
-            // Owner leaving: delete the entire server and everything in it
+            // Owner leaving: delete the entire server and everything in it.
+            // messages/dm-ish rows cascade their reactions/votes/acks/pins/
+            // search tokens via message_id FKs; voice_sessions cascade their
+            // participants via channel_id. Tables with NO FK to servers need
+            // explicit cleanup: conversation_profile_data (keyed by server id),
+            // pending_events (server_id is a plain column) and voice_sanctions.
             conn.execute("DELETE FROM server_keys WHERE server_id = ?1", params![server_id])
                 .map_err(|e| e.to_string())?;
             conn.execute(
@@ -2206,19 +2245,79 @@ impl Database {
             .map_err(|e| e.to_string())?;
             conn.execute("DELETE FROM server_members WHERE server_id = ?1", params![server_id])
                 .map_err(|e| e.to_string())?;
-            conn.execute("DELETE FROM channels WHERE server_id = ?1", params![server_id])
-                .map_err(|e| e.to_string())?;
             conn.execute("DELETE FROM server_bans WHERE server_id = ?1", params![server_id])
+                .map_err(|e| e.to_string())?;
+            conn.execute("DELETE FROM voice_sanctions WHERE server_id = ?1", params![server_id])
+                .map_err(|e| e.to_string())?;
+            conn.execute(
+                "DELETE FROM pending_events WHERE server_id = ?1",
+                params![server_id],
+            )
+            .map_err(|e| e.to_string())?;
+            // Per-server profile snapshots must be removed BEFORE channels are
+            // deleted (the channel-scoped rows match by channel id).
+            conn.execute(
+                "DELETE FROM conversation_profile_data WHERE conversation_type = 'channel' AND (conversation_id = ?1 OR conversation_id IN (SELECT id FROM channels WHERE server_id = ?1))",
+                params![server_id],
+            )
+            .map_err(|e| e.to_string())?;
+            conn.execute("DELETE FROM channels WHERE server_id = ?1", params![server_id])
                 .map_err(|e| e.to_string())?;
             conn.execute("DELETE FROM servers WHERE id = ?1", params![server_id])
                 .map_err(|e| e.to_string())?;
             return Ok(true); // true = server was deleted
         }
 
-        // Non-owner leaving: delete their messages in the server, then remove membership
+        // Non-owner leaving: delete their messages in the server, then remove
+        // membership. Message rows cascade their OWN reactions/votes/acks/pins
+        // via message_id FKs, but the leaver's rows on OTHER members' messages
+        // (and every other user-scoped row in this server) must be wiped too so
+        // no member can still see any trace of them: reactions, poll votes, read
+        // acks, pins, per-server profile snapshots, voice state + sanctions, and
+        // pending events about them.
         conn.execute(
             "DELETE FROM messages WHERE sender_id = ?1 AND channel_id IN (SELECT id FROM channels WHERE server_id = ?2)",
             params![user_id, server_id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM message_reactions WHERE reactor_id = ?1 AND message_id IN (SELECT id FROM messages WHERE channel_id IN (SELECT id FROM channels WHERE server_id = ?2))",
+            params![user_id, server_id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM message_poll_votes WHERE voter_id = ?1 AND message_id IN (SELECT id FROM messages WHERE channel_id IN (SELECT id FROM channels WHERE server_id = ?2))",
+            params![user_id, server_id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM message_acks WHERE acker_id = ?1 AND message_id IN (SELECT id FROM messages WHERE channel_id IN (SELECT id FROM channels WHERE server_id = ?2))",
+            params![user_id, server_id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM message_pins WHERE pinned_by = ?1 AND message_id IN (SELECT id FROM messages WHERE channel_id IN (SELECT id FROM channels WHERE server_id = ?2))",
+            params![user_id, server_id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM conversation_profile_data WHERE user_id = ?1 AND conversation_type = 'channel' AND (conversation_id = ?2 OR conversation_id IN (SELECT id FROM channels WHERE server_id = ?2))",
+            params![user_id, server_id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM voice_sanctions WHERE server_id = ?1 AND user_id = ?2",
+            params![server_id, user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM voice_participants WHERE user_id = ?1 AND voice_session_id IN (SELECT id FROM voice_sessions WHERE channel_id IN (SELECT id FROM channels WHERE server_id = ?2))",
+            params![user_id, server_id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM pending_events WHERE server_id = ?1 AND (user_id = ?2 OR affected_user_id = ?2)",
+            params![server_id, user_id],
         )
         .map_err(|e| e.to_string())?;
         conn.execute(
@@ -2715,6 +2814,9 @@ impl Database {
         encrypted_sender_username: Option<&str>,
         sender_username_nonce: Option<&str>,
         file_id: Option<&str>,
+        // Disappearing-message TTL: fixed-width RFC3339 wall-clock expiry
+        // (NULL = never). The server enforces it; the content stays encrypted.
+        expires_at: Option<&str>,
     ) -> Result<Message, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let id = Uuid::new_v4().to_string();
@@ -2734,8 +2836,8 @@ impl Database {
         // space-separated — that breaks ordering and pagination for same-second messages.
         let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string();
         conn.execute(
-            "INSERT INTO messages (id, channel_id, sender_id, encrypted_content, nonce, timestamp, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_sender_username, sender_username_nonce, sender_id_hash, file_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            params![id, channel_id, sender_id, encrypted_content, nonce, ts, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_sender_username, sender_username_nonce, h, file_id],
+            "INSERT INTO messages (id, channel_id, sender_id, encrypted_content, nonce, timestamp, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_sender_username, sender_username_nonce, sender_id_hash, file_id, expires_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![id, channel_id, sender_id, encrypted_content, nonce, ts, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_sender_username, sender_username_nonce, h, file_id, expires_at],
         )
         .map_err(|e| e.to_string())?;
 
@@ -4203,6 +4305,9 @@ impl Database {
         encrypted_sender_username: Option<&str>,
         sender_username_nonce: Option<&str>,
         file_id: Option<&str>,
+        // Disappearing-message TTL: fixed-width RFC3339 wall-clock expiry
+        // (NULL = never). The server enforces it; the content stays encrypted.
+        expires_at: Option<&str>,
     ) -> Result<DmMessage, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let id = Uuid::new_v4().to_string();
@@ -4217,8 +4322,8 @@ impl Database {
         // Same fixed-width RFC3339 timestamp as channel messages (see save_message).
         let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string();
         conn.execute(
-            "INSERT INTO dm_messages (id, dm_channel_id, sender_id, encrypted_content, nonce, timestamp, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_sender_username, sender_username_nonce, sender_id_hash, file_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            params![id, dm_channel_id, sender_id, encrypted_content, nonce, ts, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_sender_username, sender_username_nonce, h, file_id],
+            "INSERT INTO dm_messages (id, dm_channel_id, sender_id, encrypted_content, nonce, timestamp, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_sender_username, sender_username_nonce, sender_id_hash, file_id, expires_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![id, dm_channel_id, sender_id, encrypted_content, nonce, ts, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_sender_username, sender_username_nonce, h, file_id, expires_at],
         )
         .map_err(|e| e.to_string())?;
 
@@ -4420,6 +4525,139 @@ impl Database {
             }
         }
         Ok(())
+    }
+
+    /// Delete a file record + its chunks on disk from a stored file_id_hash.
+    /// Shared by normal message deletion and disappearing-message shredding.
+    fn shred_file_by_hash(&self, file_id_hash: &str) {
+        if let Ok(fid) = self.get_file_id_by_hash_from_files(file_id_hash) {
+            if let Ok(info) = self.delete_file_record(&fid) {
+                let dir = format!("{}/{}", "uploads", fid);
+                for i in 0..info.chunk_count {
+                    let chunk_path = format!("{}/{}.enc", dir, i);
+                    let _ = std::fs::remove_file(&chunk_path);
+                }
+                let _ = std::fs::remove_dir(&dir);
+            }
+        }
+    }
+
+    // --- Disappearing messages (server-enforced TTL + shredding) ---
+    // Expired rows are listed by the sweeper, then hard-deleted. All dependent
+    // rows (search tokens, reactions, poll votes, acks, pins) cascade via their
+    // message_id FKs; attached files are shredded from the files table + disk.
+
+    /// Return every expired channel message as (id, channel_id, file_id_hash).
+    pub fn list_expired_messages(&self, now_rfc3339: &str) -> Result<Vec<(String, String, Option<String>)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT id, channel_id, file_id FROM messages WHERE expires_at IS NOT NULL AND expires_at <= ?1")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![now_rfc3339], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
+            })
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows.flatten() { out.push(r); }
+        Ok(out)
+    }
+
+    /// Return every expired DM message as (id, dm_channel_id, file_id_hash).
+    pub fn list_expired_dm_messages(&self, now_rfc3339: &str) -> Result<Vec<(String, String, Option<String>)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT id, dm_channel_id, file_id FROM dm_messages WHERE expires_at IS NOT NULL AND expires_at <= ?1")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![now_rfc3339], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
+            })
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows.flatten() { out.push(r); }
+        Ok(out)
+    }
+
+    /// Hard-delete one channel message + its file (no sender check — used by
+    /// the TTL sweeper). All dependent rows cascade via message_id FKs.
+    pub fn shred_message(&self, message_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let file_id_hash: Option<String> = conn
+            .query_row(
+                "SELECT file_id FROM messages WHERE id = ?1",
+                params![message_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(None);
+        conn.execute("DELETE FROM messages WHERE id = ?1", params![message_id])
+            .map_err(|e| e.to_string())?;
+        drop(conn);
+        if let Some(h) = file_id_hash {
+            self.shred_file_by_hash(&h);
+        }
+        Ok(())
+    }
+
+    /// Hard-delete one DM message + its file (no sender check — TTL sweeper).
+    pub fn shred_dm_message(&self, message_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let file_id_hash: Option<String> = conn
+            .query_row(
+                "SELECT file_id FROM dm_messages WHERE id = ?1",
+                params![message_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(None);
+        conn.execute("DELETE FROM dm_messages WHERE id = ?1", params![message_id])
+            .map_err(|e| e.to_string())?;
+        drop(conn);
+        if let Some(h) = file_id_hash {
+            self.shred_file_by_hash(&h);
+        }
+        Ok(())
+    }
+
+    /// Fetch expires_at for a batch of message ids (for the message-list JSON;
+    /// NULL = never expires). Clients use it to render the countdown banner.
+    pub fn get_message_expiries(&self, message_ids: &[String]) -> Result<std::collections::HashMap<String, Option<String>>, String> {
+        if message_ids.is_empty() { return Ok(std::collections::HashMap::new()); }
+        let placeholders: Vec<String> = (1..=message_ids.len()).map(|i| format!("?{}", i)).collect();
+        let sql = format!(
+            "SELECT id, expires_at FROM messages WHERE id IN ({})",
+            placeholders.join(",")
+        );
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let values: Vec<rusqlite::types::Value> = message_ids.iter().map(|s| rusqlite::types::Value::Text(s.clone())).collect();
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let mut out: std::collections::HashMap<String, Option<String>> = std::collections::HashMap::new();
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(values), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })
+            .map_err(|e| e.to_string())?;
+        for r in rows.flatten() { out.insert(r.0, r.1); }
+        Ok(out)
+    }
+
+    pub fn get_dm_message_expiries(&self, message_ids: &[String]) -> Result<std::collections::HashMap<String, Option<String>>, String> {
+        if message_ids.is_empty() { return Ok(std::collections::HashMap::new()); }
+        let placeholders: Vec<String> = (1..=message_ids.len()).map(|i| format!("?{}", i)).collect();
+        let sql = format!(
+            "SELECT id, expires_at FROM dm_messages WHERE id IN ({})",
+            placeholders.join(",")
+        );
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let values: Vec<rusqlite::types::Value> = message_ids.iter().map(|s| rusqlite::types::Value::Text(s.clone())).collect();
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let mut out: std::collections::HashMap<String, Option<String>> = std::collections::HashMap::new();
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(values), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })
+            .map_err(|e| e.to_string())?;
+        for r in rows.flatten() { out.insert(r.0, r.1); }
+        Ok(out)
     }
 
     pub fn get_message_channel_id(&self, message_id: &str) -> Result<String, String> {
@@ -4764,6 +5002,267 @@ impl Database {
                         encrypted_emoji: row.get(3)?,
                         emoji_nonce: row.get(4)?,
                         created_at: row.get(5)?,
+                    },
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        for r in rows.flatten() {
+            out.entry(r.0).or_default().push(r.1);
+        }
+        Ok(out)
+    }
+
+    // --- E2E-encrypted polls (blind-index votes) ---
+    // Each vote is a row of (voter_id, option_token) where option_token is an
+    // HMAC-SHA256 of the option id keyed by the conversation key. The server
+    // never sees the option text — it just stores/returns opaque tokens and
+    // lets clients match them against the option ids from the decrypted poll.
+    // UNIQUE(message_id, voter_id, option_token) makes re-sending the same
+    // token a toggle-off (same pattern as reactions).
+
+    /// Insert a vote. Returns true if newly added, false if the exact
+    /// (message, voter, option) already exists (the caller toggles it off).
+    pub fn add_poll_vote(&self, message_id: &str, voter_id: &str, option_token: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let id = Uuid::new_v4().to_string();
+        let n = conn
+            .execute(
+                "INSERT OR IGNORE INTO message_poll_votes (id, message_id, voter_id, option_token) VALUES (?1, ?2, ?3, ?4)",
+                params![id, message_id, voter_id, option_token],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(n > 0)
+    }
+
+    pub fn add_dm_poll_vote(&self, message_id: &str, voter_id: &str, option_token: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let id = Uuid::new_v4().to_string();
+        let n = conn
+            .execute(
+                "INSERT OR IGNORE INTO dm_message_poll_votes (id, message_id, voter_id, option_token) VALUES (?1, ?2, ?3, ?4)",
+                params![id, message_id, voter_id, option_token],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(n > 0)
+    }
+
+    /// Remove the voter's vote for one option token. Returns true if removed.
+    pub fn remove_poll_vote(&self, message_id: &str, voter_id: &str, option_token: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let n = conn
+            .execute(
+                "DELETE FROM message_poll_votes WHERE message_id = ?1 AND voter_id = ?2 AND option_token = ?3",
+                params![message_id, voter_id, option_token],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(n > 0)
+    }
+
+    pub fn remove_dm_poll_vote(&self, message_id: &str, voter_id: &str, option_token: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let n = conn
+            .execute(
+                "DELETE FROM dm_message_poll_votes WHERE message_id = ?1 AND voter_id = ?2 AND option_token = ?3",
+                params![message_id, voter_id, option_token],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(n > 0)
+    }
+
+    /// Remove the voter's votes matching ANY of the given option tokens on one
+    /// message (single-choice poll switch). Returns how many rows were removed.
+    pub fn remove_poll_votes(&self, message_id: &str, voter_id: &str, option_tokens: &[String]) -> Result<usize, String> {
+        if option_tokens.is_empty() { return Ok(0); }
+        let placeholders: Vec<String> = (1..=option_tokens.len()).map(|i| format!("?{}", i + 3)).collect();
+        let sql = format!(
+            "DELETE FROM message_poll_votes WHERE message_id = ?1 AND voter_id = ?2 AND option_token IN ({})",
+            placeholders.join(",")
+        );
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut params_vec: Vec<rusqlite::types::Value> = vec![
+            rusqlite::types::Value::Text(message_id.to_string()),
+            rusqlite::types::Value::Text(voter_id.to_string()),
+        ];
+        for t in option_tokens { params_vec.push(rusqlite::types::Value::Text(t.clone())); }
+        let n = conn
+            .execute(&sql, rusqlite::params_from_iter(params_vec))
+            .map_err(|e| e.to_string())?;
+        Ok(n)
+    }
+
+    pub fn remove_dm_poll_votes(&self, message_id: &str, voter_id: &str, option_tokens: &[String]) -> Result<usize, String> {
+        if option_tokens.is_empty() { return Ok(0); }
+        let placeholders: Vec<String> = (1..=option_tokens.len()).map(|i| format!("?{}", i + 3)).collect();
+        let sql = format!(
+            "DELETE FROM dm_message_poll_votes WHERE message_id = ?1 AND voter_id = ?2 AND option_token IN ({})",
+            placeholders.join(",")
+        );
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut params_vec: Vec<rusqlite::types::Value> = vec![
+            rusqlite::types::Value::Text(message_id.to_string()),
+            rusqlite::types::Value::Text(voter_id.to_string()),
+        ];
+        for t in option_tokens { params_vec.push(rusqlite::types::Value::Text(t.clone())); }
+        let n = conn
+            .execute(&sql, rusqlite::params_from_iter(params_vec))
+            .map_err(|e| e.to_string())?;
+        Ok(n)
+    }
+
+    /// Fetch poll votes for a batch of message ids (message-list loading,
+    /// infinite scroll, pins, and around-message jumps).
+    pub fn get_message_poll_votes(&self, message_ids: &[String]) -> Result<std::collections::HashMap<String, Vec<PollVoteRow>>, String> {
+        if message_ids.is_empty() { return Ok(std::collections::HashMap::new()); }
+        let placeholders: Vec<String> = (1..=message_ids.len()).map(|i| format!("?{}", i)).collect();
+        let sql = format!(
+            "SELECT message_id, voter_id, option_token, created_at FROM message_poll_votes WHERE message_id IN ({})",
+            placeholders.join(",")
+        );
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let values: Vec<rusqlite::types::Value> = message_ids.iter().map(|s| rusqlite::types::Value::Text(s.clone())).collect();
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let mut out: std::collections::HashMap<String, Vec<PollVoteRow>> = std::collections::HashMap::new();
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(values), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    PollVoteRow {
+                        voter_id: row.get(1)?,
+                        option_token: row.get(2)?,
+                        created_at: row.get(3)?,
+                    },
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        for r in rows.flatten() {
+            out.entry(r.0).or_default().push(r.1);
+        }
+        Ok(out)
+    }
+
+    pub fn get_dm_message_poll_votes(&self, message_ids: &[String]) -> Result<std::collections::HashMap<String, Vec<PollVoteRow>>, String> {
+        if message_ids.is_empty() { return Ok(std::collections::HashMap::new()); }
+        let placeholders: Vec<String> = (1..=message_ids.len()).map(|i| format!("?{}", i)).collect();
+        let sql = format!(
+            "SELECT message_id, voter_id, option_token, created_at FROM dm_message_poll_votes WHERE message_id IN ({})",
+            placeholders.join(",")
+        );
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let values: Vec<rusqlite::types::Value> = message_ids.iter().map(|s| rusqlite::types::Value::Text(s.clone())).collect();
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let mut out: std::collections::HashMap<String, Vec<PollVoteRow>> = std::collections::HashMap::new();
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(values), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    PollVoteRow {
+                        voter_id: row.get(1)?,
+                        option_token: row.get(2)?,
+                        created_at: row.get(3)?,
+                    },
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        for r in rows.flatten() {
+            out.entry(r.0).or_default().push(r.1);
+        }
+        Ok(out)
+    }
+
+    // --- Per-message delivery/read acks (E2E blind-token receipts) ---
+    // Each row is one recipient's receipt on one message. `ack_token` is an
+    // HMAC-SHA256 of the message id keyed by the conversation key — the server
+    // stores it (and sanity-checks its shape) but can never forge a receipt
+    // because it never holds the key. UNIQUE(message_id, acker_id) gives one
+    // row per recipient; re-acking upgrades delivered -> read, never downgrades.
+
+    /// Record (or upgrade) one ack. Returns true when the row was inserted or
+    /// its status was upgraded to 'read'; false when it was already at least as
+    /// high (e.g. 'read' re-acked, or a stale 'delivered' on a 'read' row).
+    pub fn record_message_ack(&self, message_id: &str, acker_id: &str, status: &str, ack_token: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let id = Uuid::new_v4().to_string();
+        let n = conn
+            .execute(
+                "INSERT INTO message_acks (id, message_id, acker_id, status, ack_token) VALUES (?1, ?2, ?3, ?4, ?5)\n\
+                 ON CONFLICT(message_id, acker_id) DO UPDATE SET\n\
+                    status = excluded.status,\n\
+                    ack_token = excluded.ack_token,\n\
+                    created_at = CURRENT_TIMESTAMP\n\
+                 WHERE message_acks.status != 'read'",
+                params![id, message_id, acker_id, status, ack_token],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(n > 0)
+    }
+
+    pub fn record_dm_message_ack(&self, message_id: &str, acker_id: &str, status: &str, ack_token: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let id = Uuid::new_v4().to_string();
+        let n = conn
+            .execute(
+                "INSERT INTO dm_message_acks (id, message_id, acker_id, status, ack_token) VALUES (?1, ?2, ?3, ?4, ?5)\n\
+                 ON CONFLICT(message_id, acker_id) DO UPDATE SET\n\
+                    status = excluded.status,\n\
+                    ack_token = excluded.ack_token,\n\
+                    created_at = CURRENT_TIMESTAMP\n\
+                 WHERE dm_message_acks.status != 'read'",
+                params![id, message_id, acker_id, status, ack_token],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(n > 0)
+    }
+
+    /// Fetch ack rows for a batch of message ids (message-list loading,
+    /// infinite scroll, pins, and around-message jumps).
+    pub fn get_message_acks(&self, message_ids: &[String]) -> Result<std::collections::HashMap<String, Vec<AckRow>>, String> {
+        if message_ids.is_empty() { return Ok(std::collections::HashMap::new()); }
+        let placeholders: Vec<String> = (1..=message_ids.len()).map(|i| format!("?{}", i)).collect();
+        let sql = format!(
+            "SELECT message_id, acker_id, status, created_at FROM message_acks WHERE message_id IN ({})",
+            placeholders.join(",")
+        );
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let values: Vec<rusqlite::types::Value> = message_ids.iter().map(|s| rusqlite::types::Value::Text(s.clone())).collect();
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let mut out: std::collections::HashMap<String, Vec<AckRow>> = std::collections::HashMap::new();
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(values), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    AckRow {
+                        acker_id: row.get(1)?,
+                        status: row.get(2)?,
+                        created_at: row.get(3)?,
+                    },
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        for r in rows.flatten() {
+            out.entry(r.0).or_default().push(r.1);
+        }
+        Ok(out)
+    }
+
+    pub fn get_dm_message_acks(&self, message_ids: &[String]) -> Result<std::collections::HashMap<String, Vec<AckRow>>, String> {
+        if message_ids.is_empty() { return Ok(std::collections::HashMap::new()); }
+        let placeholders: Vec<String> = (1..=message_ids.len()).map(|i| format!("?{}", i)).collect();
+        let sql = format!(
+            "SELECT message_id, acker_id, status, created_at FROM dm_message_acks WHERE message_id IN ({})",
+            placeholders.join(",")
+        );
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let values: Vec<rusqlite::types::Value> = message_ids.iter().map(|s| rusqlite::types::Value::Text(s.clone())).collect();
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let mut out: std::collections::HashMap<String, Vec<AckRow>> = std::collections::HashMap::new();
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(values), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    AckRow {
+                        acker_id: row.get(1)?,
+                        status: row.get(2)?,
+                        created_at: row.get(3)?,
                     },
                 ))
             })
@@ -6024,6 +6523,20 @@ impl Database {
         conn.execute("DELETE FROM message_reactions WHERE reactor_id = ?1", params![user_id])
             .map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM dm_message_reactions WHERE reactor_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+
+        // 4c3. Clean up the user's poll votes on other people's polls
+        //      (poll rows cascade their own votes via message_id FK).
+        conn.execute("DELETE FROM message_poll_votes WHERE voter_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM dm_message_poll_votes WHERE voter_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+
+        // 4c4. Clean up the user's delivery/read acks on other people's messages
+        //      (message rows cascade their own acks via message_id FK).
+        conn.execute("DELETE FROM message_acks WHERE acker_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM dm_message_acks WHERE acker_id = ?1", params![user_id])
             .map_err(|e| e.to_string())?;
 
         // 4f. Clean up server_bans where user is the banned user
