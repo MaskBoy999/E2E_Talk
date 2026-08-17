@@ -14,6 +14,43 @@
     </div>
     <!-- Device-local app background photo layer (one image underneath the whole app) -->
     <div id="app-bg"></div>
+    <!-- Transparent drag surface, only active while editing the background (desktop) -->
+    <div id="app-bg-drag" title="Drag to move the background"></div>
+    <!-- Live background-edit panel: floats over the real app so you tune every
+         section while seeing the picture behind it. Desktop only. -->
+    <div id="app-bg-edit-panel" style="display:none">
+        <div class="app-bg-edit-head">
+            <div>
+                <strong>Editing background</strong>
+                <div class="app-bg-edit-hint" id="app-bg-edit-hint">Drag anywhere on the app to move the picture · hover a section name to see which part it tunes</div>
+            </div>
+            <div class="app-bg-edit-actions">
+                <div class="app-bg-mode-toggle" id="app-bg-mode-toggle" title="While editing: drag the picture, or interact with the app normally">
+                    <button class="app-bg-mode-btn active" data-mode="drag">✋ Move</button>
+                    <button class="app-bg-mode-btn" data-mode="interact">🖐 Interact</button>
+                </div>
+                <button class="btn btn-primary" id="app-bg-edit-done">Done</button>
+            </div>
+        </div>
+        <div class="app-bg-ctrl-row">
+            <label class="app-bg-ctrl-label" for="app-bg-edit-pos">Position</label>
+            <select id="app-bg-edit-pos" class="settings-select" style="max-width:170px">
+                <option value="left top">Top left</option>
+                <option value="center top">Top center</option>
+                <option value="right top">Top right</option>
+                <option value="left center">Left</option>
+                <option value="center center" selected>Center</option>
+                <option value="right center">Right</option>
+                <option value="left bottom">Bottom left</option>
+                <option value="center bottom">Bottom center</option>
+                <option value="right bottom">Bottom right</option>
+            </select>
+            <label class="app-bg-ctrl-label" for="app-bg-edit-zoom">Zoom <span id="app-bg-edit-zoom-val">100%</span></label>
+            <input type="range" id="app-bg-edit-zoom" min="100" max="300" step="10" value="100" class="app-bg-zoom">
+            <button class="btn btn-secondary" id="app-bg-edit-center" title="Reset position and pan">Center</button>
+        </div>
+        <div class="app-bg-sections" id="app-bg-edit-sections"></div>
+    </div>
     <div class="app">
         <!-- Server Strip (far left) -->
         <div class="server-strip" id="server-strip">
@@ -466,6 +503,7 @@
                     <div class="app-bg-row">
                         <input type="file" id="app-bg-file" accept="image/*" style="display:none">
                         <button class="btn btn-primary" id="app-bg-upload-btn">📷 Choose Image</button>
+                        <button class="btn btn-secondary" id="app-bg-edit-btn" style="display:none">✏️ Edit</button>
                         <button class="btn btn-danger" id="app-bg-remove-btn" style="display:none">Remove</button>
                         <div class="app-bg-thumb" id="app-bg-thumb" style="display:none"></div>
                     </div>
@@ -487,6 +525,14 @@
                             <input type="range" id="app-bg-zoom" min="100" max="300" step="10" value="100" class="app-bg-zoom">
                         </div>
                         <div class="app-bg-sections" id="app-bg-sections"></div>
+                    </div>
+                </div>
+                <div class="settings-group" style="padding-bottom:12px;border-bottom:1px solid var(--bg-border)">
+                    <h4>Appearance Backup</h4>
+                    <p class="settings-hint">Export your accent color, background color, theme mode, and app background (picture + position/zoom/per-section settings) to an encrypted file, or import one here. Everything is device-local — nothing is stored on the server.</p>
+                    <div class="app-bg-row">
+                        <button class="btn btn-secondary" id="theme-export-btn">⬇️ Export</button>
+                        <button class="btn btn-secondary" id="theme-import-btn">⬆️ Import</button>
                     </div>
                 </div>
                 <div class="settings-group">
@@ -1372,6 +1418,29 @@
     </div>
 
     <!-- Friend Code Password Modal (Recover/Regenerate) -->
+    <!-- Appearance backup password modal (export needs set+confirm, import one field) -->
+    <div class="modal" id="appearance-pw-modal" style="display:none">
+        <div class="modal-content" style="max-width:420px">
+            <h3 style="margin-bottom:12px;color:var(--accent)" id="appearance-pw-title">Export appearance</h3>
+            <p style="margin-bottom:16px;color:var(--text-muted);font-size:13px">
+                This backup is encrypted on your device with a password. Keep it safe — you will need it to import.
+            </p>
+            <div style="margin-bottom:16px">
+                <label style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">Password</label>
+                <input type="password" id="appearance-pw-input" placeholder="Enter a password" autocomplete="new-password" class="modal-input" style="width:100%;padding:10px 14px;border:1px solid #2a2a4a;border-radius:8px;background:#1a1a2e;color:#e0e0e0;font-size:16px;box-sizing:border-box;">
+            </div>
+            <div id="appearance-pw-confirm-wrap" style="margin-bottom:16px">
+                <label style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">Confirm password</label>
+                <input type="password" id="appearance-pw-confirm-input" placeholder="Repeat the password" autocomplete="new-password" class="modal-input" style="width:100%;padding:10px 14px;border:1px solid #2a2a4a;border-radius:8px;background:#1a1a2e;color:#e0e0e0;font-size:16px;box-sizing:border-box;">
+            </div>
+            <div id="appearance-pw-error" style="color:var(--danger);margin-bottom:12px;display:none;font-size:13px"></div>
+            <div class="modal-actions" style="gap:8px;flex-wrap:wrap">
+                <button class="btn-cancel" id="appearance-pw-cancel-btn">Cancel</button>
+                <button class="btn-invite" id="appearance-pw-confirm-btn">&#128274; Confirm</button>
+            </div>
+        </div>
+    </div>
+
     <div class="modal" id="friend-code-password-modal" style="display:none">
         <div class="modal-content" style="max-width:420px">
             <h3 style="margin-bottom:12px;color:var(--accent)">Account Verification</h3>

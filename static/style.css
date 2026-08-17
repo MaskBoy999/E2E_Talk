@@ -7870,6 +7870,111 @@ body.show-msg-status-hover .message:hover .content .msg-status {
     font-size: 11px;
 }
 
+/* Transparent drag surface — only exists while live-editing the background.
+   It sits above the app (so dragging anywhere moves the picture) but below
+   the edit panel and all modals. */
+#app-bg-drag {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 900;
+    cursor: grab;
+    touch-action: none;
+}
+body.app-bg-edit #app-bg-drag {
+    display: block;
+}
+#app-bg-drag.dragging {
+    cursor: grabbing;
+}
+
+/* Floating live-edit panel: the real app stays visible underneath so every
+   slider/toggle takes effect immediately on the actual UI. */
+#app-bg-edit-panel {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    bottom: 16px;
+    width: 340px;
+    max-width: calc(100vw - 32px);
+    z-index: 1100;
+    display: flex;
+    flex-direction: column;
+    background: color-mix(in srgb, var(--bg-secondary) 94%, transparent);
+    border: 1px solid var(--bg-border);
+    border-radius: 12px;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+    padding: 14px;
+    overflow-y: auto;
+    -webkit-backdrop-filter: blur(14px);
+    backdrop-filter: blur(14px);
+}
+.app-bg-edit-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 6px;
+}
+.app-bg-edit-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+}
+.app-bg-mode-toggle {
+    display: flex;
+    border: 1px solid var(--bg-border);
+    border-radius: 8px;
+    overflow: hidden;
+}
+.app-bg-mode-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-size: 12px;
+    padding: 6px 10px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.app-bg-mode-btn.active {
+    background: var(--accent, #4fc3f7);
+    color: #0b0f1a;
+    font-weight: 700;
+}
+.app-bg-edit-hint {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 4px;
+    line-height: 1.4;
+}
+
+/* In "interact" mode the transparent drag layer is disabled so the app behind
+   the edit panel is fully usable (scroll/click/type) while still visible. */
+body.app-bg-edit.app-bg-interact #app-bg-drag {
+    display: none;
+}
+
+/* Hovering a section row in the edit panel outlines that part of the live app. */
+body.app-bg-edit.app-bg-hl-strip .server-strip,
+body.app-bg-edit.app-bg-hl-sidebar .sidebar,
+body.app-bg-edit.app-bg-hl-footer .sidebar-footer,
+body.app-bg-edit.app-bg-hl-header .chat-header,
+body.app-bg-edit.app-bg-hl-chat .chat-body,
+body.app-bg-edit.app-bg-hl-members .members-panel,
+body.app-bg-edit.app-bg-hl-input .chat-input {
+    outline: 2px solid var(--accent, #4fc3f7);
+    outline-offset: -2px;
+    box-shadow: inset 0 0 0 1px rgba(79, 195, 247, 0.4);
+}
+
+/* Phone users keep the settings preview panel — the live-edit button is desktop only. */
+@media (max-width: 768px) {
+    #app-bg-edit-btn {
+        display: none !important;
+    }
+}
+
 /* ===== Loading Overlay ===== */
 .loading-overlay {
     position: fixed;

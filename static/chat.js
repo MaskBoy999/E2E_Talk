@@ -3095,9 +3095,11 @@ document.addEventListener('DOMContentLoaded', () => {
     var themeBgPicker = document.getElementById('theme-bg-picker');
     var themeBgReset = document.getElementById('theme-bg-reset');
 
-    // Helper to save both theme colors at once
+    // Theme colors + mode are device-local (localStorage only) and deliberately
+    // NOT synced through the encrypted profile — each device keeps its own look.
     function saveThemeColors(accentHex, bgHex) {
-        saveThemeColor(accentHex, bgHex);
+        localStorage.setItem('theme_color', accentHex);
+        if (bgHex !== undefined) localStorage.setItem('theme_bg_color', bgHex);
     }
 
     if (themeColorPicker) {
@@ -3253,28 +3255,32 @@ document.addEventListener('DOMContentLoaded', () => {
     function defaultAppBgSettings() {
         var sections = {};
         appBgSections.forEach(function (s) { sections[s.key] = { on: true, blur: s.defaultBlur, dim: s.defaultDim }; });
-        return { img: '', pos: 'center center', zoom: 100, sections: sections };
+        return { img: '', pos: 'center center', zoom: 100, panX: 0, panY: 0, sections: sections };
+    }
+    function normalizeAppBgSettings(parsed) {
+        if (!parsed || typeof parsed !== 'object' || !parsed.img) return defaultAppBgSettings();
+        var d = defaultAppBgSettings();
+        parsed.sections = parsed.sections || {};
+        appBgSections.forEach(function (s) {
+            var cur = parsed.sections[s.key] || {};
+            var def = d.sections[s.key];
+            parsed.sections[s.key] = {
+                on: typeof cur.on === 'boolean' ? cur.on : def.on,
+                blur: typeof cur.blur === 'number' ? cur.blur : def.blur,
+                dim: typeof cur.dim === 'number' ? cur.dim : def.dim
+            };
+        });
+        if (typeof parsed.pos !== 'string') parsed.pos = 'center center';
+        if (typeof parsed.zoom !== 'number' || parsed.zoom < 100) parsed.zoom = 100;
+        if (typeof parsed.panX !== 'number') parsed.panX = 0;
+        if (typeof parsed.panY !== 'number') parsed.panY = 0;
+        return parsed;
     }
     function loadAppBg() {
         try {
             var raw = localStorage.getItem(APP_BG_KEY);
             if (!raw) return defaultAppBgSettings();
-            var parsed = JSON.parse(raw);
-            if (!parsed || typeof parsed !== 'object' || !parsed.img) return defaultAppBgSettings();
-            var d = defaultAppBgSettings();
-            parsed.sections = parsed.sections || {};
-            appBgSections.forEach(function (s) {
-                var cur = parsed.sections[s.key] || {};
-                var def = d.sections[s.key];
-                parsed.sections[s.key] = {
-                    on: typeof cur.on === 'boolean' ? cur.on : def.on,
-                    blur: typeof cur.blur === 'number' ? cur.blur : def.blur,
-                    dim: typeof cur.dim === 'number' ? cur.dim : def.dim
-                };
-            });
-            if (typeof parsed.pos !== 'string') parsed.pos = 'center center';
-            if (typeof parsed.zoom !== 'number' || parsed.zoom < 100) parsed.zoom = 100;
-            return parsed;
+            return normalizeAppBgSettings(JSON.parse(raw));
         } catch (_) {
             return defaultAppBgSettings();
         }
@@ -3297,7 +3303,17 @@ document.addEventListener('DOMContentLoaded', () => {
         document.body.classList.toggle('app-bg-on', has);
         if (!has) return;
         bgEl.style.backgroundImage = 'url("' + appBgSettings.img + '")';
-        bgEl.style.backgroundPosition = appBgSettings.pos || 'center center';
+        // Pixel pan offsets (drag-to-move in edit mode) sit on top of the 9-way
+        // position origin. Without pan the plain position string is kept so
+        // existing behavior (and tests) see exactly 'left top' etc.
+        if (appBgSettings.panX || appBgSettings.panY) {
+            var originParts = appBgPosToOrigin(appBgSettings.pos).split(/\s+/);
+            bgEl.style.backgroundPosition =
+                'calc(' + (originParts[0] || '50%') + ' + ' + (appBgSettings.panX || 0) + 'px) ' +
+                'calc(' + (originParts[1] || '50%') + ' + ' + (appBgSettings.panY || 0) + 'px)';
+        } else {
+            bgEl.style.backgroundPosition = appBgSettings.pos || 'center center';
+        }
         bgEl.style.transform = 'scale(' + (Math.max(100, appBgSettings.zoom || 100) / 100) + ')';
         bgEl.style.transformOrigin = appBgPosToOrigin(appBgSettings.pos);
         var root = document.documentElement;
@@ -3308,6 +3324,65 @@ document.addEventListener('DOMContentLoaded', () => {
             root.style.setProperty('--bg-dim-' + s.key, (on ? cfg.dim : 100) + '%');
         });
     }
+    // Shared per-section builder: the same rows render in the settings modal and
+    // in the floating live-edit panel, so both always stay in sync. The edit
+    // panel's rows are only built when edit mode opens (never eagerly), so the
+    // un-scoped .app-bg-* selectors keep matching exactly one set of controls.
+    function syncAppBgSectionValues(container) {
+        if (!container) return;
+        container.querySelectorAll('.app-bg-section').forEach(function (row) {
+            var key = row.getAttribute('data-key');
+            var cfg = appBgSettings.sections[key];
+            if (!cfg) return;
+            row.querySelector('.app-bg-on').checked = cfg.on !== false;
+            var blurIn = row.querySelector('.app-bg-blur');
+            blurIn.value = cfg.blur;
+            row.querySelector('.app-bg-blur-val').textContent = cfg.blur + 'px';
+            var dimIn = row.querySelector('.app-bg-dim');
+            dimIn.value = cfg.dim;
+            row.querySelector('.app-bg-dim-val').textContent = cfg.dim + '%';
+        });
+    }
+    function buildAppBgSectionRows(container, withHover) {
+        if (!container || container.dataset.built) return;
+        container.dataset.built = '1';
+        container.innerHTML = '';
+        appBgSections.forEach(function (s) {
+            var row = document.createElement('div');
+            row.className = 'app-bg-section';
+            row.setAttribute('data-key', s.key);
+            row.innerHTML =
+                '<span class="app-bg-section-name">' + escapeHtml(s.label) + '</span>' +
+                '<label class="app-bg-toggle"><input type="checkbox" class="app-bg-on" data-section="' + s.key + '"><span>Show</span></label>' +
+                '<label class="app-bg-slider-label">Blur <input type="range" class="app-bg-blur" data-section="' + s.key + '" min="0" max="24" step="1"><span class="app-bg-slider-val app-bg-blur-val" data-section="' + s.key + '"></span></label>' +
+                '<label class="app-bg-slider-label">Dim <input type="range" class="app-bg-dim" data-section="' + s.key + '" min="0" max="95" step="5"><span class="app-bg-slider-val app-bg-dim-val" data-section="' + s.key + '"></span></label>';
+            container.appendChild(row);
+            if (withHover) {
+                row.addEventListener('mouseenter', function () {
+                    document.body.classList.add('app-bg-hl-' + s.key);
+                });
+                row.addEventListener('mouseleave', function () {
+                    document.body.classList.remove('app-bg-hl-' + s.key);
+                });
+            }
+        });
+        container.addEventListener('change', function (e) {
+            var sec = e.target && e.target.getAttribute && e.target.getAttribute('data-section');
+            if (!sec || !appBgSettings.sections[sec]) return;
+            if (e.target.classList.contains('app-bg-on')) {
+                appBgSettings.sections[sec].on = e.target.checked;
+            } else if (e.target.classList.contains('app-bg-blur')) {
+                appBgSettings.sections[sec].blur = parseInt(e.target.value, 10) || 0;
+            } else if (e.target.classList.contains('app-bg-dim')) {
+                appBgSettings.sections[sec].dim = parseInt(e.target.value, 10) || 0;
+            } else {
+                return;
+            }
+            saveAppBg();
+            applyAppBg();
+            updateAppBgUI();
+        });
+    }
     function updateAppBgUI() {
         var has = !!appBgSettings.img;
         var uploadBtn = document.getElementById('app-bg-upload-btn');
@@ -3316,6 +3391,8 @@ document.addEventListener('DOMContentLoaded', () => {
         var controls = document.getElementById('app-bg-controls');
         if (uploadBtn) uploadBtn.textContent = has ? '📷 Change Image' : '📷 Choose Image';
         if (removeBtn) removeBtn.style.display = has ? '' : 'none';
+        var editBtn = document.getElementById('app-bg-edit-btn');
+        if (editBtn) editBtn.style.display = (has && isAppBgDesktop()) ? '' : 'none';
         if (thumb) {
             thumb.style.display = has ? '' : 'none';
             if (has) thumb.style.backgroundImage = 'url("' + appBgSettings.img + '")';
@@ -3323,55 +3400,19 @@ document.addEventListener('DOMContentLoaded', () => {
         if (controls) controls.style.display = has ? '' : 'none';
         var posSel = document.getElementById('app-bg-pos');
         if (posSel) posSel.value = appBgSettings.pos || 'center center';
+        var editPosSel = document.getElementById('app-bg-edit-pos');
+        if (editPosSel) editPosSel.value = appBgSettings.pos || 'center center';
         var zoom = document.getElementById('app-bg-zoom');
         var zoomVal = document.getElementById('app-bg-zoom-val');
         if (zoom) zoom.value = appBgSettings.zoom || 100;
         if (zoomVal) zoomVal.textContent = (appBgSettings.zoom || 100) + '%';
+        var editZoom = document.getElementById('app-bg-edit-zoom');
+        var editZoomVal = document.getElementById('app-bg-edit-zoom-val');
+        if (editZoom) editZoom.value = appBgSettings.zoom || 100;
+        if (editZoomVal) editZoomVal.textContent = (appBgSettings.zoom || 100) + '%';
         var sectionsBox = document.getElementById('app-bg-sections');
-        if (sectionsBox) {
-            if (!sectionsBox.dataset.built) {
-                sectionsBox.dataset.built = '1';
-                sectionsBox.innerHTML = '';
-                appBgSections.forEach(function (s) {
-                    var row = document.createElement('div');
-                    row.className = 'app-bg-section';
-                    row.innerHTML =
-                        '<span class="app-bg-section-name">' + escapeHtml(s.label) + '</span>' +
-                        '<label class="app-bg-toggle"><input type="checkbox" class="app-bg-on" data-section="' + s.key + '"><span>Show</span></label>' +
-                        '<label class="app-bg-slider-label">Blur <input type="range" class="app-bg-blur" data-section="' + s.key + '" min="0" max="24" step="1"><span class="app-bg-slider-val app-bg-blur-val" data-section="' + s.key + '"></span></label>' +
-                        '<label class="app-bg-slider-label">Dim <input type="range" class="app-bg-dim" data-section="' + s.key + '" min="0" max="95" step="5"><span class="app-bg-slider-val app-bg-dim-val" data-section="' + s.key + '"></span></label>';
-                    sectionsBox.appendChild(row);
-                });
-                sectionsBox.addEventListener('change', function (e) {
-                    var sec = e.target && e.target.getAttribute && e.target.getAttribute('data-section');
-                    if (!sec || !appBgSettings.sections[sec]) return;
-                    if (e.target.classList.contains('app-bg-on')) {
-                        appBgSettings.sections[sec].on = e.target.checked;
-                    } else if (e.target.classList.contains('app-bg-blur')) {
-                        appBgSettings.sections[sec].blur = parseInt(e.target.value, 10) || 0;
-                    } else if (e.target.classList.contains('app-bg-dim')) {
-                        appBgSettings.sections[sec].dim = parseInt(e.target.value, 10) || 0;
-                    } else {
-                        return;
-                    }
-                    saveAppBg();
-                    applyAppBg();
-                    updateAppBgUI();
-                });
-            }
-            sectionsBox.querySelectorAll('.app-bg-section').forEach(function (row) {
-                var key = row.querySelector('.app-bg-on').getAttribute('data-section');
-                var cfg = appBgSettings.sections[key];
-                if (!cfg) return;
-                row.querySelector('.app-bg-on').checked = cfg.on !== false;
-                var blurIn = row.querySelector('.app-bg-blur');
-                blurIn.value = cfg.blur;
-                row.querySelector('.app-bg-blur-val').textContent = cfg.blur + 'px';
-                var dimIn = row.querySelector('.app-bg-dim');
-                dimIn.value = cfg.dim;
-                row.querySelector('.app-bg-dim-val').textContent = cfg.dim + '%';
-            });
-        }
+        buildAppBgSectionRows(sectionsBox, false);
+        syncAppBgSectionValues(sectionsBox);
     }
     function compressAppBgImage(file, cb) {
         var reader = new FileReader();
@@ -3456,6 +3497,291 @@ document.addEventListener('DOMContentLoaded', () => {
             if (zoomVal) zoomVal.textContent = appBgSettings.zoom + '%';
         });
     }
+
+    // ===== Live background edit mode (desktop) =====
+    // Closing the settings modal and floating a compact panel over the REAL app
+    // (drag layer + hover highlights) lets you tune every section while actually
+    // seeing the picture behind the UI. Phone users keep the settings preview.
+    function isAppBgDesktop() { return window.innerWidth > 768; }
+    function enterAppBgEdit() {
+        if (!appBgSettings.img) return;
+        hideModal('settings-modal');
+        document.body.classList.add('app-bg-edit');
+        var panel = document.getElementById('app-bg-edit-panel');
+        if (panel) panel.style.display = '';
+        var editSectionsBox = document.getElementById('app-bg-edit-sections');
+        buildAppBgSectionRows(editSectionsBox, true);
+        syncAppBgSectionValues(editSectionsBox);
+        applyAppBgEditModeUI();
+        updateAppBgUI();
+    }
+    function exitAppBgEdit() {
+        document.body.classList.remove('app-bg-edit');
+        var panel = document.getElementById('app-bg-edit-panel');
+        if (panel) panel.style.display = 'none';
+        appBgSections.forEach(function (s) { document.body.classList.remove('app-bg-hl-' + s.key); });
+    }
+    var appBgEditBtn = document.getElementById('app-bg-edit-btn');
+    if (appBgEditBtn) appBgEditBtn.addEventListener('click', enterAppBgEdit);
+    var appBgEditDone = document.getElementById('app-bg-edit-done');
+    if (appBgEditDone) appBgEditDone.addEventListener('click', exitAppBgEdit);
+    document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape' && document.body.classList.contains('app-bg-edit')) exitAppBgEdit();
+    });
+    var appBgEditPos = document.getElementById('app-bg-edit-pos');
+    if (appBgEditPos) {
+        appBgEditPos.addEventListener('change', function () {
+            appBgSettings.pos = appBgEditPos.value;
+            saveAppBg(); applyAppBg(); updateAppBgUI();
+        });
+    }
+    var appBgEditZoom = document.getElementById('app-bg-edit-zoom');
+    if (appBgEditZoom) {
+        appBgEditZoom.addEventListener('input', function () {
+            appBgSettings.zoom = parseInt(appBgEditZoom.value, 10) || 100;
+            saveAppBg(); applyAppBg(); updateAppBgUI();
+        });
+    }
+    var appBgEditCenter = document.getElementById('app-bg-edit-center');
+    if (appBgEditCenter) {
+        appBgEditCenter.addEventListener('click', function () {
+            appBgSettings.pos = 'center center';
+            appBgSettings.panX = 0;
+            appBgSettings.panY = 0;
+            saveAppBg(); applyAppBg(); updateAppBgUI();
+        });
+    }
+    // ===== Interact vs drag toggle (live edit mode) =====
+    // Default is drag-to-move; switching to "interact" disables the transparent
+    // drag layer so you can scroll/click the real app while the panel stays open.
+    var appBgInteract = localStorage.getItem('app_bg_edit_interact') === '1';
+    function applyAppBgEditModeUI() {
+        document.body.classList.toggle('app-bg-interact', appBgInteract);
+        var modeBtns = document.querySelectorAll('.app-bg-mode-btn');
+        modeBtns.forEach(function (b) {
+            var want = b.getAttribute('data-mode') === (appBgInteract ? 'interact' : 'drag');
+            b.classList.toggle('active', want);
+        });
+        var hint = document.getElementById('app-bg-edit-hint');
+        if (hint) {
+            hint.textContent = appBgInteract
+                ? 'The app is fully interactive now — scroll, click, type. Switch to Move to drag the picture behind it.'
+                : 'Drag anywhere on the app to move the picture · hover a section name to see which part it tunes';
+        }
+    }
+    var appBgModeToggle = document.getElementById('app-bg-mode-toggle');
+    if (appBgModeToggle) {
+        appBgModeToggle.addEventListener('click', function (e) {
+            var btn = e.target && e.target.closest && e.target.closest('.app-bg-mode-btn');
+            if (!btn) return;
+            appBgInteract = btn.getAttribute('data-mode') === 'interact';
+            localStorage.setItem('app_bg_edit_interact', appBgInteract ? '1' : '0');
+            applyAppBgEditModeUI();
+        });
+    }
+
+    // ===== Appearance export / import (password-encrypted, device-local) =====
+    // Bundles accent color, background color, theme mode, and the app background
+    // (picture + position/zoom/per-section settings) into one encrypted file, so
+    // you can move your whole look between devices without syncing it.
+    var appearancePwModal = document.getElementById('appearance-pw-modal');
+    var appearancePwTitle = document.getElementById('appearance-pw-title');
+    var appearancePwConfirmWrap = document.getElementById('appearance-pw-confirm-wrap');
+    var appearancePwInput = document.getElementById('appearance-pw-input');
+    var appearancePwConfirm = document.getElementById('appearance-pw-confirm-input');
+    var appearancePwError = document.getElementById('appearance-pw-error');
+    var _appearancePendingImport = null;
+    function appearancePwShow(title, needConfirm) {
+        if (!appearancePwModal) return;
+        if (appearancePwTitle) appearancePwTitle.textContent = title;
+        if (appearancePwConfirmWrap) appearancePwConfirmWrap.style.display = needConfirm ? '' : 'none';
+        if (appearancePwError) appearancePwError.style.display = 'none';
+        if (appearancePwInput) appearancePwInput.value = '';
+        if (appearancePwConfirm) appearancePwConfirm.value = '';
+        appearancePwModal.style.display = 'flex';
+        if (appearancePwInput) appearancePwInput.focus();
+    }
+    function appearancePwHide() {
+        if (appearancePwModal) appearancePwModal.style.display = 'none';
+        _appearancePendingImport = null;
+    }
+    if (appearancePwModal) {
+        appearancePwModal.addEventListener('click', function (e) {
+            if (e.target === appearancePwModal) appearancePwHide();
+        });
+    }
+    function buildAppearancePayload() {
+        return {
+            v: 1,
+            theme_color: localStorage.getItem('theme_color') || '#4fc3f7',
+            theme_bg_color: localStorage.getItem('theme_bg_color') || '#4fc3f7',
+            theme_mode: localStorage.getItem('theme_mode') || 'dark',
+            app_bg: JSON.parse(JSON.stringify(appBgSettings))
+        };
+    }
+    function applyAppearancePayload(payload) {
+        if (!payload || payload.v !== 1) return false;
+        var mode = payload.theme_mode || localStorage.getItem('theme_mode') || 'dark';
+        if (payload.theme_color) {
+            localStorage.setItem('theme_color', payload.theme_color);
+            applyThemeColor(payload.theme_color, mode);
+            var picker = document.getElementById('theme-color-picker');
+            if (picker) picker.value = payload.theme_color;
+            var hex = document.getElementById('theme-color-hex');
+            if (hex) hex.value = payload.theme_color;
+        }
+        if (payload.theme_bg_color) {
+            localStorage.setItem('theme_bg_color', payload.theme_bg_color);
+            applyThemeBgColor(payload.theme_bg_color, mode);
+            var bgPicker = document.getElementById('theme-bg-picker');
+            if (bgPicker) bgPicker.value = payload.theme_bg_color;
+            var bgHex = document.getElementById('theme-bg-hex');
+            if (bgHex) bgHex.value = payload.theme_bg_color;
+        }
+        if (payload.theme_mode) {
+            localStorage.setItem('theme_mode', payload.theme_mode);
+            applyThemeMode(payload.theme_mode);
+        }
+        if (payload.app_bg) {
+            appBgSettings = normalizeAppBgSettings(JSON.parse(JSON.stringify(payload.app_bg)));
+            saveAppBg();
+            applyAppBg();
+            updateAppBgUI();
+        }
+        return true;
+    }
+    var themeExportBtn = document.getElementById('theme-export-btn');
+    if (themeExportBtn) {
+        themeExportBtn.addEventListener('click', function () {
+            _appearancePendingImport = null;
+            appearancePwShow('Export appearance', true);
+        });
+    }
+    var themeImportBtn = document.getElementById('theme-import-btn');
+    if (themeImportBtn) {
+        themeImportBtn.addEventListener('click', function () {
+            var input = document.createElement('input');
+            input.type = 'file';
+            input.accept = '.e2etheme,.json,application/json';
+            input.onchange = function () {
+                var f = input.files && input.files[0];
+                if (!f) return;
+                var reader = new FileReader();
+                reader.onload = function () {
+                    try {
+                        var parsed = JSON.parse(reader.result);
+                        if (!parsed || parsed.app !== 'e2e_chat' || parsed.kind !== 'appearance' ||
+                            !parsed.salt || !parsed.nonce || !parsed.encrypted_private_key) {
+                            flashToast('Not a valid appearance backup file.', 'error');
+                            return;
+                        }
+                        _appearancePendingImport = parsed;
+                        appearancePwShow('Import appearance', false);
+                    } catch (_) {
+                        flashToast('Could not read that file.', 'error');
+                    }
+                };
+                reader.readAsText(f);
+            };
+            input.click();
+        });
+    }
+    var appearancePwConfirmBtn = document.getElementById('appearance-pw-confirm-btn');
+    if (appearancePwConfirmBtn) {
+        appearancePwConfirmBtn.addEventListener('click', function () {
+            var pw = appearancePwInput ? appearancePwInput.value : '';
+            if (!pw) {
+                if (appearancePwError) { appearancePwError.textContent = 'Enter a password.'; appearancePwError.style.display = ''; }
+                return;
+            }
+            if (_appearancePendingImport) {
+                var decrypted = E2ECrypto.decryptWithPassword(
+                    _appearancePendingImport.encrypted_private_key, pw,
+                    _appearancePendingImport.salt, _appearancePendingImport.nonce);
+                if (!decrypted) {
+                    if (appearancePwError) { appearancePwError.textContent = 'Wrong password — could not decrypt this backup.'; appearancePwError.style.display = ''; }
+                    return;
+                }
+                try {
+                    if (applyAppearancePayload(JSON.parse(decrypted))) {
+                        appearancePwHide();
+                        flashToast('Appearance imported');
+                    } else {
+                        if (appearancePwError) { appearancePwError.textContent = 'Backup file is not supported.'; appearancePwError.style.display = ''; }
+                    }
+                } catch (_) {
+                    if (appearancePwError) { appearancePwError.textContent = 'Backup file is corrupted.'; appearancePwError.style.display = ''; }
+                }
+                return;
+            }
+            // Export: confirm + minimum length.
+            var confirmPw = appearancePwConfirm ? appearancePwConfirm.value : '';
+            if (pw.length < 4) {
+                if (appearancePwError) { appearancePwError.textContent = 'Password must be at least 4 characters.'; appearancePwError.style.display = ''; }
+                return;
+            }
+            if (pw !== confirmPw) {
+                if (appearancePwError) { appearancePwError.textContent = 'Passwords do not match.'; appearancePwError.style.display = ''; }
+                return;
+            }
+            try {
+                var enc = E2ECrypto.encryptWithPassword(JSON.stringify(buildAppearancePayload()), pw);
+                var fileData = { app: 'e2e_chat', kind: 'appearance', v: 1, salt: enc.salt, nonce: enc.nonce, encrypted_private_key: enc.encrypted_private_key };
+                var blob = new Blob([JSON.stringify(fileData)], { type: 'application/json' });
+                var url = URL.createObjectURL(blob);
+                var a = document.createElement('a');
+                a.href = url;
+                a.download = 'e2e_appearance_' + new Date().toISOString().slice(0, 10) + '.e2etheme';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                appearancePwHide();
+                flashToast('Appearance exported');
+            } catch (e) {
+                if (appearancePwError) { appearancePwError.textContent = 'Export failed: ' + e.message; appearancePwError.style.display = ''; }
+            }
+        });
+    }
+    var appearancePwCancelBtn = document.getElementById('appearance-pw-cancel-btn');
+    if (appearancePwCancelBtn) appearancePwCancelBtn.addEventListener('click', appearancePwHide);
+
+    // Drag anywhere on the visible app to move the picture behind it. The drag
+    // distance is divided by the zoom scale so the image follows the cursor 1:1.
+    var appBgDrag = document.getElementById('app-bg-drag');
+    if (appBgDrag) {
+        var appBgDragging = false, appBgDragLastX = 0, appBgDragLastY = 0;
+        appBgDrag.addEventListener('pointerdown', function (e) {
+            if (!document.body.classList.contains('app-bg-edit')) return;
+            appBgDragging = true;
+            appBgDragLastX = e.clientX; appBgDragLastY = e.clientY;
+            appBgDrag.classList.add('dragging');
+            try { appBgDrag.setPointerCapture(e.pointerId); } catch (_) {}
+            if (e.preventDefault) e.preventDefault();
+        });
+        appBgDrag.addEventListener('pointermove', function (e) {
+            if (!appBgDragging) return;
+            var scale = Math.max(100, appBgSettings.zoom || 100) / 100;
+            appBgSettings.panX = Math.round((appBgSettings.panX || 0) + (e.clientX - appBgDragLastX) / scale);
+            appBgSettings.panY = Math.round((appBgSettings.panY || 0) + (e.clientY - appBgDragLastY) / scale);
+            appBgDragLastX = e.clientX; appBgDragLastY = e.clientY;
+            saveAppBg(); applyAppBg();
+        });
+        function appBgDragStop() {
+            if (!appBgDragging) return;
+            appBgDragging = false;
+            appBgDrag.classList.remove('dragging');
+        }
+        appBgDrag.addEventListener('pointerup', appBgDragStop);
+        appBgDrag.addEventListener('pointercancel', appBgDragStop);
+    }
+    // Keep the Edit button honest across window resizes; bail out of live-edit
+    // if the window is shrunk into the phone layout.
+    window.addEventListener('resize', function () {
+        var editBtn = document.getElementById('app-bg-edit-btn');
+        if (editBtn) editBtn.style.display = (appBgSettings.img && isAppBgDesktop()) ? '' : 'none';
+        if (!isAppBgDesktop() && document.body.classList.contains('app-bg-edit')) exitAppBgEdit();
+    });
     updateAppBgUI();
     applyAppBg();
 
@@ -10616,14 +10942,6 @@ function connectWebSocket(t) {
                                 myProfile.username_border_color = decryptedProfileUpdate.username_border_color;
                                 if (decryptedProfileUpdate.nickname !== undefined) myProfile.nickname = decryptedProfileUpdate.nickname;
                                 if (decryptedProfileUpdate.description !== undefined) myProfile.description = decryptedProfileUpdate.description;
-                                if (decryptedProfileUpdate.theme_color) {
-                                    myProfile.theme_color = decryptedProfileUpdate.theme_color;
-                                    if (myProfile.decrypted) myProfile.decrypted.theme_color = decryptedProfileUpdate.theme_color;
-                                }
-                                if (decryptedProfileUpdate.theme_bg_color) {
-                                    myProfile.theme_bg_color = decryptedProfileUpdate.theme_bg_color;
-                                    if (myProfile.decrypted) myProfile.decrypted.theme_bg_color = decryptedProfileUpdate.theme_bg_color;
-                                }
                                 // Extract pic/banner from decrypted profile data
                                 // Use !== undefined so explicit null (field was removed) clears myProfile.
                                 // The old if(value) check was falsy for null, making removals invisible.
@@ -10651,26 +10969,8 @@ function connectWebSocket(t) {
                                     }
                                 }
                             }
-                            // Apply theme colors if present in the update
-                            var mode = localStorage.getItem('theme_mode') || 'dark';
-                            var themeFromUpdate = decryptedProfileUpdate.theme_color;
-                            if (themeFromUpdate) {
-                                localStorage.setItem('theme_color', themeFromUpdate);
-                                applyThemeColor(themeFromUpdate, mode);
-                                var picker = document.getElementById('theme-color-picker');
-                                if (picker) picker.value = themeFromUpdate;
-                            }
-                            var themeBgFromUpdate = decryptedProfileUpdate.theme_bg_color;
-                            if (themeBgFromUpdate) {
-                                localStorage.setItem('theme_bg_color', themeBgFromUpdate);
-                                applyThemeBgColor(themeBgFromUpdate, mode);
-                                var bgPicker = document.getElementById('theme-bg-picker');
-                                if (bgPicker) bgPicker.value = themeBgFromUpdate;
-                            }
-                            var themeModeFromUpdate = decryptedProfileUpdate.theme_mode;
-                            if (themeModeFromUpdate) {
-                                applyThemeMode(themeModeFromUpdate);
-                            }
+                            // Theme colors/mode are device-local — not applied
+                            // from profile updates (see PROGRESS.md).
                         }
                         // Pic/banner keys now come from decrypted encrypted_profile_data,
                         // no longer need separate decryptOwnProfileFileKeys call.
@@ -25211,54 +25511,8 @@ async function loadMyProfile() {
             try { VoiceManager.refreshSelfProfile(); } catch (_) {}
         }
         
-        // Apply theme colors from decrypted profile data
-        var decryptedThemeColor = null;
-        var decryptedThemeBgColor = null;
-        if (data.encrypted_profile_data && ident) {
-            try {
-                if (data.encrypted_profile_data_key) {
-                    var dk = E2ECrypto.decodeEncryptedFileKey(data.encrypted_profile_data_key, ident.privateKey);
-                    if (dk) {
-                        var keyArr = E2ECrypto.base64ToArrayBuffer(dk);
-                        var pts = data.encrypted_profile_data.split(':');
-                        if (pts.length === 2) {
-                            var dec = E2ECrypto.decryptProfileData(pts[1], pts[0], new Uint8Array(keyArr));
-                            if (dec) {
-                                if (dec.theme_color) decryptedThemeColor = dec.theme_color;
-                                if (dec.theme_bg_color) {
-                                    decryptedThemeBgColor = dec.theme_bg_color;
-                                } else if (dec.theme_color) {
-                                    // Backward compat: profiles saved before bg split only have theme_color
-                                    decryptedThemeBgColor = dec.theme_color;
-                                }
-                                if (dec.theme_mode) {
-                                    localStorage.setItem('theme_mode', dec.theme_mode);
-                                } else {
-                                    // Keep existing localStorage value if not in encrypted data yet
-                                    if (!localStorage.getItem('theme_mode')) {
-                                        localStorage.setItem('theme_mode', 'dark');
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            } catch (_) {}
-        }
-        if (decryptedThemeColor) {
-            localStorage.setItem('theme_color', decryptedThemeColor);
-            var mode = localStorage.getItem('theme_mode') || 'dark';
-            applyThemeColor(decryptedThemeColor, mode);
-            var picker = document.getElementById('theme-color-picker');
-            if (picker) picker.value = decryptedThemeColor;
-        }
-        if (decryptedThemeBgColor) {
-            localStorage.setItem('theme_bg_color', decryptedThemeBgColor);
-            var mode = localStorage.getItem('theme_mode') || 'dark';
-            applyThemeBgColor(decryptedThemeBgColor, mode);
-            var bgPicker = document.getElementById('theme-bg-picker');
-            if (bgPicker) bgPicker.value = decryptedThemeBgColor;
-        }
+        // Theme colors / mode / app background are device-local (localStorage)
+        // and deliberately NOT applied from the synced profile.
         
         // Update settings UI if open
         updateProfileSettingsUI(data);
@@ -27207,12 +27461,6 @@ async function saveProfile() {
         // Build profile data to encrypt
         var toggle = document.getElementById('disable-friend-requests-toggle');
         var isDisabled = toggle ? toggle.checked : false;
-        // Read current theme colors from pickers or localStorage
-        var themePicker = document.getElementById('theme-color-picker');
-        var currentThemeColor = themePicker ? themePicker.value : (localStorage.getItem('theme_color') || '#4fc3f7');
-        var themeBgPicker = document.getElementById('theme-bg-picker');
-        var currentThemeBgColor = themeBgPicker ? themeBgPicker.value : (localStorage.getItem('theme_bg_color') || '#4fc3f7');
-        var currentThemeMode = localStorage.getItem('theme_mode') || 'dark';
         // Fallback source for un-changed PFP/banner fields. profileOriginalData.data
         // is the profile fetched when the modal opened, with raw file keys decrypted
         // via decryptOwnProfileFileKeys() — more reliable than the myProfile global.
@@ -27225,9 +27473,8 @@ async function saveProfile() {
             username_border_color: borderColor,
             profile_background_color: bgColor,
             friend_requests_disabled: isDisabled,
-            theme_color: currentThemeColor,
-            theme_bg_color: currentThemeBgColor,
-            theme_mode: currentThemeMode,
+            // Theme colors/mode are device-local (localStorage) and intentionally
+            // NOT part of the synced profile — see PROGRESS.md.
             // PFP/banner fields encrypted alongside other profile data so they're
             // automatically shared via shared_profile_data_keys mechanism.
             // IMPORTANT: Fall back to myProfile current values when the editor
@@ -27376,70 +27623,7 @@ async function saveProfile() {
     }
 }
 
-// Save just the theme color to the server (via encrypted_profile_data update)
-async function saveThemeColor(accentHex, bgHex) {
-    if (!user || !user.id) return;
-    try {
-        var identity = E2ECrypto.getIdentityKeyPair();
-        if (!identity) return;
-        // If bgHex wasn't provided, read from localStorage or default
-        if (bgHex === undefined) {
-            bgHex = localStorage.getItem('theme_bg_color') || '#4fc3f7';
-        }
-        // Build profile data from the already-decrypted myProfile fields
-        var profileData = {
-            display_name: (myProfile && (myProfile.decrypted ? myProfile.decrypted.display_name : null)) || myProfile.display_name || user.username,
-            nickname: (myProfile && (myProfile.decrypted ? myProfile.decrypted.nickname : null)) || myProfile.nickname || '',
-            description: (myProfile && (myProfile.decrypted ? myProfile.decrypted.description : null)) || myProfile.description || '',
-            username_color: (myProfile && (myProfile.decrypted ? myProfile.decrypted.username_color : null)) || myProfile.username_color || null,
-            username_border_color: (myProfile && (myProfile.decrypted ? myProfile.decrypted.username_border_color : null)) || myProfile.username_border_color || null,
-            profile_background_color: (myProfile && (myProfile.decrypted ? myProfile.decrypted.profile_background_color : null)) || myProfile.profile_background_color || '#16213e',
-            friend_requests_disabled: (myProfile && (myProfile.decrypted ? myProfile.decrypted.friend_requests_disabled : null)) || false,
-            theme_color: accentHex,
-            theme_bg_color: bgHex,
-            theme_mode: localStorage.getItem('theme_mode') || 'dark',
-            // Include current pic/banner fields so they survive a theme-only save
-            profile_picture_file_id: myProfile.profile_picture_file_id || null,
-            profile_banner_file_id: myProfile.profile_banner_file_id || null,
-            encrypted_pic_key: (myProfile && myProfile.encrypted_pic_key) || null,
-            pic_key_nonce: (myProfile && myProfile.pic_key_nonce) || null,
-            encrypted_banner_key: (myProfile && myProfile.encrypted_banner_key) || null,
-            banner_key_nonce: (myProfile && myProfile.banner_key_nonce) || null
-        };
-        // Reuse existing profile data key if available, otherwise generate a new one
-        var existingKeyB64 = userDisplayNameCache[user.id + ':profile_data_key'];
-        var profileDataKey;
-        if (existingKeyB64) {
-            profileDataKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(existingKeyB64));
-        } else {
-            profileDataKey = E2ECrypto.generateProfileDataKey();
-        }
-        var profileDataJson = JSON.stringify(profileData);
-        var encrypted = E2ECrypto.encryptProfileData(profileDataJson, profileDataKey);
-        var profileDataKeyB64 = existingKeyB64 || E2ECrypto.arrayBufferToBase64(profileDataKey);
-        var encryptedProfileDataKey = E2ECrypto.encodeEncryptedFileKey(profileDataKeyB64, identity.privateKey);
-        var encryptedProfileData = encrypted.nonce + ':' + encrypted.ciphertext;
-        var res = await authFetch('/api/profile', {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                encrypted_profile_data: encryptedProfileData,
-                encrypted_profile_data_key: encryptedProfileDataKey
-            })
-        });
-        if (res.ok) {
-            if (!myProfile.decrypted) myProfile.decrypted = {};
-            myProfile.decrypted.theme_color = hexColor;
-            // Cache the key for sharing with friends (only on first generation)
-            if (!existingKeyB64 && profileDataKeyB64) {
-                profileKeyCache[user.id + ':profile_data_key'] = profileDataKeyB64;
-                scheduleProfileKeySave();
-            }
-        }
-    } catch (e) {
-        console.warn('Failed to save theme color:', e);
-    }
-}
+// Theme colors / mode are device-local only — nothing to sync to the server.
 
 // ===== Right-panel crop for Banner =====
 function openBannerCrop(file) {

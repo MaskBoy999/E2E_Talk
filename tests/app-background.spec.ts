@@ -1,4 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
+import path from 'path';
+import fs from 'fs';
 
 const BASE = 'https://localhost:3443';
 
@@ -197,6 +199,238 @@ test.describe('App Background (device-local photo layer)', () => {
         }
         // And the fixed layer is actually behind the app.
         expect(await page.locator('#app-bg').evaluate((el) => getComputedStyle(el).position)).toBe('fixed');
+    });
+
+    test('live edit mode: edit button, drag-to-move, hover highlight, done/escape, center reset', async ({ page }) => {
+        await registerAndSetup(page);
+        await openDisplaySettings(page);
+        await uploadBackground(page);
+        await expect(page.locator('body')).toHaveClass(/app-bg-on/, { timeout: 10000 });
+
+        // Edit button only appears once an image is set (desktop viewport).
+        await expect(page.locator('#app-bg-edit-btn')).toBeVisible();
+
+        // Enter edit mode: settings closes, the floating panel opens over the
+        // real app so every tune is visible live behind the UI.
+        await page.click('#app-bg-edit-btn');
+        await expect(page.locator('#settings-modal')).toBeHidden();
+        await expect(page.locator('body')).toHaveClass(/app-bg-edit/);
+        await expect(page.locator('#app-bg-edit-panel')).toBeVisible();
+        await expect(page.locator('#app-bg-edit-sections .app-bg-section')).toHaveCount(7);
+
+        // Drag anywhere on the app → the picture pans (calc() with px offsets).
+        const before = await page.locator('#app-bg').evaluate((el) => (el as HTMLElement).style.backgroundPosition);
+        expect(before).toBe('center center');
+        const box = await page.locator('#app-bg-drag').boundingBox();
+        const cx = box!.x + box!.width / 2;
+        const cy = box!.y + box!.height / 2;
+        await page.mouse.move(cx, cy);
+        await page.mouse.down();
+        await page.mouse.move(cx + 120, cy + 40, { steps: 6 });
+        await page.mouse.up();
+        const after = await page.locator('#app-bg').evaluate((el) => (el as HTMLElement).style.backgroundPosition);
+        expect(after).toContain('calc(');
+        expect(after).toContain('120px');
+
+        // Hovering a section row highlights that part of the live app.
+        const sidebarRow = page.locator('#app-bg-edit-sections .app-bg-section[data-key="sidebar"]');
+        await sidebarRow.hover();
+        await expect(page.locator('body')).toHaveClass(/app-bg-hl-sidebar/);
+
+        // Section controls in the panel apply live to the actual app.
+        await page.locator('#app-bg-edit-sections .app-bg-dim[data-section="sidebar"]').evaluate((el) => {
+            (el as HTMLInputElement).value = '30';
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+        const dim = await page.evaluate(() =>
+            getComputedStyle(document.documentElement).getPropertyValue('--bg-dim-sidebar').trim());
+        expect(dim).toBe('30%');
+
+        // Center button resets position + pan back to the plain origin.
+        await page.click('#app-bg-edit-center');
+        expect(await page.locator('#app-bg').evaluate((el) => (el as HTMLElement).style.backgroundPosition)).toBe('center center');
+
+        // Pan again, then Escape exits edit mode and the pan persists.
+        await page.mouse.move(cx, cy);
+        await page.mouse.down();
+        await page.mouse.move(cx - 60, cy, { steps: 4 });
+        await page.mouse.up();
+        await page.keyboard.press('Escape');
+        await expect(page.locator('body')).not.toHaveClass(/app-bg-edit/);
+        await expect(page.locator('#app-bg-edit-panel')).toBeHidden();
+        const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('app_bg') || 'null'));
+        expect(Math.abs(stored.panX)).toBeGreaterThan(0);
+
+        // Persisted pan survives a reload.
+        await page.reload();
+        await page.waitForSelector('#settings-btn', { timeout: 15000 });
+        const posAfterReload = await page.locator('#app-bg').evaluate((el) => (el as HTMLElement).style.backgroundPosition);
+        expect(posAfterReload).toContain('calc(');
+    });
+
+    test('live edit mode is desktop-only (button hidden and mode exits on phone widths)', async ({ page }) => {
+        await page.setViewportSize({ width: 390, height: 844 });
+        await registerAndSetup(page);
+        // On phone the sidebar is off-canvas — open it before reaching settings.
+        await page.click('#hamburger');
+        await page.waitForSelector('#settings-btn', { state: 'visible', timeout: 5000 });
+        await page.click('#settings-btn');
+        await page.waitForSelector('#settings-modal', { state: 'visible', timeout: 5000 });
+        await page.click('[data-tab="display-settings"]');
+        await page.waitForSelector('#app-bg-upload-btn', { state: 'visible', timeout: 5000 });
+        await uploadBackground(page);
+        await expect(page.locator('body')).toHaveClass(/app-bg-on/, { timeout: 10000 });
+        await expect(page.locator('#app-bg-edit-btn')).toBeHidden();
+
+        // Grow to desktop → the button appears.
+        await page.setViewportSize({ width: 1280, height: 720 });
+        await expect(page.locator('#app-bg-edit-btn')).toBeVisible();
+
+        // Enter edit mode, then shrink back to phone → mode auto-exits.
+        await page.click('#app-bg-edit-btn');
+        await expect(page.locator('body')).toHaveClass(/app-bg-edit/);
+        await page.setViewportSize({ width: 390, height: 844 });
+        await expect(page.locator('body')).not.toHaveClass(/app-bg-edit/);
+        await expect(page.locator('#app-bg-edit-panel')).toBeHidden();
+    });
+
+    test('live edit mode: interact toggle disables the drag layer, restores app use, and persists', async ({ page }) => {
+        await registerAndSetup(page);
+        await openDisplaySettings(page);
+        await uploadBackground(page);
+        await expect(page.locator('body')).toHaveClass(/app-bg-on/, { timeout: 10000 });
+
+        await page.click('#app-bg-edit-btn');
+        await expect(page.locator('body')).toHaveClass(/app-bg-edit/);
+
+        const centerEl = () =>
+            page.evaluate(() => {
+                const el = document.elementFromPoint(Math.floor(innerWidth / 2), Math.floor(innerHeight / 2));
+                return el ? (el.id || el.className || el.tagName).toString() : '';
+            });
+
+        // Default is Move: the transparent drag layer sits above the app.
+        expect(await centerEl()).toContain('app-bg-drag');
+
+        // Switch to Interact → drag layer gone, the real app is reachable.
+        await page.click('.app-bg-mode-btn[data-mode="interact"]');
+        await expect(page.locator('body')).toHaveClass(/app-bg-interact/);
+        await expect(page.locator('#app-bg-drag')).toBeHidden();
+        expect(await centerEl()).not.toContain('app-bg-drag');
+        expect(await page.locator('#app-bg-edit-hint').textContent()).toContain('interactive');
+
+        // Persisted across re-entry (Escape leaves settings closed — reopen it).
+        await page.keyboard.press('Escape');
+        await expect(page.locator('body')).not.toHaveClass(/app-bg-edit/);
+        await page.click('#settings-btn');
+        await page.waitForSelector('#settings-modal', { state: 'visible', timeout: 5000 });
+        await page.click('[data-tab="display-settings"]');
+        await page.click('#app-bg-edit-btn');
+        await expect(page.locator('body')).toHaveClass(/app-bg-interact/);
+
+        // Back to Move restores the drag layer.
+        await page.click('.app-bg-mode-btn[data-mode="drag"]');
+        await expect(page.locator('body')).not.toHaveClass(/app-bg-interact/);
+        expect(await centerEl()).toContain('app-bg-drag');
+    });
+
+    test('theme colors are device-local: changing them triggers no profile PATCH', async ({ page }) => {
+        await registerAndSetup(page);
+        await openDisplaySettings(page);
+
+        let profilePatches = 0;
+        page.on('request', (req) => {
+            if (req.method() === 'PATCH' && req.url().includes('/api/profile')) profilePatches++;
+        });
+
+        await page.locator('#theme-color-hex').fill('#ff00ff');
+        await page.locator('#theme-color-hex').dispatchEvent('change');
+        await page.locator('#theme-bg-hex').fill('#00ff00');
+        await page.locator('#theme-bg-hex').dispatchEvent('change');
+
+        expect(await page.evaluate(() => localStorage.getItem('theme_color'))).toBe('#ff00ff');
+        expect(await page.evaluate(() => localStorage.getItem('theme_bg_color'))).toBe('#00ff00');
+        expect(await page.inputValue('#theme-color-picker')).toBe('#ff00ff');
+        expect(await page.inputValue('#theme-bg-picker')).toBe('#00ff00');
+        expect(profilePatches).toBe(0);
+    });
+
+    test('appearance export/import round-trips colors + background with a password, wrong password rejected', async ({ page }) => {
+        await registerAndSetup(page);
+        await openDisplaySettings(page);
+
+        // A distinct look: accent + bg colors, an app background, a tuned section.
+        await page.locator('#theme-color-hex').fill('#ff6600');
+        await page.locator('#theme-color-hex').dispatchEvent('change');
+        await page.locator('#theme-bg-hex').fill('#2244aa');
+        await page.locator('#theme-bg-hex').dispatchEvent('change');
+        await uploadBackground(page);
+        await expect(page.locator('body')).toHaveClass(/app-bg-on/, { timeout: 10000 });
+        await page.locator('.app-bg-blur[data-section="sidebar"]').evaluate((el) => {
+            (el as HTMLInputElement).value = '18';
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+        await page.locator('.app-bg-dim[data-section="sidebar"]').evaluate((el) => {
+            (el as HTMLInputElement).value = '25';
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+
+        // Export with a password.
+        await page.click('#theme-export-btn');
+        await expect(page.locator('#appearance-pw-modal')).toBeVisible();
+        await page.fill('#appearance-pw-input', 'backup123');
+        await page.fill('#appearance-pw-confirm-input', 'backup123');
+        const outPath = path.join(__dirname, '..', 'test-results', 'appearance-export.e2etheme');
+        fs.mkdirSync(path.dirname(outPath), { recursive: true });
+        const [download] = await Promise.all([
+            page.waitForEvent('download'),
+            page.click('#appearance-pw-confirm-btn'),
+        ]);
+        await download.saveAs(outPath);
+        await expect(page.locator('#appearance-pw-modal')).toBeHidden();
+
+        // Wreck the local look.
+        await page.locator('#theme-color-hex').fill('#000000');
+        await page.locator('#theme-color-hex').dispatchEvent('change');
+        await page.click('#app-bg-remove-btn');
+        await expect(page.locator('body')).not.toHaveClass(/app-bg-on/);
+
+        // Import restores everything.
+        const [chooser] = await Promise.all([
+            page.waitForEvent('filechooser'),
+            page.click('#theme-import-btn'),
+        ]);
+        await chooser.setFiles(outPath);
+        await expect(page.locator('#appearance-pw-modal')).toBeVisible();
+        await page.fill('#appearance-pw-input', 'backup123');
+        await page.click('#appearance-pw-confirm-btn');
+
+        await expect(page.locator('body')).toHaveClass(/app-bg-on/, { timeout: 15000 });
+        expect(await page.evaluate(() => localStorage.getItem('theme_color'))).toBe('#ff6600');
+        expect(await page.evaluate(() => localStorage.getItem('theme_bg_color'))).toBe('#2244aa');
+        const props = await page.evaluate(() => {
+            const cs = getComputedStyle(document.documentElement);
+            return {
+                dim: cs.getPropertyValue('--bg-dim-sidebar').trim(),
+                blur: cs.getPropertyValue('--bg-blur-sidebar').trim(),
+            };
+        });
+        expect(props.dim).toBe('25%');
+        expect(props.blur).toBe('18px');
+        const bgImage = await page.locator('#app-bg').evaluate((el) => (el as HTMLElement).style.backgroundImage);
+        expect(bgImage).toContain('data:image/jpeg');
+
+        // Wrong password is rejected.
+        const [chooser2] = await Promise.all([
+            page.waitForEvent('filechooser'),
+            page.click('#theme-import-btn'),
+        ]);
+        await chooser2.setFiles(outPath);
+        await expect(page.locator('#appearance-pw-modal')).toBeVisible();
+        await page.fill('#appearance-pw-input', 'wrongpass');
+        await page.click('#appearance-pw-confirm-btn');
+        await expect(page.locator('#appearance-pw-error')).toBeVisible();
+        expect(await page.locator('#appearance-pw-error').textContent()).toContain('Wrong password');
     });
 });
 
