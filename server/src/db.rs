@@ -1222,6 +1222,9 @@ impl Database {
         // Migration 064: disappearing messages — expires_at (NULL = never) on
         // messages + dm_messages; the sweeper shreds expired rows + files.
         let _ = conn.execute_batch(include_str!("../migrations/064_disappearing.sql"));
+        // Migration 065: files.chunk_bytes — cumulative actual bytes written per
+        // file, so chunk uploads are bounded by the declared size (H1).
+        let _ = conn.execute_batch(include_str!("../migrations/065_file_chunk_bytes.sql"));
 
         // Data migration: normalize legacy space-separated CURRENT_TIMESTAMP values
         // ("YYYY-MM-DD HH:MM:SS") to fixed-width RFC3339 ("YYYY-MM-DDTHH:MM:SS.000000Z")
@@ -6646,6 +6649,46 @@ impl Database {
         conn.execute(
             "UPDATE files SET upload_complete = 1 WHERE id = ?1",
             params![file_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// H1: atomically add `delta` (new chunk size minus the overwritten chunk's
+    /// old size) to the file's cumulative chunk_bytes, but only while the file
+    /// is still in progress AND the running total stays at or below `allowed`.
+    /// Returns Ok(false) when the charge would exceed the cap (caller rejects
+    /// the chunk before writing it).
+    pub fn charge_file_chunk(&self, file_id: &str, delta: i64, allowed: i64) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let affected = conn
+            .execute(
+                "UPDATE files SET chunk_bytes = chunk_bytes + ?1 \
+                 WHERE id = ?2 AND upload_complete = 0 AND chunk_bytes + ?1 <= ?3",
+                params![delta, file_id, allowed],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(affected > 0)
+    }
+
+    /// H1: current cumulative chunk bytes written for a file (0 if none).
+    pub fn get_file_chunk_bytes(&self, file_id: &str) -> Result<i64, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT COALESCE(chunk_bytes, 0) FROM files WHERE id = ?1",
+            params![file_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    /// H3: replace the stored password verifier (used by the self-healing
+    /// upgrade when a legacy bare client-hash credential verifies successfully).
+    pub fn update_password_hash(&self, user_id: &str, new_hash: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE users SET password_hash = ?1 WHERE id = ?2",
+            params![new_hash, user_id],
         )
         .map_err(|e| e.to_string())?;
         Ok(())

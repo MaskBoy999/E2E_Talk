@@ -89,6 +89,17 @@ static KILL_SWITCH_IP_RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(|| Rat
     attempts: Mutex::new(HashMap::new()),
 });
 
+/// Per-account companion to KILL_SWITCH_IP_RATE_LIMITER: caps kill-switch
+/// proof attempts per target username so one account can't be hammered from
+/// many IPs (a distributed brute-force of the kill-switch password). Same
+/// 5/5min default and the same byte-identical 429 as the general login
+/// limit. Env-overridable for test suites (same pattern as
+/// KILL_SWITCH_IP_MAX): set KILL_SWITCH_USER_MAX=0 to disable, or a number
+/// to raise the budget.
+static KILL_SWITCH_USER_RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(|| RateLimiter {
+    attempts: Mutex::new(HashMap::new()),
+});
+
 /// Per-IP throttle for the public /api/client-config endpoint (the value is
 /// public, but the endpoint shouldn't be hammerable). Env-overridable for
 /// test suites (same pattern as HMAC_KEY_IP_MAX).
@@ -214,6 +225,25 @@ pub(crate) fn check_mutation_rate_limit(
     }
 
     None
+}
+
+/// H3: verify a client-computed credential (HMAC for new accounts, raw
+/// password for legacy) against the stored verifier, and self-heal legacy
+/// bare-credential rows by replacing them with a server-side Argon2id verifier
+/// on the first successful login. The stored value is never a replayable
+/// password-equivalent (see auth::verify_user_verifier).
+fn verify_user_password_and_upgrade(
+    state: &AppState,
+    user_id: &str,
+    stored: &str,
+    credential: &str,
+) -> Result<bool, String> {
+    let valid = auth::verify_user_verifier(credential, stored)?;
+    if valid && auth::verifier_needs_upgrade(stored) {
+        let upgraded = auth::hash_user_verifier(credential)?;
+        let _ = state.db.update_password_hash(user_id, &upgraded);
+    }
+    Ok(valid)
 }
 
 fn get_admin_tokens() -> std::sync::MutexGuard<'static, Option<HashMap<String, Instant>>> {
@@ -444,8 +474,10 @@ pub async fn kick_auth_session(
                 .into_response();
         }
     };
-    use subtle::ConstantTimeEq;
-    let valid: bool = req.current_password.as_bytes().ct_eq(stored_hash.as_bytes()).into();
+    let valid = match verify_user_password_and_upgrade(&state, &user_id, &stored_hash, &req.current_password) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
     if !valid {
         return (
             StatusCode::UNAUTHORIZED,
@@ -514,8 +546,10 @@ pub async fn kick_all_auth_sessions(
                 .into_response();
         }
     };
-    use subtle::ConstantTimeEq;
-    let valid: bool = req.current_password.as_bytes().ct_eq(stored_hash.as_bytes()).into();
+    let valid = match verify_user_password_and_upgrade(&state, &user_id, &stored_hash, &req.current_password) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
     if !valid {
         return (
             StatusCode::UNAUTHORIZED,
@@ -800,8 +834,13 @@ pub async fn register(
             .into_response();
     }
 
-    // Password is already client-computed hash. Store it as-is.
-    let password_hash = &req.password;
+    // H3: the client sends a deterministic credential (HMAC of the password);
+    // store a server-side Argon2id verifier of it, never the credential itself,
+    // so a DB dump is not a replayable password-equivalent.
+    let password_hash = match auth::hash_user_verifier(&req.password) {
+        Ok(h) => h,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
 
     let identity_key_bytes = req.identity_public_key.as_ref().and_then(|k| {
         base64::engine::general_purpose::STANDARD.decode(k).ok()
@@ -940,6 +979,21 @@ pub async fn login(
             )
                 .into_response();
         }
+
+        // Per-account budget (same default, byte-identical 429): one target
+        // can't be hammered from many IPs. Applied to every proof attempt
+        // (even for unknown usernames) so it never reveals whether an account
+        // has a kill switch — the throttle looks exactly like the general
+        // login rate limit.
+        let ks_user_key = format!("login_ks_user:{}", req.username);
+        let ks_user_max: u32 = std::env::var("KILL_SWITCH_USER_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(5);
+        if ks_user_max > 0 && !KILL_SWITCH_USER_RATE_LIMITER.check_and_increment(&ks_user_key, ks_user_max, Duration::from_secs(300)) {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({"error": "Too many login attempts. Try again in 5 minutes."})),
+            )
+                .into_response();
+        }
     }
 
     let password_hash = match state.db.get_password_hash(&req.username) {
@@ -953,9 +1007,17 @@ pub async fn login(
         }
     };
 
-    // Client-computed hash (HMAC-SHA256) — constant-time comparison to prevent timing attacks
-    use subtle::ConstantTimeEq;
-    let valid: bool = req.password.as_bytes().ct_eq(password_hash.as_bytes()).into();
+    // H3: verify against the server-side verifier (Argon2id of the client
+    // credential — the stored value is never a replayable password-equivalent)
+    // and self-heal legacy bare rows on the first successful login.
+    let user_for_verify = state.db.get_user_by_username(&req.username).ok();
+    let valid = match &user_for_verify {
+        Some(u) => match verify_user_password_and_upgrade(&state, &u.id, &password_hash, &req.password) {
+            Ok(v) => v,
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+        },
+        None => false,
+    };
 
     // Kill Switch: entering the kill-switch password instead of the real one
     // deletes the account on the spot (shows as a generic server error so the
@@ -966,6 +1028,7 @@ pub async fn login(
         if let Some(proof) = &req.kill_switch_proof {
             if let Ok(Some(check)) = state.db.get_kill_switch_check(&req.username) {
                 let proof_check = crate::db::hmac_sha256_hex(proof.as_bytes(), KILL_SWITCH_CHECK_LABEL);
+                use subtle::ConstantTimeEq;
                 if proof_check.as_bytes().ct_eq(check.as_bytes()).into() {
                     // Kill switch armed. If the account has 2FA, require the
                     // code too (looks like a normal 2FA login) — the deletion
@@ -1148,6 +1211,23 @@ pub async fn login_2fa(
             .into_response();
     }
 
+    // Kill Switch + 2FA: the code step of a kill-switch deletion is the actual
+    // deletion point, so it gets the same per-account budget as the proof step
+    // (one target can't be hammered from many IPs). Applied before code
+    // verification so every attempt counts — even replays after a deletion —
+    // with the same 429 as the general 2FA rate limit so nothing is revealed.
+    if is_kill_switch {
+        let ks_user_key = format!("login_ks_user2fa:{}", claims.sub);
+        let ks_user_max: u32 = std::env::var("KILL_SWITCH_USER_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(5);
+        if ks_user_max > 0 && !KILL_SWITCH_USER_RATE_LIMITER.check_and_increment(&ks_user_key, ks_user_max, Duration::from_secs(300)) {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({"error": "Too many attempts. Try again in 5 minutes."})),
+            )
+                .into_response();
+        }
+    }
+
     let secret_row = match state.db.get_totp_secret(&claims.sub) {
         Ok(Some(r)) => r,
         _ => {
@@ -1322,7 +1402,11 @@ pub async fn enroll_2fa(
                 .into_response();
         }
     };
-    if req.password != stored_hash {
+    let valid = match verify_user_password_and_upgrade(&state, &user_id, &stored_hash, &req.password) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    if !valid {
         return (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({"error": "Wrong password"})),
@@ -1633,9 +1717,12 @@ pub async fn change_password(
         }
     };
 
-    // Client-computed hash (HMAC-SHA256) — constant-time comparison.
-    use subtle::ConstantTimeEq;
-    let valid: bool = req.old_password.as_bytes().ct_eq(password_hash.as_bytes()).into();
+    // H3: verify against the server-side verifier (Argon2id of the client
+    // credential) and self-heal legacy bare rows on success.
+    let valid = match verify_user_password_and_upgrade(&state, &user_id, &password_hash, &req.old_password) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
     if !valid {
         return (
             StatusCode::UNAUTHORIZED,
@@ -1662,10 +1749,16 @@ pub async fn change_password(
         None
     };
 
+    // H3: store a server-side verifier of the new client credential.
+    let new_verifier = match auth::hash_user_verifier(&req.new_password) {
+        Ok(h) => h,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+
     if let Err(e) = state.db.change_password_credentials(
         &user_id,
         &current_sid,
-        &req.new_password,
+        &new_verifier,
         &req.encrypted_hash_key,
         &req.hash_key_salt,
         &req.hash_key_nonce,
@@ -1932,9 +2025,12 @@ pub async fn reauth(
         }
     };
 
-    // Client-computed hash (HMAC-SHA256) — constant-time comparison
-    use subtle::ConstantTimeEq;
-    let valid: bool = req.password.as_bytes().ct_eq(password_hash.as_bytes()).into();
+    // H3: verify against the server-side verifier (Argon2id of the client
+    // credential) and self-heal legacy bare rows on success.
+    let valid = match verify_user_password_and_upgrade(&state, &user_id, &password_hash, &req.password) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
 
     if !valid {
         return (
@@ -3329,9 +3425,15 @@ pub async fn list_messages_around(
 
 
 pub async fn get_user_id(
+    headers: HeaderMap,
     Path(username): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
+    // H4: username → id resolution is private (user enumeration).
+    let _user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e,
+    };
     match state.db.get_user_by_username(&username) {
         Ok(user) => (
             StatusCode::OK,
@@ -5099,7 +5201,49 @@ pub async fn upload_file_chunk(
             .into_response();
     }
 
+    // H1: a single chunk must stay small (the client splits plaintext into
+    // 64 KB chunks, so an encrypted chunk is ≤ 65624 bytes; 1 MiB is a generous
+    // bound that still stops one oversized write).
+    if body.len() > 1024 * 1024 {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({"error": "Chunk too large"})),
+        )
+            .into_response();
+    }
+
+    // H1: cumulative enforcement — the running total of DISTINCT chunk bytes
+    // may never exceed the declared size plus the per-chunk AEAD overhead
+    // (client: 40 bytes/chunk). This makes the init-time quota / max-file
+    // checks actually binding: a client that declares size=1 cannot write
+    // unlimited chunks past it.
     let chunk_path = format!("{}/{}/{}.enc", UPLOAD_DIR, file_id, index);
+    let old_size: i64 = match tokio::fs::metadata(&chunk_path).await {
+        Ok(m) => m.len() as i64,
+        Err(_) => 0,
+    };
+    let delta: i64 = body.len() as i64 - old_size;
+    let orig: i64 = file_info.original_size.max(0);
+    let total_chunks = orig / 65536 + if orig % 65536 == 0 { 0 } else { 1 };
+    let allowed = orig + 64 * total_chunks;
+    match state.db.charge_file_chunk(&file_id, delta, allowed) {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(serde_json::json!({"error": "Upload exceeds declared size"})),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    }
+
     if let Err(e) = tokio::fs::write(&chunk_path, &body).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -5148,6 +5292,22 @@ pub async fn complete_file_upload(
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": "No chunks uploaded"})),
+        )
+            .into_response();
+    }
+
+    // H1: the cumulative bytes on disk must match the declared size (within the
+    // per-chunk AEAD overhead). This catches a client that declared size=1 but
+    // wrote far past it — including across a server restart that lost the
+    // incremental meter (the write-time check only sees the running total).
+    let chunk_bytes = state.db.get_file_chunk_bytes(&file_id).unwrap_or(0);
+    let orig: i64 = file_info.original_size.max(0);
+    let total_chunks = orig / 65536 + if orig % 65536 == 0 { 0 } else { 1 };
+    let allowed = orig + 64 * total_chunks;
+    if chunk_bytes < orig || chunk_bytes > allowed {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Uploaded size does not match declared size"})),
         )
             .into_response();
     }
@@ -5929,8 +6089,10 @@ pub async fn delete_me(
     };
     // Deleting is permanent — require the password so a stolen session can't
     // nuke the account (same rule as 2FA, password change, and kill switch).
-    use subtle::ConstantTimeEq;
-    let valid: bool = req.current_password.as_bytes().ct_eq(stored_hash.as_bytes()).into();
+    let valid = match verify_user_password_and_upgrade(&state, &user_id, &stored_hash, &req.current_password) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
     if !valid {
         return (
             StatusCode::UNAUTHORIZED,
@@ -6001,8 +6163,10 @@ pub async fn set_kill_switch(
         }
     };
     // Re-verify the password so a stolen session can't arm/change the kill switch.
-    use subtle::ConstantTimeEq;
-    let valid: bool = req.current_password.as_bytes().ct_eq(stored_hash.as_bytes()).into();
+    let valid = match verify_user_password_and_upgrade(&state, &user_id, &stored_hash, &req.current_password) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
     if !valid {
         return (
             StatusCode::UNAUTHORIZED,
@@ -6079,8 +6243,10 @@ pub async fn clear_kill_switch(
                 .into_response();
         }
     };
-    use subtle::ConstantTimeEq;
-    let valid: bool = req.current_password.as_bytes().ct_eq(stored_hash.as_bytes()).into();
+    let valid = match verify_user_password_and_upgrade(&state, &user_id, &stored_hash, &req.current_password) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
     if !valid {
         return (
             StatusCode::UNAUTHORIZED,
@@ -6559,7 +6725,11 @@ pub async fn regen_friend_code_with_password(
         Err(_) => return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "User not found"}))).into_response(),
     };
 
-    if req.password != stored_password_hash {
+    let valid = match verify_user_password_and_upgrade(&state, &user_id, &stored_password_hash, &req.password) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    if !valid {
         return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Wrong password"}))).into_response();
     }
 
@@ -7323,8 +7493,14 @@ pub async fn get_dm_keys(
 }
 
 pub async fn list_online_users(
+    headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
+    // H4: presence is private — only authenticated users may see who is online.
+    let _user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
     let online = state.ws_manager.get_online_user_ids().await;
     (StatusCode::OK, Json(serde_json::json!(online))).into_response()
 }

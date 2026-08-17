@@ -42,6 +42,54 @@ pub fn verify_password(password: &str, hash: &str) -> Result<bool, String> {
         .is_ok())
 }
 
+// --- H3: server-side password verifier (kills pass-the-hash) ---
+// The client sends a deterministic credential (HMAC-SHA256(hash_key, password)
+// for new accounts, the raw password for legacy ones). Storing that value
+// verbatim made the DB row a replayable password-equivalent — anyone with a
+// dump could log in without knowing the password. The server now stores a
+// slow Argon2id hash of the credential (`$e2e$` prefix) instead, so a dump is
+// never directly replayable at /api/login. Format detection:
+//   `$e2e$<argon2id>`   – Argon2id of the client credential (current scheme)
+//   `$argon2id$...`     – legacy server hash of the RAW password (pre-hash era)
+//   anything else       – insecure bare client credential; upgraded in place on
+//                         the first successful verification.
+pub const E2E_VERIFIER_PREFIX: &str = "$e2e$";
+
+pub fn hash_user_verifier(credential: &str) -> Result<String, String> {
+    // The credential is a 256-bit client HMAC (high entropy), so pass-the-hash
+    // is defeated by ANY one-way hash — a heavy KDF would only slow logins
+    // without adding security. Argon2id with modest params (2 MiB, t=1) still
+    // gives memory-hardness against precomputation/ASIC while keeping login
+    // snappy (the pure-Rust argon2 crate is scalar-only; the 64 MiB default
+    // takes seconds per hash on modest hardware).
+    let params = argon2::Params::new(2048, 1, 1, None).map_err(|e| e.to_string())?;
+    let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
+    let salt = SaltString::generate(&mut OsRng);
+    let hash = argon2
+        .hash_password(credential.as_bytes(), &salt)
+        .map_err(|e| e.to_string())?;
+    Ok(format!("{}{}", E2E_VERIFIER_PREFIX, hash))
+}
+
+pub fn verify_user_verifier(credential: &str, stored: &str) -> Result<bool, String> {
+    if let Some(inner) = stored.strip_prefix(E2E_VERIFIER_PREFIX) {
+        verify_password(credential, inner)
+    } else if stored.starts_with("$argon2") {
+        // Legacy account: stored value is a server-side Argon2id hash of the
+        // raw password (the legacy client fallback sends the raw password).
+        verify_password(credential, stored)
+    } else {
+        // Insecure legacy-client-hash scheme: constant-time compare; the caller
+        // upgrades the stored value on success.
+        use subtle::ConstantTimeEq;
+        Ok(credential.as_bytes().ct_eq(stored.as_bytes()).into())
+    }
+}
+
+pub fn verifier_needs_upgrade(stored: &str) -> bool {
+    !stored.starts_with(E2E_VERIFIER_PREFIX) && !stored.starts_with("$argon2")
+}
+
 /// Issue a token with a caller-chosen lifetime. Callers (login/register/reauth)
 /// pass a duration chosen in Settings (clamped server-side to 30 days max);
 /// missing duration falls back to the 30-day default.

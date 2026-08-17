@@ -625,8 +625,11 @@ test.describe('Kill Switch rate limiting (isolated server)', () => {
                 PORT: '3454',
                 HTTPS_PORT: '3455',
                 DATABASE_URL: tmpDb,
-                // Tiny kill-switch budget so the throttle trips deterministically.
+                // Tiny per-IP kill-switch budget so the throttle trips
+                // deterministically; the per-account budget raised so this
+                // server isolates the per-IP limiter.
                 KILL_SWITCH_IP_MAX: '3',
+                KILL_SWITCH_USER_MAX: '100000',
                 // Everything else raised so only the kill-switch limiter fires.
                 LOGIN_IP_MAX: '100000',
                 LOGIN_USER_MAX: '100000',
@@ -687,6 +690,115 @@ test.describe('Kill Switch rate limiting (isolated server)', () => {
         const normal = await request.post(`${ALT}/api/login`, {
             headers: { 'Content-Type': 'application/json' },
             data: { username: 'nobody2', password: 'whatever' },
+        });
+        expect(normal.status()).toBe(401);
+    });
+});
+
+test.describe('Kill Switch per-account rate limiting (isolated server)', () => {
+    let child: ChildProcess;
+    let tmpDb: string;
+    // Ports 3456/3457 (other isolated suites use 3445/3451/3453/3455) so
+    // isolated suites can run side by side.
+    const ALT = 'https://127.0.0.1:3457';
+
+    test.beforeAll(async ({ request }) => {
+        const serverDir = path.join(__dirname, '..', 'server');
+        const bin = path.join(serverDir, 'target', 'debug', process.platform === 'win32' ? 'e2e-chat.exe' : 'e2e-chat');
+        if (!fs.existsSync(bin)) throw new Error('server binary not found at ' + bin);
+        tmpDb = path.join(serverDir, `ks-user-rl-${Date.now()}.db`);
+        child = spawn(bin, [], {
+            cwd: serverDir,
+            env: {
+                ...process.env,
+                PORT: '3456',
+                HTTPS_PORT: '3457',
+                DATABASE_URL: tmpDb,
+                // Tiny per-ACCOUNT kill-switch budget so the throttle trips
+                // deterministically regardless of where requests come from.
+                KILL_SWITCH_USER_MAX: '3',
+                // Per-IP kill-switch budget raised so THIS server isolates the
+                // per-account limiter: even requests from many different IPs
+                // (simulated with X-Forwarded-For) share the account budget.
+                KILL_SWITCH_IP_MAX: '100000',
+                // Everything else raised so only the kill-switch limiter fires.
+                LOGIN_IP_MAX: '100000',
+                LOGIN_USER_MAX: '100000',
+                AUTH_PARAMS_IP_MAX: '100000',
+                HMAC_KEY_IP_MAX: '100000',
+                REGISTER_IP_MAX: '100000',
+                LOGIN_2FA_IP_MAX: '100000',
+            },
+            stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        let up = false;
+        for (let i = 0; i < 60; i++) {
+            try {
+                const r = await request.get(`${ALT}/`);
+                if (r.status() < 500) { up = true; break; }
+            } catch (_) { /* not up yet */ }
+            await new Promise((r2) => setTimeout(r2, 300));
+        }
+        expect(up, 'isolated server came up').toBe(true);
+    });
+
+    test.afterAll(async () => {
+        if (child) child.kill();
+        await new Promise((r) => setTimeout(r, 500));
+        if (tmpDb) {
+            try { fs.unlinkSync(tmpDb); } catch (_) {}
+        }
+    });
+
+    test('kill-switch proof attempts are throttled per account even when spread across many IPs', async ({ request }) => {
+        test.setTimeout(120000);
+        // Fresh DB → the first admin login sets up the admin password.
+        const setup = await request.post(`${ALT}/api/admin/login`, { data: { password: 'hardening' } });
+        expect(setup.ok(), 'admin setup on isolated server').toBeTruthy();
+
+        const proof = 'a'.repeat(64);
+        // First 3 proof attempts against the SAME target account are allowed
+        // (each is just a plain failed login) — even though every request
+        // comes from a DIFFERENT IP, so the per-IP limiter can't catch them.
+        for (let i = 0; i < 3; i++) {
+            const r = await request.post(`${ALT}/api/login`, {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Forwarded-For': `203.0.113.${10 + i}`, // distinct fake IPs
+                },
+                data: { username: 'target_account', password: '', kill_switch_proof: proof },
+            });
+            expect(r.status(), `proof attempt ${i + 1} from a new IP should be a plain 401`).toBe(401);
+        }
+        // The 4th attempt — again from a brand-new IP — trips the per-ACCOUNT
+        // budget with EXACTLY the same response as the general login rate-limit.
+        const blocked = await request.post(`${ALT}/api/login`, {
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Forwarded-For': '203.0.113.99',
+            },
+            data: { username: 'target_account', password: '', kill_switch_proof: proof },
+        });
+        expect(blocked.status()).toBe(429);
+        const err = await blocked.json();
+        expect(err.error).toBe('Too many login attempts. Try again in 5 minutes.');
+
+        // A DIFFERENT account is not affected by the target's budget: a proof
+        // for another username (from yet another IP) still reaches the server.
+        const other = await request.post(`${ALT}/api/login`, {
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Forwarded-For': '198.51.100.7',
+            },
+            data: { username: 'other_account', password: '', kill_switch_proof: proof },
+        });
+        expect(other.status()).toBe(401);
+
+        // And a normal login for the throttled account is NOT blocked by the
+        // kill-switch budget — only proof-carrying requests are throttled.
+        const normal = await request.post(`${ALT}/api/login`, {
+            headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '198.51.100.8' },
+            data: { username: 'target_account', password: 'whatever' },
         });
         expect(normal.status()).toBe(401);
     });

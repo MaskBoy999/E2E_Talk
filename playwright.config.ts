@@ -2,7 +2,11 @@ import { defineConfig } from '@playwright/test';
 
 export default defineConfig({
     testDir: './tests',
-    timeout: 30000,
+    timeout: 45000,
+    // This dev machine is slow (multi-second TLS handshakes, 64 MiB client-side
+    // Argon2id per register) — the default 4 workers starve each other and push
+    // tests past the timeout. Two workers keep runs reliable without serializing.
+    workers: 2,
     retries: 0,
     use: {
         baseURL: 'https://localhost:3443',
@@ -28,9 +32,11 @@ export default defineConfig({
             FRIEND_REQUEST_USER_MAX: '100000',
             LOGIN_IP_MAX: '100000',
             LOGIN_USER_MAX: '100000',
-            // Kill-switch proof attempts have their own tighter per-IP budget;
-            // raise it so the kill-switch suite's logins never 429 mid-suite.
+            // Kill-switch proof attempts have their own tighter per-IP AND
+            // per-account budgets; raise both so the kill-switch suite's
+            // logins never 429 mid-suite.
             KILL_SWITCH_IP_MAX: '100000',
+            KILL_SWITCH_USER_MAX: '100000',
             // F2: registration is now per-IP limited (account spam) — the suite
             // registers dozens of users from one IP, so raise the budget.
             REGISTER_IP_MAX: '100000',
