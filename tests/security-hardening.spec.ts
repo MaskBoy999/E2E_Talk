@@ -96,6 +96,7 @@ test.describe('G2 — Mutation rate limit + storage quota (isolated server)', ()
         PORT: '3450',
         HTTPS_PORT: '3451',
         DATABASE_URL: tmpDb,
+                UPLOAD_DIR: tmpDb + '-uploads',
         LOGIN_IP_MAX: '100000',
         LOGIN_USER_MAX: '100000',
         AUTH_PARAMS_IP_MAX: '100000',
@@ -135,6 +136,7 @@ test.describe('G2 — Mutation rate limit + storage quota (isolated server)', ()
     await new Promise((r) => setTimeout(r, 500));
     if (tmpDb) {
       try { fs.unlinkSync(tmpDb); } catch (_) {}
+            try { fs.rmSync(tmpDb + '-uploads', { recursive: true, force: true }); } catch (_) {}
     }
   });
 

@@ -192,6 +192,8 @@ document.addEventListener('DOMContentLoaded', () => {
             document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
             btn.classList.add('active');
             document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+            // Raw Tables loads lazily on first open.
+            if (btn.dataset.tab === 'raw-tables' && !rawTablesCache) loadRawTables();
         });
     });
 
@@ -228,25 +230,69 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     document.getElementById('clear-all-btn').addEventListener('click', clearAll);
+    document.getElementById('confirm-wipe-all').addEventListener('click', confirmWipeAll);
+    document.getElementById('cancel-wipe-confirm').addEventListener('click', closeWipeModal);
+    document.getElementById('wipe-confirm-input').addEventListener('input', updateWipeConfirmState);
+    document.addEventListener('keydown', (e) => {
+        const wipeModal = document.getElementById('wipe-confirm-modal');
+        if (e.key === 'Escape' && wipeModal && wipeModal.style.display === 'flex') closeWipeModal();
+    });
     document.getElementById('export-db-btn').addEventListener('click', showExportModal);
     document.getElementById('import-db-btn').addEventListener('click', importDB);
+    document.getElementById('validate-db-btn').addEventListener('click', validateImportDB);
 
     // Export/Import password modal show/hide toggles
     setupPasswordToggle('toggle-export-password', 'export-password-input');
     setupPasswordToggle('toggle-export-password-confirm', 'export-password-confirm-input');
     setupPasswordToggle('toggle-import-password', 'import-password-input');
 
-    // Export modal buttons
+    // Export modal buttons + no-password toggle
     document.getElementById('confirm-export-db').addEventListener('click', confirmExport);
     document.getElementById('cancel-export-db').addEventListener('click', closeExportModal);
+    const exportNopw = document.getElementById('export-db-nopw');
+    if (exportNopw) exportNopw.addEventListener('change', updateExportEncryptionUI);
 
     // Import modal buttons
     document.getElementById('confirm-import-db').addEventListener('click', confirmImport);
     document.getElementById('cancel-import-db').addEventListener('click', closeImportModal);
+    document.getElementById('continue-import-confirm').addEventListener('click', continueImportConfirm);
+    document.getElementById('cancel-import-confirm').addEventListener('click', closeImportConfirmModal);
+    document.getElementById('import-from-results').addEventListener('click', importFromResults);
+    document.getElementById('close-import-results').addEventListener('click', function () {
+        document.getElementById('import-results-modal').style.display = 'none';
+        pendingDecrypted = null;
+        pendingRiskyImport = false;
+    });
+
+    // Risky-import typed-word guard
+    document.getElementById('confirm-risky-import').addEventListener('click', confirmRiskyImport);
+    document.getElementById('cancel-risky-import').addEventListener('click', closeRiskyImportModal);
+    document.getElementById('risky-import-input').addEventListener('input', updateRiskyImportState);
+    document.addEventListener('keydown', (e) => {
+        const modal = document.getElementById('risky-import-modal');
+        if (e.key === 'Escape' && modal && modal.style.display === 'flex') closeRiskyImportModal();
+    });
+
+    // Dry-run table preview
+    document.getElementById('close-import-preview').addEventListener('click', function () {
+        document.getElementById('import-preview-modal').style.display = 'none';
+    });
 });
 
 // Store pending import data between file selection and password entry
 let pendingImportData = null;
+// When true, the next import confirmation runs a dry-run validation instead
+// of replacing the live database.
+let pendingDryRun = false;
+// When true, the flow came from the Import button with “Validate before
+// importing” checked, so the dry-run results offer “Import this backup”.
+let pendingValidateFirst = false;
+// Decrypted SQLite bytes retained after a validate-first dry run so the
+// “Import this backup” action can reuse them without re-decrypting.
+let pendingDecrypted = null;
+// Set when the dry run found integrity or foreign-key problems: the final
+// import must then pass a typed-word (IMPORT) confirmation.
+let pendingRiskyImport = false;
 
 function setupPasswordToggle(toggleId, inputId) {
     const toggleBtn = document.getElementById(toggleId);
@@ -265,7 +311,23 @@ function showExportModal() {
     document.getElementById('export-password-input').value = '';
     document.getElementById('export-password-confirm-input').value = '';
     document.getElementById('export-password-error').style.display = 'none';
+    const nopw = document.getElementById('export-db-nopw');
+    if (nopw) nopw.checked = false;
+    updateExportEncryptionUI();
     document.getElementById('export-db-password-modal').style.display = 'flex';
+}
+
+function updateExportEncryptionUI() {
+    const nopw = document.getElementById('export-db-nopw');
+    const fields = document.getElementById('export-db-fields');
+    const hint = document.getElementById('export-db-hint');
+    const unchecked = !nopw || !nopw.checked;
+    if (fields) fields.style.display = unchecked ? '' : 'none';
+    if (hint) {
+        hint.textContent = unchecked
+            ? 'Encrypt the exported database with a password (Argon2id + AEAD — the same strong scheme the app uses).'
+            : 'No password will be used — the backup is saved unencrypted.';
+    }
 }
 
 function closeExportModal() {
@@ -281,22 +343,36 @@ function showImportModal() {
 
 function closeImportModal() {
     document.getElementById('import-db-password-modal').style.display = 'none';
+    pendingDryRun = false;
 }
 
 async function confirmExport() {
-    const password = document.getElementById('export-password-input').value;
-    const confirmPw = document.getElementById('export-password-confirm-input').value;
     const errorEl = document.getElementById('export-password-error');
     errorEl.style.display = 'none';
 
-    if (password && password !== confirmPw) {
+    // Export without a password → unencrypted backup (magic 0x00).
+    const nopw = document.getElementById('export-db-nopw');
+    if (nopw && nopw.checked) {
+        closeExportModal();
+        await doExport('');
+        return;
+    }
+
+    const password = document.getElementById('export-password-input').value;
+    const confirmPw = document.getElementById('export-password-confirm-input').value;
+    if (!password) {
+        errorEl.textContent = 'Enter a password or check “Export without a password”.';
+        errorEl.style.display = 'block';
+        return;
+    }
+    if (password !== confirmPw) {
         errorEl.textContent = 'Passwords do not match.';
         errorEl.style.display = 'block';
         return;
     }
 
     closeExportModal();
-    await doExport(password || '');
+    await doExport(password);
 }
 
 async function confirmImport() {
@@ -310,9 +386,80 @@ async function confirmImport() {
         return;
     }
 
+    // Capture the flags BEFORE closing — closeImportModal resets pendingDryRun.
+    const dryRun = pendingDryRun;
+    const validateFirst = pendingValidateFirst;
     closeImportModal();
-    await doImport(pendingImportData, password);
+    pendingDryRun = false;
+    pendingValidateFirst = false;
+    await doImport(pendingImportData, password, dryRun, validateFirst);
     pendingImportData = null;
+}
+
+// --- Busy overlay (export/import/validate can take a while on a big DB) ---
+function setBusy(label) {
+    const ov = document.getElementById('admin-busy-overlay');
+    if (!ov) return;
+    const lbl = document.getElementById('admin-busy-label');
+    if (lbl) lbl.textContent = label || 'Working…';
+    ov.style.display = 'flex';
+}
+function clearBusy() {
+    const ov = document.getElementById('admin-busy-overlay');
+    if (ov) ov.style.display = 'none';
+}
+
+// --- Backup bundle (DB + uploaded file bytes) ---
+// New exports embed the SQLite DB plus an uploads bundle (all uploaded image
+// bytes) under one inner header so an export → wipe → import round-trip
+// restores pictures too. Legacy backups (raw DB, no header) still import.
+// Inner payload layout:
+//   [0xDB][u32 LE db_len][db bytes][uploads bundle (manifest+payload)]
+const BACKUP_BUNDLE_MAGIC = 0xDB;
+
+// Build the inner payload: DB bytes + uploads bundle (may be null/empty).
+function buildBackupPayload(dbBytes, uploadsBundle) {
+    const dbLen = dbBytes.byteLength;
+    const up = uploadsBundle ? new Uint8Array(uploadsBundle) : new Uint8Array(0);
+    const out = new Uint8Array(1 + 4 + dbLen + up.byteLength);
+    out[0] = BACKUP_BUNDLE_MAGIC;
+    const dv = new DataView(out.buffer);
+    dv.setUint32(1, dbLen, true);
+    out.set(new Uint8Array(dbBytes), 5);
+    out.set(up, 5 + dbLen);
+    return out.buffer;
+}
+
+// Split a decrypted backup into { dbBytes, uploadsBundle }. Legacy backups
+// (no bundle magic) are returned whole as dbBytes with a null uploadsBundle.
+function unpackBackup(decrypted) {
+    const bytes = new Uint8Array(decrypted);
+    if (bytes.length >= 1 && bytes[0] === BACKUP_BUNDLE_MAGIC) {
+        if (bytes.length < 5) throw new Error('Corrupted backup bundle (truncated header).');
+        const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const dbLen = dv.getUint32(1, true);
+        if (5 + dbLen > bytes.length) throw new Error('Corrupted backup bundle (DB length overflows).');
+        const dbBytes = decrypted.slice(5, 5 + dbLen);
+        const uploadsBundle = decrypted.slice(5 + dbLen);
+        return { dbBytes, uploadsBundle: uploadsBundle.byteLength > 0 ? uploadsBundle : null };
+    }
+    return { dbBytes: decrypted, uploadsBundle: null };
+}
+
+// Parse an API error body that may or may not be JSON (axum returns plain-text
+// for body-limit 413s and other early rejections). Never throw a SyntaxError.
+async function apiErrorText(res) {
+    try {
+        const data = await res.json();
+        if (data && data.error) return data.error;
+        return 'HTTP ' + res.status;
+    } catch (_) {
+        try {
+            const text = await res.text();
+            if (text) return text.slice(0, 300);
+        } catch (_) {}
+        return 'HTTP ' + res.status;
+    }
 }
 
 function showError(msg) {
@@ -1087,9 +1234,47 @@ function renderSharedProfileDataKeys(rows) {
     renderPaginationControls('shared-profile-data-keys');
 }
 
-async function clearAll() {
-    if (!confirm('Are you sure you want to wipe ALL data?')) return;
-    if (!confirm('This will permanently delete ALL users, servers, channels, messages, keys, and files. The server will return to its fresh-install state, requiring a new admin password setup. This cannot be undone. Continue?')) return;
+function clearAll() {
+    // Open the typed-word confirmation modal with a fresh state.
+    const input = document.getElementById('wipe-confirm-input');
+    const confirmBtn = document.getElementById('confirm-wipe-all');
+    const errorEl = document.getElementById('wipe-confirm-error');
+    if (input) input.value = '';
+    if (confirmBtn) {
+        confirmBtn.disabled = true;
+        confirmBtn.style.opacity = '0.5';
+    }
+    if (errorEl) errorEl.style.display = 'none';
+    document.getElementById('wipe-confirm-modal').style.display = 'flex';
+    if (input) input.focus();
+}
+
+function updateWipeConfirmState() {
+    const input = document.getElementById('wipe-confirm-input');
+    const confirmBtn = document.getElementById('confirm-wipe-all');
+    const errorEl = document.getElementById('wipe-confirm-error');
+    if (!input || !confirmBtn) return;
+    const ok = input.value === 'DELETE';
+    confirmBtn.disabled = !ok;
+    confirmBtn.style.opacity = ok ? '1' : '0.5';
+    if (errorEl) errorEl.style.display = 'none';
+}
+
+function closeWipeModal() {
+    document.getElementById('wipe-confirm-modal').style.display = 'none';
+}
+
+async function confirmWipeAll() {
+    const input = document.getElementById('wipe-confirm-input');
+    const errorEl = document.getElementById('wipe-confirm-error');
+    if (!input || input.value !== 'DELETE') {
+        if (errorEl) {
+            errorEl.textContent = 'Type DELETE to confirm the wipe.';
+            errorEl.style.display = 'block';
+        }
+        return;
+    }
+    closeWipeModal();
     try {
         const adminToken = sessionStorage.getItem('admin_token') || '';
         const res = await fetch('/api/admin/clear', {
@@ -1116,38 +1301,72 @@ async function deriveAESKey(password, salt) {
     return await crypto.subtle.importKey('raw', pwHash, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
 }
 
+// Chunked base64 for large files (avoids the spread-argument limit).
+function bytesToB64(u8) {
+    let s = '';
+    const CH = 0x8000;
+    for (let i = 0; i < u8.length; i += CH) {
+        s += String.fromCharCode.apply(null, u8.subarray(i, i + CH));
+    }
+    return btoa(s);
+}
+function b64ToBytes(b64) {
+    const bin = atob(b64);
+    const u8 = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+    return u8;
+}
+
 async function doExport(password) {
+    setBusy(password ? 'Encrypting and downloading the database backup… this can take a while for a large database.' : 'Downloading the database backup…');
     try {
         const adminToken = sessionStorage.getItem('admin_token') || '';
         const res = await fetch('/api/admin/export-db', {
             headers: adminToken ? { 'Authorization': 'Bearer ' + adminToken } : {}
         });
         if (!res.ok) {
-            const data = await res.json().catch(() => ({}));
-            throw new Error(data.error || 'Export failed');
+            throw new Error(await apiErrorText(res) || 'Export failed');
         }
         const blob = await res.blob();
         const data = await blob.arrayBuffer();
+        // Fetch the uploaded-file bytes too, so the backup round-trips images.
+        setBusy('Downloading uploaded files…');
+        let uploadsBundle = null;
+        try {
+            const upRes = await fetch('/api/admin/export-uploads', {
+                headers: adminToken ? { 'Authorization': 'Bearer ' + adminToken } : {}
+            });
+            if (upRes.ok) {
+                uploadsBundle = await (await upRes.blob()).arrayBuffer();
+            } else {
+                console.warn('export-uploads failed with ' + upRes.status + ' — continuing DB-only');
+            }
+        } catch (e) {
+            console.warn('export-uploads fetch failed — continuing DB-only:', e);
+        }
+        const data2 = buildBackupPayload(data, uploadsBundle);
+        setBusy(password ? 'Encrypting the backup…' : 'Saving the backup…');
         let finalBlob;
         if (password) {
-            // Encrypt with password + random salt
-            const saltBytes = crypto.getRandomValues(new Uint8Array(16));
-            const salt = Array.from(saltBytes).map(b => b.toString(16).padStart(2, '0')).join('');
-            const key = await deriveAESKey(password, salt);
-            const nonce = crypto.getRandomValues(new Uint8Array(12));
-            const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce }, key, data);
-            // Format: magic byte 0x01 + salt (16) + nonce (12) + ciphertext
-            const combined = new Uint8Array(1 + 16 + 12 + encrypted.byteLength);
-            combined[0] = 0x01;
+            // v2 (current): Argon2id + AEAD — the same password-encryption scheme
+            // the chat app uses (crypto.js E2ECrypto via libsodium). Format:
+            // magic 0x02 + salt(16) + nonce(24) + ciphertext
+            const dataB64 = bytesToB64(new Uint8Array(data2));
+            const enc = E2ECrypto.encryptWithPassword(dataB64, password);
+            const saltBytes = b64ToBytes(enc.salt);
+            const nonceBytes = b64ToBytes(enc.nonce);
+            const ctBytes = b64ToBytes(enc.encrypted_private_key);
+            const combined = new Uint8Array(1 + saltBytes.length + nonceBytes.length + ctBytes.length);
+            combined[0] = 0x02;
             combined.set(saltBytes, 1);
-            combined.set(nonce, 17);
-            combined.set(new Uint8Array(encrypted), 29);
+            combined.set(nonceBytes, 1 + saltBytes.length);
+            combined.set(ctBytes, 1 + saltBytes.length + nonceBytes.length);
             finalBlob = new Blob([combined], { type: 'application/octet-stream' });
         } else {
-            // Unencrypted: magic byte 0x00 + raw data
-            const combined = new Uint8Array(1 + data.byteLength);
+            // Unencrypted: magic byte 0x00 + raw bundle payload
+            const combined = new Uint8Array(1 + data2.byteLength);
             combined[0] = 0x00;
-            combined.set(new Uint8Array(data), 1);
+            combined.set(new Uint8Array(data2), 1);
             finalBlob = new Blob([combined], { type: 'application/octet-stream' });
         }
         const url = URL.createObjectURL(finalBlob);
@@ -1160,86 +1379,431 @@ async function doExport(password) {
         URL.revokeObjectURL(url);
     } catch (err) {
         alert('Export failed: ' + err.message);
+    } finally {
+        clearBusy();
     }
 }
 
-async function doImport(buffer, password) {
+async function doImport(buffer, password, dryRun, validateFirst) {
+    setBusy('Decrypting the backup file…');
     try {
-        const saltBytes = new Uint8Array(buffer, 1, 16);
-        const salt = Array.from(saltBytes).map(b => b.toString(16).padStart(2, '0')).join('');
-        const key = await deriveAESKey(password, salt);
-        const nonce = new Uint8Array(buffer, 17, 12);
-        const ciphertext = new Uint8Array(buffer, 29);
-        const decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: nonce }, key, ciphertext);
+        const magic = new Uint8Array(buffer, 0, 1)[0];
+        let decrypted;
+        if (magic === 0x02) {
+            // v2 (Argon2id + AEAD): salt(16) + nonce(24) + ciphertext
+            if (buffer.byteLength < 41) throw new Error('Corrupted encrypted file.');
+            const saltB64 = E2ECrypto.arrayBufferToBase64(buffer.slice(1, 17));
+            const nonceB64 = E2ECrypto.arrayBufferToBase64(buffer.slice(17, 41));
+            const ctB64 = E2ECrypto.arrayBufferToBase64(buffer.slice(41));
+            const plainB64 = E2ECrypto.decryptWithPassword(ctB64, password, saltB64, nonceB64);
+            if (!plainB64) throw new Error('Wrong password or corrupted file');
+            decrypted = b64ToBytes(plainB64).buffer;
+        } else {
+            // v1 (legacy SHA-256 + AES-GCM): salt(16) + nonce(12) + ciphertext
+            const saltBytes = new Uint8Array(buffer, 1, 16);
+            const salt = Array.from(saltBytes).map(b => b.toString(16).padStart(2, '0')).join('');
+            const key = await deriveAESKey(password, salt);
+            const nonce = new Uint8Array(buffer, 17, 12);
+            const ciphertext = new Uint8Array(buffer, 29);
+            decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: nonce }, key, ciphertext);
+        }
 
-        const adminToken = sessionStorage.getItem('admin_token') || '';
-        const res = await fetch('/api/admin/import-db', {
+        await uploadImport(decrypted, dryRun, validateFirst);
+    } catch (err) {
+        alert('Import failed: ' + err.message);
+    } finally {
+        clearBusy();
+    }
+}
+
+// POST a decrypted SQLite body to the import endpoint (real or dry-run).
+// validateFirst=true keeps the bytes so the results modal can offer
+// “Import this backup” without re-decrypting.
+async function uploadImport(decrypted, dryRun, validateFirst) {
+    setBusy('Preparing the backup…');
+    // Split DB + uploaded-file bytes (legacy DB-only backups have no bundle).
+    const { dbBytes, uploadsBundle } = unpackBackup(decrypted);
+    const adminToken = sessionStorage.getItem('admin_token') || '';
+    let uploadsData = null;
+    if (uploadsBundle) {
+        setBusy(dryRun ? 'Validating uploaded files…' : 'Restoring uploaded files…');
+        const upRes = await fetch('/api/admin/import-uploads' + (dryRun ? '?dry_run=1' : ''), {
             method: 'POST',
             headers: {
                 'Authorization': 'Bearer ' + adminToken,
                 'Content-Type': 'application/octet-stream'
             },
-            body: decrypted
+            body: uploadsBundle
         });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'Import failed');
-        alert('Database imported successfully! You will need to re-login.');
-        sessionStorage.removeItem('admin_auth');
-        sessionStorage.removeItem('admin_token');
-        window.location.reload();
-    } catch (err) {
-        alert('Import failed: ' + err.message);
+        let upJson = null;
+        try { upJson = await upRes.json(); } catch (_) { upJson = null; }
+        if (!upRes.ok) {
+            throw new Error('Uploads restore failed: ' + ((upJson && upJson.error) || (await apiErrorText(upRes)) || upRes.status));
+        }
+        uploadsData = upJson || {};
+        if (!dryRun && uploadsData && uploadsData.ok) {
+            console.log('Uploads restored:', uploadsData.files, 'files,', uploadsData.bytes, 'bytes');
+        }
     }
+
+    setBusy(dryRun
+        ? 'Validating the database on a staging copy…'
+        : 'Replacing the live database with the backup… this can take a while for a large database.');
+    const res = await fetch('/api/admin/import-db' + (dryRun ? '?dry_run=1' : ''), {
+        method: 'POST',
+        headers: {
+            'Authorization': 'Bearer ' + adminToken,
+            'Content-Type': 'application/octet-stream'
+        },
+        body: dbBytes
+    });
+    // The server may answer with a non-JSON body (body-limit 413 etc.) — parse
+    // defensively so the admin sees the real reason, never "Unexpected token".
+    let data = null;
+    try { data = await res.json(); } catch (_) { data = null; }
+    if (!res.ok) throw new Error((data && data.error) || (await apiErrorText(res)) || 'Import failed');
+    if (!data) data = {};
+    if (dryRun) {
+        // Keep the bytes around for table previews (and, in the validate-first
+        // flow, for “Import this backup”). Cleared when the results close.
+        clearBusy();
+        pendingDecrypted = decrypted;
+        showImportResults(data, validateFirst, uploadsData);
+        return;
+    }
+    pendingDecrypted = null;
+    clearBusy();
+    alert('Database imported successfully! You will need to re-login.');
+    sessionStorage.removeItem('admin_auth');
+    sessionStorage.removeItem('admin_token');
+    window.location.reload();
 }
 
-async function importDB() {
+// Shared file-picker flow; dryRun=true validates without replacing.
+async function pickImportFile(dryRun) {
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = '.dbpack,.db,.sqlite,.sqlite3';
     input.onchange = async function(e) {
         const file = e.target.files[0];
         if (!file) return;
-        if (!confirm('Importing a new database will REPLACE all current data. The server will reconnect. Continue?')) return;
         try {
             const buffer = await file.arrayBuffer();
             if (buffer.byteLength < 1) {
                 alert('Empty file.');
                 return;
             }
-            const magic = new Uint8Array(buffer, 0, 1)[0];
-            if (magic === 0x01) {
-                // Encrypted: salt(16) + nonce(12) + ciphertext
-                if (buffer.byteLength < 29) {
-                    alert('Corrupted encrypted file.');
-                    return;
-                }
-                // Store buffer and show password modal
-                pendingImportData = buffer;
-                showImportModal();
+            if (dryRun) {
+                // Standalone Validate button — straight to the dry run.
+                await continueImportWithBuffer(buffer, true, false);
             } else {
-                // Unencrypted: upload directly
-                const decrypted = buffer.slice(1);
-                const adminToken = sessionStorage.getItem('admin_token') || '';
-                const res = await fetch('/api/admin/import-db', {
-                    method: 'POST',
-                    headers: {
-                        'Authorization': 'Bearer ' + adminToken,
-                        'Content-Type': 'application/octet-stream'
-                    },
-                    body: decrypted
-                });
-                const data = await res.json();
-                if (!res.ok) throw new Error(data.error || 'Import failed');
-                alert('Database imported successfully! You will need to re-login.');
-                sessionStorage.removeItem('admin_auth');
-                sessionStorage.removeItem('admin_token');
-                window.location.reload();
+                // Import button — confirm the replace and offer validate-first.
+                pendingImportData = buffer;
+                pendingValidateFirst = false;
+                showImportConfirmModal();
             }
         } catch (err) {
             alert('Import failed: ' + err.message);
         }
     };
     input.click();
+}
+
+function importDB() {
+    pickImportFile(false);
+}
+
+function validateImportDB() {
+    pickImportFile(true);
+}
+
+function showImportConfirmModal() {
+    document.getElementById('import-validate-first').checked = false;
+    document.getElementById('import-confirm-modal').style.display = 'flex';
+}
+
+function closeImportConfirmModal() {
+    document.getElementById('import-confirm-modal').style.display = 'none';
+}
+
+async function continueImportConfirm() {
+    const validateFirst = document.getElementById('import-validate-first').checked;
+    const buffer = pendingImportData;
+    pendingImportData = null;
+    closeImportConfirmModal();
+    await continueImportWithBuffer(buffer, validateFirst, validateFirst);
+}
+
+// Route a picked buffer through decrypt (if needed) then upload.
+async function continueImportWithBuffer(buffer, dryRun, validateFirst) {
+    try {
+        const magic = new Uint8Array(buffer, 0, 1)[0];
+        if (magic === 0x01 || magic === 0x02) {
+            // Encrypted (v1 SHA-256+AES-GCM or v2 Argon2id): ask for the password.
+            if ((magic === 0x01 && buffer.byteLength < 29) || (magic === 0x02 && buffer.byteLength < 41)) {
+                alert('Corrupted encrypted file.');
+                return;
+            }
+            // Store buffer and show password modal
+            pendingImportData = buffer;
+            pendingDryRun = dryRun;
+            pendingValidateFirst = validateFirst;
+            showImportModal();
+        } else {
+            // Unencrypted: strip the magic byte and upload directly
+            await uploadImport(buffer.slice(1), dryRun, validateFirst);
+        }
+    } catch (err) {
+        alert('Import failed: ' + err.message);
+    }
+}
+
+// “Import this backup” from the dry-run results modal (validate-first flow).
+// When the dry run found problems, require a typed-word (IMPORT) confirm first.
+async function importFromResults() {
+    if (!pendingDecrypted) {
+        alert('Import failed: no decrypted data available.');
+        return;
+    }
+    if (pendingRiskyImport) {
+        document.getElementById('import-results-modal').style.display = 'none';
+        showRiskyImportModal();
+        return;
+    }
+    document.getElementById('import-results-modal').style.display = 'none';
+    const decrypted = pendingDecrypted;
+    pendingDecrypted = null;
+    await uploadImport(decrypted, false, false);
+}
+
+function showRiskyImportModal() {
+    const input = document.getElementById('risky-import-input');
+    const confirmBtn = document.getElementById('confirm-risky-import');
+    if (input) input.value = '';
+    if (confirmBtn) {
+        confirmBtn.disabled = true;
+        confirmBtn.style.opacity = '0.5';
+    }
+    document.getElementById('risky-import-error').style.display = 'none';
+    document.getElementById('risky-import-modal').style.display = 'flex';
+    if (input) input.focus();
+}
+
+function closeRiskyImportModal() {
+    document.getElementById('risky-import-modal').style.display = 'none';
+}
+
+function updateRiskyImportState() {
+    const input = document.getElementById('risky-import-input');
+    const confirmBtn = document.getElementById('confirm-risky-import');
+    const errorEl = document.getElementById('risky-import-error');
+    if (!input || !confirmBtn) return;
+    const ok = input.value === 'IMPORT';
+    confirmBtn.disabled = !ok;
+    confirmBtn.style.opacity = ok ? '1' : '0.5';
+    if (errorEl) errorEl.style.display = 'none';
+}
+
+async function confirmRiskyImport() {
+    const input = document.getElementById('risky-import-input');
+    const errorEl = document.getElementById('risky-import-error');
+    if (!input || input.value !== 'IMPORT') {
+        if (errorEl) {
+            errorEl.textContent = 'Type IMPORT to confirm the import.';
+            errorEl.style.display = 'block';
+        }
+        return;
+    }
+    closeRiskyImportModal();
+    const decrypted = pendingDecrypted;
+    pendingDecrypted = null;
+    pendingRiskyImport = false;
+    await uploadImport(decrypted, false, false);
+}
+
+// Human-readable byte size (B / KB / MB).
+function formatBytes(n) {
+    if (n == null || isNaN(n)) return '—';
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    return (n / (1024 * 1024)).toFixed(2) + ' MB';
+}
+
+// Render dry-run validation results in the results modal.
+// allowImport=true shows the “Import this backup” button (validate-first flow).
+// uploadsData is the optional /api/admin/import-uploads?dry_run=1 response.
+function showImportResults(data, allowImport, uploadsData) {
+    const summary = document.getElementById('import-results-summary');
+    const errorsEl = document.getElementById('import-results-errors');
+    const body = document.getElementById('import-results-body');
+    const fkViolations = (data.foreign_key_violations || []);
+    const tableCount = (data.tables || []).length;
+    const totalRows = (data.tables || []).reduce((sum, t) => sum + (t.count || 0), 0);
+    const totalBytes = data.total_size_bytes != null ? data.total_size_bytes :
+        (data.tables || []).reduce((sum, t) => sum + (t.size_bytes || 0), 0) || null;
+
+    let summaryText = (data.integrity_ok ? '✅ Integrity check passed' : '⚠️ Integrity check found problems') +
+        ' · ' + tableCount + ' tables · ' + totalRows + ' rows · ' + formatBytes(totalBytes) + ' total';
+    if (uploadsData) {
+        const missing = uploadsData.missing_rows || 0;
+        const upOk = uploadsData.ok && missing === 0;
+        summaryText += ' · Uploaded files: ' + (uploadsData.files || 0) + ' (' + formatBytes(uploadsData.bytes || 0) + ')' +
+            (missing > 0 ? ' · ⚠️ ' + missing + ' file(s) have no DB row (would be swept)' : '');
+        if (!upOk) summary.style.color = '#faa61a';
+    }
+    summary.textContent = summaryText;
+    summary.style.color = (data.integrity_ok && (!uploadsData || (uploadsData.ok && (uploadsData.missing_rows || 0) === 0))) ? 'var(--text-primary)' : '#faa61a';
+
+    // The validate-first import is “risky” when the backup failed checks or
+    // the uploads bundle references files with no DB row (they'd be swept).
+    pendingRiskyImport = allowImport && (!data.integrity_ok || fkViolations.length > 0 ||
+        (uploadsData && (!uploadsData.ok || (uploadsData.missing_rows || 0) > 0)));
+
+    if (data.integrity_ok && fkViolations.length === 0) {
+        errorsEl.style.display = 'none';
+    } else {
+        const lines = [];
+        if (!data.integrity_ok) lines.push('Integrity check failed:\n' + (data.integrity || []).join('\n'));
+        fkViolations.forEach(v => lines.push('Foreign-key violation: ' + v));
+        errorsEl.textContent = lines.join('\n');
+        errorsEl.style.display = 'block';
+    }
+
+    body.innerHTML = (data.tables || []).map(t =>
+        '<tr data-import-preview="' + escapeHtml(t.name) + '"><td>' + escapeHtml(t.name) + '</td><td>' + t.count + '</td><td>' +
+        formatBytes(t.size_bytes) + '</td></tr>'
+    ).join('') || '<tr><td colspan="3" class="empty-state">No tables found</td></tr>';
+
+    const importBtn = document.getElementById('import-from-results');
+    if (importBtn) importBtn.style.display = allowImport ? '' : 'none';
+
+    // Each table row is clickable → preview its columns + rows.
+    body.querySelectorAll('tr[data-import-preview]').forEach(tr => {
+        tr.style.cursor = 'pointer';
+        tr.title = 'Click to preview rows';
+        tr.addEventListener('click', () => openImportPreview(tr.getAttribute('data-import-preview')));
+    });
+
+    document.getElementById('import-results-modal').style.display = 'flex';
+}
+
+// Preview one table's columns + rows from the staged backup (dry run, read-only).
+async function openImportPreview(table) {
+    if (!pendingDecrypted) {
+        alert('Preview failed: no decrypted data available.');
+        return;
+    }
+    const titleEl = document.getElementById('import-preview-title');
+    const subEl = document.getElementById('import-preview-sub');
+    const headEl = document.getElementById('import-preview-head');
+    const bodyEl = document.getElementById('import-preview-body');
+    if (titleEl) titleEl.textContent = table;
+    if (subEl) subEl.textContent = 'Loading…';
+    document.getElementById('import-preview-modal').style.display = 'flex';
+
+    try {
+        const adminToken = sessionStorage.getItem('admin_token') || '';
+        const { dbBytes } = unpackBackup(pendingDecrypted);
+        const res = await fetch('/api/admin/import-db?dry_run=1&table=' + encodeURIComponent(table), {
+            method: 'POST',
+            headers: {
+                'Authorization': 'Bearer ' + adminToken,
+                'Content-Type': 'application/octet-stream'
+            },
+            body: dbBytes
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Preview failed');
+        const cols = data.columns || [];
+        const rows = data.rows || [];
+        if (subEl) subEl.textContent = rows.length + ' rows (latest 100) · ' + cols.length + ' columns';
+        if (headEl) headEl.innerHTML = '<tr>' + cols.map(c => '<th>' + escapeHtml(c) + '</th>').join('') + '</tr>';
+        if (rows.length === 0) {
+            if (bodyEl) bodyEl.innerHTML = '<tr><td colspan="' + Math.max(1, cols.length) + '" class="empty-state">No rows.</td></tr>';
+            return;
+        }
+        if (bodyEl) {
+            bodyEl.innerHTML = rows.map(r =>
+                '<tr>' + r.map((v, i) => {
+                    const col = cols[i] || '';
+                    const isId = /_id$|^id$|key|nonce|salt|token|hash|blob|payload|cipher/i.test(col);
+                    const cls = isId ? 'id-cell' : 'blob-cell';
+                    const txt = v === null ? '<i style="color:#777">NULL</i>' : String(v);
+                    const long = txt.length > 60;
+                    return '<td class="' + cls + '"' + (long ? ' title="' + escapeHtml(txt) + '"' : '') + '>' +
+                        (long ? escapeHtml(truncate(txt, 60)) : escapeHtml(txt)) + '</td>';
+                }).join('') + '</tr>'
+            ).join('');
+        }
+    } catch (err) {
+        if (bodyEl) bodyEl.innerHTML = '<tr><td class="empty-state" style="color:#ed4245">Failed: ' + escapeHtml(err.message) + '</td></tr>';
+        if (subEl) subEl.textContent = '';
+    }
+}
+
+// --- Raw Tables (generic browser over every DB table) ---
+let rawTablesCache = null;
+async function loadRawTables() {
+    const listEl = document.getElementById('raw-tables-list');
+    const countEl = document.getElementById('raw-tables-count');
+    try {
+        const rows = await apiFetch('/api/admin/tables');
+        rawTablesCache = rows;
+        if (countEl) countEl.textContent = rows.length + ' tables';
+        renderRawTablesList();
+    } catch (err) {
+        if (listEl) listEl.innerHTML = '<span style="color:#ed4245">Failed to load tables: ' + escapeHtml(err.message) + '</span>';
+    }
+}
+function renderRawTablesList() {
+    const listEl = document.getElementById('raw-tables-list');
+    if (!listEl) return;
+    const q = (document.getElementById('search-raw-tables').value || '').toLowerCase();
+    const rows = rawTablesCache || [];
+    const filtered = rows.filter(t => !q || t.name.toLowerCase().includes(q) || String(t.count).includes(q));
+    listEl.innerHTML = filtered.map(t =>
+        '<button type="button" class="tab-btn" data-raw-table="' + escapeHtml(t.name) + '" style="font-size:12px;padding:6px 12px;border:1px solid #444;">' +
+        escapeHtml(t.name) + ' <span style="color:#999">(' + t.count + ')</span></button>'
+    ).join('') || '<span style="color:var(--text-muted)">No tables match.</span>';
+    listEl.querySelectorAll('[data-raw-table]').forEach(btn => {
+        btn.addEventListener('click', () => openRawTable(btn.getAttribute('data-raw-table')));
+    });
+}
+function filterRawTables() { renderRawTablesList(); }
+async function openRawTable(name) {
+    const titleEl = document.getElementById('raw-table-title');
+    const countEl = document.getElementById('raw-table-rows-count');
+    const headEl = document.getElementById('raw-table-head');
+    const bodyEl = document.getElementById('raw-table-body');
+    if (titleEl) titleEl.textContent = name;
+    if (countEl) countEl.textContent = 'Loading…';
+    try {
+        const data = await apiFetch('/api/admin/table/' + encodeURIComponent(name));
+        const cols = data.columns || [];
+        const rows = data.rows || [];
+        if (countEl) countEl.textContent = rows.length + ' rows (latest 1000)';
+        if (headEl) headEl.innerHTML = '<tr>' + cols.map(c => '<th>' + escapeHtml(c) + '</th>').join('') + '</tr>';
+        if (rows.length === 0) {
+            if (bodyEl) bodyEl.innerHTML = '<tr><td colspan="' + cols.length + '" class="empty-state">No rows.</td></tr>';
+            return;
+        }
+        if (bodyEl) {
+            bodyEl.innerHTML = rows.map(r =>
+                '<tr>' + r.map((v, i) => {
+                    const col = cols[i] || '';
+                    const isId = /_id$|^id$|key|nonce|salt|token|hash|blob|payload|cipher/i.test(col);
+                    const cls = isId ? 'id-cell' : 'blob-cell';
+                    const txt = v === null ? '<i style="color:#777">NULL</i>' : String(v);
+                    const long = txt.length > 60;
+                    return '<td class="' + cls + '"' + (long ? ' title="' + escapeHtml(txt) + '"' : '') + '>' +
+                        (long ? escapeHtml(truncate(txt, 60)) : escapeHtml(txt)) + '</td>';
+                }).join('') + '</tr>'
+            ).join('');
+        }
+    } catch (err) {
+        if (bodyEl) bodyEl.innerHTML = '<tr><td class="empty-state" style="color:#ed4245">Failed: ' + escapeHtml(err.message) + '</td></tr>';
+        if (countEl) countEl.textContent = '';
+    }
 }
 
 // --- Audit Log (G4) ---

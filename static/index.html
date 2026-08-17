@@ -1422,16 +1422,27 @@
     <div class="modal" id="appearance-pw-modal" style="display:none">
         <div class="modal-content" style="max-width:420px">
             <h3 style="margin-bottom:12px;color:var(--accent)" id="appearance-pw-title">Export appearance</h3>
-            <p style="margin-bottom:16px;color:var(--text-muted);font-size:13px">
-                This backup is encrypted on your device with a password. Keep it safe — you will need it to import.
+            <p style="margin-bottom:16px;color:var(--text-muted);font-size:13px" id="appearance-pw-hint">
+                The backup is encrypted on your device with a password. Keep it safe — you will need it to import.
             </p>
-            <div style="margin-bottom:16px">
-                <label style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">Password</label>
-                <input type="password" id="appearance-pw-input" placeholder="Enter a password" autocomplete="new-password" class="modal-input" style="width:100%;padding:10px 14px;border:1px solid #2a2a4a;border-radius:8px;background:#1a1a2e;color:#e0e0e0;font-size:16px;box-sizing:border-box;">
+            <div id="appearance-pw-fields">
+                <div style="margin-bottom:16px">
+                    <label style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">Password</label>
+                    <input type="password" id="appearance-pw-input" placeholder="Enter a password" autocomplete="new-password" class="modal-input" style="width:100%;padding:10px 14px;border:1px solid #2a2a4a;border-radius:8px;background:#1a1a2e;color:#e0e0e0;font-size:16px;box-sizing:border-box;">
+                </div>
+                <div id="appearance-pw-confirm-wrap" style="margin-bottom:16px">
+                    <label style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">Confirm password</label>
+                    <input type="password" id="appearance-pw-confirm-input" placeholder="Repeat the password" autocomplete="new-password" class="modal-input" style="width:100%;padding:10px 14px;border:1px solid #2a2a4a;border-radius:8px;background:#1a1a2e;color:#e0e0e0;font-size:16px;box-sizing:border-box;">
+                </div>
             </div>
-            <div id="appearance-pw-confirm-wrap" style="margin-bottom:16px">
-                <label style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">Confirm password</label>
-                <input type="password" id="appearance-pw-confirm-input" placeholder="Repeat the password" autocomplete="new-password" class="modal-input" style="width:100%;padding:10px 14px;border:1px solid #2a2a4a;border-radius:8px;background:#1a1a2e;color:#e0e0e0;font-size:16px;box-sizing:border-box;">
+            <div id="appearance-pw-nopw-wrap" style="margin-bottom:16px;display:none">
+                <label class="settings-checkbox-label" style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-primary);cursor:pointer">
+                    <input type="checkbox" id="appearance-pw-nopw" style="width:15px;height:15px;accent-color:var(--accent,#5865f2)">
+                    Export without a password (not encrypted)
+                </label>
+            </div>
+            <div id="appearance-pw-nopw-note" style="display:none;margin-bottom:16px;padding:10px 12px;border:1px solid var(--bg-border);border-radius:8px;background:var(--bg-tertiary);color:var(--text-primary);font-size:13px">
+                This backup has no password — it is not encrypted. Anyone with the file can read your appearance settings.
             </div>
             <div id="appearance-pw-error" style="color:var(--danger);margin-bottom:12px;display:none;font-size:13px"></div>
             <div class="modal-actions" style="gap:8px;flex-wrap:wrap">

@@ -1,9 +1,31 @@
 use std::path::Path;
 
+/// Compute the default uploads directory from the database path: the file's
+/// parent dir + "/uploads". A DB at `e2e_chat.db` (cwd) → `uploads`; a DB at
+/// `server/e2e_chat.db` → `server/uploads`. This keeps uploaded bytes glued to
+/// the DB file so launching the server from a different working directory
+/// after a rebuild never orphans the images.
+fn default_upload_dir(database_url: &str) -> String {
+    let p = Path::new(database_url);
+    match p.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => {
+            parent.join("uploads").to_string_lossy().into_owned()
+        }
+        _ => "uploads".to_string(),
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub port: u16,
     pub database_url: String,
+    /// Directory holding uploaded file chunks (each file = a subdir named by
+    /// its id). Defaults to a sibling of the DATABASE_URL file (e.g. a DB at
+    /// `server/e2e_chat.db` → `server/uploads`), so the files always follow
+    /// the database no matter which working directory the server is launched
+    /// from — a cwd change can no longer silently orphan every uploaded image.
+    /// Override with UPLOAD_DIR (absolute or relative to the launch cwd).
+    pub upload_dir: String,
     pub jwt_secret: String,
     pub hmac_key: String,
     pub tls_cert_path: Option<String>,
@@ -114,6 +136,13 @@ impl Config {
                 .unwrap_or(3000),
             database_url: std::env::var("DATABASE_URL")
                 .unwrap_or_else(|_| "e2e_chat.db".to_string()),
+            upload_dir: {
+                if let Ok(v) = std::env::var("UPLOAD_DIR") {
+                    if !v.trim().is_empty() { v.trim().to_string() } else { default_upload_dir("e2e_chat.db") }
+                } else {
+                    default_upload_dir(&std::env::var("DATABASE_URL").unwrap_or_else(|_| "e2e_chat.db".to_string()))
+                }
+            },
             jwt_secret,
             hmac_key,
             tls_cert_path: std::env::var("TLS_CERT_PATH").ok(),

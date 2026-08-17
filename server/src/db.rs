@@ -138,6 +138,10 @@ fn upsert_user_key_blob(conn: &Connection, user_id: &str, encrypted_blob: &str, 
 
 pub struct Database {
     conn: Mutex<Connection>,
+    /// Directory holding uploaded file chunks (sibling of the DB file by
+    /// default; env UPLOAD_DIR overrides). Stored so cleanup/shredding always
+    /// operate on the same directory the upload handlers write to.
+    upload_dir: String,
 }
 
 #[derive(Debug, Clone)]
@@ -292,12 +296,13 @@ impl Database {
         Ok(())
     }
 
-    pub fn new(path: &str) -> Result<Self, rusqlite::Error> {
+    pub fn new(path: &str, upload_dir: &str) -> Result<Self, rusqlite::Error> {
         let conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
 
         let db = Self {
             conn: Mutex::new(conn),
+            upload_dir: upload_dir.to_string(),
         };
         db.run_migrations()?;
         Ok(db)
@@ -4428,7 +4433,7 @@ impl Database {
         if let Some(hash) = file_id_hash {
             if let Ok(fid) = self.get_file_id_by_hash_from_files(&hash) {
                 if let Ok(info) = self.delete_file_record(&fid) {
-                    let dir = format!("{}/{}", "uploads", fid);
+                    let dir = format!("{}/{}", self.upload_dir, fid);
                     for i in 0..info.chunk_count {
                         let chunk_path = format!("{}/{}.enc", dir, i);
                         let _ = std::fs::remove_file(&chunk_path);
@@ -4518,7 +4523,7 @@ impl Database {
         if let Some(hash) = file_id_hash {
             if let Ok(fid) = self.get_file_id_by_hash_from_files(&hash) {
                 if let Ok(info) = self.delete_file_record(&fid) {
-                    let dir = format!("{}/{}", "uploads", fid);
+                    let dir = format!("{}/{}", self.upload_dir, fid);
                     for i in 0..info.chunk_count {
                         let chunk_path = format!("{}/{}.enc", dir, i);
                         let _ = std::fs::remove_file(&chunk_path);
@@ -4535,7 +4540,7 @@ impl Database {
     fn shred_file_by_hash(&self, file_id_hash: &str) {
         if let Ok(fid) = self.get_file_id_by_hash_from_files(file_id_hash) {
             if let Ok(info) = self.delete_file_record(&fid) {
-                let dir = format!("{}/{}", "uploads", fid);
+                let dir = format!("{}/{}", self.upload_dir, fid);
                 for i in 0..info.chunk_count {
                     let chunk_path = format!("{}/{}.enc", dir, i);
                     let _ = std::fs::remove_file(&chunk_path);
@@ -7080,31 +7085,96 @@ impl Database {
                 }
             }
         }
-        // Wipe all tables in dependency-safe order
-        conn.execute("DELETE FROM voice_participants", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM voice_sessions", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM user_media", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM files", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM messages", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM dm_messages", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM server_keys", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM server_bans", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM server_members", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM channels", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM servers", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM dm_members", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM dm_channels", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM friend_requests", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM friendships", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM pending_notifications", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM pending_events", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM user_stickers", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM conversation_profile_data", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM notification_sounds", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM auth_sessions", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM users", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM admin_config", []).map_err(|e| e.to_string())?;
+        // Wipe EVERY table so "clear all" really clears the whole database,
+        // including every table added by later migrations (reactions, read
+        // acks, polls, pins, search tokens, ringtones, escrow, sessions, …).
+        // The connection is exclusively locked for the duration, so toggling
+        // foreign_keys is safe — deleting children before parents is handled
+        // implicitly by disabling FK enforcement while wiping.
+        conn.execute_batch("PRAGMA foreign_keys = OFF;")
+            .map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
+            .map_err(|e| e.to_string())?;
+        let names: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        for name in names {
+            conn.execute(&format!("DELETE FROM \"{}\"", name), [])
+                .map_err(|e| e.to_string())?;
+        }
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    /// Admin raw-table browser: list every table with its row count.
+    pub fn admin_list_tables(&self) -> Result<Vec<(String, i64)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+            .map_err(|e| e.to_string())?;
+        let names: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        let mut out = Vec::new();
+        for name in names {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM \"{}\"", name), [], |r| r.get(0))
+                .unwrap_or(0);
+            out.push((name, count));
+        }
+        Ok(out)
+    }
+
+    /// Admin raw-table browser: columns + (latest-first, capped) rows for one table.
+    pub fn admin_table_rows(&self, table: &str) -> Result<(Vec<String>, Vec<Vec<serde_json::Value>>), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+                params![table],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if !exists {
+            return Err(format!("Unknown table: {}", table));
+        }
+        let cols: Vec<String> = {
+            let mut stmt = conn
+                .prepare(&format!("PRAGMA table_info(\"{}\")", table))
+                .map_err(|e| e.to_string())?;
+            let mut out = Vec::new();
+            let mut q = stmt.query([]).map_err(|e| e.to_string())?;
+            while let Some(row) = q.next().map_err(|e| e.to_string())? {
+                out.push(row.get::<_, String>(1).map_err(|e| e.to_string())?);
+            }
+            out
+        };
+        let sql = format!("SELECT * FROM \"{}\" ORDER BY rowid DESC LIMIT 1000", table);
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let mut rows = Vec::new();
+        let mut q = stmt.query([]).map_err(|e| e.to_string())?;
+        while let Some(row) = q.next().map_err(|e| e.to_string())? {
+            let mut r = Vec::new();
+            for i in 0..cols.len() {
+                let v: rusqlite::types::Value = row.get(i).map_err(|e| e.to_string())?;
+                let jv = match v {
+                    rusqlite::types::Value::Null => serde_json::Value::Null,
+                    rusqlite::types::Value::Integer(i) => serde_json::Value::from(i),
+                    rusqlite::types::Value::Real(f) => serde_json::Value::from(f),
+                    rusqlite::types::Value::Text(t) => serde_json::Value::String(t),
+                    rusqlite::types::Value::Blob(b) => serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(b)),
+                };
+                r.push(jv);
+            }
+            rows.push(r);
+        }
+        Ok((cols, rows))
     }
 
     // ---- Auth sessions (Settings → Security → Devices) ----

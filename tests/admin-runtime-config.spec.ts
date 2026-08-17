@@ -67,6 +67,7 @@ test.describe('Admin runtime config (G2) — isolated server + temp DB', () => {
         PORT: '3452',
         HTTPS_PORT: '3453',
         DATABASE_URL: tmpDb,
+                UPLOAD_DIR: tmpDb + '-uploads',
         LOGIN_IP_MAX: '100000',
         LOGIN_USER_MAX: '100000',
         AUTH_PARAMS_IP_MAX: '100000',
@@ -90,6 +91,7 @@ test.describe('Admin runtime config (G2) — isolated server + temp DB', () => {
     await new Promise((r) => setTimeout(r, 500));
     if (tmpDb) {
       try { fs.unlinkSync(tmpDb); } catch (_) {}
+            try { fs.rmSync(tmpDb + '-uploads', { recursive: true, force: true }); } catch (_) {}
     }
   });
 

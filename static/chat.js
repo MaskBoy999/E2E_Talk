@@ -3586,20 +3586,50 @@ document.addEventListener('DOMContentLoaded', () => {
     // you can move your whole look between devices without syncing it.
     var appearancePwModal = document.getElementById('appearance-pw-modal');
     var appearancePwTitle = document.getElementById('appearance-pw-title');
+    var appearancePwHint = document.getElementById('appearance-pw-hint');
+    var appearancePwFields = document.getElementById('appearance-pw-fields');
     var appearancePwConfirmWrap = document.getElementById('appearance-pw-confirm-wrap');
+    var appearancePwNopwWrap = document.getElementById('appearance-pw-nopw-wrap');
+    var appearancePwNopw = document.getElementById('appearance-pw-nopw');
+    var appearancePwNopwNote = document.getElementById('appearance-pw-nopw-note');
     var appearancePwInput = document.getElementById('appearance-pw-input');
     var appearancePwConfirm = document.getElementById('appearance-pw-confirm-input');
     var appearancePwError = document.getElementById('appearance-pw-error');
     var _appearancePendingImport = null;
-    function appearancePwShow(title, needConfirm) {
+    var _appearancePwMode = 'export'; // 'export' | 'import-enc' | 'import-plain'
+    var appearanceExportNoPw = false;
+    function appearancePwShow(title, mode) {
         if (!appearancePwModal) return;
+        _appearancePwMode = mode;
+        var isExport = mode === 'export';
+        var isPlain = mode === 'import-plain';
+        var needPw = isExport ? !appearanceExportNoPw : !isPlain;
         if (appearancePwTitle) appearancePwTitle.textContent = title;
-        if (appearancePwConfirmWrap) appearancePwConfirmWrap.style.display = needConfirm ? '' : 'none';
+        if (appearancePwHint) {
+            appearancePwHint.textContent = isPlain
+                ? 'This backup has no password — it is not encrypted. Anyone with the file can read your appearance settings.'
+                : (isExport
+                    ? (appearanceExportNoPw
+                        ? 'No password will be used — the backup is saved unencrypted.'
+                        : 'The backup is encrypted on your device with the password below. Keep it safe — you will need it to import.')
+                    : 'Enter the password that was used to encrypt this backup.');
+        }
+        if (appearancePwFields) appearancePwFields.style.display = needPw ? '' : 'none';
+        if (appearancePwConfirmWrap) appearancePwConfirmWrap.style.display = (isExport && !appearanceExportNoPw) ? '' : 'none';
+        if (appearancePwNopwWrap) appearancePwNopwWrap.style.display = isExport ? '' : 'none';
+        if (appearancePwNopw) appearancePwNopw.checked = appearanceExportNoPw;
+        if (appearancePwNopwNote) appearancePwNopwNote.style.display = isPlain ? '' : 'none';
         if (appearancePwError) appearancePwError.style.display = 'none';
         if (appearancePwInput) appearancePwInput.value = '';
         if (appearancePwConfirm) appearancePwConfirm.value = '';
         appearancePwModal.style.display = 'flex';
-        if (appearancePwInput) appearancePwInput.focus();
+        if (needPw && appearancePwInput) appearancePwInput.focus();
+    }
+    if (appearancePwNopw) {
+        appearancePwNopw.addEventListener('change', function () {
+            appearanceExportNoPw = appearancePwNopw.checked;
+            if (_appearancePwMode === 'export') appearancePwShow('Export appearance', 'export');
+        });
     }
     function appearancePwHide() {
         if (appearancePwModal) appearancePwModal.style.display = 'none';
@@ -3654,7 +3684,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (themeExportBtn) {
         themeExportBtn.addEventListener('click', function () {
             _appearancePendingImport = null;
-            appearancePwShow('Export appearance', true);
+            appearancePwShow('Export appearance', 'export');
         });
     }
     var themeImportBtn = document.getElementById('theme-import-btn');
@@ -3670,13 +3700,21 @@ document.addEventListener('DOMContentLoaded', () => {
                 reader.onload = function () {
                     try {
                         var parsed = JSON.parse(reader.result);
-                        if (!parsed || parsed.app !== 'e2e_chat' || parsed.kind !== 'appearance' ||
-                            !parsed.salt || !parsed.nonce || !parsed.encrypted_private_key) {
+                        if (!parsed || parsed.app !== 'e2e_chat' || parsed.kind !== 'appearance') {
                             flashToast('Not a valid appearance backup file.', 'error');
                             return;
                         }
-                        _appearancePendingImport = parsed;
-                        appearancePwShow('Import appearance', false);
+                        if (parsed.salt && parsed.nonce && parsed.encrypted_private_key) {
+                            // Encrypted backup → ask for the password.
+                            _appearancePendingImport = parsed;
+                            appearancePwShow('Import appearance', 'import-enc');
+                        } else if (parsed.payload) {
+                            // No-password backup → just confirm.
+                            _appearancePendingImport = parsed;
+                            appearancePwShow('Import appearance', 'import-plain');
+                        } else {
+                            flashToast('Not a valid appearance backup file.', 'error');
+                        }
                     } catch (_) {
                         flashToast('Could not read that file.', 'error');
                     }
@@ -3686,15 +3724,41 @@ document.addEventListener('DOMContentLoaded', () => {
             input.click();
         });
     }
+    function downloadAppearanceFile(fileData) {
+        var blob = new Blob([JSON.stringify(fileData)], { type: 'application/json' });
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = 'e2e_appearance_' + new Date().toISOString().slice(0, 10) + '.e2etheme';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    }
     var appearancePwConfirmBtn = document.getElementById('appearance-pw-confirm-btn');
     if (appearancePwConfirmBtn) {
         appearancePwConfirmBtn.addEventListener('click', function () {
-            var pw = appearancePwInput ? appearancePwInput.value : '';
-            if (!pw) {
-                if (appearancePwError) { appearancePwError.textContent = 'Enter a password.'; appearancePwError.style.display = ''; }
+            // ---- Import: no-password backup (nothing to decrypt) ----
+            if (_appearancePendingImport && _appearancePwMode === 'import-plain') {
+                try {
+                    if (applyAppearancePayload(_appearancePendingImport.payload)) {
+                        appearancePwHide();
+                        flashToast('Appearance imported');
+                    } else {
+                        if (appearancePwError) { appearancePwError.textContent = 'Backup file is not supported.'; appearancePwError.style.display = ''; }
+                    }
+                } catch (_) {
+                    if (appearancePwError) { appearancePwError.textContent = 'Backup file is corrupted.'; appearancePwError.style.display = ''; }
+                }
                 return;
             }
+            var pw = appearancePwInput ? appearancePwInput.value : '';
+            // ---- Import: encrypted backup ----
             if (_appearancePendingImport) {
+                if (!pw) {
+                    if (appearancePwError) { appearancePwError.textContent = 'Enter the password.'; appearancePwError.style.display = ''; }
+                    return;
+                }
                 var decrypted = E2ECrypto.decryptWithPassword(
                     _appearancePendingImport.encrypted_private_key, pw,
                     _appearancePendingImport.salt, _appearancePendingImport.nonce);
@@ -3714,7 +3778,22 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 return;
             }
-            // Export: confirm + minimum length.
+            // ---- Export without a password ----
+            if (appearanceExportNoPw) {
+                try {
+                    downloadAppearanceFile({ app: 'e2e_chat', kind: 'appearance', v: 1, payload: buildAppearancePayload() });
+                    appearancePwHide();
+                    flashToast('Appearance exported (no password)');
+                } catch (e) {
+                    if (appearancePwError) { appearancePwError.textContent = 'Export failed: ' + e.message; appearancePwError.style.display = ''; }
+                }
+                return;
+            }
+            // ---- Export with a password ----
+            if (!pw) {
+                if (appearancePwError) { appearancePwError.textContent = 'Enter a password.'; appearancePwError.style.display = ''; }
+                return;
+            }
             var confirmPw = appearancePwConfirm ? appearancePwConfirm.value : '';
             if (pw.length < 4) {
                 if (appearancePwError) { appearancePwError.textContent = 'Password must be at least 4 characters.'; appearancePwError.style.display = ''; }
@@ -3726,16 +3805,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             try {
                 var enc = E2ECrypto.encryptWithPassword(JSON.stringify(buildAppearancePayload()), pw);
-                var fileData = { app: 'e2e_chat', kind: 'appearance', v: 1, salt: enc.salt, nonce: enc.nonce, encrypted_private_key: enc.encrypted_private_key };
-                var blob = new Blob([JSON.stringify(fileData)], { type: 'application/json' });
-                var url = URL.createObjectURL(blob);
-                var a = document.createElement('a');
-                a.href = url;
-                a.download = 'e2e_appearance_' + new Date().toISOString().slice(0, 10) + '.e2etheme';
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-                URL.revokeObjectURL(url);
+                downloadAppearanceFile({ app: 'e2e_chat', kind: 'appearance', v: 1, salt: enc.salt, nonce: enc.nonce, encrypted_private_key: enc.encrypted_private_key });
                 appearancePwHide();
                 flashToast('Appearance exported');
             } catch (e) {

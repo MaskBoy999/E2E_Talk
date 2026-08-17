@@ -113,6 +113,7 @@ test.describe('F-series security hardening', () => {
                 PORT: String(HTTP_PORT),
                 HTTPS_PORT: String(HTTPS_PORT),
                 DATABASE_URL: tmpDb,
+                UPLOAD_DIR: tmpDb + '-uploads',
                 // F2: tight per-IP registration budget so the limiter test can
                 // exhaust it quickly from one IP.
                 REGISTER_IP_MAX: '3',
@@ -147,6 +148,7 @@ test.describe('F-series security hardening', () => {
         if (child) child.kill();
         await new Promise((r) => setTimeout(r, 500));
         if (tmpDb) { try { fs.unlinkSync(tmpDb); } catch (_) {} }
+            if (tmpDb) { try { fs.rmSync(tmpDb + '-uploads', { recursive: true, force: true }); } catch (_) {} }
     });
 
     test('F1: plain-HTTP listener only redirects to HTTPS (no plaintext app)', async () => {

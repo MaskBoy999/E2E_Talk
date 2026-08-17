@@ -1665,6 +1665,106 @@ body.show-msg-times-hover .message:hover .file-card .time-hover {
     background: #43a047;
 }
 
+/* ===== Generic app buttons (.btn family) =====
+   Used across settings, the background edit panel, and voice diagnostics.
+   Without these rules the elements rendered as raw browser buttons. */
+.btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--bg-border);
+    color: var(--text-primary);
+    padding: 8px 16px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.2;
+    white-space: nowrap;
+    transition: background 0.15s, border-color 0.15s, color 0.15s, filter 0.15s, transform 0.05s;
+}
+.btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+.btn:active {
+    transform: translateY(1px);
+}
+.btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+.btn-primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #0b0f1a;
+}
+.btn-primary:hover {
+    filter: brightness(1.12);
+    color: #0b0f1a;
+}
+.btn-secondary {
+    background: var(--bg-secondary);
+    border-color: var(--bg-border);
+    color: var(--text-primary);
+}
+.btn-secondary:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+.btn-danger {
+    background: var(--danger);
+    border-color: var(--danger);
+    color: #fff;
+}
+.btn-danger:hover {
+    filter: brightness(1.1);
+    color: #fff;
+}
+.btn-success {
+    background: var(--success);
+    border-color: var(--success);
+    color: #fff;
+}
+.btn-success:hover {
+    filter: brightness(1.1);
+    color: #fff;
+}
+
+/* ===== App-styled dropdowns =====
+   .settings-select covers the settings selects (position, timestamps, read
+   receipts); select.modal-input covers the security/voice dropdowns (session
+   length, heartbeat, video quality, black-feed watchdog). Both replace the
+   native grey control with a themed select + custom chevron. */
+.settings-select,
+select.modal-input {
+    background-color: var(--bg-secondary);
+    border: 1px solid var(--bg-border);
+    color: var(--text-primary);
+    padding: 8px 30px 8px 12px;
+    border-radius: 8px;
+    font-size: 13px;
+    cursor: pointer;
+    appearance: none;
+    -webkit-appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%23a3a3b3' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    max-width: 100%;
+}
+.settings-select:hover,
+select.modal-input:hover {
+    border-color: var(--accent);
+}
+.settings-select:focus,
+select.modal-input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
 /* ===== Mobile: 768px and below ===== */
 @media (max-width: 768px) {
     .server-strip {

@@ -432,6 +432,99 @@ test.describe('App Background (device-local photo layer)', () => {
         await expect(page.locator('#appearance-pw-error')).toBeVisible();
         expect(await page.locator('#appearance-pw-error').textContent()).toContain('Wrong password');
     });
+
+    test('settings buttons and dropdowns are app-styled, not native browser controls', async ({ page }) => {
+        await registerAndSetup(page);
+        await openDisplaySettings(page);
+
+        const probe = (sel: string) =>
+            page.evaluate((s) => {
+                const el = document.querySelector(s);
+                if (!el) return null;
+                const cs = getComputedStyle(el);
+                return {
+                    borderRadius: cs.borderRadius,
+                    cursor: cs.cursor,
+                    appearance: cs.appearance,
+                    bgImage: cs.backgroundImage.slice(0, 30),
+                };
+            }, sel);
+
+        // .btn family — every flagged button is themed (radius + pointer cursor).
+        const btns = ['#app-bg-edit-done', '#app-bg-edit-center', '#app-bg-upload-btn', '#app-bg-edit-btn',
+            '#app-bg-remove-btn', '#theme-export-btn', '#theme-import-btn', '#theme-color-reset', '#theme-bg-reset',
+            '#voice-diag-refresh', '#voice-diag-heal'];
+        for (const sel of btns) {
+            const st = await probe(sel);
+            expect(st, sel).not.toBeNull();
+            expect(parseFloat(st!.borderRadius), sel + ' radius').toBeGreaterThanOrEqual(6);
+            expect(st!.cursor, sel + ' cursor').toBe('pointer');
+        }
+
+        // .settings-select dropdowns (positions, timestamps, read receipts).
+        const settingsSelects = ['#app-bg-pos', '#app-bg-edit-pos', '#show-msg-times', '#show-msg-status'];
+        for (const sel of settingsSelects) {
+            const st = await probe(sel);
+            expect(st, sel).not.toBeNull();
+            expect(st!.appearance, sel + ' appearance').toBe('none');
+            expect(st!.bgImage, sel + ' arrow').toContain('data:image/svg');
+        }
+
+        // select.modal-input dropdowns (session length, heartbeat, video quality, watchdog).
+        const modalSelects = ['#reauth-duration-select', '#heartbeat-interval-select',
+            '#voice-send-camera-res', '#voice-send-screen-res', '#voice-recv-camera-res',
+            '#voice-recv-screen-res', '#voice-video-watchdog-secs'];
+        for (const sel of modalSelects) {
+            const st = await probe(sel);
+            expect(st, sel).not.toBeNull();
+            expect(st!.appearance, sel + ' appearance').toBe('none');
+            expect(st!.bgImage, sel + ' arrow').toContain('data:image/svg');
+        }
+    });
+
+    test('appearance export/import: passwordless option + auto-detect on import', async ({ page }) => {
+        await registerAndSetup(page);
+        await openDisplaySettings(page);
+
+        await page.locator('#theme-color-hex').fill('#ff6600');
+        await page.locator('#theme-color-hex').dispatchEvent('change');
+
+        // Export with the "no password" checkbox → fields hide, hint updates.
+        await page.click('#theme-export-btn');
+        await expect(page.locator('#appearance-pw-modal')).toBeVisible();
+        await page.check('#appearance-pw-nopw');
+        await expect(page.locator('#appearance-pw-fields')).toBeHidden();
+        expect(await page.locator('#appearance-pw-hint').textContent()).toContain('unencrypted');
+
+        const outPath = path.join(__dirname, '..', 'test-results', 'appearance-nopw.e2etheme');
+        fs.mkdirSync(path.dirname(outPath), { recursive: true });
+        const [download] = await Promise.all([
+            page.waitForEvent('download'),
+            page.click('#appearance-pw-confirm-btn'),
+        ]);
+        await download.saveAs(outPath);
+
+        // The file is plaintext JSON carrying a payload (no salt/nonce/ciphertext).
+        const fileData = JSON.parse(fs.readFileSync(outPath, 'utf8'));
+        expect(fileData.kind).toBe('appearance');
+        expect(fileData.payload.theme_color).toBe('#ff6600');
+        expect(fileData.salt).toBeUndefined();
+
+        // Wreck the color, then import — no password is asked because the file has none.
+        await page.locator('#theme-color-hex').fill('#000000');
+        await page.locator('#theme-color-hex').dispatchEvent('change');
+        const [chooser] = await Promise.all([
+            page.waitForEvent('filechooser'),
+            page.click('#theme-import-btn'),
+        ]);
+        await chooser.setFiles(outPath);
+        await expect(page.locator('#appearance-pw-modal')).toBeVisible();
+        await expect(page.locator('#appearance-pw-fields')).toBeHidden();
+        await expect(page.locator('#appearance-pw-nopw-note')).toBeVisible();
+        await page.click('#appearance-pw-confirm-btn');
+        await expect(page.locator('#appearance-pw-modal')).toBeHidden();
+        expect(await page.evaluate(() => localStorage.getItem('theme_color'))).toBe('#ff6600');
+    });
 });
 
 test.describe('Display-name glow is not clipped (overflow: clip + clip margin)', () => {

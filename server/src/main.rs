@@ -405,7 +405,8 @@ async fn main() {
         .init();
 
     let config = config::Config::from_env();
-    let db = db::Database::new(&config.database_url).expect("Failed to initialize database");
+    let db = db::Database::new(&config.database_url, &config.upload_dir)
+        .expect("Failed to initialize database");
     // A server restart invalidates every in-memory voice room, so any persisted
     // DM-call waiting state is stale (the waiting user's connection died with
     // the server). Clear it so nobody is left with a phantom "waiting for you
@@ -436,8 +437,9 @@ async fn main() {
             // Initial cleanup on startup
             tracing::info!("Running orphan file cleanup...");
             let s = state_for_cleanup.clone();
+            let upload_dir = s.config.upload_dir.clone();
             let _ = tokio::task::spawn_blocking(move || {
-                s.db.cleanup_orphan_files("uploads");
+                s.db.cleanup_orphan_files(&upload_dir);
             }).await;
             tracing::info!("Orphan file cleanup complete.");
 
@@ -446,8 +448,9 @@ async fn main() {
             loop {
                 interval.tick().await;
                 let s = state_for_cleanup.clone();
+                let upload_dir = s.config.upload_dir.clone();
                 let _ = tokio::task::spawn_blocking(move || {
-                    s.db.cleanup_orphan_files("uploads");
+                    s.db.cleanup_orphan_files(&upload_dir);
                 }).await;
             }
         });
@@ -573,8 +576,20 @@ async fn main() {
         .route("/api/admin/user-key-blobs", get(handlers::admin_list_user_key_blobs))
         .route("/api/admin/profile-data-keys", get(handlers::admin_list_profile_data_keys))
         .route("/api/admin/shared-profile-data-keys", get(handlers::admin_list_shared_profile_data_keys))
+        .route("/api/admin/tables", get(handlers::admin_list_tables))
+        .route("/api/admin/table/{table}", get(handlers::admin_table_rows))
         .route("/api/admin/export-db", get(handlers::admin_export_db))
+        .route("/api/admin/export-uploads", get(handlers::admin_export_uploads))
         .route("/api/admin/import-db", post(handlers::admin_import_db))
+        .route("/api/admin/import-uploads", post(handlers::admin_import_uploads))
+        // Admin DB backups can be far larger than the 32MB router-wide limit
+        // (a full app DB with messages/files is often 40MB+, and the uploads
+        // bundle grows it further). This route lifts axum's body limit to 4GiB
+        // (the Bytes extractor allocates only what the client actually sends,
+        // and the endpoint is admin-token-gated), so a big backup uploads
+        // instead of bouncing off axum's default 2MB / the 32MB Json layer with
+        // a plain-text 413 that the client can't parse.
+        .route_layer(DefaultBodyLimit::max(4 * 1024 * 1024 * 1024))
         .route("/api/admin/clear", post(handlers::admin_clear_all))
         .route("/api/admin/audit-log", get(handlers::admin_audit_log))
         .route(

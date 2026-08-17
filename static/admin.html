@@ -81,6 +81,18 @@
         </div>
 
         <!-- Admin Panel (hidden until authenticated) -->
+    <style>
+        /* Busy overlay spinner (export/import/validate take a while on a big DB). */
+        .admin-spinner {
+            width: 46px; height: 46px;
+            border: 4px solid rgba(255,255,255,.25);
+            border-top-color: #fff;
+            border-radius: 50%;
+            animation: admin-spin 0.9s linear infinite;
+        }
+        @keyframes admin-spin { to { transform: rotate(360deg); } }
+    </style>
+
         <div id="admin-panel" class="admin-card" style="display: none;">
             <div class="admin-header">
                 <h1>Admin Panel</h1>
@@ -88,6 +100,7 @@
                     <button id="runtime-limits-btn" class="btn-download" style="font-size:12px;padding:8px 14px;background:#5865F2;color:#fff;border:none;border-radius:4px;cursor:pointer">⚙ Runtime Limits</button>
                     <button id="export-db-btn" class="btn-download" style="font-size:12px;padding:8px 14px;background:#1565c0;color:#fff;border:none;border-radius:4px;cursor:pointer">📥 Export DB</button>
                     <button id="import-db-btn" class="btn-upload" style="font-size:12px;padding:8px 14px;background:#2e7d32;color:#fff;border:none;border-radius:4px;cursor:pointer">📤 Import DB</button>
+                    <button id="validate-db-btn" class="btn-download" style="font-size:12px;padding:8px 14px;background:#e65100;color:#fff;border:none;border-radius:4px;cursor:pointer">🔍 Validate Backup</button>
                     <button id="clear-all-btn" class="btn-delete" style="font-size:13px;padding:8px 16px;background:#7b1fa2;border-color:#9c27b0">&#9888; Wipe Everything</button>
                     <button id="auto-refresh-btn" class="btn-toggle" style="font-size:12px;padding:8px 14px;background:#555;color:#aaa;border:1px solid #777;border-radius:4px;cursor:pointer">Auto-Refresh: OFF</button>
                     <a href="index.html" class="back-link">Back to chat</a>
@@ -117,6 +130,7 @@
                 <button class="tab-btn" data-tab="profile-data-keys">Profile Data Keys</button>
                 <button class="tab-btn" data-tab="shared-profile-data-keys">Shared Profile Keys</button>
                 <button class="tab-btn" data-tab="audit-log">Audit Log</button>
+                <button class="tab-btn" data-tab="raw-tables">Raw Tables</button>
             </div>
 
             <!-- Users Tab -->
@@ -509,6 +523,30 @@
                 </div>
                 <div id="shared-profile-data-keys-pagination" class="pagination-container"></div>
             </div>
+
+            <!-- Raw Tables Tab: generic browser over every table in the DB, so
+                 the panel always reflects tables added/removed/changed by
+                 migrations (reactions, read acks, polls, pins, search tokens,
+                 ringtones, escrow, sessions, …). -->
+            <div class="tab-content" id="tab-raw-tables">
+                <div class="table-header">
+                    <div class="search-bar">
+                        <input type="text" id="search-raw-tables" placeholder="Filter tables..." oninput="filterRawTables()">
+                        <span class="record-count" id="raw-tables-count"></span>
+                    </div>
+                </div>
+                <div id="raw-tables-list" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px;">Loading…</div>
+                <div class="table-scroll">
+                    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+                        <strong id="raw-table-title" style="font-size:14px;"></strong>
+                        <span class="record-count" id="raw-table-rows-count"></span>
+                    </div>
+                    <table class="data-table">
+                        <thead id="raw-table-head"></thead>
+                        <tbody id="raw-table-body"><tr><td class="empty-state">Pick a table above to browse its rows.</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -516,22 +554,30 @@
     <div class="modal" id="export-db-password-modal" style="display:none">
         <div class="modal-content" style="max-width:420px">
             <h3 style="margin-bottom:12px;color:var(--accent)">Encrypt Export</h3>
-            <p style="margin-bottom:16px;color:var(--text-muted);font-size:13px">
-                Encrypt the exported database with a password. Leave empty for unencrypted.
+            <p style="margin-bottom:16px;color:var(--text-muted);font-size:13px" id="export-db-hint">
+                Encrypt the exported database with a password (Argon2id + AEAD — the same strong scheme the app uses).
             </p>
-            <div style="margin-bottom:12px">
-                <label style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">Password</label>
-                <div class="auth-input-row">
-                    <input type="password" id="export-password-input" placeholder="Encryption password" autocomplete="off" class="modal-input auth-code-input" style="flex:1;" />
-                    <button type="button" class="toggle-visibility-btn" id="toggle-export-password" title="Show/Hide">&#128065;</button>
+            <div id="export-db-fields">
+                <div style="margin-bottom:12px">
+                    <label style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">Password</label>
+                    <div class="auth-input-row">
+                        <input type="password" id="export-password-input" placeholder="Encryption password" autocomplete="off" class="modal-input auth-code-input" style="flex:1;" />
+                        <button type="button" class="toggle-visibility-btn" id="toggle-export-password" title="Show/Hide">&#128065;</button>
+                    </div>
+                </div>
+                <div style="margin-bottom:12px">
+                    <label style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">Confirm Password</label>
+                    <div class="auth-input-row">
+                        <input type="password" id="export-password-confirm-input" placeholder="Confirm encryption password" autocomplete="off" class="modal-input auth-code-input" style="flex:1;" />
+                        <button type="button" class="toggle-visibility-btn" id="toggle-export-password-confirm" title="Show/Hide">&#128065;</button>
+                    </div>
                 </div>
             </div>
             <div style="margin-bottom:16px">
-                <label style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">Confirm Password</label>
-                <div class="auth-input-row">
-                    <input type="password" id="export-password-confirm-input" placeholder="Confirm encryption password" autocomplete="off" class="modal-input auth-code-input" style="flex:1;" />
-                    <button type="button" class="toggle-visibility-btn" id="toggle-export-password-confirm" title="Show/Hide">&#128065;</button>
-                </div>
+                <label class="settings-checkbox-label" style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-primary);cursor:pointer">
+                    <input type="checkbox" id="export-db-nopw" style="width:15px;height:15px;accent-color:var(--accent,#5865f2)">
+                    Export without a password (not encrypted)
+                </label>
             </div>
             <div id="export-password-error" style="color:var(--danger);margin-bottom:12px;display:none;font-size:13px"></div>
             <div class="modal-actions">
@@ -636,7 +682,119 @@
         </div>
     </div>
 
+    <!-- Import Confirmation Modal (replace warning + validate-first checkbox) -->
+    <div class="modal" id="import-confirm-modal" style="display:none">
+        <div class="modal-content" style="max-width:480px">
+            <h3 style="margin-bottom:12px;color:var(--danger,#f44336)">&#9888; Replace database?</h3>
+            <p style="margin-bottom:14px;color:var(--text-muted);font-size:13px">
+                Importing a new database will <strong style="color:var(--text-primary)">REPLACE all current data</strong>.
+                The server will reconnect and you will need to re-login. This cannot be undone.
+            </p>
+            <label class="settings-checkbox-label" style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-primary);cursor:pointer;margin-bottom:14px">
+                <input type="checkbox" id="import-validate-first" style="width:15px;height:15px;accent-color:var(--accent,#5865f2)">
+                Validate before importing — run a dry run first, review the results, then import if it looks good
+            </label>
+            <div class="modal-actions">
+                <button class="btn-cancel" id="cancel-import-confirm">Cancel</button>
+                <button class="btn-invite" id="continue-import-confirm" style="background:#2e7d32;border-color:#2e7d32;">Continue</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Dry-Run Import Results Modal -->
+    <div class="modal" id="import-results-modal" style="display:none">
+        <div class="modal-content" style="max-width:640px">
+            <h3 style="margin-bottom:4px;color:var(--accent)">🔍 Backup Validation (dry run)</h3>
+            <p style="margin-bottom:12px;color:var(--text-muted);font-size:13px" id="import-results-summary"></p>
+            <div id="import-results-errors" style="color:var(--danger);margin-bottom:12px;display:none;font-size:13px;white-space:pre-wrap"></div>
+            <div class="table-scroll" style="max-height:45vh;border:1px solid #1a1a2e;border-radius:6px;">
+                <table class="data-table">
+                    <thead><tr><th>Table</th><th>Rows</th><th>Size</th></tr></thead>
+                    <tbody id="import-results-body"></tbody>
+                </table>
+            </div>
+            <div style="margin-top:14px;color:var(--text-muted);font-size:12px" id="import-results-note">
+                Nothing was imported — your live database is untouched.
+                Click a table row to preview its columns and rows.
+            </div>
+            <div class="modal-actions">
+                <button class="btn-invite" id="import-from-results" style="background:#2e7d32;border-color:#2e7d32;display:none">📤 Import this backup</button>
+                <button class="btn-cancel" id="close-import-results">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Dry-Run Table Preview Modal -->
+    <div class="modal" id="import-preview-modal" style="display:none">
+        <div class="modal-content" style="max-width:820px">
+            <h3 style="margin-bottom:4px;color:var(--accent)">👁 Preview: <span id="import-preview-title"></span></h3>
+            <p style="margin-bottom:12px;color:var(--text-muted);font-size:13px" id="import-preview-sub"></p>
+            <div class="table-scroll" style="max-height:50vh;border:1px solid #1a1a2e;border-radius:6px;">
+                <table class="data-table">
+                    <thead id="import-preview-head"></thead>
+                    <tbody id="import-preview-body"></tbody>
+                </table>
+            </div>
+            <div class="modal-actions">
+                <button class="btn-cancel" id="close-import-preview">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Risky Import Confirmation Modal (typed-word guard) -->
+    <div class="modal" id="risky-import-modal" style="display:none">
+        <div class="modal-content" style="max-width:460px">
+            <h3 style="margin-bottom:12px;color:var(--danger,#f44336)">&#9888; Import with problems?</h3>
+            <p style="margin-bottom:14px;color:var(--text-muted);font-size:13px">
+                The dry run reported <strong style="color:var(--danger,#f44336)">integrity or foreign-key problems</strong>
+                in this backup. Importing it will <strong style="color:var(--text-primary)">REPLACE all current data</strong>
+                with a database that failed validation — messages, keys, and files may be missing or corrupt.
+            </p>
+            <label for="risky-import-input" style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">
+                Type <strong style="color:var(--danger,#f44336);font-family:monospace">IMPORT</strong> to confirm:
+            </label>
+            <input type="text" id="risky-import-input" placeholder="Type IMPORT" autocomplete="off" class="modal-input" style="width:100%;box-sizing:border-box;margin-bottom:12px" />
+            <div id="risky-import-error" style="color:var(--danger);margin-bottom:12px;display:none;font-size:13px"></div>
+            <div class="modal-actions">
+                <button class="btn-cancel" id="cancel-risky-import">Cancel</button>
+                <button class="btn-delete" id="confirm-risky-import" disabled style="background:var(--danger,#f44336);border-color:var(--danger,#f44336);opacity:.5">&#9888; Import Anyway</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Wipe Everything Confirmation Modal (typed-word guard) -->
+    <div class="modal" id="wipe-confirm-modal" style="display:none">
+        <div class="modal-content" style="max-width:460px">
+            <h3 style="margin-bottom:12px;color:var(--danger,#f44336)">&#9888; Wipe ALL Data</h3>
+            <p style="margin-bottom:14px;color:var(--text-muted);font-size:13px">
+                This permanently deletes <strong style="color:var(--text-primary)">every</strong> user, server,
+                channel, message, key, file, and the audit log. The server returns to its fresh-install state
+                and the admin password must be set up again. <strong style="color:var(--danger,#f44336)">This cannot be undone.</strong>
+            </p>
+            <label for="wipe-confirm-input" style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">
+                Type <strong style="color:var(--danger,#f44336);font-family:monospace">DELETE</strong> to confirm:
+            </label>
+            <input type="text" id="wipe-confirm-input" placeholder="Type DELETE" autocomplete="off" class="modal-input" style="width:100%;box-sizing:border-box;margin-bottom:12px" />
+            <div id="wipe-confirm-error" style="color:var(--danger);margin-bottom:12px;display:none;font-size:13px"></div>
+            <div class="modal-actions">
+                <button class="btn-cancel" id="cancel-wipe-confirm">Cancel</button>
+                <button class="btn-delete" id="confirm-wipe-all" disabled style="background:var(--danger,#f44336);border-color:var(--danger,#f44336);opacity:.5">&#9888; Wipe Everything</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Busy overlay: shown during export/import/validate so the admin knows
+         the long encryption/upload is still working (it can take a while for
+         a large database) and is not stuck. -->
+    <div id="admin-busy-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:99999;align-items:center;justify-content:center;flex-direction:column;gap:14px">
+        <div class="admin-spinner"></div>
+        <div id="admin-busy-label" style="color:#fff;font-size:14px;font-family:var(--font,inherit);max-width:420px;text-align:center">Working…</div>
+    </div>
+
+    <script src="libsodium-sumo.js"></script>
+    <script src="libsodium-wrappers.js"></script>
+    <script src="crypto.js?v=8"></script>
     <script src="secure-storage.js?v=1"></script>
-    <script src="admin.js?v=4"></script>
+    <script src="admin.js?v=6"></script>
 </body>
 </html>

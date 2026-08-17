@@ -4850,7 +4850,7 @@ pub async fn admin_clear_all(
         return e.into_response();
     }
 
-    match state.db.clear_all("uploads") {
+    match state.db.clear_all(&state.config.upload_dir) {
         Ok(()) => {
             log_admin_action(&state, "admin_clear_all", None, &headers);
             // Invalidate all in-memory admin tokens so the admin must re-login
@@ -4984,6 +4984,43 @@ pub async fn admin_list_shared_profile_data_keys(
     (StatusCode::OK, Json(serde_json::json!(result))).into_response()
 }
 
+/// GET /api/admin/tables — every table in the DB with its row count
+/// (raw-table browser so the panel always reflects added/removed tables).
+pub async fn admin_list_tables(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) {
+        return e.into_response();
+    }
+    match state.db.admin_list_tables() {
+        Ok(rows) => {
+            let list: Vec<serde_json::Value> = rows
+                .iter()
+                .map(|(name, count)| serde_json::json!({ "name": name, "count": count }))
+                .collect();
+            (StatusCode::OK, Json(serde_json::json!(list))).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+/// GET /api/admin/table/{name} — columns + rows (latest-first, capped at 1000)
+/// for one table.
+pub async fn admin_table_rows(
+    Path(table): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) {
+        return e.into_response();
+    }
+    match state.db.admin_table_rows(&table) {
+        Ok((cols, rows)) => (StatusCode::OK, Json(serde_json::json!({"table": table, "columns": cols, "rows": rows}))).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
 /// GET /api/admin/export-db — downloads the entire SQLite database file
 pub async fn admin_export_db(
     headers: HeaderMap,
@@ -5010,10 +5047,13 @@ pub async fn admin_export_db(
     }
 }
 
-/// POST /api/admin/import-db — upload a SQLite database file to replace the current one
+/// POST /api/admin/import-db — upload a SQLite database file to replace the current one.
+/// Query param `dry_run=1` validates the file (integrity check + table census) on a
+/// temp copy WITHOUT touching the live database.
 pub async fn admin_import_db(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
     if let Err(e) = extract_admin_token(&headers) {
@@ -5025,6 +5065,20 @@ pub async fn admin_import_db(
     if body.len() < 16 || &body[..16] != b"SQLite format 3\x00" {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "File does not appear to be a valid SQLite database"}))).into_response();
     }
+
+    // Dry-run: validate a staged copy and report without replacing anything.
+    // An optional `table` param returns a row preview from that table instead
+    // of the census (columns + latest rows, read-only from the staged copy).
+    if params.get("dry_run").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false) {
+        if let Some(table) = params.get("table") {
+            if table.trim().is_empty() {
+                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Empty table name"}))).into_response();
+            }
+            return preview_import_table(&body, table).into_response();
+        }
+        return validate_import_db(&body).into_response();
+    }
+
     let db_path = state.config.database_url.clone();
 
     // Step 1: Checkpoint the old WAL so all pending writes flush to the main DB file.
@@ -5066,9 +5120,460 @@ pub async fn admin_import_db(
     }
 }
 
+/// Bundle format shared by the uploads export/import endpoints:
+///   [4-byte LE manifest_len][manifest JSON utf8][payload bytes]
+/// where manifest = [{file_id, chunks: [byte_len, ...]}, ...] and payload is
+/// every chunk's bytes concatenated in manifest order. The client folds this
+/// (plus the DB) into one inner payload for the admin backup so an export →
+/// wipe → import round-trip restores uploaded images too (a DB-only backup
+/// leaves every file row dangling — "the picture name remains, the bytes are
+/// gone").
+const UPLOADS_BUNDLE_MAGIC_HEADER: u8 = 0xDB;
+
+fn read_u32_le(b: &[u8], off: usize) -> Option<u32> {
+    if off + 4 > b.len() { return None; }
+    Some(u32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]]))
+}
+
+fn push_u32_le(out: &mut Vec<u8>, v: u32) {
+    out.extend_from_slice(&v.to_le_bytes());
+}
+
+/// GET /api/admin/export-uploads — stream every uploaded file chunk as a
+/// manifest + payload bundle (same shape the client embeds in the backup).
+pub async fn admin_export_uploads(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) {
+        return e.into_response();
+    }
+    log_admin_action(&state, "admin_export_uploads", None, &headers);
+
+    let upload_dir = &state.config.upload_dir;
+    let mut manifest: Vec<serde_json::Value> = Vec::new();
+    let mut payload: Vec<u8> = Vec::new();
+    let mut total_chunks = 0usize;
+
+    let entries = match std::fs::read_dir(upload_dir) {
+        Ok(e) => e,
+        Err(_) => {
+            // No uploads dir yet — a valid empty bundle (manifest [], payload []).
+            let manifest_bytes = serde_json::to_vec(&manifest).unwrap_or_default();
+            let mut out = Vec::with_capacity(4 + manifest_bytes.len());
+            push_u32_le(&mut out, manifest_bytes.len() as u32);
+            out.extend_from_slice(&manifest_bytes);
+            return (StatusCode::OK, [( "content-type", "application/octet-stream")], out).into_response();
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() { continue; }
+        let file_id = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        let mut chunk_lens: Vec<u32> = Vec::new();
+        let mut i = 0u32;
+        loop {
+            let chunk_path = format!("{}/{}/{}.enc", upload_dir, file_id, i);
+            match std::fs::read(&chunk_path) {
+                Ok(bytes) => {
+                    chunk_lens.push(bytes.len() as u32);
+                    payload.extend_from_slice(&bytes);
+                    total_chunks += 1;
+                    i += 1;
+                }
+                Err(_) => break,
+            }
+        }
+        if !chunk_lens.is_empty() {
+            manifest.push(serde_json::json!({"file_id": file_id, "chunks": chunk_lens}));
+        }
+    }
+
+    let manifest_bytes = match serde_json::to_vec(&manifest) {
+        Ok(m) => m,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": format!("Failed to encode uploads manifest: {}", e)}))).into_response();
+        }
+    };
+    let mut out = Vec::with_capacity(4 + manifest_bytes.len() + payload.len());
+    push_u32_le(&mut out, manifest_bytes.len() as u32);
+    out.extend_from_slice(&manifest_bytes);
+    out.extend_from_slice(&payload);
+    tracing::info!("admin export-uploads: {} files, {} chunks, {} bytes", manifest.len(), total_chunks, payload.len());
+    (
+        StatusCode::OK,
+        [("content-type", "application/octet-stream")],
+        out,
+    )
+        .into_response()
+}
+
+/// Parse a uploads bundle (manifest + payload) into (file_id, chunk lens, bytes).
+fn parse_uploads_bundle(body: &[u8]) -> Result<Vec<(String, Vec<u32>, Vec<u8>)>, String> {
+    if body.len() < 4 {
+        return Err("Uploads bundle too small".to_string());
+    }
+    let manifest_len = read_u32_le(body, 0).unwrap() as usize;
+    if 4 + manifest_len > body.len() {
+        return Err("Uploads bundle manifest overflows the payload".to_string());
+    }
+    let manifest: Vec<serde_json::Value> = serde_json::from_slice(&body[4..4 + manifest_len])
+        .map_err(|e| format!("Uploads bundle manifest is not valid JSON: {}", e))?;
+    let mut cursor = 4 + manifest_len;
+    let mut files: Vec<(String, Vec<u32>, Vec<u8>)> = Vec::new();
+    for item in &manifest {
+        let file_id = item.get("file_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        // Path-traversal guard: the id must be a single safe path segment.
+        if file_id.is_empty()
+            || file_id.contains('/')
+            || file_id.contains('\\')
+            || file_id == "."
+            || file_id == ".."
+        {
+            return Err(format!("Uploads bundle contains an unsafe file id: {:?}", file_id));
+        }
+        let chunks = item.get("chunks").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let mut lens: Vec<u32> = Vec::with_capacity(chunks.len());
+        let mut bytes: Vec<u8> = Vec::new();
+        for c in &chunks {
+            let len = c.as_u64().unwrap_or(0);
+            if len as usize > body.len() - cursor {
+                return Err(format!("Uploads bundle truncated for file {}", file_id));
+            }
+            bytes.extend_from_slice(&body[cursor..cursor + len as usize]);
+            lens.push(len as u32);
+            cursor += len as usize;
+        }
+        if !lens.is_empty() {
+            files.push((file_id, lens, bytes));
+        }
+    }
+    if cursor != body.len() {
+        return Err("Uploads bundle has trailing bytes after the payload".to_string());
+    }
+    Ok(files)
+}
+
+/// POST /api/admin/import-uploads — restore uploaded file chunks from a bundle.
+/// `?dry_run=1` parses + cross-checks against the live DB without writing.
+pub async fn admin_import_uploads(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) {
+        return e.into_response();
+    }
+    let dry_run = params.get("dry_run").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+    let files = match parse_uploads_bundle(&body) {
+        Ok(f) => f,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+
+    if dry_run {
+        // Cross-check each bundle file against the LIVE files table: a file in
+        // the bundle without a DB row would be swept as an orphan by cleanup.
+        let mut missing: Vec<String> = Vec::new();
+        for (file_id, _, _) in &files {
+            if state.db.get_file_info(file_id).is_err() {
+                missing.push(file_id.clone());
+            }
+        }
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "ok": true,
+                "dry_run": true,
+                "files": files.len(),
+                "chunks": files.iter().map(|(_, l, _)| l.len()).sum::<usize>(),
+                "bytes": files.iter().map(|(_, _, b)| b.len()).sum::<usize>(),
+                "missing_rows": missing.len(),
+                "missing_file_ids": missing.iter().take(50).cloned().collect::<Vec<_>>(),
+            })),
+        )
+            .into_response();
+    }
+
+    let upload_dir = &state.config.upload_dir;
+    let mut written_files = 0usize;
+    let mut written_bytes = 0usize;
+    for (file_id, lens, bytes) in &files {
+        let dir = format!("{}/{}", upload_dir, file_id);
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": format!("Failed to create upload dir for {}: {}", file_id, e)}))).into_response();
+        }
+        let mut cursor = 0usize;
+        for (i, len) in lens.iter().enumerate() {
+            let chunk = &bytes[cursor..cursor + *len as usize];
+            cursor += *len as usize;
+            let chunk_path = format!("{}/{}.enc", dir, i);
+            if let Err(e) = std::fs::write(&chunk_path, chunk) {
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": format!("Failed to write {}: {}", chunk_path, e)}))).into_response();
+            }
+            written_bytes += chunk.len();
+        }
+        written_files += 1;
+    }
+    log_admin_action(&state, "admin_import_uploads", None, &headers);
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"ok": true, "files": written_files, "bytes": written_bytes})),
+    )
+        .into_response()
+}
+
+/// Preview columns + latest rows of one table from a candidate SQLite database
+/// on a temp copy (dry-run import with `table`). The live DB is untouched.
+fn preview_import_table(body: &[u8], table: &str) -> (StatusCode, Json<serde_json::Value>) {
+    // Stage the file in the system temp dir with a unique name.
+    let mut tmp_path = std::env::temp_dir();
+    let unique = format!(
+        "e2e_import_dryrun_{}_{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    tmp_path.push(unique);
+    let tmp_str = tmp_path.to_string_lossy().into_owned();
+
+    if let Err(e) = std::fs::write(&tmp_str, body) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("Could not stage file for preview: {}", e)})),
+        );
+    }
+
+    let result = (|| -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open_with_flags(
+            &tmp_str,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|e| format!("Could not open as SQLite: {}", e))?;
+
+        // The table must exist in THIS backup (quoted safely below).
+        let exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?1)",
+                rusqlite::params![table],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if !exists {
+            return Err(format!("Table not found in this backup: {}", table));
+        }
+        let safe_name = table.replace('"', "\"\"");
+
+        let cols: Vec<String> = {
+            let mut stmt = conn
+                .prepare(&format!("PRAGMA table_info(\"{}\")", safe_name))
+                .map_err(|e| e.to_string())?;
+            let mut out = Vec::new();
+            let mut q = stmt.query([]).map_err(|e| e.to_string())?;
+            while let Some(row) = q.next().map_err(|e| e.to_string())? {
+                out.push(row.get::<_, String>(1).map_err(|e| e.to_string())?);
+            }
+            out
+        };
+
+        // Latest rows first (same ordering the Raw Tables browser uses).
+        let sql = format!("SELECT * FROM \"{}\" ORDER BY rowid DESC LIMIT 100", safe_name);
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
+        let mut q = stmt.query([]).map_err(|e| e.to_string())?;
+        while let Some(row) = q.next().map_err(|e| e.to_string())? {
+            let mut r = Vec::new();
+            for i in 0..cols.len() {
+                let v: rusqlite::types::Value = row.get(i).map_err(|e| e.to_string())?;
+                let jv = match v {
+                    rusqlite::types::Value::Null => serde_json::Value::Null,
+                    rusqlite::types::Value::Integer(i) => serde_json::Value::from(i),
+                    rusqlite::types::Value::Real(f) => serde_json::Value::from(f),
+                    rusqlite::types::Value::Text(t) => serde_json::Value::String(t),
+                    rusqlite::types::Value::Blob(b) => {
+                        serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(b))
+                    }
+                };
+                r.push(jv);
+            }
+            rows.push(r);
+        }
+
+        Ok(serde_json::json!({
+            "ok": true,
+            "dry_run": true,
+            "table": table,
+            "columns": cols,
+            "rows": rows,
+            "row_count": rows.len(),
+        }))
+    })();
+
+    // Always clean up the staged copy AND its WAL/SHM sidecars (opening the
+    // temp DB in WAL mode leaves -wal/-shm files behind that would otherwise
+    // accumulate in the server directory forever).
+    let _ = std::fs::remove_file(&tmp_str);
+    let _ = std::fs::remove_file(format!("{}-wal", tmp_str));
+    let _ = std::fs::remove_file(format!("{}-shm", tmp_str));
+
+    match result {
+        Ok(value) => (StatusCode::OK, Json(value)),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": format!("Invalid database: {}", e)})),
+        ),
+    }
+}
+
+/// Validate a candidate SQLite database on a temp copy (dry-run import).
+/// Returns integrity status plus a per-table census; the live DB is untouched.
+fn validate_import_db(body: &[u8]) -> (StatusCode, Json<serde_json::Value>) {
+    // Stage the file in the system temp dir with a unique name.
+    let mut tmp_path = std::env::temp_dir();
+    let unique = format!(
+        "e2e_import_dryrun_{}_{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    tmp_path.push(unique);
+    let tmp_str = tmp_path.to_string_lossy().into_owned();
+
+    if let Err(e) = std::fs::write(&tmp_str, body) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("Could not stage file for validation: {}", e)})),
+        );
+    }
+
+    let result = (|| -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open_with_flags(
+            &tmp_str,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|e| format!("Could not open as SQLite: {}", e))?;
+
+        // Integrity check — every row must read "ok".
+        let mut stmt = conn
+            .prepare("PRAGMA integrity_check")
+            .map_err(|e| e.to_string())?;
+        let rows: Vec<String> = stmt
+            .query_map([], |r| r.get(0))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?;
+        let integrity_ok = rows.iter().all(|r| r == "ok");
+
+        // Foreign-key sanity: list violations without failing the run.
+        let mut fk_stmt = conn
+            .prepare("PRAGMA foreign_key_check")
+            .map_err(|e| e.to_string())?;
+        let fk_rows = fk_stmt
+            .query_map([], |r| {
+                Ok(format!(
+                    "{}: {} row {} references {}",
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?
+                ))
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+
+        // Per-table on-disk size in bytes (data + indexes) via the dbstat
+        // virtual table; falls back to None when dbstat is unavailable.
+        // total_size_bytes comes from the staged file itself (authoritative).
+        let total_size_bytes = std::fs::metadata(&tmp_str)
+            .map(|m| m.len() as i64)
+            .unwrap_or(0);
+        let mut per_table_bytes: HashMap<String, i64> = HashMap::new();
+        let dbstat_ok = conn
+            .prepare(
+                "SELECT m.tbl_name, SUM(d.pgsize) FROM \
+                 (SELECT name, pgsize FROM dbstat WHERE aggregate = TRUE) d \
+                 JOIN sqlite_master m ON m.name = d.name \
+                 GROUP BY m.tbl_name",
+            )
+            .and_then(|mut stmt| {
+                let rows = stmt.query_map([], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+                });
+                match rows {
+                    Ok(iter) => {
+                        for row in iter.flatten() {
+                            per_table_bytes.insert(row.0, row.1);
+                        }
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
+            });
+        let dbstat_ok = dbstat_ok.is_ok();
+
+        // Table census.
+        let mut tables: Vec<serde_json::Value> = Vec::new();
+        {
+            let mut stmt = conn
+                .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+                .map_err(|e| e.to_string())?;
+            let names: Vec<String> = stmt
+                .query_map([], |r| r.get(0))
+                .map_err(|e| e.to_string())?
+                .collect::<Result<_, _>>()
+                .map_err(|e| e.to_string())?;
+            for name in names {
+                let count: i64 = conn
+                    .query_row(
+                        &format!("SELECT COUNT(*) FROM \"{}\"", name.replace('"', "\"\"")),
+                        [],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| format!("table {}: {}", name, e))?;
+                let bytes = if dbstat_ok { per_table_bytes.get(&name).copied() } else { None };
+                tables.push(serde_json::json!({"name": name, "count": count, "size_bytes": bytes}));
+            }
+        }
+
+        Ok(serde_json::json!({
+            "ok": true,
+            "dry_run": true,
+            "integrity_ok": integrity_ok,
+            "integrity": rows,
+            "foreign_key_violations": fk_rows,
+            "tables": tables,
+            "table_count": tables.len(),
+            "total_size_bytes": total_size_bytes,
+        }))
+    })();
+
+    // Always clean up the staged copy AND its WAL/SHM sidecars (opening the
+    // temp DB in WAL mode leaves -wal/-shm files behind that would otherwise
+    // accumulate in the server directory forever).
+    let _ = std::fs::remove_file(&tmp_str);
+    let _ = std::fs::remove_file(format!("{}-wal", tmp_str));
+    let _ = std::fs::remove_file(format!("{}-shm", tmp_str));
+
+    match result {
+        Ok(value) => (StatusCode::OK, Json(value)),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": format!("Invalid database: {}", e)})),
+        ),
+    }
+}
+
 // ===== Phase 5: File Sharing =====
 
-const UPLOAD_DIR: &str = "uploads";
 
 #[derive(Deserialize)]
 pub struct InitFileUploadRequest {
@@ -5147,7 +5652,7 @@ pub async fn init_file_upload(
 
     match state.db.create_file_record(&user_id, req.size, encrypted_mime_bytes.as_deref(), mime_nonce_bytes.as_deref()) {
         Ok((file_id, _file_hash)) => {
-            let dir = format!("{}/{}", UPLOAD_DIR, file_id);
+            let dir = format!("{}/{}", state.config.upload_dir, file_id);
             let _ = tokio::fs::create_dir_all(&dir).await;
             (
                 StatusCode::OK,
@@ -5217,7 +5722,7 @@ pub async fn upload_file_chunk(
     // (client: 40 bytes/chunk). This makes the init-time quota / max-file
     // checks actually binding: a client that declares size=1 cannot write
     // unlimited chunks past it.
-    let chunk_path = format!("{}/{}/{}.enc", UPLOAD_DIR, file_id, index);
+    let chunk_path = format!("{}/{}/{}.enc", state.config.upload_dir, file_id, index);
     let old_size: i64 = match tokio::fs::metadata(&chunk_path).await {
         Ok(m) => m.len() as i64,
         Err(_) => 0,
@@ -5374,7 +5879,7 @@ pub async fn download_file(
     // Read all encrypted chunks and concatenate
     let mut data = Vec::new();
     for i in 0..file_info.chunk_count {
-        let chunk_path = format!("{}/{}/{}.enc", UPLOAD_DIR, file_id, i);
+        let chunk_path = format!("{}/{}/{}.enc", state.config.upload_dir, file_id, i);
         match std::fs::read(&chunk_path) {
             Ok(chunk) => data.extend_from_slice(&chunk),
             Err(_) => {
@@ -5469,7 +5974,7 @@ pub async fn download_file_by_hash(
     // Read all encrypted chunks and concatenate
     let mut data = Vec::new();
     for i in 0..file_info.chunk_count {
-        let chunk_path = format!("{}/{}/{}.enc", UPLOAD_DIR, file_id, i);
+        let chunk_path = format!("{}/{}/{}.enc", state.config.upload_dir, file_id, i);
         match std::fs::read(&chunk_path) {
             Ok(chunk) => data.extend_from_slice(&chunk),
             Err(_) => {
@@ -5691,11 +6196,11 @@ pub async fn update_profile(
             if let Ok(old_info) = state.db.delete_file_record(&old_id) {
                 // Delete chunk files from disk
                 for i in 0..old_info.chunk_count {
-                    let chunk_path = format!("{}/{}/{}.enc", UPLOAD_DIR, old_id, i);
+                    let chunk_path = format!("{}/{}/{}.enc", state.config.upload_dir, old_id, i);
                     let _ = std::fs::remove_file(&chunk_path);
                 }
                 // Remove the directory
-                let dir = format!("{}/{}", UPLOAD_DIR, old_id);
+                let dir = format!("{}/{}", state.config.upload_dir, old_id);
                 let _ = std::fs::remove_dir(&dir);
             }
         }
@@ -6041,7 +6546,7 @@ async fn delete_account_and_cleanup(
 
     // Remove the on-disk chunk dirs for the user's files (uploads/{file_id}).
     for fid in &file_ids {
-        let dir = format!("{}/{}", UPLOAD_DIR, fid);
+        let dir = format!("{}/{}", state.config.upload_dir, fid);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

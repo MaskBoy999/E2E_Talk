@@ -625,6 +625,7 @@ test.describe('Kill Switch rate limiting (isolated server)', () => {
                 PORT: '3454',
                 HTTPS_PORT: '3455',
                 DATABASE_URL: tmpDb,
+                UPLOAD_DIR: tmpDb + '-uploads',
                 // Tiny per-IP kill-switch budget so the throttle trips
                 // deterministically; the per-account budget raised so this
                 // server isolates the per-IP limiter.
@@ -656,6 +657,7 @@ test.describe('Kill Switch rate limiting (isolated server)', () => {
         await new Promise((r) => setTimeout(r, 500));
         if (tmpDb) {
             try { fs.unlinkSync(tmpDb); } catch (_) {}
+            try { fs.rmSync(tmpDb + '-uploads', { recursive: true, force: true }); } catch (_) {}
         }
     });
 
@@ -714,6 +716,7 @@ test.describe('Kill Switch per-account rate limiting (isolated server)', () => {
                 PORT: '3456',
                 HTTPS_PORT: '3457',
                 DATABASE_URL: tmpDb,
+                UPLOAD_DIR: tmpDb + '-uploads',
                 // Tiny per-ACCOUNT kill-switch budget so the throttle trips
                 // deterministically regardless of where requests come from.
                 KILL_SWITCH_USER_MAX: '3',
@@ -747,6 +750,7 @@ test.describe('Kill Switch per-account rate limiting (isolated server)', () => {
         await new Promise((r) => setTimeout(r, 500));
         if (tmpDb) {
             try { fs.unlinkSync(tmpDb); } catch (_) {}
+            try { fs.rmSync(tmpDb + '-uploads', { recursive: true, force: true }); } catch (_) {}
         }
     });
 
