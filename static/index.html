@@ -12,6 +12,8 @@
         <div class="loading-spinner"></div>
         <div class="loading-text">Loading…</div>
     </div>
+    <!-- Device-local app background photo layer (one image underneath the whole app) -->
+    <div id="app-bg"></div>
     <div class="app">
         <!-- Server Strip (far left) -->
         <div class="server-strip" id="server-strip">
@@ -456,6 +458,35 @@
                     <div class="theme-mode-row">
                         <button class="theme-mode-btn active" id="theme-mode-dark" data-mode="dark">🌙 Dark</button>
                         <button class="theme-mode-btn" id="theme-mode-light" data-mode="light">☀️ Light</button>
+                    </div>
+                </div>
+                <div class="settings-group" style="padding-bottom:12px;border-bottom:1px solid var(--bg-border);margin-top:16px">
+                    <h4>App Background</h4>
+                    <p class="settings-hint">Put a photo behind the whole app. It is stored only on this device, so each device can have its own. Use the sliders to tune how the picture looks behind each section.</p>
+                    <div class="app-bg-row">
+                        <input type="file" id="app-bg-file" accept="image/*" style="display:none">
+                        <button class="btn btn-primary" id="app-bg-upload-btn">📷 Choose Image</button>
+                        <button class="btn btn-danger" id="app-bg-remove-btn" style="display:none">Remove</button>
+                        <div class="app-bg-thumb" id="app-bg-thumb" style="display:none"></div>
+                    </div>
+                    <div id="app-bg-controls" style="display:none">
+                        <div class="app-bg-ctrl-row">
+                            <label class="app-bg-ctrl-label" for="app-bg-pos">Position</label>
+                            <select id="app-bg-pos" class="settings-select" style="max-width:170px">
+                                <option value="left top">Top left</option>
+                                <option value="center top">Top center</option>
+                                <option value="right top">Top right</option>
+                                <option value="left center">Left</option>
+                                <option value="center center" selected>Center</option>
+                                <option value="right center">Right</option>
+                                <option value="left bottom">Bottom left</option>
+                                <option value="center bottom">Bottom center</option>
+                                <option value="right bottom">Bottom right</option>
+                            </select>
+                            <label class="app-bg-ctrl-label" for="app-bg-zoom">Zoom <span id="app-bg-zoom-val">100%</span></label>
+                            <input type="range" id="app-bg-zoom" min="100" max="300" step="10" value="100" class="app-bg-zoom">
+                        </div>
+                        <div class="app-bg-sections" id="app-bg-sections"></div>
                     </div>
                 </div>
                 <div class="settings-group">

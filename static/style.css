@@ -30,6 +30,68 @@ body {
     font-size: clamp(14px, 2.5vw, 16px);
 }
 
+/* ===== App Background (device-local photo layer) =====
+   A single fixed image sits underneath the whole app. Each major section
+   can tune how the picture looks behind it via per-section custom props
+   set from the Display settings (--bg-blur-* = backdrop blur px,
+   --bg-dim-* = opacity % of the theme panel color over the image).
+   Off by default: without body.app-bg-on everything is solid as before. */
+#app-bg {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    display: none;
+    background-repeat: no-repeat;
+    background-size: cover;
+    background-position: center center;
+    transform-origin: center center;
+    pointer-events: none;
+}
+body.app-bg-on #app-bg {
+    display: block;
+}
+body.app-bg-on .app {
+    position: relative;
+    z-index: 1;
+}
+body.app-bg-on .server-strip {
+    background: color-mix(in srgb, var(--bg-primary) var(--bg-dim-strip, 55%), transparent);
+    -webkit-backdrop-filter: blur(var(--bg-blur-strip, 6px));
+    backdrop-filter: blur(var(--bg-blur-strip, 6px));
+}
+body.app-bg-on .sidebar {
+    background: color-mix(in srgb, var(--bg-secondary) var(--bg-dim-sidebar, 55%), transparent);
+    -webkit-backdrop-filter: blur(var(--bg-blur-sidebar, 8px));
+    backdrop-filter: blur(var(--bg-blur-sidebar, 8px));
+}
+body.app-bg-on .sidebar-footer {
+    background: color-mix(in srgb, var(--bg-secondary) var(--bg-dim-footer, 60%), transparent);
+    -webkit-backdrop-filter: blur(var(--bg-blur-footer, 8px));
+    backdrop-filter: blur(var(--bg-blur-footer, 8px));
+}
+body.app-bg-on .main {
+    background: color-mix(in srgb, var(--bg-primary) var(--bg-dim-chat, 65%), transparent);
+}
+body.app-bg-on .chat-header {
+    background: color-mix(in srgb, var(--bg-primary) var(--bg-dim-header, 50%), transparent);
+    -webkit-backdrop-filter: blur(var(--bg-blur-header, 6px));
+    backdrop-filter: blur(var(--bg-blur-header, 6px));
+}
+body.app-bg-on .chat-body {
+    -webkit-backdrop-filter: blur(var(--bg-blur-chat, 4px));
+    backdrop-filter: blur(var(--bg-blur-chat, 4px));
+}
+body.app-bg-on .members-panel {
+    background: color-mix(in srgb, var(--bg-secondary) var(--bg-dim-members, 55%), transparent);
+    -webkit-backdrop-filter: blur(var(--bg-blur-members, 8px));
+    backdrop-filter: blur(var(--bg-blur-members, 8px));
+}
+body.app-bg-on .chat-input {
+    background: color-mix(in srgb, var(--bg-primary) var(--bg-dim-input, 60%), transparent);
+    -webkit-backdrop-filter: blur(var(--bg-blur-input, 10px));
+    backdrop-filter: blur(var(--bg-blur-input, 10px));
+}
+
 /* ===== Smooth Theme Transitions ===== */
 body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
 .dm-item, .message, .chat-header, .chat-body, .chat-input,
@@ -826,7 +888,10 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
 .member-name {
     font-size: clamp(12px, 2vw, 14px);
     color: var(--text-primary);
-    overflow: hidden;
+    /* overflow: clip (not hidden) + clip margin lets the display-name glow
+       paint smoothly beyond the box while keeping the ellipsis truncation. */
+    overflow: clip;
+    overflow-clip-margin: 20px;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
@@ -1268,7 +1333,8 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     font-size: 14px;
     font-weight: 600;
     white-space: nowrap;
-    overflow: hidden;
+    overflow: clip;
+    overflow-clip-margin: 20px;
     text-overflow: ellipsis;
 }
 
@@ -1943,7 +2009,8 @@ body.show-msg-times-hover .message:hover .file-card .time-hover {
     font-size: 13px;
     color: var(--text-primary);
     white-space: nowrap;
-    overflow: hidden;
+    overflow: clip;
+    overflow-clip-margin: 20px;
     text-overflow: ellipsis;
 }
 
@@ -6053,7 +6120,8 @@ body.show-msg-status-hover .message:hover .content .msg-status {
 }
 .mst-name {
     font-weight: 600;
-    overflow: hidden;
+    overflow: clip;
+    overflow-clip-margin: 20px;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
@@ -7717,6 +7785,91 @@ body.show-msg-status-hover .message:hover .content .msg-status {
     color: var(--bg-primary);
 }
 
+/* ===== App Background Settings ===== */
+.app-bg-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 8px;
+    flex-wrap: wrap;
+}
+.app-bg-thumb {
+    width: 64px;
+    height: 40px;
+    border-radius: 6px;
+    border: 1px solid var(--bg-border);
+    background-size: cover;
+    background-position: center;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+}
+.app-bg-ctrl-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 12px;
+    flex-wrap: wrap;
+}
+.app-bg-ctrl-label {
+    font-size: 13px;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+.app-bg-zoom {
+    width: 140px;
+    accent-color: var(--accent, #4fc3f7);
+}
+.app-bg-sections {
+    margin-top: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.app-bg-section {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 8px 10px;
+    border: 1px solid var(--bg-border);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+}
+.app-bg-section-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    min-width: 110px;
+}
+.app-bg-toggle {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 12px;
+    color: var(--text-muted);
+    cursor: pointer;
+    white-space: nowrap;
+}
+.app-bg-toggle input {
+    accent-color: var(--accent, #4fc3f7);
+}
+.app-bg-slider-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+.app-bg-slider-label input[type="range"] {
+    width: 90px;
+    accent-color: var(--accent, #4fc3f7);
+}
+.app-bg-slider-label .app-bg-slider-val {
+    min-width: 40px;
+    color: var(--text-primary);
+    font-size: 11px;
+}
+
 /* ===== Loading Overlay ===== */
 .loading-overlay {
     position: fixed;
@@ -8140,7 +8293,7 @@ video.remote-video-tile.mirrored {
     flex: 1;
     min-width: 0;
 }
-.voice-member-name { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.voice-member-name { font-size: 14px; overflow: clip; overflow-clip-margin: 20px; text-overflow: ellipsis; white-space: nowrap; }
 .voice-member-status { font-size: 12px; color: var(--text-muted, #888); }
 .vm-badge { margin-right: 2px; }
 .vm-badge.locked { color: #ef5350; }

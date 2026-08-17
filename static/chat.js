@@ -1861,6 +1861,22 @@ function ackOpenConversationRead(convId, isDm) {
     }
 }
 
+// Returning to the app tab re-acks the open conversation as read. Messages that
+// arrived while the tab was hidden skipped scheduleReadAck (document.hidden), so
+// without this the author's checkmark would sit at ✓✓ delivered until the reader
+// reloads — "simply looking" at the conversation must be enough. Runs only when
+// the tab becomes visible again, so background tabs never send false reads.
+// (Presence cleanup on actual page/tab/browser close is handled separately by
+// ws.onclose → onlineUsers refresh, so closing never leaves the reader "looking".)
+document.addEventListener('visibilitychange', function () {
+    if (document.hidden) return;
+    if (currentDmChannelId) {
+        ackOpenConversationRead(currentDmChannelId, true);
+    } else if (currentChannelId) {
+        ackOpenConversationRead(currentChannelId, false);
+    }
+});
+
 // Derive the rendered status of an own message from its ack rows.
 function messageReadStatus(msg, capAtDelivered) {
     if (!msg || !Array.isArray(msg.acks) || !msg.acks.length) return 'sent';
@@ -3218,6 +3234,230 @@ document.addEventListener('DOMContentLoaded', () => {
             saveThemeColors(accentVal, bgVal);
         });
     }
+
+    // ===== App Background (device-local photo layer) =====
+    // One fixed photo underneath the whole app. Stored only in localStorage
+    // (each device can have its own). Per-section blur/dim tune how the
+    // picture looks behind each surface; off by default (no image set).
+    var APP_BG_KEY = 'app_bg';
+    var appBgSections = [
+        { key: 'strip',   label: 'Server Strip',    defaultBlur: 6,  defaultDim: 55 },
+        { key: 'sidebar', label: 'Sidebar',         defaultBlur: 8,  defaultDim: 55 },
+        { key: 'header',  label: 'Chat Header',     defaultBlur: 6,  defaultDim: 50 },
+        { key: 'chat',    label: 'Messages',        defaultBlur: 4,  defaultDim: 65 },
+        { key: 'members', label: 'Members Panel',   defaultBlur: 8,  defaultDim: 55 },
+        { key: 'input',   label: 'Chat Input',      defaultBlur: 10, defaultDim: 60 },
+        { key: 'footer',  label: 'Sidebar Footer',  defaultBlur: 8,  defaultDim: 60 }
+    ];
+
+    function defaultAppBgSettings() {
+        var sections = {};
+        appBgSections.forEach(function (s) { sections[s.key] = { on: true, blur: s.defaultBlur, dim: s.defaultDim }; });
+        return { img: '', pos: 'center center', zoom: 100, sections: sections };
+    }
+    function loadAppBg() {
+        try {
+            var raw = localStorage.getItem(APP_BG_KEY);
+            if (!raw) return defaultAppBgSettings();
+            var parsed = JSON.parse(raw);
+            if (!parsed || typeof parsed !== 'object' || !parsed.img) return defaultAppBgSettings();
+            var d = defaultAppBgSettings();
+            parsed.sections = parsed.sections || {};
+            appBgSections.forEach(function (s) {
+                var cur = parsed.sections[s.key] || {};
+                var def = d.sections[s.key];
+                parsed.sections[s.key] = {
+                    on: typeof cur.on === 'boolean' ? cur.on : def.on,
+                    blur: typeof cur.blur === 'number' ? cur.blur : def.blur,
+                    dim: typeof cur.dim === 'number' ? cur.dim : def.dim
+                };
+            });
+            if (typeof parsed.pos !== 'string') parsed.pos = 'center center';
+            if (typeof parsed.zoom !== 'number' || parsed.zoom < 100) parsed.zoom = 100;
+            return parsed;
+        } catch (_) {
+            return defaultAppBgSettings();
+        }
+    }
+    var appBgSettings = loadAppBg();
+    function saveAppBg() {
+        try { localStorage.setItem(APP_BG_KEY, JSON.stringify(appBgSettings)); } catch (_) {}
+    }
+    function appBgPosToOrigin(pos) {
+        var parts = (pos || 'center center').split(/\s+/);
+        var x = parts[0] || 'center', y = parts[1] || 'center';
+        var xm = { left: '0%', center: '50%', right: '100%' }[x] || '50%';
+        var ym = { top: '0%', center: '50%', bottom: '100%' }[y] || '50%';
+        return xm + ' ' + ym;
+    }
+    function applyAppBg() {
+        var bgEl = document.getElementById('app-bg');
+        if (!bgEl) return;
+        var has = !!appBgSettings.img;
+        document.body.classList.toggle('app-bg-on', has);
+        if (!has) return;
+        bgEl.style.backgroundImage = 'url("' + appBgSettings.img + '")';
+        bgEl.style.backgroundPosition = appBgSettings.pos || 'center center';
+        bgEl.style.transform = 'scale(' + (Math.max(100, appBgSettings.zoom || 100) / 100) + ')';
+        bgEl.style.transformOrigin = appBgPosToOrigin(appBgSettings.pos);
+        var root = document.documentElement;
+        appBgSections.forEach(function (s) {
+            var cfg = appBgSettings.sections[s.key];
+            var on = cfg ? cfg.on !== false : true;
+            root.style.setProperty('--bg-blur-' + s.key, (on && cfg.blur ? cfg.blur : 0) + 'px');
+            root.style.setProperty('--bg-dim-' + s.key, (on ? cfg.dim : 100) + '%');
+        });
+    }
+    function updateAppBgUI() {
+        var has = !!appBgSettings.img;
+        var uploadBtn = document.getElementById('app-bg-upload-btn');
+        var removeBtn = document.getElementById('app-bg-remove-btn');
+        var thumb = document.getElementById('app-bg-thumb');
+        var controls = document.getElementById('app-bg-controls');
+        if (uploadBtn) uploadBtn.textContent = has ? '📷 Change Image' : '📷 Choose Image';
+        if (removeBtn) removeBtn.style.display = has ? '' : 'none';
+        if (thumb) {
+            thumb.style.display = has ? '' : 'none';
+            if (has) thumb.style.backgroundImage = 'url("' + appBgSettings.img + '")';
+        }
+        if (controls) controls.style.display = has ? '' : 'none';
+        var posSel = document.getElementById('app-bg-pos');
+        if (posSel) posSel.value = appBgSettings.pos || 'center center';
+        var zoom = document.getElementById('app-bg-zoom');
+        var zoomVal = document.getElementById('app-bg-zoom-val');
+        if (zoom) zoom.value = appBgSettings.zoom || 100;
+        if (zoomVal) zoomVal.textContent = (appBgSettings.zoom || 100) + '%';
+        var sectionsBox = document.getElementById('app-bg-sections');
+        if (sectionsBox) {
+            if (!sectionsBox.dataset.built) {
+                sectionsBox.dataset.built = '1';
+                sectionsBox.innerHTML = '';
+                appBgSections.forEach(function (s) {
+                    var row = document.createElement('div');
+                    row.className = 'app-bg-section';
+                    row.innerHTML =
+                        '<span class="app-bg-section-name">' + escapeHtml(s.label) + '</span>' +
+                        '<label class="app-bg-toggle"><input type="checkbox" class="app-bg-on" data-section="' + s.key + '"><span>Show</span></label>' +
+                        '<label class="app-bg-slider-label">Blur <input type="range" class="app-bg-blur" data-section="' + s.key + '" min="0" max="24" step="1"><span class="app-bg-slider-val app-bg-blur-val" data-section="' + s.key + '"></span></label>' +
+                        '<label class="app-bg-slider-label">Dim <input type="range" class="app-bg-dim" data-section="' + s.key + '" min="0" max="95" step="5"><span class="app-bg-slider-val app-bg-dim-val" data-section="' + s.key + '"></span></label>';
+                    sectionsBox.appendChild(row);
+                });
+                sectionsBox.addEventListener('change', function (e) {
+                    var sec = e.target && e.target.getAttribute && e.target.getAttribute('data-section');
+                    if (!sec || !appBgSettings.sections[sec]) return;
+                    if (e.target.classList.contains('app-bg-on')) {
+                        appBgSettings.sections[sec].on = e.target.checked;
+                    } else if (e.target.classList.contains('app-bg-blur')) {
+                        appBgSettings.sections[sec].blur = parseInt(e.target.value, 10) || 0;
+                    } else if (e.target.classList.contains('app-bg-dim')) {
+                        appBgSettings.sections[sec].dim = parseInt(e.target.value, 10) || 0;
+                    } else {
+                        return;
+                    }
+                    saveAppBg();
+                    applyAppBg();
+                    updateAppBgUI();
+                });
+            }
+            sectionsBox.querySelectorAll('.app-bg-section').forEach(function (row) {
+                var key = row.querySelector('.app-bg-on').getAttribute('data-section');
+                var cfg = appBgSettings.sections[key];
+                if (!cfg) return;
+                row.querySelector('.app-bg-on').checked = cfg.on !== false;
+                var blurIn = row.querySelector('.app-bg-blur');
+                blurIn.value = cfg.blur;
+                row.querySelector('.app-bg-blur-val').textContent = cfg.blur + 'px';
+                var dimIn = row.querySelector('.app-bg-dim');
+                dimIn.value = cfg.dim;
+                row.querySelector('.app-bg-dim-val').textContent = cfg.dim + '%';
+            });
+        }
+    }
+    function compressAppBgImage(file, cb) {
+        var reader = new FileReader();
+        reader.onerror = function () { cb(''); };
+        reader.onload = function () {
+            var img = new Image();
+            img.onerror = function () { cb(''); };
+            img.onload = function () {
+                var MAX = 2400;
+                var baseScale = Math.min(1, MAX / Math.max(img.width, img.height));
+                var bgColor = '#1a1a2e';
+                try { bgColor = getComputedStyle(document.body).backgroundColor || bgColor; } catch (_) {}
+                function exportAt(scale) {
+                    var w = Math.max(1, Math.round(img.width * scale));
+                    var h = Math.max(1, Math.round(img.height * scale));
+                    var canvas = document.createElement('canvas');
+                    canvas.width = w; canvas.height = h;
+                    var ctx = canvas.getContext('2d');
+                    // Fill first so transparent PNGs don't turn black on JPEG export.
+                    ctx.fillStyle = bgColor;
+                    ctx.fillRect(0, 0, w, h);
+                    ctx.drawImage(img, 0, 0, w, h);
+                    var quality = 0.85;
+                    var dataUrl = canvas.toDataURL('image/jpeg', quality);
+                    while (dataUrl.length > 1500000 && quality > 0.25) {
+                        quality -= 0.08;
+                        dataUrl = canvas.toDataURL('image/jpeg', quality);
+                    }
+                    // Still too big for localStorage — shrink the canvas itself.
+                    if (dataUrl.length > 4000000 && scale > 0.15) {
+                        exportAt(scale * 0.7);
+                        return;
+                    }
+                    cb(dataUrl);
+                }
+                exportAt(baseScale);
+            };
+            img.src = reader.result;
+        };
+        reader.readAsDataURL(file);
+    }
+    var appBgFile = document.getElementById('app-bg-file');
+    var appBgUploadBtn = document.getElementById('app-bg-upload-btn');
+    var appBgRemoveBtn = document.getElementById('app-bg-remove-btn');
+    var appBgPos = document.getElementById('app-bg-pos');
+    var appBgZoom = document.getElementById('app-bg-zoom');
+    if (appBgUploadBtn && appBgFile) {
+        appBgUploadBtn.addEventListener('click', function () { appBgFile.click(); });
+        appBgFile.addEventListener('change', function () {
+            var f = appBgFile.files && appBgFile.files[0];
+            if (!f) return;
+            compressAppBgImage(f, function (dataUrl) {
+                if (!dataUrl) return;
+                appBgSettings.img = dataUrl;
+                saveAppBg();
+                applyAppBg();
+                updateAppBgUI();
+            });
+        });
+    }
+    if (appBgRemoveBtn) {
+        appBgRemoveBtn.addEventListener('click', function () {
+            appBgSettings.img = '';
+            saveAppBg();
+            applyAppBg();
+            updateAppBgUI();
+        });
+    }
+    if (appBgPos) {
+        appBgPos.addEventListener('change', function () {
+            appBgSettings.pos = appBgPos.value;
+            saveAppBg();
+            applyAppBg();
+        });
+    }
+    if (appBgZoom) {
+        appBgZoom.addEventListener('input', function () {
+            appBgSettings.zoom = parseInt(appBgZoom.value, 10) || 100;
+            saveAppBg();
+            applyAppBg();
+            var zoomVal = document.getElementById('app-bg-zoom-val');
+            if (zoomVal) zoomVal.textContent = appBgSettings.zoom + '%';
+        });
+    }
+    updateAppBgUI();
+    applyAppBg();
 
     // Friend requests disabled setting
     const disableFrToggle = document.getElementById('disable-friend-requests-toggle');
@@ -11652,6 +11892,14 @@ async function loadMessages(channelId, aroundMessageId, skipBottomScroll) {
             _messagePagination[channelId].hasMore = false;
         }
 
+        // CRITICAL: reset the grouping tracker before rendering the fresh batch.
+        // Without this, a second load of the same conversation (e.g. the
+        // auto-select in loadChannels followed by a channel click, or simply
+        // re-opening the channel) compares the FIRST message against the last
+        // message of the previous render — same sender within 2 minutes — and
+        // wrongly adds .grouped, which hides the sender header (CSS: display:none),
+        // so the first message's pfp + display name never appear.
+        lastMessageInfo = { senderId: null, channelId: null, time: 0 };
         for (const msg of messages) {
             // Stop rendering if the user switched channels mid-loop
             if (currentChannelId !== channelId) return;
@@ -14952,6 +15200,12 @@ async function loadDmMessages(dmChannelId, otherUserId, skipBottomScroll) {
             })(sid2);
         }
 
+        // CRITICAL: reset the DM grouping tracker right before rendering the
+        // fresh batch (see loadMessages — a double load would otherwise group
+        // the first message with the previous render's last message and hide
+        // its sender header). Reset here, after all the awaits above, so a
+        // live WS append racing the load can't get its grouping state wiped.
+        lastDmMessageInfo = { senderId: null, dmChannelId: null, time: 0 };
         for (const msg of messages) {
             // Stop rendering if the user switched DMs mid-loop
             if (currentDmChannelId !== dmChannelId) return;
