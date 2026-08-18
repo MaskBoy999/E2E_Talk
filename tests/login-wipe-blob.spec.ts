@@ -69,7 +69,14 @@ test.describe('Login page wipes ALL client data when not logged in', () => {
             } catch (_) { idbCount = -1; }
             return { keys, idbCount, sessionKeys: sessionStorage.length };
         });
-        expect(leftovers.keys.length).toBe(0);
+        // The wipe removes every stale account key/setting; the only keys that
+        // may remain are the deliberately-preserved media caches (fkc_*, profile
+        // key cache, display-name cache — they hold no account secrets and keep
+        // avatars/names alive across a forced re-login).
+        const preserved = ['profile_key_cache', 'user_display_name_cache'];
+        const staleLeftovers = leftovers.keys.filter((k: string) =>
+            !k.startsWith('fkc_') && preserved.indexOf(k) === -1);
+        expect(staleLeftovers).toEqual([]);
         expect(leftovers.sessionKeys).toBe(0);
         if (leftovers.idbCount !== -1) {
             expect(leftovers.idbCount).toBe(0);
@@ -124,7 +131,7 @@ test.describe('Key blob includes ALL key types + versioning + recovery', () => {
             };
         });
 
-        expect(bundleInfo.version).toBe(2);
+        expect(bundleInfo.version).toBe(3);
         expect(bundleInfo.hasAuthKey).toBe(true);
         expect(bundleInfo.hasInvite).toBe(true);
         expect(bundleInfo.hasServer).toBe(true);
@@ -285,6 +292,29 @@ test.describe('Key blob includes ALL key types + versioning + recovery', () => {
         // deliberately stale v1 bundle that lacks the newer key types
         // (e2e_auth_key, e2e_invite_*) — exactly what an old client would
         // have saved before those keys were added to the bundle.
+        // The app keeps the blob fresh as media caches change (debounced 3s),
+        // so a delayed PUT could race the stale replacement below. Wait for the
+        // blob to STABILIZE (same ciphertext across samples spanning > 3s) so
+        // no debounced save is still in flight before we replace it.
+        await page.waitForFunction(async (pw: string) => {
+            const sample = async () => {
+                try {
+                    const t = localStorage.getItem('token');
+                    const res = await fetch('/api/key-blob', { headers: { Authorization: 'Bearer ' + t } });
+                    const data = await res.json();
+                    const b = E2ECrypto.decryptKeyBundle(data.encrypted_blob, pw, data.salt, data.nonce);
+                    return { v: b ? b.v : -1, blob: data.encrypted_blob };
+                } catch (_) { return { v: -1, blob: null }; }
+            };
+            const s1 = await sample();
+            if (s1.v < 3) return false;
+            await new Promise(r => setTimeout(r, 2000));
+            const s2 = await sample();
+            await new Promise(r => setTimeout(r, 2000));
+            const s3 = await sample();
+            return s2.v >= 3 && s3.v >= 3 && s1.blob === s2.blob && s2.blob === s3.blob;
+        }, password, { timeout: 25000 });
+
         const stalePutOk = await page.evaluate(async (pw: string) => {
             // Ensure the current build's keys exist so the rebuilt blob can
             // include them (auth_key is set during registration).
@@ -369,9 +399,9 @@ test.describe('Key blob includes ALL key types + versioning + recovery', () => {
             };
         }, password);
         expect(rebuilt.ok).toBe(true);
-        // The auto-update: version bumped from 1 -> 2 and the newer key type
+        // The auto-update: version bumped from 1 -> 3 and the newer key type
         // (e2e_auth_key) that the stale blob was missing is now in the bundle.
-        expect(rebuilt.version).toBe(2);
+        expect(rebuilt.version).toBe(3);
         expect(rebuilt.hasAuthKey).toBe(true);
         expect(rebuilt.hasIdentity).toBe(true);
         expect(rebuilt.hasProfileCache).toBe(true);

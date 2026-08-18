@@ -808,6 +808,28 @@
                         <div class="session-log-empty">No re-authentication events yet for this account.</div>
                     </div>
                 </div>
+                <div class="settings-group">
+                    <h4>🔐 Restore from Server Backup</h4>
+                    <p class="settings-hint">Lost your device or cleared browser data? Enter your account password to restore all encryption keys (identity, server keys, media caches, friend code) from the server backup. This only works if you have a key backup saved (created automatically at login/registration).</p>
+                    <p class="settings-hint" id="backup-status-line" style="margin-top:8px;font-weight:600;">Checking backup status…</p>
+                    <div id="backup-age-warning" style="display:none;margin-top:8px;padding:10px 14px;border-radius:8px;font-size:13px;background:rgba(250,166,26,0.1);border:1px solid rgba(250,166,26,0.3);color:#faa61a;"></div>
+                    <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap;">
+                        <button class="btn-reauth" id="save-backup-now-btn">&#128190; Save Backup Now</button>
+                        <button class="btn-reauth" id="restore-backup-btn">&#128260; Restore Keys from Backup</button>
+                    </div>
+                    <p id="save-backup-status" style="margin-top:6px;font-size:13px;"></p>
+                    <div id="restore-backup-section" style="display:none;margin-top:10px;">
+                        <div class="auth-input-row" style="margin-bottom:8px;">
+                            <input type="password" id="restore-backup-password" placeholder="Enter your password" class="modal-input auth-code-input" style="flex:1;" autocomplete="current-password" />
+                            <button type="button" class="toggle-visibility-btn" id="toggle-restore-backup-password" title="Show/Hide">&#128065;</button>
+                        </div>
+                        <div style="display:flex;gap:8px;">
+                            <button class="btn-reauth-confirm" id="restore-backup-confirm-btn" style="font-size:13px;padding:8px 16px;">&#128260; Restore</button>
+                            <button class="btn-reauth" id="restore-backup-cancel-btn" style="font-size:13px;padding:8px 16px;">Cancel</button>
+                        </div>
+                    </div>
+                    <p id="restore-backup-status" style="margin-top:8px;font-size:13px;"></p>
+                </div>
                 <div class="settings-group settings-danger">
                     <h4>Danger Zone</h4>
                     <p class="settings-hint">Permanently delete your account and all associated data. This cannot be undone.</p>

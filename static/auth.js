@@ -65,8 +65,37 @@ document.addEventListener('DOMContentLoaded', () => {
     function wipeAllClientData() {
         // 1) Secure-storage-aware clear: removes sensitive keys, the
         //    in-memory encryption key, and the session key (bypasses the
-        //    interceptor).
-        try { if (window._secClearAll) window._secClearAll(); } catch (_) {}
+        //    interceptor). The media caches (fkc_* file keys + profile_key_cache)
+        //    survive: same trust level as user_display_name_cache (downloads are
+        //    server-gated by friendship/membership), and losing them on a forced
+        //    re-login breaks every avatar/banner/emoji until conversation
+        //    profiles re-sync. Because the wipe rotates the encryption key, we
+        //    must read the plaintexts BEFORE the clear and re-write them AFTER
+        //    so they re-encrypt under the new key (and _secReKey migrates them
+        //    to the password key on login).
+        var _mediaCachePlain = {};
+        try {
+            if (window._secClearAll) {
+                for (var _mi = 0; _mi < localStorage.length; _mi++) {
+                    var _mk = localStorage.key(_mi);
+                    // user_display_name_cache matches the 'user' sensitive prefix,
+                    // so it's removed by the clear like the other media caches.
+                    if (_mk && (_mk.indexOf('fkc_') === 0 || _mk === 'profile_key_cache' || _mk === 'user_display_name_cache')) {
+                        try {
+                            var _mv = window._secGet ? window._secGet(_mk) : localStorage.getItem(_mk);
+                            if (_mv !== null) _mediaCachePlain[_mk] = _mv;
+                        } catch (_e2) {}
+                    }
+                }
+                window._secClearAll();
+                // Re-write the preserved media caches with the post-wipe key.
+                for (var _mk2 in _mediaCachePlain) {
+                    if (_mediaCachePlain.hasOwnProperty(_mk2)) {
+                        try { localStorage.setItem(_mk2, _mediaCachePlain[_mk2]); } catch (_e3) {}
+                    }
+                }
+            }
+        } catch (_e) {}
         // 2) Remove EVERYTHING else (non-sensitive keys: themes, settings,
         //    mute flags, volume, invite codes, etc.) via the raw API.
         try {
@@ -93,6 +122,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Identity keys, server keys, and account state are still wiped.
                 if (wipeKey === 'user_display_name_cache') continue;
                 if (wipeKey.indexOf('fkc_') === 0) continue;
+                // profile_key_cache holds raw decrypted file keys (pfp/banner/
+                // profile-data keys) — same download-gated trust level as fkc_*,
+                // and losing it on a forced re-login breaks every avatar/banner
+                // until the conversation profiles re-sync.
+                if (wipeKey === 'profile_key_cache') continue;
                 Storage.prototype.removeItem.call(localStorage, wipeKey);
             }
         } catch (_) {}

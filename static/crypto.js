@@ -566,7 +566,10 @@ var E2ECrypto = (() => {
     // Bump BUNDLE_VERSION whenever NEW key types are added to the bundle so
     // stale blobs (saved by an older build without those keys) can be detected
     // on restore and rebuilt with the complete key set.
-    const BUNDLE_VERSION = 2;
+    // v3: + user_display_name_cache (display names + raw profile pic/banner
+    // keys), so a complete localStorage clear on a new device restores the
+    // media caches instantly instead of waiting for conversation re-fetches.
+    const BUNDLE_VERSION = 3;
 
     // All encryption/identity key types that must be recoverable. Kept as a
     // single source of truth so every key kind added in the future is simply
@@ -582,6 +585,10 @@ var E2ECrypto = (() => {
     ];
     const BUNDLE_EXACT_KEYS = [
         'profile_key_cache',
+        // Display-name cache: display names, colors, AND the raw profile
+        // pic/banner keys it mirrors from conversation-profile fetches. Without
+        // it a fresh device loses every avatar/name until profiles re-sync.
+        'user_display_name_cache',
         'e2e_hmac_key',
         'e2e_auth_key',
         'e2e_friend_code',

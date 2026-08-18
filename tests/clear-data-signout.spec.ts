@@ -176,7 +176,14 @@ test.describe('Clear Data and Sign Out Flows', () => {
             }
             return keys.sort();
         });
-        expect(allKeysAfter.length).toBe(0, 'Login page wipe should leave localStorage empty');
+        // The wipe removes every account key; only the deliberately-preserved
+        // media caches may remain (fkc_*, profile key cache, display-name
+        // cache — they hold no account secrets and keep avatars/names alive
+        // across the forced re-login).
+        const preserved = ['profile_key_cache', 'user_display_name_cache'];
+        const staleAfter = allKeysAfter.filter((k: string) =>
+            !k.startsWith('fkc_') && preserved.indexOf(k) === -1);
+        expect(staleAfter, 'Login page wipe should leave only preserved media caches').toEqual([]);
 
         // 5. Re-login restores keys from the server blob.
         await loginUser(page, username, password);

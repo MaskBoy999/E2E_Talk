@@ -2419,12 +2419,13 @@ pub async fn get_user_key_blob(
     };
 
     match state.db.get_user_key_blob(&user_id) {
-        Ok(Some((encrypted_blob, salt, nonce, needs_rebuild))) => {
+        Ok(Some((encrypted_blob, salt, nonce, needs_rebuild, updated_at))) => {
             (StatusCode::OK, Json(serde_json::json!({
                 "encrypted_blob": encrypted_blob,
                 "salt": salt,
                 "nonce": nonce,
                 "needs_rebuild": needs_rebuild,
+                "updated_at": updated_at,
             }))).into_response()
         }
         Ok(None) => {

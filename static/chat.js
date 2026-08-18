@@ -286,6 +286,9 @@ function saveUserDisplayNameCache() {
             }
         }
         localStorage.setItem('user_display_name_cache', JSON.stringify(saveable));
+        // Immediate blob save — if the client crashes before a debounced write
+        // fires, the server still has the latest names + pic keys.
+        try { saveKeyBlobToServer(); } catch (_) {}
     } catch (e) {
         // localStorage might be full or unavailable
     }
@@ -322,6 +325,45 @@ var _userDisplayNameSaveTimer = null;
 function scheduleUserDisplayNameSave() {
     if (_userDisplayNameSaveTimer) clearTimeout(_userDisplayNameSaveTimer);
     _userDisplayNameSaveTimer = setTimeout(saveUserDisplayNameCache, 500);
+}
+
+// Persist profileKeyCache (raw decrypted file keys / profile data keys) to
+// localStorage so it survives page refresh. These values only decrypt files
+// the user is already authorized to download (same trust level as the fkc_*
+// media cache), so keeping them across a forced re-login leaks nothing new.
+// WARNING: this function MUST stay defined — it is called from the
+// profile_key_sync / profile_key_server_sync handlers. Before it existed,
+// every call threw a ReferenceError that aborted the rest of those blocks:
+// the display-name cache write and the immediate PFP fetch never ran.
+var PROFILE_KEY_CACHE_STORAGE_KEY = 'profile_key_cache';
+var _profileKeySaveTimer = null;
+function saveProfileKeyCache() {
+    try {
+        localStorage.setItem(PROFILE_KEY_CACHE_STORAGE_KEY, JSON.stringify(profileKeyCache));
+        // Immediate blob save — crash-resilient: the server always has the latest.
+        try { saveKeyBlobToServer(); } catch (_) {}
+    } catch (e) {
+        // localStorage might be full or unavailable
+    }
+}
+function scheduleProfileKeySave() {
+    if (_profileKeySaveTimer) clearTimeout(_profileKeySaveTimer);
+    _profileKeySaveTimer = setTimeout(saveProfileKeyCache, 500);
+}
+function loadProfileKeyCache() {
+    try {
+        var saved = localStorage.getItem(PROFILE_KEY_CACHE_STORAGE_KEY);
+        if (saved) {
+            var parsed = JSON.parse(saved);
+            for (var k in parsed) {
+                if (parsed.hasOwnProperty(k) && typeof parsed[k] === 'string') {
+                    profileKeyCache[k] = parsed[k];
+                }
+            }
+        }
+    } catch (e) {
+        // Ignore parse errors
+    }
 }
 
 // Key blob save to server for recovery after cookie clear
@@ -372,8 +414,128 @@ function saveKeyBlobToServer() {
     }
 }
 
+// ── Boot-time media-key cache audit ─────────────────────────────────────────
+// The secure-storage interceptor returns the RAW '~'-prefixed ciphertext when
+// it cannot decrypt an entry (wrong encryption key after a wipe / rekey /
+// cross-session contamination), and the fkc_* / profile_key_cache consumers
+// treat that garbage as a valid key — so images silently stay broken AND the
+// on-demand recovery paths never fire (they only run when the cached key is
+// MISSING). This audit drops the unreadable entries and re-kicks key
+// re-derivation for profile files so nothing stays broken silently.
+function isPlausibleFileKeyB64(v) {
+    if (typeof v !== 'string' || v.length < 16 || v.length > 400) return false;
+    if (v.charAt(0) === '~') return false; // undecryptable ciphertext leak
+    // Raw 32-byte base64 keys, or 'nonce:ciphertext' (both base64) — nothing
+    // outside this charset is ever a valid file key.
+    return /^[A-Za-z0-9+/=:]+$/.test(v);
+}
+function isJsonObjectString(s) {
+    try { var p = JSON.parse(s); return p !== null && typeof p === 'object'; } catch (_) { return false; }
+}
+
+var _mediaKeyRepairQueue = null;
+var _mediaKeyRepairTimer = null;
+function _kickMediaKeyRepairs() {
+    try {
+        if (!_mediaKeyRepairQueue) return;
+        var still = false;
+        for (var uid in _mediaKeyRepairQueue) {
+            if (!_mediaKeyRepairQueue.hasOwnProperty(uid)) continue;
+            var job = _mediaKeyRepairQueue[uid];
+            if (user && (dmConversations.length > 0 || servers.length > 0)) {
+                try { recoverProfileKeysFromServer(uid); } catch (_) {}
+                delete _mediaKeyRepairQueue[uid];
+                continue;
+            }
+            job.tries++;
+            if (job.tries >= job.max) { delete _mediaKeyRepairQueue[uid]; continue; }
+            still = true;
+        }
+        var remaining = 0;
+        for (var k in _mediaKeyRepairQueue) { if (_mediaKeyRepairQueue.hasOwnProperty(k)) remaining++; }
+        if (remaining === 0 && _mediaKeyRepairTimer) {
+            clearInterval(_mediaKeyRepairTimer);
+            _mediaKeyRepairTimer = null;
+        }
+        void still;
+    } catch (_) {}
+}
+function _scheduleMediaKeyRepair(ownerId) {
+    if (!ownerId) return;
+    if (!_mediaKeyRepairQueue) _mediaKeyRepairQueue = {};
+    _mediaKeyRepairQueue[ownerId] = { tries: 0, max: 15 };
+    if (!_mediaKeyRepairTimer) {
+        _mediaKeyRepairTimer = setInterval(_kickMediaKeyRepairs, 2000);
+    }
+}
+function auditMediaKeyCaches() {
+    try {
+        var removed = 0, restored = 0, kicked = 0;
+        // 1) fkc_* file keys: drop entries whose value is not a usable key.
+        var keys = [];
+        for (var i = 0; i < localStorage.length; i++) {
+            var k = localStorage.key(i);
+            if (k && k.indexOf('fkc_') === 0) keys.push(k);
+        }
+        for (var j = 0; j < keys.length; j++) {
+            var fk = keys[j];
+            var fid = fk.slice(4);
+            if (!fid) continue;
+            var val = null;
+            try { val = localStorage.getItem(fk); } catch (_) {}
+            if (val === null) continue; // truly absent — nothing to audit
+            if (isPlausibleFileKeyB64(val)) continue;
+            // Unreadable / garbage: try to repair from what we already know.
+            var owner = null;
+            var repairedHere = false;
+            for (var uid in userDisplayNameCache) {
+                if (!userDisplayNameCache.hasOwnProperty(uid)) continue;
+                var pc = userDisplayNameCache[uid];
+                if (pc && (pc.profile_picture_file_id === fid || pc.profile_banner_file_id === fid)) {
+                    owner = uid;
+                    var goodKey = pc.profile_picture_file_id === fid ? pc.profile_picture_file_key : pc.profile_banner_file_key;
+                    if (goodKey && isPlausibleFileKeyB64(goodKey)) {
+                        // Direct repair: the display-name cache already holds the
+                        // raw key — rewrite fkc_* under the current storage key.
+                        try { localStorage.setItem(fk, goodKey); } catch (_) {}
+                        restored++;
+                        repairedHere = true;
+                    }
+                    break;
+                }
+            }
+            if (owner && !repairedHere) {
+                // No cached key: re-derive from the server conversation profile
+                // once the session data is ready (user + conversations loaded).
+                _scheduleMediaKeyRepair(owner);
+                kicked++;
+            }
+            if (!repairedHere) {
+                try { localStorage.removeItem(fk); } catch (_) {}
+                removed++;
+            }
+        }
+        // 2) profile_key_cache: must be a JSON object; otherwise reset so the
+        //    in-memory profileKeyCache and the stored value stay consistent.
+        try {
+            var pkcVal = localStorage.getItem('profile_key_cache');
+            if (pkcVal !== null && (typeof pkcVal !== 'string' || pkcVal.charAt(0) === '~' || !isJsonObjectString(pkcVal))) {
+                localStorage.setItem('profile_key_cache', '{}');
+            }
+        } catch (_) {}
+        if (removed > 0) {
+            console.warn('[media-key-audit] dropped ' + removed + ' unreadable fkc_* entries (' + restored + ' restored from the display-name cache, ' + kicked + ' queued for server re-derivation)');
+        }
+    } catch (_) {}
+}
+
 // Load the caches immediately
 loadUserDisplayNameCache();
+loadProfileKeyCache();
+// Repair any unreadable media-cache entries before the first render, so
+// avatars/banners/attachments never silently stay broken (the on-demand
+// recovery paths only run when a key is missing, not when it's garbage).
+auditMediaKeyCaches();
 
 // Fetch another user's profile blob from the server, decrypt it with their profile_data_key,
 // and cache the result in userDisplayNameCache so the DM sidebar and messages show the display name.
@@ -403,6 +565,15 @@ async function fetchAndCacheUserProfile(userId) {
         if (decrypted.profile_picture_file_key !== undefined) userDisplayNameCache[userId].profile_picture_file_key = decrypted.profile_picture_file_key;
         if (decrypted.profile_banner_file_id !== undefined) userDisplayNameCache[userId].profile_banner_file_id = decrypted.profile_banner_file_id;
         if (decrypted.profile_banner_file_key !== undefined) userDisplayNameCache[userId].profile_banner_file_key = decrypted.profile_banner_file_key;
+        // Persist the derived file keys into the fkc_* media cache (survives
+        // page refreshes and forced re-logins) so future renders skip the
+        // fetch/decrypt chain entirely.
+        if (decrypted.profile_picture_file_id && decrypted.profile_picture_file_key) {
+            try { fileKeyCache.set(decrypted.profile_picture_file_id, decrypted.profile_picture_file_key); } catch (_) {}
+        }
+        if (decrypted.profile_banner_file_id && decrypted.profile_banner_file_key) {
+            try { fileKeyCache.set(decrypted.profile_banner_file_id, decrypted.profile_banner_file_key); } catch (_) {}
+        }
         scheduleUserDisplayNameSave();
         updateExistingMessageStyles(userId);
         updateMemberListItem(userId);
@@ -443,6 +614,13 @@ async function fetchServerConversationProfile(userId, serverId, serverKey) {
         if (decrypted.profile_picture_file_key !== undefined) userDisplayNameCache[userId].profile_picture_file_key = decrypted.profile_picture_file_key;
         if (decrypted.profile_banner_file_id !== undefined) userDisplayNameCache[userId].profile_banner_file_id = decrypted.profile_banner_file_id;
         if (decrypted.profile_banner_file_key !== undefined) userDisplayNameCache[userId].profile_banner_file_key = decrypted.profile_banner_file_key;
+        // Persist the derived file keys into the fkc_* media cache too.
+        if (decrypted.profile_picture_file_id && decrypted.profile_picture_file_key) {
+            try { fileKeyCache.set(decrypted.profile_picture_file_id, decrypted.profile_picture_file_key); } catch (_) {}
+        }
+        if (decrypted.profile_banner_file_id && decrypted.profile_banner_file_key) {
+            try { fileKeyCache.set(decrypted.profile_banner_file_id, decrypted.profile_banner_file_key); } catch (_) {}
+        }
         scheduleUserDisplayNameSave();
         updateExistingMessageStyles(userId);
         updateMemberListItem(userId);
@@ -505,6 +683,13 @@ async function fetchDmConversationProfile(userId, dmChannelId) {
         if (decrypted.profile_picture_file_key !== undefined) userDisplayNameCache[userId].profile_picture_file_key = decrypted.profile_picture_file_key;
         if (decrypted.profile_banner_file_id !== undefined) userDisplayNameCache[userId].profile_banner_file_id = decrypted.profile_banner_file_id;
         if (decrypted.profile_banner_file_key !== undefined) userDisplayNameCache[userId].profile_banner_file_key = decrypted.profile_banner_file_key;
+        // Persist the derived file keys into the fkc_* media cache too.
+        if (decrypted.profile_picture_file_id && decrypted.profile_picture_file_key) {
+            try { fileKeyCache.set(decrypted.profile_picture_file_id, decrypted.profile_picture_file_key); } catch (_) {}
+        }
+        if (decrypted.profile_banner_file_id && decrypted.profile_banner_file_key) {
+            try { fileKeyCache.set(decrypted.profile_banner_file_id, decrypted.profile_banner_file_key); } catch (_) {}
+        }
         scheduleUserDisplayNameSave();
         updateExistingMessageStyles(userId);
         updateMemberListItem(userId);
@@ -723,8 +908,17 @@ async function broadcastProfileKeySyncToServer(serverId) {
 // Local file key cache (file_id → base64 file_key) for sticker previews
 const fileKeyCache = {
     _prefix: 'fkc_',
+    _blobTimer: null,
     get(fileId) { return localStorage.getItem(this._prefix + fileId); },
-    set(fileId, keyB64) { if (fileId && keyB64) localStorage.setItem(this._prefix + fileId, keyB64); },
+    set(fileId, keyB64) {
+        if (fileId && keyB64) {
+            localStorage.setItem(this._prefix + fileId, keyB64);
+            // Immediate blob save — crash-resilient: server always has latest file keys.
+            // Debounce at 1s to coalesce bursts (many attachment keys in one message).
+            if (this._blobTimer) clearTimeout(this._blobTimer);
+            this._blobTimer = setTimeout(function () { try { saveKeyBlobToServer(); } catch (_) {} }, 1000);
+        }
+    },
     getAll() {
         const result = {};
         for (let i = 0; i < localStorage.length; i++) {
@@ -2927,8 +3121,77 @@ document.addEventListener('DOMContentLoaded', () => {
             // Previews must not keep playing when we leave the tab.
             if (window._stopRingTrimPreview) window._stopRingTrimPreview();
             if (window._stopNotifTrimPreview) window._stopNotifTrimPreview();
+            // Fetch backup status when security tab opens.
+            if (tab.dataset.tab === 'security-settings') fetchBackupStatus();
         });
     });
+
+    async function fetchBackupStatus() {
+        var el = document.getElementById('backup-status-line');
+        if (!el) return;
+        el.textContent = 'Checking backup status…';
+        el.style.color = 'var(--text-muted)';
+        try {
+            var res = await authFetch('/api/key-blob');
+            if (res.status === 404) {
+                el.innerHTML = '⚠️ No key backup found on server. <span style="font-weight:normal;color:var(--text-muted)">(Keys are saved automatically at login and registration.)</span>';
+                el.style.color = '#faa61a';
+                return;
+            }
+            if (!res.ok) {
+                el.textContent = '⚠️ Could not check backup status.';
+                el.style.color = '#faa61a';
+                return;
+            }
+            var data = await res.json();
+            var hasBlob = !!(data.encrypted_blob);
+            if (!hasBlob) {
+                el.innerHTML = '⚠️ No key backup found on server. <span style="font-weight:normal;color:var(--text-muted)">(Keys are saved automatically at login and registration.)</span>';
+                el.style.color = '#faa61a';
+                return;
+            }
+            var timeStr = '';
+            if (data.updated_at) {
+                try {
+                    var d = new Date(data.updated_at + 'Z');
+                    var now = Date.now();
+                    var diff = now - d.getTime();
+                    if (diff < 60000) timeStr = 'just now';
+                    else if (diff < 3600000) timeStr = Math.floor(diff / 60000) + 'm ago';
+                    else if (diff < 86400000) timeStr = Math.floor(diff / 3600000) + 'h ago';
+                    else timeStr = Math.floor(diff / 86400000) + 'd ago';
+                } catch (_) { timeStr = data.updated_at; }
+            }
+            el.innerHTML = '✅ Key backup exists on server' + (timeStr ? ' <span style="font-weight:normal;color:var(--text-muted)">(last saved ' + timeStr + ')</span>' : '');
+            el.style.color = '#43b581';
+            // Show age warning if backup is over 30 days old
+            var ageEl = document.getElementById('backup-age-warning');
+            if (ageEl && data.updated_at) {
+                try {
+                    var backupMs = new Date(data.updated_at + 'Z').getTime();
+                    var ageDays = Math.floor((Date.now() - backupMs) / 86400000);
+                    if (ageDays >= 30) {
+                        ageEl.style.display = 'block';
+                        ageEl.innerHTML = '⚠️ Your backup is ' + ageDays + ' days old. Consider saving a new backup to ensure other devices can restore your keys. <button id="backup-age-save-btn" style="margin-left:8px;padding:4px 12px;border-radius:6px;border:1px solid #faa61a;background:transparent;color:#faa61a;cursor:pointer;font-size:12px;">Save Now</button>';
+                        // Wire the button
+                        var saveBtn = document.getElementById('backup-age-save-btn');
+                        if (saveBtn) {
+                            saveBtn.addEventListener('click', function() {
+                                var mainBtn = document.getElementById('save-backup-now-btn');
+                                if (mainBtn) mainBtn.click();
+                            });
+                        }
+                    } else {
+                        ageEl.style.display = 'none';
+                        ageEl.innerHTML = '';
+                    }
+                } catch (_) { ageEl.style.display = 'none'; }
+            }
+        } catch (_) {
+            el.textContent = '⚠️ Could not check backup status (server unreachable).';
+            el.style.color = '#faa61a';
+        }
+    }
 
     // Auto-load previews setting
     const autoLoadCheckbox = document.getElementById('auto-load-previews');
@@ -5471,6 +5734,133 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    // --- Save Backup Now (Settings → Security) ---
+    var saveBackupNowBtn = document.getElementById('save-backup-now-btn');
+    var saveBackupStatus = document.getElementById('save-backup-status');
+    if (saveBackupNowBtn) {
+        saveBackupNowBtn.addEventListener('click', async function () {
+            saveBackupNowBtn.disabled = true;
+            saveBackupNowBtn.innerHTML = '⏳ Saving...';
+            if (saveBackupStatus) { saveBackupStatus.textContent = 'Encrypting keys...'; saveBackupStatus.style.color = 'var(--text-muted)'; }
+            try {
+                var encPw = localStorage.getItem('e2e_encrypted_password');
+                var devKeyStr = localStorage.getItem('e2e_device_key');
+                if (!encPw || !devKeyStr) throw new Error('Not logged in');
+                var dk = new Uint8Array(E2ECrypto.base64ToArrayBuffer(devKeyStr));
+                var pwB64 = E2ECrypto.decodeEncryptedFileKey(encPw, dk);
+                if (!pwB64) throw new Error('Could not decode password');
+                var pw = atob(pwB64);
+                var t = localStorage.getItem('token');
+                if (!t) throw new Error('No auth token');
+                var bundle = E2ECrypto.buildKeyBundle();
+                var enc = E2ECrypto.encryptKeyBundle(bundle, pw);
+                if (saveBackupStatus) saveBackupStatus.textContent = 'Uploading to server...';
+                var res = await fetch('/api/key-blob', {
+                    method: 'PUT',
+                    headers: { 'Authorization': 'Bearer ' + t, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ encrypted_blob: enc.encrypted_private_key, salt: enc.salt, nonce: enc.nonce })
+                });
+                if (!res.ok) throw new Error('Server returned ' + res.status);
+                if (saveBackupStatus) { saveBackupStatus.textContent = '✅ Backup saved! (' + Object.keys(bundle).length + ' keys encrypted)'; saveBackupStatus.style.color = '#43b581'; }
+                // Refresh the status indicator
+                fetchBackupStatus();
+            } catch (e) {
+                if (saveBackupStatus) { saveBackupStatus.textContent = '❌ ' + (e.message || 'Save failed'); saveBackupStatus.style.color = 'var(--danger)'; }
+            } finally {
+                saveBackupNowBtn.disabled = false;
+                saveBackupNowBtn.innerHTML = '&#128190; Save Backup Now';
+            }
+        });
+    }
+
+    // --- Restore from Server Backup (Settings → Security) ---
+    var restoreBackupBtn = document.getElementById('restore-backup-btn');
+    var restoreBackupSection = document.getElementById('restore-backup-section');
+    var restoreBackupConfirmBtn = document.getElementById('restore-backup-confirm-btn');
+    var restoreBackupCancelBtn = document.getElementById('restore-backup-cancel-btn');
+    var restoreBackupStatus = document.getElementById('restore-backup-status');
+    var restoreBackupPassword = document.getElementById('restore-backup-password');
+    var restoreBackupToggle = document.getElementById('toggle-restore-backup-password');
+
+    if (restoreBackupToggle && restoreBackupPassword) {
+        restoreBackupToggle.addEventListener('click', function () {
+            var visible = restoreBackupPassword.type === 'text';
+            restoreBackupPassword.type = visible ? 'password' : 'text';
+            restoreBackupToggle.innerHTML = visible ? '&#128065;' : '&#128064;';
+            restoreBackupToggle.classList.toggle('active', !visible);
+        });
+    }
+
+    if (restoreBackupBtn) {
+        restoreBackupBtn.addEventListener('click', function () {
+            var open = restoreBackupSection.style.display !== 'block';
+            restoreBackupSection.style.display = open ? 'block' : 'none';
+            if (open) {
+                if (restoreBackupPassword) { restoreBackupPassword.type = 'password'; restoreBackupPassword.value = ''; restoreBackupPassword.focus(); }
+                if (restoreBackupStatus) { restoreBackupStatus.textContent = ''; }
+            }
+        });
+    }
+
+    if (restoreBackupCancelBtn) {
+        restoreBackupCancelBtn.addEventListener('click', function () {
+            restoreBackupSection.style.display = 'none';
+            if (restoreBackupStatus) restoreBackupStatus.textContent = '';
+        });
+    }
+
+    if (restoreBackupConfirmBtn) {
+        restoreBackupConfirmBtn.addEventListener('click', async function () {
+            var pw = restoreBackupPassword ? restoreBackupPassword.value.trim() : '';
+            if (!pw) {
+                if (restoreBackupStatus) { restoreBackupStatus.textContent = '❌ Please enter your password.'; restoreBackupStatus.style.color = 'var(--danger)'; }
+                return;
+            }
+            restoreBackupConfirmBtn.disabled = true;
+            restoreBackupConfirmBtn.innerHTML = '⏳ Restoring...';
+            try {
+                // Ensure encrypted password exists for _secReKey
+                if (!localStorage.getItem('e2e_encrypted_password')) {
+                    storeEncryptedPassword(pw);
+                }
+                if (restoreBackupStatus) { restoreBackupStatus.textContent = '⏳ Fetching key backup from server...'; restoreBackupStatus.style.color = 'var(--text-muted)'; }
+                var blobRes = await authFetch('/api/key-blob');
+                if (!blobRes.ok) {
+                    var errData = null;
+                    try { errData = await blobRes.json(); } catch (_) {}
+                    throw new Error((errData && errData.error) || 'Failed to fetch key backup');
+                }
+                var blobData = await blobRes.json();
+                if (!blobData.encrypted_blob || !blobData.salt || !blobData.nonce) {
+                    throw new Error('No key backup found on server. Keys are saved automatically at login and registration.');
+                }
+                if (restoreBackupStatus) restoreBackupStatus.textContent = '⏳ Decrypting key backup...';
+                var bundle = E2ECrypto.decryptKeyBundle(blobData.encrypted_blob, pw, blobData.salt, blobData.nonce);
+                if (!bundle) throw new Error('Wrong password or corrupted backup.');
+                E2ECrypto.restoreKeyBundle(bundle);
+                // Re-key secure-storage to use the password-derived key
+                if (window._secReKey) {
+                    try { window._secReKey(); } catch (_) {}
+                }
+                storeEncryptedPassword(pw);
+                // Also restore friend code if present
+                if (bundle['e2e_friend_code']) {
+                    myFriendCode = bundle['e2e_friend_code'];
+                }
+                // Save updated blob back so newly joined servers are included
+                saveKeyBlobToServer();
+                if (restoreBackupStatus) { restoreBackupStatus.textContent = '✅ Keys restored successfully! All encryption keys, media caches, and friend code have been recovered.'; restoreBackupStatus.style.color = '#43b581'; }
+                // Clear password field
+                if (restoreBackupPassword) restoreBackupPassword.value = '';
+            } catch (e) {
+                if (restoreBackupStatus) { restoreBackupStatus.textContent = '❌ ' + (e.message || 'Recovery failed'); restoreBackupStatus.style.color = 'var(--danger)'; }
+            } finally {
+                restoreBackupConfirmBtn.disabled = false;
+                restoreBackupConfirmBtn.innerHTML = '&#128260; Restore';
+            }
+        });
+    }
+
     // --- Two-Factor Authentication (2FA) ---
     var twofaEnrollModal = document.getElementById('twofa-enroll-modal');
     var twofaDisableModal = document.getElementById('twofa-disable-modal');
@@ -7780,13 +8170,20 @@ document.addEventListener('DOMContentLoaded', () => {
         if (dlBtn) {
             const card = dlBtn.closest('.file-card, .audio-file-card');
             if (card) {
-                downloadFileById(
-                    card.dataset.fileId,
-                    card.dataset.fileKey,
-                    card.dataset.fileName,
-                    card.dataset.fileMime,
-                    parseInt(card.dataset.fileSize, 10) || 0
-                );
+                const fid = card.dataset.fileId;
+                const fkey = card.dataset.fileKey;
+                const fname = card.dataset.fileName;
+                const fmime = card.dataset.fileMime;
+                const fsize = parseInt(card.dataset.fileSize, 10) || 0;
+                if (fkey) {
+                    downloadFileById(fid, fkey, fname, fmime, fsize);
+                } else {
+                    // Missing key (old render / evicted cache): re-derive it from
+                    // the message content via the conversation key, then download.
+                    recoverAttachmentFileKey(fid, card).then((recovered) => {
+                        if (recovered) downloadFileById(fid, recovered, fname, fmime, fsize);
+                    }).catch(() => {});
+                }
             }
         }
         // Download button for GIFs
@@ -11457,6 +11854,8 @@ async function fetchAndDecryptServerKey(serverId) {
                 } catch (_) {}
             }
         }
+        // Immediate blob save — crash-resilient: server key just written.
+        if (anySuccess) { try { saveKeyBlobToServer(); } catch (_) {} }
         return anySuccess;
     } catch (err) {
         console.error('Failed to fetch server key:', err);
@@ -11479,6 +11878,8 @@ async function rotateServerKey(serverId) {
     // Generate a new server key
     const newKey = E2ECrypto.generateSymmetricKey();
     E2ECrypto.saveServerKey(serverId, newKey);
+    // Immediate blob save — crash-resilient: new server key just generated.
+    try { saveKeyBlobToServer(); } catch (_) {}
 
     // Upload the old key for all members first (so old messages remain decryptable),
     // then upload the new key.
@@ -12963,6 +13364,9 @@ async function appendMessage(msg) {
                         }
                     }
                 }
+                // Persist attachment keys into fkc_* + stash the encryption
+                // context so previews/downloads can self-heal missing keys.
+                cacheMessageAttachmentKeys(parsed, msg, div);
             } catch (_) {}
         } catch (e) {
             console.warn('Decrypt failed:', e);
@@ -15837,6 +16241,9 @@ async function appendDmMessage(msg, kp, otherPublicKey) {
                         }
                     }
                 }
+                // Persist attachment keys into fkc_* + stash the encryption
+                // context so previews/downloads can self-heal missing keys.
+                cacheMessageAttachmentKeys(parsed, msg, div);
             } catch (_) {}
         } catch (e) {
             textContent = '[encrypted message - unable to decrypt]';
@@ -16709,6 +17116,8 @@ async function createServer() {
 
             // Save the channel key locally
             E2ECrypto.saveServerKey(serverData.id, channelKey);
+            // Immediate blob save — crash-resilient: server key + invite code just created.
+            try { saveKeyBlobToServer(); } catch (_) {}
 
             const identity = E2ECrypto.getIdentityKeyPair();
             if (identity) {
@@ -16795,6 +17204,8 @@ async function showInviteModal() {
             if (res.ok) {
                 currentInviteCode = inviteCode;
                 localStorage.setItem('e2e_invite_' + currentServerId, inviteCode);
+                // Immediate blob save — crash-resilient: invite code just generated.
+                try { saveKeyBlobToServer(); } catch (_) {}
             } else {
                 return; // Failed to create invite, can't open modal
             }
@@ -16901,6 +17312,8 @@ async function regenerateInvite() {
         if (res.ok) {
             currentInviteCode = inviteCode;
             localStorage.setItem('e2e_invite_' + currentServerId, inviteCode);
+            // Immediate blob save — crash-resilient: invite code just regenerated.
+            try { saveKeyBlobToServer(); } catch (_) {}
             const display = document.getElementById('invite-code-display');
             display.dataset.value = inviteCode;
             display.dataset.visible = '0';
@@ -17207,6 +17620,8 @@ async function handleFriendCodeRecover(storedPw) {
         // Success — store and update UI
         myFriendCode = decrypted;
         localStorage.setItem('e2e_friend_code', myFriendCode);
+        // Immediate blob save — crash-resilient: friend code just recovered.
+        try { saveKeyBlobToServer(); } catch (_) {}
         const el = document.getElementById('my-friend-code');
         if (el) {
             el.dataset.value = myFriendCode;
@@ -17397,6 +17812,8 @@ async function handleFriendCodeRegenerate(preverifiedPw) {
         // Success — store and update UI
         myFriendCode = newCode;
         localStorage.setItem('e2e_friend_code', myFriendCode);
+        // Immediate blob save — crash-resilient: friend code just regenerated.
+        try { saveKeyBlobToServer(); } catch (_) {}
         const el = document.getElementById('my-friend-code');
         if (el) {
             el.dataset.value = myFriendCode;
@@ -21952,6 +22369,89 @@ function buildMultiFileCardHtml(files) {
     return html;
 }
 
+// ── Attachment file-key self-heal ───────────────────────────────────────────
+// Message attachment keys travel INSIDE the E2E-encrypted message content
+// (server key for channels, DM key for DMs). The fkc_* media cache
+// (fileKeyCache) persists across reloads and survives the forced-login wipe, so:
+//   1. cacheMessageAttachmentKeys — at render time, write every attachment key
+//      that was decrypted from the message content into fkc_*;
+//   2. recoverAttachmentFileKey — on demand, when a preview/download needs a
+//      key that is missing or stale, re-decrypt the message content with the
+//      conversation key and re-derive the file key (no re-upload needed).
+function collectMessageFileEntries(parsed) {
+    const out = [];
+    if (!parsed || typeof parsed !== 'object') return out;
+    if (parsed.type === 'file' && parsed.file_id) out.push(parsed);
+    if (parsed.type === 'files' && Array.isArray(parsed.files)) {
+        for (const f of parsed.files) if (f && f.file_id) out.push(f);
+    }
+    if (parsed.type === 'forward') {
+        if (parsed.file && parsed.file.file_id) out.push(parsed.file);
+        if (Array.isArray(parsed.files)) for (const f of parsed.files) if (f && f.file_id) out.push(f);
+    }
+    return out;
+}
+
+function cacheMessageAttachmentKeys(parsed, msg, div) {
+    try {
+        const entries = collectMessageFileEntries(parsed);
+        for (const e of entries) {
+            if (e.file_key) {
+                try { fileKeyCache.set(e.file_id, e.file_key); } catch (_) {}
+            }
+        }
+        // Attachment keys are only in fkc_* (re-derivable, but a fresh-device
+        // restore is instant if the blob holds them) — refresh the blob.
+        if (entries.length > 0) {
+            try { saveKeyBlobToServer(); } catch (_) {}
+        }
+        // Stash the encryption context on the element so a later preview/download
+        // can re-derive a missing/stale key from the message content itself.
+        if (div && msg && msg.encrypted_content && msg.nonce) {
+            div._attachmentCtx = {
+                content: msg.encrypted_content,
+                nonce: msg.nonce,
+                serverId: msg.server_id || currentServerId || null,
+                dmId: msg.dm_channel_id || currentDmChannelId || null,
+            };
+        }
+    } catch (_) {}
+}
+
+async function recoverAttachmentFileKey(fileId, scopeEl) {
+    if (!fileId) return null;
+    // 1) The fkc_* media cache first (survives reloads + the login wipe).
+    try {
+        const cached = fileKeyCache.get(fileId);
+        if (cached) return cached;
+    } catch (_) {}
+    // 2) Re-derive from the message content with the conversation key.
+    const msgEl = scopeEl && scopeEl.closest ? scopeEl.closest('.message') : null;
+    const ctx = msgEl && msgEl._attachmentCtx;
+    if (!ctx || !ctx.content || !ctx.nonce) return null;
+    let plaintext = null;
+    if (ctx.serverId) {
+        try { plaintext = tryDecryptWithAllKeys(ctx.serverId, ctx.content, ctx.nonce); } catch (_) {}
+    } else if (ctx.dmId) {
+        try {
+            const k = dmSearchKey(ctx.dmId);
+            if (k) plaintext = E2ECrypto.decryptMessage(ctx.content, ctx.nonce, k);
+        } catch (_) {}
+    }
+    if (!plaintext) return null;
+    try {
+        const parsed = JSON.parse(plaintext);
+        const entries = collectMessageFileEntries(parsed);
+        for (const e of entries) {
+            if (e.file_id === fileId && e.file_key) {
+                try { fileKeyCache.set(fileId, e.file_key); } catch (_) {}
+                return e.file_key;
+            }
+        }
+    } catch (_) {}
+    return null;
+}
+
 async function loadMediaPreview(container, fileData) {
     if (!container) return;
     const isImage = fileData.mime_type && fileData.mime_type.startsWith('image/');
@@ -21964,7 +22464,23 @@ async function loadMediaPreview(container, fileData) {
     container.innerHTML = '<div class="file-loading">Loading preview...</div>';
 
     try {
-        const blob = await downloadAndDecryptFile(fileData.file_id, fileData.file_key, fileData.mime_type, fileData.file_size);
+        // Resolve the file key: the payload's key may be missing (old renders,
+        // evicted caches) — recover it from the message content via the
+        // conversation key before giving up.
+        let fileKey = fileData.file_key;
+        if (!fileKey) {
+            try { fileKey = await recoverAttachmentFileKey(fileData.file_id, container); } catch (_) {}
+        }
+        if (!fileKey) throw new Error('File key unavailable');
+        let blob;
+        try {
+            blob = await downloadAndDecryptFile(fileData.file_id, fileKey, fileData.mime_type, fileData.file_size);
+        } catch (e) {
+            // Stale/mismatched key: re-derive from the message content and retry once.
+            const recovered = await recoverAttachmentFileKey(fileData.file_id, container);
+            if (!recovered || recovered === fileKey) throw e;
+            blob = await downloadAndDecryptFile(fileData.file_id, recovered, fileData.mime_type, fileData.file_size);
+        }
         // Stale-container guard: if the message was removed (channel/DM switch)
         // or the preview was converted to a "Load preview" button (streamer-mode
         // toggle) while the download was in flight, don't write into a detached
@@ -25236,6 +25752,13 @@ function getProfilePicUrl(fileId, userId) {
                 fileKeyB64 = profileKeyCache[cacheKeyForLoad];
             }
             
+            // Persist a resolved key into the fkc_* media cache so it survives
+            // the next page load even if profile_key_cache / display-name cache
+            // are later evicted.
+            if (fileKeyB64) {
+                try { fileKeyCache.set(fileId, fileKeyB64); } catch (_) {}
+            }
+            
             // Fetch user's profile to get the file key
             if (!fileKeyB64) {
                 try {
@@ -25265,10 +25788,25 @@ function getProfilePicUrl(fileId, userId) {
                                     userDisplayNameCache[_resolvedUserId].profile_picture_file_key = fileKeyB64;
                                 }
                             }
+                        } else if (profileData && _resolvedUserId !== (user && user.id)) {
+                            // Another user's pic key is encrypted to THEIR
+                            // identity key, so /api/profile/{id} can't decrypt it
+                            // for us. Re-derive it from the conversation-profile
+                            // endpoints instead (encrypted with the server/DM key
+                            // we share): those land the raw key in
+                            // userDisplayNameCache and re-call getProfilePicUrl
+                            // when they finish, which terminates here via the
+                            // profilePicCache hit.
+                            recoverProfileKeysFromServer(_resolvedUserId);
                         }
+                    } else if (_resolvedUserId !== (user && user.id)) {
+                        recoverProfileKeysFromServer(_resolvedUserId);
                     }
                 } catch (e) {
                     console.warn('Failed to fetch profile for pic key:', e);
+                    if (_resolvedUserId !== (user && user.id)) {
+                        try { recoverProfileKeysFromServer(_resolvedUserId); } catch (_) {}
+                    }
                 }
             }
             
@@ -25326,6 +25864,53 @@ function getProfilePicUrl(fileId, userId) {
         }
     }).catch(function () {});
     return null; // Will be updated async when fetch completes
+}
+
+// Self-heal: re-derive another user's profile file keys from the server when
+// every local cache (userDisplayNameCache / profileKeyCache / fkc_*) is empty
+// — e.g. after mobile-browser localStorage eviction. Kicks the conversation-
+// profile fetches, which decrypt the raw pic/banner keys with the server/DM
+// key we share and re-call getProfilePicUrl when done.
+function recoverProfileKeysFromServer(userId) {
+    if (!userId || !user || userId === user.id) return;
+    try {
+        var kickedDm = false;
+        if (dmConversations) {
+            for (var i = 0; i < dmConversations.length; i++) {
+                var c = dmConversations[i];
+                if (c && c.other_user_id === userId && c.dm_channel_id) {
+                    fetchDmConversationProfile(userId, c.dm_channel_id).catch(function () {});
+                    kickedDm = true;
+                    break;
+                }
+            }
+        }
+        // Server conversation profiles: try the current server first, then any
+        // other server we share with this user.
+        var tried = {};
+        if (currentServerId && E2ECrypto.getServerKey(currentServerId)) {
+            tried[currentServerId] = true;
+            fetchServerConversationProfile(userId, currentServerId, E2ECrypto.getServerKey(currentServerId)).catch(function () {});
+        }
+        if (servers) {
+            for (var si = 0; si < servers.length; si++) {
+                var s = servers[si];
+                var sk = s && s.id ? E2ECrypto.getServerKey(s.id) : null;
+                if (s && s.id && sk && !tried[s.id]) {
+                    tried[s.id] = true;
+                    fetchServerConversationProfile(userId, s.id, sk).catch(function () {});
+                }
+            }
+        }
+        // If we already hold the user's profile-data key, the plain profile
+        // endpoint becomes decryptable too.
+        if (profileKeyCache[userId + ':profile_data_key']) {
+            fetchAndCacheUserProfile(userId).catch(function () {});
+        }
+        void kickedDm;
+    } catch (e) {
+        // Silently ignore — a later render retries.
+    }
 }
 
 // Update sidebar footer with display name and avatar
@@ -27022,6 +27607,9 @@ function getDecryptedFileUrl(fileId, fileKey, callback, userId) {
             }
             if (!keyB64 && myProfile && myProfile.profile_picture_file_id === fileId) {
                 keyB64 = localStorage.getItem('e2e_file_key_' + fileId);
+            }
+            if (keyB64 && keyB64.indexOf(':') === -1) {
+                try { fileKeyCache.set(fileId, keyB64); } catch (_) {}
             }
             if (keyB64 && enc.length > 40) {
                 try {

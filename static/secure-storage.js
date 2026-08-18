@@ -194,6 +194,22 @@
             var devKeyStr = _realOrigGet.call(localStorage, 'e2e_device_key');
             if (!encPw || !devKeyStr) return null;
 
+            // The interceptor may have stored the password encrypted with the
+            // current (random/bootstrap) key — e.g. right after a fresh login,
+            // before _secReKey migrated the storage key to the password-derived
+            // key. Decrypt it with that current key FIRST so the derivation can
+            // proceed; otherwise split(':') fails on the '~'-prefixed ciphertext
+            // and the migration never happens, leaving every later read to flip
+            // to a password-derived key that the other values were never
+            // encrypted under (identity keys become silently unreadable).
+            if (encPw.charAt(0) === MAGIC) {
+                try {
+                    var cur = _currentKeyRaw();
+                    var decrypted = cur ? _decryptWithKey(encPw.substring(1), cur) : null;
+                    if (decrypted !== null) encPw = decrypted;
+                } catch (_) {}
+            }
+
             // Parse the encrypted password: format is nonce:ciphertext
             var parts = encPw.split(':');
             if (parts.length !== 2) return null;
@@ -257,6 +273,68 @@
         }
         var tag = _computeTag(plaintext);
         return tag + '.' + _bytesToBase64(result);
+    }
+
+    /**
+     * XOR decrypt tag.b64 with an EXPLICIT key (no _ensureKey call — safe to
+     * use from _tryDeriveFromEncryptedPassword / _secReKey without recursion).
+     * Verifies the integrity tag. If it doesn't match, the key has changed
+     * since encryption — returns null. Also handles old-format values (bare
+     * b64, no tag) which are decrypted without verification.
+     */
+    function _decryptWithKey(stored, key) {
+        if (!stored || !key) return null;
+        var cipherB64, expectedTag;
+        // New format: tag.bbb...  (the separator at position TAG_HEX_LEN)
+        if (stored.length > TAG_HEX_LEN && stored.charAt(TAG_HEX_LEN) === '.') {
+            expectedTag = stored.substring(0, TAG_HEX_LEN);
+            cipherB64 = stored.substring(TAG_HEX_LEN + 1);
+        } else {
+            // Old format: bare b64, no tag — decrypt without verification
+            expectedTag = null;
+            cipherB64 = stored;
+        }
+
+        var bytes = _base64ToBytes(cipherB64);
+        var result = new Uint8Array(bytes.length);
+        for (var i = 0; i < bytes.length; i++) {
+            result[i] = bytes[i] ^ key[i % key.length];
+        }
+        var plaintext = new TextDecoder().decode(result);
+
+        // Verify tag if this is new-format data
+        if (expectedTag !== null) {
+            var actualTag = _computeTag(plaintext);
+            if (actualTag !== expectedTag) {
+                return null;
+            }
+        }
+        return plaintext;
+    }
+
+    /**
+     * Current storage key WITHOUT triggering _ensureKey's password-derivation
+     * path (which would recurse into _tryDeriveFromEncryptedPassword). Checks
+     * the in-memory key, the sessionStorage cache, then the localStorage
+     * bootstrap fallback. Returns null if none is available.
+     */
+    function _currentKeyRaw() {
+        if (_key) return _key;
+        try {
+            var stored = sessionStorage.getItem(SESSION_KEY_NAME);
+            if (stored) {
+                var k = _base64ToBytes(stored);
+                if (k.length === 32) return k;
+            }
+        } catch (_) {}
+        try {
+            var lsKey = _realOrigGet.call(localStorage, LOCAL_KEY_NAME);
+            if (lsKey) {
+                var k2 = _base64ToBytes(lsKey);
+                if (k2.length === 32) return k2;
+            }
+        } catch (_) {}
+        return null;
     }
 
     /**
@@ -533,12 +611,21 @@
     /**
      * Completely clear all secure storage for "Clear All Data" flows.
      */
-    window._secClearAll = function () {
-        // Remove all sensitive keys
+    window._secClearAll = function (preserve) {
+        // Remove all sensitive keys. `preserve` (optional array of exact keys)
+        // is kept — the login-page wipe uses it for the media caches
+        // (fkc_* file keys + profile_key_cache): those decrypt only
+        // server-gated downloads, so keeping them across a forced re-login
+        // leaks nothing new and avoids every avatar/banner/emoji breaking.
+        var preserveSet = null;
+        if (preserve && preserve.length) {
+            preserveSet = {};
+            for (var pi = 0; pi < preserve.length; pi++) preserveSet[preserve[pi]] = true;
+        }
         var toRemove = [];
         for (var i = 0; i < localStorage.length; i++) {
             var k = localStorage.key(i);
-            if (k && isSensitive(k)) {
+            if (k && isSensitive(k) && !(preserveSet && preserveSet[k])) {
                 toRemove.push(k);
             }
         }
@@ -606,6 +693,13 @@
     window.escapeAttr = window.escapeHtml;
 
     window._secReKey = function () {
+        // Capture the CURRENT key BEFORE clearing anything: the plaintexts must
+        // be decrypted with the key they were encrypted under. _ensureKey()/_xorDecrypt
+        // must NOT be used here — once e2e_encrypted_password is derivable (e.g.
+        // a fresh login stored it), _ensureKey would flip to the password-derived
+        // key mid-collection and every old-key value would be lost.
+        var oldKey = _currentKeyRaw();
+
         // Clear in-memory and sessionStorage caches
         _key = null;
         sessionStorage.removeItem(SESSION_KEY_NAME);
@@ -621,10 +715,10 @@
             if (k && isSensitive(k)) {
                 var raw = _realOrigGet.call(localStorage, k);
                 if (raw !== null) {
-                    // Decrypt with old key if it's encrypted
+                    // Decrypt with the OLD key if it's encrypted
                     if (_isEncrypted(raw)) {
                         try {
-                            var decrypted = _xorDecrypt(raw.substring(1));
+                            var decrypted = oldKey ? _decryptWithKey(raw.substring(1), oldKey) : null;
                             if (decrypted !== null) plaintexts[k] = decrypted;
                         } catch (_) {}
                     } else {
@@ -668,7 +762,9 @@
     window._secRekeyToPassword = function (newPassword) {
         try {
             // 1. Collect plaintexts with the CURRENT key (the old password is
-            //    still stored, so _ensureKey() still derives the old key).
+            //    still stored). Decrypt with the key captured NOW — _ensureKey
+            //    must not run mid-collection and flip to a derivable key.
+            var oldKey = _currentKeyRaw();
             var plaintexts = {};
             for (var i = 0; i < localStorage.length; i++) {
                 var k = localStorage.key(i);
@@ -677,7 +773,7 @@
                     if (raw !== null) {
                         if (_isEncrypted(raw)) {
                             try {
-                                var decrypted = _xorDecrypt(raw.substring(1));
+                                var decrypted = oldKey ? _decryptWithKey(raw.substring(1), oldKey) : null;
                                 if (decrypted !== null) plaintexts[k] = decrypted;
                             } catch (_) {}
                         } else {

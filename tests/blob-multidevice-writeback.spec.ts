@@ -155,7 +155,7 @@ test('blob survives multi-device write-back: register A â†’ login B (re-saves) â
     expect(stored.friendCode).toBe(snapA.friendCode);
     expect(stored.hmacKey).toBe(snapA.hmacKey);
     expect(stored.serverKeys[`e2e_server_${serverId}`]).toBe(snapA.serverKeys[`e2e_server_${serverId}`]);
-    expect(stored.version).toBe(2);
+    expect(stored.version).toBe(3);
 
     await ctxA.close();
     await ctxB.close();

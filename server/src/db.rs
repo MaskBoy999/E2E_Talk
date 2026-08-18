@@ -3055,7 +3055,7 @@ impl Database {
         tx.commit().map_err(|e| e.to_string())
     }
 
-    pub fn get_user_key_blob(&self, user_id: &str) -> Result<Option<(String, String, String, bool)>, String> {
+    pub fn get_user_key_blob(&self, user_id: &str) -> Result<Option<(String, String, String, bool, Option<String>)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         // Check if needs_rebuild column exists (migration 026)
         let rebuild_col: bool = conn
@@ -3068,9 +3068,9 @@ impl Database {
             .unwrap_or(false);
         if rebuild_col {
             let result = conn.query_row(
-                "SELECT encrypted_blob, salt, nonce, COALESCE(needs_rebuild, 0) FROM user_key_blobs WHERE user_id = ?1",
+                "SELECT encrypted_blob, salt, nonce, COALESCE(needs_rebuild, 0), updated_at FROM user_key_blobs WHERE user_id = ?1",
                 params![user_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i32>(3)? != 0)),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i32>(3)? != 0, row.get::<_, Option<String>>(4)?)),
             );
             match result {
                 Ok(row) => Ok(Some(row)),
@@ -3079,9 +3079,9 @@ impl Database {
             }
         } else {
             let result = conn.query_row(
-                "SELECT encrypted_blob, salt, nonce FROM user_key_blobs WHERE user_id = ?1",
+                "SELECT encrypted_blob, salt, nonce, updated_at FROM user_key_blobs WHERE user_id = ?1",
                 params![user_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, false)),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, false, row.get::<_, Option<String>>(3)?)),
             );
             match result {
                 Ok(row) => Ok(Some(row)),
