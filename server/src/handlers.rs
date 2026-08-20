@@ -2694,6 +2694,7 @@ pub async fn list_channels(
                 "encrypted_name": c.encrypted_name.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                 "name_nonce": c.name_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                 "channel_type": c.channel_type,
+                "category_id": c.category_id,
             })
         })
         .collect();
@@ -3348,7 +3349,7 @@ pub async fn list_messages(
     let acks = state.db.get_message_acks(&msg_ids).unwrap_or_default();
     let expiries = state.db.get_message_expiries(&msg_ids).unwrap_or_default();
 
-    let message_infos: Vec<serde_json::Value> = messages
+    let mut message_infos: Vec<serde_json::Value> = messages
         .iter()
         .map(|m| {
             serde_json::json!({
@@ -3372,6 +3373,8 @@ pub async fn list_messages(
                 "poll_votes": poll_votes_json(&state, poll_votes.get(&m.id)),
                 "acks": acks_json(&state, acks.get(&m.id), &user_id, &m.sender_id),
                 "expires_at": expiries.get(&m.id).cloned().flatten(),
+                "thread_parent_id": m.thread_parent_id,
+                "thread_reply_count": 0, // filled below
 
                 "conversation_profile": conv_profiles.get(&m.sender_id).map(|(data, nonce)| serde_json::json!({
                     "encrypted_profile_data": data,
@@ -3381,7 +3384,176 @@ pub async fn list_messages(
         })
         .collect();
 
+    // F3: fill thread reply counts for top-level messages
+    let parent_ids: Vec<&str> = message_infos.iter()
+        .filter(|m| m.get("thread_parent_id").and_then(|v| v.as_str()).is_none())
+        .map(|m| m.get("id").and_then(|v| v.as_str()).unwrap())
+        .collect();
+    if let Ok(counts) = state.db.get_thread_reply_counts(&parent_ids) {
+        for mi in message_infos.iter_mut() {
+            if mi.get("thread_parent_id").and_then(|v| v.as_str()).is_none() {
+                if let Some(id) = mi.get("id").and_then(|v| v.as_str()) {
+                    if let Some(count) = counts.get(id) {
+                        mi["thread_reply_count"] = serde_json::json!(count);
+                    }
+                }
+            }
+        }
+    }
+
     (StatusCode::OK, Json(serde_json::json!(message_infos))).into_response()
+}
+
+/// F3: List thread replies for a parent message.
+pub async fn list_thread_messages(
+    Path((channel_id, parent_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    let server_id = match state.db.get_server_id_for_channel(&channel_id) {
+        Ok(id) => id,
+        Err(e) => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    if !state.db.is_member_of_server(&user_id, &server_id).unwrap_or(false) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Not a member"}))).into_response();
+    }
+    let limit: i64 = 100;
+    let messages = match state.db.list_thread_messages(&parent_id, limit) {
+        Ok(m) => m,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let mut sender_ids: Vec<&str> = messages.iter().map(|m| m.sender_id.as_str()).collect();
+    sender_ids.dedup();
+    let conv_profiles = state.db.get_conversation_profiles_batch("channel", &server_id, &sender_ids).unwrap_or_default();
+    let msg_ids: Vec<String> = messages.iter().map(|m| m.id.clone()).collect();
+    let reactions = state.db.get_message_reactions(&msg_ids).unwrap_or_default();
+    let acks = state.db.get_message_acks(&msg_ids).unwrap_or_default();
+    let message_infos: Vec<serde_json::Value> = messages.iter().map(|m| {
+        serde_json::json!({
+            "id": m.id,
+            "sender_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &m.sender_id),
+            "sender_user_id": m.sender_id,
+            "sender_id_hash": m.sender_id_hash,
+            "encrypted_sender_username": m.encrypted_sender_username,
+            "sender_username_nonce": m.sender_username_nonce,
+            "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
+            "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
+            "timestamp": m.timestamp,
+            "edited_at": m.edited_at,
+            "key_version": m.key_version,
+            "encrypted_profile_snapshot": m.encrypted_profile_snapshot.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+            "profile_snapshot_nonce": m.profile_snapshot_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+            "pinned": false,
+            "reactions": reactions_json(&state, reactions.get(&m.id)),
+            "poll_votes": serde_json::json!({}),
+            "acks": acks_json(&state, acks.get(&m.id), &user_id, &m.sender_id),
+            "expires_at": serde_json::Value::Null,
+            "thread_parent_id": m.thread_parent_id,
+            "thread_reply_count": 0,
+            "conversation_profile": conv_profiles.get(&m.sender_id).map(|(data, nonce)| serde_json::json!({
+                "encrypted_profile_data": data, "nonce": nonce,
+            })),
+        })
+    }).collect();
+    (StatusCode::OK, Json(serde_json::json!(message_infos))).into_response()
+}
+
+/// F4: List channel categories for a server.
+pub async fn list_categories(
+    Path(server_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    if !state.db.is_member_of_server(&user_id, &server_id).unwrap_or(false) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Not a member"}))).into_response();
+    }
+    let categories = state.db.list_categories(&server_id).unwrap_or_default();
+    let result: Vec<serde_json::Value> = categories.iter().map(|c| {
+        serde_json::json!({
+            "id": c.id,
+            "server_id": c.server_id,
+            "encrypted_name": c.encrypted_name.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+            "name_nonce": c.name_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+            "position": c.position,
+        })
+    }).collect();
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
+/// F4: Create a channel category (owner only).
+pub async fn create_category(
+    Path(server_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Json(body): axum::extract::Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    if !state.db.is_server_owner(&user_id, &server_id).unwrap_or(false) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Only server owner can create categories"}))).into_response();
+    }
+    let encrypted_name = body.get("encrypted_name").and_then(|v| v.as_str()).and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+    let name_nonce = body.get("name_nonce").and_then(|v| v.as_str()).and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+    let position = body.get("position").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+    match state.db.create_category(&server_id, encrypted_name.as_deref(), name_nonce.as_deref(), position) {
+        Ok(cat) => (StatusCode::OK, Json(serde_json::json!({"id": cat.id, "position": cat.position}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+/// F4: Delete a channel category (owner only).
+pub async fn delete_category(
+    Path((server_id, category_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    if !state.db.is_server_owner(&user_id, &server_id).unwrap_or(false) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Only server owner can delete categories"}))).into_response();
+    }
+    // Prevent deleting the last category
+    let cats = state.db.list_categories(&server_id).unwrap_or_default();
+    if cats.len() <= 1 {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Cannot delete the last category"}))).into_response();
+    }
+    match state.db.delete_category(&category_id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+/// F4: Move a channel to a category (owner only).
+pub async fn move_channel_to_category(
+    Path((server_id, channel_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Json(body): axum::extract::Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    if !state.db.is_server_owner(&user_id, &server_id).unwrap_or(false) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Only server owner can move channels"}))).into_response();
+    }
+    let category_id = body.get("category_id").and_then(|v| v.as_str());
+    match state.db.move_channel_to_category(&channel_id, category_id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
 }
 
 /// List pinned messages for a server channel. Returns the full encrypted message
@@ -3499,7 +3671,7 @@ pub async fn list_messages_around(
     let acks2 = state.db.get_message_acks(&msg_ids2).unwrap_or_default();
     let expiries2 = state.db.get_message_expiries(&msg_ids2).unwrap_or_default();
 
-    let message_infos: Vec<serde_json::Value> = messages
+    let mut message_infos: Vec<serde_json::Value> = messages
         .iter()
         .map(|m| {
             serde_json::json!({
@@ -3522,6 +3694,8 @@ pub async fn list_messages_around(
                 "poll_votes": poll_votes_json(&state, poll_votes2.get(&m.id)),
                 "acks": acks_json(&state, acks2.get(&m.id), &user_id, &m.sender_id),
                 "expires_at": expiries2.get(&m.id).cloned().flatten(),
+                "thread_parent_id": m.thread_parent_id,
+                "thread_reply_count": 0,
                 "conversation_profile": conv_profiles2.get(&m.sender_id).map(|(data, nonce)| serde_json::json!({
                     "encrypted_profile_data": data,
                     "nonce": nonce,
@@ -3529,6 +3703,23 @@ pub async fn list_messages_around(
             })
         })
         .collect();
+
+    // F3: fill thread reply counts
+    let parent_ids2: Vec<&str> = message_infos.iter()
+        .filter(|m| m.get("thread_parent_id").and_then(|v| v.as_str()).is_none())
+        .map(|m| m.get("id").and_then(|v| v.as_str()).unwrap())
+        .collect();
+    if let Ok(counts) = state.db.get_thread_reply_counts(&parent_ids2) {
+        for mi in message_infos.iter_mut() {
+            if mi.get("thread_parent_id").and_then(|v| v.as_str()).is_none() {
+                if let Some(id) = mi.get("id").and_then(|v| v.as_str()) {
+                    if let Some(count) = counts.get(id) {
+                        mi["thread_reply_count"] = serde_json::json!(count);
+                    }
+                }
+            }
+        }
+    }
 
     (StatusCode::OK, Json(serde_json::json!(message_infos))).into_response()
 }
@@ -3583,6 +3774,75 @@ pub async fn get_turn_config(
         body["credential"] = serde_json::Value::String(p.clone());
     }
     (StatusCode::OK, Json(body)).into_response()
+}
+
+// --- F14: Custom CSS (E2E-encrypted) ---
+
+pub async fn get_user_css(
+    Path(target_user_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let _user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    match state.db.get_user_css(&target_user_id) {
+        Ok(Some((encrypted_css, css_nonce, updated_at))) => {
+            (StatusCode::OK, Json(serde_json::json!({
+                "encrypted_css": base64::engine::general_purpose::STANDARD.encode(&encrypted_css),
+                "css_nonce": base64::engine::general_purpose::STANDARD.encode(&css_nonce),
+                "updated_at": updated_at,
+            }))).into_response()
+        }
+        Ok(None) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "No CSS found"}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn save_user_css(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Json(body): axum::extract::Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    let encrypted_css_b64 = match body.get("encrypted_css").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "encrypted_css required"}))).into_response(),
+    };
+    let css_nonce_b64 = match body.get("css_nonce").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "css_nonce required"}))).into_response(),
+    };
+    let encrypted_css = match base64::engine::general_purpose::STANDARD.decode(encrypted_css_b64) {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid base64"}))).into_response(),
+    };
+    let css_nonce = match base64::engine::general_purpose::STANDARD.decode(css_nonce_b64) {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid base64"}))).into_response(),
+    };
+    match state.db.save_user_css(&user_id, &encrypted_css, &css_nonce) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn delete_user_css(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    match state.db.delete_user_css(&user_id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
 }
 
 // --- Server Keys (E2EE) ---

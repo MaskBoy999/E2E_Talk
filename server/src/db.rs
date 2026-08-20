@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Sha256, Digest};
 use chacha20poly1305::{
     aead::{Aead, AeadCore, KeyInit, OsRng, generic_array::GenericArray, generic_array::typenum::U32},
@@ -27,6 +27,7 @@ fn message_from_row(row: &rusqlite::Row) -> rusqlite::Result<Message> {
         sender_username_nonce: row.get(11)?,
         sender_id_hash: row.get(12)?,
         file_id: row.get(13)?,
+        thread_parent_id: None,
     })
 }
 
@@ -174,6 +175,8 @@ pub struct Channel {
     pub channel_type: String,
     pub position: i32,
     pub created_at: String,
+    // F4: category FK (NULL = uncategorized)
+    pub category_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -193,6 +196,17 @@ pub struct Message {
     pub sender_username_nonce: Option<String>,
     pub sender_id_hash: Option<String>,
     pub file_id: Option<String>,
+    // F3: Threaded replies
+    pub thread_parent_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChannelCategory {
+    pub id: String,
+    pub server_id: String,
+    pub encrypted_name: Option<Vec<u8>>,
+    pub name_nonce: Option<Vec<u8>>,
+    pub position: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -1230,6 +1244,10 @@ impl Database {
         // Migration 065: files.chunk_bytes — cumulative actual bytes written per
         // file, so chunk uploads are bounded by the declared size (H1).
         let _ = conn.execute_batch(include_str!("../migrations/065_file_chunk_bytes.sql"));
+        // Migration 066: threads + channel categories
+        let _ = conn.execute_batch(include_str!("../migrations/066_threads_and_categories.sql"));
+        // Migration 067: per-user encrypted custom CSS
+        let _ = conn.execute_batch(include_str!("../migrations/067_user_css.sql"));
 
         // Data migration: normalize legacy space-separated CURRENT_TIMESTAMP values
         // ("YYYY-MM-DD HH:MM:SS") to fixed-width RFC3339 ("YYYY-MM-DDTHH:MM:SS.000000Z")
@@ -1858,6 +1876,18 @@ impl Database {
         )
         .map_err(|e| e.to_string())?;
 
+        // F4: Create default categories "Text Channels" and "Voice Channels"
+        let text_cat_id = Uuid::new_v4().to_string();
+        let voice_cat_id = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO channel_categories (id, server_id, position, created_at) VALUES (?1, ?2, 0, datetime('now'))",
+            params![text_cat_id, server_id],
+        ).map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO channel_categories (id, server_id, position, created_at) VALUES (?1, ?2, 1, datetime('now'))",
+            params![voice_cat_id, server_id],
+        ).map_err(|e| e.to_string())?;
+
         // Check if channels table has encrypted_name and name_nonce columns
         let has_ch_name_col: bool = conn
             .query_row(
@@ -1877,14 +1907,14 @@ impl Database {
             .unwrap_or(false);
         if has_ch_name_col && has_ch_nonce_col {
             conn.execute(
-                "INSERT INTO channels (id, server_id, encrypted_name, name_nonce, type, position) VALUES (?1, ?2, ?3, ?4, 'text', 0)",
-                params![general_id, server_id, channel_encrypted_name, channel_name_nonce],
+                "INSERT INTO channels (id, server_id, encrypted_name, name_nonce, type, position, category_id) VALUES (?1, ?2, ?3, ?4, 'text', 0, ?5)",
+                params![general_id, server_id, channel_encrypted_name, channel_name_nonce, text_cat_id],
             )
             .map_err(|e| e.to_string())?;
         } else {
             conn.execute(
-                "INSERT INTO channels (id, server_id, type, position) VALUES (?1, ?2, 'text', 0)",
-                params![general_id, server_id],
+                "INSERT INTO channels (id, server_id, type, position, category_id) VALUES (?1, ?2, 'text', 0, ?3)",
+                params![general_id, server_id, text_cat_id],
             )
             .map_err(|e| e.to_string())?;
         }
@@ -2430,7 +2460,7 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, server_id, encrypted_name, name_nonce, type, COALESCE(position, 0), COALESCE(created_at, '') FROM channels
+                "SELECT id, server_id, encrypted_name, name_nonce, type, COALESCE(position, 0), COALESCE(created_at, ''), category_id FROM channels
                  WHERE server_id = ?1 ORDER BY position",
             )
             .map_err(|e| e.to_string())?;
@@ -2444,6 +2474,7 @@ impl Database {
                     channel_type: row.get(4)?,
                     position: row.get::<_, i32>(5)?,
                     created_at: row.get::<_, String>(6)?,
+                    category_id: row.get(7)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -2496,6 +2527,7 @@ impl Database {
             channel_type: ctype.to_string(),
             position: 0,
             created_at: String::new(),
+            category_id: None,
         })
     }
 
@@ -2658,6 +2690,7 @@ impl Database {
                     sender_username_nonce: row.get(13)?,
                     sender_id_hash: row.get(14).ok().flatten(),
                     file_id: None,
+                    thread_parent_id: None,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -2708,6 +2741,7 @@ impl Database {
                     sender_username_nonce: row.get(13)?,
                     sender_id_hash: row.get(14).ok().flatten(),
                     file_id: None,
+                    thread_parent_id: None,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -2759,6 +2793,7 @@ impl Database {
                     sender_username_nonce: row.get(11)?,
                     sender_id_hash: row.get(12).ok().flatten(),
                     file_id: None,
+                    thread_parent_id: None,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -2800,6 +2835,7 @@ impl Database {
                     sender_username_nonce: row.get(11)?,
                     sender_id_hash: row.get(12).ok().flatten(),
                     file_id: None,
+                    thread_parent_id: None,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -2825,6 +2861,8 @@ impl Database {
         // Disappearing-message TTL: fixed-width RFC3339 wall-clock expiry
         // (NULL = never). The server enforces it; the content stays encrypted.
         expires_at: Option<&str>,
+        // F3: threaded reply — NULL = top-level, non-NULL = reply in thread
+        thread_parent_id: Option<&str>,
     ) -> Result<Message, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let id = Uuid::new_v4().to_string();
@@ -2838,14 +2876,10 @@ impl Database {
             .map_err(|_| "Sender not found".to_string())?;
 
         let h = sha256_hex(&format!("{}:{}", sender_id, channel_id));
-        // Fixed-width RFC3339 timestamp (UTC, 6-digit fractional seconds) so string
-        // sorting matches chronological order and the WS/REST values are identical.
-        // Avoids the table default (CURRENT_TIMESTAMP) which is second-precision and
-        // space-separated — that breaks ordering and pagination for same-second messages.
         let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string();
         conn.execute(
-            "INSERT INTO messages (id, channel_id, sender_id, encrypted_content, nonce, timestamp, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_sender_username, sender_username_nonce, sender_id_hash, file_id, expires_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-            params![id, channel_id, sender_id, encrypted_content, nonce, ts, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_sender_username, sender_username_nonce, h, file_id, expires_at],
+            "INSERT INTO messages (id, channel_id, sender_id, encrypted_content, nonce, timestamp, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_sender_username, sender_username_nonce, sender_id_hash, file_id, expires_at, thread_parent_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![id, channel_id, sender_id, encrypted_content, nonce, ts, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_sender_username, sender_username_nonce, h, file_id, expires_at, thread_parent_id],
         )
         .map_err(|e| e.to_string())?;
 
@@ -2864,6 +2898,7 @@ impl Database {
             sender_username_nonce: sender_username_nonce.map(|s| s.to_string()),
             sender_id_hash: Some(sha256_hex(&format!("{}:{}", sender_id, channel_id))),
             file_id: file_id.map(|s| s.to_string()),
+            thread_parent_id: thread_parent_id.map(|s| s.to_string()),
         })
     }
 
@@ -4406,6 +4441,7 @@ impl Database {
                         sender_username_nonce: row.get(11)?,
                         sender_id_hash: row.get(12)?,
                         file_id: row.get(13)?,
+                        thread_parent_id: None,
                     })
                 },
             )
@@ -5437,6 +5473,7 @@ impl Database {
                     sender_username_nonce: row.get(13)?,
                     sender_id_hash: row.get(14).ok().flatten(),
                     file_id: row.get(15).ok().flatten(),
+                    thread_parent_id: None,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -6018,6 +6055,7 @@ impl Database {
                     channel_type: row.get(4)?,
                     position: row.get::<_, i32>(5)?,
                     created_at: row.get(6)?,
+                    category_id: row.get(7).ok().flatten(),
                 })
             })
             .map_err(|e| e.to_string())?
@@ -6053,6 +6091,7 @@ impl Database {
                     sender_username_nonce: None,
                     sender_id_hash: Some(row.get(12)?),
                     file_id: None,
+                    thread_parent_id: None,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -7297,5 +7336,199 @@ impl Database {
             })
             .map_err(|e| e.to_string())?;
         rows.next().transpose().map_err(|e| e.to_string())
+    }
+
+    // ==================== F3: Threaded Replies ====================
+
+    /// List thread replies for a parent message, ordered by timestamp.
+    pub fn list_thread_messages(&self, parent_id: &str, limit: i64) -> Result<Vec<Message>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, channel_id, sender_id, encrypted_content, nonce, timestamp, edited_at, key_version, encrypted_profile_snapshot, profile_snapshot_nonce, encrypted_sender_username, sender_username_nonce, sender_id_hash, file_id, thread_parent_id FROM messages WHERE thread_parent_id = ?1 ORDER BY timestamp ASC LIMIT ?2",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params![parent_id, limit], |row| {
+                Ok(Message {
+                    id: row.get(0)?,
+                    channel_id: row.get(1)?,
+                    sender_id: row.get(2)?,
+                    encrypted_content: row.get(3)?,
+                    nonce: row.get(4)?,
+                    timestamp: row.get(5)?,
+                    edited_at: row.get(6)?,
+                    key_version: row.get(7)?,
+                    encrypted_profile_snapshot: row.get(8)?,
+                    profile_snapshot_nonce: row.get(9)?,
+                    encrypted_sender_username: row.get(10)?,
+                    sender_username_nonce: row.get(11)?,
+                    sender_id_hash: row.get(12).ok().flatten(),
+                    file_id: row.get(13).ok().flatten(),
+                    thread_parent_id: Some(row.get::<_, String>(14)?),
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    }
+
+    /// Count thread replies for a set of parent message IDs.
+    pub fn get_thread_reply_counts(&self, parent_ids: &[&str]) -> Result<std::collections::HashMap<String, i64>, String> {
+        if parent_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let placeholders: Vec<String> = parent_ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect();
+        let sql = format!("SELECT thread_parent_id, COUNT(*) FROM messages WHERE thread_parent_id IN ({}) GROUP BY thread_parent_id", placeholders.join(","));
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let params: Vec<&dyn rusqlite::types::ToSql> = parent_ids.iter().map(|p| p as &dyn rusqlite::types::ToSql).collect();
+        let rows = stmt.query_map(params.as_slice(), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        }).map_err(|e| e.to_string())?;
+        let mut map = std::collections::HashMap::new();
+        for row in rows {
+            let (id, count) = row.map_err(|e| e.to_string())?;
+            map.insert(id, count);
+        }
+        Ok(map)
+    }
+
+    // ==================== F4: Channel Categories ====================
+
+    /// Create a channel category.
+    pub fn create_category(&self, server_id: &str, encrypted_name: Option<&[u8]>, name_nonce: Option<&[u8]>, position: i32) -> Result<ChannelCategory, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let id = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO channel_categories (id, server_id, encrypted_name, name_nonce, position) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![id, server_id, encrypted_name, name_nonce, position],
+        ).map_err(|e| e.to_string())?;
+        Ok(ChannelCategory {
+            id,
+            server_id: server_id.to_string(),
+            encrypted_name: encrypted_name.map(|v| v.to_vec()),
+            name_nonce: name_nonce.map(|v| v.to_vec()),
+            position,
+        })
+    }
+
+    /// List categories for a server.
+    pub fn list_categories(&self, server_id: &str) -> Result<Vec<ChannelCategory>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT id, server_id, encrypted_name, name_nonce, position FROM channel_categories WHERE server_id = ?1 ORDER BY position ASC")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params![server_id], |row| {
+                Ok(ChannelCategory {
+                    id: row.get(0)?,
+                    server_id: row.get(1)?,
+                    encrypted_name: row.get(2)?,
+                    name_nonce: row.get(3)?,
+                    position: row.get(4)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    }
+
+    /// Delete a channel category and set its channels to uncategorized.
+    pub fn delete_category(&self, category_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        // Cascade: delete all channels in this category + their messages
+        let channel_ids: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT id FROM channels WHERE category_id = ?1")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt.query_map(rusqlite::params![category_id], |row| row.get(0))
+                .map_err(|e| e.to_string())?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        for ch_id in &channel_ids {
+            conn.execute("DELETE FROM messages WHERE channel_id = ?1", rusqlite::params![ch_id])
+                .map_err(|e| e.to_string())?;
+            conn.execute("DELETE FROM channels WHERE id = ?1", rusqlite::params![ch_id])
+                .map_err(|e| e.to_string())?;
+        }
+        conn.execute(
+            "DELETE FROM channel_categories WHERE id = ?1",
+            rusqlite::params![category_id],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Move a channel to a category (or NULL to uncategory).
+    pub fn move_channel_to_category(&self, channel_id: &str, category_id: Option<&str>) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE channels SET category_id = ?1 WHERE id = ?2",
+            rusqlite::params![category_id, channel_id],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Check if a user is the owner of the server a category belongs to.
+    pub fn is_category_owner(&self, user_id: &str, category_id: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM channel_categories cc JOIN servers s ON cc.server_id = s.id WHERE cc.id = ?1 AND s.owner_id = ?2",
+                rusqlite::params![category_id, user_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(count > 0)
+    }
+
+    /// Get category_id for a channel.
+    pub fn get_channel_category_id(&self, channel_id: &str) -> Result<Option<String>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT category_id FROM channels WHERE id = ?1",
+            rusqlite::params![channel_id],
+            |row| row.get(0),
+        ).map_err(|e| e.to_string())
+    }
+
+    /// Get the server_id that owns a category.
+    pub fn get_category_server_id(&self, category_id: &str) -> Result<String, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT server_id FROM channel_categories WHERE id = ?1",
+            rusqlite::params![category_id],
+            |row| row.get(0),
+        ).map_err(|e| e.to_string())
+    }
+
+    // ==================== F14: Custom CSS ====================
+
+    /// Save or update a user's encrypted custom CSS.
+    pub fn save_user_css(&self, user_id: &str, encrypted_css: &[u8], css_nonce: &[u8]) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO user_css (user_id, encrypted_css, css_nonce, updated_at) VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP) ON CONFLICT(user_id) DO UPDATE SET encrypted_css = ?2, css_nonce = ?3, updated_at = CURRENT_TIMESTAMP",
+            rusqlite::params![user_id, encrypted_css, css_nonce],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Fetch a user's encrypted custom CSS. Returns (encrypted_css, css_nonce, updated_at).
+    pub fn get_user_css(&self, user_id: &str) -> Result<Option<(Vec<u8>, Vec<u8>, String)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT encrypted_css, css_nonce, updated_at FROM user_css WHERE user_id = ?1",
+            rusqlite::params![user_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).optional().map_err(|e| e.to_string())
+    }
+
+    /// Delete a user's custom CSS.
+    pub fn delete_user_css(&self, user_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM user_css WHERE user_id = ?1",
+            rusqlite::params![user_id],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
     }
 }

@@ -517,6 +517,11 @@ async fn main() {
         .route("/api/channels/{channel_id}/messages", get(handlers::list_messages))
         .route("/api/channels/{channel_id}/messages/around/{message_id}", get(handlers::list_messages_around))
         .route("/api/channels/{channel_id}/pins", get(handlers::list_channel_pins))
+        .route("/api/channels/{channel_id}/thread/{parent_id}", get(handlers::list_thread_messages))
+        .route("/api/servers/{server_id}/categories", get(handlers::list_categories).post(handlers::create_category))
+        .route("/api/servers/{server_id}/categories/{category_id}", delete(handlers::delete_category))
+        .route("/api/servers/{server_id}/channels/{channel_id}/category", put(handlers::move_channel_to_category))
+
         .route("/api/channels/{channel_id}", delete(handlers::delete_channel))
         // E2E blind-index message search (GET query + client token-index backfill)
         .route("/api/search", get(handlers::search_messages_handler).post(handlers::index_search_tokens))

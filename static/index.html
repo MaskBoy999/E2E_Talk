@@ -416,6 +416,8 @@
                 <button class="settings-tab" data-tab="notification-settings">Notifications</button>
                 <button class="settings-tab" data-tab="security-settings">Security</button>
                 <button class="settings-tab" data-tab="voice-settings">Voice</button>
+                <button class="settings-tab" data-tab="shortcut-settings">Shortcuts</button>
+                <button class="settings-tab" data-tab="custom-css-settings">CSS</button>
             </div>
 
             <!-- User Settings -->
@@ -848,6 +850,20 @@
             </div>
 
             <!-- Voice Settings -->
+
+            <div class="settings-panel" id="custom-css-settings" style="display:none">
+                <div class="settings-group">
+                    <h3 style="color:var(--text-primary);margin:0 0 12px">Custom CSS</h3>
+                    <p style="color:var(--text-muted);font-size:12px;margin:0 0 12px">Write your own CSS to customize the chat appearance. Stored encrypted on the server.</p>
+                    <div id="custom-css-editor-container"></div>
+                </div>
+            </div>
+            <div class="settings-panel" id="shortcut-settings" style="display:none">
+                <div class="settings-group">
+                    <h3 style="color:var(--text-primary);margin:0 0 8px">Keyboard Shortcuts</h3>
+                    <div id="shortcut-settings-container"></div>
+                </div>
+            </div>
             <div class="settings-panel" id="voice-settings" style="display:none">
                 <div class="settings-group">
                     <h4>Voice &amp; Video</h4>
@@ -1884,6 +1900,7 @@
 
     <script src="secure-storage.js?v=1"></script>
     <script src="voice.js?v=2"></script>
+    <script src="thread_categories_shortcuts.js?v=1"></script>
     <script src="chat.js?v=40"></script>
 </body>
 </html>

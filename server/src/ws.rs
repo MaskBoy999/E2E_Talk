@@ -389,6 +389,9 @@ struct OutgoingChatMessage {
     // metadata so the client can render the countdown immediately.
     #[serde(skip_serializing_if = "Option::is_none")]
     expires_at: Option<String>,
+    // F3: Threaded replies
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thread_parent_id: Option<String>,
 }
 
 pub async fn ws_handler(
@@ -761,8 +764,9 @@ async fn handle_ws_message(
             // Disappearing-message TTL: optional plaintext seconds (clamped to
             // 5s..24h); the server enforces the countdown + shreds at expiry.
             let expires_at = disappearing_expiry(&parsed);
+            let thread_parent_id = parsed.get("thread_parent_id").and_then(|c| c.as_str());
 
-            let message = match state.db.save_encrypted_message(channel_id, user_id, &encrypted_content, &nonce, encrypted_profile_snapshot.as_deref(), profile_snapshot_nonce.as_deref(), encrypted_sender_username.as_deref(), sender_username_nonce.as_deref(), file_id_hash.as_deref(), expires_at.as_deref()) {
+            let message = match state.db.save_encrypted_message(channel_id, user_id, &encrypted_content, &nonce, encrypted_profile_snapshot.as_deref(), profile_snapshot_nonce.as_deref(), encrypted_sender_username.as_deref(), sender_username_nonce.as_deref(), file_id_hash.as_deref(), expires_at.as_deref(), thread_parent_id) {
                 Ok(m) => m,
                 Err(e) => {
                     tracing::error!("Failed to save message: {}", e);
@@ -804,6 +808,7 @@ async fn handle_ws_message(
                     encrypted_profile_snapshot: encrypted_profile_snapshot.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                     profile_snapshot_nonce: profile_snapshot_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                     expires_at: expires_at.clone(),
+                    thread_parent_id: thread_parent_id.map(|s| s.to_string()),
                 }),
                 user_id: None,
                 username: None,
@@ -977,6 +982,7 @@ async fn handle_ws_message(
                     encrypted_profile_snapshot: encrypted_profile_snapshot.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                     profile_snapshot_nonce: profile_snapshot_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                     expires_at: expires_at.clone(),
+                    thread_parent_id: None,
                 }),
                 user_id: None,
                 username: None,
@@ -1105,6 +1111,7 @@ async fn handle_ws_message(
                     encrypted_profile_snapshot: None,
                     profile_snapshot_nonce: None,
                     expires_at: None,
+                    thread_parent_id: None,
                 }),
                 user_id: None,
                 username: None,
@@ -1218,6 +1225,7 @@ async fn handle_ws_message(
                     encrypted_profile_snapshot: None,
                     profile_snapshot_nonce: None,
                     expires_at: None,
+                    thread_parent_id: None,
                 }),
                 user_id: None,
                 username: None,

@@ -78,7 +78,6 @@ static/test_*
 status/
 SCHEMA_ANALYSIS.md
 PLAN.md
-PROGRESS.md
 distribution.md
 e2e-talk-streamlined-architecture.md
 security.md

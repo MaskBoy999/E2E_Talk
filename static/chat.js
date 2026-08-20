@@ -3123,6 +3123,15 @@ document.addEventListener('DOMContentLoaded', () => {
             if (window._stopNotifTrimPreview) window._stopNotifTrimPreview();
             // Fetch backup status when security tab opens.
             if (tab.dataset.tab === 'security-settings') fetchBackupStatus();
+            // F13: Render keyboard shortcut settings when shortcuts tab opens.
+            if (tab.dataset.tab === 'shortcut-settings' && typeof renderShortcutSettings === 'function') {
+                var sc = document.getElementById('shortcut-settings-container');
+                if (sc) renderShortcutSettings(sc);
+            }
+            if (tab.dataset.tab === 'custom-css-settings' && typeof renderCustomCssSettings === 'function') {
+                var cc = document.getElementById('custom-css-editor-container');
+                if (cc) renderCustomCssSettings(cc);
+            }
         });
     });
 
@@ -6293,6 +6302,13 @@ document.addEventListener('DOMContentLoaded', () => {
     loadFriendRequestBadge();
     loadEmojiCache(); // Load custom emojis
     loadMyProfile(); // Load own profile for sidebar footer
+    // F14: Auto-load custom CSS on startup (local only)
+    (function () {
+        if (typeof applyCustomCss === "function") {
+            var local = localStorage.getItem("custom_css_text") || "";
+            if (local) applyCustomCss(local);
+        }
+    })();
     requestNotificationPermission();
     setupMentionAutocomplete();
     initMentionsInbox();
@@ -10429,6 +10445,7 @@ function connectWebSocket(t) {
     }
     const protocol = isSecure ? 'wss:' : 'ws:';
     ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+    window.ws = ws;
 
     ws.onopen = () => {
         var devId = localStorage.getItem('e2e_device_key');
@@ -10606,7 +10623,14 @@ function connectWebSocket(t) {
                         } catch (_) {}
                     }
                     if (data.channel_id === currentChannelId) {
-                        await appendMessage(data.message);
+                        // F3: Thread reply — update thread panel instead of main chat
+                        if (data.message.thread_parent_id && typeof window._threadPanelOpen !== 'undefined' && window._threadPanelOpen && window._threadParentId === data.message.thread_parent_id) {
+                            if (typeof window._loadThreadMessages === 'function') {
+                                window._loadThreadMessages(data.message.thread_parent_id, data.channel_id);
+                            }
+                        } else if (!data.message.thread_parent_id) {
+                            await appendMessage(data.message);
+                        }
                         // E2E delivery/read receipts: ack received messages with
                         // the blind conversation-key token so the author's
                         // checkmark moves to ✓✓ delivered, then ✓✓ read once
@@ -13542,6 +13566,7 @@ async function appendMessage(msg) {
         '<button class="msg-action-btn" data-action="reply" title="Reply">&#x21A9;</button>' +
         '<button class="msg-action-btn" data-action="forward" title="Forward to channel">&#x21AA;</button>' +
         '<button class="msg-action-btn" data-action="forward-dm" title="Forward to DM">&#x1F4AC;</button>' +
+        '<button class="msg-action-btn" data-action="thread" title="Reply in Thread">&#x1F9F5;</button>' +
         (isOwn ? '<button class="msg-action-btn" data-action="edit" title="Edit">&#x270E;</button>' : '') +
         (isOwn ? '<button class="msg-action-btn" data-action="delete" title="Delete">&#x2715;</button>' : '') +
         '</div>';
@@ -13913,8 +13938,23 @@ function setupMessageActions() {
             togglePinMessage(messageId, true);
         } else if (action === 'unpin') {
             togglePinMessage(messageId, false);
+        } else if (action === 'thread') {
+            openThreadPanel(messageId, currentChannelId);
         }
     });
+
+    // F3: Thread reply indicator click delegation
+    var messageListEl = document.getElementById('message-list');
+    if (messageListEl && !messageListEl._threadClickBound) {
+        messageListEl._threadClickBound = true;
+        messageListEl.addEventListener('click', function(e) {
+            var indicator = e.target.closest('.thread-reply-indicator');
+            if (indicator) {
+                var threadId = indicator.getAttribute('data-thread-id');
+                if (threadId) openThreadPanel(threadId, currentChannelId);
+            }
+        });
+    }
 
     // Streamer mode reveal button delegation
     document.getElementById('message-list').addEventListener('click', function (e) {
@@ -16417,6 +16457,7 @@ async function appendDmMessage(msg, kp, otherPublicKey) {
             wrappedContent +
             editedHtml +
             reactionsHtml +
+            (msg.thread_reply_count > 0 ? '<div class="thread-reply-indicator" data-thread-id="' + msg.id + '">🧵 ' + msg.thread_reply_count + ' repl' + (msg.thread_reply_count === 1 ? 'y' : 'ies') + '</div>' : '') +
         '</div>' +
         actionsHtml;
     // Keep the parsed poll payload on the element for live vote updates.
@@ -19830,7 +19871,12 @@ function renderMarkdown(text) {
         if (inCodeBlock) {
             if (line.trim() === '```') {
                 const langAttr = codeBlockLang ? ' data-lang="' + codeBlockLang + '"' : '';
-                html += '<div style="position:relative;margin:8px 0"><pre style="background:#1e1e1e;border:1px solid #3d3d3d;border-radius:6px;padding:12px;margin:0;overflow-x:auto;font-family:monospace;font-size:13px;color:#d4d4d4;line-height:1.5"' + langAttr + '><code>' + codeBlockContent + '</code></pre></div>';
+                // F9: Apply syntax highlighting when a language tag is present
+                var highlightedCode = codeBlockContent;
+                if (codeBlockLang && typeof highlightSyntax === 'function') {
+                    highlightedCode = highlightSyntax(codeBlockContent, 'code.' + codeBlockLang, '');
+                }
+                html += '<div style="position:relative;margin:8px 0"><pre style="background:#1e1e1e;border:1px solid #3d3d3d;border-radius:6px;padding:12px;margin:0;overflow-x:auto;font-family:monospace;font-size:13px;color:#d4d4d4;line-height:1.5"' + langAttr + '><code>' + highlightedCode + '</code></pre></div>';
                 codeBlockContent = '';
                 codeBlockLang = '';
                 inCodeBlock = false;
