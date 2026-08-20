@@ -11585,7 +11585,7 @@ function connectWebSocket(t) {
                         // B4: the envelope's notification_type is blinded (HMAC) —
                         // dispatch from the decrypted payload's type instead.
                         var notifType = (notifData && notifData.type) || data.notification_type;
-                        if (notifType === 'mention_notification' || notifType === 'reply_notification' || notifType === 'dm_new' || notifType === 'friend_request_accepted' || notifType === 'friend_request_received') {
+                        if (notifType === 'mention_notification' || notifType === 'reply_notification' || notifType === 'dm_new' || notifType === 'friend_request_accepted' || notifType === 'friend_request_received' || notifType === 'login_attempt_alert') {
                             // Dispatch to decrypted notification handler
                             handleDecryptedNotification(notifData);
                         }
@@ -26365,6 +26365,22 @@ function handleDecryptedNotification(notifData) {
             try { renderDmSidebar(); } catch (_) {}
         });
         loadFriendRequestBadge();
+    } else if (ntype === 'login_attempt_alert') {
+        // S3: Someone tried to brute-force this account's password.
+        // Show a prominent browser notification + in-app toast.
+        var attempts = notifData.attempts || '?';
+        var ip = notifData.ip || 'unknown';
+        var ts = notifData.timestamp || '';
+        var title = '⚠️ Security Alert';
+        var body = 'Someone failed to log in to your account ' + attempts + ' time' + (attempts === 1 ? '' : 's') + ' from IP ' + ip + '.';
+        showBrowserNotification(title, body, null);
+        // Show in-app toast for immediate visibility
+        var toast = document.createElement('div');
+        toast.style.cssText = 'position:fixed;top:20px;left:50%;transform:translateX(-50%);z-index:99999;background:#ff4444;color:#fff;padding:12px 24px;border-radius:8px;font-size:14px;box-shadow:0 4px 12px rgba(0,0,0,0.3);max-width:500px;text-align:center;transition:opacity 0.3s;cursor:pointer;';
+        toast.textContent = '⚠️ ' + body;
+        toast.onclick = function() { toast.style.opacity = '0'; setTimeout(function() { toast.remove(); }, 350); };
+        document.body.appendChild(toast);
+        setTimeout(function() { toast.style.opacity = '0'; setTimeout(function() { toast.remove(); }, 350); }, 12000);
     }
 }
 

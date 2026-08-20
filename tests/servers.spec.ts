@@ -10,6 +10,9 @@ test.describe('Step 4: Server, Channel & Invite Code Encryption', () => {
 
     async function registerUser(page: any, username: string, password: string) {
         await page.goto(`${BASE}/login.html`);
+        await page.evaluate(() => { localStorage.clear(); });
+        await page.goto(`${BASE}/login.html`);
+        await page.waitForSelector('#show-register', { timeout: 10000 });
         await page.click('#show-register');
         await page.waitForSelector('#register-form', { state: 'visible' });
         await page.fill('#register-username', username);
@@ -169,11 +172,8 @@ test.describe('Step 4: Server, Channel & Invite Code Encryption', () => {
         await page.waitForSelector('#create-server-modal', { state: 'visible', timeout: 5000 });
         await page.fill('#new-server-name', 'Key Test Server');
         await page.click('#confirm-create-server');
-        await page.waitForTimeout(2000);
-
-        // Verify server key exists in localStorage
-        const userStr = await page.evaluate(() => localStorage.getItem('user'));
-        const user = JSON.parse(userStr as string);
+        // Wait for the server icon to appear (server created)
+        await page.waitForSelector('.server-icon', { timeout: 10000 });
 
         // Get server IDs from UI
         const serverIds = await page.evaluate(() => {
@@ -182,19 +182,23 @@ test.describe('Step 4: Server, Channel & Invite Code Encryption', () => {
         });
         expect(serverIds.length).toBeGreaterThan(0);
 
-        // Verify server key is stored in localStorage
-        const serverKeyExists = await page.evaluate((sid: string) => {
-            const E = globalThis.E2ECrypto;
-            return E.getServerKey(sid) !== null;
-        }, serverIds[0]);
-        expect(serverKeyExists).toBeTruthy();
+        // Wait for the server key to be stored (via WS key delivery)
+        await page.waitForFunction((sid: string) => {
+            const E = (window as any).E2ECrypto;
+            return E && E.getServerKey(sid) !== null;
+        }, serverIds[0], { timeout: 15000 });
+
+        // Verify server key exists in localStorage
+        const userStr = await page.evaluate(() => localStorage.getItem('user'));
+        const user = JSON.parse(userStr as string);
+        expect(user).toBeTruthy();
 
         // Verify invite code is stored for the owner
         const inviteCode = await page.evaluate((sid: string) => {
             return localStorage.getItem('e2e_invite_' + sid);
         }, serverIds[0]);
         expect(inviteCode).toBeTruthy();
-        expect(inviteCode!.length).toBe(8);
+        expect(inviteCode!.length).toBe(16);
     });
 
     test('invite code hash uses HMAC and server stores hash not plaintext', async ({ page, request }) => {

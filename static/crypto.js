@@ -35,6 +35,16 @@ var E2ECrypto = (() => {
         return diff === 0;
     }
 
+    // ---- Secure memory erasure (S7) ----
+    // Zero out a Uint8Array/ArrayBuffer to prevent casual recovery via
+    // devtools memory snapshots. JavaScript doesn't guarantee memory zeroing,
+    // but fill(0) is the best we can do for defensive-in-depth.
+    function _secureZero(arr) {
+        if (!arr) return;
+        if (arr instanceof ArrayBuffer) arr = new Uint8Array(arr);
+        if (arr.fill) arr.fill(0);
+    }
+
     // ---- Random bytes ----
     function randomBytes(n) {
         return sodium.randombytes_buf(n);
@@ -84,6 +94,7 @@ var E2ECrypto = (() => {
             result.set(t.slice(0, toCopy), offset);
             offset += toCopy;
         }
+        _secureZero(prk);
         return result.slice(0, lenNum);
     }
 
@@ -122,8 +133,11 @@ var E2ECrypto = (() => {
         // OLD ephemeral version — kept for backward compat with server_keys
         const eph = x25519GenerateKeyPair();
         const shared = x25519SharedSecret(eph.privateKey, recipientPublicKey);
+        _secureZero(eph.privateKey);
         const key = hkdf(shared, shared, 'e2e-envelope-v1', 32);
+        _secureZero(shared);
         const enc = _aeadEncryptRaw(plaintextBytes, key, null, null);
+        _secureZero(key);
         return {
             ciphertext: arrayBufferToBase64(enc.ciphertext),
             nonce: arrayBufferToBase64(enc.nonce),
@@ -137,16 +151,22 @@ var E2ECrypto = (() => {
         const ephPub = new Uint8Array(base64ToArrayBuffer(ephemeralPublicKeyB64));
         const priv = new Uint8Array(recipientPrivateKey);
         const shared = x25519SharedSecret(priv, ephPub);
+        _secureZero(priv);
         const key = hkdf(shared, shared, 'e2e-envelope-v1', 32);
-        return _aeadDecryptRaw(ct, key, null, n);
+        _secureZero(shared);
+        const pt = _aeadDecryptRaw(ct, key, null, n);
+        _secureZero(key);
+        return pt;
     }
 
     // NEW: Authenticated envelope (static ECDH)
     function envelopeEncrypt(plaintext, recipientPublicKey, senderPrivateKey) {
         const shared = x25519SharedSecret(senderPrivateKey, recipientPublicKey);
         const key = hkdf(shared, shared, 'e2e-envelope-v1', 32);
+        _secureZero(shared);
         const pt = typeof plaintext === 'string' ? new TextEncoder().encode(plaintext) : new Uint8Array(plaintext);
         const enc = _aeadEncryptRaw(pt, key, null, null);
+        _secureZero(key);
         return { ciphertext: arrayBufferToBase64(enc.ciphertext), nonce: arrayBufferToBase64(enc.nonce) };
     }
 
@@ -155,7 +175,10 @@ var E2ECrypto = (() => {
         const n = new Uint8Array(base64ToArrayBuffer(nonceB64));
         const shared = x25519SharedSecret(recipientPrivateKey, senderPublicKey);
         const key = hkdf(shared, shared, 'e2e-envelope-v1', 32);
-        return _aeadDecryptRaw(ct, key, null, n);
+        _secureZero(shared);
+        const pt = _aeadDecryptRaw(ct, key, null, n);
+        _secureZero(key);
+        return pt;
     }
 
     // ---- Simplified AEAD with AAD support ----
@@ -206,9 +229,11 @@ var E2ECrypto = (() => {
             sodium.crypto_pwhash_MEMLIMIT_MODERATE,
             sodium.crypto_pwhash_ALG_ARGON2ID13
         );
+        _secureZero(pwdBytes);
         const ptB64 = btoa(plaintext);
         const ptBytes = new TextEncoder().encode(ptB64);
         const enc = _aeadEncryptRaw(ptBytes, key, null, null);
+        _secureZero(key);
         return {
             encrypted_private_key: arrayBufferToBase64(enc.ciphertext),
             salt: arrayBufferToBase64(salt),
@@ -227,10 +252,15 @@ var E2ECrypto = (() => {
             sodium.crypto_pwhash_MEMLIMIT_MODERATE,
             sodium.crypto_pwhash_ALG_ARGON2ID13
         );
+        _secureZero(pwdBytes);
+        _secureZero(salt);
         try {
             const ptBytes = _aeadDecryptRaw(ct, key, null, n);
+            _secureZero(key);
+            _secureZero(ct);
+            _secureZero(n);
             return atob(new TextDecoder().decode(ptBytes));
-        } catch (_) { return null; }
+        } catch (_) { _secureZero(key); _secureZero(ct); _secureZero(n); return null; }
     }
 
     // ---- Profile Data Key (for sharing encrypted profile data) ----
@@ -249,6 +279,8 @@ var E2ECrypto = (() => {
         const n = new Uint8Array(base64ToArrayBuffer(nonceB64));
         const k = key instanceof Uint8Array ? key : new Uint8Array(key);
         const pt = _aeadDecryptRaw(ct, k, null, n);
+        _secureZero(ct);
+        _secureZero(n);
         if (!pt) return null;
         return JSON.parse(new TextDecoder().decode(pt));
     }
@@ -256,16 +288,20 @@ var E2ECrypto = (() => {
     // ---- HMAC hex (for invite/friend codes) ----
     function hmacHex(keyBytesOrB64, dataString) {
         let keyBytes;
+        let _ownedKey = false;
         if (typeof keyBytesOrB64 === 'string' && keyBytesOrB64.length > 32 && /[+\/=]/.test(keyBytesOrB64)) {
             // Base64-encoded key (contains base64-specific chars)
             keyBytes = new Uint8Array(base64ToArrayBuffer(keyBytesOrB64));
+            _ownedKey = true;
         } else if (keyBytesOrB64 instanceof Uint8Array) {
             keyBytes = keyBytesOrB64;
         } else {
             keyBytes = new TextEncoder().encode(keyBytesOrB64);
+            _ownedKey = true;
         }
         const dataBytes = new TextEncoder().encode(dataString);
         const hash = hmacSHA256(keyBytes, dataBytes);
+        if (_ownedKey) _secureZero(keyBytes);
         let hex = '';
         for (let i = 0; i < hash.length; i++) hex += hash[i].toString(16).padStart(2, '0');
         return hex;
@@ -389,16 +425,21 @@ var E2ECrypto = (() => {
     // ---- Simplified DM Encryption (ECDH + HKDF per-channel, with message padding) ----
     function getDmKey(dmChannelId, myPrivateKey, otherPublicKey) {
         const shared = x25519SharedSecret(myPrivateKey, otherPublicKey);
-        return hkdf(shared, shared, 'dm-channel:' + dmChannelId, 32);
+        const key = hkdf(shared, shared, 'dm-channel:' + dmChannelId, 32);
+        _secureZero(shared);
+        return key;
     }
     function encryptDm(plaintext, dmChannelId, myPrivateKey, otherPublicKey) {
         const dmKey = getDmKey(dmChannelId, myPrivateKey, otherPublicKey);
         var padded = padPlaintext(plaintext);
-        return aeadEncrypt(padded, dmKey);
+        var result = aeadEncrypt(padded, dmKey);
+        _secureZero(dmKey);
+        return result;
     }
     function decryptDm(ciphertextB64, nonceB64, dmChannelId, myPrivateKey, otherPublicKey) {
         const dmKey = getDmKey(dmChannelId, myPrivateKey, otherPublicKey);
         var raw = aeadDecrypt(ciphertextB64, dmKey, nonceB64);
+        _secureZero(dmKey);
         if (!raw) return null;
         var unpadded = unpadPlaintext(new Uint8Array(raw));
         return new TextDecoder().decode(unpadded);
@@ -514,12 +555,16 @@ var E2ECrypto = (() => {
     function encryptFileKeyForStorage(fileKeyB64, symmetricKey) {
         const fileKeyBytes = new Uint8Array(base64ToArrayBuffer(fileKeyB64));
         const enc = _aeadEncryptRaw(fileKeyBytes, symmetricKey, null, null);
+        _secureZero(fileKeyBytes);
         return { ciphertext: arrayBufferToBase64(enc.ciphertext), nonce: arrayBufferToBase64(enc.nonce) };
     }
     function decryptFileKeyFromStorage(ciphertextB64, nonceB64, symmetricKey) {
         const combined = new Uint8Array(base64ToArrayBuffer(ciphertextB64));
         const n = new Uint8Array(base64ToArrayBuffer(nonceB64));
-        return arrayBufferToBase64(_aeadDecryptRaw(combined, symmetricKey, null, n));
+        const pt = _aeadDecryptRaw(combined, symmetricKey, null, n);
+        _secureZero(combined);
+        _secureZero(n);
+        return arrayBufferToBase64(pt);
     }
     function encodeEncryptedFileKey(fileKeyB64, symmetricKey) {
         const result = encryptFileKeyForStorage(fileKeyB64, symmetricKey);
@@ -539,13 +584,17 @@ var E2ECrypto = (() => {
     function deriveEscrowKey(password, salt) {
         const pwdBytes = new TextEncoder().encode(password);
         const saltBytes = salt instanceof Uint8Array ? salt : new Uint8Array(base64ToArrayBuffer(salt));
-        return hkdf(pwdBytes, saltBytes, 'e2e-key-escrow-v1', 32);
+        const key = hkdf(pwdBytes, saltBytes, 'e2e-key-escrow-v1', 32);
+        _secureZero(pwdBytes);
+        return key;
     }
     function encryptKeyForEscrow(privateKeyB64, password) {
         const salt = randomBytes(16);
         const key = deriveEscrowKey(password, salt);
         const plaintext = new Uint8Array(base64ToArrayBuffer(privateKeyB64));
         const enc = _aeadEncryptRaw(plaintext, key, null, null);
+        _secureZero(key);
+        _secureZero(plaintext);
         return {
             encrypted_private_key: arrayBufferToBase64(enc.ciphertext),
             salt: arrayBufferToBase64(salt),
@@ -558,8 +607,11 @@ var E2ECrypto = (() => {
         const key = deriveEscrowKey(password, saltB64);
         try {
             const plaintext = _aeadDecryptRaw(combined, key, null, n);
+            _secureZero(key);
+            _secureZero(combined);
+            _secureZero(n);
             return plaintext ? arrayBufferToBase64(plaintext) : null;
-        } catch (_) { return null; }
+        } catch (_) { _secureZero(key); _secureZero(combined); _secureZero(n); return null; }
     }
 
     // ---- Key Bundle (password-encrypted key backup for full recovery) ----
@@ -726,5 +778,11 @@ var E2ECrypto = (() => {
                 return null;
             }
         },
+        // Secure memory erasure (S7)
+        secureZero: _secureZero,
+
+        // Key Escrow
+        encryptKeyForEscrow: encryptKeyForEscrow,
+        decryptKeyFromEscrow: decryptKeyFromEscrow,
     };
 })();

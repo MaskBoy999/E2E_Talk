@@ -38,6 +38,38 @@ impl RateLimiter {
         true
     }
 
+    /// Check-only: returns true if the key is within budget, without incrementing.
+    /// Used to test a budget before performing expensive work (e.g. password
+    /// verification) so the counter is only bumped on actual failures.
+    fn is_blocked(&self, key: &str, max_attempts: u32, window: Duration) -> bool {
+        let mut map = self.attempts.lock().unwrap();
+        let now = Instant::now();
+        if let Some(&(count, first_attempt)) = map.get(key) {
+            if now.duration_since(first_attempt) > window {
+                map.remove(key);
+                return false;
+            }
+            return count >= max_attempts;
+        }
+        false
+    }
+
+    /// Increment the counter for a key (called after a confirmed failure).
+    /// If the window expired, starts a fresh bucket.
+    fn increment(&self, key: &str, window: Duration) {
+        let mut map = self.attempts.lock().unwrap();
+        let now = Instant::now();
+        if let Some(&(count, first_attempt)) = map.get(key) {
+            if now.duration_since(first_attempt) > window {
+                map.insert(key.to_string(), (1, now));
+            } else {
+                map.insert(key.to_string(), (count + 1, first_attempt));
+            }
+        } else {
+            map.insert(key.to_string(), (1, now));
+        }
+    }
+
     /// Snapshot live buckets: (key, count, seconds_remaining_in_window).
     /// Expired buckets are dropped first so the view only shows active windows.
     fn snapshot(&self, window: Duration) -> Vec<(String, u32, u64)> {
@@ -54,6 +86,25 @@ impl RateLimiter {
 }
 
 static LOGIN_RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(|| RateLimiter {
+    attempts: Mutex::new(HashMap::new()),
+});
+
+/// S8 — Per-username failure limiter: caps FAILED password attempts per
+/// username regardless of IP.  Unlike LOGIN_RATE_LIMITER (which counts every
+/// attempt including successes), this only bumps on a confirmed wrong password
+/// so legitimate users are never throttled by their own successful logins.
+/// Default: 3 failures / 15 min. Env-overridable: LOGIN_USER_FAIL_MAX=0 to
+/// disable, or a number to raise the budget.
+static LOGIN_USER_FAIL_RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(|| RateLimiter {
+    attempts: Mutex::new(HashMap::new()),
+});
+
+/// S3 — Per-username login-failure notification limiter. Tracks confirmed
+/// wrong-password attempts and fires an encrypted notification when the
+/// threshold is reached (default 5 / 10 min). The notification alerts the
+/// account owner that someone is trying to brute-force their password.
+/// Env-overridable: LOGIN_FAIL_NOTIFY_MAX=0 to disable.
+static LOGIN_FAIL_NOTIFY_RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(|| RateLimiter {
     attempts: Mutex::new(HashMap::new()),
 });
 
@@ -964,6 +1015,21 @@ pub async fn login(
             .into_response();
     }
 
+    // S8 — Per-username failure limiter: caps FAILED password attempts per
+    // username regardless of IP (default 3/15min). Unlike LOGIN_RATE_LIMITER
+    // which counts every attempt, this only blocks after confirmed wrong
+    // passwords so legitimate users are unaffected. Checked before the
+    // expensive Argon2 verification; bumped after a confirmed failure.
+    let fail_rate_key = format!("login_fail:{}", req.username);
+    let user_fail_max: u32 = std::env::var("LOGIN_USER_FAIL_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+    if user_fail_max > 0 && LOGIN_USER_FAIL_RATE_LIMITER.is_blocked(&fail_rate_key, user_fail_max, Duration::from_secs(900)) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "Too many failed attempts for this account. Try again in 15 minutes."})),
+        )
+            .into_response();
+    }
+
     // Kill-switch proof attempts get their own tighter per-IP budget (default
     // 5/5min vs the general 10/5min) so a brute-force of kill-switch passwords
     // is throttled even if LOGIN_IP_MAX is raised. The response is byte-identical
@@ -1072,6 +1138,51 @@ pub async fn login(
                 }
             }
         }
+        // S8: bump the per-username failure counter (only on confirmed wrong
+        // password, never on success or kill-switch paths, so legitimate
+        // users and kill-switch attempts are unaffected).
+        if user_fail_max > 0 {
+            LOGIN_USER_FAIL_RATE_LIMITER.increment(&fail_rate_key, Duration::from_secs(900));
+        }
+
+        // S3: Login attempt notification — when the per-username failure count
+        // hits the threshold, send an encrypted alert to the account owner via
+        // WS (or queue for offline delivery). This lets users know someone is
+        // trying to brute-force their password.
+        let notify_max: u32 = std::env::var("LOGIN_FAIL_NOTIFY_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(5);
+        if notify_max > 0 {
+            let notify_key = format!("login_notify:{}", req.username);
+            LOGIN_FAIL_NOTIFY_RATE_LIMITER.increment(&notify_key, Duration::from_secs(600));
+            // Snapshot: check if we just hit the threshold (count == notify_max)
+            let snapshot = LOGIN_FAIL_NOTIFY_RATE_LIMITER.snapshot(Duration::from_secs(600));
+            if let Some(&(_, count, _)) = snapshot.iter().find(|(k, _, _)| k == &notify_key) {
+                if count == notify_max {
+                    // Only notify for existing users (password hash lookup succeeded above)
+                    let notify_ip = get_client_ip(&headers);
+                    if let Ok(user) = state.db.get_user_by_username(&req.username) {
+                        let payload = serde_json::json!({
+                            "type": "login_attempt_alert",
+                            "attempts": count,
+                            "ip": notify_ip,
+                            "timestamp": chrono::Utc::now().to_rfc3339(),
+                        });
+                        let state_clone = state.clone();
+                        let uid = user.id.clone();
+                        let notif_str = payload.to_string();
+                        // Fire-and-forget: deliver encrypted notification
+                        tokio::spawn(async move {
+                            crate::ws::deliver_encrypted_notification(
+                                &state_clone,
+                                &[uid],
+                                "login_attempt_alert",
+                                &notif_str,
+                            ).await;
+                        });
+                    }
+                }
+            }
+        }
+
         return (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({"error": "Wrong username or password"})),

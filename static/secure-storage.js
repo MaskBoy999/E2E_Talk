@@ -90,6 +90,15 @@
     // Cached encryption/decryption key as a Uint8Array
     var _key = null;
 
+    // S7 — Secure memory erasure: zero out sensitive buffers after use.
+    // JavaScript doesn't guarantee memory zeroing, but fill(0) prevents
+    // casual recovery via devtools memory snapshots.
+    function _secureZero(arr) {
+        if (!arr) return;
+        if (arr instanceof ArrayBuffer) arr = new Uint8Array(arr);
+        if (arr.fill) arr.fill(0);
+    }
+
     // Whether we've already installed the prototype interceptors
     var _intercepted = false;
 
@@ -167,14 +176,19 @@
         var combined = new Uint8Array(pwdBytes.length + salt.length);
         combined.set(pwdBytes);
         combined.set(salt, pwdBytes.length);
+        _secureZero(pwdBytes);
         // Extract: deterministic 32-byte PRK
         var prk = _mixHash(combined);
+        _secureZero(combined);
         // Expand with info tag for domain separation
         var info = new TextEncoder().encode('lokey');
         var expandInput = new Uint8Array(prk.length + info.length);
         expandInput.set(prk);
         expandInput.set(info, prk.length);
-        return _mixHash(expandInput);
+        _secureZero(prk);
+        var result = _mixHash(expandInput);
+        _secureZero(expandInput);
+        return result;
     }
 
     /**
@@ -220,7 +234,9 @@
             if (typeof E2ECrypto === 'undefined' || !E2ECrypto.decodeEncryptedFileKey) return null;
 
             // Decrypt the password using the device key
-            var password = E2ECrypto.decodeEncryptedFileKey(encPw, new Uint8Array(E2ECrypto.base64ToArrayBuffer(devKeyStr)));
+            var devKeyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(devKeyStr));
+            var password = E2ECrypto.decodeEncryptedFileKey(encPw, devKeyBytes);
+            _secureZero(devKeyBytes);
             if (!password) return null;
 
             // Derive storage key from the actual password
@@ -300,7 +316,9 @@
         for (var i = 0; i < bytes.length; i++) {
             result[i] = bytes[i] ^ key[i % key.length];
         }
+        _secureZero(bytes);
         var plaintext = new TextDecoder().decode(result);
+        _secureZero(result);
 
         // Verify tag if this is new-format data
         if (expectedTag !== null) {
@@ -363,7 +381,9 @@
         for (var i = 0; i < bytes.length; i++) {
             result[i] = bytes[i] ^ key[i % key.length];
         }
+        _secureZero(bytes);
         var plaintext = new TextDecoder().decode(result);
+        _secureZero(result);
 
         // Verify tag if this is new-format data
         if (expectedTag !== null) {
@@ -789,6 +809,7 @@
             var devKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(devKeyStr));
             _realOrigSet.call(localStorage, 'e2e_encrypted_password',
                 E2ECrypto.encodeEncryptedFileKey(btoa(newPassword), devKey));
+            _secureZero(devKey);
 
             // 3. Derive the NEW key and drop the old caches.
             _key = null;

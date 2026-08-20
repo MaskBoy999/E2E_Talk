@@ -677,7 +677,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, client_ip: Strin
 /// get it queued (which encrypts with a fresh ephemeral key). The envelope's
 /// notification_type is blinded (B4); the real type rides inside the encrypted
 /// payload, which is what the client dispatches on.
-async fn deliver_encrypted_notification(
+pub(crate) async fn deliver_encrypted_notification(
     state: &Arc<AppState>,
     user_ids: &[String],
     notification_type: &str,
