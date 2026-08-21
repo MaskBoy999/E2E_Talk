@@ -71,6 +71,7 @@ function setDmChannelId(id) {
     }
 }
 let isUploading = false;
+let _uploadAbortController = null;
 let isSendingSticker = false;
 let selectedFiles = [];
 let currentServerMemberList = [];
@@ -6734,6 +6735,13 @@ document.addEventListener('DOMContentLoaded', () => {
         if (file.type.startsWith('image/')) openPhotoEditModal(file);
         else if (file.type.startsWith('video/')) openVideoEditModal(file);
         else if (file.type.startsWith('audio/')) openAudioEditModal(file);
+        else if (file.type === 'application/pdf' && window.DocPreview) {
+            var blob = new Blob([file], { type: file.type });
+            window.DocPreview.openPdfEditor(blob, file.name);
+        }
+        else if (file.type.startsWith('text/') || file.name.match(/\.(txt|md|json|html|css|js|ts|py|java|c|cpp|h|hpp|rs|go|rb|php|xml|yaml|yml|toml|ini|cfg|conf|log|env|csv|tsv|sql|sh|bat|ps1|cmd|vue|svelte|jsx|tsx)$/i)) {
+            openTextEditorModal(file);
+        }
     });
     document.getElementById('upload-btn-mirror').addEventListener('click', _mirrorUploadFile);
     document.getElementById('upload-btn-rotate-left').addEventListener('click', function() { _rotateUploadFile(-90); });
@@ -8215,6 +8223,26 @@ document.addEventListener('DOMContentLoaded', () => {
                         if (recovered) downloadFileById(fid, recovered, fname, fmime, fsize);
                     }).catch(() => {});
                 }
+            }
+        }
+        // Document preview button
+        const docPrevBtn = e.target.closest('.file-doc-preview-btn');
+        if (docPrevBtn && window.DocPreview) {
+            const card = docPrevBtn.closest('.file-card');
+            if (card) {
+                const fid = card.dataset.fileId;
+                const fkey = card.dataset.fileKey;
+                const fname = card.dataset.fileName;
+                const fmime = card.dataset.fileMime;
+                const fsize = parseInt(card.dataset.fileSize, 10) || 0;
+                async function _openDocPreview() {
+                    let key = fkey;
+                    if (!key) { try { key = await recoverAttachmentFileKey(fid, card); } catch (_) {} }
+                    if (!key) return;
+                    const blob = await downloadAndDecryptFile(fid, key, fmime, fsize);
+                    DocPreview.previewDocument(blob, fname, fmime);
+                }
+                _openDocPreview().catch(function (e) { console.warn('Doc preview failed:', e); });
             }
         }
         // Download button for GIFs
@@ -18693,7 +18721,7 @@ function isTextFile(filename, mime) {
     if (mime === 'application/json' || mime === 'application/javascript' || mime === 'application/xml') return true;
     if (!filename) return false;
     const ext = filename.split('.').pop().toLowerCase();
-    const textExts = ['txt','js','ts','jsx','tsx','py','cpp','c','h','hpp','java','rs','go','sh','sql','html','htm','css','json','xml','rb','php','swift','kt','cs','lua','pl','r','m','mm','yaml','yml','toml','ini','cfg','conf','inf','reg','bat','cmd','vbs','ps1','md','mdx','csv','tsv','log','env','svg','dockerfile','makefile'];
+    const textExts = ['txt','js','ts','jsx','tsx','py','cpp','c','h','hpp','java','rs','go','sh','sql','html','htm','css','json','xml','rb','php','swift','kt','cs','lua','pl','r','m','mm','yaml','yml','toml','ini','cfg','conf','inf','reg','bat','cmd','vbs','ps1','md','mdx','log','env','svg','dockerfile','makefile'];
     return textExts.includes(ext);
 }
 
@@ -20399,6 +20427,7 @@ function closeUploadModal() {
     modal.style.display = 'none';
     selectedFiles = [];
     currentFileIndex = 0;
+    if (_uploadAbortController) { _uploadAbortController.abort(); _uploadAbortController = null; }
     isUploading = false;
     _resetUploadEditState();
     const addMoreInput = document.getElementById('add-more-file-input');
@@ -20423,14 +20452,17 @@ function _showUploadQuickActions() {
     var qa = document.getElementById('upload-quick-actions');
     if (!qa || selectedFiles.length === 0) { if (qa) qa.style.display = 'none'; return; }
     var file = selectedFiles[currentFileIndex];
-    var isMedia = file && (file.type.startsWith('image/') || file.type.startsWith('video/') || file.type.startsWith('audio/'));
+    var isText = file && (file.type.startsWith('text/') || file.name.match(/\.(txt|md|json|html|css|js|ts|py|java|c|cpp|h|hpp|rs|go|rb|php|xml|yaml|yml|toml|ini|cfg|conf|log|env|csv|tsv|sql|sh|bat|ps1|cmd|vue|svelte|jsx|tsx)$/i));
+    var isMedia = file && (file.type.startsWith('image/') || file.type.startsWith('video/') || file.type.startsWith('audio/') || file.type === 'application/pdf' || isText);
     qa.style.display = isMedia ? 'flex' : 'none';
-    // Audio gets Edit only: the mirror/rotate quick buttons transform
-    // image/video previews, while audio edits live inside the edit modal.
+    // Audio/PDF/Text get Edit only: the mirror/rotate quick buttons transform
+    // image/video previews, while audio, PDF, and text edits live inside the edit modal.
     var isAudio = !!(file && file.type.startsWith('audio/'));
+    var isPdf = !!(file && file.type === 'application/pdf');
+    var hideQuickTransform = isAudio || isPdf || isText;
     ['upload-btn-mirror', 'upload-btn-rotate-left', 'upload-btn-rotate-right'].forEach(function(id) {
         var b = document.getElementById(id);
-        if (b) b.style.display = isAudio ? 'none' : '';
+        if (b) b.style.display = hideQuickTransform ? 'none' : '';
     });
 }
 function _applyUploadTransformsToPreview() {
@@ -22041,6 +22073,83 @@ async function _audioEditConfirm() {
         if (err) { err.textContent = 'Audio export failed: ' + (ex && ex.message ? ex.message : ex); err.style.display = 'block'; }
     }
 }
+// ─── Text editor modal (upload modal) ───────────────────────────────
+var _textEditorState = { originalText: '', editedText: '', fileName: '' };
+
+function openTextEditorModal(file) {
+    var reader = new FileReader();
+    reader.onload = function (e) {
+        var text = e.target.result;
+        _textEditorState.originalText = text;
+        _textEditorState.editedText = text;
+        _textEditorState.fileName = file.name;
+        // Create or reuse the modal
+        var modal = document.getElementById('text-edit-modal');
+        if (!modal) {
+            modal = document.createElement('div');
+            modal.id = 'text-edit-modal';
+            modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:10000;display:flex;align-items:center;justify-content:center';
+            modal.innerHTML = '<div style="background:#1a1a2e;border-radius:12px;width:90%;max-width:800px;max-height:85vh;display:flex;flex-direction:column;border:1px solid #333;overflow:hidden">'
+                + '<div style="padding:16px 20px;border-bottom:1px solid #333;display:flex;justify-content:space-between;align-items:center">'
+                + '<span style="color:#e0e0e0;font-size:16px;font-weight:600">📝 Edit Text</span>'
+                + '<span id="text-edit-filename" style="color:#888;font-size:13px"></span></div>'
+                + '<div style="flex:1;overflow:hidden;padding:0">'
+                + '<textarea id="text-edit-area" style="width:100%;height:100%;min-height:400px;background:#0d1117;color:#c9d1d9;border:none;padding:16px;font-family:Consolas,Monaco,monospace;font-size:14px;resize:none;outline:none;tab-size:4"></textarea>'
+                + '</div>'
+                + '<div style="padding:12px 20px;border-top:1px solid #333;display:flex;justify-content:space-between;align-items:center">'
+                + '<div style="display:flex;gap:8px">'
+                + '<button id="text-edit-undo" style="padding:6px 14px;border:1px solid #555;background:#2a2a3e;color:#e0e0e0;border-radius:6px;cursor:pointer;font-size:13px">↩ Undo</button>'
+                + '<button id="text-edit-redo" style="padding:6px 14px;border:1px solid #555;background:#2a2a3e;color:#e0e0e0;border-radius:6px;cursor:pointer;font-size:13px">↪ Redo</button>'
+                + '<span id="text-edit-info" style="color:#888;font-size:12px;margin-left:8px"></span></div>'
+                + '<div style="display:flex;gap:8px">'
+                + '<button id="text-edit-cancel" style="padding:8px 18px;border:none;background:#f44336;color:#fff;border-radius:6px;cursor:pointer;font-weight:600;font-size:13px">Cancel</button>'
+                + '<button id="text-edit-confirm" style="padding:8px 18px;border:none;background:#4caf50;color:#fff;border-radius:6px;cursor:pointer;font-weight:600;font-size:13px">✅ Save & Upload</button>'
+                + '</div></div></div>';
+            document.body.appendChild(modal);
+            // Event handlers
+            document.getElementById('text-edit-cancel').onclick = function () {
+                modal.style.display = 'none';
+            };
+            document.getElementById('text-edit-confirm').onclick = function () {
+                var editedText = document.getElementById('text-edit-area').value;
+                if (editedText === _textEditorState.originalText) {
+                    modal.style.display = 'none';
+                    return;
+                }
+                var ext = _textEditorState.fileName.split('.').pop() || 'txt';
+                var mimeMap = { 'txt': 'text/plain', 'md': 'text/markdown', 'json': 'application/json', 'html': 'text/html', 'css': 'text/css', 'js': 'application/javascript', 'ts': 'application/typescript', 'py': 'text/x-python', 'xml': 'application/xml', 'csv': 'text/csv', 'sql': 'text/plain', 'sh': 'text/x-shellscript' };
+                var blob = new Blob([editedText], { type: (mimeMap[ext] || 'text/plain') + ';charset=utf-8' });
+                var newFile = new File([blob], _textEditorState.fileName, { type: blob.type, lastModified: Date.now() });
+                selectedFiles[currentFileIndex] = newFile;
+                _clearUploadEditState(currentFileIndex);
+                modal.style.display = 'none';
+                renderUploadPreview();
+                _showUploadQuickActions();
+            };
+            // Tab key inserts spaces instead of switching focus
+            document.getElementById('text-edit-area').addEventListener('keydown', function (ev) {
+                if (ev.key === 'Tab') {
+                    ev.preventDefault();
+                    var start = this.selectionStart;
+                    var end = this.selectionEnd;
+                    this.value = this.value.substring(0, start) + '    ' + this.value.substring(end);
+                    this.selectionStart = this.selectionEnd = start + 4;
+                }
+            });
+        }
+        document.getElementById('text-edit-filename').textContent = file.name;
+        var area = document.getElementById('text-edit-area');
+        area.value = text;
+        // Update info
+        var lines = text.split('\n').length;
+        var chars = text.length;
+        document.getElementById('text-edit-info').textContent = lines + ' lines · ' + chars + ' chars';
+        modal.style.display = 'flex';
+        area.focus();
+    };
+    reader.readAsText(file);
+}
+
 // G5 — client-side magic-byte validation. The server stores every upload as
 // client-encrypted ciphertext, so it cannot sniff content; the client is the
 // only place plaintext exists, so type checks happen HERE before encryption.
@@ -22162,6 +22271,7 @@ async function startFileUpload() {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
     isUploading = true;
+    _uploadAbortController = new AbortController();
     const confirmBtn = document.getElementById('confirm-upload');
     const progressContainer = document.getElementById('upload-progress-container');
     const progressFill = document.getElementById('upload-progress-fill');
@@ -22181,6 +22291,7 @@ async function startFileUpload() {
 
     try {
         for (var fi = 0; fi < selectedFiles.length; fi++) {
+            if (!isUploading) throw new Error('Upload cancelled');
             var file = selectedFiles[fi];
             progressText.textContent = 'File ' + (uploadedFiles + 1) + '/' + totalFiles + ': ' + file.name;
             progressFill.style.width = Math.round(((uploadedFiles) / totalFiles) * 100) + '%';
@@ -22291,6 +22402,7 @@ function buildFileCardHtml(fileData) {
     const isVideo = fileData.mime_type && fileData.mime_type.startsWith('video/');
     const isText = isTextFile(fileData.filename, fileData.mime_type);
     const isAudio = !isText && fileData.mime_type && fileData.mime_type.startsWith('audio/');
+    const isDoc = window.DocPreview && DocPreview.isDocumentFile(fileData.filename, fileData.mime_type);
     const icon = getFileIcon(fileData.mime_type, fileData.filename);
 
     // Audio: render as a full-width player (same as upload modal), not crammed inside a file-card
@@ -22335,6 +22447,7 @@ function buildFileCardHtml(fileData) {
         'data-file-mime="' + escapeAttr(fileData.mime_type) + '" ' +
         'data-file-size="' + fileData.file_size + '">' +
         '<button class="file-download-btn" title="Download">⬇</button>' +
+        (isDoc ? '<button class="file-doc-preview-btn" title="Preview document">👁️</button>' : '') +
 
         '<div class="file-details">' +
             '<div class="file-name">' + icon + ' ' + escapeHtml(fileData.filename) + '</div>' +
@@ -22527,7 +22640,8 @@ async function loadMediaPreview(container, fileData) {
     const isVideo = fileData.mime_type && fileData.mime_type.startsWith('video/');
     const isText = isTextFile(fileData.filename, fileData.mime_type);
     const isAudio = !isText && fileData.mime_type && fileData.mime_type.startsWith('audio/');
-    if (!isImage && !isVideo && !isAudio && !isText) return;
+    const isDoc = window.DocPreview && DocPreview.isDocumentFile(fileData.filename, fileData.mime_type);
+    if (!isImage && !isVideo && !isAudio && !isText && !isDoc) return;
 
     // Show loading indicator
     container.innerHTML = '<div class="file-loading">Loading preview...</div>';
@@ -22690,6 +22804,26 @@ async function loadMediaPreview(container, fileData) {
                 container.dataset.fullText = text;
             } catch (_) {
                 container.innerHTML = '<div class="file-type-icon">📄</div>';
+            }
+        } else if (isDoc) {
+            // Document preview — show file info with preview button (don't auto-open modal)
+            try {
+                var docIcon = getFileIcon(fileData.mime_type, fileData.filename);
+                container.innerHTML = '<div class="doc-preview-hint" style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--bg-secondary,rgba(255,255,255,0.05));border-radius:8px;cursor:pointer;transition:background .15s" ' +
+                    'title="Click to preview">' +
+                    '<span style="font-size:24px">' + docIcon + '</span>' +
+                    '<div style="flex:1;min-width:0">' +
+                        '<div style="font-size:13px;color:var(--text-primary,#eee);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(fileData.filename) + '</div>' +
+                        '<div style="font-size:11px;color:var(--text-muted,#999)">' + formatFileSize(fileData.file_size) + ' — click to preview</div>' +
+                    '</div>' +
+                    '<span style="font-size:18px;opacity:0.6">👁️</span>' +
+                    '</div>';
+                // Click to open preview modal
+                container.querySelector('.doc-preview-hint').addEventListener('click', function () {
+                    DocPreview.previewDocument(blob, fileData.filename, fileData.mime_type);
+                });
+            } catch (_) {
+                container.innerHTML = '<div class="file-type-icon">' + getFileIcon(fileData.mime_type, fileData.filename) + '</div>';
             }
         }
     } catch (e) {

@@ -5336,3 +5336,47 @@ Message attachment keys travel *inside* the E2E-encrypted message content (serve
 **Files modified:** `server/src/db.rs`, `static/chat.js`, `static/thread_categories_shortcuts.js`, `static/style.css`
 **Tests:** `tests/threads-categories.spec.ts` — threaded replies + category CRUD + permissions
 
+
+### 67. Document Preview & Editing System (PDF, DOCX, XLSX, CSV, PPTX, ZIP)
+
+**New feature**: Client-side document preview and PDF editing. All rendering happens in the browser after E2E decryption — the server never sees decrypted file contents.
+
+**New file**: `static/doc-preview.js` — self-contained module with lazy-loading for preview libraries.
+
+**Document types supported**:
+
+| Format | Library | What renders | Edit? |
+|--------|---------|-------------|-------|
+| **PDF** | pdf.js (Mozilla, local) | Page-by-page canvas rendering with scroll, up to 50 pages | ✅ Rotate, delete, duplicate pages, drag-to-reorder, merge PDFs, annotate (text, draw, whiteout), crop, undo/redo, export |
+| **DOCX** | docx-preview + JSZip (local) | Rich HTML with styling, tables, images, page breaks, headers/footers | View only |
+| **XLSX** | SheetJS (local) | Tabbed spreadsheet with styled table, sheet switcher | View only |
+| **CSV/TSV** | PapaParse (local) | Auto-parsed table with headers, row count, sticky header | View only |
+| **PPTX** | Custom OOXML parser via JSZip (local) | Slides with text runs, positioned shapes, embedded images, slide counter | View only |
+| **ZIP** | JSZip (local) | File listing with icons, paths, sizes; click any file to preview inline | View only |
+
+**PDF Editor features**:
+- **Page tools**: Rotate left/right (90°), delete page, duplicate page, drag-to-reorder thumbnails
+- **Annotate**: Add text, freehand draw, whiteout
+- **Crop**: Crop pages with visual crop box
+- **Merge**: Import another PDF to merge pages
+- **Undo/Redo**: Full history with 30-state limit
+- **Export**: Save edited PDF as download
+
+**All libraries served locally** from `static/libs/` — zero external CDN dependencies:
+- `pdf.min.js` + `pdf.worker.min.js` (pdf.js)
+- `jszip.min.js` + `docx-preview.min.js`
+- `xlsx.full.min.js` (SheetJS)
+- `papaparse.min.js`
+- `pdf-lib.min.js` (PDF editing)
+
+**Changes to `static/chat.js`**:
+- `buildFileCardHtml` — Document files show a 👁️ preview button alongside the ⬇️ download button
+- `loadMediaPreview` — Document branch renders file info card with preview button
+- `isTextFile` — CSV/TSV removed (now handled by PapaParse table preview)
+- Upload cancel now properly aborts in-flight requests via `AbortController`
+
+**CSP hardened**: Removed `https://cdn.jsdelivr.net` from `script-src` — all scripts now self-hosted.
+
+**Files created**: `static/doc-preview.js`, `static/libs/pdf.min.js`, `static/libs/pdf.worker.min.js`, `static/libs/jszip.min.js`, `static/libs/docx-preview.min.js`, `static/libs/xlsx.full.min.js`, `static/libs/papaparse.min.js`, `static/libs/pdf-lib.min.js`
+**Files modified**: `static/chat.js`, `static/index.html`, `static/style.css`, `server/src/main.rs` (CSP update)
+**Tests**: `tests/doc-preview.spec.ts` — 13 tests covering module loading, file type detection, CSV/ZIP/PDF/XLSX/PPTX preview rendering, modal open/close (Escape + backdrop), file card HTML generation, PDF editor tool panel, PDF rotate/delete operations
