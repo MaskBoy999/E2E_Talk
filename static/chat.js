@@ -1,5 +1,17 @@
     console.log('chat.js v26 loaded - proportional contrast glow');
 
+// Global toast notification
+window.showToast = function showToast(msg) {
+    var el = document.querySelector('body');
+    if (!el) return;
+    var t = document.createElement('div');
+    t.className = 'global-toast';
+    t.textContent = msg;
+    t.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#323232;color:#fff;padding:10px 24px;border-radius:8px;font-size:14px;z-index:99999;opacity:1;transition:opacity .3s;pointer-events:none;box-shadow:0 4px 16px rgba(0,0,0,.4)';
+    document.body.appendChild(t);
+    setTimeout(function () { t.style.opacity = '0'; setTimeout(function () { t.remove(); }, 350); }, 2000);
+};
+
 function generateCode(len) {
     const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     let code = '';
@@ -934,6 +946,7 @@ const authFetch = (url, opts = {}) => {
     opts.headers = { ...(opts.headers || {}), 'Authorization': 'Bearer ' + token() };
     return fetch(url, opts);
 };
+window.authFetch = authFetch;
 
 // JWT helpers
 function decodeJwtPayload(t) {
@@ -6302,9 +6315,11 @@ document.addEventListener('DOMContentLoaded', () => {
     loadFriendRequestBadge();
     loadEmojiCache(); // Load custom emojis
     loadMyProfile(); // Load own profile for sidebar footer
-    // F14: Auto-load custom CSS on startup (local only)
+    // F14: Auto-load active CSS slot from server on startup
     (function () {
-        if (typeof applyCustomCss === "function") {
+        if (typeof _loadActiveSlotCss === "function") {
+            _loadActiveSlotCss();
+        } else if (typeof applyCustomCss === "function") {
             var local = localStorage.getItem("custom_css_text") || "";
             if (local) applyCustomCss(local);
         }
@@ -17121,9 +17136,14 @@ function showAddServerMenu() {
     document.getElementById('server-choice-modal').style.display = 'flex';
 }
 
+var _creatingServer = false;
 async function createServer() {
     const name = document.getElementById('new-server-name').value.trim();
-    if (!name) return;
+    if (!name || _creatingServer) return;
+    _creatingServer = true;
+    const btn = document.getElementById('confirm-create-server');
+    const origText = btn ? btn.textContent : '';
+    if (btn) { btn.textContent = '\u23f3 Creating\u2026'; btn.disabled = true; }
 
     try {
         // Generate server channel key (32-byte symmetric key)
@@ -17187,6 +17207,9 @@ async function createServer() {
         }
     } catch (err) {
         console.error('Create server failed:', err);
+    } finally {
+        _creatingServer = false;
+        if (btn) { btn.textContent = origText; btn.disabled = false; }
     }
 }
 

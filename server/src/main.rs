@@ -521,6 +521,10 @@ async fn main() {
         .route("/api/servers/{server_id}/categories", get(handlers::list_categories).post(handlers::create_category))
         .route("/api/servers/{server_id}/categories/{category_id}", delete(handlers::delete_category))
         .route("/api/servers/{server_id}/channels/{channel_id}/category", put(handlers::move_channel_to_category))
+        // F14: User Custom CSS slots
+        .route("/api/user-css/slots", get(handlers::get_css_slots))
+        .route("/api/user-css/slot/{slot}", put(handlers::save_css_slot).delete(handlers::delete_css_slot))
+        .route("/api/user-css/active", put(handlers::set_css_active_slot))
 
         .route("/api/channels/{channel_id}", delete(handlers::delete_channel))
         // E2E blind-index message search (GET query + client token-index backfill)

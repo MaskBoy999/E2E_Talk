@@ -1348,13 +1348,12 @@
     // ── Built-in theme presets ──
     var _defaultCssCache = null;
     function fetchDefaultCss() {
-        if (_defaultCssCache !== null) return Promise.resolve(_defaultCssCache);
-        return fetch('/style.css').then(function(r) { return r.text(); }).then(function(css) {
+        // Always fetch fresh style.css so the textarea reflects any CSS updates
+        return fetch('/style.css?v=' + Date.now()).then(function(r) { return r.text(); }).then(function(css) {
             _defaultCssCache = css || '/* Could not load style.css */';
             return _defaultCssCache;
         }).catch(function() {
-            _defaultCssCache = '/* Could not load style.css */';
-            return _defaultCssCache;
+            return _defaultCssCache || '/* Could not load style.css */';
         });
     }
 
@@ -1508,23 +1507,66 @@
         URL.revokeObjectURL(url);
     }
 
+    // ── F14: E2E encryption helpers for CSS slots ──
+    function _getCssEncKey() {
+        var kp = (window.E2ECrypto && E2ECrypto.getIdentityKeyPair) ? E2ECrypto.getIdentityKeyPair() : null;
+        return kp ? kp.privateKey : null;
+    }
+    function _encryptCss(cssPlaintext) {
+        var key = _getCssEncKey();
+        if (!key) {
+            // Fallback: base64 encode (no encryption available)
+            return { encrypted_css: btoa(unescape(encodeURIComponent(cssPlaintext))), nonce: '' };
+        }
+        var enc = E2ECrypto.aeadEncrypt(cssPlaintext, key);
+        return { encrypted_css: enc.ciphertext, nonce: enc.nonce };
+    }
+    function _decryptCss(encryptedCss, nonce) {
+        if (!encryptedCss) return '';
+        var key = _getCssEncKey();
+        if (!key || !nonce) {
+            // Fallback: treat as base64
+            try { return decodeURIComponent(escape(atob(encryptedCss))); } catch (_) { return ''; }
+        }
+        try {
+            var pt = E2ECrypto.aeadDecrypt(encryptedCss, key, nonce);
+            if (!pt) return '';
+            return (typeof pt === 'string') ? pt : new TextDecoder().decode(pt);
+        } catch (_) {
+            // Legacy base64 fallback
+            try { return decodeURIComponent(escape(atob(encryptedCss))); } catch (_) { return ''; }
+        }
+    }
+
     function buildCssPayload() {
-        return {
-            css: localStorage.getItem('custom_css_text') || '',
-            preset: localStorage.getItem('custom_css_preset') || null,
-            mode: localStorage.getItem('custom_css_mode') || null
-        };
+        // Build payload from the currently visible textarea
+        var ta = document.getElementById('custom-css-textarea');
+        return { css: ta ? ta.value : '' };
     }
 
     function applyCssPayload(payload) {
-        if (!payload) return false;
-        if (payload.css !== undefined) localStorage.setItem('custom_css_text', payload.css);
-        if (payload.preset) localStorage.setItem('custom_css_preset', payload.preset);
-        else localStorage.removeItem('custom_css_preset');
-        if (payload.mode) localStorage.setItem('custom_css_mode', payload.mode);
-        else localStorage.removeItem('custom_css_mode');
-        applyCustomCss(payload.css || '');
-        return true;
+        if (!payload || !payload.css) return Promise.resolve(false);
+        var enc = _encryptCss(payload.css);
+        // Save to the active slot (or slot 1 if none active)
+        var targetSlot = 1;
+        return fetchCssSlots().then(function (data) {
+            targetSlot = data.active_slot > 0 ? data.active_slot : 1;
+            return authFetch('/api/user-css/slot/' + targetSlot, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(enc)
+            });
+        }).then(function () {
+            invalidateCssSlotCache();
+            return authFetch('/api/user-css/active', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ active_slot: targetSlot })
+            });
+        }).then(function () {
+            applyCustomCss(payload.css);
+            return true;
+        }).catch(function () { return false; });
     }
 
     // ── CSS modal event wiring (once at load) ──
@@ -1556,16 +1598,19 @@
                     // ── Import: no-password backup ──
                     if (_cssPendingImport && _cssPwMode === 'import-plain') {
                         try {
-                            if (applyCssPayload(_cssPendingImport.payload)) {
-                                cssPwHide();
-                                showToast('CSS imported');
-                                if (typeof renderCustomCssSettings === 'function') {
-                                    var container = document.getElementById('custom-css-editor-container');
-                                    if (container) renderCustomCssSettings(container);
+                            applyCssPayload(_cssPendingImport.payload).then(function (ok) {
+                                if (ok) {
+                                    cssPwHide();
+                                    showToast('CSS imported');
+                                    invalidateCssSlotCache();
+                                    if (typeof renderCustomCssSettings === 'function') {
+                                        var container = document.getElementById('custom-css-editor-container');
+                                        if (container) renderCustomCssSettings(container);
+                                    }
+                                } else {
+                                    if (errorEl) { errorEl.textContent = 'Backup file is not supported.'; errorEl.style.display = ''; }
                                 }
-                            } else {
-                                if (errorEl) { errorEl.textContent = 'Backup file is not supported.'; errorEl.style.display = ''; }
-                            }
+                            });
                         } catch (_) {
                             if (errorEl) { errorEl.textContent = 'Backup file is corrupted.'; errorEl.style.display = ''; }
                         }
@@ -1585,16 +1630,19 @@
                             return;
                         }
                         try {
-                            if (applyCssPayload(JSON.parse(decrypted))) {
-                                cssPwHide();
-                                showToast('CSS imported');
-                                if (typeof renderCustomCssSettings === 'function') {
-                                    var container = document.getElementById('custom-css-editor-container');
-                                    if (container) renderCustomCssSettings(container);
+                            applyCssPayload(JSON.parse(decrypted)).then(function (ok) {
+                                if (ok) {
+                                    cssPwHide();
+                                    showToast('CSS imported');
+                                    invalidateCssSlotCache();
+                                    if (typeof renderCustomCssSettings === 'function') {
+                                        var container = document.getElementById('custom-css-editor-container');
+                                        if (container) renderCustomCssSettings(container);
+                                    }
+                                } else {
+                                    if (errorEl) { errorEl.textContent = 'Backup file is not supported.'; errorEl.style.display = ''; }
                                 }
-                            } else {
-                                if (errorEl) { errorEl.textContent = 'Backup file is not supported.'; errorEl.style.display = ''; }
-                            }
+                            });
                         } catch (_) {
                             if (errorEl) { errorEl.textContent = 'Backup file is corrupted.'; errorEl.style.display = ''; }
                         }
@@ -1643,227 +1691,353 @@
         }
     })();
 
-    function renderCustomCssSettings(container) {
-        var localCss = localStorage.getItem('custom_css_text') || '';
-        var currentTheme = localStorage.getItem('custom_css_preset') || 'default';
-        var isCustomMode = localStorage.getItem('custom_css_mode') === 'custom';
+    // ── F14: CSS Settings (2 server-side encrypted slots + default) ────
 
-        var html = '<div class="custom-css-settings-inner">';
+    var _cssSlotsCache = null; // { slot1: {encrypted_css, nonce}, slot2: {...}, active_slot }
 
-        // ── Theme Presets ──
-        html += '<div style="margin-bottom:16px">';
-        html += '<h3 style="color:var(--text-primary);margin:0 0 8px;font-size:14px">Theme Presets</h3>';
-        html += '<div id="css-preset-selector" style="display:flex;gap:8px;flex-wrap:wrap">';
-
-        var presetMeta = [
-            { id: 'default',      label: 'Default',          desc: 'Original look',                                   color: '#666' },
-            { id: 'performance',  label: '\u26a1 Performance', desc: 'No blur/animation \u2014 fast on low-end GPUs',   color: '#4caf50' },
-            { id: 'premium',      label: '\u2728 Premium',    desc: 'Glassmorphism & smooth animations',               color: '#7c4dff' },
-            { id: 'highcontrast', label: '\u2b50 High Contrast', desc: 'WCAG AAA accessibility',                         color: '#ffff00' }
-        ];
-
-        presetMeta.forEach(function (p) {
-            var active = !isCustomMode && currentTheme === p.id;
-            html += '<div data-preset="' + p.id + '" style="cursor:pointer;padding:10px 16px;border-radius:8px;border:2px solid ' + (active ? p.color : '#333') + ';background:' + (active ? p.color + '22' : '#1a1a2e') + ';min-width:120px;text-align:center">';
-            html += '<div style="color:' + (active ? p.color : '#ccc') + ';font-weight:600;font-size:13px;margin-bottom:4px">' + p.label + '</div>';
-            html += '<div style="color:#888;font-size:10px">' + p.desc + '</div>';
-            html += '</div>';
-        });
-
-        // Custom CSS button
-        html += '<div data-preset="custom" style="cursor:pointer;padding:10px 16px;border-radius:8px;border:2px solid ' + (isCustomMode ? '#e0e0e0' : '#333') + ';background:' + (isCustomMode ? 'rgba(224,224,224,0.1)' : '#1a1a2e') + ';min-width:120px;text-align:center">';
-        html += '<div style="color:' + (isCustomMode ? '#e0e0e0' : '#ccc') + ';font-weight:600;font-size:13px;margin-bottom:4px">\u270f\ufe0f Custom</div>';
-        html += '<div style="color:#888;font-size:10px">Write your own CSS</div>';
-        html += '</div>';
-
-        html += '</div></div>';
-
-        // ── Textarea ──
-        var displayCss = '';
-        var isLoadingDefault = false;
-        if (isCustomMode) {
-            displayCss = localCss;
-        } else if (currentTheme === 'default') {
-            isLoadingDefault = true;
-        } else if (BUILTIN_THEMES[currentTheme]) {
-            displayCss = BUILTIN_THEMES[currentTheme];
-        } else {
-            displayCss = localCss;
-        }
-
-        html += '<textarea id="custom-css-textarea" style="width:100%;min-height:120px;max-height:600px;background:#0f0f23;border:1px solid #444;border-radius:8px;padding:12px;color:#d4d4d4;font-family:monospace;font-size:13px;resize:vertical;outline:none;overflow-y:auto"' + (isCustomMode ? ' placeholder="/* Your custom CSS here */"' : ' readonly placeholder="Select a preset to view its CSS"') + '>';
-        html += (displayCss || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-        html += '</textarea>';
-
-        // Auto-size textarea to fit content
-        function _autoSizeTa() {
-            var ta = document.getElementById('custom-css-textarea');
-            if (!ta) return;
-            ta.style.height = 'auto';
-            ta.style.height = Math.min(ta.scrollHeight, 600) + 'px';
-        }
-        setTimeout(_autoSizeTa, 0);
-
-        if (isLoadingDefault) {
-            setTimeout(function () {
-                fetchDefaultCss().then(function (css) {
-                    var ta = document.getElementById('custom-css-textarea');
-                    if (ta) {
-                        ta.value = css;
-                        ta.style.height = 'auto';
-                        ta.style.height = Math.min(ta.scrollHeight, 600) + 'px';
-                    }
-                });
-            }, 0);
-        }
-
-        // ── Action buttons ──
-        html += '<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">';
-
-        if (!isCustomMode) {
-            html += '<button id="css-copy" style="padding:10px 20px;border-radius:8px;border:none;background:linear-gradient(135deg,#4fc3f7,#29b6f6);color:#fff;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s;box-shadow:0 2px 8px rgba(79,195,247,0.3)">📋 Copy CSS</button>';
-        } else {
-            html += '<button id="css-save-local" style="padding:10px 20px;border-radius:8px;border:none;background:linear-gradient(135deg,#4fc3f7,#29b6f6);color:#fff;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s;box-shadow:0 2px 8px rgba(79,195,247,0.3)">💾 Save & Apply</button>';
-            html += '<button id="css-preview" style="padding:10px 20px;border-radius:8px;border:2px solid #4fc3f7;background:transparent;color:#4fc3f7;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">👁️ Preview</button>';
-            html += '<button id="css-import" style="padding:10px 20px;border-radius:8px;border:2px solid #666;background:rgba(255,255,255,0.05);color:#ccc;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">📁 Import .css</button>';
-            html += '<button id="css-export" style="padding:10px 20px;border-radius:8px;border:2px solid #7c4dff;background:rgba(124,77,255,0.1);color:#b388ff;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">📤 Export</button>';
-            html += '<button id="css-import-backup" style="padding:10px 20px;border-radius:8px;border:2px solid #7c4dff;background:rgba(124,77,255,0.1);color:#b388ff;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">📥 Import Backup</button>';
-        }
-
-        html += '<button id="css-reset" style="padding:10px 20px;border-radius:8px;border:2px solid #f44336;background:rgba(244,67,54,0.1);color:#f44336;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">🔄 Reset to Default</button>';
-
-        html += '</div>';
-        html += '<input type="file" id="css-import-input" accept=".css" style="display:none">';
-        html += '<input type="file" id="css-import-backup-input" accept=".e2ecss,.json,application/json" style="display:none">';
-        html += '</div>';
-
-        container.innerHTML = html;
-
-        // ── Preset click handlers ──
-        var presetEls = container.querySelectorAll('[data-preset]');
-        Array.from(presetEls).forEach(function (el) {
-            el.addEventListener('click', function () {
-                var presetId = el.getAttribute('data-preset');
-                if (presetId === 'custom') {
-                    localStorage.setItem('custom_css_mode', 'custom');
-                    renderCustomCssSettings(container);
-                    return;
-                }
-                var css = BUILTIN_THEMES[presetId] || '';
-                localStorage.setItem('custom_css_preset', presetId);
-                localStorage.removeItem('custom_css_mode');
-                localStorage.setItem('custom_css_text', css);
-                applyCustomCss(css);
-                renderCustomCssSettings(container);
-                showToast('Theme applied: ' + presetId);
-            });
-        });
-
-        // ── Copy CSS ──
-        var copyBtn = document.getElementById('css-copy');
-        if (copyBtn) {
-            copyBtn.addEventListener('click', function () {
-                var ta = document.getElementById('custom-css-textarea');
-                if (ta) {
-                    copyToClipboard(ta.value).then(function (ok) {
-                        if (ok) {
-                            showToast('CSS copied to clipboard');
-                            copyBtn.textContent = '\u2705 Copied!';
-                            setTimeout(function () { copyBtn.textContent = '📋 Copy CSS'; }, 2000);
-                        }
-                    });
-                }
-            });
-        }
-
-        // ── Save Local (custom mode) ──
-        var saveBtn = document.getElementById('css-save-local');
-        if (saveBtn) {
-            saveBtn.addEventListener('click', function () {
-                var css = document.getElementById('custom-css-textarea').value;
-                localStorage.setItem('custom_css_text', css);
-                localStorage.removeItem('custom_css_preset');
-                localStorage.removeItem('custom_css_mode');
-                applyCustomCss(css);
-                showToast('Custom CSS saved & applied');
-            });
-        }
-
-        // ── Preview (custom mode) ──
-        var previewBtn = document.getElementById('css-preview');
-        if (previewBtn) {
-            previewBtn.addEventListener('click', function () {
-                applyCustomCss(document.getElementById('custom-css-textarea').value);
-                showToast('CSS preview applied');
-            });
-        }
-
-        // ── Reset to Default ──
-        document.getElementById('css-reset').addEventListener('click', function () {
-            localStorage.removeItem('custom_css_text');
-            localStorage.removeItem('custom_css_preset');
-            localStorage.removeItem('custom_css_mode');
-            applyCustomCss('');
-            renderCustomCssSettings(container);
-            showToast('Reset to default theme');
-        });
-
-        // ── Import plain .css file ──
-        document.getElementById('css-import').addEventListener('click', function () {
-            document.getElementById('css-import-input').click();
-        });
-        document.getElementById('css-import-input').addEventListener('change', function (e) {
-            var file = e.target.files[0];
-            if (!file) return;
-            var reader = new FileReader();
-            reader.onload = function (ev) {
-                localStorage.setItem('custom_css_text', ev.target.result);
-                localStorage.setItem('custom_css_mode', 'custom');
-                localStorage.removeItem('custom_css_preset');
-                renderCustomCssSettings(container);
-                showToast('CSS file imported — click Save & Apply');
-            };
-            reader.readAsText(file);
-        });
-
-        // ── Export CSS backup (with optional password) ──
-        document.getElementById('css-export').addEventListener('click', function () {
-            _cssExportNoPw = false;
-            cssPwShow('Export CSS', 'export');
-        });
-
-        // ── Import CSS backup (encrypted or plaintext) ──
-        document.getElementById('css-import-backup').addEventListener('click', function () {
-            document.getElementById('css-import-backup-input').click();
-        });
-        document.getElementById('css-import-backup-input').addEventListener('change', function (e) {
-            var file = e.target.files[0];
-            if (!file) return;
-            var reader = new FileReader();
-            reader.onload = function (ev) {
-                try {
-                    var parsed = JSON.parse(ev.target.result);
-                    if (!parsed || parsed.app !== 'e2e_chat' || parsed.kind !== 'custom_css') {
-                        showToast('Not a valid CSS backup file');
-                        return;
-                    }
-                    if (parsed.salt && parsed.nonce && parsed.encrypted_private_key) {
-                        _cssPendingImport = parsed;
-                        cssPwShow('Import CSS', 'import-enc');
-                    } else if (parsed.payload) {
-                        _cssPendingImport = parsed;
-                        cssPwShow('Import CSS', 'import-plain');
-                    } else {
-                        showToast('Not a valid CSS backup file');
-                    }
-                } catch (_) {
-                    showToast('Could not read that file');
-                }
-            };
-            reader.readAsText(file);
+    function fetchCssSlots() {
+        if (_cssSlotsCache) return Promise.resolve(_cssSlotsCache);
+        return authFetch('/api/user-css/slots').then(function (r) { return r.json(); }).then(function (data) {
+            _cssSlotsCache = data;
+            return data;
+        }).catch(function () {
+            _cssSlotsCache = { slot1: { encrypted_css: '' }, slot2: { encrypted_css: '' }, active_slot: 0 };
+            return _cssSlotsCache;
         });
     }
 
+    function invalidateCssSlotCache() { _cssSlotsCache = null; }
+
+    function renderCustomCssSettings(container) {
+        container.innerHTML = '<div style="text-align:center;padding:24px;color:var(--text-muted)"><div style="display:inline-block;width:28px;height:28px;border:3px solid #444;border-top-color:var(--accent,#4fc3f7);border-radius:50%;animation:css-spin .6s linear infinite"></div><div style="margin-top:8px;font-size:13px">Loading CSS settings\u2026</div><style>@keyframes css-spin{to{transform:rotate(360deg)}}</style></div>';
+
+        fetchCssSlots().then(function (slotsData) {
+            var activeSlot = slotsData.active_slot || 0;
+            var slot1Has = !!(slotsData.slot1 && slotsData.slot1.encrypted_css);
+            var slot2Has = !!(slotsData.slot2 && slotsData.slot2.encrypted_css);
+
+            var html = '<div class="custom-css-settings-inner">';
+
+            // ── Slot Selector ──
+            html += '<div style="margin-bottom:16px">';
+            html += '<h3 style="color:var(--text-primary);margin:0 0 8px;font-size:14px">CSS Source</h3>';
+            html += '<p style="color:var(--text-muted);font-size:12px;margin:0 0 12px">Choose which stylesheet to use. Custom CSS is encrypted and stored on the server.</p>';
+            html += '<div style="display:flex;gap:8px;flex-wrap:wrap">';
+
+            var slots = [
+                { id: 0, label: 'Default', desc: 'App default stylesheet', hasContent: true, color: '#666' },
+                { id: 1, label: 'Slot 1', desc: slot1Has ? '\ud83d\udcbe Saved custom CSS' : 'Empty slot', hasContent: slot1Has, color: '#4fc3f7' },
+                { id: 2, label: 'Slot 2', desc: slot2Has ? '\ud83d\udcbe Saved custom CSS' : 'Empty slot', hasContent: slot2Has, color: '#7c4dff' }
+            ];
+
+            slots.forEach(function (s) {
+                var active = activeSlot === s.id;
+                var opacity = (!active && !s.hasContent) ? '0.5' : '1';
+                html += '<div data-css-slot="' + s.id + '" style="cursor:pointer;padding:10px 16px;border-radius:8px;border:2px solid ' + (active ? s.color : '#333') + ';background:' + (active ? s.color + '22' : '#1a1a2e') + ';min-width:120px;text-align:center;opacity:' + opacity + ';transition:all .2s">';
+                html += '<div style="color:' + (active ? s.color : '#ccc') + ';font-weight:600;font-size:13px;margin-bottom:4px">' + s.label + '</div>';
+                html += '<div style="color:#888;font-size:10px">' + s.desc + '</div>';
+                html += '</div>';
+            });
+
+            html += '</div></div>';
+
+            // ── Textarea ──
+            var isEditing = localStorage.getItem('css_editing_slot');
+            var displayCss = '';
+            var textareaReadonly = true;
+
+            var loadSlotAsync = false;
+            if (isEditing && parseInt(isEditing) === activeSlot) {
+                textareaReadonly = false;
+                displayCss = localStorage.getItem('css_draft_' + isEditing) || '';
+            } else if (activeSlot === 0) {
+                displayCss = '';
+            } else if (slotsData['slot' + activeSlot] && slotsData['slot' + activeSlot].encrypted_css) {
+                // Decode async — show placeholder while loading
+                loadSlotAsync = true;
+                displayCss = '/* Loading slot CSS\u2026 */';
+            } else {
+                displayCss = '/* Empty slot */';
+            }
+
+            html += '<textarea id="custom-css-textarea" style="width:100%;min-height:120px;max-height:600px;background:#0f0f23;border:1px solid #444;border-radius:8px;padding:12px;color:#d4d4d4;font-family:monospace;font-size:13px;resize:vertical;outline:none;overflow-y:auto"' + (textareaReadonly ? ' readonly placeholder="Select a source above"' : ' placeholder="/* Your custom CSS here */"') + '>';
+            html += (displayCss || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            html += '</textarea>';
+
+            // Auto-size
+            setTimeout(function () {
+                var ta = document.getElementById('custom-css-textarea');
+                if (ta) { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 600) + 'px'; }
+            }, 0);
+
+            // Load CSS async (default or slot)
+            if (activeSlot === 0 && !isEditing) {
+                setTimeout(function () {
+                    fetchDefaultCss().then(function (css) {
+                        var ta = document.getElementById('custom-css-textarea');
+                        if (ta) {
+                            ta.value = css;
+                            ta.style.height = 'auto';
+                            ta.style.height = Math.min(ta.scrollHeight, 600) + 'px';
+                        }
+                    });
+                }, 0);
+            } else if (loadSlotAsync) {
+                setTimeout(function () {
+                    _applyServerSlot(activeSlot);
+                    var slotData = slotsData['slot' + activeSlot];
+                    if (slotData && slotData.encrypted_css) {
+                        try {
+                            var decoded = _decryptCss(slotData.encrypted_css, slotData.nonce);
+                            var ta = document.getElementById('custom-css-textarea');
+                            if (ta) {
+                                ta.value = decoded;
+                                ta.style.height = 'auto';
+                                ta.style.height = Math.min(ta.scrollHeight, 600) + 'px';
+                            }
+                        } catch (_) {}
+                    }
+                }, 0);
+            }
+
+            // ── Action Buttons ──
+            html += '<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">';
+
+            if (isEditing && parseInt(isEditing) === activeSlot) {
+                html += '<button id="css-save-slot" style="padding:10px 20px;border-radius:8px;border:none;background:linear-gradient(135deg,#4fc3f7,#29b6f6);color:#fff;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s;box-shadow:0 2px 8px rgba(79,195,247,0.3)">\ud83d\udcbe Save & Apply</button>';
+                html += '<button id="css-preview" style="padding:10px 20px;border-radius:8px;border:2px solid #4fc3f7;background:transparent;color:#4fc3f7;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">\ud83d\udc41\ufe0f Preview</button>';
+                html += '<button id="css-import-file" style="padding:10px 20px;border-radius:8px;border:2px solid #666;background:rgba(255,255,255,0.05);color:#ccc;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">\ud83d\udcc1 Import .css</button>';
+                html += '<button id="css-cancel-edit" style="padding:10px 20px;border-radius:8px;border:2px solid #888;background:rgba(255,255,255,0.05);color:#ccc;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">\u21a9\ufe0f Cancel</button>';
+                html += '<button id="css-clear-slot" style="padding:10px 20px;border-radius:8px;border:2px solid #f44336;background:rgba(244,67,54,0.1);color:#f44336;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">\ud83d\uddd1\ufe0f Clear Slot</button>';
+            } else if (activeSlot > 0) {
+                html += '<button id="css-copy" style="padding:10px 20px;border-radius:8px;border:none;background:linear-gradient(135deg,#4fc3f7,#29b6f6);color:#fff;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s;box-shadow:0 2px 8px rgba(79,195,247,0.3)">\ud83d\udccb Copy CSS</button>';
+                html += '<button id="css-edit-slot" style="padding:10px 20px;border-radius:8px;border:2px solid #e0e0e0;background:rgba(224,224,224,0.1);color:#e0e0e0;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">\u270f\ufe0f Edit</button>';
+                html += '<button id="css-export" style="padding:10px 20px;border-radius:8px;border:2px solid #7c4dff;background:rgba(124,77,255,0.1);color:#b388ff;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">\ud83d\udce4 Export</button>';
+                html += '<button id="css-import-backup" style="padding:10px 20px;border-radius:8px;border:2px solid #7c4dff;background:rgba(124,77,255,0.1);color:#b388ff;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">\ud83d\udce5 Import Backup</button>';
+            } else {
+                html += '<button id="css-copy" style="padding:10px 20px;border-radius:8px;border:none;background:linear-gradient(135deg,#4fc3f7,#29b6f6);color:#fff;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s;box-shadow:0 2px 8px rgba(79,195,247,0.3)">\ud83d\udccb Copy CSS</button>';
+            }
+
+            html += '</div>';
+            html += '<input type="file" id="css-import-backup-input" accept=".e2ecss,.json,application/json" style="display:none">';
+            html += '<input type="file" id="css-import-file-input" accept=".css" style="display:none">';
+            html += '</div>';
+
+            container.innerHTML = html;
+
+            // ── Wire up event listeners ──
+
+            // Slot clicks
+            container.querySelectorAll('[data-css-slot]').forEach(function (el) {
+                el.addEventListener('click', function () {
+                    var slotId = parseInt(el.getAttribute('data-css-slot'));
+                    invalidateCssSlotCache();
+                    localStorage.removeItem('css_editing_slot');
+                    localStorage.removeItem('css_draft_1');
+                    localStorage.removeItem('css_draft_2');
+                    authFetch('/api/user-css/active', {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ active_slot: slotId })
+                    }).then(function () {
+                        if (slotId > 0) {
+                            applyCustomCss('');
+                            _applyServerSlot(slotId);
+                        } else {
+                            applyCustomCss('');
+                        }
+                        renderCustomCssSettings(container);
+                    });
+                });
+            });
+
+            // Save to slot
+            var saveBtn = document.getElementById('css-save-slot');
+            if (saveBtn) {
+                saveBtn.addEventListener('click', function () {
+                    var ta = document.getElementById('custom-css-textarea');
+                    var css = ta ? ta.value : '';
+                    saveBtn.textContent = '\u23f3 Saving\u2026';
+                    saveBtn.disabled = true;
+                    var enc = _encryptCss(css);
+                    authFetch('/api/user-css/slot/' + activeSlot, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(enc)
+                    }).then(function () {
+                        localStorage.removeItem('css_editing_slot');
+                        localStorage.removeItem('css_draft_' + activeSlot);
+                        invalidateCssSlotCache();
+                        applyCustomCss(css);
+                        saveBtn.textContent = '\u2705 Saved!';
+                        setTimeout(function () { renderCustomCssSettings(container); }, 800);
+                    }).catch(function () {
+                        saveBtn.textContent = '\u274c Error';
+                        saveBtn.disabled = false;
+                        setTimeout(function () { saveBtn.textContent = '\ud83d\udcbe Save & Apply'; saveBtn.disabled = false; }, 1500);
+                    });
+                });
+            }
+
+            // Preview
+            var previewBtn = document.getElementById('css-preview');
+            if (previewBtn) {
+                previewBtn.addEventListener('click', function () {
+                    var ta = document.getElementById('custom-css-textarea');
+                    if (ta) applyCustomCss(ta.value);
+                    previewBtn.textContent = '\ud83d\udc41\ufe0f Applied!';
+                    setTimeout(function () { previewBtn.textContent = '\ud83d\udc41\ufe0f Preview'; }, 1200);
+                });
+            }
+
+            // Import .css file into textarea
+            var importFileBtn = document.getElementById('css-import-file');
+            if (importFileBtn) {
+                importFileBtn.addEventListener('click', function () {
+                    document.getElementById('css-import-file-input').click();
+                });
+            }
+            var importFileInput = document.getElementById('css-import-file-input');
+            if (importFileInput) {
+                importFileInput.addEventListener('change', function (e) {
+                    var file = e.target.files[0];
+                    if (!file) return;
+                    var reader = new FileReader();
+                    reader.onload = function (ev) {
+                        var ta = document.getElementById('custom-css-textarea');
+                        if (ta) {
+                            ta.value = ev.target.result;
+                            ta.style.height = 'auto';
+                            ta.style.height = Math.min(ta.scrollHeight, 600) + 'px';
+                        }
+                    };
+                    reader.readAsText(file);
+                    importFileInput.value = '';
+                });
+            }
+
+            // Cancel edit
+            var cancelBtn = document.getElementById('css-cancel-edit');
+            if (cancelBtn) {
+                cancelBtn.addEventListener('click', function () {
+                    localStorage.removeItem('css_editing_slot');
+                    localStorage.removeItem('css_draft_1');
+                    localStorage.removeItem('css_draft_2');
+                    renderCustomCssSettings(container);
+                });
+            }
+
+            // Clear slot
+            var clearBtn = document.getElementById('css-clear-slot');
+            if (clearBtn) {
+                clearBtn.addEventListener('click', function () {
+                    if (!confirm('Clear this CSS slot?')) return;
+                    authFetch('/api/user-css/slot/' + activeSlot, { method: 'DELETE' }).then(function () {
+                        invalidateCssSlotCache();
+                        localStorage.removeItem('css_editing_slot');
+                        localStorage.removeItem('css_draft_' + activeSlot);
+                        applyCustomCss('');
+                        renderCustomCssSettings(container);
+                        showToast('Slot cleared');
+                    });
+                });
+            }
+
+            // Copy
+            var copyBtn = document.getElementById('css-copy');
+            if (copyBtn) {
+                copyBtn.addEventListener('click', function () {
+                    var ta = document.getElementById('custom-css-textarea');
+                    if (ta) {
+                        copyToClipboard(ta.value).then(function (ok) {
+                            if (ok) {
+                                copyBtn.textContent = '\u2705 Copied!';
+                                setTimeout(function () { copyBtn.textContent = '\ud83d\udccb Copy CSS'; }, 2000);
+                            }
+                        });
+                    }
+                });
+            }
+
+            // Edit slot button
+            var editBtn = document.getElementById('css-edit-slot');
+            if (editBtn) {
+                editBtn.addEventListener('click', function () {
+                    localStorage.setItem('css_editing_slot', activeSlot);
+                    renderCustomCssSettings(container);
+                });
+            }
+
+            // Export (triggers password modal for optional encryption)
+            var exportBtn = document.getElementById('css-export');
+            if (exportBtn) {
+                exportBtn.addEventListener('click', function () {
+                    _cssExportNoPw = false;
+                    cssPwShow('Export CSS', 'export');
+                });
+            }
+
+            // Import backup (triggers password modal for encrypted or plaintext)
+            var importBtn = document.getElementById('css-import-backup');
+            if (importBtn) {
+                importBtn.addEventListener('click', function () {
+                    document.getElementById('css-import-backup-input').click();
+                });
+            }
+            var importInput = document.getElementById('css-import-backup-input');
+            if (importInput) {
+                importInput.addEventListener('change', function (e) {
+                    var file = e.target.files[0];
+                    if (!file) return;
+                    var reader = new FileReader();
+                    reader.onload = function (ev) {
+                        try {
+                            var parsed = JSON.parse(ev.target.result);
+                            if (!parsed || parsed.app !== 'e2e_chat' || parsed.kind !== 'custom_css') {
+                                showToast('Not a valid CSS backup file');
+                                return;
+                            }
+                            if (parsed.salt && parsed.nonce && parsed.encrypted_private_key) {
+                                _cssPendingImport = parsed;
+                                cssPwShow('Import CSS', 'import-enc');
+                            } else if (parsed.payload) {
+                                _cssPendingImport = parsed;
+                                cssPwShow('Import CSS', 'import-plain');
+                            } else {
+                                showToast('Not a valid CSS backup file');
+                            }
+                        } catch (_) {
+                            showToast('Could not read backup file');
+                        }
+                    };
+                    reader.readAsText(file);
+                    importInput.value = '';
+                });
+            }
+
+        });
+    }
+
+    // Apply CSS from a server-side slot (decode base64)
+    function _applyServerSlot(slotId) {
+        fetchCssSlots().then(function (data) {
+            var slot = slotId === 1 ? data.slot1 : data.slot2;
+            if (!slot || !slot.encrypted_css) { applyCustomCss(''); return; }
+            try {
+                var css = _decryptCss(slot.encrypted_css, slot.nonce);
+                applyCustomCss(css);
+            } catch (_) {
+                applyCustomCss('/* Could not decode CSS */');
+            }
+        });
+    }
+
+    // Auto-load active slot CSS on page load
+    function _loadActiveSlotCss() {
+        fetchCssSlots().then(function (data) {
+            if (data.active_slot > 0) _applyServerSlot(data.active_slot);
+        });
+    }
     window.renderCustomCssSettings = renderCustomCssSettings;
     window.applyCustomCss = applyCustomCss;
 

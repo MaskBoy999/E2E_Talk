@@ -8312,3 +8312,87 @@ pub async fn list_online_users(
     let online = state.ws_manager.get_online_user_ids().await;
     (StatusCode::OK, Json(serde_json::json!(online))).into_response()
 }
+
+// ── F14: User Custom CSS Slots ─────────────────────────────────────────────
+// Two encrypted CSS slots per user.  The client encrypts the plaintext CSS
+// with the user's identity key; the server only stores opaque blobs.
+// active_slot: 0 = use app default, 1 or 2 = use that slot.
+
+/// GET /api/user-css/slots — return both slots and active_slot for the caller.
+pub async fn get_css_slots(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    match state.db.get_css_slots(&user_id) {
+        Ok((s1_css, s1_nonce, s2_css, s2_nonce, active)) => {
+            (StatusCode::OK, Json(serde_json::json!({
+                "slot1": { "encrypted_css": s1_css, "nonce": s1_nonce },
+                "slot2": { "encrypted_css": s2_css, "nonce": s2_nonce },
+                "active_slot": active,
+            }))).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+/// PUT /api/user-css/slot/:slot — save encrypted CSS to slot 1 or 2.
+pub async fn save_css_slot(
+    Path(slot_num): Path<i64>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    if slot_num != 1 && slot_num != 2 {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "slot must be 1 or 2"}))).into_response();
+    }
+    let encrypted_css = body["encrypted_css"].as_str().unwrap_or("").to_string();
+    let nonce = body["nonce"].as_str().unwrap_or("").to_string();
+    match state.db.save_css_slot(&user_id, slot_num, &encrypted_css, &nonce) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+/// DELETE /api/user-css/slot/:slot — clear a CSS slot.
+pub async fn delete_css_slot(
+    Path(slot_num): Path<i64>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    match state.db.delete_css_slot(&user_id, slot_num) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+/// PUT /api/user-css/active — set which slot is active (0 = default, 1 or 2).
+pub async fn set_css_active_slot(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    let active = body["active_slot"].as_i64().unwrap_or(0);
+    if active < 0 || active > 2 {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "active_slot must be 0, 1, or 2"}))).into_response();
+    }
+    match state.db.set_css_active_slot(&user_id, active) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true, "active_slot": active}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}

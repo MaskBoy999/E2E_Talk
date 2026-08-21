@@ -1246,6 +1246,10 @@ impl Database {
         let _ = conn.execute_batch(include_str!("../migrations/065_file_chunk_bytes.sql"));
         // Migration 066: threads + channel categories
         let _ = conn.execute_batch(include_str!("../migrations/066_threads_and_categories.sql"));
+        // Migration 067: user CSS slots
+        let _ = conn.execute_batch(include_str!("../migrations/067_user_css_slots.sql"));
+        // Migration 068: Recreate user_key_escrow (dropped by 023, still referenced by code)
+        let _ = conn.execute_batch(include_str!("../migrations/068_recreate_key_escrow.sql"));
 
         // Data migration: normalize legacy space-separated CURRENT_TIMESTAMP values
         // ("YYYY-MM-DD HH:MM:SS") to fixed-width RFC3339 ("YYYY-MM-DDTHH:MM:SS.000000Z")
@@ -7496,6 +7500,61 @@ impl Database {
             rusqlite::params![category_id],
             |row| row.get(0),
         ).map_err(|e| e.to_string())
+    }
+
+    // ── F14: User Custom CSS Slots ─────────────────────────────────────────────
+
+    pub fn get_css_slots(&self, user_id: &str) -> Result<(String, String, String, String, i64), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let (s1_css, s1_nonce) = conn
+            .query_row(
+                "SELECT encrypted_css, nonce FROM user_css_slots WHERE user_id = ?1 AND slot = 1",
+                rusqlite::params![user_id],
+                |row| Ok((row.get::<_, String>(0).unwrap_or_default(), row.get::<_, String>(1).unwrap_or_default())),
+            )
+            .unwrap_or_default();
+        let (s2_css, s2_nonce) = conn
+            .query_row(
+                "SELECT encrypted_css, nonce FROM user_css_slots WHERE user_id = ?1 AND slot = 2",
+                rusqlite::params![user_id],
+                |row| Ok((row.get::<_, String>(0).unwrap_or_default(), row.get::<_, String>(1).unwrap_or_default())),
+            )
+            .unwrap_or_default();
+        let active = conn
+            .query_row(
+                "SELECT active_slot FROM user_css_prefs WHERE user_id = ?1",
+                rusqlite::params![user_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0);
+        Ok((s1_css, s1_nonce, s2_css, s2_nonce, active))
+    }
+
+    pub fn save_css_slot(&self, user_id: &str, slot: i64, encrypted_css: &str, nonce: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT OR REPLACE INTO user_css_slots (user_id, slot, encrypted_css, nonce) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![user_id, slot, encrypted_css, nonce],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn delete_css_slot(&self, user_id: &str, slot: i64) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM user_css_slots WHERE user_id = ?1 AND slot = ?2",
+            rusqlite::params![user_id, slot],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn set_css_active_slot(&self, user_id: &str, active: i64) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT OR REPLACE INTO user_css_prefs (user_id, active_slot) VALUES (?1, ?2)",
+            rusqlite::params![user_id, active],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
     }
 
 }
