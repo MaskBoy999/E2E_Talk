@@ -230,7 +230,7 @@ var E2ECrypto = (() => {
             sodium.crypto_pwhash_ALG_ARGON2ID13
         );
         _secureZero(pwdBytes);
-        const ptB64 = btoa(plaintext);
+        const ptB64 = arrayBufferToBase64(new TextEncoder().encode(plaintext).buffer);
         const ptBytes = new TextEncoder().encode(ptB64);
         const enc = _aeadEncryptRaw(ptBytes, key, null, null);
         _secureZero(key);
@@ -259,7 +259,7 @@ var E2ECrypto = (() => {
             _secureZero(key);
             _secureZero(ct);
             _secureZero(n);
-            return atob(new TextDecoder().decode(ptBytes));
+            return new TextDecoder().decode(new Uint8Array(base64ToArrayBuffer(new TextDecoder().decode(ptBytes))));
         } catch (_) { _secureZero(key); _secureZero(ct); _secureZero(n); return null; }
     }
 

@@ -1246,8 +1246,6 @@ impl Database {
         let _ = conn.execute_batch(include_str!("../migrations/065_file_chunk_bytes.sql"));
         // Migration 066: threads + channel categories
         let _ = conn.execute_batch(include_str!("../migrations/066_threads_and_categories.sql"));
-        // Migration 067: per-user encrypted custom CSS
-        let _ = conn.execute_batch(include_str!("../migrations/067_user_css.sql"));
 
         // Data migration: normalize legacy space-separated CURRENT_TIMESTAMP values
         // ("YYYY-MM-DD HH:MM:SS") to fixed-width RFC3339 ("YYYY-MM-DDTHH:MM:SS.000000Z")
@@ -7500,35 +7498,4 @@ impl Database {
         ).map_err(|e| e.to_string())
     }
 
-    // ==================== F14: Custom CSS ====================
-
-    /// Save or update a user's encrypted custom CSS.
-    pub fn save_user_css(&self, user_id: &str, encrypted_css: &[u8], css_nonce: &[u8]) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "INSERT INTO user_css (user_id, encrypted_css, css_nonce, updated_at) VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP) ON CONFLICT(user_id) DO UPDATE SET encrypted_css = ?2, css_nonce = ?3, updated_at = CURRENT_TIMESTAMP",
-            rusqlite::params![user_id, encrypted_css, css_nonce],
-        ).map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
-    /// Fetch a user's encrypted custom CSS. Returns (encrypted_css, css_nonce, updated_at).
-    pub fn get_user_css(&self, user_id: &str) -> Result<Option<(Vec<u8>, Vec<u8>, String)>, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.query_row(
-            "SELECT encrypted_css, css_nonce, updated_at FROM user_css WHERE user_id = ?1",
-            rusqlite::params![user_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        ).optional().map_err(|e| e.to_string())
-    }
-
-    /// Delete a user's custom CSS.
-    pub fn delete_user_css(&self, user_id: &str) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "DELETE FROM user_css WHERE user_id = ?1",
-            rusqlite::params![user_id],
-        ).map_err(|e| e.to_string())?;
-        Ok(())
-    }
 }

@@ -37,17 +37,21 @@ test.describe('F14 · Custom CSS', () => {
         await openCssTab(page);
         expect(await page.locator('#custom-css-textarea').isVisible()).toBe(true);
         expect(await page.locator('#css-save-local').isVisible()).toBe(true);
-        expect(await page.locator('#css-save-account').isVisible()).toBe(true);
         expect(await page.locator('#css-preview').isVisible()).toBe(true);
         expect(await page.locator('#css-reset').isVisible()).toBe(true);
         expect(await page.locator('#css-import').isVisible()).toBe(true);
+        expect(await page.locator('#css-export').isVisible()).toBe(true);
+        expect(await page.locator('#css-import-backup').isVisible()).toBe(true);
         const presets = await page.locator('[data-preset]').count();
-        expect(presets).toBe(6); // default, performance, premium, neon, light, highcontrast
+        expect(presets).toBe(7); // default, performance, premium, neon, light, highcontrast, custom
     });
 
     test('save local CSS persists in localStorage and applies', async ({ page }) => {
         await registerAndLogin(page);
         await openCssTab(page);
+        // Switch to custom mode first
+        await page.click('[data-preset="custom"]');
+        await page.waitForTimeout(300);
         await page.fill('#custom-css-textarea', 'body { background: red !important; }');
         await page.click('#css-save-local');
         await page.waitForTimeout(500);
@@ -58,9 +62,6 @@ test.describe('F14 · Custom CSS', () => {
     test('reset removes CSS, localStorage, and preset selection', async ({ page }) => {
         await registerAndLogin(page);
         await openCssTab(page);
-        await page.fill('#custom-css-textarea', 'body { color: blue; }');
-        await page.click('#css-save-local');
-        await page.waitForTimeout(300);
         await page.click('[data-preset="performance"]');
         await page.waitForTimeout(300);
         expect(await page.evaluate(() => localStorage.getItem('custom_css_preset'))).toBe('performance');
@@ -68,37 +69,20 @@ test.describe('F14 · Custom CSS', () => {
         await page.waitForTimeout(300);
         expect(await page.evaluate(() => localStorage.getItem('custom_css_text'))).toBeNull();
         expect(await page.evaluate(() => localStorage.getItem('custom_css_preset'))).toBeNull();
-        expect(await page.evaluate(() => localStorage.getItem('custom_css_use_account'))).toBeNull();
+        expect(await page.evaluate(() => localStorage.getItem('custom_css_mode'))).toBeNull();
         expect(await page.evaluate(() => !!document.getElementById('custom-user-css'))).toBe(false);
     });
 
     test('preview applies CSS without saving to localStorage', async ({ page }) => {
         await registerAndLogin(page);
         await openCssTab(page);
+        await page.click('[data-preset="custom"]');
+        await page.waitForTimeout(300);
         await page.fill('#custom-css-textarea', 'body { background: green !important; }');
         await page.click('#css-preview');
         await page.waitForTimeout(500);
         expect(await page.evaluate(() => !!document.getElementById('custom-user-css'))).toBe(true);
         expect(await page.evaluate(() => localStorage.getItem('custom_css_text'))).toBeNull();
-    });
-
-    test('use-account toggle stored in localStorage', async ({ page }) => {
-        await registerAndLogin(page);
-        await openCssTab(page);
-        await page.check('#css-use-account');
-        await page.waitForTimeout(300);
-        expect(await page.evaluate(() => localStorage.getItem('custom_css_use_account'))).toBe('true');
-    });
-
-    test('CSS API endpoints respond correctly', async ({ page }) => {
-        await registerAndLogin(page);
-        const myId = await page.evaluate(() => (window as any).myUserId || '');
-        const getRes = await page.evaluate(async (id) => {
-            const token = localStorage.getItem('auth_token');
-            const r = await fetch('/api/user-css/' + id, { headers: { 'Authorization': 'Bearer ' + token } });
-            return r.status;
-        }, myId);
-        expect(getRes).toBe(404);
     });
 
     // ── Preset-specific tests ──
@@ -153,7 +137,7 @@ test.describe('F14 · Custom CSS', () => {
         expect(css).toContain('--text-primary: #212121');
         expect(css).toContain('background: #ffffff');
         expect(css).toContain('color: #212121');
-        expect(css).toContain('#1976d2'); // blue accent
+        expect(css).toContain('#1976d2');
     });
 
     test('High Contrast preset: WCAG AAA with yellow focus outlines', async ({ page }) => {
@@ -203,9 +187,8 @@ test.describe('F14 · Custom CSS', () => {
     test('manual CSS edit deselects preset', async ({ page }) => {
         await registerAndLogin(page);
         await openCssTab(page);
-        await page.click('[data-preset="performance"]');
+        await page.click('[data-preset="custom"]');
         await page.waitForTimeout(300);
-        expect(await page.evaluate(() => localStorage.getItem('custom_css_preset'))).toBe('performance');
         await page.fill('#custom-css-textarea', 'body { color: pink; }');
         await page.click('#css-save-local');
         await page.waitForTimeout(300);
@@ -285,5 +268,71 @@ test.describe('F14 · Custom CSS', () => {
             }
         }
         expect(seen.size).toBe(5); // default is empty, 5 others have unique CSS
+    });
+
+    test('export button opens password modal', async ({ page }) => {
+        await registerAndLogin(page);
+        await openCssTab(page);
+        await page.click('#css-export');
+        await page.waitForTimeout(300);
+        const modal = page.locator('#css-pw-modal');
+        expect(await modal.isVisible()).toBe(true);
+        expect(await page.locator('#css-pw-title').textContent()).toContain('Export CSS');
+    });
+
+    test('export without password option downloads plaintext file', async ({ page }) => {
+        await registerAndLogin(page);
+        await openCssTab(page);
+        // First apply some CSS
+        await page.click('[data-preset="performance"]');
+        await page.waitForTimeout(300);
+        // Click export
+        await page.click('#css-export');
+        await page.waitForTimeout(300);
+        // Check the no-password checkbox
+        await page.check('#css-pw-nopw');
+        await page.waitForTimeout(200);
+        // Click confirm
+        const [download] = await Promise.all([
+            page.waitForEvent('download'),
+            page.click('#css-pw-confirm-btn'),
+        ]);
+        expect(download.suggestedFilename()).toContain('.e2ecss');
+    });
+
+    test('export with password encrypts the file', async ({ page }) => {
+        await registerAndLogin(page);
+        await openCssTab(page);
+        await page.click('[data-preset="performance"]');
+        await page.waitForTimeout(300);
+        await page.click('#css-export');
+        await page.waitForTimeout(300);
+        await page.fill('#css-pw-input', 'testpass123');
+        await page.fill('#css-pw-confirm-input', 'testpass123');
+        const [download] = await Promise.all([
+            page.waitForEvent('download'),
+            page.click('#css-pw-confirm-btn'),
+        ]);
+        expect(download.suggestedFilename()).toContain('.e2ecss');
+        // Read file and verify it's encrypted (has salt, nonce, encrypted_private_key)
+        const path = await download.path();
+        if (path) {
+            const fs = require('fs');
+            const content = JSON.parse(fs.readFileSync(path, 'utf-8'));
+            expect(content.app).toBe('e2e_chat');
+            expect(content.kind).toBe('custom_css');
+            expect(content.salt).toBeTruthy();
+            expect(content.nonce).toBeTruthy();
+            expect(content.encrypted_private_key).toBeTruthy();
+        }
+    });
+
+    test('import backup button opens file picker', async ({ page }) => {
+        await registerAndLogin(page);
+        await openCssTab(page);
+        const fileInput = page.locator('#css-import-backup-input');
+        expect(await fileInput.isVisible()).toBe(false); // hidden file input
+        // Verify the import backup button exists
+        expect(await page.locator('#css-import-backup').isVisible()).toBe(true);
     });
 });
