@@ -9024,7 +9024,7 @@ document.addEventListener('DOMContentLoaded', () => {
     ['settings-modal', 'server-choice-modal', 'create-server-modal', 'join-server-modal',
      'add-friend-modal', 'server-settings-modal', 'friend-requests-modal',
      'sticker-upload-modal', 'profile-crop-modal', 'upload-modal',
-     'friend-code-password-modal'].forEach(setupModalClickOff);
+     'friend-code-password-modal', 'category-name-modal', 'channel-rename-modal'].forEach(setupModalClickOff);
     // Closing the settings modal (click-off) must silence any trim preview.
     var _settingsModalEl = document.getElementById('settings-modal');
     if (_settingsModalEl) {
@@ -9196,6 +9196,7 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('dm-strip-btn').addEventListener('click', enterDmView);
     document.getElementById('dm-strip-btn').addEventListener('contextmenu', function (e) {
         e.preventDefault();
+        e.stopPropagation();
         showDmStripContextMenu(e);
     });
 
@@ -12962,6 +12963,7 @@ function renderServerList() {
         });
         div.addEventListener('contextmenu', function (e) {
             e.preventDefault();
+            e.stopPropagation();
             showServerContextMenu(e, s.id, s.name);
         });
         list.appendChild(div);
@@ -13231,6 +13233,7 @@ async function loadChannels(serverId) {
         list.querySelectorAll('.channel-item').forEach(function (ch) {
             ch.addEventListener('contextmenu', function (e) {
                 e.preventDefault();
+                e.stopPropagation();
                 showChannelContextMenu(e, ch.dataset.id, ch.dataset.name);
             });
         });
@@ -16312,6 +16315,7 @@ function renderDmSidebar() {
         // Right-click context menu for mute/unmute
         item.addEventListener('contextmenu', function (e) {
             e.preventDefault();
+            e.stopPropagation();
             var dmId = item.dataset.dmId;
             var username = item.dataset.username || 'user';
             showDmContextMenu(e, dmId, username);

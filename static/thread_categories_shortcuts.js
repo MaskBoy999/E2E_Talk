@@ -727,27 +727,15 @@
             catBtn.textContent = '+ Category';
 
             catBtn.addEventListener('click', function () {
-
-                var name = prompt('Category name:');
-
-                if (!name) return;
-
-                // Encrypt the category name with the server key
-
-                var serverKey = E2ECrypto.getServerKey(serverId);
-
-                if (serverKey) {
-
-                    var enc = E2ECrypto.encryptMessage(name, serverKey);
-
-                    createCategory(serverId, enc.ciphertext, enc.nonce).then(function () {
-
-                        loadChannels(serverId);
-
-                    });
-
-                }
-
+                _showCategoryNameModal('Create Category', 'Create', function (name) {
+                    var serverKey = E2ECrypto.getServerKey(serverId);
+                    if (serverKey) {
+                        var enc = E2ECrypto.encryptMessage(name, serverKey);
+                        createCategory(serverId, enc.ciphertext, enc.nonce).then(function () {
+                            loadChannels(serverId);
+                        });
+                    }
+                });
             });
 
             list.appendChild(catBtn);
@@ -800,19 +788,7 @@
 
 
 
-        // Context menu on each channel
 
-        list.querySelectorAll('.channel-item').forEach(function (ch) {
-
-            ch.addEventListener('contextmenu', function (ev) {
-
-                ev.preventDefault();
-
-                showChannelContextMenu(ev, ch.dataset.id, ch.dataset.name);
-
-            });
-
-        });
 
 
 
@@ -948,37 +924,12 @@
             });
         }
 
-        // Double-click to rename category (owner only)
+        // Right-click context menu for category header (owner only)
         if (isOwner && categoryId) {
-            header.addEventListener('dblclick', function (e) {
-                // Don't trigger if clicking the delete button or chevron
-                if (e.target.classList.contains('category-delete-btn') || e.target.classList.contains('category-chevron') || e.target.classList.contains('category-add-channel-btn')) return;
+            header.addEventListener('contextmenu', function (e) {
+                e.preventDefault();
                 e.stopPropagation();
-                var input = document.createElement('input');
-                input.type = 'text';
-                input.value = name;
-                input.maxLength = 50;
-                input.style.cssText = 'background:#1a1a2e;color:#e0e0e0;border:1px solid var(--accent,#4fc3f7);border-radius:4px;padding:1px 4px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;width:140px;outline:none;';
-                var textNode = header.childNodes[1]; // the text after chevron
-                if (textNode) header.replaceChild(input, textNode);
-                input.focus();
-                input.select();
-                var committed = false;
-                async function commitRename() {
-                    if (committed) return;
-                    committed = true;
-                    var newName = input.value.trim();
-                    if (newName && newName !== name) {
-                        await renameCategory(serverId, categoryId, newName);
-                    }
-                    // Re-render
-                    if (typeof window.loadChannels === 'function') window.loadChannels(serverId);
-                }
-                input.addEventListener('blur', commitRename);
-                input.addEventListener('keydown', function (ke) {
-                    if (ke.key === 'Enter') { ke.preventDefault(); input.blur(); }
-                    if (ke.key === 'Escape') { committed = true; input.blur(); }
-                });
+                _showCategoryContextMenu(e.clientX, e.clientY, serverId, categoryId, name, channels);
             });
         }
 
@@ -1022,59 +973,11 @@
         // Click to collapse/expand
 
         header.addEventListener('click', function (e) {
-            // Don't collapse if clicking the delete button
-            if (e.target.classList.contains('category-delete-btn') || e.target.classList.contains('category-add-channel-btn')) return;
             group.classList.toggle('collapsed');
 
         });
 
-        // Add-channel button (owner only) — left of delete button
-        if (isOwner && categoryId) {
-            var addChBtn = document.createElement('span');
-            addChBtn.className = 'category-add-channel-btn';
-            addChBtn.textContent = '+';
-            addChBtn.title = 'Add channel to ' + name;
-            addChBtn.style.cssText = 'color:var(--text-muted,#888);font-size:15px;cursor:pointer;padding:0 4px;opacity:0;transition:opacity .2s;margin-left:auto;';
-            header.addEventListener('mouseenter', function () { addChBtn.style.opacity = '1'; });
-            header.addEventListener('mouseleave', function () { addChBtn.style.opacity = '0'; });
-            addChBtn.addEventListener('click', function (e) {
-                e.stopPropagation();
-                window._pendingChannelCategoryId = categoryId;
-                document.getElementById('create-channel-modal').style.display = 'flex';
-                document.getElementById('new-channel-name').value = '';
-                document.getElementById('new-channel-name').focus();
-            });
-            header.appendChild(addChBtn);
-        }
 
-        // Delete category button (owner only, not the last category)
-        if (isOwner && categoryId) {
-            var delBtn = document.createElement('span');
-            delBtn.className = 'category-delete-btn';
-            delBtn.textContent = '\u00d7';
-            delBtn.title = 'Delete category (deletes all channels inside)';
-            delBtn.style.cssText = 'color:var(--text-muted,#888);font-size:16px;cursor:pointer;padding:0 4px;opacity:0;transition:opacity .2s;';
-            header.addEventListener('mouseenter', function () { delBtn.style.opacity = '1'; });
-            header.addEventListener('mouseleave', function () { delBtn.style.opacity = '0'; });
-            delBtn.addEventListener('click', function (e) {
-                e.stopPropagation();
-                var chCount = channels.length;
-                var msg = 'Delete category \"' + name + '\"?';
-                if (chCount > 0) {
-                    msg += '\n\nThis will permanently delete ' + chCount + ' channel' + (chCount > 1 ? 's' : '') + ' and ALL messages inside them.';
-                }
-                msg += '\n\nThis cannot be undone.';
-                if (!confirm(msg)) return;
-                deleteCategory(serverId, categoryId).then(function (result) {
-                    if (result && result.ok) {
-                        loadChannels(serverId);
-                    } else if (result && result.error) {
-                        alert(result.error);
-                    }
-                });
-            });
-            header.appendChild(delBtn);
-        }
 
 
 
@@ -1254,59 +1157,12 @@
             nameSpan.style.flex = '1';
 
             div.appendChild(nameSpan);
-
-            // Double-click to rename channel (owner only)
-            if (isOwner) {
-                nameSpan.addEventListener('dblclick', function (e) {
-                    e.stopPropagation();
-                    e.preventDefault();
-                    var input = document.createElement('input');
-                    input.type = 'text';
-                    input.value = chDisplayName;
-                    input.maxLength = 50;
-                    input.style.cssText = 'background:#1a1a2e;color:#e0e0e0;border:1px solid var(--accent,#4fc3f7);border-radius:4px;padding:1px 4px;font-size:13px;width:140px;outline:none;flex:1;';
-                    div.replaceChild(input, nameSpan);
-                    input.focus();
-                    input.select();
-                    var committed = false;
-                    async function commitRename() {
-                        if (committed) return;
-                        committed = true;
-                        var newName = input.value.trim();
-                        if (newName && newName !== chDisplayName) {
-                            await renameChannelAPI(serverId, ch.id, newName);
-                        }
-                        if (typeof window.loadChannels === 'function') window.loadChannels(serverId);
-                    }
-                    input.addEventListener('blur', commitRename);
-                    input.addEventListener('keydown', function (ke) {
-                        if (ke.key === 'Enter') { ke.preventDefault(); input.blur(); }
-                        if (ke.key === 'Escape') { committed = true; input.blur(); }
-                    });
-                });
-            }
-
-            if (isOwner) {
-
-                var delBtn = document.createElement('button');
-
-                delBtn.className = 'btn-delete-channel';
-
-                delBtn.textContent = '×';
-
-                delBtn.title = 'Delete channel';
-
-                delBtn.addEventListener('click', function (ev) {
-
-                    ev.stopPropagation();
-
-                    deleteChannel(ch.id, ch.name);
-
-                });
-
-                div.appendChild(delBtn);
-
-            }
+            // Right-click context menu for channel (all users)
+            div.addEventListener('contextmenu', function (e) {
+                e.preventDefault();
+                e.stopPropagation();
+                _showChannelContextMenu(e.clientX, e.clientY, serverId, ch, chDisplayName, categoryId, isOwner);
+            });
 
             body.appendChild(div);
 
@@ -1386,6 +1242,183 @@
         });
     }
     window.updateCategoryIndicators = updateCategoryIndicators;
+
+    // --- Right-click context menus for categories and channels ---
+    function _dismissContextMenu() {
+        var old = document.querySelector('.channel-context-menu');
+        if (old) old.remove();
+    }
+    document.addEventListener('click', _dismissContextMenu);
+    document.addEventListener('contextmenu', function () { _dismissContextMenu(); });
+
+    function _showContextMenu(x, y, items) {
+        _dismissContextMenu();
+        var menu = document.createElement('div');
+        menu.className = 'channel-context-menu';
+        items.forEach(function (item) {
+            if (item === '---') {
+                var sep = document.createElement('div');
+                sep.style.cssText = 'height:1px;background:var(--border-color,#333);margin:4px 0;';
+                menu.appendChild(sep);
+                return;
+            }
+            var el = document.createElement('div');
+            el.className = 'context-menu-item' + (item.danger ? ' context-menu-danger' : '');
+            el.textContent = item.label;
+            el.addEventListener('click', function (e) {
+                e.stopPropagation();
+                menu.remove();
+                item.action();
+            });
+            menu.appendChild(el);
+        });
+        document.body.appendChild(menu);
+        // Keep menu on screen (check all edges)
+        var rect = menu.getBoundingClientRect();
+        if (rect.right > window.innerWidth) menu.style.left = Math.max(0, x - rect.width) + 'px';
+        if (rect.bottom > window.innerHeight) menu.style.top = Math.max(0, y - rect.height) + 'px';
+        if (rect.left < 0) menu.style.left = '0px';
+        if (rect.top < 0) menu.style.top = '0px';
+    }
+
+    function _showCategoryContextMenu(x, y, serverId, categoryId, catName, channels) {
+        var items = [
+            { label: 'Rename', action: function () {
+                _showCategoryNameModal('Rename Category', 'Rename', function (newName) {
+                    renameCategory(serverId, categoryId, newName).then(function () {
+                        if (typeof window.loadChannels === 'function') window.loadChannels(serverId);
+                    });
+                }, catName);
+            }},
+            { label: 'Add Channel', action: function () {
+                window._pendingChannelCategoryId = categoryId;
+                var modal = document.getElementById('create-channel-modal');
+                if (modal) {
+                    modal.style.display = 'flex';
+                    var nameInput = document.getElementById('new-channel-name');
+                    if (nameInput) { nameInput.value = ''; nameInput.focus(); }
+                }
+            }},
+            '---',
+            { label: 'Delete', danger: true, action: function () {
+                var chCount = channels.length;
+                var msg = 'Delete category "' + catName + '"?';
+                if (chCount > 0) {
+                    msg += '\n\nThis will permanently delete ' + chCount + ' channel' + (chCount > 1 ? 's' : '') + ' and ALL messages inside them.';
+                }
+                msg += '\n\nThis cannot be undone.';
+                if (!confirm(msg)) return;
+                deleteCategory(serverId, categoryId).then(function (result) {
+                    if (result && result.ok) {
+                        loadChannels(serverId);
+                    } else if (result && result.error) {
+                        alert(result.error);
+                    }
+                });
+            }}
+        ];
+        _showContextMenu(x, y, items);
+    }
+
+    function _showChannelContextMenu(x, y, serverId, ch, chDisplayName, categoryId, isOwner) {
+        var items = [];
+        // Owner-only actions
+        if (isOwner) {
+            items.push({ label: 'Rename', action: function () {
+                _showChannelRenameModal(chDisplayName, function (newName) {
+                    renameChannelAPI(serverId, ch.id, newName).then(function () {
+                        if (typeof window.loadChannels === 'function') window.loadChannels(serverId);
+                    });
+                });
+            }});
+        }
+        // Mute toggle (all users)
+        var isMuted = typeof mutedChannels !== 'undefined' && mutedChannels.indexOf(ch.id) !== -1;
+        items.push({ label: isMuted ? 'Unmute #' + chDisplayName : 'Mute #' + chDisplayName, action: function () {
+            if (typeof toggleMuteChannel === 'function') toggleMuteChannel(ch.id, serverId);
+        }});
+        // Clear notifications (all users)
+        var unreadCount = (typeof unreadMentionsByChannel !== 'undefined' && unreadMentionsByChannel[ch.id]) ? unreadMentionsByChannel[ch.id].count : 0;
+        items.push({ label: unreadCount > 0 ? 'Clear notifications (' + unreadCount + ')' : 'No notifications', action: function () {
+            if (typeof clearUnreadChannelMentions === 'function') clearUnreadChannelMentions(ch.id);
+        }});
+        // Owner-only: delete
+        if (isOwner) {
+            items.push('---');
+            items.push({ label: 'Delete', danger: true, action: function () {
+                var msg = 'Delete channel "' + chDisplayName + '"?';
+                msg += '\n\nThis will permanently delete ALL messages inside it.';
+                msg += '\n\nThis cannot be undone.';
+                if (!confirm(msg)) return;
+                deleteChannel(ch.id, ch.name);
+            }});
+        }
+        _showContextMenu(x, y, items);
+    }
+
+    // --- In-page modals for rename / create (no browser prompts) ---
+    function _showCategoryNameModal(title, buttonText, onConfirm, defaultValue) {
+        var modal = document.getElementById('category-name-modal');
+        var titleEl = document.getElementById('category-name-modal-title');
+        var input = document.getElementById('category-name-input');
+        var confirmBtn = document.getElementById('category-name-confirm');
+        var cancelBtn = document.getElementById('category-name-cancel');
+        if (!modal || !input || !confirmBtn || !cancelBtn) return;
+        titleEl.textContent = title || 'Category Name';
+        confirmBtn.textContent = buttonText || 'Create';
+        input.value = defaultValue || '';
+        modal.style.display = 'flex';
+        setTimeout(function () { input.focus(); input.select(); }, 50);
+        var committed = false;
+        function commit() {
+            if (committed) return;
+            committed = true;
+            var val = input.value.trim();
+            modal.style.display = 'none';
+            if (val) onConfirm(val);
+        }
+        function cancel() {
+            if (committed) return;
+            committed = true;
+            modal.style.display = 'none';
+        }
+        confirmBtn.onclick = commit;
+        cancelBtn.onclick = cancel;
+        input.onkeydown = function (e) {
+            if (e.key === 'Enter') { e.preventDefault(); commit(); }
+            if (e.key === 'Escape') cancel();
+        };
+    }
+
+    function _showChannelRenameModal(currentName, onConfirm) {
+        var modal = document.getElementById('channel-rename-modal');
+        var input = document.getElementById('channel-rename-input');
+        var confirmBtn = document.getElementById('channel-rename-confirm');
+        var cancelBtn = document.getElementById('channel-rename-cancel');
+        if (!modal || !input || !confirmBtn || !cancelBtn) return;
+        input.value = currentName || '';
+        modal.style.display = 'flex';
+        setTimeout(function () { input.focus(); input.select(); }, 50);
+        var committed = false;
+        function commit() {
+            if (committed) return;
+            committed = true;
+            var val = input.value.trim();
+            modal.style.display = 'none';
+            if (val && val !== currentName) onConfirm(val);
+        }
+        function cancel() {
+            if (committed) return;
+            committed = true;
+            modal.style.display = 'none';
+        }
+        confirmBtn.onclick = commit;
+        cancelBtn.onclick = cancel;
+        input.onkeydown = function (e) {
+            if (e.key === 'Enter') { e.preventDefault(); commit(); }
+            if (e.key === 'Escape') cancel();
+        };
+    }
 
     // Expose category API
 
