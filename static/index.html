@@ -152,6 +152,7 @@
                     <button class="attach-btn" id="attach-btn" title="Attach file">+</button>
                     <div class="attach-popup" id="attach-popup" style="display:none">
                         <button class="attach-popup-item" data-action="upload">📁 Upload Files</button>
+                        <button class="attach-popup-item" data-action="vault-send">&#128274; Send from Vault</button>
                         <button class="attach-popup-item" data-action="photo">📷 Take Photo</button>
                         <button class="attach-popup-item" data-action="record-video">🎥 Record Video</button>
                         <button class="attach-popup-item" data-action="record-audio">🎤 Record Audio</button>
@@ -1134,9 +1135,29 @@
                 <button class="btn btn-primary" id="vault-upload-btn">&#128228; Upload File</button>
                 <input type="file" id="vault-file-input" style="display:none" multiple>
             </div>
+            <div id="vault-upload-progress" style="display:none;margin-bottom:8px">
+                <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px" id="vault-upload-status">Encrypting...</div>
+                <div style="height:4px;background:var(--bg-secondary,#1a1a2e);border-radius:2px;overflow:hidden">
+                    <div id="vault-upload-bar" style="height:100%;background:var(--accent,#4fc3f7);width:0%;transition:width .3s"></div>
+                </div>
+            </div>
+            <input type="text" id="vault-search" placeholder="Search files..." style="width:100%;padding:6px 10px;margin-bottom:8px;border:1px solid var(--border,#333);border-radius:6px;background:var(--bg-secondary,#1a1a2e);color:var(--text,#e0e0e0);font-size:13px;box-sizing:border-box;">
             <div id="vault-file-list" class="vault-file-list"></div>
             <div class="modal-actions">
                 <button class="btn-cancel" id="close-vault">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Vault Send Picker Modal -->
+    <div class="modal" id="vault-send-modal" style="display:none">
+        <div class="modal-content" style="max-width:500px">
+            <h3>&#128274; Send from Vault</h3>
+            <p class="settings-hint" style="margin-bottom:12px">Select a file from your encrypted vault to send in this conversation.</p>
+            <input type="text" id="vault-send-search" placeholder="Search files..." style="width:100%;padding:6px 10px;margin-bottom:8px;border:1px solid var(--border,#333);border-radius:6px;background:var(--bg-secondary,#1a1a2e);color:var(--text,#e0e0e0);font-size:13px;box-sizing:border-box;">
+            <div id="vault-send-file-list" class="vault-file-list" style="max-height:300px;overflow-y:auto;margin-bottom:12px"></div>
+            <div class="modal-actions">
+                <button class="btn-cancel" id="close-vault-send">Cancel</button>
             </div>
         </div>
     </div>

@@ -8640,26 +8640,34 @@ pub async fn vault_upload(
         Err(e) => return e.into_response(),
     };
 
-    // Parse JSON body
-    let parsed: serde_json::Value = match serde_json::from_slice(&body) {
-        Ok(v) => v,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "invalid JSON"}))).into_response(),
-    };
+    // Metadata comes from headers; encrypted blob is the raw body (no base64)
+    let file_id = headers.get("x-vault-file-id")
+        .and_then(|v| v.to_str().ok()).unwrap_or("");
+    let encrypted_filename = headers.get("x-vault-filename")
+        .and_then(|v| v.to_str().ok()).unwrap_or("");
+    let filename_nonce = headers.get("x-vault-filename-nonce")
+        .and_then(|v| v.to_str().ok()).unwrap_or("");
+    let encrypted_mime = headers.get("x-vault-mime")
+        .and_then(|v| v.to_str().ok()).unwrap_or("");
+    let mime_nonce = headers.get("x-vault-mime-nonce")
+        .and_then(|v| v.to_str().ok()).unwrap_or("");
+    let original_size: i64 = headers.get("x-vault-original-size")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse().ok()).unwrap_or(0);
+    let stored_size: i64 = headers.get("x-vault-stored-size")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse().ok()).unwrap_or(body.len() as i64);
+    let enc_file_key = headers.get("x-vault-file-key")
+        .and_then(|v| v.to_str().ok()).unwrap_or("");
+    let file_key_nonce = headers.get("x-vault-file-key-nonce")
+        .and_then(|v| v.to_str().ok()).unwrap_or("");
+    let content_hash = headers.get("x-vault-hash")
+        .and_then(|v| v.to_str().ok()).unwrap_or("");
+    let compression = headers.get("x-vault-compression")
+        .and_then(|v| v.to_str().ok()).unwrap_or("none");
 
-    let file_id = parsed["file_id"].as_str().unwrap_or("");
-    let encrypted_data = parsed["encrypted_data"].as_str().unwrap_or("");
-    let encrypted_filename = parsed["encrypted_filename"].as_str().unwrap_or("");
-    let filename_nonce = parsed["filename_nonce"].as_str().unwrap_or("");
-    let encrypted_mime = parsed["encrypted_mime_type"].as_str().unwrap_or("");
-    let mime_nonce = parsed["mime_type_nonce"].as_str().unwrap_or("");
-    let original_size = parsed["original_size"].as_i64().unwrap_or(0);
-    let stored_size = parsed["stored_size"].as_i64().unwrap_or(0);
-    let enc_file_key = parsed["encrypted_file_key"].as_str().unwrap_or("");
-    let file_key_nonce = parsed["file_key_nonce"].as_str().unwrap_or("");
-    let content_hash = parsed["content_hash"].as_str().unwrap_or("");
-
-    if file_id.is_empty() || encrypted_data.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "file_id and encrypted_data required"}))).into_response();
+    if file_id.is_empty() || body.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "x-vault-file-id header and body required"}))).into_response();
     }
 
     // Check vault size quota
@@ -8672,18 +8680,13 @@ pub async fn vault_upload(
         return (StatusCode::PAYLOAD_TOO_LARGE, Json(serde_json::json!({"error": "Vault size limit reached"}))).into_response();
     }
 
-    // Decode base64 encrypted data
-    let data_bytes = match base64::engine::general_purpose::STANDARD.decode(encrypted_data) {
-        Ok(b) => b,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "invalid base64 data"}))).into_response(),
-    };
-
     match state.db.vault_store_file(
-        &user_id, file_id, &data_bytes,
+        &user_id, file_id, &body,
         encrypted_filename, filename_nonce,
         encrypted_mime, mime_nonce,
         original_size, stored_size,
         enc_file_key, file_key_nonce, content_hash,
+        compression,
     ) {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true, "file_id": file_id}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
@@ -8727,12 +8730,11 @@ pub async fn vault_download(
 
     match state.db.vault_get_file(&user_id, &file_id) {
         Ok(Some((data, mime, nonce))) => {
-            let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
-            (StatusCode::OK, Json(serde_json::json!({
-                "encrypted_data": encoded,
-                "encrypted_mime_type": mime,
-                "mime_type_nonce": nonce,
-            }))).into_response()
+            // Return raw binary body with metadata in headers (no base64 overhead)
+            let mut resp_headers = axum::http::HeaderMap::new();
+            resp_headers.insert("x-vault-mime", mime.parse().unwrap_or(axum::http::HeaderValue::from_static("application/octet-stream")));
+            resp_headers.insert("x-vault-mime-nonce", nonce.parse().unwrap_or(axum::http::HeaderValue::from_static("")));
+            (StatusCode::OK, resp_headers, data).into_response()
         }
         Ok(None) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "file not found"}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),

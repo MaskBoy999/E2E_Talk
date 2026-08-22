@@ -3131,12 +3131,18 @@ document.addEventListener('DOMContentLoaded', () => {
     const vaultQuotaFill = document.getElementById('vault-quota-fill');
     const vaultQuotaText = document.getElementById('vault-quota-text');
     var _vaultFileMetaCache = {}; // fileId -> metadata from list endpoint
+    var _vaultFilesList = []; // last loaded vault file list for search filtering
     vaultBtn.addEventListener('click', () => {
         vaultModal.style.display = 'flex';
         loadVaultFiles();
+        var si = document.getElementById('vault-search');
+        if (si) setTimeout(() => si.focus(), 100);
     });
     document.getElementById('close-vault').addEventListener('click', () => {
         vaultModal.style.display = 'none';
+    });
+    vaultModal.addEventListener('click', (e) => {
+        if (e.target === vaultModal) vaultModal.style.display = 'none';
     });
     document.getElementById('vault-upload-btn').addEventListener('click', () => {
         vaultFileInput.click();
@@ -3150,27 +3156,98 @@ document.addEventListener('DOMContentLoaded', () => {
         vaultFileInput.value = '';
         loadVaultFiles();
     });
+    // --- Vault compression helpers (gzip via CompressionStream API) ---
+    async function compressVaultData(data) {
+        if (typeof CompressionStream === 'undefined') return { compressed: data, algorithm: 'none' };
+        try {
+            const cs = new CompressionStream('gzip');
+            const writer = cs.writable.getWriter();
+            writer.write(data);
+            writer.close();
+            const reader = cs.readable.getReader();
+            const chunks = [];
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                chunks.push(value);
+            }
+            let totalLen = 0;
+            for (const c of chunks) totalLen += c.length;
+            const result = new Uint8Array(totalLen);
+            let off = 0;
+            for (const c of chunks) { result.set(c, off); off += c.length; }
+            return { compressed: result, algorithm: 'gzip' };
+        } catch (_) {
+            return { compressed: data, algorithm: 'none' };
+        }
+    }
+    async function decompressVaultData(data, algorithm) {
+        if (!algorithm || algorithm === 'none') return data;
+        try {
+            const ds = new DecompressionStream('gzip');
+            const writer = ds.writable.getWriter();
+            writer.write(data);
+            writer.close();
+            const reader = ds.readable.getReader();
+            const chunks = [];
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                chunks.push(value);
+            }
+            let totalLen = 0;
+            for (const c of chunks) totalLen += c.length;
+            const result = new Uint8Array(totalLen);
+            let off = 0;
+            for (const c of chunks) { result.set(c, off); off += c.length; }
+            return result;
+        } catch (_) {
+            return data;
+        }
+    }
+
+    function _showVaultProgress(status, pct) {
+        const wrap = document.getElementById('vault-upload-progress');
+        const bar = document.getElementById('vault-upload-bar');
+        const txt = document.getElementById('vault-upload-status');
+        if (!wrap || !bar || !txt) return;
+        wrap.style.display = 'block';
+        txt.textContent = status;
+        bar.style.width = Math.min(100, Math.round(pct)) + '%';
+    }
+    function _hideVaultProgress() {
+        const wrap = document.getElementById('vault-upload-progress');
+        if (wrap) wrap.style.display = 'none';
+    }
     async function vaultUploadFile(file) {
         const tok = localStorage.getItem('token');
         if (!tok) return;
         try {
+            _showVaultProgress('Reading file...', 5);
             const fileKey = E2ECrypto.generateFileKey();
             const fileKeyB64 = E2ECrypto.arrayBufferToBase64(fileKey);
             // Read file as ArrayBuffer
             const arrayBuf = await file.arrayBuffer();
             const plaintext = new Uint8Array(arrayBuf);
+            // Compress before encrypting (gzip)
+            _showVaultProgress('Compressing...', 15);
+            await new Promise(r => setTimeout(r, 0)); // yield to render
+            const { compressed, algorithm } = await compressVaultData(plaintext);
             // Encrypt file data chunked
+            _showVaultProgress('Encrypting...', 30);
+            await new Promise(r => setTimeout(r, 0));
             const CHUNK = 65536;
             const chunks = [];
-            for (let i = 0; i < plaintext.length; i += CHUNK) {
-                chunks.push(E2ECrypto.encryptFileChunk(fileKey, plaintext.slice(i, i + CHUNK)));
+            for (let i = 0; i < compressed.length; i += CHUNK) {
+                chunks.push(E2ECrypto.encryptFileChunk(fileKey, compressed.slice(i, i + CHUNK)));
             }
             let totalLen = 0;
             for (const c of chunks) totalLen += c.length;
             const encryptedData = new Uint8Array(totalLen);
             let off = 0;
             for (const c of chunks) { encryptedData.set(c, off); off += c.length; }
-            const encDataB64 = E2ECrypto.arrayBufferToBase64(encryptedData);
+            _showVaultProgress('Preparing upload...', 60);
+            await new Promise(r => setTimeout(r, 0));
             // Encrypt metadata with identity key
             const idKey = E2ECrypto.getIdentityKeyPair();
             const idSymBytes = idKey ? new Uint8Array(idKey.publicKey) : null;
@@ -3189,31 +3266,42 @@ document.addEventListener('DOMContentLoaded', () => {
                 fkNonce = fkEnc.nonce;
             }
             const fileId = crypto.randomUUID();
-            const contentHash = await E2ECrypto.sha256Hex(encDataB64);
+            _showVaultProgress('Hashing...', 70);
+            const contentHash = await E2ECrypto.sha256Hex(E2ECrypto.arrayBufferToBase64(encryptedData));
+            _showVaultProgress('Uploading to vault...', 80);
+            await new Promise(r => setTimeout(r, 0));
+            // Send raw binary body + metadata in headers (no base64 overhead)
             const resp = await fetch('/api/vault/upload', {
                 method: 'POST',
-                headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    file_id: fileId,
-                    encrypted_data: encDataB64,
-                    encrypted_filename: encFileName,
-                    filename_nonce: fnNonce,
-                    encrypted_mime_type: encMime,
-                    mime_type_nonce: mimeNonce,
-                    original_size: plaintext.length,
-                    stored_size: encryptedData.length,
-                    encrypted_file_key: encFileKey,
-                    file_key_nonce: fkNonce,
-                    content_hash: contentHash,
-                })
+                headers: {
+                    'Authorization': 'Bearer ' + tok,
+                    'Content-Type': 'application/octet-stream',
+                    'x-vault-file-id': fileId,
+                    'x-vault-filename': encFileName,
+                    'x-vault-filename-nonce': fnNonce,
+                    'x-vault-mime': encMime,
+                    'x-vault-mime-nonce': mimeNonce,
+                    'x-vault-original-size': String(plaintext.length),
+                    'x-vault-stored-size': String(encryptedData.length),
+                    'x-vault-file-key': encFileKey,
+                    'x-vault-file-key-nonce': fkNonce,
+                    'x-vault-hash': contentHash,
+                    'x-vault-compression': algorithm,
+                },
+                body: encryptedData,
             });
             if (!resp.ok) {
                 const err = await resp.json().catch(() => ({}));
                 alert('Upload failed: ' + (err.error || resp.status));
+            } else {
+                _showVaultProgress('Done!', 100);
+                await new Promise(r => setTimeout(r, 600));
             }
         } catch (err) {
             console.error('Vault upload error:', err);
             alert('Upload failed: ' + err.message);
+        } finally {
+            _hideVaultProgress();
         }
     }
     async function loadVaultFiles() {
@@ -3244,21 +3332,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 vaultFileList.innerHTML = '<div class="vault-empty">No files in your vault yet.</div>';
                 return;
             }
-            vaultFileList.innerHTML = files.map(f => {
-                const id = f.id || '';
-                const size = f.original_size || f.stored_size || 0;
-                const date = f.created_at ? new Date(f.created_at + 'Z').toLocaleDateString() : '';
-                return '<div class="vault-file-item" data-id="' + escapeHtml(id) + '">' +
-                    '<div class="vault-file-info">' +
-                    '<div class="vault-file-name">' + escapeHtml(id.substring(0, 12)) + '…</div>' +
-                    '<div class="vault-file-meta">' + formatFileSize(size) + (date ? ' • ' + date : '') + '</div>' +
-                    '</div>' +
-                    '<div class="vault-file-actions">' +
-                    '<button class="vault-dl-btn" title="Download">⬇</button>' +
-                    '<button class="vault-delete-btn" title="Delete">🗑</button>' +
-                    '</div>' +
-                    '</div>';
-            }).join('');
+            _vaultFilesList = files;
+            document.getElementById('vault-search').value = '';
+            _renderVaultFileList(vaultFileList, files);
             // Bind download/delete
             vaultFileList.querySelectorAll('.vault-dl-btn').forEach(btn => {
                 btn.addEventListener('click', async () => {
@@ -3278,6 +3354,59 @@ document.addEventListener('DOMContentLoaded', () => {
             console.error('Vault load error:', err);
         }
     }
+    // Decrypt a vault file's display name from its metadata
+    function _decryptVaultDisplayName(meta) {
+        if (!meta) return 'Encrypted file';
+        const idKey = E2ECrypto.getIdentityKeyPair();
+        const idSym = idKey ? new Uint8Array(idKey.publicKey) : null;
+        if (idSym && meta.encrypted_filename && meta.filename_nonce) {
+            try {
+                const dec = E2ECrypto.aeadDecrypt(meta.encrypted_filename, idSym, meta.filename_nonce);
+                const name = new TextDecoder().decode(dec);
+                if (name) return name;
+            } catch (_) {}
+        }
+        return 'Encrypted file';
+    }
+    function _renderVaultFileList(container, files, searchTerm) {
+        const term = (searchTerm || '').toLowerCase();
+        const filtered = term ? files.filter(f => {
+            const name = _decryptVaultDisplayName(_vaultFileMetaCache[f.id] || f);
+            return name.toLowerCase().includes(term);
+        }) : files;
+        if (filtered.length === 0) {
+            container.innerHTML = '<div class="vault-empty">' + (term ? 'No matching files.' : 'No files in your vault yet.') + '</div>';
+            return;
+        }
+        container.innerHTML = filtered.map(f => {
+            const id = f.id || '';
+            const size = f.original_size || f.stored_size || 0;
+            const date = f.created_at ? new Date(f.created_at + 'Z').toLocaleDateString() : '';
+            const displayName = _decryptVaultDisplayName(_vaultFileMetaCache[id] || f);
+            // Truncate: show first chars + extension
+            let shortName = displayName;
+            if (shortName.length > 24) {
+                const dotIdx = shortName.lastIndexOf('.');
+                if (dotIdx > 0) {
+                    const ext = shortName.substring(dotIdx);
+                    const base = shortName.substring(0, 24 - ext.length);
+                    shortName = base + '…' + ext;
+                } else {
+                    shortName = shortName.substring(0, 22) + '…';
+                }
+            }
+            return '<div class="vault-file-item" data-id="' + escapeHtml(id) + '" data-name="' + escapeHtml(displayName).toLowerCase() + '">' +
+                '<div class="vault-file-info">' +
+                '<div class="vault-file-name">' + escapeHtml(shortName) + '</div>' +
+                '<div class="vault-file-meta">' + formatFileSize(size) + (date ? ' • ' + date : '') + '</div>' +
+                '</div>' +
+                '<div class="vault-file-actions">' +
+                '<button class="vault-dl-btn" title="Download">⬇</button>' +
+                '<button class="vault-delete-btn" title="Delete">🗑</button>' +
+                '</div>' +
+                '</div>';
+        }).join('');
+    }
     async function vaultDownloadFile(fileId) {
         const tok = localStorage.getItem('token');
         if (!tok) return;
@@ -3286,7 +3415,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 headers: { 'Authorization': 'Bearer ' + tok }
             });
             if (!resp.ok) { alert('Download failed'); return; }
-            const data = await resp.json();
+            // Server returns raw binary body + metadata in headers
+            const encBytes = new Uint8Array(await resp.arrayBuffer());
             const idKey = E2ECrypto.getIdentityKeyPair();
             const idSym = idKey ? new Uint8Array(idKey.publicKey) : null;
             // Get file key from list cache (download endpoint doesn't return it)
@@ -3302,16 +3432,22 @@ document.addEventListener('DOMContentLoaded', () => {
             let blobData;
             if (fileKeyB64) {
                 const fileKeyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(fileKeyB64));
-                const encBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(data.encrypted_data));
                 blobData = E2ECrypto.decryptFile(fileKeyBytes, encBytes);
             } else {
-                blobData = new Uint8Array(E2ECrypto.base64ToArrayBuffer(data.encrypted_data));
+                blobData = encBytes;
             }
-            // Decrypt mime type
+            // Decompress if the file was compressed during upload
+            const compressionAlg = (meta && meta.compression) || 'none';
+            if (compressionAlg && compressionAlg !== 'none') {
+                blobData = await decompressVaultData(blobData, compressionAlg);
+            }
+            // Decrypt mime type from response headers
             let mimeType = 'application/octet-stream';
-            if (idSym && data.encrypted_mime_type && data.mime_type_nonce) {
+            const respMime = resp.headers.get('x-vault-mime') || '';
+            const respMimeNonce = resp.headers.get('x-vault-mime-nonce') || '';
+            if (idSym && respMime && respMimeNonce) {
                 try {
-                    const dec = E2ECrypto.aeadDecrypt(data.encrypted_mime_type, idSym, data.mime_type_nonce);
+                    const dec = E2ECrypto.aeadDecrypt(respMime, idSym, respMimeNonce);
                     mimeType = new TextDecoder().decode(dec) || mimeType;
                 } catch (_) {}
             }
@@ -3346,6 +3482,190 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!resp.ok) alert('Delete failed');
         } catch (err) {
             console.error('Vault delete error:', err);
+        }
+    }
+
+    // Vault search
+    var vaultSearchInput = document.getElementById('vault-search');
+    if (vaultSearchInput) {
+        vaultSearchInput.addEventListener('input', function () {
+            _renderVaultFileList(vaultFileList, _vaultFilesList, vaultSearchInput.value);
+            // Re-bind download/delete after re-render
+            vaultFileList.querySelectorAll('.vault-dl-btn').forEach(btn => {
+                btn.addEventListener('click', async () => {
+                    const fid = btn.closest('.vault-file-item').dataset.id;
+                    await vaultDownloadFile(fid);
+                });
+            });
+            vaultFileList.querySelectorAll('.vault-delete-btn').forEach(btn => {
+                btn.addEventListener('click', async () => {
+                    const fid = btn.closest('.vault-file-item').dataset.id;
+                    if (!confirm('Delete this vault file?')) return;
+                    await vaultDeleteFile(fid);
+                    loadVaultFiles();
+                });
+            });
+        });
+    }
+
+    // --- Send from Vault ---
+    function _renderVaultSendList(container, files, searchTerm) {
+        const term = (searchTerm || '').toLowerCase();
+        const filtered = term ? files.filter(f => {
+            const name = _decryptVaultDisplayName(_vaultFileMetaCache[f.id] || f);
+            return name.toLowerCase().includes(term);
+        }) : files;
+        if (filtered.length === 0) {
+            container.innerHTML = '<div class="vault-empty">' + (term ? 'No matching files.' : 'No files in your vault yet.') + '</div>';
+            return;
+        }
+        container.innerHTML = filtered.map(f => {
+            const id = f.id || '';
+            const size = f.original_size || f.stored_size || 0;
+            const date = f.created_at ? new Date(f.created_at + 'Z').toLocaleDateString() : '';
+            const displayName = _decryptVaultDisplayName(_vaultFileMetaCache[id] || f);
+            let shortName = displayName;
+            if (shortName.length > 24) {
+                const dotIdx = shortName.lastIndexOf('.');
+                if (dotIdx > 0) {
+                    const ext = shortName.substring(dotIdx);
+                    const base = shortName.substring(0, 24 - ext.length);
+                    shortName = base + '…' + ext;
+                } else {
+                    shortName = shortName.substring(0, 22) + '…';
+                }
+            }
+            return '<div class="vault-file-item vault-send-item" data-id="' + escapeHtml(id) + '" style="cursor:pointer">' +
+                '<div class="vault-file-info">' +
+                '<div class="vault-file-name">' + escapeHtml(shortName) + '</div>' +
+                '<div class="vault-file-meta">' + formatFileSize(size) + (date ? ' • ' + date : '') + '</div>' +
+                '</div>' +
+                '<div class="vault-file-actions">' +
+                '<button class="vault-send-btn" title="Send to chat">📤</button>' +
+                '</div>' +
+                '</div>';
+        }).join('');
+    }
+    function _bindVaultSendItems(container, modal) {
+        container.querySelectorAll('.vault-send-item').forEach(item => {
+            item.addEventListener('click', async function (e) {
+                if (e.target.closest('.vault-send-btn') || e.target === item) {
+                    const fid = item.dataset.id;
+                    modal.style.display = 'none';
+                    await sendVaultFileToChat(fid);
+                }
+            });
+        });
+    }
+    async function openVaultSendPicker() {
+        const modal = document.getElementById('vault-send-modal');
+        const list = document.getElementById('vault-send-file-list');
+        if (!modal || !list) return;
+        const tok = localStorage.getItem('token');
+        if (!tok) return;
+        list.innerHTML = '<div style="color:var(--text-muted);padding:12px">Loading vault files...</div>';
+        modal.style.display = 'flex';
+        var sendSI = document.getElementById('vault-send-search');
+        if (sendSI) setTimeout(() => sendSI.focus(), 100);
+        try {
+            const resp = await fetch('/api/vault/files', {
+                headers: { 'Authorization': 'Bearer ' + tok }
+            });
+            if (!resp.ok) { list.innerHTML = '<div style="color:var(--text-muted);padding:12px">Failed to load vault files.</div>'; return; }
+            const data = await resp.json();
+            const files = data.files || [];
+            if (files.length === 0) {
+                list.innerHTML = '<div class="vault-empty">No files in your vault yet.</div>';
+                return;
+            }
+            _vaultFileMetaCache = {};
+            files.forEach(f => { _vaultFileMetaCache[f.id] = f; });
+            // Wire up search
+            var sendSearchInput = document.getElementById('vault-send-search');
+            if (sendSearchInput) sendSearchInput.value = '';
+            _renderVaultSendList(list, files);
+            _bindVaultSendItems(list, modal);
+            if (sendSearchInput) {
+                sendSearchInput.oninput = function () {
+                    _renderVaultSendList(list, files, sendSearchInput.value);
+                    _bindVaultSendItems(list, modal);
+                };
+            }
+        } catch (err) {
+            console.error('Vault send picker error:', err);
+            list.innerHTML = '<div style="color:var(--text-muted);padding:12px">Error loading vault files.</div>';
+        }
+    }
+    document.getElementById('close-vault-send').addEventListener('click', function () {
+        document.getElementById('vault-send-modal').style.display = 'none';
+    });
+    document.getElementById('vault-send-modal').addEventListener('click', function (e) {
+        if (e.target.id === 'vault-send-modal') e.target.style.display = 'none';
+    });
+
+    async function sendVaultFileToChat(fileId) {
+        const tok = localStorage.getItem('token');
+        if (!tok) return;
+        const isDm = viewMode === 'dms';
+        if (!isDm && !currentChannelId) return;
+        if (isDm && !currentDmChannelId) return;
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        try {
+            // Download the encrypted blob from vault (raw binary response)
+            const resp = await fetch('/api/vault/files/' + encodeURIComponent(fileId), {
+                headers: { 'Authorization': 'Bearer ' + tok }
+            });
+            if (!resp.ok) { alert('Failed to download vault file'); return; }
+            const encBytes = new Uint8Array(await resp.arrayBuffer());
+            // Decrypt vault file with identity key + file key
+            const idKey = E2ECrypto.getIdentityKeyPair();
+            const idSym = idKey ? new Uint8Array(idKey.publicKey) : null;
+            const meta = _vaultFileMetaCache[fileId];
+            let fileKeyB64 = null;
+            if (idSym && meta && meta.encrypted_file_key && meta.file_key_nonce) {
+                try {
+                    const fkDec = E2ECrypto.aeadDecrypt(meta.encrypted_file_key, idSym, meta.file_key_nonce);
+                    fileKeyB64 = E2ECrypto.arrayBufferToBase64(fkDec);
+                } catch (_) {}
+            }
+            let decryptedData;
+            if (fileKeyB64) {
+                const fileKeyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(fileKeyB64));
+                decryptedData = E2ECrypto.decryptFile(fileKeyBytes, encBytes);
+            } else {
+                decryptedData = encBytes;
+            }
+            // Decompress if needed
+            const compressionAlg = (meta && meta.compression) || 'none';
+            if (compressionAlg && compressionAlg !== 'none') {
+                decryptedData = await decompressVaultData(decryptedData, compressionAlg);
+            }
+            // Decrypt filename
+            let fileName = 'file';
+            if (idSym && meta && meta.encrypted_filename && meta.filename_nonce) {
+                try {
+                    const dec = E2ECrypto.aeadDecrypt(meta.encrypted_filename, idSym, meta.filename_nonce);
+                    fileName = new TextDecoder().decode(dec) || fileName;
+                } catch (_) {}
+            }
+            // Decrypt mime type from response headers
+            let mimeType = 'application/octet-stream';
+            const respMime = resp.headers.get('x-vault-mime') || '';
+            const respMimeNonce = resp.headers.get('x-vault-mime-nonce') || '';
+            if (idSym && respMime && respMimeNonce) {
+                try {
+                    const dec = E2ECrypto.aeadDecrypt(respMime, idSym, respMimeNonce);
+                    mimeType = new TextDecoder().decode(dec) || mimeType;
+                } catch (_) {}
+            }
+            // Create a File object and feed it through the normal upload pipeline
+            const file = new File([decryptedData], fileName, { type: mimeType });
+            selectedFiles = [file];
+            currentFileIndex = 0;
+            showUploadModal();
+        } catch (err) {
+            console.error('Send vault file error:', err);
+            alert('Failed to send vault file: ' + err.message);
         }
     }
 
@@ -7047,6 +7367,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (window.openCreatePollModal) window.openCreatePollModal();
             } else if (action === 'schedule') {
                 openScheduleModal();
+            } else if (action === 'vault-send') {
+                openVaultSendPicker();
             }
             // 'record-audio' is handled by the record-audio click handler below
         });

@@ -685,11 +685,12 @@ async fn main() {
         .route("/api/me/self-destruct", get(handlers::get_self_destruct).put(handlers::set_self_destruct))
         .route("/ws", get(ws::ws_handler))
         .fallback(get(serve_static))
-        // Encrypted audio blobs (notification sounds, ringtones) are base64 in
-        // JSON bodies — a 30s 48kHz WAV is several MB, far over axum's default
-        // 2MB Json limit. Raise it to 32MB (still way below any DoS concern
-        // since payloads are per-authenticated-user and rate-limited).
-        .layer(DefaultBodyLimit::max(32 * 1024 * 1024))
+        // Encrypted audio blobs, ringtones, and vault file uploads are raw
+        // binary bodies. Vault files can be 1 GB+ after compression+encryption.
+        // Raise to 2 GiB — the vault quota check in the handler is the real
+        // size gate; payloads are per-authenticated-user, rate-limited, and
+        // quota-gated.
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024 * 1024))
         // G1/G2/G3 hardening layers. Order (last layer = outermost): the
         // security headers wrap everything; the origin check and mutation
         // rate limit run before handlers. File-chunk uploads are exempt from

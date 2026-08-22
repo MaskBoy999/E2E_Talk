@@ -306,19 +306,29 @@ impl Database {
     pub fn reconnect(&self, path: &str) -> Result<(), String> {
         let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
         *conn = Connection::open(path).map_err(|e| e.to_string())?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;").map_err(|e| e.to_string())?;
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA max_length=4294967296;").map_err(|e| e.to_string())?;
         Ok(())
     }
 
     pub fn new(path: &str, upload_dir: &str) -> Result<Self, rusqlite::Error> {
         let conn = Connection::open(path)?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        // Raise max_length from the 1 GB default so vault blobs up to 4 GiB can
+        // be stored in a single row (the vault quota is the real gate).
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA max_length=4294967296;"
+        )?;
 
         let db = Self {
             conn: Mutex::new(conn),
             upload_dir: upload_dir.to_string(),
         };
         db.run_migrations()?;
+        // Re-apply max_length after migrations (some PRAGMA settings can be
+        // reset by migration batches that use execute_batch).
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute_batch("PRAGMA max_length=4294967296;")?;
+        }
         Ok(db)
     }
 
@@ -1252,6 +1262,8 @@ impl Database {
         let _ = conn.execute_batch(include_str!("../migrations/068_recreate_key_escrow.sql"));
         let _ = conn.execute_batch(include_str!("../migrations/069_file_vault.sql"));
         let _ = conn.execute_batch(include_str!("../migrations/070_self_destruct.sql"));
+        let _ = conn.execute_batch(include_str!("../migrations/071_vault_compression.sql"));
+        let _ = conn.execute_batch(include_str!("../migrations/072_vault_disk_storage.sql"));
 
         // Data migration: normalize legacy space-separated CURRENT_TIMESTAMP values
         // ("YYYY-MM-DD HH:MM:SS") to fixed-width RFC3339 ("YYYY-MM-DDTHH:MM:SS.000000Z")
@@ -1283,6 +1295,10 @@ impl Database {
         } else {
             eprintln!("WARN: Could not verify files table schema — the files table may not exist or is corrupted.");
         }
+
+        // Ensure max_length is high enough for vault blobs (default 1 GB is too
+        // small for files up to 4 GiB; the vault quota is the real gate).
+        conn.execute_batch("PRAGMA max_length=4294967296;")?;
 
         Ok(())
     }
@@ -7611,18 +7627,31 @@ impl Database {
 
     // --- F3-15: Encrypted File Vault ---
 
+    /// Return the on-disk path for a vault file, creating dirs as needed.
+    fn vault_file_path(&self, user_id: &str, file_id: &str) -> Result<std::path::PathBuf, String> {
+        let dir = std::path::Path::new(&self.upload_dir).join("vault").join(user_id);
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        Ok(dir.join(format!("{}.enc", file_id)))
+    }
+
     /// Store a file in the user's encrypted vault.
+    /// The encrypted blob is written to disk; only metadata lives in SQLite.
     pub fn vault_store_file(
         &self, user_id: &str, file_id: &str, encrypted_data: &[u8],
         encrypted_filename: &str, filename_nonce: &str,
         encrypted_mime: &str, mime_nonce: &str,
         original_size: i64, stored_size: i64,
         enc_file_key: &str, file_key_nonce: &str, content_hash: &str,
+        compression: &str,
     ) -> Result<(), String> {
+        // Write encrypted blob to disk (no SQLite BLOB size limit).
+        let path = self.vault_file_path(user_id, file_id)?;
+        std::fs::write(&path, encrypted_data).map_err(|e| e.to_string())?;
+        let path_str = path.to_string_lossy().to_string();
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
-            "INSERT INTO user_vault_files (id, user_id, encrypted_data, encrypted_filename, filename_nonce, encrypted_mime_type, mime_type_nonce, original_size, stored_size, encrypted_file_key, file_key_nonce, content_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            rusqlite::params![file_id, user_id, encrypted_data, encrypted_filename, filename_nonce, encrypted_mime, mime_nonce, original_size, stored_size, enc_file_key, file_key_nonce, content_hash],
+            "INSERT INTO user_vault_files (id, user_id, encrypted_data, encrypted_filename, filename_nonce, encrypted_mime_type, mime_type_nonce, original_size, stored_size, encrypted_file_key, file_key_nonce, content_hash, compression, storage_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            rusqlite::params![file_id, user_id, b"", encrypted_filename, filename_nonce, encrypted_mime, mime_nonce, original_size, stored_size, enc_file_key, file_key_nonce, content_hash, compression, path_str],
         ).map_err(|e| e.to_string())?;
         Ok(())
     }
@@ -7631,7 +7660,7 @@ impl Database {
     pub fn vault_list_files(&self, user_id: &str) -> Result<Vec<serde_json::Value>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn.prepare(
-            "SELECT id, encrypted_filename, filename_nonce, encrypted_mime_type, mime_type_nonce, original_size, stored_size, encrypted_file_key, file_key_nonce, content_hash, created_at FROM user_vault_files WHERE user_id = ?1 ORDER BY created_at DESC"
+            "SELECT id, encrypted_filename, filename_nonce, encrypted_mime_type, mime_type_nonce, original_size, stored_size, encrypted_file_key, file_key_nonce, content_hash, created_at, compression FROM user_vault_files WHERE user_id = ?1 ORDER BY created_at DESC"
         ).map_err(|e| e.to_string())?;
         let rows = stmt.query_map(rusqlite::params![user_id], |row| {
             Ok(serde_json::json!({
@@ -7646,6 +7675,7 @@ impl Database {
                 "file_key_nonce": row.get::<_, String>(8)?,
                 "content_hash": row.get::<_, String>(9)?,
                 "created_at": row.get::<_, String>(10)?,
+                "compression": row.get::<_, String>(11).unwrap_or_else(|_| "none".to_string()),
             }))
         }).map_err(|e| e.to_string())?;
         let mut result = Vec::new();
@@ -7654,22 +7684,43 @@ impl Database {
     }
 
     /// Download a vault file (encrypted data blob).
+    /// Reads from disk (new storage_path path) or falls back to the legacy
+    /// encrypted_data BLOB column for files uploaded before the disk migration.
     pub fn vault_get_file(&self, user_id: &str, file_id: &str) -> Result<Option<(Vec<u8>, String, String)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn.prepare(
-            "SELECT encrypted_data, encrypted_mime_type, mime_type_nonce FROM user_vault_files WHERE user_id = ?1 AND id = ?2"
+            "SELECT encrypted_data, encrypted_mime_type, mime_type_nonce, storage_path FROM user_vault_files WHERE user_id = ?1 AND id = ?2"
         ).map_err(|e| e.to_string())?;
         let mut rows = stmt.query_map(rusqlite::params![user_id, file_id], |row| {
-            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
         }).map_err(|e| e.to_string())?;
         match rows.next() {
-            Some(r) => Ok(Some(r.map_err(|e| e.to_string())?)),
+            Some(r) => {
+                let (blob, mime, nonce, disk_path) = r.map_err(|e| e.to_string())?;
+                let data = if let Some(ref p) = disk_path {
+                    // New path: read from disk
+                    std::fs::read(p).map_err(|e| format!("{} (path={})", e, p))?
+                } else {
+                    // Legacy: data still in the BLOB column
+                    blob
+                };
+                Ok(Some((data, mime, nonce)))
+            }
             None => Ok(None),
         }
     }
 
-    /// Delete a vault file.
+    /// Delete a vault file (disk blob + DB row).
     pub fn vault_delete_file(&self, user_id: &str, file_id: &str) -> Result<(), String> {
+        // Remove disk file first (best-effort).
+        if let Ok(path) = self.vault_file_path(user_id, file_id) {
+            let _ = std::fs::remove_file(&path);
+        }
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
             "DELETE FROM user_vault_files WHERE user_id = ?1 AND id = ?2",
@@ -7691,6 +7742,21 @@ impl Database {
 
     /// Delete all vault files for a user (account deletion).
     pub fn vault_delete_all_for_user(&self, user_id: &str) -> Result<(), String> {
+        // Collect disk paths before deleting rows.
+        let paths: Vec<String> = {
+            let conn = self.conn.lock().map_err(|e| e.to_string())?;
+            let mut stmt = conn.prepare(
+                "SELECT storage_path FROM user_vault_files WHERE user_id = ?1 AND storage_path IS NOT NULL"
+            ).map_err(|e| e.to_string())?;
+            let rows: Vec<String> = stmt.query_map(rusqlite::params![user_id], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?
+                .filter_map(|r| r.ok())
+                .collect();
+            rows
+        };
+        for p in &paths {
+            let _ = std::fs::remove_file(p);
+        }
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
             "DELETE FROM user_vault_files WHERE user_id = ?1",
