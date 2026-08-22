@@ -10413,6 +10413,10 @@ function updateChannelBadges() {
             if (existing) existing.remove();
         }
     });
+    // Keep category header indicators in sync without a full re-render
+    if (typeof window.updateCategoryIndicators === 'function') {
+        window.updateCategoryIndicators();
+    }
 }
 
 // --- Channel Context Menu (Right-click to mute) ---

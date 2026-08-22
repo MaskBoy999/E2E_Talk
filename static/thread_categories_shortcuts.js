@@ -696,31 +696,21 @@
 
             var voiceChannels = grouped[catId] ? grouped[catId].voice : [];
 
-            // Show text channels in the category
+            // Show all channels (text + voice) together in the same category
 
-            renderCategoryGroup(list, cat.name, catId, textChannels, serverId, isOwner, false);
+            var allChannels = textChannels.concat(voiceChannels);
 
-            // Show voice channels in a sub-group
-
-            if (voiceChannels.length > 0) {
-
-                renderCategoryGroup(list, cat.name + ' (Voice)', catId, voiceChannels, serverId, isOwner, true);
-
-            }
+            renderCategoryGroup(list, cat.name, catId, allChannels, serverId, isOwner, false);
 
         });
 
         // Render uncategorized channels (no category assigned)
 
-        if (uncategorized.text.length > 0) {
+        if (uncategorized.text.length > 0 || uncategorized.voice.length > 0) {
 
-            renderCategoryGroup(list, 'Uncategorized', null, uncategorized.text, serverId, isOwner, false);
+            var allUncat = uncategorized.text.concat(uncategorized.voice);
 
-        }
-
-        if (uncategorized.voice.length > 0) {
-
-            renderCategoryGroup(list, 'Uncategorized (Voice)', null, uncategorized.voice, serverId, isOwner, true);
+            renderCategoryGroup(list, 'Uncategorized', null, allUncat, serverId, isOwner, false);
 
         }
 
@@ -1353,6 +1343,49 @@
             return null;
         }
     }
+
+    // --- Live category indicator updater ---
+    // Re-evaluates notif / mention / voice dots on existing category headers
+    // without a full loadChannels re-render.
+    function updateCategoryIndicators() {
+        var groups = document.querySelectorAll('.channel-category-group[data-category-id]');
+        groups.forEach(function (group) {
+            var header = group.querySelector('.channel-category-header');
+            if (!header) return;
+            var body = group.querySelector('.channel-category-body');
+            if (!body) return;
+            var channelIds = [];
+            var hasVoiceChannel = false;
+            body.querySelectorAll('.channel-item[data-id]').forEach(function (el) {
+                channelIds.push(el.getAttribute('data-id'));
+                if (el.classList.contains('channel-item-voice')) hasVoiceChannel = true;
+            });
+            // --- notif / mention ---
+            var hasNotif = false;
+            var hasMention = false;
+            for (var i = 0; i < channelIds.length; i++) {
+                if (typeof unreadChannels !== 'undefined' && unreadChannels && unreadChannels.indexOf(channelIds[i]) !== -1) hasNotif = true;
+                if (typeof unreadMentionsByChannel !== 'undefined' && unreadMentionsByChannel[channelIds[i]]) hasMention = true;
+            }
+            // --- voice activity ---
+            var hasVoice = false;
+            if (hasVoiceChannel && typeof window.VoiceManager !== 'undefined' && VoiceManager.getServerPresence && typeof currentServerId !== 'undefined' && currentServerId) {
+                var _presence = VoiceManager.getServerPresence(currentServerId);
+                if (_presence && _presence.channels) {
+                    for (var vi = 0; vi < _presence.channels.length; vi++) {
+                        if (channelIds.indexOf(_presence.channels[vi].channel_id) !== -1 && _presence.channels[vi].members && _presence.channels[vi].members.length > 0) {
+                            hasVoice = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            header.classList.toggle('category-has-notif', hasNotif);
+            header.classList.toggle('category-has-mention', hasMention);
+            header.classList.toggle('category-has-voice', hasVoice);
+        });
+    }
+    window.updateCategoryIndicators = updateCategoryIndicators;
 
     // Expose category API
 

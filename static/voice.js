@@ -3091,6 +3091,10 @@
         // server members (including ourselves), so a dot appears/disappears
         // the moment someone enters or leaves a voice channel.
         updateServerVoiceIndicators();
+        // Update category voice indicators (green dot on category header)
+        if (typeof window.updateCategoryIndicators === 'function') {
+            window.updateCategoryIndicators();
+        }
     }
 
     // Ask the server for the current voice presence snapshot for a server.
