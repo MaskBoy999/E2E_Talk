@@ -1,0 +1,21 @@
+{
+    "name": "E2E Chat",
+    "short_name": "E2E Chat",
+    "description": "End-to-end encrypted messaging with voice, video, and file sharing",
+    "start_url": "/",
+    "display": "standalone",
+    "background_color": "#0d0d1a",
+    "theme_color": "#4fc3f7",
+    "orientation": "any",
+    "icons": [
+        {
+            "src": "/icons/icon-192.svg",
+            "sizes": "192x192",
+            "type": "image/svg+xml",
+            "purpose": "any"
+        }
+    ],
+    "categories": ["communication", "social"],
+    "lang": "en",
+    "dir": "ltr"
+}

@@ -452,6 +452,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, client_ip: Strin
                                 }
                                 // Refresh the session's last-active marker.
                                 let _ = state.db.touch_auth_session(&claims.sid);
+                                // F3-14: Update last_active_at for self-destruct check
+                                let _ = state.db.touch_last_active(&claims.sub);
                                 break (claims.sub, auth_msg.device_id, auth_msg.last_seen_timestamp);
                             }
                             Err(_) => {

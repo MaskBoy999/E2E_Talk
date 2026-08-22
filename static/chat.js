@@ -3123,7 +3123,231 @@ document.addEventListener('DOMContentLoaded', () => {
         settingsModal.style.display = 'none';
         if (window._stopRingTrimPreview) window._stopRingTrimPreview();
         if (window._stopNotifTrimPreview) window._stopNotifTrimPreview();
+    });    // --- File Vault ---
+    const vaultBtn = document.getElementById('vault-btn');
+    const vaultModal = document.getElementById('vault-modal');
+    const vaultFileInput = document.getElementById('vault-file-input');
+    const vaultFileList = document.getElementById('vault-file-list');
+    const vaultQuotaFill = document.getElementById('vault-quota-fill');
+    const vaultQuotaText = document.getElementById('vault-quota-text');
+    var _vaultFileMetaCache = {}; // fileId -> metadata from list endpoint
+    vaultBtn.addEventListener('click', () => {
+        vaultModal.style.display = 'flex';
+        loadVaultFiles();
     });
+    document.getElementById('close-vault').addEventListener('click', () => {
+        vaultModal.style.display = 'none';
+    });
+    document.getElementById('vault-upload-btn').addEventListener('click', () => {
+        vaultFileInput.click();
+    });
+    vaultFileInput.addEventListener('change', async (e) => {
+        const files = e.target.files;
+        if (!files || files.length === 0) return;
+        for (let i = 0; i < files.length; i++) {
+            await vaultUploadFile(files[i]);
+        }
+        vaultFileInput.value = '';
+        loadVaultFiles();
+    });
+    async function vaultUploadFile(file) {
+        const tok = localStorage.getItem('token');
+        if (!tok) return;
+        try {
+            const fileKey = E2ECrypto.generateFileKey();
+            const fileKeyB64 = E2ECrypto.arrayBufferToBase64(fileKey);
+            // Read file as ArrayBuffer
+            const arrayBuf = await file.arrayBuffer();
+            const plaintext = new Uint8Array(arrayBuf);
+            // Encrypt file data chunked
+            const CHUNK = 65536;
+            const chunks = [];
+            for (let i = 0; i < plaintext.length; i += CHUNK) {
+                chunks.push(E2ECrypto.encryptFileChunk(fileKey, plaintext.slice(i, i + CHUNK)));
+            }
+            let totalLen = 0;
+            for (const c of chunks) totalLen += c.length;
+            const encryptedData = new Uint8Array(totalLen);
+            let off = 0;
+            for (const c of chunks) { encryptedData.set(c, off); off += c.length; }
+            const encDataB64 = E2ECrypto.arrayBufferToBase64(encryptedData);
+            // Encrypt metadata with identity key
+            const idKey = E2ECrypto.getIdentityKeyPair();
+            const idSymBytes = idKey ? new Uint8Array(idKey.publicKey) : null;
+            let encFileName = file.name, fnNonce = '';
+            let encMime = file.type || '', mimeNonce = '';
+            let encFileKey = fileKeyB64, fkNonce = '';
+            if (idSymBytes) {
+                const fnEnc = E2ECrypto.aeadEncrypt(file.name, idSymBytes);
+                encFileName = fnEnc.ciphertext;
+                fnNonce = fnEnc.nonce;
+                const mimeEnc = E2ECrypto.aeadEncrypt(file.type || '', idSymBytes);
+                encMime = mimeEnc.ciphertext;
+                mimeNonce = mimeEnc.nonce;
+                const fkEnc = E2ECrypto.aeadEncrypt(new Uint8Array(E2ECrypto.base64ToArrayBuffer(fileKeyB64)), idSymBytes);
+                encFileKey = fkEnc.ciphertext;
+                fkNonce = fkEnc.nonce;
+            }
+            const fileId = crypto.randomUUID();
+            const contentHash = await E2ECrypto.sha256Hex(encDataB64);
+            const resp = await fetch('/api/vault/upload', {
+                method: 'POST',
+                headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    file_id: fileId,
+                    encrypted_data: encDataB64,
+                    encrypted_filename: encFileName,
+                    filename_nonce: fnNonce,
+                    encrypted_mime_type: encMime,
+                    mime_type_nonce: mimeNonce,
+                    original_size: plaintext.length,
+                    stored_size: encryptedData.length,
+                    encrypted_file_key: encFileKey,
+                    file_key_nonce: fkNonce,
+                    content_hash: contentHash,
+                })
+            });
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({}));
+                alert('Upload failed: ' + (err.error || resp.status));
+            }
+        } catch (err) {
+            console.error('Vault upload error:', err);
+            alert('Upload failed: ' + err.message);
+        }
+    }
+    async function loadVaultFiles() {
+        const tok = localStorage.getItem('token');
+        if (!tok) return;
+        try {
+            const resp = await fetch('/api/vault/files', {
+                headers: { 'Authorization': 'Bearer ' + tok }
+            });
+            if (!resp.ok) return;
+            const data = await resp.json();
+            const files = data.files || [];
+            const totalSize = data.total_size || 0;
+            const maxSize = data.max_size_bytes || 0;
+            // Cache metadata for download
+            _vaultFileMetaCache = {};
+            files.forEach(f => { _vaultFileMetaCache[f.id] = f; });
+            // Update quota bar
+            if (maxSize > 0) {
+                const pct = Math.min(100, (totalSize / maxSize) * 100);
+                vaultQuotaFill.style.width = pct + '%';
+                vaultQuotaText.textContent = formatFileSize(totalSize) + ' / ' + formatFileSize(maxSize);
+            } else {
+                vaultQuotaFill.style.width = '0%';
+                vaultQuotaText.textContent = formatFileSize(totalSize) + ' used';
+            }
+            if (files.length === 0) {
+                vaultFileList.innerHTML = '<div class="vault-empty">No files in your vault yet.</div>';
+                return;
+            }
+            vaultFileList.innerHTML = files.map(f => {
+                const id = f.id || '';
+                const size = f.original_size || f.stored_size || 0;
+                const date = f.created_at ? new Date(f.created_at + 'Z').toLocaleDateString() : '';
+                return '<div class="vault-file-item" data-id="' + escapeHtml(id) + '">' +
+                    '<div class="vault-file-info">' +
+                    '<div class="vault-file-name">' + escapeHtml(id.substring(0, 12)) + '…</div>' +
+                    '<div class="vault-file-meta">' + formatFileSize(size) + (date ? ' • ' + date : '') + '</div>' +
+                    '</div>' +
+                    '<div class="vault-file-actions">' +
+                    '<button class="vault-dl-btn" title="Download">⬇</button>' +
+                    '<button class="vault-delete-btn" title="Delete">🗑</button>' +
+                    '</div>' +
+                    '</div>';
+            }).join('');
+            // Bind download/delete
+            vaultFileList.querySelectorAll('.vault-dl-btn').forEach(btn => {
+                btn.addEventListener('click', async () => {
+                    const fid = btn.closest('.vault-file-item').dataset.id;
+                    await vaultDownloadFile(fid);
+                });
+            });
+            vaultFileList.querySelectorAll('.vault-delete-btn').forEach(btn => {
+                btn.addEventListener('click', async () => {
+                    const fid = btn.closest('.vault-file-item').dataset.id;
+                    if (!confirm('Delete this vault file?')) return;
+                    await vaultDeleteFile(fid);
+                    loadVaultFiles();
+                });
+            });
+        } catch (err) {
+            console.error('Vault load error:', err);
+        }
+    }
+    async function vaultDownloadFile(fileId) {
+        const tok = localStorage.getItem('token');
+        if (!tok) return;
+        try {
+            const resp = await fetch('/api/vault/files/' + encodeURIComponent(fileId), {
+                headers: { 'Authorization': 'Bearer ' + tok }
+            });
+            if (!resp.ok) { alert('Download failed'); return; }
+            const data = await resp.json();
+            const idKey = E2ECrypto.getIdentityKeyPair();
+            const idSym = idKey ? new Uint8Array(idKey.publicKey) : null;
+            // Get file key from list cache (download endpoint doesn't return it)
+            let fileKeyB64 = null;
+            const meta = _vaultFileMetaCache[fileId];
+            if (idSym && meta && meta.encrypted_file_key && meta.file_key_nonce) {
+                try {
+                    const fkDec = E2ECrypto.aeadDecrypt(meta.encrypted_file_key, idSym, meta.file_key_nonce);
+                    fileKeyB64 = E2ECrypto.arrayBufferToBase64(fkDec);
+                } catch (_) {}
+            }
+            // Decrypt data if we have file key
+            let blobData;
+            if (fileKeyB64) {
+                const fileKeyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(fileKeyB64));
+                const encBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(data.encrypted_data));
+                blobData = E2ECrypto.decryptFile(fileKeyBytes, encBytes);
+            } else {
+                blobData = new Uint8Array(E2ECrypto.base64ToArrayBuffer(data.encrypted_data));
+            }
+            // Decrypt mime type
+            let mimeType = 'application/octet-stream';
+            if (idSym && data.encrypted_mime_type && data.mime_type_nonce) {
+                try {
+                    const dec = E2ECrypto.aeadDecrypt(data.encrypted_mime_type, idSym, data.mime_type_nonce);
+                    mimeType = new TextDecoder().decode(dec) || mimeType;
+                } catch (_) {}
+            }
+            // Decrypt filename from cache
+            let fileName = fileId;
+            if (idSym && meta && meta.encrypted_filename && meta.filename_nonce) {
+                try {
+                    const dec = E2ECrypto.aeadDecrypt(meta.encrypted_filename, idSym, meta.filename_nonce);
+                    fileName = new TextDecoder().decode(dec) || fileName;
+                } catch (_) {}
+            }
+            // Trigger download
+            const blob = new Blob([blobData], { type: mimeType });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url; a.download = fileName; document.body.appendChild(a); a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        } catch (err) {
+            console.error('Vault download error:', err);
+            alert('Download failed: ' + err.message);
+        }
+    }
+    async function vaultDeleteFile(fileId) {
+        const tok = localStorage.getItem('token');
+        if (!tok) return;
+        try {
+            const resp = await fetch('/api/vault/files/' + encodeURIComponent(fileId), {
+                method: 'DELETE',
+                headers: { 'Authorization': 'Bearer ' + tok }
+            });
+            if (!resp.ok) alert('Delete failed');
+        } catch (err) {
+            console.error('Vault delete error:', err);
+        }
+    }
 
     // Tab switching
     settingsModal.querySelectorAll('.settings-tab').forEach(tab => {
@@ -3326,54 +3550,8 @@ document.addEventListener('DOMContentLoaded', () => {
         applyStreamerMode(streamerToggle.checked);
     }
 
-    // Keyboard shortcut: Ctrl+Shift+S to toggle streamer mode instantly
-    document.addEventListener('keydown', function (e) {
-        if (e.ctrlKey && e.shiftKey && (e.key === 's' || e.key === 'S')) {
-            e.preventDefault();
-            var st = document.getElementById('streamer-mode-toggle');
-            if (st) {
-                st.checked = !st.checked;
-                localStorage.setItem('streamerMode', st.checked);
-                applyStreamerMode(st.checked);
-                // Brief visual feedback — toast indicator
-                var oldToast = document.querySelector('.streamer-toast');
-                if (oldToast) oldToast.remove();
-                var toast = document.createElement('div');
-                toast.className = 'streamer-toast';
-                toast.textContent = st.checked ? '🔴 Streamer Mode ON' : '✅ Streamer Mode OFF';
-                toast.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:99999;background:rgba(0,0,0,0.85);color:#fff;padding:8px 18px;border-radius:8px;font-size:13px;font-weight:600;pointer-events:none;transition:opacity 0.3s;';
-                document.body.appendChild(toast);
-                setTimeout(function () { toast.style.opacity = '0'; setTimeout(function () { toast.remove(); }, 350); }, 1500);
-            }
-        }
-    });
-
-    // Keyboard shortcut: Ctrl+Shift+M to toggle auto-load media previews
-    document.addEventListener('keydown', function (e) {
-        if (e.ctrlKey && e.shiftKey && (e.key === 'm' || e.key === 'M')) {
-            e.preventDefault();
-            var cb = document.getElementById('auto-load-previews');
-            if (cb) {
-                cb.checked = !cb.checked;
-                localStorage.setItem('autoLoadPreviews', cb.checked);
-                // Re-render current messages to reflect the change
-                if (currentServerId && currentChannelId) {
-                    loadMessages(currentChannelId);
-                } else if (currentDmChannelId) {
-                    loadDmMessages(currentDmChannelId);
-                }
-                // Toast
-                var oldToast = document.querySelector('.streamer-toast');
-                if (oldToast) oldToast.remove();
-                var toast = document.createElement('div');
-                toast.className = 'streamer-toast';
-                toast.textContent = cb.checked ? '✅ Media Previews ON' : '❌ Media Previews OFF';
-                toast.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:99999;background:rgba(0,0,0,0.85);color:#fff;padding:8px 18px;border-radius:8px;font-size:13px;font-weight:600;pointer-events:none;transition:opacity 0.3s;';
-                document.body.appendChild(toast);
-                setTimeout(function () { toast.style.opacity = '0'; setTimeout(function () { toast.remove(); }, 350); }, 1500);
-            }
-        }
-    });
+    // Note: Ctrl+Shift+S and Ctrl+Shift+M shortcuts are handled by the
+    // remappable shortcut system in thread_categories_shortcuts.js
 
     // Theme color pickers
     var themeColorPicker = document.getElementById('theme-color-picker');
@@ -6255,6 +6433,53 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     loadKillSwitchStatus();
 
+    // --- F3-14: Self-Destruct (per-user setting) ---
+    (function () {
+        var sdSelect = document.getElementById('self-destruct-days');
+        var sdSaveBtn = document.getElementById('self-destruct-save-btn');
+        var sdStatus = document.getElementById('self-destruct-status');
+        if (!sdSelect || !sdSaveBtn) return;
+
+        // Load current setting
+        async function loadSelfDestruct() {
+            try {
+                var res = await authFetch('/api/me/self-destruct');
+                if (res.ok) {
+                    var data = await res.json();
+                    sdSelect.value = String(data.self_destruct_days || 0);
+                }
+            } catch (_) {}
+        }
+
+        sdSaveBtn.addEventListener('click', async function () {
+            var days = parseInt(sdSelect.value, 10) || 0;
+            if (days > 0) {
+                if (!confirm('Enable self-destruct? Your account will be permanently deleted after ' + days + ' days of inactivity (no sign-in).')) return;
+            }
+            try {
+                var res = await authFetch('/api/me/self-destruct', {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ self_destruct_days: days })
+                });
+                var data = await res.json();
+                if (res.ok) {
+                    sdStatus.textContent = days > 0 ? 'Self-destruct set: account deletes after ' + days + ' days of inactivity' : 'Self-destruct disabled';
+                    sdStatus.style.color = 'var(--accent,#4fc3f7)';
+                } else {
+                    sdStatus.textContent = data.error || 'Failed to save';
+                    sdStatus.style.color = 'var(--danger,#ed4245)';
+                }
+            } catch (e) {
+                sdStatus.textContent = 'Server not reachable';
+                sdStatus.style.color = 'var(--danger,#ed4245)';
+            }
+        });
+
+        // Load on security tab open
+        loadSelfDestruct();
+    })();
+
     connectWebSocket(t);
     setupMessageActions();
     setupForwardModal();
@@ -6641,6 +6866,115 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+    // ─── Scheduled Messages ──────────────────────────────────────────
+    // Store scheduled messages locally (encrypted via the key blob). The
+    // scheduler checks every second and sends any that are due.
+    var _scheduledMessages = [];
+
+    function loadScheduledMessages() {
+        try {
+            var raw = localStorage.getItem('scheduled_messages');
+            if (raw) _scheduledMessages = JSON.parse(raw);
+        } catch (_) { _scheduledMessages = []; }
+    }
+
+    function saveScheduledMessages() {
+        try { localStorage.setItem('scheduled_messages', JSON.stringify(_scheduledMessages)); } catch (_) {}
+    }
+
+    function openScheduleModal() {
+        var modal = document.getElementById('schedule-msg-modal');
+        if (!modal) return;
+        modal.style.display = 'flex';
+        // Default to 1 hour from now
+        var now = new Date();
+        now.setHours(now.getHours() + 1);
+        document.getElementById('schedule-msg-date').value = now.toISOString().slice(0, 10);
+        document.getElementById('schedule-msg-time').value = now.toTimeString().slice(0, 5);
+        document.getElementById('schedule-msg-text').value = '';
+        document.getElementById('schedule-msg-error').style.display = 'none';
+        renderScheduledList();
+    }
+
+    function closeScheduleModal() {
+        var modal = document.getElementById('schedule-msg-modal');
+        if (modal) modal.style.display = 'none';
+    }
+
+    function renderScheduledList() {
+        var list = document.getElementById('schedule-msg-list');
+        if (!list) return;
+        var html = '';
+        _scheduledMessages.forEach(function (msg, i) {
+            var d = new Date(msg.sendAt);
+            var ts = d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+            var ch = msg.channelId ? 'Channel' : 'DM';
+            html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 8px;background:var(--bg-secondary,#1a1a2e);border-radius:6px;margin-bottom:4px;font-size:12px">' +
+                '<span style="color:var(--text-primary,#e0e0e0);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + ts + ' — ' + ch + ': ' + (msg.text || '').substring(0, 40) + '</span>' +
+                '<button onclick="window._cancelScheduledMsg(' + i + ')" style="background:none;border:none;color:var(--danger,#ed4245);cursor:pointer;font-size:14px;padding:2px 6px">&times;</button>' +
+                '</div>';
+        });
+        if (!_scheduledMessages.length) html = '<div style="color:var(--text-muted,#888);font-size:12px;text-align:center;padding:8px">No scheduled messages</div>';
+        list.innerHTML = html;
+    }
+
+    window._cancelScheduledMsg = function (idx) {
+        _scheduledMessages.splice(idx, 1);
+        saveScheduledMessages();
+        renderScheduledList();
+    };
+
+    function confirmScheduleMsg() {
+        var text = document.getElementById('schedule-msg-text').value.trim();
+        var dateVal = document.getElementById('schedule-msg-date').value;
+        var timeVal = document.getElementById('schedule-msg-time').value;
+        var errEl = document.getElementById('schedule-msg-error');
+        if (!text) { errEl.textContent = 'Message cannot be empty'; errEl.style.display = ''; return; }
+        if (!dateVal || !timeVal) { errEl.textContent = 'Pick a date and time'; errEl.style.display = ''; return; }
+        var sendAt = new Date(dateVal + 'T' + timeVal + ':00');
+        if (isNaN(sendAt.getTime()) || sendAt.getTime() <= Date.now()) {
+            errEl.textContent = 'Schedule time must be in the future'; errEl.style.display = ''; return;
+        }
+        _scheduledMessages.push({
+            text: text,
+            sendAt: sendAt.toISOString(),
+            channelId: currentChannelId || null,
+            serverId: currentServerId || null,
+            dmChannelId: currentDmChannelId || null,
+            created: Date.now()
+        });
+        saveScheduledMessages();
+        closeScheduleModal();
+    }
+
+    // Wire schedule modal buttons
+    var _scheduleAttachHandler = null;
+    document.getElementById('schedule-msg-confirm').addEventListener('click', confirmScheduleMsg);
+    document.getElementById('schedule-msg-cancel').addEventListener('click', closeScheduleModal);
+    loadScheduledMessages();
+
+    // Scheduler tick: check every second and send any due messages
+    setInterval(function () {
+        var now = Date.now();
+        var changed = false;
+        for (var i = _scheduledMessages.length - 1; i >= 0; i--) {
+            var msg = _scheduledMessages[i];
+            if (new Date(msg.sendAt).getTime() <= now) {
+                // Send the message via the existing send pipeline
+                if (msg.text && ws && ws.readyState === WebSocket.OPEN) {
+                    var body = msg.text;
+                    var payload = { type: 'message', text: body };
+                    if (msg.channelId) payload.channel_id = msg.channelId;
+                    else if (msg.dmChannelId) payload.dm_channel_id = msg.dmChannelId;
+                    try { ws.send(JSON.stringify(payload)); } catch (_) {}
+                }
+                _scheduledMessages.splice(i, 1);
+                changed = true;
+            }
+        }
+        if (changed) saveScheduledMessages();
+    }, 1000);
+
     // Typing indicator: send a throttled `typing` WS message while typing,
     // and keep refreshing it (Discord-style) so the other side's 4s auto-hide
     // never fires mid-typing. Cleared automatically on send (input clears).
@@ -6711,6 +7045,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 startVideoRecording();
             } else if (action === 'poll') {
                 if (window.openCreatePollModal) window.openCreatePollModal();
+            } else if (action === 'schedule') {
+                openScheduleModal();
             }
             // 'record-audio' is handled by the record-audio click handler below
         });
@@ -12466,6 +12802,28 @@ async function loadChannels(serverId) {
             return;
         }
 
+        // If categories system is available, use it instead of flat list
+        var server = (servers || []).find(function(s) { return s.id === serverId; });
+        var isOwner = server && server.is_owner;
+        if (typeof window.renderChannelsWithCategories === 'function') {
+            // Load categories first, then render grouped
+            if (typeof window.loadCategories === 'function') {
+                await window.loadCategories(serverId);
+            }
+            window.renderChannelsWithCategories(channels, serverId, isOwner);
+            // Render voice member chips for voice channels
+            if (window.VoiceManager) {
+                try { VoiceManager.onChannelsRendered && VoiceManager.onChannelsRendered(); } catch (_) {}
+            }
+            updateChannelBadges();
+            updateChannelMutedUI();
+            if (window.innerWidth > 768 && !currentChannelId) {
+                var firstCh = list.querySelector('.channel-item');
+                if (firstCh) firstCh.click();
+            }
+            return;
+        }
+
         channels.forEach(ch => {
             const div = document.createElement('div');
             const isVoice = ch.channel_type === 'voice';
@@ -13729,10 +14087,13 @@ async function appendMessage(msg) {
     // Reply highlight: if this message replies to the current user, add yellow border
     if (replyTo && replyTo.author && user && replyTo.author === user.username) {
         div.classList.add('reply-highlighted');
+    }    // T1-5: Link previews — scan text for URLs and fetch OG metadata
+    if (textContent && !pollData && !filesData && !fileData && !gifData && !stickerData) {
+        try { attachLinkPreviews(div, textContent); } catch (_) {}
     }
 
     // Reply quote click → scroll to original
-    const replyQuote = div.querySelector('.reply-quote');
+        const replyQuote = div.querySelector('.reply-quote');
     if (replyQuote) {
         replyQuote.addEventListener('click', () => {
             const targetId = replyQuote.getAttribute('data-reply-to');
@@ -17422,9 +17783,12 @@ async function regenerateInvite() {
     }
 }
 
-async function createChannel() {
+async function createChannel(targetCategoryId) {
     const name = document.getElementById('new-channel-name').value.trim();
     if (!name || !currentServerId) return;
+    // Use provided category (must be a string, not an event), or fall back to pending
+    const categoryId = (typeof targetCategoryId === 'string' ? targetCategoryId : null) || window._pendingChannelCategoryId || null;
+    window._pendingChannelCategoryId = null;
 
     try {
         // Encrypt channel name with server's channelKey
@@ -17446,6 +17810,7 @@ async function createChannel() {
                 encrypted_name: encName.ciphertext,
                 name_nonce: encName.nonce,
                 channel_type,
+                category_id: categoryId,
             }),
         });
 
@@ -29115,3 +29480,149 @@ async function uploadBannerImage(file) {
 }
 
 // ===== Favorite GIF on .gif file cards =====
+
+// ===== T1-5: Rich Link Previews =====
+// Detects URLs in messages and fetches OG metadata from the server to render
+// embed cards with title, description, image, and domain.
+var _linkPreviewCache = {};
+var _linkPreviewPending = {};
+
+async function fetchLinkPreview(url) {
+    if (_linkPreviewCache[url]) return _linkPreviewCache[url];
+    if (_linkPreviewPending[url]) return _linkPreviewPending[url];
+    _linkPreviewPending[url] = (async () => {
+        try {
+            const res = await authFetch('/api/link-preview?url=' + encodeURIComponent(url));
+            if (!res.ok) return null;
+            const data = await res.json();
+            if (data && (data.title || data.description || data.image)) {
+                _linkPreviewCache[url] = data;
+                return data;
+            }
+        } catch (_) {}
+        _linkPreviewPending[url] = null;
+        return null;
+    })();
+    return _linkPreviewPending[url];
+}
+
+function extractUrls(text) {
+    if (!text) return [];
+    var urlPattern = /https?:\/\/[^\s<>"')\]]+/gi;
+    var matches = text.match(urlPattern) || [];
+    // Deduplicate
+    var seen = {};
+    return matches.filter(function(u) {
+        if (seen[u]) return false;
+        seen[u] = true;
+        // Skip obvious non-page URLs (images, videos, audio)
+        var lower = u.toLowerCase();
+        if (lower.match(/\.(jpg|jpeg|png|gif|webp|svg|mp4|webm|mp3|wav|ogg|zip|rar|7z|tar|gz)(\?|$)/)) return false;
+        return true;
+    });
+}
+
+function buildLinkPreviewHtml(preview) {
+    if (!preview) return '';
+    var html = '<div class="link-preview-card" style="display:flex;border:1px solid var(--border-color,#333);border-radius:8px;overflow:hidden;max-width:420px;margin-top:6px;background:var(--bg-secondary,#1a1a2e)">';
+    if (preview.image) {
+        html += '<div style="width:120px;min-height:80px;flex-shrink:0;background:#111;display:flex;align-items:center;justify-content:center;overflow:hidden">';
+        html += '<img src="' + escapeHtml(preview.image) + '" alt="" style="width:100%;height:100%;object-fit:cover" onerror="this.parentElement.style.display=\'none\'">';
+        html += '</div>';
+    }
+    html += '<div style="padding:8px 12px;flex:1;min-width:0">';
+    if (preview.site_name) {
+        html += '<div style="font-size:11px;color:var(--text-muted,#888);text-transform:uppercase;margin-bottom:2px">' + escapeHtml(preview.site_name) + '</div>';
+    }
+    if (preview.title) {
+        html += '<div style="font-size:13px;font-weight:600;color:var(--text-primary,#e0e0e0);margin-bottom:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(preview.title) + '</div>';
+    }
+    if (preview.description) {
+        var desc = preview.description.length > 120 ? preview.description.substring(0, 120) + '…' : preview.description;
+        html += '<div style="font-size:12px;color:var(--text-muted,#888);line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">' + escapeHtml(desc) + '</div>';
+    }
+    if (preview.domain) {
+        html += '<div style="font-size:11px;color:var(--accent,#4fc3f7);margin-top:4px">' + escapeHtml(preview.domain) + '</div>';
+    }
+    html += '</div></div>';
+    return html;
+}
+
+// Attach link previews to a message element after it's been appended.
+// Scans textContent for URLs, fetches metadata asynchronously, and inserts
+// embed cards below the text.
+function attachLinkPreviews(msgEl, textContent) {
+    if (!msgEl || !textContent) return;
+    var urls = extractUrls(textContent);
+    if (!urls.length) return;
+    var textDiv = msgEl.querySelector('.text');
+    if (!textDiv) return;
+    var previewContainer = document.createElement('div');
+    previewContainer.className = 'link-previews';
+    textDiv.appendChild(previewContainer);
+    urls.slice(0, 3).forEach(function(url) {
+        fetchLinkPreview(url).then(function(preview) {
+            if (preview && previewContainer.isConnected) {
+                previewContainer.insertAdjacentHTML('beforeend', buildLinkPreviewHtml(preview));
+            }
+        });
+    });
+}
+
+// ===== T5-29/30: PWA — Offline Message Queue + Push Notifications =====
+// Queue messages when offline and send them when back online.
+// Register for push notifications in settings.
+
+var _offlineMessageQueue = [];
+
+function queueOfflineMessage(payload) {
+    _offlineMessageQueue.push({ payload: payload, queuedAt: Date.now() });
+    try { localStorage.setItem('offline_msg_queue', JSON.stringify(_offlineMessageQueue)); } catch (_) {}
+}
+
+function loadOfflineQueue() {
+    try {
+        var raw = localStorage.getItem('offline_msg_queue');
+        if (raw) _offlineMessageQueue = JSON.parse(raw);
+    } catch (_) { _offlineMessageQueue = []; }
+}
+
+function flushOfflineQueue() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    while (_offlineMessageQueue.length > 0) {
+        var msg = _offlineMessageQueue.shift();
+        try { ws.send(JSON.stringify(msg.payload)); } catch (_) {
+            _offlineMessageQueue.unshift(msg);
+            break;
+        }
+    }
+    try { localStorage.setItem('offline_msg_queue', JSON.stringify(_offlineMessageQueue)); } catch (_) {}
+}
+
+// Flush queue when WebSocket reconnects
+var _wsReconnectCheck = setInterval(function () {
+    if (ws && ws.readyState === WebSocket.OPEN && _offlineMessageQueue.length > 0) {
+        flushOfflineQueue();
+    }
+}, 2000);
+
+loadOfflineQueue();
+
+// Push notification request (called from settings)
+window.requestPushPermission = async function () {
+    if (!('Notification' in window)) {
+        showToast('Push notifications not supported in this browser');
+        return false;
+    }
+    if (Notification.permission === 'granted') return true;
+    if (Notification.permission === 'denied') {
+        showToast('Push notifications blocked — enable in browser settings');
+        return false;
+    }
+    var result = await Notification.requestPermission();
+    return result === 'granted';
+};
+
+window.isPushEnabled = function () {
+    return 'Notification' in window && Notification.permission === 'granted';
+};

@@ -489,6 +489,39 @@ async fn main() {
         });
     }
 
+    // F3-14: Self-Destructing Accounts — check every hour for inactive users
+    {
+        let state_for_sd = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+            loop {
+                interval.tick().await;
+                let s = state_for_sd.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    if let Ok(user_ids) = s.db.get_inactive_users_for_deletion() {
+                        for uid in &user_ids {
+                            tracing::info!("Self-destruct: deleting inactive user {}", uid);
+                            // Use the full delete_user which cleans up all related
+                            // tables (vault files, reactions, voice state, DMs, etc.)
+                            match s.db.self_destruct_user(uid) {
+                                Ok(file_ids) => {
+                                    // Clean up on-disk upload chunks
+                                    for fid in &file_ids {
+                                        let dir = format!("{}/{}", s.config.upload_dir, fid);
+                                        let _ = std::fs::remove_dir_all(&dir);
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::error!("Self-destruct failed for {}: {}", uid, e);
+                                }
+                            }
+                        }
+                    }
+                }).await;
+            }
+        });
+    }
+
     let app = Router::new()
         .route("/api/auth-params/{username}", get(handlers::get_auth_params))
         .route("/api/register", post(handlers::register))
@@ -519,8 +552,10 @@ async fn main() {
         .route("/api/channels/{channel_id}/pins", get(handlers::list_channel_pins))
         .route("/api/channels/{channel_id}/thread/{parent_id}", get(handlers::list_thread_messages))
         .route("/api/servers/{server_id}/categories", get(handlers::list_categories).post(handlers::create_category))
-        .route("/api/servers/{server_id}/categories/{category_id}", delete(handlers::delete_category))
+        .route("/api/servers/{server_id}/categories/{category_id}", put(handlers::rename_category).delete(handlers::delete_category))
         .route("/api/servers/{server_id}/channels/{channel_id}/category", put(handlers::move_channel_to_category))
+        .route("/api/servers/{server_id}/categories/reorder", put(handlers::reorder_categories))
+        .route("/api/servers/{server_id}/channels/reorder", put(handlers::reorder_channels))
         // F14: User Custom CSS slots
         .route("/api/user-css/slots", get(handlers::get_css_slots))
         .route("/api/user-css/slot/{slot}", put(handlers::save_css_slot).delete(handlers::delete_css_slot))
@@ -642,6 +677,12 @@ async fn main() {
         .route("/api/users/me/stickers", get(handlers::list_user_stickers).post(handlers::add_user_sticker))
         .route("/api/users/me/stickers/{sticker_id}", delete(handlers::remove_user_sticker))
         .route("/api/online", get(handlers::list_online_users))
+        .route("/api/link-preview", get(handlers::link_preview))
+        .route("/api/vault/upload", post(handlers::vault_upload))
+        .route("/api/vault/files", get(handlers::vault_list))
+        .route("/api/vault/files/{file_id}", get(handlers::vault_download).delete(handlers::vault_delete))
+        .route("/api/me/export", get(handlers::export_user_data))
+        .route("/api/me/self-destruct", get(handlers::get_self_destruct).put(handlers::set_self_destruct))
         .route("/ws", get(ws::ws_handler))
         .fallback(get(serve_static))
         // Encrypted audio blobs (notification sounds, ringtones) are base64 in
@@ -738,5 +779,8 @@ async fn main() {
         }
     }
 }
+
+
+
 
 

@@ -490,6 +490,86 @@
 
 
 
+    async function renameCategory(serverId, categoryId, newName) {
+
+        try {
+
+            var serverKey = E2ECrypto.getServerKey(serverId);
+
+            if (!serverKey) return null;
+
+            var enc = E2ECrypto.encryptMessage(newName, serverKey);
+
+            var res = await authFetch('/api/servers/' + serverId + '/categories/' + categoryId, {
+
+                method: 'PUT',
+
+                headers: { 'Content-Type': 'application/json' },
+
+                body: JSON.stringify({
+
+                    encrypted_name: enc.ciphertext,
+
+                    name_nonce: enc.nonce
+
+                })
+
+            });
+
+            return await res.json();
+
+        } catch (err) {
+
+            console.error('Failed to rename category:', err);
+
+            return null;
+
+        }
+
+    }
+
+
+
+    async function renameChannelAPI(serverId, channelId, newName) {
+
+        try {
+
+            var serverKey = E2ECrypto.getServerKey(serverId);
+
+            if (!serverKey) return null;
+
+            var enc = E2ECrypto.encryptMessage(newName, serverKey);
+
+            var res = await authFetch('/api/servers/' + serverId + '/channels/' + channelId + '/name', {
+
+                method: 'PUT',
+
+                headers: { 'Content-Type': 'application/json' },
+
+                body: JSON.stringify({
+
+                    encrypted_name: enc.ciphertext,
+
+                    name_nonce: enc.nonce
+
+                })
+
+            });
+
+            return await res.json();
+
+        } catch (err) {
+
+            console.error('Failed to rename channel:', err);
+
+            return null;
+
+        }
+
+    }
+
+
+
     function decryptCategoryName(cat) {
 
         if (!cat.encrypted_name || !cat.name_nonce) {
@@ -532,6 +612,17 @@
         if (!list) return;
 
         list.innerHTML = '';
+
+        // Drop zone: drop a channel here to remove it from any category
+        list.addEventListener('drop', function (e) {
+            e.preventDefault();
+            var channelId = e.dataTransfer.getData('text/channel-id') || e.dataTransfer.getData('text/plain');
+            if (!channelId) return;
+            // Check the drop wasn't inside a category group (those have their own handlers)
+            if (e.target.closest && e.target.closest('.channel-category-group')) return;
+            moveChannelToCategory(serverId, channelId, null);
+        });
+        list.addEventListener('dragover', function (e) { e.preventDefault(); });
 
 
 
@@ -687,6 +778,8 @@
 
             chBtn.addEventListener('click', function () {
 
+                // Default to the first category if available
+                window._pendingChannelCategoryId = sortedCats.length > 0 ? sortedCats[0] : null;
                 document.getElementById('create-channel-modal').style.display = 'flex';
 
                 document.getElementById('new-channel-name').value = '';
@@ -753,26 +846,87 @@
 
         // Drag-drop: allow dropping channels into this category
 
-        group.addEventListener('dragover', function (e) { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; group.style.background = 'rgba(79,195,247,0.1)'; });
+        group.addEventListener('dragover', function (e) {
+            e.preventDefault();
+            var isCatDrag = e.dataTransfer.types.indexOf('text/category-id') !== -1;
+            var isChDrag = e.dataTransfer.types.indexOf('text/channel-id') !== -1;
+            e.dataTransfer.dropEffect = 'move';
+            // For category reorder, show indicator on the header only
+            if (isCatDrag && categoryId && e.target.closest && e.target.closest('.channel-category-header') && e.target !== group) {
+                var rect = group.getBoundingClientRect();
+                var midY = rect.top + rect.height / 2;
+                // Clean previous indicators on all category groups
+                document.querySelectorAll('.drag-over-top, .drag-over-bottom').forEach(function (el) {
+                    el.classList.remove('drag-over-top', 'drag-over-bottom');
+                });
+                if (e.clientY < midY) {
+                    group.classList.add('drag-over-top');
+                } else {
+                    group.classList.add('drag-over-bottom');
+                }
+            } else if (isChDrag) {
+                group.style.background = 'rgba(79,195,247,0.1)';
+            }
+        });
 
-        group.addEventListener('dragleave', function () { group.style.background = ''; });
+        group.addEventListener('dragleave', function (e) {
+            // Only clean up if we're truly leaving the group (not entering a child)
+            if (!group.contains(e.relatedTarget)) {
+                group.style.background = '';
+                group.classList.remove('drag-over-top', 'drag-over-bottom');
+            }
+        });
 
         group.addEventListener('drop', function (e) {
             e.preventDefault();
             group.style.background = '';
+            group.classList.remove('drag-over-top', 'drag-over-bottom');
+            var catId = e.dataTransfer.getData('text/category-id');
             var channelId = e.dataTransfer.getData('text/channel-id');
-            if (channelId && categoryId !== undefined) {
-                // Move channel to this category
+            if (catId && categoryId && catId !== categoryId) {
+                // Reorder categories: get current order, move dragged to target position
+                (async function() {
+                    var groups = document.querySelectorAll('.channel-category-group[data-category-id]');
+                    var ids = Array.from(groups).map(function (g) { return g.getAttribute('data-category-id'); });
+                    // Remove dragged from current position
+                    var fromIdx = ids.indexOf(catId);
+                    if (fromIdx !== -1) ids.splice(fromIdx, 1);
+                    // Determine drop position (above or below target)
+                    var rect = group.getBoundingClientRect();
+                    var insertIdx = ids.indexOf(categoryId);
+                    if (e.clientY > rect.top + rect.height / 2) insertIdx++;
+                    ids.splice(insertIdx, 0, catId);
+                    await reorderCategoriesAPI(serverId, ids);
+                    if (typeof window.loadChannels === 'function') window.loadChannels(serverId);
+                })();
+            } else if (channelId && categoryId !== undefined) {
+                // Move channel to this category at the correct position
                 (async function() {
                     try {
-                        var token = localStorage.getItem('auth_token');
+                        // Determine insertion position among existing channels in this category body
+                        var chDivs = body.querySelectorAll('.channel-item[data-id]');
+                        var ids = Array.from(chDivs).map(function (d) { return d.getAttribute('data-id'); });
+                        // Remove dragged channel from current position if present
+                        var fromIdx = ids.indexOf(channelId);
+                        if (fromIdx !== -1) ids.splice(fromIdx, 1);
+                        // Find insert position based on mouse Y
+                        var insertIdx = ids.length; // default: append
+                        for (var ci = 0; ci < chDivs.length; ci++) {
+                            var chRect = chDivs[ci].getBoundingClientRect();
+                            if (e.clientY < chRect.top + chRect.height / 2) {
+                                insertIdx = ci;
+                                break;
+                            }
+                        }
+                        ids.splice(insertIdx, 0, channelId);
+                        // Move channel to this category
                         await fetch('/api/servers/' + serverId + '/channels/' + channelId + '/category', {
                             method: 'PUT',
-                            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+                            headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ category_id: categoryId })
                         });
-                        await loadCategories(serverId);
-                        // Re-render via the loadChannels callback
+                        // Reorder to place it at the correct position
+                        await reorderChannelsAPI(serverId, ids);
                         if (typeof window.loadChannels === 'function') window.loadChannels(serverId);
                     } catch (e) { console.error('Failed to move channel:', e); }
                 })();
@@ -787,14 +941,63 @@
 
         header.innerHTML = '<span class="category-chevron">▼</span> ' + escapeHtml(name);
 
+        // Category drag-to-reorder (owner only)
+        if (isOwner && categoryId) {
+            group.draggable = true;
+            header.addEventListener('dragstart', function (e) {
+                e.stopPropagation();
+                e.dataTransfer.setData('text/category-id', categoryId);
+                e.dataTransfer.effectAllowed = 'move';
+                setTimeout(function () { group.classList.add('dragging'); }, 0);
+            });
+            header.addEventListener('dragend', function () {
+                group.classList.remove('dragging');
+                document.querySelectorAll('.drag-over-top, .drag-over-bottom').forEach(function (el) {
+                    el.classList.remove('drag-over-top', 'drag-over-bottom');
+                });
+            });
+        }
 
+        // Double-click to rename category (owner only)
+        if (isOwner && categoryId) {
+            header.addEventListener('dblclick', function (e) {
+                // Don't trigger if clicking the delete button or chevron
+                if (e.target.classList.contains('category-delete-btn') || e.target.classList.contains('category-chevron') || e.target.classList.contains('category-add-channel-btn')) return;
+                e.stopPropagation();
+                var input = document.createElement('input');
+                input.type = 'text';
+                input.value = name;
+                input.maxLength = 50;
+                input.style.cssText = 'background:#1a1a2e;color:#e0e0e0;border:1px solid var(--accent,#4fc3f7);border-radius:4px;padding:1px 4px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;width:140px;outline:none;';
+                var textNode = header.childNodes[1]; // the text after chevron
+                if (textNode) header.replaceChild(input, textNode);
+                input.focus();
+                input.select();
+                var committed = false;
+                async function commitRename() {
+                    if (committed) return;
+                    committed = true;
+                    var newName = input.value.trim();
+                    if (newName && newName !== name) {
+                        await renameCategory(serverId, categoryId, newName);
+                    }
+                    // Re-render
+                    if (typeof window.loadChannels === 'function') window.loadChannels(serverId);
+                }
+                input.addEventListener('blur', commitRename);
+                input.addEventListener('keydown', function (ke) {
+                    if (ke.key === 'Enter') { ke.preventDefault(); input.blur(); }
+                    if (ke.key === 'Escape') { committed = true; input.blur(); }
+                });
+            });
+        }
 
         // Check if any channel in this category has unread notifications, mentions, or voice activity
         var hasNotif = false;
         var hasMention = false;
         var hasVoice = false;
         channels.forEach(function (ch) {
-            if (unreadChannels && unreadChannels.indexOf(ch.id) !== -1) hasNotif = true;
+            if (typeof unreadChannels !== 'undefined' && unreadChannels && unreadChannels.indexOf(ch.id) !== -1) hasNotif = true;
             // F4 mention indicator: check if any channel in this category has unread mentions
             if (typeof unreadMentionsByChannel !== 'undefined' && unreadMentionsByChannel[ch.id]) hasMention = true;
         });
@@ -828,11 +1031,60 @@
 
         // Click to collapse/expand
 
-        header.addEventListener('click', function () {
-
+        header.addEventListener('click', function (e) {
+            // Don't collapse if clicking the delete button
+            if (e.target.classList.contains('category-delete-btn') || e.target.classList.contains('category-add-channel-btn')) return;
             group.classList.toggle('collapsed');
 
         });
+
+        // Add-channel button (owner only) — left of delete button
+        if (isOwner && categoryId) {
+            var addChBtn = document.createElement('span');
+            addChBtn.className = 'category-add-channel-btn';
+            addChBtn.textContent = '+';
+            addChBtn.title = 'Add channel to ' + name;
+            addChBtn.style.cssText = 'color:var(--text-muted,#888);font-size:15px;cursor:pointer;padding:0 4px;opacity:0;transition:opacity .2s;margin-left:auto;';
+            header.addEventListener('mouseenter', function () { addChBtn.style.opacity = '1'; });
+            header.addEventListener('mouseleave', function () { addChBtn.style.opacity = '0'; });
+            addChBtn.addEventListener('click', function (e) {
+                e.stopPropagation();
+                window._pendingChannelCategoryId = categoryId;
+                document.getElementById('create-channel-modal').style.display = 'flex';
+                document.getElementById('new-channel-name').value = '';
+                document.getElementById('new-channel-name').focus();
+            });
+            header.appendChild(addChBtn);
+        }
+
+        // Delete category button (owner only, not the last category)
+        if (isOwner && categoryId) {
+            var delBtn = document.createElement('span');
+            delBtn.className = 'category-delete-btn';
+            delBtn.textContent = '\u00d7';
+            delBtn.title = 'Delete category (deletes all channels inside)';
+            delBtn.style.cssText = 'color:var(--text-muted,#888);font-size:16px;cursor:pointer;padding:0 4px;opacity:0;transition:opacity .2s;';
+            header.addEventListener('mouseenter', function () { delBtn.style.opacity = '1'; });
+            header.addEventListener('mouseleave', function () { delBtn.style.opacity = '0'; });
+            delBtn.addEventListener('click', function (e) {
+                e.stopPropagation();
+                var chCount = channels.length;
+                var msg = 'Delete category \"' + name + '\"?';
+                if (chCount > 0) {
+                    msg += '\n\nThis will permanently delete ' + chCount + ' channel' + (chCount > 1 ? 's' : '') + ' and ALL messages inside them.';
+                }
+                msg += '\n\nThis cannot be undone.';
+                if (!confirm(msg)) return;
+                deleteCategory(serverId, categoryId).then(function (result) {
+                    if (result && result.ok) {
+                        loadChannels(serverId);
+                    } else if (result && result.error) {
+                        alert(result.error);
+                    }
+                });
+            });
+            header.appendChild(delBtn);
+        }
 
 
 
@@ -914,10 +1166,70 @@
             div.draggable = true;
             div.addEventListener('dragstart', function (e) {
                 e.dataTransfer.setData('text/channel-id', ch.id);
+                e.dataTransfer.setData('text/plain', ch.id);
                 e.dataTransfer.effectAllowed = 'move';
+                setTimeout(function () { div.classList.add('dragging'); }, 0);
             });
-
-
+            div.addEventListener('dragend', function () {
+                div.classList.remove('dragging');
+                document.querySelectorAll('.drag-over-top, .drag-over-bottom').forEach(function (el) {
+                    el.classList.remove('drag-over-top', 'drag-over-bottom');
+                });
+            });
+            // Channel drag-to-reorder within category
+            div.addEventListener('dragover', function (e) {
+                e.preventDefault();
+                var isChDrag = e.dataTransfer.types.indexOf('text/channel-id') !== -1;
+                var isCatDrag = e.dataTransfer.types.indexOf('text/category-id') !== -1;
+                if (isChDrag && !isCatDrag) {
+                    e.dataTransfer.dropEffect = 'move';
+                    var rect = div.getBoundingClientRect();
+                    var midY = rect.top + rect.height / 2;
+                    // Clean indicators on siblings
+                    div.classList.remove('drag-over-top', 'drag-over-bottom');
+                    var siblings = body.querySelectorAll('.channel-item');
+                    siblings.forEach(function (s) { s.classList.remove('drag-over-top', 'drag-over-bottom'); });
+                    if (e.clientY < midY) {
+                        div.classList.add('drag-over-top');
+                    } else {
+                        div.classList.add('drag-over-bottom');
+                    }
+                }
+            });
+            div.addEventListener('dragleave', function (e) {
+                if (!div.contains(e.relatedTarget)) {
+                    div.classList.remove('drag-over-top', 'drag-over-bottom');
+                }
+            });
+            div.addEventListener('drop', function (e) {
+                e.preventDefault();
+                e.stopPropagation();
+                div.classList.remove('drag-over-top', 'drag-over-bottom');
+                var draggedChId = e.dataTransfer.getData('text/channel-id');
+                if (draggedChId && draggedChId !== ch.id && isOwner) {
+                    // Reorder: get all channels in this body, compute new order
+                    var allChDivs = body.querySelectorAll('.channel-item[data-id]');
+                    var ids = Array.from(allChDivs).map(function (d) { return d.getAttribute('data-id'); });
+                    var fromIdx = ids.indexOf(draggedChId);
+                    var isCrossCategory = fromIdx === -1;
+                    if (fromIdx !== -1) ids.splice(fromIdx, 1);
+                    var toIdx = ids.indexOf(ch.id);
+                    var rect = div.getBoundingClientRect();
+                    if (e.clientY > rect.top + rect.height / 2) toIdx++;
+                    ids.splice(toIdx, 0, draggedChId);
+                    // If cross-category, move the channel to this category first
+                    var doReorder = function () {
+                        return reorderChannelsAPI(serverId, ids).then(function () {
+                            if (typeof window.loadChannels === 'function') window.loadChannels(serverId);
+                        });
+                    };
+                    if (isCrossCategory) {
+                        moveChannelToCategory(serverId, draggedChId, categoryId).then(doReorder);
+                    } else {
+                        doReorder();
+                    }
+                }
+            });
 
             if (isVoiceCh) {
 
@@ -953,7 +1265,36 @@
 
             div.appendChild(nameSpan);
 
-
+            // Double-click to rename channel (owner only)
+            if (isOwner) {
+                nameSpan.addEventListener('dblclick', function (e) {
+                    e.stopPropagation();
+                    e.preventDefault();
+                    var input = document.createElement('input');
+                    input.type = 'text';
+                    input.value = chDisplayName;
+                    input.maxLength = 50;
+                    input.style.cssText = 'background:#1a1a2e;color:#e0e0e0;border:1px solid var(--accent,#4fc3f7);border-radius:4px;padding:1px 4px;font-size:13px;width:140px;outline:none;flex:1;';
+                    div.replaceChild(input, nameSpan);
+                    input.focus();
+                    input.select();
+                    var committed = false;
+                    async function commitRename() {
+                        if (committed) return;
+                        committed = true;
+                        var newName = input.value.trim();
+                        if (newName && newName !== chDisplayName) {
+                            await renameChannelAPI(serverId, ch.id, newName);
+                        }
+                        if (typeof window.loadChannels === 'function') window.loadChannels(serverId);
+                    }
+                    input.addEventListener('blur', commitRename);
+                    input.addEventListener('keydown', function (ke) {
+                        if (ke.key === 'Enter') { ke.preventDefault(); input.blur(); }
+                        if (ke.key === 'Escape') { committed = true; input.blur(); }
+                    });
+                });
+            }
 
             if (isOwner) {
 
@@ -985,6 +1326,34 @@
 
 
 
+    async function reorderCategoriesAPI(serverId, orderedIds) {
+        try {
+            var res = await authFetch('/api/servers/' + serverId + '/categories/reorder', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ordered_ids: orderedIds })
+            });
+            return await res.json();
+        } catch (err) {
+            console.error('Failed to reorder categories:', err);
+            return null;
+        }
+    }
+
+    async function reorderChannelsAPI(serverId, orderedIds) {
+        try {
+            var res = await authFetch('/api/servers/' + serverId + '/channels/reorder', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ordered_ids: orderedIds })
+            });
+            return await res.json();
+        } catch (err) {
+            console.error('Failed to reorder channels:', err);
+            return null;
+        }
+    }
+
     // Expose category API
 
     window.loadCategories = loadCategories;
@@ -994,6 +1363,14 @@
     window.moveChannelToCategory = moveChannelToCategory;
 
     window.deleteCategory = deleteCategory;
+
+    window.renameCategory = renameCategory;
+
+    window.renameChannelAPI = renameChannelAPI;
+
+    window.reorderCategoriesAPI = reorderCategoriesAPI;
+
+    window.reorderChannelsAPI = reorderChannelsAPI;
 
 
 
@@ -1007,7 +1384,27 @@
 
         'search': { key: 'k', shift: true, ctrl: true, label: 'Search' },
 
-        'toggle_sidebar': { key: 'b', shift: true, ctrl: true, label: 'Toggle Sidebar' }
+        'toggle_sidebar': { key: 'b', shift: true, ctrl: true, label: 'Toggle Sidebar' },
+
+        'nav_prev_channel': { key: 'ArrowUp', shift: true, ctrl: true, label: 'Previous Channel' },
+
+        'nav_next_channel': { key: 'ArrowDown', shift: true, ctrl: true, label: 'Next Channel' },
+
+        'nav_prev_server': { key: 'ArrowLeft', shift: true, ctrl: true, label: 'Previous Server' },
+
+        'nav_next_server': { key: 'ArrowRight', shift: true, ctrl: true, label: 'Next Server' },
+
+        'focus_composer': { key: '/', shift: false, ctrl: false, label: 'Focus Message Composer' },
+
+        'edit_last_message': { key: 'e', shift: false, ctrl: false, label: 'Edit Last Message' },
+
+        'reply_to_last': { key: 'r', shift: false, ctrl: false, label: 'Reply to Last Message' },
+
+        'toggle_upload': { key: 'u', shift: false, ctrl: false, label: 'Open Upload' },
+
+        'toggle_emoji_picker': { key: 'e', shift: true, ctrl: false, label: 'Toggle Emoji Picker' },
+
+        'new_server': { key: 'n', shift: true, ctrl: true, label: 'Create/Join Server' }
 
     };
 
@@ -1197,29 +1594,29 @@
 
         document.addEventListener('keydown', _globalShortcutHandler, true);
 
-    }
+    }    function _globalShortcutHandler(e) {
 
-
-
-    function _globalShortcutHandler(e) {
-
-        if (!e.ctrlKey && !e.shiftKey) return;
-
-        // Don't intercept when typing in inputs
+        // Don't intercept when typing in inputs (except for Esc)
 
         var tag = e.target.tagName;
 
-        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || e.target.isContentEditable) return;
+        var inInput = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || e.target.isContentEditable;
 
 
-
-        Object.keys(DEFAULT_SHORTCUTS).forEach(function (action) {
+        Object.keys(DEFAULT_SHORTCUTS).forEach(function (action) {
 
             var s = getShortcut(action);
 
             if (!s) return;
 
-            if (e.ctrlKey === s.ctrl && e.shiftKey === s.shift && e.key && e.key.toLowerCase() === s.key) {
+            // Single-key shortcuts (no ctrl/shift required) only fire when NOT in input
+
+            var needsModifier = s.ctrl || s.shift;
+
+            if (inInput && !needsModifier) return;
+
+
+            if (e.ctrlKey === !!s.ctrl && e.shiftKey === !!s.shift && e.key && e.key.toLowerCase() === s.key.toLowerCase()) {
 
                 e.preventDefault();
 
@@ -1235,13 +1632,34 @@
 
     function executeShortcut(action) {
 
+        function _showToast(msg) {
+            var old = document.querySelector('.streamer-toast');
+            if (old) old.remove();
+            var t = document.createElement('div');
+            t.className = 'streamer-toast';
+            t.textContent = msg;
+            t.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:99999;background:rgba(0,0,0,0.85);color:#fff;padding:8px 18px;border-radius:8px;font-size:13px;font-weight:600;pointer-events:none;transition:opacity 0.3s;';
+            document.body.appendChild(t);
+            setTimeout(function () { t.style.opacity = '0'; setTimeout(function () { t.remove(); }, 350); }, 1500);
+        }
+
         switch (action) {
 
             case 'toggle_streamer_mode':
 
                 var st = document.getElementById('streamer-mode-toggle');
 
-                if (st) { st.click(); }
+                if (st) {
+
+                    st.checked = !st.checked;
+
+                    localStorage.setItem('streamerMode', st.checked);
+
+                    if (typeof applyStreamerMode === 'function') applyStreamerMode(st.checked);
+
+                    _showToast(st.checked ? '🔴 Streamer Mode ON' : '✅ Streamer Mode OFF');
+
+                }
 
                 break;
 
@@ -1249,7 +1667,19 @@
 
                 var cb = document.getElementById('auto-load-previews');
 
-                if (cb) { cb.click(); }
+                if (cb) {
+
+                    cb.checked = !cb.checked;
+
+                    localStorage.setItem('autoLoadPreviews', cb.checked);
+
+                    if (currentServerId && currentChannelId && typeof loadMessages === 'function') loadMessages(currentChannelId);
+
+                    else if (currentDmChannelId && typeof loadDmMessages === 'function') loadDmMessages(currentDmChannelId);
+
+                    _showToast(cb.checked ? '✅ Media Previews ON' : '❌ Media Previews OFF');
+
+                }
 
                 break;
 
@@ -1275,7 +1705,210 @@
 
                 break;
 
+
+            // --- F13: New navigation shortcuts ---
+
+            case 'nav_prev_channel':
+
+            case 'nav_next_channel':
+
+                navigateChannelNav(action === 'nav_next_channel' ? 1 : -1);
+
+                break;
+
+
+            case 'nav_prev_server':
+
+            case 'nav_next_server':
+
+                navigateServerNav(action === 'nav_next_server' ? 1 : -1);
+
+                break;
+
+
+            case 'focus_composer':
+
+                var msgInput = document.getElementById('message-input');
+
+                if (msgInput) { msgInput.focus(); msgInput.disabled = false; }
+
+                break;
+
+
+            case 'edit_last_message':
+
+                editOwnLastMessage();
+
+                break;
+
+
+            case 'reply_to_last':
+
+                replyToLastMessage();
+
+                break;
+
+
+            case 'toggle_upload':
+
+                var attachBtn = document.getElementById('attach-btn');
+
+                if (attachBtn) attachBtn.click();
+
+                break;
+
+
+            case 'toggle_emoji_picker':
+
+                var emojiBtn = document.getElementById('sticker-btn');
+
+                if (emojiBtn) emojiBtn.click();
+
+                break;
+
+
+            case 'new_server':
+
+                var addBtn = document.getElementById('add-server-btn');
+
+                if (addBtn) addBtn.click();
+
+                break;
+
         }
+
+    }
+
+
+    // ─── Navigation helpers ───────────────────────────────────────────
+
+    function navigateChannelNav(dir) {
+
+        var channels = document.querySelectorAll('.channel-list-item');
+
+        if (!channels.length) return;
+
+        var idx = -1;
+
+        for (var i = 0; i < channels.length; i++) {
+
+            if (channels[i].classList.contains('active')) { idx = i; break; }
+
+        }
+
+        var next = idx + dir;
+
+        if (next < 0) next = channels.length - 1;
+
+        if (next >= channels.length) next = 0;
+
+        channels[next].click();
+
+    }
+
+
+    function navigateServerNav(dir) {
+
+        var icons = document.querySelectorAll('.server-icon:not(.add-server)');
+
+        if (!icons.length) return;
+
+        var idx = -1;
+
+        for (var i = 0; i < icons.length; i++) {
+
+            if (icons[i].classList.contains('active')) { idx = i; break; }
+
+        }
+
+        var next = idx + dir;
+
+        if (next < 0) next = icons.length - 1;
+
+        if (next >= icons.length) next = 0;
+
+        icons[next].click();
+
+    }
+
+
+    function editOwnLastMessage() {
+
+        var messages = document.querySelectorAll('.message[data-sender]');
+
+        var selfId = (typeof getSelfId === 'function') ? getSelfId() : null;
+
+        for (var i = messages.length - 1; i >= 0; i--) {
+
+            var msg = messages[i];
+
+            if (selfId && msg.getAttribute('data-sender') === selfId) {
+
+                var editBtn = msg.querySelector('[data-action="edit"]');
+
+                if (editBtn) editBtn.click();
+
+                return;
+
+            }
+
+        }
+
+    }
+
+
+    function replyToLastMessage() {
+
+        var messages = document.querySelectorAll('.message[data-mid]');
+
+        if (!messages.length) return;
+
+        var last = messages[messages.length - 1];
+
+        var mid = last.getAttribute('data-mid');
+
+        var sender = last.getAttribute('data-sender');
+
+        if (!mid || !sender) return;
+
+        var displayName = '';
+
+        try {
+
+            var cache = (typeof userDisplayNameCache !== 'undefined') ? userDisplayNameCache[sender] : null;
+
+            displayName = cache ? (cache.display_name || cache.username || '') : '';
+
+        } catch (_) {}
+
+        showReplyBar(mid, displayName);
+
+    }
+
+
+    function showReplyBar(messageId, senderName) {
+
+        var bar = document.getElementById('reply-bar');
+
+        if (!bar) return;
+
+        var msgEl = document.querySelector('[data-mid="' + messageId + '"]');
+
+        var preview = msgEl ? (msgEl.querySelector('.message-text') || {}).textContent || '' : '';
+
+        preview = preview.substring(0, 120);
+
+        bar.innerHTML = '<span class="reply-bar-text">Replying to <strong>' + (senderName || 'message') + '</strong>: ' + preview + '</span>' +
+
+            '<button class="reply-bar-close" onclick="document.getElementById(\'reply-bar\').style.display=\'none\'">&times;</button>';
+
+        bar.style.display = 'flex';
+
+        bar.setAttribute('data-reply-to', messageId);
+
+        var msgInput = document.getElementById('message-input');
+
+        if (msgInput) { msgInput.focus(); msgInput.disabled = false; }
 
     }
 

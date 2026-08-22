@@ -2507,6 +2507,84 @@ select.modal-input:focus {
     color: var(--accent);
 }
 
+/* File Vault Modal */
+.vault-quota-bar {
+    width: 100%;
+    height: 6px;
+    background: var(--bg-tertiary, #2a2a2a);
+    border-radius: 3px;
+    overflow: hidden;
+    margin-bottom: 4px;
+}
+.vault-quota-fill {
+    height: 100%;
+    background: var(--accent, #4fc3f7);
+    border-radius: 3px;
+    transition: width 0.3s;
+}
+.vault-quota-text {
+    font-size: 11px;
+    color: var(--text-muted, #999);
+}
+.vault-file-list {
+    max-height: 320px;
+    overflow-y: auto;
+    margin-bottom: 8px;
+}
+.vault-file-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--bg-border, #333);
+    gap: 8px;
+}
+.vault-file-item:last-child {
+    border-bottom: none;}
+.vault-file-info {
+    flex: 1;
+    min-width: 0;
+}
+.vault-file-name {
+    font-size: 13px;
+    color: var(--text-primary, #eee);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.vault-file-meta {
+    font-size: 11px;
+    color: var(--text-muted, #999);
+}
+.vault-file-actions {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
+}
+.vault-file-actions button {
+    background: transparent;
+    border: 1px solid var(--bg-border, #444);
+    color: var(--text-muted, #999);
+    padding: 4px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+}
+.vault-file-actions button:hover {
+    color: var(--accent, #4fc3f7);
+    border-color: var(--accent, #4fc3f7);
+}
+.vault-file-actions .vault-delete-btn:hover {
+    color: var(--danger, #f44);
+    border-color: var(--danger, #f44);
+}
+.vault-empty {
+    text-align: center;
+    padding: 24px 0;
+    color: var(--text-muted, #999);
+    font-size: 13px;
+}
+
 /* Notification sound upload */
 .notif-sound-controls {
     display: flex;
@@ -9577,6 +9655,28 @@ body.resizing-dm { cursor: ns-resize !important; user-select: none; }
 }
 .channel-category-body {
     padding: 0 0 4px 0;
+}
+/* F4: Drag reorder indicators */
+.drag-over-top {
+    border-top: 2px solid var(--accent, #4fc3f7) !important;
+}
+.drag-over-bottom {
+    border-bottom: 2px solid var(--accent, #4fc3f7) !important;
+}
+.drag-over-category {
+    background: rgba(79, 195, 247, 0.08) !important;
+}
+.channel-category-header[draggable='true'] {
+    cursor: grab;
+}
+.channel-category-header[draggable='true']:active {
+    cursor: grabbing;
+}
+.channel-category-group.dragging {
+    opacity: 0.4;
+}
+.channel-item.dragging {
+    opacity: 0.4;
 }
 .category-has-notif {
     position: relative;

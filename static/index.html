@@ -3,6 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="theme-color" content="#4fc3f7">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <link rel="manifest" href="/manifest.json">
     <title>E2E Chat</title>
     <link rel="stylesheet" href="style.css?v=9">
 </head>
@@ -90,6 +94,7 @@
                     </div>
                 </div>
                 <div class="footer-actions">
+                    <button id="vault-btn" class="settings-gear" title="File Vault">&#128274;</button>
                     <button id="settings-btn" class="settings-gear" title="Settings">&#9881;</button>
                 </div>
             </div>
@@ -151,6 +156,7 @@
                         <button class="attach-popup-item" data-action="record-video">🎥 Record Video</button>
                         <button class="attach-popup-item" data-action="record-audio">🎤 Record Audio</button>
                         <button class="attach-popup-item" data-action="poll">&#x1F5F3;&#xFE0F; Create Poll</button>
+                        <button class="attach-popup-item" data-action="schedule">&#x23F0; Schedule Message</button>
                         <div class="disappear-popup-wrap">
                             <button class="attach-popup-item" id="disappear-btn" title="Disappearing messages">&#x23F1;&#xFE0F; Disappearing messages</button>
                             <div class="disappear-menu" id="disappear-menu" style="display:none">
@@ -796,6 +802,23 @@
                     <p id="kill-switch-status" style="margin-top:8px;font-size:13px;"></p>
                 </div>
                 <div class="settings-group">
+                    <h4>Self-Destruct</h4>
+                    <p class="settings-hint">Auto-delete your account after a period of inactivity. Off by default. If enabled and you don't sign in within the chosen period, your account and all data will be permanently deleted.</p>
+                    <div style="display:flex;align-items:center;gap:12px;margin-top:8px;">
+                        <label style="color:var(--text-muted,#888);font-size:13px;">Auto-delete after:</label>
+                        <select id="self-destruct-days" class="settings-select" style="max-width:160px;">
+                            <option value="0">Off</option>
+                            <option value="30">30 days</option>
+                            <option value="60">60 days</option>
+                            <option value="90">90 days</option>
+                            <option value="180">6 months</option>
+                            <option value="365">1 year</option>
+                        </select>
+                        <button class="btn-reauth-confirm" id="self-destruct-save-btn" style="font-size:12px;padding:6px 14px;">Save</button>
+                    </div>
+                    <p id="self-destruct-status" style="margin-top:8px;font-size:13px;"></p>
+                </div>
+                <div class="settings-group">
                     <h4>Devices</h4>
                     <p class="settings-hint">Every device currently signed in to your account. You can force-sign-out any of them — they are kicked immediately, everywhere (including voice channels and calls).</p>
                     <div id="devices-list" class="session-log-list">
@@ -1094,6 +1117,26 @@
 
             <div class="modal-actions">
                 <button class="btn-cancel" id="close-settings">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- File Vault Modal -->
+    <div class="modal" id="vault-modal" style="display:none">
+        <div class="modal-content" style="max-width:560px">
+            <h3>&#128274; File Vault</h3>
+            <p class="settings-hint" style="margin-bottom:12px">Your personal encrypted file vault. Files are encrypted client-side and stored on the server.</p>
+            <div class="vault-quota" id="vault-quota" style="margin-bottom:12px">
+                <div class="vault-quota-bar"><div class="vault-quota-fill" id="vault-quota-fill"></div></div>
+                <span class="vault-quota-text" id="vault-quota-text"></span>
+            </div>
+            <div style="display:flex;gap:8px;margin-bottom:12px">
+                <button class="btn btn-primary" id="vault-upload-btn">&#128228; Upload File</button>
+                <input type="file" id="vault-file-input" style="display:none" multiple>
+            </div>
+            <div id="vault-file-list" class="vault-file-list"></div>
+            <div class="modal-actions">
+                <button class="btn-cancel" id="close-vault">Close</button>
             </div>
         </div>
     </div>
@@ -1932,10 +1975,56 @@
         </div>
     </div>
 
+    <!-- Schedule Message modal -->
+    <div class="modal" id="schedule-msg-modal" style="display:none">
+        <div class="modal-content" style="max-width:400px">
+            <h3 style="margin-bottom:12px;color:var(--accent)">&#x23F0; Schedule Message</h3>
+            <p style="color:var(--text-muted);font-size:13px;margin-bottom:10px">Your message will be encrypted locally and sent automatically at the scheduled time.</p>
+            <textarea id="schedule-msg-text" placeholder="Type your message..." rows="3" class="modal-input" style="width:100%;box-sizing:border-box;resize:vertical;min-height:60px;margin-bottom:10px"></textarea>
+            <div class="auth-input-row" style="margin-bottom:10px">
+                <label style="color:var(--text-muted);font-size:13px;min-width:50px">Date</label>
+                <input type="date" id="schedule-msg-date" class="modal-input" style="flex:1" />
+            </div>
+            <div class="auth-input-row" style="margin-bottom:10px">
+                <label style="color:var(--text-muted);font-size:13px;min-width:50px">Time</label>
+                <input type="time" id="schedule-msg-time" class="modal-input" style="flex:1" />
+            </div>
+            <p id="schedule-msg-error" style="color:var(--danger,#ed4245);font-size:13px;margin-bottom:8px;display:none"></p>
+            <div id="schedule-msg-list" style="max-height:120px;overflow-y:auto;margin-bottom:10px"></div>
+            <div class="modal-actions">
+                <button class="btn-cancel" id="schedule-msg-cancel">Cancel</button>
+                <button class="btn-invite" id="schedule-msg-confirm" style="background:var(--accent);border-color:var(--accent)">Schedule</button>
+            </div>
+        </div>
+    </div>
+
     <script src="secure-storage.js?v=1"></script>
     <script src="voice.js?v=2"></script>
+    <script src="annotation.js?v=1"></script>
     <script src="thread_categories_shortcuts.js?v=1"></script>
     <script src="doc-preview.js?v=1"></script>
     <script src="chat.js?v=40"></script>
+    <script>
+    // PWA: Register service worker
+    if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('/sw.js').then(function(reg) {
+            // Check for updates every hour
+            setInterval(function() { reg.update(); }, 3600000);
+        }).catch(function(err) {
+            console.warn('SW registration failed:', err);
+        });
+        // Handle messages from service worker (flush queued messages)
+        navigator.serviceWorker.addEventListener('message', function(event) {
+            if (event.data && event.data.type === 'flush-queued-message') {
+                // Re-send the queued message via WebSocket
+                if (typeof ws !== 'undefined' && ws && ws.readyState === WebSocket.OPEN) {
+                    try { ws.send(JSON.stringify(event.data.payload)); } catch (_) {}
+                }
+            } else if (event.data && event.data.type === 'navigate') {
+                window.location.href = event.data.url;
+            }
+        });
+    }
+    </script>
 </body>
 </html>

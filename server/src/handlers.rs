@@ -1,5 +1,6 @@
 use crate::totp;
 use std::collections::HashMap;
+use std::time::Duration as StdDuration;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -2708,6 +2709,8 @@ pub struct CreateChannelRequest {
     pub name_nonce: Option<String>,
     #[serde(default)]
     pub channel_type: Option<String>,
+    #[serde(default)]
+    pub category_id: Option<String>,
 }
 
 pub async fn create_channel(
@@ -2733,7 +2736,8 @@ pub async fn create_channel(
     let name_nonce_bytes = req.name_nonce.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
 
     let ctype = req.channel_type.as_deref().unwrap_or("text");
-    let channel = match state.db.create_channel(&server_id, encrypted_name_bytes.as_deref(), name_nonce_bytes.as_deref(), ctype) {
+    let cat_id = req.category_id.as_deref();
+    let channel = match state.db.create_channel(&server_id, encrypted_name_bytes.as_deref(), name_nonce_bytes.as_deref(), ctype, cat_id) {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -3535,6 +3539,34 @@ pub async fn delete_category(
     }
 }
 
+/// F4: Rename a channel category (owner only).
+pub async fn rename_category(
+    Path((server_id, category_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UpdateEncryptedNameRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    if !state.db.is_server_owner(&user_id, &server_id).unwrap_or(false) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Only the server owner can rename categories"}))).into_response();
+    }
+    let enc_name = match base64::engine::general_purpose::STANDARD.decode(&req.encrypted_name) {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid encrypted_name"}))).into_response(),
+    };
+    let nonce = match base64::engine::general_purpose::STANDARD.decode(&req.name_nonce) {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid name_nonce"}))).into_response(),
+    };
+    if let Err(e) = state.db.update_category_name(&category_id, Some(&enc_name), Some(&nonce)) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
+    }
+    (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+}
+
 /// F4: Move a channel to a category (owner only).
 pub async fn move_channel_to_category(
     Path((server_id, channel_id)): Path<(String, String)>,
@@ -3551,6 +3583,56 @@ pub async fn move_channel_to_category(
     }
     let category_id = body.get("category_id").and_then(|v| v.as_str());
     match state.db.move_channel_to_category(&channel_id, category_id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+/// F4: Reorder categories within a server (owner only).
+pub async fn reorder_categories(
+    Path(server_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    if !state.db.is_server_owner(&user_id, &server_id).unwrap_or(false) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Only server owner can reorder"}))).into_response();
+    }
+    let ids: Vec<&str> = match body.get("ordered_ids").and_then(|v| v.as_array()) {
+        Some(arr) => arr.iter().filter_map(|v| v.as_str()).collect(),
+        None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "ordered_ids required"}))).into_response(),
+    };
+    let refs: Vec<&str> = ids.iter().map(|s| *s).collect();
+    match state.db.reorder_categories(&server_id, &refs) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+/// F4: Reorder channels within a server (owner only).
+pub async fn reorder_channels(
+    Path(server_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    if !state.db.is_server_owner(&user_id, &server_id).unwrap_or(false) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Only server owner can reorder"}))).into_response();
+    }
+    let ids: Vec<&str> = match body.get("ordered_ids").and_then(|v| v.as_array()) {
+        Some(arr) => arr.iter().filter_map(|v| v.as_str()).collect(),
+        None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "ordered_ids required"}))).into_response(),
+    };
+    let refs: Vec<&str> = ids.iter().map(|s| *s).collect();
+    match state.db.reorder_channels(&server_id, &refs) {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
@@ -8394,5 +8476,365 @@ pub async fn set_css_active_slot(
     match state.db.set_css_active_slot(&user_id, active) {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true, "active_slot": active}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+// --- Link Preview: fetch OG metadata for URLs ---
+
+/// GET /api/link-preview?url=<encoded_url>
+/// Fetches a URL and extracts Open Graph / basic metadata for link previews.
+/// Rate-limited to prevent abuse. Returns JSON with title, description,
+/// image, and site_name fields.
+pub async fn link_preview(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let _user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    let url = match params.get("url") {
+        Some(u) if !u.is_empty() => u.clone(),
+        _ => {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "url parameter required"}))).into_response();
+        }
+    };
+
+    // Validate URL scheme
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "only http/https URLs allowed"}))).into_response();
+    }
+
+    // Fetch with timeout and size limit
+    let client = reqwest::Client::builder()
+        .timeout(StdDuration::from_secs(5))
+        .user_agent("E2E-Chat/1.0 LinkPreview")
+        .danger_accept_invalid_certs(false)
+        .build();
+
+    let client = match client {
+        Ok(c) => c,
+        Err(_) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "failed to create client"}))).into_response();
+        }
+    };
+
+    let resp = match client.get(&url).send().await {
+        Ok(r) => r,
+        Err(_) => {
+            return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": "failed to fetch URL"}))).into_response();
+        }
+    };
+
+    // Read first 100KB of HTML only
+    let content_type = resp.headers().get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    let body = match resp.bytes().await {
+        Ok(b) => {
+            let limit = std::cmp::min(b.len(), 100 * 1024);
+            b[..limit].to_vec()
+        }
+        Err(_) => {
+            return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": "failed to read response"}))).into_response();
+        }
+    };
+
+    let html = String::from_utf8_lossy(&body).to_string();
+
+    // Extract OG metadata from HTML
+    let title = extract_meta(&html, "og:title")
+        .or_else(|| extract_tag_text(&html, "title"))
+        .unwrap_or_default();
+    let description = extract_meta(&html, "og:description")
+        .or_else(|| extract_meta_content(&html, "description"))
+        .unwrap_or_default();
+    let image = extract_meta(&html, "og:image").unwrap_or_default();
+    let site_name = extract_meta(&html, "og:site_name").unwrap_or_default();
+    let video = extract_meta(&html, "og:video").unwrap_or_default();
+
+    let parsed_url = url::Url::parse(&url);
+    let domain = parsed_url.as_ref().map(|u| u.host_str().unwrap_or("")).unwrap_or("").to_string();
+
+    (StatusCode::OK, Json(serde_json::json!({
+        "url": url,
+        "title": title,
+        "description": description,
+        "image": image,
+        "video": video,
+        "site_name": site_name,
+        "domain": domain,
+        "content_type": content_type,
+    }))).into_response()
+}
+
+fn extract_meta(html: &str, property: &str) -> Option<String> {
+    // Look for <meta property="og:xxx" content="yyy" />
+    let lower = html.to_lowercase();
+    let prop_lower = property.to_lowercase();
+    if let Some(idx) = lower.find(&format!("property=\"{}\"", prop_lower)) {
+        let rest = &html[idx..];
+        if let Some(ci) = rest.find("content=\"") {
+            let start = ci + 9;
+            if let Some(end) = rest[start..].find('"') {
+                return Some(html[start + (start - idx - 9 + 9 - 9)..start + end].to_string());
+            }
+        }
+    }
+    // Also try name="xxx" (for twitter:card etc)
+    if let Some(idx) = lower.find(&format!("name=\"{}\"", prop_lower)) {
+        let rest = &html[idx..];
+        if let Some(ci) = rest.find("content=\"") {
+            let start = ci + 9;
+            if let Some(end) = rest[start..].find('"') {
+                return Some(rest[start..start + end].to_string());
+            }
+        }
+    }
+    None
+}
+
+fn extract_meta_content(html: &str, name: &str) -> Option<String> {
+    let lower = html.to_lowercase();
+    let name_lower = name.to_lowercase();
+    if let Some(idx) = lower.find(&format!("name=\"{}\"", name_lower)) {
+        let rest = &html[idx..];
+        if let Some(ci) = rest.find("content=\"") {
+            let start = ci + 9;
+            if let Some(end) = rest[start..].find('"') {
+                return Some(rest[start..start + end].to_string());
+            }
+        }
+    }
+    None
+}
+
+fn extract_tag_text(html: &str, tag: &str) -> Option<String> {
+    let lower = html.to_lowercase();
+    let open = format!("<{}>", tag);
+    let close = format!("</{}>", tag);
+    if let Some(start) = lower.find(&open) {
+        let text_start = start + open.len();
+        if let Some(end) = lower[text_start..].find(&close) {
+            return Some(html[text_start..text_start + end].trim().to_string());
+        }
+    }
+    None
+}
+
+// --- F3-15: Encrypted File Vault ---
+/// POST /api/vault/upload — store a file in the user's encrypted vault.
+/// The file data is already encrypted + compressed client-side; the server
+/// stores the opaque blob. Max vault size is enforced.
+pub async fn vault_upload(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    // Parse JSON body
+    let parsed: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "invalid JSON"}))).into_response(),
+    };
+
+    let file_id = parsed["file_id"].as_str().unwrap_or("");
+    let encrypted_data = parsed["encrypted_data"].as_str().unwrap_or("");
+    let encrypted_filename = parsed["encrypted_filename"].as_str().unwrap_or("");
+    let filename_nonce = parsed["filename_nonce"].as_str().unwrap_or("");
+    let encrypted_mime = parsed["encrypted_mime_type"].as_str().unwrap_or("");
+    let mime_nonce = parsed["mime_type_nonce"].as_str().unwrap_or("");
+    let original_size = parsed["original_size"].as_i64().unwrap_or(0);
+    let stored_size = parsed["stored_size"].as_i64().unwrap_or(0);
+    let enc_file_key = parsed["encrypted_file_key"].as_str().unwrap_or("");
+    let file_key_nonce = parsed["file_key_nonce"].as_str().unwrap_or("");
+    let content_hash = parsed["content_hash"].as_str().unwrap_or("");
+
+    if file_id.is_empty() || encrypted_data.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "file_id and encrypted_data required"}))).into_response();
+    }
+
+    // Check vault size quota
+    let tuning = state.runtime_tuning.read().unwrap();
+    let max_bytes = tuning.file_storage_quota_bytes;
+    drop(tuning);
+    
+    let current_size = state.db.vault_total_size(&user_id).unwrap_or(0);
+    if max_bytes > 0 && (current_size + stored_size) > max_bytes {
+        return (StatusCode::PAYLOAD_TOO_LARGE, Json(serde_json::json!({"error": "Vault size limit reached"}))).into_response();
+    }
+
+    // Decode base64 encrypted data
+    let data_bytes = match base64::engine::general_purpose::STANDARD.decode(encrypted_data) {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "invalid base64 data"}))).into_response(),
+    };
+
+    match state.db.vault_store_file(
+        &user_id, file_id, &data_bytes,
+        encrypted_filename, filename_nonce,
+        encrypted_mime, mime_nonce,
+        original_size, stored_size,
+        enc_file_key, file_key_nonce, content_hash,
+    ) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true, "file_id": file_id}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+/// GET /api/vault/files — list files in the user's vault (metadata only).
+pub async fn vault_list(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    let tuning = state.runtime_tuning.read().unwrap();
+    let max_bytes = tuning.file_storage_quota_bytes;
+    drop(tuning);
+
+    let total_size = state.db.vault_total_size(&user_id).unwrap_or(0);
+    let files = state.db.vault_list_files(&user_id).unwrap_or_default();
+
+    (StatusCode::OK, Json(serde_json::json!({
+        "files": files,
+        "total_size": total_size,
+        "max_size_bytes": max_bytes,
+    }))).into_response()
+}
+
+/// GET /api/vault/files/:file_id — download a vault file (encrypted blob).
+pub async fn vault_download(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Path(file_id): Path<String>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    match state.db.vault_get_file(&user_id, &file_id) {
+        Ok(Some((data, mime, nonce))) => {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
+            (StatusCode::OK, Json(serde_json::json!({
+                "encrypted_data": encoded,
+                "encrypted_mime_type": mime,
+                "mime_type_nonce": nonce,
+            }))).into_response()
+        }
+        Ok(None) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "file not found"}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+/// DELETE /api/vault/files/:file_id — delete a vault file.
+pub async fn vault_delete(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Path(file_id): Path<String>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    match state.db.vault_delete_file(&user_id, &file_id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+// --- F4-19: Data Portability ---
+/// GET /api/me/export -- export all data for the authenticated user.
+pub async fn export_user_data(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    let mut export = serde_json::json!({
+        "export_version": "1.0",
+        "exported_at": chrono::Utc::now().to_rfc3339(),
+        "user_id": user_id,
+    });
+
+    // User info
+    if let Ok(user_row) = state.db.get_user_by_id(&user_id) {
+        export["user"] = serde_json::json!({
+            "id": user_id,
+            "username": user_row.username,
+        });
+    }
+
+    // Vault files metadata
+    if let Ok(vault_files) = state.db.vault_list_files(&user_id) {
+        export["vault"] = serde_json::json!({
+            "files": vault_files,
+            "count": vault_files.len(),
+        });
+    }
+
+    // Servers
+    if let Ok(servers) = state.db.list_user_servers(&user_id) {
+        export["servers"] = serde_json::json!(servers.into_iter().map(|s| s.id).collect::<Vec<_>>());
+    }
+
+    // DM channels
+    if let Ok(dms) = state.db.list_dm_channels_for_user(&user_id) {
+        export["dm_conversations"] = serde_json::json!(dms.len());
+    }
+
+    // Friends
+    if let Ok(friends) = state.db.list_friends(&user_id) {
+        export["friends"] = serde_json::json!(friends.len());
+    }
+
+    (StatusCode::OK, Json(export)).into_response()
+}
+// --- F3-14: Self-Destructing Accounts (per-user API) ---
+
+/// GET /api/me/self-destruct — get the user's self-destruct setting.
+pub async fn get_self_destruct(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    let days = state.db.get_self_destruct_days(&user_id).unwrap_or(0);
+    (StatusCode::OK, Json(serde_json::json!({ "self_destruct_days": days }))).into_response()
+}
+
+/// PUT /api/me/self-destruct — set the user's self-destruct setting.
+pub async fn set_self_destruct(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    let days = body["self_destruct_days"].as_i64().unwrap_or(0);
+    let days = if days < 0 { 0 } else if days > 365 { 365 } else { days };
+    match state.db.set_self_destruct_days(&user_id, days) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true, "self_destruct_days": days }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e }))).into_response(),
     }
 }

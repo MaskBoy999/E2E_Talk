@@ -1250,6 +1250,8 @@ impl Database {
         let _ = conn.execute_batch(include_str!("../migrations/067_user_css_slots.sql"));
         // Migration 068: Recreate user_key_escrow (dropped by 023, still referenced by code)
         let _ = conn.execute_batch(include_str!("../migrations/068_recreate_key_escrow.sql"));
+        let _ = conn.execute_batch(include_str!("../migrations/069_file_vault.sql"));
+        let _ = conn.execute_batch(include_str!("../migrations/070_self_destruct.sql"));
 
         // Data migration: normalize legacy space-separated CURRENT_TIMESTAMP values
         // ("YYYY-MM-DD HH:MM:SS") to fixed-width RFC3339 ("YYYY-MM-DDTHH:MM:SS.000000Z")
@@ -2485,7 +2487,7 @@ impl Database {
         Ok(channels)
     }
 
-    pub fn create_channel(&self, server_id: &str, encrypted_name: Option<&[u8]>, name_nonce: Option<&[u8]>, channel_type: &str) -> Result<Channel, String> {
+    pub fn create_channel(&self, server_id: &str, encrypted_name: Option<&[u8]>, name_nonce: Option<&[u8]>, channel_type: &str, category_id: Option<&str>) -> Result<Channel, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let id = Uuid::new_v4().to_string();
         let ctype = if channel_type == "voice" { "voice" } else { "text" };
@@ -2509,14 +2511,14 @@ impl Database {
             .unwrap_or(false);
         if has_name_col {
             conn.execute(
-                "INSERT INTO channels (id, server_id, encrypted_name, name_nonce, type, position, name) VALUES (?1, ?2, ?3, ?4, ?5, ?6, '')",
-                params![id, server_id, encrypted_name, name_nonce, ctype, max_pos + 1],
+                "INSERT INTO channels (id, server_id, encrypted_name, name_nonce, type, position, category_id, name) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '')",
+                params![id, server_id, encrypted_name, name_nonce, ctype, max_pos + 1, category_id],
             )
             .map_err(|e| e.to_string())?;
         } else {
             conn.execute(
-                "INSERT INTO channels (id, server_id, encrypted_name, name_nonce, type, position) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![id, server_id, encrypted_name, name_nonce, ctype, max_pos + 1],
+                "INSERT INTO channels (id, server_id, encrypted_name, name_nonce, type, position, category_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![id, server_id, encrypted_name, name_nonce, ctype, max_pos + 1, category_id],
             )
             .map_err(|e| e.to_string())?;
         }
@@ -2529,7 +2531,7 @@ impl Database {
             channel_type: ctype.to_string(),
             position: 0,
             created_at: String::new(),
-            category_id: None,
+            category_id: category_id.map(|s| s.to_string()),
         })
     }
 
@@ -6567,6 +6569,10 @@ impl Database {
         conn.execute("DELETE FROM files WHERE uploader_id = ?1", params![user_id])
             .map_err(|e| e.to_string())?;
 
+        // 4c5. Clean up encrypted file vault (ON DELETE CASCADE exists but be explicit)
+        conn.execute("DELETE FROM user_vault_files WHERE user_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+
         // 4c2. Clean up the user's reactions on other people's messages
         //      (message rows cascade their own reactions via message_id FK).
         conn.execute("DELETE FROM message_reactions WHERE reactor_id = ?1", params![user_id])
@@ -7459,12 +7465,32 @@ impl Database {
         Ok(())
     }
 
+    /// Rename a channel category (owner only enforced by caller).
+    pub fn update_category_name(&self, category_id: &str, encrypted_name: Option<&[u8]>, name_nonce: Option<&[u8]>) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE channel_categories SET encrypted_name = ?1, name_nonce = ?2 WHERE id = ?3",
+            rusqlite::params![encrypted_name, name_nonce, category_id],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     /// Move a channel to a category (or NULL to uncategory).
     pub fn move_channel_to_category(&self, channel_id: &str, category_id: Option<&str>) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
             "UPDATE channels SET category_id = ?1 WHERE id = ?2",
             rusqlite::params![category_id, channel_id],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Move all channels in a server into a category (used when creating the default category).
+    pub fn move_channel_to_category_by_server(&self, server_id: &str, category_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE channels SET category_id = ?1 WHERE server_id = ?2",
+            rusqlite::params![category_id, server_id],
         ).map_err(|e| e.to_string())?;
         Ok(())
     }
@@ -7500,6 +7526,32 @@ impl Database {
             rusqlite::params![category_id],
             |row| row.get(0),
         ).map_err(|e| e.to_string())
+    }
+
+    /// Bulk-reorder categories for a server. Accepts an ordered list of category IDs;
+    /// each ID gets position = its index in the list.
+    pub fn reorder_categories(&self, server_id: &str, ordered_ids: &[&str]) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        for (i, cat_id) in ordered_ids.iter().enumerate() {
+            conn.execute(
+                "UPDATE channel_categories SET position = ?1 WHERE id = ?2 AND server_id = ?3",
+                rusqlite::params![i as i32, cat_id, server_id],
+            ).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    /// Bulk-reorder channels within a category (or server-wide for uncategorized).
+    /// Accepts an ordered list of channel IDs; each gets position = its index.
+    pub fn reorder_channels(&self, server_id: &str, ordered_ids: &[&str]) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        for (i, ch_id) in ordered_ids.iter().enumerate() {
+            conn.execute(
+                "UPDATE channels SET position = ?1 WHERE id = ?2 AND server_id = ?3",
+                rusqlite::params![i as i32, ch_id, server_id],
+            ).map_err(|e| e.to_string())?;
+        }
+        Ok(())
     }
 
     // ── F14: User Custom CSS Slots ─────────────────────────────────────────────
@@ -7557,4 +7609,149 @@ impl Database {
         Ok(())
     }
 
+    // --- F3-15: Encrypted File Vault ---
+
+    /// Store a file in the user's encrypted vault.
+    pub fn vault_store_file(
+        &self, user_id: &str, file_id: &str, encrypted_data: &[u8],
+        encrypted_filename: &str, filename_nonce: &str,
+        encrypted_mime: &str, mime_nonce: &str,
+        original_size: i64, stored_size: i64,
+        enc_file_key: &str, file_key_nonce: &str, content_hash: &str,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO user_vault_files (id, user_id, encrypted_data, encrypted_filename, filename_nonce, encrypted_mime_type, mime_type_nonce, original_size, stored_size, encrypted_file_key, file_key_nonce, content_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            rusqlite::params![file_id, user_id, encrypted_data, encrypted_filename, filename_nonce, encrypted_mime, mime_nonce, original_size, stored_size, enc_file_key, file_key_nonce, content_hash],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// List files in the user's vault.
+    pub fn vault_list_files(&self, user_id: &str) -> Result<Vec<serde_json::Value>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT id, encrypted_filename, filename_nonce, encrypted_mime_type, mime_type_nonce, original_size, stored_size, encrypted_file_key, file_key_nonce, content_hash, created_at FROM user_vault_files WHERE user_id = ?1 ORDER BY created_at DESC"
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map(rusqlite::params![user_id], |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "encrypted_filename": row.get::<_, String>(1)?,
+                "filename_nonce": row.get::<_, String>(2)?,
+                "encrypted_mime_type": row.get::<_, String>(3)?,
+                "mime_type_nonce": row.get::<_, String>(4)?,
+                "original_size": row.get::<_, i64>(5)?,
+                "stored_size": row.get::<_, i64>(6)?,
+                "encrypted_file_key": row.get::<_, String>(7)?,
+                "file_key_nonce": row.get::<_, String>(8)?,
+                "content_hash": row.get::<_, String>(9)?,
+                "created_at": row.get::<_, String>(10)?,
+            }))
+        }).map_err(|e| e.to_string())?;
+        let mut result = Vec::new();
+        for row in rows { result.push(row.map_err(|e| e.to_string())?); }
+        Ok(result)
+    }
+
+    /// Download a vault file (encrypted data blob).
+    pub fn vault_get_file(&self, user_id: &str, file_id: &str) -> Result<Option<(Vec<u8>, String, String)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT encrypted_data, encrypted_mime_type, mime_type_nonce FROM user_vault_files WHERE user_id = ?1 AND id = ?2"
+        ).map_err(|e| e.to_string())?;
+        let mut rows = stmt.query_map(rusqlite::params![user_id, file_id], |row| {
+            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        }).map_err(|e| e.to_string())?;
+        match rows.next() {
+            Some(r) => Ok(Some(r.map_err(|e| e.to_string())?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Delete a vault file.
+    pub fn vault_delete_file(&self, user_id: &str, file_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM user_vault_files WHERE user_id = ?1 AND id = ?2",
+            rusqlite::params![user_id, file_id],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Get total stored size for a user's vault.
+    pub fn vault_total_size(&self, user_id: &str) -> Result<i64, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let result: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(stored_size), 0) FROM user_vault_files WHERE user_id = ?1",
+            rusqlite::params![user_id],
+            |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        Ok(result)
+    }
+
+    /// Delete all vault files for a user (account deletion).
+    pub fn vault_delete_all_for_user(&self, user_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM user_vault_files WHERE user_id = ?1",
+            rusqlite::params![user_id],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+
+    // --- F3-14: Self-Destructing Accounts (per-user setting) ---
+
+    /// Update the last_active_at timestamp for a user.
+    pub fn touch_last_active(&self, user_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE users SET last_active_at = datetime('now') WHERE id = ?1",
+            rusqlite::params![user_id],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Get users with self-destruct enabled who have been inactive past their threshold.
+    pub fn get_inactive_users_for_deletion(&self) -> Result<Vec<String>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT id FROM users WHERE self_destruct_days > 0 AND last_active_at IS NOT NULL AND last_active_at < datetime('now', '-' || self_destruct_days || ' days')"
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |row| {
+            row.get::<_, String>(0)
+        }).map_err(|e| e.to_string())?;
+        let mut result = Vec::new();
+        for row in rows { result.push(row.map_err(|e| e.to_string())?); }
+        Ok(result)
+    }
+
+    /// Get the self-destruct setting for a user.
+    pub fn get_self_destruct_days(&self, user_id: &str) -> Result<i64, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let result: i64 = conn.query_row(
+            "SELECT COALESCE(self_destruct_days, 0) FROM users WHERE id = ?1",
+            rusqlite::params![user_id],
+            |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        Ok(result)
+    }
+
+    /// Set the self-destruct setting for a user.
+    pub fn set_self_destruct_days(&self, user_id: &str, days: i64) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE users SET self_destruct_days = ?1 WHERE id = ?2",
+            rusqlite::params![days, user_id],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Delete a user and all related data (reuses the full delete_user cleanup).
+    /// Returns file IDs for the caller to clean up on-disk chunks.
+    pub fn self_destruct_user(&self, user_id: &str) -> Result<Vec<String>, String> {
+        // Delegate to the comprehensive delete_user which handles all tables,
+        // including vault files, reactions, voice state, DMs, servers, etc.
+        self.delete_user(user_id)
+    }
 }

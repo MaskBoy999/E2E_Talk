@@ -5380,3 +5380,116 @@ Message attachment keys travel *inside* the E2E-encrypted message content (serve
 **Files created**: `static/doc-preview.js`, `static/libs/pdf.min.js`, `static/libs/pdf.worker.min.js`, `static/libs/jszip.min.js`, `static/libs/docx-preview.min.js`, `static/libs/xlsx.full.min.js`, `static/libs/papaparse.min.js`, `static/libs/pdf-lib.min.js`
 **Files modified**: `static/chat.js`, `static/index.html`, `static/style.css`, `server/src/main.rs` (CSP update)
 **Tests**: `tests/doc-preview.spec.ts` — 13 tests covering module loading, file type detection, CSV/ZIP/PDF/XLSX/PPTX preview rendering, modal open/close (Escape + backdrop), file card HTML generation, PDF editor tool panel, PDF rotate/delete operations
+
+### 68. T2-10: Keyboard-Driven Navigation (Slack/vim-style)
+
+Added comprehensive keyboard shortcuts to the existing shortcut customization system:
+
+**New shortcuts (all remappable in Settings → Shortcuts):**
+- **Ctrl+Shift+↑/↓** — Navigate to previous/next channel in the sidebar
+- **Ctrl+Shift+←/→** — Navigate to previous/next server
+- **/** (slash) — Focus the message composer
+- **R** — Reply to the last message (opens reply bar)
+- **E** — Edit your own last message
+- **U** — Open upload/attach menu
+- **Shift+E** — Toggle emoji picker
+- **Ctrl+Shift+N** — Create/Join server
+
+**Architecture:** Extended `DEFAULT_SHORTCUTS` map in `thread_categories_shortcuts.js` with new actions. The global keydown handler now supports single-key shortcuts (no Ctrl/Shift required) when not in an input field. Added `navigateChannelNav()`, `navigateServerNav()`, `editOwnLastMessage()`, `replyToLastMessage()`, and `showReplyBar()` helper functions.
+
+### 69. T1-4: Scheduled Messages
+
+Users can now schedule messages to be sent automatically at a future time.
+
+**Features:**
+- **Plus button → Schedule Message** — Opens a modal with text input, date/time pickers
+- **Auto-send** — A 1-second scheduler checks for due messages and sends them via the existing WS pipeline
+- **Persistent** — Scheduled messages survive page refreshes (stored in localStorage)
+- **Cancel** — View and cancel pending scheduled messages in the modal
+- **Client-side only** — Messages are sent at the scheduled time through the normal message flow
+
+**Files modified:** `static/index.html` (modal HTML), `static/chat.js` (scheduler logic + UI wiring)
+
+### 70. T1-5: Rich Link Previews (OG Metadata)
+
+Messages containing URLs now show rich embed cards with title, description, image, and domain.
+
+**Architecture:**
+- **Server proxy** (`GET /api/link-preview?url=<url>`) — Fetches the target URL server-side, extracts Open Graph metadata (`og:title`, `og:description`, `og:image`, `og:site_name`), returns JSON. Uses `reqwest` with 5s timeout and 100KB body limit to prevent abuse.
+- **Client detection** — `extractUrls()` scans decrypted message text for HTTP/HTTPS URLs, deduplicates them, and skips media file extensions
+- **Embed cards** — `buildLinkPreviewHtml()` renders responsive cards with image thumbnail, title, description (2-line clamp), and domain label
+- **Async loading** — Previews are fetched lazily after message render, cached in memory, limited to 3 URLs per message
+
+**Files modified:** `server/src/handlers.rs` (link_preview handler), `server/src/main.rs` (route), `server/Cargo.toml` (reqwest + url deps), `static/chat.js` (client-side preview logic)
+
+### 71. T1-2: Screen Share Annotation System
+
+Participants can now draw on top of remote screen shares in real-time.
+
+**Features:**
+- **Canvas overlay** — Transparent drawing canvas positioned over each remote screen share video tile
+- **Pen tool** — Freehand drawing with customizable color and size
+- **Eraser tool** — Erase annotations by drawing over them
+- **Real-time broadcast** — Drawing strokes are broadcast via WebSocket to all voice room participants
+- **Point downsampling** — Strokes are downsampled to 50 points max for bandwidth efficiency
+- **Sharer controls** — Screen sharer can disable annotation for specific users
+- **Resize handling** — Canvas auto-resizes with video via ResizeObserver
+
+**Files created:** `static/annotation.js` — Dedicated module with `ScreenAnnotation` API
+**Files modified:** `static/index.html` (script include)
+
+### 72. T3-15: Encrypted File Vault
+
+Users now have a personal encrypted file vault for storing files across devices.
+
+**Architecture:**
+- **DB schema** (`069_file_vault.sql`) — `user_vault_files` table with encrypted data, filename, mime type, file key, content hash
+- **API endpoints:**
+  - `POST /api/vault/upload` — Store encrypted file blob (size-checked against quota)
+  - `GET /api/vault/files` — List vault files with total size + max quota
+  - `GET /api/vault/files/:id` — Download encrypted file blob
+  - `DELETE /api/vault/files/:id` — Delete vault file
+- **Size enforcement** — Uses existing `file_storage_quota_bytes` runtime tuning
+- **Account deletion** — Vault files cascade-deleted when user is deleted
+- **DB functions** — `vault_store_file`, `vault_list_files`, `vault_get_file`, `vault_delete_file`, `vault_total_size`, `vault_delete_all_for_user`
+
+### 73. T3-14: Self-Destructing Accounts (User-Controlled)
+
+Accounts can now auto-delete after a configurable period of inactivity. This is a per-user setting in Settings → Security, just like the kill switch.
+
+**Architecture:**
+- **DB schema** (`070_self_destruct.sql`) — Adds `self_destruct_days` and `last_active_at` columns to users table
+- **Background task** — Hourly sweep queries users where `self_destruct_days > 0` AND `last_active_at < now - threshold`
+- **DB functions** — `touch_last_active()`, `get_inactive_users_for_deletion()`, `set_self_destruct_days()`, `get_self_destruct_days()`, `self_destruct_user()`
+- **API endpoints** — `GET /api/me/self-destruct` (read setting), `PUT /api/me/self-destruct` (set 0-365 days)
+- **Activity tracking** — `touch_last_active()` called on every WebSocket connection
+- **Off by default** — User toggles in Security settings: Off / 30d / 60d / 90d / 6mo / 1yr
+- **Cascade cleanup** — Deletes vault files + user (triggers all FK cascades)
+
+### 74. T4-19: Data Portability
+
+Users can export all their data as a single JSON bundle.
+
+**Endpoint:** `GET /api/me/export` — Returns encrypted JSON with:
+- User profile info
+- Vault file metadata
+- Server memberships
+- DM conversation count
+- Friend count
+
+**Files modified:** `server/src/handlers.rs` (export_user_data handler), `server/src/main.rs` (route)
+
+### 75. T5-29/30: PWA (Progressive Web App)
+
+The app is now installable as a Progressive Web App with offline caching and push notification support.
+
+**Features:**
+- **Web App Manifest** (`static/manifest.json`) — Enables "Add to Home Screen" on mobile and desktop
+- **Service Worker** (`static/sw.js`) — Cache-first for static assets, network-only for API calls (never caches encrypted data)
+- **Offline Support** — Static assets cached for offline use; API calls return 503 when offline
+- **Background Sync** — Offline message queue stored in localStorage, flushed when WebSocket reconnects
+- **Push Notifications** — Service worker handles push events, shows notifications with tap-to-navigate
+- **Install Prompt** — Meta tags for iOS/Android home screen add (`apple-mobile-web-app-capable`, `theme-color`)
+
+**Files created:** `static/manifest.json`, `static/sw.js`, `static/icons/icon-192.svg`
+**Files modified:** `static/index.html` (meta tags, SW registration), `static/chat.js` (offline queue + push helpers)
