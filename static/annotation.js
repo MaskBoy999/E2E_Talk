@@ -33,10 +33,16 @@
         setColor: function (c) { _annotationColor = c; },
         setSize: function (s) { _annotationSize = s; },
         setTool: function (t) { _annotationTool = t; },
+        getTool: function () { return _annotationTool; },
+        getColor: function () { return _annotationColor; },
+        getSize: function () { return _annotationSize; },
         renderOverlay: renderOverlayForVideo,
         sendAnnotation: sendAnnotationData,
         handleAnnotation: handleAnnotationData,
         handleClear: handleClearData,
+        handleDisabled: handleDisabledData,
+        sendDisable: sendDisableData,
+        cleanup: cleanup,
     };
 
     function init() {
@@ -60,6 +66,30 @@
         return _annotationEnabled;
     }
 
+    // Full cleanup: disable mode, clear all annotations, remove all overlays.
+    // Called on fullscreen exit, screenshare unload, or annotation close.
+    function cleanup() {
+        if (_annotationPenActive && _currentPath) {
+            _annotationPenActive = false;
+            _currentPath = null;
+        }
+        if (_annotationEnabled) {
+            _annotationEnabled = false;
+            clearAll();
+        }
+        Object.keys(_annotationCanvases).forEach(function (uid) {
+            removeOverlayForUid(uid);
+        });
+        _annotationTool = 'pen';
+        _annotationColor = '#ff0000';
+        _annotationSize = 3;
+        // Remove any toolbar the voice.js may have injected
+        var tb = document.querySelector('.annotation-toolbar');
+        if (tb) tb.remove();
+        var ab = document.querySelector('.annotation-activate-btn');
+        if (ab) ab.remove();
+    }
+
     // Render (or update) the annotation canvas overlay on top of a screen video
     function renderOverlayForVideo(video, uid) {
         if (!video || !uid) return;
@@ -75,30 +105,32 @@
             return;
         }
 
-        var container = video.parentElement;
-        if (!container) return;
-
-        // Ensure container is positioned
-        var pos = window.getComputedStyle(container);
-        if (pos.position === 'static') container.style.position = 'relative';
-
-        // Create or reuse canvas
+        // Create or reuse canvas — always append to document.body with
+        // position:fixed so it paints ABOVE the fullscreen flex wrapper
+        // (flex children with transforms create stacking contexts that
+        // defeat z-index on sibling absolute elements).
         var canvas = _annotationCanvases[uid];
         if (!canvas) {
             canvas = document.createElement('canvas');
             canvas.className = 'annotation-overlay';
-            canvas.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;z-index:10;cursor:crosshair;pointer-events:none;';
             canvas.dataset.uid = uid;
-            container.appendChild(canvas);
+            // Fixed overlay covers the whole viewport; z-index above everything
+            canvas.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:999999;cursor:crosshair;pointer-events:auto;display:block;';
+            document.body.appendChild(canvas);
             _annotationCanvases[uid] = canvas;
             _annotationOverlay[uid] = { canvas: canvas, ctx: canvas.getContext('2d'), paths: [] };
         }
 
-        // Size the canvas to match the video
+        // Size the canvas pixel buffer to match the video display area
         function resizeCanvas() {
             if (!canvas || !video) return;
-            canvas.width = video.clientWidth || video.videoWidth || 640;
-            canvas.height = video.clientHeight || video.videoHeight || 360;
+            var w = video.clientWidth || video.videoWidth || window.innerWidth || 640;
+            var h = video.clientHeight || video.videoHeight || window.innerHeight || 360;
+            // Only resize (which clears the buffer) when dimensions actually change
+            if (w > 0 && h > 0 && (canvas.width !== w || canvas.height !== h)) {
+                canvas.width = w;
+                canvas.height = h;
+            }
             redrawCanvas(uid);
         }
         resizeCanvas();
@@ -108,17 +140,32 @@
             canvas._resizeObs.observe(video);
         }
 
-        // Enable pointer events and draw handlers only for the active annotator
-        if (_annotationEnabled) {
-            canvas.style.pointerEvents = 'auto';
-            _setupDrawHandlers(canvas, uid);
+        // Position the canvas to exactly overlay the video element
+        function positionCanvas() {
+            if (!canvas || !video) return;
+            var r = video.getBoundingClientRect();
+            canvas.style.position = 'fixed';
+            canvas.style.left = r.left + 'px';
+            canvas.style.top = r.top + 'px';
+            canvas.style.width = r.width + 'px';
+            canvas.style.height = r.height + 'px';
         }
+        positionCanvas();
+        if (window.ResizeObserver && !canvas._posObs) {
+            canvas._posObs = new ResizeObserver(positionCanvas);
+            canvas._posObs.observe(video);
+        }
+
+        // Enable pointer events and draw handlers
+        canvas.style.pointerEvents = 'auto';
+        _setupDrawHandlers(canvas, uid);
     }
 
     function removeOverlayForUid(uid) {
         var canvas = _annotationCanvases[uid];
         if (canvas) {
             if (canvas._resizeObs) canvas._resizeObs.disconnect();
+            if (canvas._posObs) canvas._posObs.disconnect();
             canvas.remove();
             delete _annotationCanvases[uid];
             delete _annotationOverlay[uid];
@@ -138,8 +185,17 @@
 
         canvas.addEventListener('mousedown', function (e) {
             if (!_annotationEnabled) return;
+            // Temporarily hide canvas to find what's underneath
+            canvas.style.pointerEvents = 'none';
+            var underEl = document.elementFromPoint(e.clientX, e.clientY);
+            canvas.style.pointerEvents = 'auto';
+            // If click is on toolbar / activate button, let it through
+            if (underEl && underEl.closest && (underEl.closest('.annotation-toolbar') || underEl.closest('.annotation-activate-btn'))) {
+                return;
+            }
             e.preventDefault();
             e.stopPropagation();
+            e.stopImmediatePropagation();
             _annotationPenActive = true;
             var pos = getPos(e);
             _currentPath = {
@@ -190,6 +246,9 @@
 
         canvas.addEventListener('mouseup', function (e) {
             if (!_annotationPenActive || !_currentPath) return;
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
             _annotationPenActive = false;
             // Store the path
             var overlay = _annotationOverlay[uid];
@@ -197,6 +256,21 @@
             // Broadcast to other participants
             sendAnnotationData(uid, _currentPath);
             _currentPath = null;
+        });
+
+        // Also block click so the video's click→fullscreen toggle doesn't fire
+        canvas.addEventListener('click', function (e) {
+            if (!_annotationEnabled) return;
+            // Let toolbar clicks through
+            canvas.style.pointerEvents = 'none';
+            var underEl = document.elementFromPoint(e.clientX, e.clientY);
+            canvas.style.pointerEvents = 'auto';
+            if (underEl && underEl.closest && (underEl.closest('.annotation-toolbar') || underEl.closest('.annotation-activate-btn'))) {
+                return;
+            }
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
         });
 
         canvas.addEventListener('mouseleave', function (e) {
@@ -270,10 +344,15 @@
         // Broadcast clear
         if (typeof ws !== 'undefined' && ws && ws.readyState === WebSocket.OPEN) {
             try {
-                ws.send(JSON.stringify({
+                var msg = {
                     type: 'voice_annotation_clear',
                     target_uid: uid,
-                }));
+                };
+                var room = _getRoomContext();
+                if (room.room_type) msg.room_type = room.room_type;
+                if (room.channel_id) msg.channel_id = room.channel_id;
+                if (room.dm_channel_id) msg.dm_channel_id = room.dm_channel_id;
+                ws.send(JSON.stringify(msg));
             } catch (_) {}
         }
     }
@@ -283,6 +362,15 @@
         Object.keys(_annotationOverlay).forEach(function (uid) {
             clearCanvas(uid);
         });
+    }
+
+    // Get room context from VoiceManager for annotation messages
+    function _getRoomContext() {
+        var ctx = {};
+        if (typeof VoiceManager !== 'undefined' && VoiceManager.getRoomContext) {
+            ctx = VoiceManager.getRoomContext() || {};
+        }
+        return ctx;
     }
 
     // Send annotation data over voice WebSocket
@@ -298,7 +386,7 @@
                 if (tmp[tmp.length - 1] !== sampled[sampled.length - 1]) tmp.push(sampled[sampled.length - 1]);
                 sampled = tmp;
             }
-            ws.send(JSON.stringify({
+            var msg = {
                 type: 'voice_annotation',
                 target_uid: targetUid,
                 path: {
@@ -307,7 +395,12 @@
                     size: path.size,
                     tool: path.tool,
                 },
-            }));
+            };
+            var room = _getRoomContext();
+            if (room.room_type) msg.room_type = room.room_type;
+            if (room.channel_id) msg.channel_id = room.channel_id;
+            if (room.dm_channel_id) msg.dm_channel_id = room.dm_channel_id;
+            ws.send(JSON.stringify(msg));
         } catch (_) {}
     }
 
@@ -341,6 +434,37 @@
             var canvas = overlay.canvas;
             overlay.ctx.clearRect(0, 0, canvas.width, canvas.height);
         }
+    }
+
+    // Handle annotation disabled/enabled notification from sharer
+    function handleDisabledData(data) {
+        var sharerUid = data.sharer_uid;
+        var disabled = data.disabled;
+        if (!sharerUid) return;
+        _annotationDisableMap[sharerUid] = !!disabled;
+        if (disabled) {
+            // Remove overlay for this sharer's screen
+            removeOverlayForUid(sharerUid);
+            // Show toast
+            if (typeof showToast === 'function') showToast('Annotation disabled by screen sharer');
+        }
+    }
+
+    // Send annotation disable/enable to a specific user (sharer only)
+    function sendDisableData(targetUserId, disabled) {
+        if (typeof ws === 'undefined' || !ws || ws.readyState !== WebSocket.OPEN) return;
+        try {
+            var msg = {
+                type: 'voice_annotation_disable',
+                target_user_id: targetUserId,
+                disabled: !!disabled,
+            };
+            var room = _getRoomContext();
+            if (room.room_type) msg.room_type = room.room_type;
+            if (room.channel_id) msg.channel_id = room.channel_id;
+            if (room.dm_channel_id) msg.dm_channel_id = room.dm_channel_id;
+            ws.send(JSON.stringify(msg));
+        } catch (_) {}
     }
 
     // Helper: getSelfId (borrow from voice.js scope if available)

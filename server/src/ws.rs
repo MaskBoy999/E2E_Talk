@@ -1830,6 +1830,15 @@ async fn handle_ws_message(
         "voice_control" => {
             handle_voice_control(parsed, state, user_id).await;
         }
+        "voice_annotation" => {
+            handle_voice_annotation(parsed, state, user_id).await;
+        }
+        "voice_annotation_clear" => {
+            handle_voice_annotation_clear(parsed, state, user_id).await;
+        }
+        "voice_annotation_disable" => {
+            handle_voice_annotation_disable(parsed, state, user_id).await;
+        }
         "dm_call_ring" => {
             handle_dm_call_ring(parsed, state, user_id).await;
         }
@@ -2596,6 +2605,87 @@ async fn handle_voice_control(
     if !server_id.is_empty() {
         voice_broadcast_server_presence(state, &server_id).await;
     }
+}
+
+/// Relay annotation drawing data to all room members.
+async fn handle_voice_annotation(
+    parsed: serde_json::Value,
+    state: &Arc<AppState>,
+    user_id: &str,
+) {
+    let room_type = parsed.get("room_type").and_then(|t| t.as_str()).unwrap_or("server");
+    let channel_id = parsed.get("channel_id").and_then(|c| c.as_str()).unwrap_or("");
+    let dm_channel_id = parsed.get("dm_channel_id").and_then(|c| c.as_str()).unwrap_or("");
+    let room_id = voice_room_id(room_type, channel_id, dm_channel_id);
+
+    // Relay to all room members (including sender for simplicity)
+    let relay = serde_json::json!({
+        "type": "voice_annotation",
+        "sender_uid": user_id,
+        "target_uid": parsed.get("target_uid").and_then(|t| t.as_str()).unwrap_or(""),
+        "path": parsed.get("path"),
+    });
+    voice_broadcast(state, &room_id, &relay).await;
+}
+
+/// Relay annotation clear to all room members.
+async fn handle_voice_annotation_clear(
+    parsed: serde_json::Value,
+    state: &Arc<AppState>,
+    user_id: &str,
+) {
+    let room_type = parsed.get("room_type").and_then(|t| t.as_str()).unwrap_or("server");
+    let channel_id = parsed.get("channel_id").and_then(|c| c.as_str()).unwrap_or("");
+    let dm_channel_id = parsed.get("dm_channel_id").and_then(|c| c.as_str()).unwrap_or("");
+    let room_id = voice_room_id(room_type, channel_id, dm_channel_id);
+
+    let relay = serde_json::json!({
+        "type": "voice_annotation_clear",
+        "sender_uid": user_id,
+        "target_uid": parsed.get("target_uid").and_then(|t| t.as_str()).unwrap_or(""),
+    });
+    voice_broadcast(state, &room_id, &relay).await;
+}
+
+/// Screen sharer disables annotation for a specific user.
+/// Only the user who is sharing their screen can do this.
+async fn handle_voice_annotation_disable(
+    parsed: serde_json::Value,
+    state: &Arc<AppState>,
+    user_id: &str,
+) {
+    let target_user_id = match parsed.get("target_user_id").and_then(|t| t.as_str()) {
+        Some(t) => t.to_string(),
+        None => return,
+    };
+    let disabled = parsed.get("disabled").and_then(|d| d.as_bool()).unwrap_or(true);
+    let room_type = parsed.get("room_type").and_then(|t| t.as_str()).unwrap_or("server");
+    let channel_id = parsed.get("channel_id").and_then(|c| c.as_str()).unwrap_or("");
+    let dm_channel_id = parsed.get("dm_channel_id").and_then(|c| c.as_str()).unwrap_or("");
+    let room_id = voice_room_id(room_type, channel_id, dm_channel_id);
+
+    // Verify the sender is sharing their screen
+    let sender_is_sharer = {
+        let rooms = match state.voice_rooms.read() {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        match rooms.get(&room_id) {
+            Some(r) => r.members.get(user_id).map(|m| m.screen).unwrap_or(false),
+            None => false,
+        }
+    };
+    if !sender_is_sharer {
+        return;
+    }
+
+    // Send disable notification to the target user
+    let msg = serde_json::json!({
+        "type": "voice_annotation_disabled",
+        "sharer_uid": user_id,
+        "disabled": disabled,
+    });
+    send_to_user(state, &target_user_id, &msg).await;
 }
 
 async fn handle_dm_call_ring(
