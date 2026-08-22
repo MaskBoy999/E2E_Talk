@@ -17,7 +17,6 @@ const STATIC_ASSETS = [
     '/voice.js',
     '/crypto.js',
     '/secure-storage.js',
-    '/annotation.js',
     '/doc-preview.js',
     '/thread_categories_shortcuts.js',
     '/manifest.json',

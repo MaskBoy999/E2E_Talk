@@ -937,10 +937,6 @@
         clearRingTimer();
         clearCalleeRingTimer();
         stopRingtone();
-        // Clean up any active screen annotation overlays
-        if (window.ScreenAnnotation && ScreenAnnotation.cleanup) {
-            ScreenAnnotation.cleanup();
-        }
         var prevDmChannelId = S.dmChannelId;
         // Manual video-load state is per-call: every join starts with feeds
         // unloaded (each feed loads individually when the viewer clicks it).
@@ -2726,21 +2722,6 @@
             case 'voice_control_received':
                 handleControlReceived(data);
                 break;
-            case 'voice_annotation':
-                if (window.ScreenAnnotation && ScreenAnnotation.handleAnnotation) {
-                    ScreenAnnotation.handleAnnotation(data);
-                }
-                break;
-            case 'voice_annotation_clear':
-                if (window.ScreenAnnotation && ScreenAnnotation.handleClear) {
-                    ScreenAnnotation.handleClear(data);
-                }
-                break;
-            case 'voice_annotation_disabled':
-                if (window.ScreenAnnotation && ScreenAnnotation.handleDisabled) {
-                    ScreenAnnotation.handleDisabled(data);
-                }
-                break;
             case 'dm_call_ring':
                 handleDmCallRing(data);
                 break;
@@ -3007,12 +2988,6 @@
             updateSelfUI();
         }
         if (mediaChanged) {
-            // If a remote member turned their screen OFF, clean up annotations.
-            if (!isSelf && prev && prev.screen && !member.screen) {
-                if (window.ScreenAnnotation && ScreenAnnotation.cleanup) {
-                    ScreenAnnotation.cleanup();
-                }
-            }
             // The state broadcast may have arrived AFTER the video tracks
             // (their classification raced) — put every stream in the correct
             // slot before re-rendering.
@@ -5173,10 +5148,6 @@
     // manual-load feature) resumes both directions.
     function unloadFeed(uid, kind) {
         markFeedUnloaded(uid, kind);
-        // If a screen feed is being unloaded, clean up any annotations on it.
-        if (kind === 'screen' && window.ScreenAnnotation && ScreenAnnotation.cleanup) {
-            ScreenAnnotation.cleanup();
-        }
         var v = document.querySelector('.remote-video-tile[data-uid="' + uid + '"][data-kind="' + kind + '"]');
         if (v) { try { v.srcObject = null; } catch (_) {} }
         applyFeedPlaceholders();
@@ -6197,31 +6168,6 @@
             menu.appendChild(row3);
         }
 
-        // Screen sharer controls — the person sharing their screen can
-        // disable annotation for any other member in the room.
-        if (!isSelf && uid !== selfId && S.roomType === 'server') {
-            var selfMember = S.members[selfId];
-            if (selfMember && selfMember.screen) {
-                var isDisabled = window.ScreenAnnotation && ScreenAnnotation.isDisabledFor(uid);
-                var annBtn = document.createElement('button');
-                annBtn.className = 'volume-menu-btn';
-                annBtn.textContent = isDisabled ? '✏️ Enable Annotation' : '🚫 Disable Annotation';
-                annBtn.addEventListener('click', function () {
-                    var nowDisabled = !isDisabled;
-                    if (window.ScreenAnnotation) {
-                        if (ScreenAnnotation.setDisabledFor) {
-                            ScreenAnnotation.setDisabledFor(uid, nowDisabled);
-                        }
-                        if (ScreenAnnotation.sendDisable) {
-                            ScreenAnnotation.sendDisable(uid, nowDisabled);
-                        }
-                    }
-                    closeVolumeMenu();
-                });
-                menu.appendChild(annBtn);
-            }
-        }
-
         menu.style.display = 'block';
         var x = Math.min(e.clientX, window.innerWidth - 220);
         var y = Math.min(e.clientY, window.innerHeight - 260);
@@ -7218,10 +7164,6 @@
         var activeWrap = el.closest ? el.closest('.voice-fs-wrap') : null;
         if (activeWrap) {
             // Already fullscreened — restore the tile to its original slot.
-            // Clean up annotations first if active.
-            if (window.ScreenAnnotation && ScreenAnnotation.cleanup) {
-                ScreenAnnotation.cleanup();
-            }
             restoreFromFsWrap(activeWrap, el);
             if (document.fullscreenElement) {
                 document.exitFullscreen().catch(function () {});
@@ -7247,58 +7189,11 @@
         if (el.dataset) applyTileTransform(el, el.dataset.uid, el.dataset.kind);
         // Move the "Reset view" hint chip into the fullscreen wrap with the tile.
         if (el.dataset) syncResetViewChips(el.dataset.uid, el.dataset.kind);
-        // For screen-share tiles: show an "Annotate" button in the fullscreen view.
-        if (el.dataset && el.dataset.kind === 'screen' && el.dataset.self !== '1') {
-            _injectAnnotateButton(wrap, el.dataset.uid);
-            // Intercept clicks on the fullscreen wrap while annotation is active
-            // so the video's click→fullscreen-toggle handler doesn't fire.
-            var _annClickGuard = function (e) {
-                if (window.ScreenAnnotation && ScreenAnnotation.isActive && ScreenAnnotation.isActive()) {
-                    // Don't block clicks on annotation UI elements
-                    var t = e.target;
-                    if (t && t.closest && (t.closest('.annotation-toolbar') || t.closest('.annotation-activate-btn') || t.closest('.annotation-overlay'))) {
-                        return;
-                    }
-                    e.stopPropagation();
-                    e.stopImmediatePropagation();
-                }
-            };
-            wrap.addEventListener('click', _annClickGuard, true);
-            // Also block mousedown/mouseup on the VIDEO element itself so the
-            // click→fullscreen-toggle never fires while annotating.
-            var _annMouseDownGuard = function (e) {
-                if (window.ScreenAnnotation && ScreenAnnotation.isActive && ScreenAnnotation.isActive()) {
-                    var t = e.target;
-                    if (t && t.closest && (t.closest('.annotation-toolbar') || t.closest('.annotation-activate-btn') || t.closest('.annotation-overlay'))) {
-                        return;
-                    }
-                    e.stopPropagation();
-                }
-            };
-            el.addEventListener('mousedown', _annMouseDownGuard, true);
-            el.addEventListener('mouseup', _annMouseDownGuard, true);
-            wrap._annMouseDownGuard = _annMouseDownGuard;
-            wrap._annClickGuard = _annClickGuard;
-        }
         var restored = false;
         var restore = function () {
             if (restored) return;
             restored = true;
             document.removeEventListener('fullscreenchange', handler);
-            // Remove click/mousedown guards so they don't leak
-            if (wrap._annClickGuard) {
-                wrap.removeEventListener('click', wrap._annClickGuard, true);
-                wrap._annClickGuard = null;
-            }
-            if (wrap._annMouseDownGuard) {
-                el.removeEventListener('mousedown', wrap._annMouseDownGuard, true);
-                el.removeEventListener('mouseup', wrap._annMouseDownGuard, true);
-                wrap._annMouseDownGuard = null;
-            }
-            // Clean up annotations on fullscreen exit
-            if (window.ScreenAnnotation && ScreenAnnotation.cleanup) {
-                ScreenAnnotation.cleanup();
-            }
             if (el.parentNode === wrap) {
                 moveTileBack(el);
             }
@@ -7327,144 +7222,6 @@
         });
     }
 
-    // ── Annotation toolbar for fullscreen screenshare ──────────────────
-
-    // Inject an "Annotate" button into a fullscreen screenshare wrapper.
-    function _injectAnnotateButton(wrap, uid) {
-        var btn = document.createElement('button');
-        btn.className = 'annotation-activate-btn';
-        btn.textContent = '✏️ Annotate';
-        btn.title = 'Draw on this screen share';
-        btn.addEventListener('click', function (e) {
-            e.stopPropagation();
-            var active = false;
-            if (window.ScreenAnnotation) {
-                active = ScreenAnnotation.toggleAnnotationMode();
-            }
-            btn.classList.toggle('active', !!active);
-            if (active) {
-                _showAnnotationToolbar(wrap, uid);
-            } else {
-                var tb = wrap.querySelector('.annotation-toolbar');
-                if (tb) tb.remove();
-            }
-        });
-        wrap.appendChild(btn);
-    }
-
-    // Show the annotation toolbar (pen / eraser / size / colors / clear / close).
-    function _showAnnotationToolbar(wrap, uid) {
-        // Remove any existing toolbar first
-        var old = wrap.querySelector('.annotation-toolbar');
-        if (old) old.remove();
-
-        var tb = document.createElement('div');
-        tb.className = 'annotation-toolbar';
-        // Stop clicks inside the toolbar from propagating to the wrap
-        tb.addEventListener('click', function (e) { e.stopPropagation(); });
-        tb.addEventListener('mousedown', function (e) { e.stopPropagation(); });
-        tb.addEventListener('mouseup', function (e) { e.stopPropagation(); });
-
-        // ── Pen button ──
-        var penBtn = document.createElement('button');
-        penBtn.className = 'ann-tool-btn active';
-        penBtn.textContent = '\u270f\ufe0f';
-        penBtn.title = 'Pen';
-        penBtn.addEventListener('click', function (e) {
-            e.stopPropagation();
-            if (window.ScreenAnnotation) ScreenAnnotation.setTool('pen');
-            tb.querySelectorAll('.ann-tool-btn').forEach(function (b) { b.classList.remove('active'); });
-            penBtn.classList.add('active');
-        });
-        tb.appendChild(penBtn);
-
-        // ── Eraser button ──
-        var eraserBtn = document.createElement('button');
-        eraserBtn.className = 'ann-tool-btn';
-        eraserBtn.textContent = '\uD83E\uDDF9';
-        eraserBtn.title = 'Eraser';
-        eraserBtn.addEventListener('click', function (e) {
-            e.stopPropagation();
-            if (window.ScreenAnnotation) ScreenAnnotation.setTool('eraser');
-            tb.querySelectorAll('.ann-tool-btn').forEach(function (b) { b.classList.remove('active'); });
-            eraserBtn.classList.add('active');
-        });
-        tb.appendChild(eraserBtn);
-
-        // ── Size slider (shared for pen & eraser) ──
-        var sizeLabel = document.createElement('span');
-        sizeLabel.className = 'ann-size-label';
-        sizeLabel.textContent = 'Size';
-        sizeLabel.style.cssText = 'color:#ccc;font-size:12px;margin-left:6px;';
-        tb.appendChild(sizeLabel);
-
-        var sizeSlider = document.createElement('input');
-        sizeSlider.type = 'range';
-        sizeSlider.min = '1';
-        sizeSlider.max = '20';
-        sizeSlider.value = String(window.ScreenAnnotation ? ScreenAnnotation.getSize() : 3);
-        sizeSlider.className = 'ann-size-slider';
-        sizeSlider.title = 'Brush / eraser size';
-        sizeSlider.addEventListener('input', function (e) {
-            e.stopPropagation();
-            if (window.ScreenAnnotation) ScreenAnnotation.setSize(parseInt(this.value, 10) || 3);
-        });
-        sizeSlider.addEventListener('click', function (e) { e.stopPropagation(); });
-        sizeSlider.addEventListener('mousedown', function (e) { e.stopPropagation(); });
-        tb.appendChild(sizeSlider);
-
-        // ── Color swatches ──
-        var colors = ['#ff0000', '#00ff00', '#0088ff', '#ffff00', '#ff00ff', '#ffffff'];
-        colors.forEach(function (c) {
-            var swatch = document.createElement('button');
-            swatch.className = 'ann-color-swatch';
-            swatch.style.background = c;
-            swatch.title = c;
-            swatch.addEventListener('click', function (e) {
-                e.stopPropagation();
-                if (window.ScreenAnnotation) {
-                    ScreenAnnotation.setColor(c);
-                    ScreenAnnotation.setTool('pen');
-                }
-                tb.querySelectorAll('.ann-tool-btn').forEach(function (b) { b.classList.remove('active'); });
-                penBtn.classList.add('active');
-                tb.querySelectorAll('.ann-color-swatch').forEach(function (s) { s.classList.remove('active'); });
-                swatch.classList.add('active');
-            });
-            tb.appendChild(swatch);
-        });
-        // Mark the default color as active
-        if (tb.querySelector('.ann-color-swatch')) {
-            tb.querySelector('.ann-color-swatch').classList.add('active');
-        }
-
-        // ── Clear button ──
-        var clearBtn = document.createElement('button');
-        clearBtn.className = 'ann-action-btn';
-        clearBtn.textContent = '\uD83D\uDDD1\uFE0F';
-        clearBtn.title = 'Clear all annotations';
-        clearBtn.addEventListener('click', function (e) {
-            e.stopPropagation();
-            if (window.ScreenAnnotation) ScreenAnnotation.clearAll();
-        });
-        tb.appendChild(clearBtn);
-
-        // ── Close / exit annotation button ──
-        var closeBtn = document.createElement('button');
-        closeBtn.className = 'ann-action-btn ann-close';
-        closeBtn.textContent = '\u2716';
-        closeBtn.title = 'Exit annotation mode';
-        closeBtn.addEventListener('click', function (e) {
-            e.stopPropagation();
-            if (window.ScreenAnnotation) ScreenAnnotation.cleanup();
-            var abtn = wrap.querySelector('.annotation-activate-btn');
-            if (abtn) abtn.classList.remove('active');
-        });
-        tb.appendChild(closeBtn);
-
-        wrap.appendChild(tb);
-    }
-
     // Restore a <video> that lives inside a .voice-fs-wrap back into the
     // member row / tile slot it was lifted from — WITHOUT destroying it. The
     // element is moved out of the wrapper first (removing the wrapper would
@@ -7472,16 +7229,6 @@
     function restoreFromFsWrap(wrap, el) {
         if (el && el.parentNode === wrap) {
             moveTileBack(el);
-        }
-        // Clean up click/mousedown guards
-        if (wrap._annClickGuard) {
-            wrap.removeEventListener('click', wrap._annClickGuard, true);
-            wrap._annClickGuard = null;
-        }
-        if (wrap._annMouseDownGuard) {
-            el.removeEventListener('mousedown', wrap._annMouseDownGuard, true);
-            el.removeEventListener('mouseup', wrap._annMouseDownGuard, true);
-            wrap._annMouseDownGuard = null;
         }
         if (wrap.parentNode) wrap.remove();
         if (el) {
@@ -7640,12 +7387,4 @@
         return S.serverPresence[serverId] || null;
     };
     VoiceManager.refreshChannelChips = updateChannelChips;
-    // Expose room context so annotation.js can include it in messages
-    VoiceManager.getRoomContext = function () {
-        return {
-            room_type: S.roomType || 'server',
-            channel_id: S.channelId || '',
-            dm_channel_id: S.dmChannelId || '',
-        };
-    };
 })();

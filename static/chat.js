@@ -7228,7 +7228,7 @@ document.addEventListener('DOMContentLoaded', () => {
         _scheduledMessages.forEach(function (msg, i) {
             var d = new Date(msg.sendAt);
             var ts = d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-            var ch = msg.channelId ? 'Channel' : 'DM';
+            var ch = msg.channelId ? 'Channel' : (msg.dmOtherUsername ? 'DM → ' + msg.dmOtherUsername : 'DM');
             html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 8px;background:var(--bg-secondary,#1a1a2e);border-radius:6px;margin-bottom:4px;font-size:12px">' +
                 '<span style="color:var(--text-primary,#e0e0e0);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + ts + ' — ' + ch + ': ' + (msg.text || '').substring(0, 40) + '</span>' +
                 '<button onclick="window._cancelScheduledMsg(' + i + ')" style="background:none;border:none;color:var(--danger,#ed4245);cursor:pointer;font-size:14px;padding:2px 6px">&times;</button>' +
@@ -7261,6 +7261,9 @@ document.addEventListener('DOMContentLoaded', () => {
             channelId: currentChannelId || null,
             serverId: currentServerId || null,
             dmChannelId: currentDmChannelId || null,
+            dmOtherUserId: currentDmOtherUser ? currentDmOtherUser.id : null,
+            dmOtherUsername: currentDmOtherUser ? currentDmOtherUser.username : null,
+            dmOtherUser: currentDmOtherUser || null,
             created: Date.now()
         });
         saveScheduledMessages();
@@ -7273,26 +7276,66 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('schedule-msg-cancel').addEventListener('click', closeScheduleModal);
     loadScheduledMessages();
 
-    // Scheduler tick: check every second and send any due messages
+        // Scheduler tick: check every second and send any due messages
     setInterval(function () {
         var now = Date.now();
-        var changed = false;
         for (var i = _scheduledMessages.length - 1; i >= 0; i--) {
             var msg = _scheduledMessages[i];
             if (new Date(msg.sendAt).getTime() <= now) {
-                // Send the message via the existing send pipeline
-                if (msg.text && ws && ws.readyState === WebSocket.OPEN) {
-                    var body = msg.text;
-                    var payload = { type: 'message', text: body };
-                    if (msg.channelId) payload.channel_id = msg.channelId;
-                    else if (msg.dmChannelId) payload.dm_channel_id = msg.dmChannelId;
-                    try { ws.send(JSON.stringify(payload)); } catch (_) {}
-                }
-                _scheduledMessages.splice(i, 1);
-                changed = true;
+                (function (_msg) {
+                    try {
+                        if (!document.getElementById('message-input') || !_msg.text || !ws || ws.readyState !== WebSocket.OPEN) return;
+                        if (_msg.channelId && _msg.serverId) {
+                            var encKey = E2ECrypto.getServerKey(_msg.serverId);
+                            if (!encKey) return;
+                            var encrypted = E2ECrypto.encryptMessage(_msg.text, encKey);
+                            var payload = {
+                                type: 'message_send',
+                                channel_id: _msg.channelId,
+                                encrypted_content: encrypted.ciphertext,
+                                nonce: encrypted.nonce,
+                                message_nonce: encrypted.messageNonce || null,
+                            };
+                            try {
+                                var _toks = E2ECrypto.searchTokensForText(extractSearchableText(_msg.text), E2ECrypto.getAllServerKeys(_msg.serverId) || []);
+                                if (_toks.length) payload.search_tokens = _toks;
+                            } catch (_) {}
+                            ws.send(JSON.stringify(payload));
+                            var idx = _scheduledMessages.indexOf(_msg);
+                            if (idx !== -1) _scheduledMessages.splice(idx, 1);
+                            saveScheduledMessages();
+                        } else if (_msg.dmChannelId && _msg.dmOtherUserId) {
+                            var kp = E2ECrypto.getIdentityKeyPair();
+                            if (!kp) return;
+                            fetch('/api/identity/' + _msg.dmOtherUserId).then(function (r) { return r.json(); }).then(function (data) {
+                                var otherPub = new Uint8Array(E2ECrypto.base64ToArrayBuffer(data.identity_public_key));
+                                var encrypted = E2ECrypto.encryptDm(_msg.text, _msg.dmChannelId, kp.privateKey, otherPub);
+                                var payload = {
+                                    type: 'dm_send',
+                                    dm_channel_id: _msg.dmChannelId,
+                                    encrypted_content: encrypted.ciphertext,
+                                    nonce: encrypted.nonce,
+                                    message_nonce: encrypted.messageNonce || null,
+                                };
+                                try {
+                                    var _dmk = E2ECrypto.getDmKey(_msg.dmChannelId, kp.privateKey, otherPub);
+                                    if (_dmk) {
+                                        var _dmtoks = E2ECrypto.searchTokensForText(extractSearchableText(_msg.text), [_dmk]);
+                                        if (_dmtoks.length) payload.search_tokens = _dmtoks;
+                                    }
+                                } catch (_) {}
+                                ws.send(JSON.stringify(payload));
+                                var idx = _scheduledMessages.indexOf(_msg);
+                                if (idx !== -1) _scheduledMessages.splice(idx, 1);
+                                saveScheduledMessages();
+                            }).catch(function () {});
+                        }
+                    } catch (e) {
+                        console.error('[Scheduler] send failed:', e);
+                    }
+                })(msg);
             }
         }
-        if (changed) saveScheduledMessages();
     }, 1000);
 
     // Typing indicator: send a throttled `typing` WS message while typing,
