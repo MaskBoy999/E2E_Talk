@@ -2540,7 +2540,8 @@ select.modal-input:focus {
     gap: 8px;
 }
 .vault-file-item:last-child {
-    border-bottom: none;}
+    border-bottom: none;
+}
 .vault-file-info {
     flex: 1;
     min-width: 0;
@@ -2986,6 +2987,227 @@ select.modal-input:focus {
 }
 .device-kick-btn:hover {
     background: rgba(237, 66, 69, 0.12);
+}
+/* ── Schedule Message Modal ─────────────────────────────────────────── */
+#schedule-msg-modal .modal-content {
+    border: 1px solid var(--bg-border);
+    padding: 24px;
+    border-radius: 14px;
+}
+#schedule-msg-modal h3 {
+    font-size: 17px;
+    margin-bottom: 6px;
+}
+#schedule-msg-text {
+    background: var(--bg-secondary);
+    border: 1px solid var(--bg-border);
+    border-radius: 10px;
+    color: var(--text-primary);
+    padding: 12px 14px;
+    font-size: 14px;
+    line-height: 1.5;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+#schedule-msg-text:focus {
+    border-color: var(--accent);
+    outline: none;
+    box-shadow: 0 0 0 3px rgba(88,101,242,0.12);
+}
+#schedule-msg-date, #schedule-msg-time {
+    background: var(--bg-secondary);
+    border: 1px solid var(--bg-border);
+    border-radius: 8px;
+    color: var(--text-primary);
+    padding: 9px 12px;
+    font-size: 13px;
+    transition: border-color 0.2s;
+}
+#schedule-msg-date:focus, #schedule-msg-time:focus {
+    border-color: var(--accent);
+    outline: none;
+}
+
+/* ── Modal scheduled list items ── */
+#schedule-msg-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+#schedule-msg-list .sch-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--bg-border);
+    border-radius: 10px;
+    transition: border-color 0.2s, background 0.2s;
+}
+#schedule-msg-list .sch-item:hover {
+    border-color: var(--accent);
+    background: var(--bg-tertiary, var(--bg-secondary));
+}
+#schedule-msg-list .sch-item .sch-info {
+    flex: 1;
+    overflow: hidden;
+    min-width: 0;
+}
+#schedule-msg-list .sch-item .sch-time {
+    color: var(--accent);
+    font-weight: 600;
+    font-size: 11px;
+}
+#schedule-msg-list .sch-item .sch-dest {
+    color: var(--text-muted);
+    font-size: 11px;
+    margin-left: 6px;
+}
+#schedule-msg-list .sch-item .sch-preview {
+    color: var(--text-primary);
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    margin-top: 2px;
+    opacity: 0.85;
+}
+.sch-cancel-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 15px;
+    padding: 5px 8px;
+    border-radius: 8px;
+    transition: all 0.15s;
+    line-height: 1;
+}
+.sch-cancel-btn:hover {
+    color: var(--danger, #ed4245);
+    background: rgba(237,66,69,0.12);
+}
+.sch-empty {
+    color: var(--text-muted);
+    font-size: 12px;
+    text-align: center;
+    padding: 14px 8px;
+    font-style: italic;
+}
+
+/* ─── User Panel: Scheduled Messages ─────────────────────────────────────────────── */
+.scheduled-list-container {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 320px;
+    overflow-y: auto;
+}
+.sch-empty-state {
+    color: var(--text-muted);
+    font-size: 13px;
+    text-align: center;
+    padding: 20px 12px;
+    opacity: 0.7;
+}
+.scheduled-list-container .sch-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px 14px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--bg-border);
+    border-radius: 10px;
+    transition: border-color 0.2s, background 0.2s;
+}
+.scheduled-list-container .sch-item:hover {
+    border-color: var(--accent);
+    background: var(--bg-tertiary, var(--bg-secondary));
+}
+.scheduled-list-container .sch-item.sch-item-urgent {
+    border-color: rgba(237,66,69,0.4);
+}
+.scheduled-list-container .sch-item.sch-item-urgent .sch-countdown {
+    color: var(--danger, #ed4245);
+}
+.scheduled-list-container .sch-item.sch-item-soon {
+    border-color: rgba(250,166,26,0.35);
+}
+.scheduled-list-container .sch-item.sch-item-soon .sch-countdown {
+    color: #faa61a;
+}
+.sch-item-icon {
+    font-size: 20px;
+    line-height: 1;
+    margin-top: 2px;
+    flex-shrink: 0;
+}
+.scheduled-list-container .sch-info {
+    flex: 1;
+    overflow: hidden;
+    min-width: 0;
+}
+.sch-top-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 3px;
+}
+.scheduled-list-container .sch-time {
+    color: var(--accent);
+    font-weight: 600;
+    font-size: 12px;
+    white-space: nowrap;
+}
+.sch-countdown {
+    color: var(--text-muted);
+    font-size: 11px;
+    white-space: nowrap;
+}
+.scheduled-list-container .sch-dest {
+    color: var(--text-muted);
+    font-size: 11px;
+    margin-bottom: 2px;
+}
+.scheduled-list-container .sch-preview {
+    color: var(--text-primary);
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    opacity: 0.8;
+}
+.sch-actions {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+}
+.sch-action-btn {
+    background: transparent;
+    border: 1px solid var(--bg-border);
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 8px;
+    transition: all 0.15s;
+    white-space: nowrap;
+}
+.sch-action-btn:hover {
+    border-color: var(--accent);
+    color: var(--text-primary);
+    background: rgba(88,101,242,0.08);
+}
+.sch-action-cancel {
+    border-color: rgba(237,66,69,0.3);
+    color: var(--danger, #ed4245);
+}
+.sch-action-cancel:hover {
+    background: rgba(237,66,69,0.1);
+    border-color: rgba(237,66,69,0.5);
+}
+
 }
 
 .identity-key-box {

@@ -3118,6 +3118,7 @@ document.addEventListener('DOMContentLoaded', () => {
         loadFriendRequestsDisabledSetting();
         renderSessionLog();
         renderDevicesPanel();
+        renderSecurityScheduledList();
     });
     document.getElementById('close-settings').addEventListener('click', () => {
         settingsModal.style.display = 'none';
@@ -3681,6 +3682,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (window._stopNotifTrimPreview) window._stopNotifTrimPreview();
             // Fetch backup status when security tab opens.
             if (tab.dataset.tab === 'security-settings') fetchBackupStatus();
+            if (tab.dataset.tab === 'user-settings') renderSecurityScheduledList();
             // F13: Render keyboard shortcut settings when shortcuts tab opens.
             if (tab.dataset.tab === 'shortcut-settings' && typeof renderShortcutSettings === 'function') {
                 var sc = document.getElementById('shortcut-settings-container');
@@ -7229,13 +7231,14 @@ document.addEventListener('DOMContentLoaded', () => {
             var d = new Date(msg.sendAt);
             var ts = d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
             var ch = msg.channelId ? 'Channel' : (msg.dmOtherUsername ? 'DM → ' + msg.dmOtherUsername : 'DM');
-            html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 8px;background:var(--bg-secondary,#1a1a2e);border-radius:6px;margin-bottom:4px;font-size:12px">' +
-                '<span style="color:var(--text-primary,#e0e0e0);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + ts + ' — ' + ch + ': ' + (msg.text || '').substring(0, 40) + '</span>' +
-                '<button onclick="window._cancelScheduledMsg(' + i + ')" style="background:none;border:none;color:var(--danger,#ed4245);cursor:pointer;font-size:14px;padding:2px 6px">&times;</button>' +
+            html += '<div class="sch-item">' +
+                '<div class="sch-info"><span class="sch-time">' + ts + '</span> <span class="sch-dest">' + ch + '</span><div class="sch-preview">' + (msg.text || '').substring(0, 50) + '</div></div>' +
+                '<button class="sch-cancel-btn" onclick="window._cancelScheduledMsg(' + i + ')" title="Cancel">✕</button>' +
                 '</div>';
         });
-        if (!_scheduledMessages.length) html = '<div style="color:var(--text-muted,#888);font-size:12px;text-align:center;padding:8px">No scheduled messages</div>';
+        if (!_scheduledMessages.length) html = '<div class="sch-empty">No scheduled messages</div>';
         list.innerHTML = html;
+        renderSecurityScheduledList();
     }
 
     window._cancelScheduledMsg = function (idx) {
@@ -7243,6 +7246,51 @@ document.addEventListener('DOMContentLoaded', () => {
         saveScheduledMessages();
         renderScheduledList();
     };
+
+    window._delayScheduledMsg = function (idx, minutes) {
+        var msg = _scheduledMessages[idx];
+        if (!msg) return;
+        msg.sendAt = new Date(new Date(msg.sendAt).getTime() + minutes * 60000).toISOString();
+        saveScheduledMessages();
+        renderScheduledList();
+    };
+
+    function renderSecurityScheduledList() {
+        var list = document.getElementById('user-scheduled-list');
+        if (!list) return;
+        // Reload from localStorage in case it was modified externally
+        loadScheduledMessages();
+        if (!_scheduledMessages.length) {
+            list.innerHTML = '<div class="sch-empty-state">\u23F0 No scheduled messages</div>';
+            return;
+        }
+        var html = '';
+        _scheduledMessages.forEach(function (msg, i) {
+            var d = new Date(msg.sendAt);
+            var now = Date.now();
+            var diff = d.getTime() - now;
+            var mins = Math.max(0, Math.round(diff / 60000));
+            var timeLabel = mins < 60 ? mins + 'm' : Math.floor(mins / 60) + 'h ' + (mins % 60) + 'm';
+            var ts = d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+            var ch = msg.channelId ? '\u{1F4AC} Channel' : (msg.dmOtherUsername ? '\u{1F4AC} DM \u2192 ' + msg.dmOtherUsername : '\u{1F4AC} DM');
+            var urgencyClass = diff < 300000 ? ' sch-item-urgent' : diff < 3600000 ? ' sch-item-soon' : '';
+            html += '<div class="sch-item' + urgencyClass + '">' +
+                '<div class="sch-item-icon">\u{1F4DD}</div>' +
+                '<div class="sch-info">' +
+                    '<div class="sch-top-row"><span class="sch-time">' + ts + '</span><span class="sch-countdown">in ' + timeLabel + '</span></div>' +
+                    '<div class="sch-dest">' + ch + '</div>' +
+                    '<div class="sch-preview">\u201C' + (msg.text || '').substring(0, 60) + '\u201D</div>' +
+                '</div>' +
+                '<div class="sch-actions">' +
+                    '<button class="sch-action-btn" onclick="window._delayScheduledMsg(' + i + ',5)" title="Delay 5 min">\u23F0 +5m</button>' +
+                    '<button class="sch-action-btn" onclick="window._delayScheduledMsg(' + i + ',30)" title="Delay 30 min">\u23F0 +30m</button>' +
+                    '<button class="sch-action-btn" onclick="window._delayScheduledMsg(' + i + ',60)" title="Delay 1 hour">\u23F0 +1h</button>' +
+                    '<button class="sch-action-btn sch-action-cancel" onclick="window._cancelScheduledMsg(' + i + ')" title="Cancel">\u2715</button>' +
+                '</div>' +
+                '</div>';
+        });
+        list.innerHTML = html;
+    }
 
     function confirmScheduleMsg() {
         var text = document.getElementById('schedule-msg-text').value.trim();
@@ -7299,6 +7347,50 @@ document.addEventListener('DOMContentLoaded', () => {
                             try {
                                 var _toks = E2ECrypto.searchTokensForText(extractSearchableText(_msg.text), E2ECrypto.getAllServerKeys(_msg.serverId) || []);
                                 if (_toks.length) payload.search_tokens = _toks;
+                            } catch (_) {}
+                            // Attach encrypted profile snapshot so PFP/display name render without reload
+                            try {
+                                if (myProfile && encKey) {
+                                    var _snap = {
+                                        display_name: myProfile.display_name || (user && user.username) || '',
+                                        username_color: myProfile.username_color || (user && user.username_color) || null,
+                                        username_border_color: myProfile.username_border_color || null,
+                                        nickname: myProfile.nickname || null,
+                                        description: myProfile.description || null,
+                                        profile_background_color: myProfile.profile_background_color || null,
+                                        profile_picture_file_id: myProfile.profile_picture_file_id || null,
+                                        profile_picture_file_key: null
+                                    };
+                                    if (myProfile.profile_picture_file_id && myProfile.profile_picture_file_key) {
+                                        var _identity = E2ECrypto.getIdentityKeyPair();
+                                        if (_identity) {
+                                            var _rawPicKey = myProfile.profile_picture_file_key;
+                                            if (_rawPicKey.indexOf(':') > 0) {
+                                                var _dk = E2ECrypto.decodeEncryptedFileKey(_rawPicKey, _identity.privateKey);
+                                                if (_dk) _rawPicKey = _dk;
+                                            }
+                                            _snap.profile_picture_file_key = _rawPicKey;
+                                        }
+                                    }
+                                    var _pdKey = profileKeyCache[user.id + ':profile_data_key'];
+                                    if (_pdKey) _snap.profile_data_key = _pdKey;
+                                    var _snapJson = JSON.stringify(_snap);
+                                    var _encSnap = E2ECrypto.encryptMessage(_snapJson, encKey);
+                                    if (_encSnap) {
+                                        payload.encrypted_profile_snapshot = _encSnap.ciphertext;
+                                        payload.profile_snapshot_nonce = _encSnap.nonce;
+                                    }
+                                }
+                            } catch (_) {}
+                            // Encrypted sender username
+                            try {
+                                if (encKey && user) {
+                                    var _encU = E2ECrypto.encryptSenderUsername(user.username, encKey);
+                                    if (_encU) {
+                                        payload.encrypted_sender_username = _encU.ciphertext;
+                                        payload.sender_username_nonce = _encU.nonce;
+                                    }
+                                }
                             } catch (_) {}
                             ws.send(JSON.stringify(payload));
                             var idx = _scheduledMessages.indexOf(_msg);

@@ -484,6 +484,13 @@
                     <p class="settings-hint">Clears all stored logins, keys, settings, cookies, and cached data. Use this if you encounter login or account issues such as constraint errors when creating a new account after logging out.</p>
                     <button class="btn-delete-account" id="clear-all-data-btn">🗑️ Clear All Data &amp; Sign Out</button>
                 </div>
+                <div class="settings-group">
+                    <h4>Scheduled Messages</h4>
+                    <p class="settings-hint">Pending messages waiting to be sent. Cancel or delay them. They are stored locally and sent automatically at the scheduled time.</p>
+                    <div id="user-scheduled-list" class="scheduled-list-container">
+                        <div class="sch-empty-state">⏰ No scheduled messages</div>
+                    </div>
+                </div>
             </div>
 
             <!-- Display Settings -->
@@ -858,6 +865,7 @@
                         <div class="session-log-empty">No re-authentication events yet for this account.</div>
                     </div>
                 </div>
+
                 <div class="settings-group">
                     <h4>🔐 Restore from Server Backup</h4>
                     <p class="settings-hint">Lost your device or cleared browser data? Enter your account password to restore all encryption keys (identity, server keys, media caches, friend code) from the server backup. This only works if you have a key backup saved (created automatically at login/registration).</p>
@@ -2022,20 +2030,22 @@
 
     <!-- Schedule Message modal -->
     <div class="modal" id="schedule-msg-modal" style="display:none">
-        <div class="modal-content" style="max-width:400px">
-            <h3 style="margin-bottom:12px;color:var(--accent)">&#x23F0; Schedule Message</h3>
-            <p style="color:var(--text-muted);font-size:13px;margin-bottom:10px">Your message will be encrypted locally and sent automatically at the scheduled time.</p>
-            <textarea id="schedule-msg-text" placeholder="Type your message..." rows="3" class="modal-input" style="width:100%;box-sizing:border-box;resize:vertical;min-height:60px;margin-bottom:10px"></textarea>
-            <div class="auth-input-row" style="margin-bottom:10px">
-                <label style="color:var(--text-muted);font-size:13px;min-width:50px">Date</label>
-                <input type="date" id="schedule-msg-date" class="modal-input" style="flex:1" />
+        <div class="modal-content" style="max-width:420px">
+            <h3 style="margin-bottom:4px;color:var(--text-primary);font-size:16px;font-weight:700">Schedule Message</h3>
+            <p style="color:var(--text-muted);font-size:12px;margin-bottom:14px;line-height:1.5">Your message is encrypted locally and sent automatically at the scheduled time.</p>
+            <textarea id="schedule-msg-text" placeholder="Type your message..." rows="3" class="modal-input" style="width:100%;box-sizing:border-box;resize:vertical;min-height:64px;margin-bottom:12px"></textarea>
+            <div style="display:flex;gap:10px;margin-bottom:12px">
+                <div class="auth-input-row" style="flex:1;margin-bottom:0">
+                    <label style="color:var(--text-muted);font-size:12px;min-width:36px">Date</label>
+                    <input type="date" id="schedule-msg-date" class="modal-input" style="flex:1" />
+                </div>
+                <div class="auth-input-row" style="flex:1;margin-bottom:0">
+                    <label style="color:var(--text-muted);font-size:12px;min-width:36px">Time</label>
+                    <input type="time" id="schedule-msg-time" class="modal-input" style="flex:1" />
+                </div>
             </div>
-            <div class="auth-input-row" style="margin-bottom:10px">
-                <label style="color:var(--text-muted);font-size:13px;min-width:50px">Time</label>
-                <input type="time" id="schedule-msg-time" class="modal-input" style="flex:1" />
-            </div>
-            <p id="schedule-msg-error" style="color:var(--danger,#ed4245);font-size:13px;margin-bottom:8px;display:none"></p>
-            <div id="schedule-msg-list" style="max-height:120px;overflow-y:auto;margin-bottom:10px"></div>
+            <p id="schedule-msg-error" style="color:var(--danger,#ed4245);font-size:12px;margin-bottom:8px;display:none"></p>
+            <div id="schedule-msg-list" style="max-height:150px;overflow-y:auto;margin-bottom:12px"></div>
             <div class="modal-actions">
                 <button class="btn-cancel" id="schedule-msg-cancel">Cancel</button>
                 <button class="btn-invite" id="schedule-msg-confirm" style="background:var(--accent);border-color:var(--accent)">Schedule</button>
