@@ -1045,11 +1045,12 @@
     // ------------------------------------------------------------------
     function effectiveNsMode() {
         var mode = S.settings.noiseSuppressionMode || 'rnnoise';
-        if (mode === 'rnnoise' && !(window.AudioWorkletNode && window.AudioContext)) {
+        var needsWorklet = (mode === 'rnnoise' || mode === 'rnnoise-gate');
+        if (needsWorklet && !(window.AudioWorkletNode && window.AudioContext)) {
             // No AudioWorklet support — fall back to the browser's built-in NS.
             return 'browser';
         }
-        if (mode === 'rnnoise' && _nsFailedSession) {
+        if (needsWorklet && _nsFailedSession) {
             // The RNNoise pipeline failed earlier this session — use the
             // browser's built-in NS instead (keeps the saved preference for
             // the next page load, where RNNoise is tried again).
@@ -1086,7 +1087,8 @@
     function setupMicPipeline(mode) {
         teardownMicPipeline(); // never leak a previous 48 kHz context
         S.localStreams.processedMic = null;
-        if (mode !== 'rnnoise' || !S.localStreams.mic || !window.AudioWorkletNode) return Promise.resolve(null);
+        var needsWorklet = (mode === 'rnnoise' || mode === 'rnnoise-gate');
+        if (!needsWorklet || !S.localStreams.mic || !window.AudioWorkletNode) return Promise.resolve(null);
         return Promise.resolve().then(function () {
             var ctx = new AudioContext({ sampleRate: 48000 });
             if (Math.abs(ctx.sampleRate - 48000) > 1) {
@@ -1115,7 +1117,58 @@
                     });
                     var dest = ctx.createMediaStreamDestination();
                     src.connect(worklet);
-                    worklet.connect(dest);
+                    // Krisp-like mode: chain RNNoise → noise gate → compressor
+                    if (mode === 'rnnoise-gate') {
+                        var analyser = ctx.createAnalyser();
+                        analyser.fftSize = 256;
+                        var gateGain = ctx.createGain();
+                        gateGain.gain.value = 1.0;
+                        var compressor = ctx.createDynamicsCompressor();
+                        compressor.threshold.value = -30;
+                        compressor.knee.value = 12;
+                        compressor.ratio.value = 4;
+                        compressor.attack.value = 0.003;
+                        compressor.release.value = 0.15;
+                        worklet.connect(analyser);
+                        worklet.connect(gateGain);
+                        gateGain.connect(compressor);
+                        compressor.connect(dest);
+                        // Noise gate: detect RMS level, close gate below threshold
+                        var gateData = new Uint8Array(analyser.frequencyBinCount);
+                        var _gateOpen = true;
+                        var GATE_THRESHOLD = 15;  // RMS 0-255 below this = silence
+                        var GATE_RELEASE_MS = 200;
+                        var _gateCloseTime = 0;
+                        var _gateTimer = setInterval(function () {
+                            analyser.getByteTimeDomainData(gateData);
+                            var sum = 0;
+                            for (var k = 0; k < gateData.length; k++) {
+                                var v = (gateData[k] - 128) / 128;
+                                sum += v * v;
+                            }
+                            var rms = Math.sqrt(sum / gateData.length) * 255;
+                            var now = ctx.currentTime * 1000;
+                            if (rms > GATE_THRESHOLD) {
+                                if (!_gateOpen) {
+                                    gateGain.gain.setTargetAtTime(1.0, ctx.currentTime, 0.005);
+                                    _gateOpen = true;
+                                }
+                                _gateCloseTime = 0;
+                            } else {
+                                if (_gateOpen && _gateCloseTime === 0) {
+                                    _gateCloseTime = now;
+                                }
+                                if (_gateOpen && _gateCloseTime > 0 && (now - _gateCloseTime) > GATE_RELEASE_MS) {
+                                    gateGain.gain.setTargetAtTime(0.0, ctx.currentTime, 0.03);
+                                    _gateOpen = false;
+                                }
+                            }
+                        }, 16);
+                        // Stash timer for cleanup
+                        S._nsGateTimer = _gateTimer;
+                    } else {
+                        worklet.connect(dest);
+                    }
                     S.nsCtx = ctx;
                     S.localStreams.processedMic = dest.stream;
                     return dest.stream.getAudioTracks()[0];
@@ -1134,6 +1187,7 @@
             S.localStreams.processedMic.getTracks().forEach(function (t) { try { t.stop(); } catch (_) {} });
             S.localStreams.processedMic = null;
         }
+        if (S._nsGateTimer) { try { clearInterval(S._nsGateTimer); } catch (_) {} S._nsGateTimer = null; }
         if (S.nsCtx) {
             try { S.nsCtx.close(); } catch (_) {}
             S.nsCtx = null;
@@ -4768,7 +4822,18 @@
         var ssvReset = document.getElementById('voice-speaker-reset');
         if (ssvReset) ssvReset.addEventListener('click', function () { setSpeakerVolume(100); applySettingsToUI(); });
         var sns = document.getElementById('voice-noise-suppression');
-        if (sns) sns.addEventListener('change', function (e) { setNoiseSuppression(e.target.value); });
+        var nsDesc = document.getElementById('ns-description');
+        var nsDescs = {
+            'rnnoise': 'RNNoise suppresses keyboard, fan & background noise on-device, right in your browser.',
+            'rnnoise-gate': 'RNNoise + Gate chains the neural model with a noise gate and compressor for the deepest on-device suppression.',
+            'browser': 'Uses the browser\u2019s built-in noise suppression. Changes apply the next time your mic starts.',
+            'off': 'No noise suppression — raw microphone audio.'
+        };
+        function updateNsDesc(val) { if (nsDesc) nsDesc.textContent = nsDescs[val] || nsDescs['rnnoise']; }
+        if (sns) {
+            sns.addEventListener('change', function (e) { setNoiseSuppression(e.target.value); updateNsDesc(e.target.value); });
+            updateNsDesc(sns.value);
+        }
         var sec = document.getElementById('voice-echo-cancellation');
         if (sec) sec.addEventListener('change', function (e) { setEchoCancellation(e.target.checked); });
         var shi = document.getElementById('voice-haptic-incoming');

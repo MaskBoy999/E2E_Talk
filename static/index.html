@@ -945,11 +945,11 @@
                     <h4>Noise Suppression</h4>
                     <select id="voice-noise-suppression" class="settings-slider" style="margin-top:8px;padding:7px 9px;border-radius:6px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-color)">
                         <option value="rnnoise">RNNoise (neural)</option>
+                        <option value="rnnoise-gate">RNNoise + Gate (Krisp-like)</option>
                         <option value="browser">Browser built-in</option>
                         <option value="off">Off</option>
                     </select>
-                    <div style="font-size:12px;color:var(--text-secondary);margin-top:6px">RNNoise suppresses keyboard, fan &amp; background noise on-device, right in your browser.</div>
-                    <p class="settings-hint">Uses the browser's built-in noise suppression. Changes apply the next time your mic starts.</p>
+                    <div id="ns-description" style="font-size:12px;color:var(--text-secondary);margin-top:6px">RNNoise + Gate chains the neural model with a noise gate and compressor for the deepest on-device suppression.</div>
                 </div>
                 <div class="settings-group">
                     <h4>Echo Cancellation</h4>
@@ -1857,6 +1857,7 @@
             <label class="voice-popup-check" style="display:flex;align-items:center;gap:8px">
                 <select id="voice-popup-noise-suppression" style="padding:4px 6px;border-radius:6px;font-size:12px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-color)">
                     <option value="rnnoise">NS: RNNoise</option>
+                    <option value="rnnoise-gate">NS: Krisp-like</option>
                     <option value="browser">NS: Browser</option>
                     <option value="off">NS: Off</option>
                 </select>

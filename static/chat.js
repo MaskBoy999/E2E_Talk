@@ -7223,17 +7223,17 @@ document.addEventListener('DOMContentLoaded', () => {
         if (modal) modal.style.display = 'none';
     }
 
-    function renderScheduledList() {
+        function renderScheduledList() {
         var list = document.getElementById('schedule-msg-list');
         if (!list) return;
         var html = '';
         _scheduledMessages.forEach(function (msg, i) {
             var d = new Date(msg.sendAt);
             var ts = d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-            var ch = msg.channelId ? 'Channel' : (msg.dmOtherUsername ? 'DM → ' + msg.dmOtherUsername : 'DM');
+            var ch = msg.channelId ? 'Channel' : (msg.dmOtherUsername ? 'DM \u2192 ' + msg.dmOtherUsername : 'DM');
             html += '<div class="sch-item">' +
                 '<div class="sch-info"><span class="sch-time">' + ts + '</span> <span class="sch-dest">' + ch + '</span><div class="sch-preview">' + (msg.text || '').substring(0, 50) + '</div></div>' +
-                '<button class="sch-cancel-btn" onclick="window._cancelScheduledMsg(' + i + ')" title="Cancel">✕</button>' +
+                '<button class="sch-cancel-btn" data-sch-action="cancel" data-sch-idx="' + i + '" title="Cancel">\u2715</button>' +
                 '</div>';
         });
         if (!_scheduledMessages.length) html = '<div class="sch-empty">No scheduled messages</div>';
@@ -7241,19 +7241,35 @@ document.addEventListener('DOMContentLoaded', () => {
         renderSecurityScheduledList();
     }
 
-    window._cancelScheduledMsg = function (idx) {
-        _scheduledMessages.splice(idx, 1);
-        saveScheduledMessages();
-        renderScheduledList();
-    };
+    // Event-delegated handlers for schedule list buttons (modal + user settings)
+    (function () {
+        var modalList = document.getElementById('schedule-msg-list');
+        var userList = document.getElementById('user-scheduled-list');
 
-    window._delayScheduledMsg = function (idx, minutes) {
-        var msg = _scheduledMessages[idx];
-        if (!msg) return;
-        msg.sendAt = new Date(new Date(msg.sendAt).getTime() + minutes * 60000).toISOString();
-        saveScheduledMessages();
-        renderScheduledList();
-    };
+        function handleSchClick(e) {
+            var btn = e.target.closest('[data-sch-action]');
+            if (!btn) return;
+            var idx = parseInt(btn.getAttribute('data-sch-idx'), 10);
+            if (isNaN(idx)) return;
+            var action = btn.getAttribute('data-sch-action');
+            if (action === 'cancel') {
+                _scheduledMessages.splice(idx, 1);
+                saveScheduledMessages();
+                renderScheduledList();
+            } else if (action === 'delay') {
+                var mins = parseInt(btn.getAttribute('data-sch-mins'), 10) || 5;
+                var msg = _scheduledMessages[idx];
+                if (msg) {
+                    msg.sendAt = new Date(new Date(msg.sendAt).getTime() + mins * 60000).toISOString();
+                    saveScheduledMessages();
+                    renderScheduledList();
+                }
+            }
+        }
+        if (modalList) modalList.addEventListener('click', handleSchClick);
+        if (userList) userList.addEventListener('click', handleSchClick);
+    })();
+
 
     function renderSecurityScheduledList() {
         var list = document.getElementById('user-scheduled-list');
@@ -7282,10 +7298,10 @@ document.addEventListener('DOMContentLoaded', () => {
                     '<div class="sch-preview">\u201C' + (msg.text || '').substring(0, 60) + '\u201D</div>' +
                 '</div>' +
                 '<div class="sch-actions">' +
-                    '<button class="sch-action-btn" onclick="window._delayScheduledMsg(' + i + ',5)" title="Delay 5 min">\u23F0 +5m</button>' +
-                    '<button class="sch-action-btn" onclick="window._delayScheduledMsg(' + i + ',30)" title="Delay 30 min">\u23F0 +30m</button>' +
-                    '<button class="sch-action-btn" onclick="window._delayScheduledMsg(' + i + ',60)" title="Delay 1 hour">\u23F0 +1h</button>' +
-                    '<button class="sch-action-btn sch-action-cancel" onclick="window._cancelScheduledMsg(' + i + ')" title="Cancel">\u2715</button>' +
+                    '<button class="sch-action-btn" data-sch-action="delay" data-sch-idx="' + i + '" data-sch-mins="5" title="Delay 5 min">\u23F0 +5m</button>' +
+                    '<button class="sch-action-btn" data-sch-action="delay" data-sch-idx="' + i + '" data-sch-mins="30" title="Delay 30 min">\u23F0 +30m</button>' +
+                    '<button class="sch-action-btn" data-sch-action="delay" data-sch-idx="' + i + '" data-sch-mins="60" title="Delay 1 hour">\u23F0 +1h</button>' +
+                    '<button class="sch-action-btn sch-action-cancel" data-sch-action="cancel" data-sch-idx="' + i + '" title="Cancel">\u2715</button>' +
                 '</div>' +
                 '</div>';
         });
