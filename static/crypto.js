@@ -196,6 +196,27 @@ var E2ECrypto = (() => {
         return _aeadDecryptRaw(ct, k, aad || null, n);
     }
 
+    // ---- Soundboard byte-level encryption (server key) ----
+    // encryptBytesForServer: encrypt raw bytes (Uint8Array) with server key
+    function encryptBytesForServer(plaintext, serverId) {
+        const key = getServerKey(serverId);
+        if (!key) throw new Error('No server key for ' + serverId);
+        const pt = plaintext instanceof Uint8Array ? plaintext : new Uint8Array(plaintext);
+        const k = key instanceof Uint8Array ? key : new Uint8Array(key);
+        const enc = _aeadEncryptRaw(pt, k, null, null);
+        return { ciphertext: arrayBufferToBase64(enc.ciphertext), nonce: arrayBufferToBase64(enc.nonce) };
+    }
+
+    // decryptBytesForServer: decrypt ciphertext bytes with server key, returns Uint8Array
+    function decryptBytesForServer(ciphertextB64, nonceB64, serverId) {
+        const key = getServerKey(serverId);
+        if (!key) throw new Error('No server key for ' + serverId);
+        const ct = new Uint8Array(base64ToArrayBuffer(ciphertextB64));
+        const k = key instanceof Uint8Array ? key : new Uint8Array(key);
+        const n = new Uint8Array(base64ToArrayBuffer(nonceB64));
+        return _aeadDecryptRaw(ct, k, null, n);
+    }
+
     // ---- Key Generation ----
     function generateIdentityKeyPair() { return x25519GenerateKeyPair(); }
     function generateSymmetricKey() { return randomBytes(32); }
@@ -780,6 +801,10 @@ var E2ECrypto = (() => {
         },
         // Secure memory erasure (S7)
         secureZero: _secureZero,
+
+        // Soundboard byte-level encryption
+        encryptBytesForServer: encryptBytesForServer,
+        decryptBytesForServer: decryptBytesForServer,
 
         // Key Escrow
         encryptKeyForEscrow: encryptKeyForEscrow,

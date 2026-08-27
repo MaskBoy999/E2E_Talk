@@ -68,7 +68,7 @@ test.describe('File persistence across server restart', () => {
 
     async function startServer(request: any) {
         const serverDir = path.join(__dirname, '..', 'server');
-        const bin = path.join(serverDir, 'target', 'debug', process.platform === 'win32' ? 'e2e-chat.exe' : 'e2e-chat');
+        const bin = path.join(serverDir, 'target', 'release', process.platform === 'win32' ? 'e2e-chat.exe' : 'e2e-chat');
         child = spawn(bin, [], {
             cwd: serverDir,
             env: {
@@ -97,7 +97,7 @@ test.describe('File persistence across server restart', () => {
 
     test.beforeAll(async ({ request }) => {
         const serverDir = path.join(__dirname, '..', 'server');
-        const bin = path.join(serverDir, 'target', 'debug', process.platform === 'win32' ? 'e2e-chat.exe' : 'e2e-chat');
+        const bin = path.join(serverDir, 'target', 'release', process.platform === 'win32' ? 'e2e-chat.exe' : 'e2e-chat');
         if (!fs.existsSync(bin)) throw new Error('server binary not found at ' + bin);
         tmpDb = path.join(serverDir, `restart-probe-${Date.now()}.db`);
         await startServer(request);

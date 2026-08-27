@@ -84,7 +84,7 @@ test.describe('G2 — Mutation rate limit + storage quota (isolated server)', ()
 
   test.beforeAll(async () => {
     const serverDir = path.join(__dirname, '..', 'server');
-    const bin = path.join(serverDir, 'target', 'debug', process.platform === 'win32' ? 'e2e-chat.exe' : 'e2e-chat');
+    const bin = path.join(serverDir, 'target', 'release', process.platform === 'win32' ? 'e2e-chat.exe' : 'e2e-chat');
     if (!fs.existsSync(bin)) throw new Error('server binary not found at ' + bin);
     // Dedicated temp DB so env overrides (which DB rows now take precedence over)
     // always apply — the isolated server must never share the dev DB.

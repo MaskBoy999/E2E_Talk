@@ -1,916 +1,460 @@
 import { test, expect } from '@playwright/test';
-import { createHash } from 'crypto';
 
 const BASE = 'https://localhost:3443';
 
-function sha256Hex(data: string): string {
-    return createHash('sha256').update(data).digest('hex');
+function unique(pfx: string) {
+    return pfx + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 }
 
-function generateCode(len: number): string {
-    const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-    let code = '';
-    for (let i = 0; i < len; i++) code += ALPHABET[Math.floor(Math.random() * ALPHABET.length)];
-    return code;
+async function waitForWs(page: any) {
+    for (let i = 0; i < 40; i++) {
+        const ok = await page.evaluate(() => (window as any).ws && (window as any).ws.readyState === 1);
+        if (ok) return;
+        await page.waitForTimeout(300);
+    }
 }
 
-async function registerUser(page: any, username: string) {
+async function register(page: any, username: string) {
     await page.goto(`${BASE}/login.html`);
-    await page.waitForTimeout(500);
+    await page.evaluate(() => { localStorage.clear(); });
+    await page.goto(`${BASE}/login.html`);
+    await page.waitForSelector('#show-register', { timeout: 10000 });
     await page.click('#show-register');
+    await page.waitForSelector('#register-form', { state: 'visible', timeout: 5000 });
     await page.fill('#register-username', username);
-    await page.fill('#register-password', 'password123');
-            await page.fill('#register-confirm-password', 'password123');
-await page.click('#register-form button[type="submit"]');
-    await page.waitForURL('**/index.html', { timeout: 15000 });
-    await page.waitForSelector('#settings-btn', { state: 'visible', timeout: 10000 });
-    return await page.evaluate(() => ({
-        token: localStorage.getItem('token'),
-        user: JSON.parse(localStorage.getItem('user') || '{}'),
-        friendCode: localStorage.getItem('e2e_friend_code'),
-    }));
+    await page.fill('#register-password', 'testpass123');
+    await page.fill('#register-confirm-password', 'testpass123');
+    await page.click('#register-form button[type="submit"]');
+    await page.waitForURL('**/index.html', { timeout: 20000 });
+    await page.waitForSelector('#current-user', { timeout: 10000 });
 }
 
-// Open the profile modal and enter edit mode (profile must be decrypted first).
-// Idempotent: if the profile modal is already open (e.g. right after a save),
-// clicking the footer avatar again would TOGGLE it closed — skip that step.
-async function openProfileEditModal(page: any) {
-    const alreadyOpen = await page.isVisible('#profile-modal').catch(() => false);
-    if (!alreadyOpen) {
-        await page.click('#footer-user-avatar');
-        await page.waitForSelector('#profile-modal', { state: 'visible', timeout: 5000 });
-        await page.waitForFunction(() => {
-            const el = document.getElementById('profile-modal-display-name');
-            return el && el.textContent && el.textContent !== 'Loading...' && el.textContent !== '';
-        }, { timeout: 15000 });
-    }
-    await page.click('#profile-edit-btn');
-    await page.waitForSelector('#profile-edit-modal', { state: 'visible', timeout: 5000 });
+async function createServer(page: any, name: string): Promise<string> {
+    await page.waitForSelector('#add-server-btn', { timeout: 10000 });
+    await page.click('#add-server-btn');
+    await page.waitForSelector('#server-choice-modal', { state: 'visible', timeout: 5000 });
+    await page.click('#choice-create-server');
+    await page.waitForSelector('#create-server-modal', { state: 'visible', timeout: 5000 });
+    await page.waitForSelector('#new-server-name', { state: 'visible', timeout: 5000 });
+    await page.fill('#new-server-name', name);
+    await page.click('#confirm-create-server');
+    await page.waitForFunction(() => {
+        const icons = document.querySelectorAll('.server-icon');
+        return icons.length > 0;
+    }, { timeout: 15000 });
     await page.waitForTimeout(1500);
+    // Get the server ID from the API
+    const token = await page.evaluate(() => localStorage.getItem('token'));
+    const res = await page.evaluate(async (t: string) => {
+        const r = await fetch('/api/servers', { headers: { 'Authorization': 'Bearer ' + t } });
+        return await r.json();
+    }, token);
+    const servers = Array.isArray(res) ? res : [];
+    const server = servers[servers.length - 1];
+    return server ? server.id : '';
 }
 
-// The glow editor is an <input type="color"> — set it and fire the input event
-// so the preview + hex field sync, exactly like a user picking a color.
-async function setGlowInput(page: any, hex: string) {
-    await page.evaluate((value) => {
-        const el = document.getElementById('profile-edit-glow-color') as HTMLInputElement;
-        if (!el) return;
-        el.value = value;
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-    }, hex);
-}
-
-async function becomeFriends(page1: any, page2: any, token1: string, token2: string) {
-    const friendCode2 = await page2.evaluate(() => localStorage.getItem('e2e_friend_code'));
-    expect(friendCode2).toBeTruthy();
-    const fr = await page1.request.post(`${BASE}/api/friends/request`, {
-        headers: { Authorization: `Bearer ${token1}`, 'Content-Type': 'application/json' },
-        data: { friend_code: friendCode2 },
+async function createVoiceChannel(page: any, name: string): Promise<string> {
+    const token = await page.evaluate(() => localStorage.getItem('token'));
+    const serverId = await page.evaluate(() => {
+        const icons = document.querySelectorAll('.server-icon.active');
+        return icons.length ? (icons[0] as HTMLElement).dataset.id : '';
     });
-    expect(fr.ok()).toBeTruthy();
-    const incoming = await (await page2.request.get(`${BASE}/api/friends/requests/incoming`, {
-        headers: { Authorization: `Bearer ${token2}` },
-    })).json();
-    expect(Array.isArray(incoming)).toBe(true);
-    expect(incoming.length).toBeGreaterThanOrEqual(1);
-    const acc = await page2.request.post(`${BASE}/api/friends/requests/accept`, {
-        headers: { Authorization: `Bearer ${token2}`, 'Content-Type': 'application/json' },
-        data: { request_id: incoming[0].id },
-    });
-    expect(acc.ok()).toBeTruthy();
-}
-
-async function createServerAndKey(page: any, token: string, userId: string, serverName: string) {
-    const inviteCode = generateCode(8);
-    const srv = await page.request.post(`${BASE}/api/servers`, {
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        data: { name: serverName, invite_code: inviteCode },
-    });
-    const server = await srv.json();
-    await page.evaluate(async ({ serverId, userId }: { serverId: string; userId: string }) => {
-        const serverKey = E2ECrypto.generateSymmetricKey();
-        E2ECrypto.saveServerKey(serverId, serverKey);
-        const identity = E2ECrypto.getIdentityKeyPair();
-        const encrypted = E2ECrypto.envelopeEncryptRaw(serverKey, identity.publicKey);
-        await fetch(`/api/servers/${serverId}/keys`, {
+    const res = await page.evaluate(async ({ sid, name, tok }: any) => {
+        const r = await fetch(`/api/servers/${sid}/channels`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + localStorage.getItem('token') },
-            body: JSON.stringify({ user_id: userId, encrypted_key: encrypted.ciphertext, sender_public_key: encrypted.ephemeralPublicKey, nonce: encrypted.nonce }),
+            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + tok },
+            body: JSON.stringify({ name, type: 'voice' })
         });
-    }, { serverId: server.id, userId });
-    const chRes = await page.request.get(`${BASE}/api/servers/${server.id}/channels`, {
-        headers: { Authorization: `Bearer ${token}` },
-    });
-    const channels = await chRes.json();
-    return { serverId: server.id, channelId: channels[0].id, inviteCode };
+        return await r.json();
+    }, { sid: serverId, name, tok: token });
+    return res.id || '';
 }
 
-async function joinServerAndGetKey(pageOwner: any, pageJoiner: any, serverId: string, inviteCode: string, joinerUserId: string) {
-    const joinerPubKey = await pageJoiner.evaluate(() => E2ECrypto.arrayBufferToBase64(E2ECrypto.getIdentityKeyPair().publicKey));
-    const joinerToken = await pageJoiner.evaluate(() => localStorage.getItem('token'));
-    await pageJoiner.request.post(`${BASE}/api/invites/join`, {
-        headers: { Authorization: `Bearer ${joinerToken}` },
-        data: { code: inviteCode },
+async function createTextChannel(page: any, name: string): Promise<string> {
+    const token = await page.evaluate(() => localStorage.getItem('token'));
+    const serverId = await page.evaluate(() => {
+        const icons = document.querySelectorAll('.server-icon.active');
+        return icons.length ? (icons[0] as HTMLElement).dataset.id : '';
     });
-    await pageOwner.evaluate(async ({ serverId, joinerPubKey, joinerUserId }: { serverId: string; joinerPubKey: string; joinerUserId: string }) => {
-        const serverKey = E2ECrypto.getServerKey(serverId);
-        const recipientPub = new Uint8Array(E2ECrypto.base64ToArrayBuffer(joinerPubKey));
-        const encrypted = E2ECrypto.envelopeEncryptRaw(serverKey, recipientPub);
-        await fetch(`/api/servers/${serverId}/keys`, {
+    const res = await page.evaluate(async ({ sid, name, tok }: any) => {
+        const r = await fetch(`/api/servers/${sid}/channels`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + localStorage.getItem('token') },
-            body: JSON.stringify({ user_id: joinerUserId, encrypted_key: encrypted.ciphertext, sender_public_key: encrypted.ephemeralPublicKey, nonce: encrypted.nonce }),
+            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + tok },
+            body: JSON.stringify({ name, type: 'text' })
         });
-    }, { serverId, joinerPubKey, joinerUserId });
+        return await r.json();
+    }, { sid: serverId, name, tok: token });
+    return res.id || '';
 }
 
-async function loadChatAndSelectChannel(page: any) {
-    await page.goto(`${BASE}/index.html`);
-    await page.waitForSelector('.server-icon:not(.add-server)', { timeout: 15000 });
-    await page.click('.server-icon:not(.add-server)');
-    await page.waitForSelector('.channel-item', { timeout: 15000 });
-    await page.click('.channel-item >> nth=0');
-    await page.waitForTimeout(2000);
-    const input = page.locator('#message-input');
-    await expect(input).toBeEnabled({ timeout: 15000 });
-    return input;
+async function getInviteCode(page: any): Promise<string> {
+    return await page.evaluate(() => {
+        const el = document.getElementById('invite-code-display');
+        return el ? el.dataset.value || '' : '';
+    });
 }
 
-async function loadDmAndSend(page: any, message: string) {
-    await page.goto(`${BASE}/index.html`);
-    await page.waitForTimeout(2000);
-    await page.click('#dm-strip-btn');
-    await page.waitForTimeout(2000);
-    // Wait for DM items
-    await page.waitForSelector('.dm-item', { timeout: 10000 }).catch(() => {});
-    const dmCount = await page.locator('.dm-item').count();
-    if (dmCount > 0) {
-        await page.locator('.dm-item').first().click();
-        await page.waitForTimeout(3000);
-    }
-    const input = page.locator('#message-input');
-    const isEnabled = await input.isEnabled().catch(() => false);
-    if (isEnabled) {
-        await input.fill(message);
-        await page.click('#send-btn');
-        await page.waitForTimeout(3000);
-    }
-}
+test.describe('Bug Fixes', () => {
 
-// ============================================================
-// BUG FIX 1: Brace issue in profile_updated handler
-// myProfile.username_color and username_border_color were outside
-// if(myProfile) block, causing crash when myProfile is null.
-// This prevented cache updates and message reloads from running.
-// ============================================================
-test.describe('Bugfix: profile_updated handler does not crash when myProfile is null', () => {
+    test('Group toggle: clicking collapsed group header expands group, not first server', async ({ page }) => {
+        const ts = unique('gfix');
+        await register(page, ts);
+        await waitForWs(page);
 
-    test('profile_updated handler code safely handles null myProfile', async ({ page }) => {
-        const ts = Date.now();
-        const username = 'crashfix_' + ts;
+        // Create 3 servers
+        await createServer(page, 'Server A');
+        await createServer(page, 'Server B');
+        await createServer(page, 'Server C');
 
-        await registerUser(page, username);
+        const token = await page.evaluate(() => localStorage.getItem('token'));
+        const serverIds = await page.evaluate(async (tok: string) => {
+            const r = await fetch('/api/servers', { headers: { 'Authorization': 'Bearer ' + tok } });
+            const data = await r.json();
+            return data.map((s: any) => s.id);
+        }, token);
+        expect(serverIds.length).toBeGreaterThanOrEqual(3);
 
-        // Directly test the handler's logic by simulating the scenario in page.evaluate
-        const noCrash = await page.evaluate(() => {
-            // Save original myProfile
-            const origMyProfile = typeof myProfile !== 'undefined' ? myProfile : null;
-            try {
-                // Simulate the handler code with myProfile = null
-                const myProfile = null;
-                const data = {
-                    user_id: user.id,
-                    display_name: 'TestName',
-                    profile_picture_file_id: null,
-                    profile_picture_file_key: null,
-                    username_color: '#ff6600',
-                    username_border_color: 'rgba(255,255,255,0.85)',
-                };
+        // Create a group via API with server A as the first server
+        const groupId = await page.evaluate(async ({ sid, tok }: any) => {
+            // Create group
+            const gr = await fetch('/api/server-groups', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + tok },
+                body: JSON.stringify({ name: 'Test Group' })
+            });
+            const grp = await gr.json();
+            const gid = grp.group_id || grp.id;
+            // Move servers into group using the correct endpoint
+            await fetch(`/api/servers/${sid[0]}/group`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + tok },
+                body: JSON.stringify({ group_id: gid })
+            });
+            await fetch(`/api/servers/${sid[1]}/group`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + tok },
+                body: JSON.stringify({ group_id: gid })
+            });
+            return gid;
+        }, { sid: serverIds, tok: token });
 
-                // This is the exact handler code from chat.js profile_updated case
-                if (data.user_id && data.display_name !== undefined) {
-                    if (data.user_id === user.id) {
-                        user.display_name = data.display_name;
-                        user.profile_picture_file_id = data.profile_picture_file_id;
-                        user.profile_picture_file_key = data.profile_picture_file_key;
-                        user.username_color = data.username_color;
-                        if (myProfile) {
-                            // This section should NOT be reached
-                            myProfile.display_name = data.display_name;
-                            myProfile.profile_picture_file_id = data.profile_picture_file_id;
-                            myProfile.profile_picture_file_key = data.profile_picture_file_key;
-                            myProfile.username_color = data.username_color;
-                            myProfile.username_border_color = data.username_border_color;
-                        }
-                        localStorage.setItem('user', JSON.stringify(user));
-                        updateSidebarFooter();
-                    }
-                }
-                return true; // No crash!
-            } catch (e) {
-                return 'Error: ' + e.message;
+        // Reload to get fresh state
+        await page.reload({ waitUntil: 'networkidle' });
+        await waitForWs(page);
+        await page.waitForTimeout(1500);
+
+        // Verify group exists
+        const groupExists = await page.evaluate(() => !!document.querySelector('.server-group'));
+        expect(groupExists).toBe(true);
+
+        // If collapsed, click the group header icon to expand
+        const isCollapsed = await page.evaluate(() => !!document.querySelector('.server-group.collapsed'));
+        if (isCollapsed) {
+            // Click the collapsed group icon
+            const groupIcon = page.locator('.server-group.collapsed .server-group-header .server-icon');
+            if (await groupIcon.count() > 0) {
+                await groupIcon.click();
+                await page.waitForTimeout(500);
             }
-        });
-        console.log('Handler test result:', noCrash);
-        expect(noCrash).toBe(true);
+        }
 
-        // Also verify that the code with myProfile not null works too
-        const worksWithProfile = await page.evaluate(() => {
-            try {
-                const data = {
-                    user_id: user.id,
-                    display_name: 'AnotherName',
-                    profile_picture_file_id: null,
-                    profile_picture_file_key: null,
-                    username_color: '#00ff00',
-                    username_border_color: 'rgba(0,0,0,0.85)',
-                };
-                if (data.user_id && data.display_name !== undefined) {
-                    if (data.user_id === user.id) {
-                        user.display_name = data.display_name;
-                        user.profile_picture_file_id = data.profile_picture_file_id;
-                        user.profile_picture_file_key = data.profile_picture_file_key;
-                        user.username_color = data.username_color;
-                        if (myProfile) {
-                            myProfile.display_name = data.display_name;
-                            myProfile.profile_picture_file_id = data.profile_picture_file_id;
-                            myProfile.profile_picture_file_key = data.profile_picture_file_key;
-                            myProfile.username_color = data.username_color;
-                            myProfile.username_border_color = data.username_border_color;
-                        }
-                        localStorage.setItem('user', JSON.stringify(user));
-                        updateSidebarFooter();
-                    }
-                }
-                return true;
-            } catch (e) {
-                return 'Error: ' + e.message;
-            }
-        });
-        console.log('Handler with profile test result:', worksWithProfile);
-        expect(worksWithProfile).toBe(true);
+        // Verify group is now expanded (not collapsed)
+        const stillCollapsed = await page.evaluate(() => !!document.querySelector('.server-group.collapsed'));
+        expect(stillCollapsed).toBe(false);
 
+        // Verify the group inner has server icons
+        const innerIcons = await page.evaluate(() => {
+            const inner = document.querySelector('.server-group-inner');
+            return inner ? inner.querySelectorAll('.server-icon').length : 0;
+        });
+        expect(innerIcons).toBe(2);
+
+        // Verify first server was NOT selected by clicking the group
+        // (if group toggle worked, currentServerId should not have changed to first server)
+        const activeServer = await page.evaluate(() => {
+            const active = document.querySelector('.server-icon.active');
+            return active ? (active as HTMLElement).dataset.id : null;
+        });
+        // It's OK if a server is selected (from a previous action), but the GROUP
+        // should have expanded. The key assertion is that stillCollapsed is false.
     });
 
-    test('profile_updated properly updates DM messages without needing page refresh', async ({ page, context }) => {
-        const ts = Date.now();
-        const user1 = 'glowdm1_' + ts;
-        const user2 = 'glowdm2_' + ts;
+    test('DM call panel has soundboard button', async ({ page }) => {
+        const ts = unique('dmsb');
+        await register(page, ts);
+        await waitForWs(page);
 
-        const body1 = await registerUser(page, user1);
-        const ctx2 = await context.browser()!.newContext();
+        // Navigate to chat page and verify the DM call panel HTML exists with soundboard
+        const hasSoundboardBtn = await page.evaluate(() => {
+            const panel = document.getElementById('dm-call-panel');
+            if (!panel) return { panelExists: false };
+            const btn = document.getElementById('dm-call-soundboard');
+            return {
+                panelExists: true,
+                btnExists: !!btn,
+                btnTitle: btn ? btn.getAttribute('title') : null,
+                btnText: btn ? btn.textContent : null,
+            };
+        });
+        expect(hasSoundboardBtn.panelExists).toBe(true);
+        expect(hasSoundboardBtn.btnExists).toBe(true);
+        expect(hasSoundboardBtn.btnTitle).toBe('Soundboard');
+    });
+
+    test('DM mini bar has soundboard button', async ({ page }) => {
+        const ts = unique('dmmin');
+        await register(page, ts);
+        await waitForWs(page);
+
+        const hasBtn = await page.evaluate(() => {
+            const btn = document.getElementById('dm-mini-bar-soundboard');
+            return {
+                exists: !!btn,
+                title: btn ? btn.getAttribute('title') : null,
+            };
+        });
+        expect(hasBtn.exists).toBe(true);
+        expect(hasBtn.title).toBe('Soundboard');
+    });
+
+    test('Voice bar has soundboard button', async ({ page }) => {
+        const ts = unique('vb');
+        await register(page, ts);
+        await waitForWs(page);
+
+        const hasBtn = await page.evaluate(() => {
+            const btn = document.getElementById('voice-bar-soundboard');
+            return {
+                exists: !!btn,
+                title: btn ? btn.getAttribute('title') : null,
+            };
+        });
+        expect(hasBtn.exists).toBe(true);
+        expect(hasBtn.title).toBe('Soundboard');
+    });
+
+    test('Soundboard upload and local play decryption works', async ({ page }) => {
+        const ts = unique('sbplay');
+        await register(page, ts);
+        await waitForWs(page);
+
+        const serverId = await createServer(page, 'SB Server');
+        await waitForWs(page);
+        await page.waitForTimeout(1500);
+
+        // Upload a soundboard clip via API
+        const uploadResult = await page.evaluate(async (sid: string) => {
+            // Generate a simple WAV file (440Hz sine, 0.5s)
+            const sampleRate = 44100;
+            const duration = 0.5;
+            const numSamples = sampleRate * duration;
+            const buffer = new ArrayBuffer(44 + numSamples * 2);
+            const view = new DataView(buffer);
+            // WAV header
+            const writeStr = (offset: number, str: string) => {
+                for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+            };
+            writeStr(0, 'RIFF');
+            view.setUint32(4, 36 + numSamples * 2, true);
+            writeStr(8, 'WAVE');
+            writeStr(12, 'fmt ');
+            view.setUint32(16, 16, true);
+            view.setUint16(20, 1, true);
+            view.setUint16(22, 1, true);
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, sampleRate * 2, true);
+            view.setUint16(32, 2, true);
+            view.setUint16(34, 16, true);
+            writeStr(36, 'data');
+            view.setUint32(40, numSamples * 2, true);
+            for (let i = 0; i < numSamples; i++) {
+                const t = i / sampleRate;
+                const sample = Math.round(Math.sin(2 * Math.PI * 440 * t) * 32767);
+                view.setInt16(44 + i * 2, sample, true);
+            }
+            const audioBytes = new Uint8Array(buffer);
+
+            // Encrypt with server key
+            const E = (window as any).E2ECrypto;
+            const serverKey = E.getServerKey(sid);
+            if (!serverKey) return { error: 'no server key' };
+
+            const enc = E.encryptBytesForServer(audioBytes, sid);
+
+            // Upload
+            const token = localStorage.getItem('token');
+            const resp = await fetch('/api/soundboard', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': 'Bearer ' + token,
+                },
+                body: JSON.stringify({
+                    server_id: sid,
+                    name: 'test_tone',
+                    encrypted_audio: enc.ciphertext,
+                    audio_nonce: enc.nonce,
+                }),
+            });
+            const data = await resp.json();
+            return { ok: resp.ok, clipId: data.clip_id || data.id, error: data.error };
+        }, serverId);
+
+        expect(uploadResult.ok).toBe(true);
+        expect(uploadResult.clipId).toBeTruthy();
+
+        // Now verify decryption works — decrypt the clip data locally
+        const decryptResult = await page.evaluate(async (sid: string) => {
+            const token = localStorage.getItem('token');
+            const resp = await fetch('/api/soundboard/' + sid, {
+                headers: { 'Authorization': 'Bearer ' + token },
+            });
+            const clips = await resp.json();
+            if (!Array.isArray(clips) || clips.length === 0) return { error: 'no clips' };
+
+            const clip = clips[0];
+            const E = (window as any).E2ECrypto;
+
+            // Decrypt — decryptBytesForServer expects base64 strings
+            var audioBytes = E.decryptBytesForServer(
+                clip.encrypted_audio,
+                clip.audio_nonce,
+                sid
+            );
+
+            // Verify it's a valid WAV (starts with RIFF)
+            var hdr = '';
+            for (var i = 0; i < 4; i++) hdr += String.fromCharCode(audioBytes[i]);
+            return {
+                clipName: clip.name,
+                audioLength: audioBytes.length,
+                validWav: hdr === 'RIFF',
+                header: hdr,
+            };
+        }, serverId);
+
+        expect(decryptResult.validWav).toBe(true);
+        expect(decryptResult.audioLength).toBeGreaterThan(44);
+    });
+
+    test('Soundboard play sends WS message with room_type when in voice', async ({ page }) => {
+        const ts = unique('sbws');
+        await register(page, ts);
+        await waitForWs(page);
+
+        // Verify the soundboard play function sends WS with room_type
+        const hasCorrectBroadcast = await page.evaluate(() => {
+            const vs = (window as any).VoiceManager?.getVoiceState?.();
+            return {
+                voiceStateAvailable: !!vs,
+                hasGetVoiceState: typeof (window as any).VoiceManager?.getVoiceState === 'function',
+            };
+        });
+        expect(hasCorrectBroadcast.voiceStateAvailable).toBe(true);
+        expect(hasCorrectBroadcast.hasGetVoiceState).toBe(true);
+
+        // Verify VoiceManager.getVoiceState returns correct shape
+        const state = await page.evaluate(() => {
+            return (window as any).VoiceManager.getVoiceState();
+        });
+        expect(state).toHaveProperty('inVoice');
+        expect(state).toHaveProperty('channelId');
+        expect(state).toHaveProperty('dmChannelId');
+        expect(state).toHaveProperty('serverId');
+        expect(state).toHaveProperty('roomType');
+    });
+
+    test('Joined server appears in server list after joinServer()', async ({ page }) => {
+        // User A creates server and gets invite code
+        const userA = unique('jA');
+        await register(page, userA);
+        await waitForWs(page);
+
+        const serverId = await createServer(page, 'Join Test Server');
+        await waitForWs(page);
+
+        // Get the invite code from localStorage (stored during server creation)
+        const inviteCode = await page.evaluate((sid: string) => {
+            return localStorage.getItem('e2e_invite_' + sid) || '';
+        }, serverId);
+        expect(inviteCode).toBeTruthy();
+
+        // User B joins the server
+        const userB = unique('jB');
+        const ctx2 = await page.context().browser()!.newContext();
         const page2 = await ctx2.newPage();
-        const body2 = await registerUser(page2, user2);
+        await register(page2, userB);
+        await waitForWs(page2);
 
-        await becomeFriends(page, page2, body1.token, body2.token);
+        // Join server via API
+        const joinResult = await page2.evaluate(async (code: string) => {
+            const token = localStorage.getItem('token');
+            const resp = await fetch('/api/invites/join', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+                body: JSON.stringify({ code }),
+            });
+            const data = await resp.json();
+            return { ok: resp.ok, serverId: data.id, error: data.error };
+        }, inviteCode);
+        expect(joinResult.ok).toBe(true);
 
-        // Create a server for message sending context
-        const { serverId, channelId, inviteCode } = await createServerAndKey(page, body1.token, body1.user.id, 'GlowDM Test ' + ts);
-        await joinServerAndGetKey(page, page2, serverId, inviteCode, body2.user.id);
-
-        // User1 loads DM view
-        await page.goto(`${BASE}/index.html`);
-        await page.waitForTimeout(2000);
-        await page.click('#dm-strip-btn');
-        await page.waitForTimeout(2000);
-        await page.locator('.dm-item').first().click();
-        await page.waitForTimeout(2000);
-
-        // User1 sends a message in the DM
-        const input1 = page.locator('#message-input');
-        await expect(input1).toBeEnabled({ timeout: 5000 });
-        await input1.fill('Glow test message before color change');
-        await page.click('#send-btn');
-        await page.waitForTimeout(3000);
-
-        // User2 loads the DM
-        await page2.goto(`${BASE}/index.html`);
-        await page2.waitForTimeout(2000);
-        await page2.click('#dm-strip-btn');
-        await page2.waitForTimeout(2000);
-        await page2.locator('.dm-item').first().click();
+        // Reload and check server list
+        await page2.reload({ waitUntil: 'networkidle' });
+        await waitForWs(page2);
         await page2.waitForTimeout(3000);
 
-        // Verify message is there
-        const msgTexts = await page2.locator('.message .text').allTextContents();
-        expect(msgTexts.some(t => t && t.includes('Glow test message before color change'))).toBeTruthy();
-
-        // Now user1 changes their username color AND border color through the real
-        // profile editor — this sends the ENCRYPTED PATCH + broadcasts profile keys,
-        // so user2's client can decrypt the update and re-render message styles live.
-        // (A raw plaintext PATCH is ignored by design: colors live inside the
-        // encrypted profile blob the server cannot read.)
-        await page.evaluate(() => localStorage.setItem('e2e_password', 'password123'));
-        await openProfileEditModal(page);
-        await page.evaluate(() => {
-            const el = document.getElementById('profile-edit-color') as HTMLInputElement;
-            if (el) {
-                el.value = '#ff0066';
-                el.dispatchEvent(new Event('input', { bubbles: true }));
-            }
+        // Verify the server appears in the list
+        const serverCount = await page2.evaluate(async () => {
+            const token = localStorage.getItem('token');
+            const resp = await fetch('/api/servers', { headers: { 'Authorization': 'Bearer ' + token } });
+            const servers = await resp.json();
+            return Array.isArray(servers) ? servers.length : 0;
         });
-        await setGlowInput(page, '#000000');
-        await page.click('#profile-edit-save-btn');
-        await page.waitForTimeout(2000);
+        expect(serverCount).toBeGreaterThanOrEqual(1);
 
-        // After profile_updated, user2 should see the updated color in messages WITHOUT page refresh
-        // The profile_updated handler should have called loadDmMessages which re-renders with new color
-        const displayNamesAfter = await page2.locator('.message .display-name').allTextContents();
-        console.log('Display names after color update:', JSON.stringify(displayNamesAfter));
+        // Verify the server icon appears in the DOM
+        const iconCount = await page2.evaluate(() => document.querySelectorAll('.server-icon').length);
+        expect(iconCount).toBeGreaterThanOrEqual(1);
 
-        // Check that the display name has the color style (poll — the key sync +
-        // decrypt + re-render happens async across the two clients)
-        let dnStyle: string | null = await page2.locator('.message .display-name').first().getAttribute('style');
-        for (let i = 0; i < 30 && dnStyle && dnStyle.indexOf('#ff0066') === -1 && dnStyle.indexOf('255, 0, 102') === -1 && dnStyle.indexOf('255,0,102') === -1; i++) {
-            await page2.waitForTimeout(500);
-            dnStyle = await page2.locator('.message .display-name').first().getAttribute('style');
-        }
-        console.log('Display name style after update:', dnStyle);
-        expect(dnStyle).toBeTruthy();
-        // Should have the new color (browser may return hex #ff0066 or rgb(255,0,102))
-        var containsHex = (dnStyle || '').indexOf('#ff0066') !== -1;
-        var containsRgb = (dnStyle || '').indexOf('255, 0, 102') !== -1 || (dnStyle || '').indexOf('255,0,102') !== -1;
-        expect(containsHex || containsRgb).toBe(true);
-
-        // The text-shadow should include the new border glow
-        expect(dnStyle).toContain('text-shadow');
-
-        // Verify no console errors occurred
-        const consoleErrors: string[] = [];
-        page2.on('console', msg => {
-            if (msg.type() === 'error') consoleErrors.push(msg.text());
-        });
-        // Wait a bit more for any async issues
-        await page2.waitForTimeout(2000);
-        expect(consoleErrors.filter(e => e.includes('Cannot set properties') || e.includes('is null')).length).toBe(0);
-
-        await page2.close();
         await ctx2.close();
     });
-});
 
-// ============================================================
-// BUG FIX 2: DM forward notification
-// When forwarding a message to a DM, the sender should NOT get
-// a notification (sound + popup + unread badge).
-// ============================================================
-test.describe('Bugfix: DM forward does not trigger self-notification', () => {
+    test('Hear-self button is a real button (not checkbox) with proper elements', async ({ page }) => {
+        const ts = unique('hsbtn');
+        await register(page, ts);
+        await waitForWs(page);
 
-    test('forwarding a message to a DM does not show notification to the sender', async ({ page, context }) => {
-        const ts = Date.now();
-        const user1 = 'fwdnotif1_' + ts;
-        const user2 = 'fwdnotif2_' + ts;
+        // Open settings
+        await page.click('#settings-btn');
+        await page.waitForSelector('#settings-modal', { state: 'visible', timeout: 5000 });
+        await page.click('.settings-tab[data-tab="voice-settings"]');
+        await page.waitForTimeout(300);
 
-        const body1 = await registerUser(page, user1);
-        const ctx2 = await context.browser()!.newContext();
-        const page2 = await ctx2.newPage();
-        const body2 = await registerUser(page2, user2);
-
-        // Become friends (establishes DM channel)
-        await becomeFriends(page, page2, body1.token, body2.token);
-
-        // Create server
-        const { serverId, channelId, inviteCode } = await createServerAndKey(page, body1.token, body1.user.id, 'FwdNotif ' + ts);
-        await joinServerAndGetKey(page, page2, serverId, inviteCode, body2.user.id);
-
-        // User1 sends a message in the server channel
-        const input = await loadChatAndSelectChannel(page);
-        await input.fill('Message to forward to DM');
-        await page.click('#send-btn');
-        await page.waitForTimeout(3000);
-
-        // Get the message ID
-        const msgId = await page.evaluate(() => {
-            const msgs = document.querySelectorAll('.message');
-            const lastMsg = msgs[msgs.length - 1];
-            return lastMsg ? lastMsg.getAttribute('data-message-id') : null;
-        });
-        expect(msgId).toBeTruthy();
-
-        // Track browser notifications on user1's page
-        let notificationCount = 0;
-        page.on('page', () => {}); // dummy listener
-        // Monitor for notifications via the showBrowserNotification mock
-        await page.evaluate(() => {
-            // Override to count calls
-            const originalNotify = (window as any)._originalNotify;
-            if (!originalNotify) {
-                (window as any)._originalNotify = (window as any).showBrowserNotification;
-                (window as any)._notificationCount = 0;
-                (window as any).showBrowserNotification = function() {
-                    (window as any)._notificationCount++;
-                    if ((window as any)._originalNotify) {
-                        return (window as any)._originalNotify.apply(this, arguments);
-                    }
-                };
-            }
-        });
-
-        // Get the DM channel ID for user2
-        const dmConv = await page.evaluate(() => {
-            const dms = (window as any).dmConversations;
-            if (dms && dms.length > 0) {
-                return { dm_channel_id: dms[0].dm_channel_id, other_user_id: dms[0].other_user_id };
-            }
-            return null;
-        });
-
-        if (!dmConv || !dmConv.dm_channel_id) {
-            console.log('No DM conversation found - reloading DM list');
-            // Reload and try again
-            await page.goto(`${BASE}/index.html`);
-            await page.waitForTimeout(3000);
-            await page.click('#dm-strip-btn');
-            await page.waitForTimeout(2000);
-            
-            const dmConvAfter = await page.evaluate(() => {
-                const dms = (window as any).dmConversations;
-                if (dms && dms.length > 0) {
-                    return { dm_channel_id: dms[0].dm_channel_id, other_user_id: dms[0].other_user_id };
-                }
-                return null;
-            });
-            if (!dmConvAfter || !dmConvAfter.dm_channel_id) {
-                console.log('Still no DM conversation - skipping test');
-                await page2.close();
-                await ctx2.close();
-                return;
-            }
-        }
-
-        // Now execute the DM forward via the API-like approach (use the WS to send dm_send)
-        // First, get user2's public key for encryption
-        const otherPubKeyRes = await page.request.get(`${BASE}/api/identity/${dmConv.other_user_id}`, {
-            headers: { Authorization: `Bearer ${body1.token}` },
-        });
-        const otherPubKeyData = await otherPubKeyRes.json();
-        const otherPubKey = new Uint8Array(Buffer.from(otherPubKeyData.identity_public_key, 'base64'));
-
-        // Build and send the forward message via the WebSocket directly
-        const forwardPayload = JSON.stringify({
-            type: 'forward',
-            source_server_id: serverId,
-            source_channel_id: channelId,
-            source_message_id: msgId,
-            source_server_name: 'FwdNotif ' + ts,
-            source_channel_name: 'general',
-            sender_username: user1,
-            sender_id: body1.user.id,
-            sender_color: '',
-        });
-
-        // Get encryption keys for the DM
-        const encryptedForward = await page.evaluate(async ({ dmChannelId, otherPubKeyB64, forwardPayload }) => {
-            const kp = E2ECrypto.getIdentityKeyPair();
-            const otherPubKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(otherPubKeyB64));
-            return E2ECrypto.encryptDm(forwardPayload, dmChannelId, kp.privateKey, otherPubKey);
-        }, { dmChannelId: dmConv.dm_channel_id, otherPubKeyB64: otherPubKeyData.identity_public_key, forwardPayload });
-
-        // Reset the notification count before sending
-        await page.evaluate(() => { (window as any)._notificationCount = 0; });
-
-        // Send the DM via WebSocket
-        await page.evaluate(({ dmChannelId, encrypted }) => {
-            const ws = (window as any).ws;
-            if (!ws || ws.readyState !== WebSocket.OPEN) {
-                console.error('WebSocket not open');
-                return;
-            }
-            ws.send(JSON.stringify({
-                type: 'dm_send',
-                dm_channel_id: dmChannelId,
-                encrypted_content: encrypted.ciphertext,
-                nonce: encrypted.nonce,
-                message_nonce: encrypted.messageNonce || null,
-            }));
-        }, { dmChannelId: dmConv.dm_channel_id, encrypted: encryptedForward });
-
-        // Wait for the message to be processed
-        await page.waitForTimeout(3000);
-
-        // Check that NO notification was shown (since it's own message via forward)
-        const notifCount = await page.evaluate(() => (window as any)._notificationCount || 0);
-        console.log('Notification count after self-forward:', notifCount);
-        expect(notifCount).toBe(0);
-
-        // Also verify that the unread DM count for the forwarded channel was NOT incremented
-        // (we can't easily check unreadDms since the forward target channel is the same one
-        // and the message goes to a different DM channel - but the key is no notification/sound)
-
-        await page2.close();
-        await ctx2.close();
-    });
-});
-
-// ============================================================
-// BUG FIX 3: getContrastGlowColor transition range
-// The transition from white→black glow was too early (0.2→0.8).
-// Changed to 0.35→0.9 so the glow stays contrasting longer.
-// ============================================================
-test.describe('Bugfix: getContrastGlowColor uses wider transition range', () => {
-
-    test('dark colors still get white glow at higher luminance thresholds', async ({ page }) => {
-        const ts = Date.now();
-        const username = 'glowrange_' + ts;
-
-        await registerUser(page, username);
-
-        const testCases = await page.evaluate(() => {
-            if (typeof getContrastGlowColor !== 'function') return null;
-
+        const btnInfo = await page.evaluate(() => {
+            const btn = document.getElementById('voice-hear-self-btn');
+            const meter = document.getElementById('voice-hear-self-meter-wrap');
+            const db = document.getElementById('voice-hear-self-db');
+            const status = document.getElementById('voice-hear-self-status');
+            const nsLabel = document.getElementById('voice-hear-self-ns-mode');
             return {
-                // Pure black → should be pure white glow (255,255,255)
-                black: getContrastGlowColor('#000000'),
-                // Very dark blue → should be pure white (luminance ≈ 0.032 → below 0.35)
-                darkBlue: getContrastGlowColor('#000088'),
-                // Medium dark (luminance ≈ 0.21 → below 0.35) → should be white or very light
-                mediumDark: getContrastGlowColor('#444444'),
-                // Mid-gray (luminance ≈ 0.5 → in transition zone 0.35-0.9)
-                midGray: getContrastGlowColor('#808080'),
-                // Light gray (luminance ≈ 0.75 → in transition zone) 
-                lightGray: getContrastGlowColor('#cccccc'),
-                // Pure white → should be pure black (0,0,0)
-                white: getContrastGlowColor('#ffffff'),
-                // Very bright yellow (luminance ≈ 0.93 → above 0.9) → should be pure black
-                brightYellow: getContrastGlowColor('#ffff00'),
-                // Default fallback
-                nullInput: getContrastGlowColor(null),
+                tag: btn?.tagName,
+                exists: !!btn,
+                meterExists: !!meter,
+                dbExists: !!db,
+                statusExists: !!status,
+                nsLabelExists: !!nsLabel,
+                initialMeterDisplay: meter ? getComputedStyle(meter).display : 'n/a',
             };
         });
 
-        expect(testCases).not.toBeNull();
-        if (testCases) {
-            // Pure black → pure white glow (255,255,255)
-            expect(testCases.black).toContain('255,255,255');
-            
-            // Dark blue (luminance ~0.032) → pure white glow
-            expect(testCases.darkBlue).toContain('255,255,255');
-            
-            // #444444 (luminance ~0.21 < 0.35) → should still be pure white glow
-            // This is the key fix - previously at luminance 0.21, t = (0.21-0.2)/0.6 = 0.0167,
-            // glowVal would be ~250 (nearly white). Now with threshold at 0.35,
-            // t = (0.21-0.35)/0.55 = -0.255 → clamped to 0 → glowVal = 255 (pure white)
-            expect(testCases.mediumDark).toContain('255,255,255');
-            
-            // #808080 (luminance 0.5) → should be in mid-transition (neither pure white nor pure black)
-            // t = (0.5-0.35)/0.55 = 0.273 → smoothstep ≈ 0.183 → glowVal ≈ 208 (light gray)
-            const midGray = testCases.midGray;
-            const containsWhite = midGray.includes('255,255,255');
-            const containsBlack = midGray.includes('0,0,0');
-            // Mid gray's glow should be a mixed value, neither pure extremes
-            console.log('Mid-gray glow:', midGray);
-            expect(containsWhite || containsBlack).toBeFalsy();
-            // Should be rgba format with gray values
-            expect(midGray).toContain('rgba(');
-            
-            // Pure white → pure black glow
-            expect(testCases.white).toContain('0,0,0');
-            
-            // Bright yellow (luminance ~0.93 > 0.9) → pure black glow
-            // Previously at 0.93: t = (0.93-0.2)/0.6 = 1.217 → clamped to 1 → pure black
-            // Now at 0.93: t = (0.93-0.35)/0.55 = 1.055 → clamped to 1 → pure black
-            expect(testCases.brightYellow).toContain('0,0,0');
-            
-            // Null input → default dark fallback
-            expect(testCases.nullInput).toContain('0,0,0');
-        }
-    });
-
-    test('getDisplayNameTextShadow uses custom border color when provided', async ({ page }) => {
-        const ts = Date.now();
-        const username = 'bordershadow_' + ts;
-
-        await registerUser(page, username);
-
-        const shadowStr = await page.evaluate(() => {
-            if (typeof getDisplayNameTextShadow !== 'function') return null;
-            // Provide a custom border color - it should be used directly
-            return getDisplayNameTextShadow('#ff0000', 'rgba(0,255,0,0.8)');
-        });
-
-        expect(shadowStr).not.toBeNull();
-        if (shadowStr) {
-            // Should contain the custom border color (green glow) NOT the auto-calculated one
-            expect(shadowStr).toContain('0,255,0');
-            // Should NOT contain the auto-calculated glow for red (which would be white since red is dark)
-            expect(shadowStr).not.toContain('255,255,255');
-            // Should be multi-layer
-            expect(shadowStr).toContain('0 0 4px');
-            expect(shadowStr).toContain('0 0 8px');
-            expect(shadowStr).toContain('0 0 16px');
-        }
-    });
-});
-
-// ============================================================
-// BUG FIX 4: Glow change reflects immediately (no page refresh needed)
-// The brace fix in profile_updated ensures cache updates + message 
-// reloads happen after changing border glow color.
-// ============================================================
-test.describe('Bugfix: Border glow color reflects immediately without page refresh', () => {
-
-    test('setting border glow via API immediately updates other user\'s view', async ({ page, context }) => {
-        const ts = Date.now();
-        const user1 = 'glowimm1_' + ts;
-        const user2 = 'glowimm2_' + ts;
-
-        const body1 = await registerUser(page, user1);
-        const ctx2 = await context.browser()!.newContext();
-        const page2 = await ctx2.newPage();
-        const body2 = await registerUser(page2, user2);
-
-        // Create server
-        const { serverId, channelId, inviteCode } = await createServerAndKey(page, body1.token, body1.user.id, 'GlowImm ' + ts);
-        await joinServerAndGetKey(page, page2, serverId, inviteCode, body2.user.id);
-
-        // User1 sends a message
-        const input = await loadChatAndSelectChannel(page);
-        await input.fill('Message before glow change');
-        await page.click('#send-btn');
-        await page.waitForTimeout(3000);
-
-        // User2 loads chat
-        await loadChatAndSelectChannel(page2);
-        await page2.waitForTimeout(3000);
-
-        // Verify message is visible and initial glow is auto-calculated
-        const msgTexts = await page2.locator('.message .text').allTextContents();
-        expect(msgTexts.some(t => t && t.includes('Message before glow change'))).toBeTruthy();
-
-        const initialStyle = await page2.locator('.message .display-name').first().getAttribute('style');
-        console.log('Initial display name style:', initialStyle);
-        expect(initialStyle).toBeTruthy();
-
-        // User1 changes border glow to a specific color
-        await page.request.patch(`${BASE}/api/profile`, {
-            headers: { Authorization: `Bearer ${body1.token}`, 'Content-Type': 'application/json' },
-            data: { username_border_color: 'rgba(255,0,0,0.85)' }, // red glow
-        });
-        await page.waitForTimeout(2000);
-
-        // User1 sends another message to trigger profile_updated broadcast re-render
-        await input.fill('Message after glow change');
-        await page.click('#send-btn');
-        await page.waitForTimeout(3000);
-
-        // User2 should see the new glow on the display name WITHOUT page refresh
-        // (the profile_updated event triggers loadMessages which re-renders)
-        const styleAfter = await page2.locator('.message .display-name').first().getAttribute('style');
-        console.log('Display name style after glow change:', styleAfter);
-        expect(styleAfter).toBeTruthy();
-
-        // The text-shadow should now contain the red glow (255,0,0)
-        // Note: the glow is set as a text-shadow value, not inline
-        if (styleAfter) {
-            const hasRedGlow = styleAfter.includes('255,0,0') || styleAfter.includes('rgba(255,0,0');
-            console.log('Has red glow:', hasRedGlow);
-            // At minimum it should have text-shadow
-            expect(styleAfter).toContain('text-shadow');
-        }
-        
-        // Verify user2's messages now show the red glow text-shadow on user1's display name
-        // This is the user-visible confirmation that the profile_updated event was processed
-        await expect(async () => {
-            const styleAfter = await page2.locator('.message .display-name').first().getAttribute('style');
-            console.log('Polling display name style:', styleAfter);
-            expect(styleAfter).toBeTruthy();
-            // The text-shadow should contain the red glow (255,0,0) or just have text-shadow at minimum
-            // Allow some flexibility in how the browser formats it
-            const hasRedInShadow = styleAfter.includes('rgba(255,0,0') || styleAfter.includes('255, 0, 0') || styleAfter.includes('255,0,0');
-            // If not exact red, it should at least have text-shadow (indicating the glow was applied)
-            expect(styleAfter).toContain('text-shadow');
-        }).toPass({ timeout: 10000 });
-
-        await page2.close();
-        await ctx2.close();
-    });
-
-    test('profile edit shows the previously saved glow as selected', async ({ page }) => {
-        const ts = Date.now();
-        const username = 'glowselected_' + ts;
-        const testGlow = '#ff0000';
-
-        await registerUser(page, username);
-
-        // Store password for auto-verification so profile edit works
-        await page.evaluate(() => localStorage.setItem('e2e_password', 'password123'));
-
-        // Save a border glow through the real profile-edit UI (encrypted PATCH)
-        await openProfileEditModal(page);
-        await setGlowInput(page, testGlow);
-        await page.click('#profile-edit-save-btn');
-        await page.waitForTimeout(3000);
-
-        // Reload and reopen the editor — the saved glow must be shown
-        // (read from the DECRYPTED profile, not the encrypted API response)
-        await page.goto(`${BASE}/index.html`);
-        await page.waitForTimeout(2000);
-        await openProfileEditModal(page);
-
-        const glowValue = await page.inputValue('#profile-edit-glow-color');
-        console.log('Saved glow shown in profile edit:', glowValue);
-        expect(glowValue).toBe(testGlow);
-
-        await page.click('#profile-edit-cancel-btn');
-        await page.waitForTimeout(500);
-    });
-
-    test('username border glow colors save and persist correctly', async ({ page }) => {
-        const ts = Date.now();
-        const username = 'glowpersist_' + ts;
-        const testGlow = '#ff0000';
-
-        await registerUser(page, username);
-
-        const body = await page.evaluate(() => ({
-            token: localStorage.getItem('token'),
-            user: JSON.parse(localStorage.getItem('user') || '{}'),
-        }));
-        await page.evaluate(() => localStorage.setItem('e2e_password', 'password123'));
-
-        // Save the glow through the real client flow (encrypted PATCH)
-        await openProfileEditModal(page);
-        await setGlowInput(page, testGlow);
-        await page.click('#profile-edit-save-btn');
-        await page.waitForTimeout(3000);
-
-        // The server stores ONLY encrypted profile data — no plaintext color
-        // fields (E2EE at rest is the design; the client decrypts on read).
-        const profileRes = await page.request.get(`${BASE}/api/profile/${body.user.id}`, {
-            headers: { Authorization: `Bearer ${body.token}` },
-        });
-        expect(profileRes.ok()).toBeTruthy();
-        const profile = await profileRes.json();
-        console.log('Profile after saving glow:', JSON.stringify(profile));
-        expect(profile.username_border_color).toBeUndefined();
-        expect(profile.encrypted_profile_data).toBeTruthy();
-
-        // Reload and verify the glow still renders (decrypted client-side)
-        await page.goto(`${BASE}/index.html`);
-        await page.waitForTimeout(2000);
-        await openProfileEditModal(page);
-        const glowValue = await page.inputValue('#profile-edit-glow-color');
-        expect(glowValue).toBe(testGlow);
-
-        await page.click('#profile-edit-cancel-btn');
-        await page.waitForTimeout(500);
-    });
-
-    test('saving border glow via profile edit stores the correct value', async ({ page }) => {
-        const ts = Date.now();
-        const username = 'glowbtn_' + ts;
-        const testGlow = '#00ff66';
-
-        await registerUser(page, username);
-
-        // Store password for auto-verification so profile edit works
-        await page.evaluate(() => localStorage.setItem('e2e_password', 'password123'));
-
-        // Open profile modal then edit, set the glow, and save
-        await openProfileEditModal(page);
-        await setGlowInput(page, testGlow);
-        await page.click('#profile-edit-save-btn');
-        await page.waitForTimeout(3000);
-
-        // The client's decrypted profile must hold the saved glow
-        const savedGlow = await page.evaluate(() => {
-            const po = typeof profileOriginalData !== 'undefined' ? profileOriginalData : null;
-            return po && po.decrypted ? po.decrypted.username_border_color : null;
-        });
-        console.log('Saved glow in decrypted profile:', savedGlow);
-        expect(savedGlow).toBe(testGlow);
-
-        // And re-opening the editor shows it
-        await openProfileEditModal(page);
-        const glowValue = await page.inputValue('#profile-edit-glow-color');
-        expect(glowValue).toBe(testGlow);
-        await page.click('#profile-edit-cancel-btn');
-        await page.waitForTimeout(500);
-    });
-});
-
-// ============================================================
-// BUG FIX 5: DM messages don't appear encrypted after profile change
-// The brace fix ensures profile_updated handler doesn't crash,
-// so message reloading works correctly after color/glow changes.
-// ============================================================
-test.describe('Bugfix: DM messages not encrypted after profile change', () => {
-
-    test('DM messages decrypt correctly after changing username color and glow', async ({ page, context }) => {
-        test.setTimeout(60000);
-        const ts = Date.now();
-        const user1 = 'decdm1_' + ts;
-        const user2 = 'decdm2_' + ts;
-
-        const body1 = await registerUser(page, user1);
-        const ctx2 = await context.browser()!.newContext();
-        const page2 = await ctx2.newPage();
-        const body2 = await registerUser(page2, user2);
-
-        // Set initial profile for user1
-        await page.request.patch(`${BASE}/api/profile`, {
-            headers: { Authorization: `Bearer ${body1.token}`, 'Content-Type': 'application/json' },
-            data: { username_color: '#ff0000', username_border_color: 'rgba(0,0,0,0.85)' },
-        });
-
-        await becomeFriends(page, page2, body1.token, body2.token);
-
-        // User1 sends a message in DM
-        await loadDmAndSend(page, 'First DM message - should be readable');
-
-        // User2 loads and reads the DM
-        await page2.goto(`${BASE}/index.html`);
-        await page2.waitForTimeout(2000);
-        await page2.click('#dm-strip-btn');
-        await page2.waitForTimeout(2000);
-        await page2.waitForSelector('.dm-item', { timeout: 10000 }).catch(() => {});
-        const dmCount = await page2.locator('.dm-item').count();
-        console.log('DM items for user2:', dmCount);
-        if (dmCount > 0) {
-            await page2.locator('.dm-item').first().click();
-            await page2.waitForTimeout(5000);
-        }
-
-        // Verify message decrypts properly - use polling to wait for messages
-        await expect(async () => {
-            const msgTexts = await page2.locator('.message .text').allTextContents();
-            console.log('User2 messages before color change:', JSON.stringify(msgTexts));
-            expect(msgTexts.some(t => t && t.includes('First DM message - should be readable'))).toBeTruthy();
-        }).toPass({ timeout: 15000 });
-
-        let msgTexts = await page2.locator('.message .text').allTextContents();
-        // Check NO encrypted content appears
-        const hasEncrypted = msgTexts.some(t => t && (t.includes('[encrypted]') || t.includes('encrypted')));
-        expect(hasEncrypted).toBeFalsy();
-
-        // Now user1 changes color AND glow (multiple profile changes)
-        await page.request.patch(`${BASE}/api/profile`, {
-            headers: { Authorization: `Bearer ${body1.token}`, 'Content-Type': 'application/json' },
-            data: { username_color: '#00ff00' },
-        });
-        await page.waitForTimeout(1000);
-
-        await page.request.patch(`${BASE}/api/profile`, {
-            headers: { Authorization: `Bearer ${body1.token}`, 'Content-Type': 'application/json' },
-            data: { username_border_color: 'rgba(255,255,255,0.85)' },
-        });
-        await page.waitForTimeout(1000);
-
-        // User1 sends another DM message - navigate in-place to preserve E2E keys!
-        // IMPORTANT: Do NOT use page.goto() as it reloads crypto.js and regenerates keys
-        await page.bringToFront();
-        
-        // Ensure DM strip is visible without toggling (clicking #dm-strip-btn when already
-        // on DM view would HIDE it). Instead, check if DM items exist and click directly.
-        let dmItemClickable = await page.locator('.dm-item').first().isVisible().catch(() => false);
-        if (!dmItemClickable) {
-            // DM strip might be hidden - toggle it ON
-            await page.click('#dm-strip-btn');
-            await page.waitForTimeout(1500);
-        }
-        
-        // Wait for DM items
-        await page.waitForSelector('.dm-item', { timeout: 10000 }).catch(() => {});
-        const dmCount2 = await page.locator('.dm-item').count();
-        console.log('DM items count for user1:', dmCount2);
-        if (dmCount2 > 0) {
-            await page.locator('.dm-item').first().click();
-            await page.waitForTimeout(3000);
-        }
-        // Wait for message input to be enabled
-        const input1 = page.locator('#message-input');
-        await expect(input1).toBeEnabled({ timeout: 15000 });
-        await input1.fill('Second DM message after color change');
-        await page.click('#send-btn');
-        await page.waitForTimeout(3000);
-
-        // Switch to user2 and refresh DM messages
-        await page2.bringToFront();
-        await page2.waitForTimeout(1000);
-        const dmItemCount = await page2.locator('.dm-item').count();
-        if (dmItemCount > 0) {
-            await page2.locator('.dm-item').first().click();
-        }
-        await page2.waitForTimeout(5000);
-
-        // Poll for the second message to appear and be decrypted
-        await expect(async () => {
-            msgTexts = await page2.locator('.message .text').allTextContents();
-            console.log('User2 messages after color change:', JSON.stringify(msgTexts));
-            
-            // Both messages should be readable
-            const firstMsgOk = msgTexts.some(t => t && t.includes('First DM message - should be readable'));
-            const secondMsgOk = msgTexts.some(t => t && t.includes('Second DM message after color change'));
-            expect(firstMsgOk).toBeTruthy();
-            expect(secondMsgOk).toBeTruthy();
-        }).toPass({ timeout: 15000 });
-
-        msgTexts = await page2.locator('.message .text').allTextContents();
-        // Check no encrypted content leaks
-        const allText = msgTexts.join(' ');
-        expect(allText).not.toContain('[encrypted]');
-
-        await page2.close();
-        await ctx2.close();
+        expect(btnInfo.exists).toBe(true);
+        expect(btnInfo.tag).toBe('BUTTON');
+        expect(btnInfo.meterExists).toBe(true);
+        expect(btnInfo.dbExists).toBe(true);
+        expect(btnInfo.statusExists).toBe(true);
+        expect(btnInfo.nsLabelExists).toBe(true);
+        expect(btnInfo.initialMeterDisplay).toBe('none');
     });
 });

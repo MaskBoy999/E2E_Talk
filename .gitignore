@@ -14,6 +14,7 @@ server/*.exe
 test-results/
 test_*
 test-*
+browser-screenshots/
 
 # Debug/log files (all)
 *.log

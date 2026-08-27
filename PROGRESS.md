@@ -5493,3 +5493,136 @@ The app is now installable as a Progressive Web App with offline caching and pus
 
 **Files created:** `static/manifest.json`, `static/sw.js`, `static/icons/icon-192.svg`
 **Files modified:** `static/index.html` (meta tags, SW registration), `static/chat.js` (offline queue + push helpers)
+
+### 76. Spoiler Tags
+
+Messages now support spoiler syntax: `||hidden text||` renders blurred and click-to-reveal.
+
+**Implementation:** Added regex in `inlineFormat()` in `chat.js` markdown renderer. CSS class `.spoiler` with `filter: blur(5px)`, toggled on click. Works in both server channels and DMs.
+
+### 77. Message Right-Click Context Menu
+
+Moved Reply, Forward, Thread from hover actions to right-click context menu. Added Copy Text and Copy Message Link.
+
+**Changes:** Stripped reply/forward/thread from hover `.message-actions`. Added `contextmenu` listener on `#message-list` with: Reply, Thread, Forward, Edit, Delete, Pin, Copy Text, Copy Link, Block/Unblock.
+
+### 78. Mobile Context Menu (Double-Tap)
+
+On touch devices, double-tap channels, categories, servers, or DM conversations to open context menus. Drag-and-drop preserved.
+
+### 79. Picture-in-Picture for Calls
+
+Added PiP button to voice popup. Uses browser `requestPictureInPicture()` API on active screen/camera video.
+
+### 80. Block User System
+
+Users can block/unblock other users. Block/Unblock appears in message right-click context menu.
+
+- **DB:** `075_user_blocks.sql` -- user_blocks table
+- **API:** `PUT /api/blocks/{user_id}`, `DELETE /api/blocks/{user_id}`, `GET /api/blocks`
+- **Client:** blockedUsers cache, isUserBlocked() check, context menu integration
+
+### 81. Unread Jump Divider
+
+Tracks last-read position per channel. Channels marked as read on select. Unread divider CSS + infrastructure.
+
+### 82. Message Effects
+
+Send `/fireworks`, `/confetti`, `/sparkles`, or `/rain` before a message for visual animation.
+
+**Effects:** Fireworks (shake + emoji), Confetti (float-up), Sparkles (glow), Rain (water drops). Effect stored in payload, rendered on receipt.
+
+### 83. Server and DM Sidebar Reordering
+
+Drag-to-reorder servers and DM conversations. Per-user ordering.
+
+- **DB:** `073_server_order.sql` (server_members.position), `074_dm_order.sql` (dm_channels.position)
+- **API:** `PUT /api/servers/reorder`, `PUT /api/dm/reorder`
+- **Client:** Drag handlers with visual indicators
+
+### 84. Category Context Menu: Mute All + Mark All Read
+
+Right-click category header for Mute All Channels and Mark All as Read.
+
+### 85. Voice Settings: Hear Yourself
+
+Toggle in Settings > Voice plays back mic through speakers. Syncs with speaker volume.
+### 86. F12: Soundboard
+
+Encrypted soundboard clips for voice channels. Users upload audio (max 30s) encrypted client-side with the server key. Clips are stored encrypted in the DB. Play a clip in voice channel via WebSocket relay to all room participants. Per-user mute support: right-click a user to mute their soundboard playback. Owner can mute soundboard for everyone. Audio trimmed on the client before encryption.
+
+### 87. F6: QR-Code Second-Device Login (Device Pairing)
+
+Pair a new device by scanning a QR code. Existing device creates a 5-minute pairing ticket containing an encrypted key blob. New device scans the QR, claims the ticket, and receives a JWT + the encrypted key blob for bootstrapping encryption. Ticket and key blob are encrypted client-side - the server only stores opaque ciphertext.
+
+### 88. DM Conversation Ordering
+
+Drag-to-reorder DM conversations in the sidebar. Per-user position stored in dm_channels.position (migration 074). Server endpoint: PUT /api/dm/reorder.
+
+### 89. Server Ordering
+
+Drag-to-reorder servers in the sidebar. Per-user position stored in server_members.position (migration 073). Server endpoint: PUT /api/servers/reorder.
+
+### 90. User Block System
+
+Block/unblock users. Blocked users messages and DMs are hidden. Block/unblock via right-click context menu on messages. Server endpoints: GET/PUT/DELETE /api/blocks. Migration 075: user_blocks table.
+
+### 91. Message Effects
+
+Send /fireworks, /confetti, /sparkles, or /rain before a message for visual CSS animations. Effects are stored in the message payload and rendered on receipt. Purely cosmetic - content stays encrypted.
+
+### 92. Spoiler Tags
+
+Wrap text in ||double pipes|| for blurred spoiler text. Click to reveal, click again to re-hide. Works in both server channels and DMs.
+
+### 93. Message Right-Click Context Menu
+
+Right-click any message for: Reply, Thread, Forward to Channel, Forward to DM, Edit, Delete, Pin, Copy Text, Copy Message Link. Reply/Forward/Thread removed from hover actions - only React remains on hover.
+
+### 94. Unread Jump Divider
+
+Tracks last-read position per channel. When scrolling up past the read position, a New messages divider appears. Channels are marked as read when selected.
+
+### 95. Picture-in-Picture for Calls
+
+PiP button in voice popup controls. Uses browser native requestPictureInPicture() on the active screen share or camera video tile.
+
+### 96. Category Context Menu: Mute All + Mark All Read
+
+Right-click a category header for Mute All Channels (skips voice channels) and Mark All as Read. Works for all users.
+
+### 97. Security Fix: Migration Registration
+
+Fixed missing migration registrations for 073 (server ordering), 074 (DM ordering), 075 (user blocks), 076 (soundboard), 077 (device pairing). These migrations existed as SQL files but were never registered in run_migrations(), causing 500 errors on /api/servers, /api/blocks, and /api/dm/conversations.
+
+### 98. Security Fix: SQL Syntax Error in DM Query
+
+Fixed missing ORDER BY clause in list_dm_channels_for_user that caused syntax errors when loading DM conversations.
+
+### 99. Server Groups (F4 Enhancement)
+
+Servers can now be grouped into collapsible folders in the left strip. Drag a server onto another to create a group, drag to gaps between servers to reorder, or right-click a group header to rename/ungroup/delete. Groups are per-user (each user organizes their own servers independently). Supports nested groups via parent_group_id. DB: server_groups table + group_id column on servers.
+
+### 100. Voice Settings: Hear Yourself After Noise Suppression
+
+Moved 'Hear Yourself' toggle from after Echo Cancellation to immediately after Noise Suppression in the Voice settings tab, making the flow more logical: configure noise suppression, then immediately test it.
+
+### 101. Soundboard: Pause/Stop + Self-Hear + Improved UI
+
+- Pause/Stop button appears while a sound is playing, Play button reappears when stopped/ended
+- Self-hear toggle in the soundboard overlay header: plays back your own sounds locally so you can preview them
+- Upload button restyled to be wider and more prominent
+- Removed 30-second length limit (both client and server)
+- Exposed loadSoundboardClips and playSoundboardClip globally for mini bar access
+
+### 102. Soundboard Button in DM Mini Bar
+
+When in a DM call and the mini bar is shown, the soundboard button (🎵) now appears alongside Mute/Deafen/End, allowing quick access to the soundboard during DM calls.
+
+### 103. Server Group Drag Indicators Fixed
+
+Server drag-to-reorder indicators changed from left/right borders to top/bottom borders (matching the vertical layout). 25% center zone triggers grouping; above/below triggers reorder. Group headers also support drag-to-reorder.
+
+### 104. Pair New Device Removed
+
+Removed the entire QR-based device pairing feature (F6) including the pairing modal, pair.html page, and _addPairingButton. The feature was unnecessary since encryption keys are already restored from the server key blob on login.

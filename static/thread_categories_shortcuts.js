@@ -1300,6 +1300,19 @@
                 }
             }},
             '---',
+            { label: 'Mute All Channels', action: function () {
+                channels.forEach(function (ch) {
+                    if (ch.channel_type !== 'voice') {
+                        if (typeof toggleMuteChannel === 'function') toggleMuteChannel(ch.id, serverId);
+                    }
+                });
+            }},
+            { label: 'Mark All as Read', action: function () {
+                channels.forEach(function (ch) {
+                    if (typeof clearUnreadChannelMentions === 'function') clearUnreadChannelMentions(ch.id);
+                });
+            }},
+            '---',
             { label: 'Delete', danger: true, action: function () {
                 var chCount = channels.length;
                 var msg = 'Delete category "' + catName + '"?';
@@ -1420,7 +1433,79 @@
         };
     }
 
+    // --- Mobile double-tap: context menu (keeps drag-and-drop working) ---
+    var _lastTapTarget = null;
+    var _lastTapTime = 0;
+    var DOUBLE_TAP_MS = 350;
+    var isTouchDevice = ('ontouchstart' in window || navigator.maxTouchPoints > 0);
+
+    if (isTouchDevice) {
+        document.getElementById('channel-list').addEventListener('touchend', function(e) {
+            var chDiv = e.target.closest('.channel-item[data-id]');
+            var catHeader = e.target.closest('.channel-category-header');
+            var target = chDiv || catHeader;
+            if (!target) { _lastTapTarget = null; return; }
+            var now = Date.now();
+            if (target === _lastTapTarget && (now - _lastTapTime) < DOUBLE_TAP_MS) {
+                e.preventDefault();
+                e.stopPropagation();
+                var touch = e.changedTouches ? e.changedTouches[0] : null;
+                var cx = touch ? touch.clientX : 0;
+                var cy = touch ? touch.clientY : 0;
+                if (chDiv) {
+                    var chId = chDiv.getAttribute('data-id');
+                    var chName = chDiv.getAttribute('data-name') || '';
+                    var isCat = chDiv.closest('.channel-category-group');
+                    var catId = isCat ? isCat.getAttribute('data-category-id') : null;
+                    var fakeCh = { id: chId, channel_type: chDiv.getAttribute('data-type') || 'text' };
+                    if (typeof _showChannelContextMenu === 'function') {
+                        _showChannelContextMenu(cx, cy, '', fakeCh, chName, catId, false);
+                    }
+                } else if (catHeader) {
+                    var group = catHeader.closest('.channel-category-group');
+                    if (group) {
+                        var catIdVal = group.getAttribute('data-category-id');
+                        var catChannels = [];
+                        group.querySelectorAll('.channel-item[data-id]').forEach(function(el) {
+                            catChannels.push({ id: el.getAttribute('data-id'), channel_type: el.getAttribute('data-type') || 'text' });
+                        });
+                        var catNameVal = catHeader.textContent.trim();
+                        if (typeof _showCategoryContextMenu === 'function') {
+                            _showCategoryContextMenu(cx, cy, '', catIdVal, catNameVal, catChannels);
+                        }
+                    }
+                }
+                _lastTapTarget = null;
+            } else {
+                _lastTapTarget = target;
+                _lastTapTime = now;
+            }
+        });
+
+        document.getElementById('server-list').addEventListener('touchend', function(e) {
+            var svIcon = e.target.closest('.server-icon');
+            if (!svIcon) return;
+            var now = Date.now();
+            if (svIcon === _lastTapTarget && (now - _lastTapTime) < DOUBLE_TAP_MS) {
+                e.preventDefault();
+                e.stopPropagation();
+                var touch = e.changedTouches ? e.changedTouches[0] : null;
+                if (touch && typeof showServerContextMenu === 'function') {
+                    var fakeEvt = { clientX: touch.clientX, clientY: touch.clientY, preventDefault: function(){}, stopPropagation: function(){} };
+                    showServerContextMenu(fakeEvt, svIcon.dataset.id, svIcon.title);
+                }
+                _lastTapTarget = null;
+            } else {
+                _lastTapTarget = svIcon;
+                _lastTapTime = now;
+            }
+        });
+    }
+
     // Expose category API
+
+    window.showContextMenu = _showContextMenu;
+    window.dismissContextMenu = _dismissContextMenu;
 
     window.loadCategories = loadCategories;
 

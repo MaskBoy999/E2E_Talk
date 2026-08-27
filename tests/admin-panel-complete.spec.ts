@@ -32,7 +32,7 @@ test.describe('Admin panel: every tab renders and XSS payloads stay escaped', ()
 
     test.beforeAll(async ({ request }) => {
         const serverDir = path.join(__dirname, '..', 'server');
-        const bin = path.join(serverDir, 'target', 'debug', process.platform === 'win32' ? 'e2e-chat.exe' : 'e2e-chat');
+        const bin = path.join(serverDir, 'target', 'release', process.platform === 'win32' ? 'e2e-chat.exe' : 'e2e-chat');
         if (!fs.existsSync(bin)) throw new Error('server binary not found at ' + bin);
         tmpDb = path.join(serverDir, `admin-panel-${Date.now()}.db`);
         child = spawn(bin, [], {

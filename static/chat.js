@@ -52,9 +52,10 @@ async function ensureHmacKey() {
 
 let ws = null;
 let currentChannelId = null;
-let currentServerId = null;
+var currentServerId = null;
 let user = null;
 let servers = [];
+let serverGroups = []; // {id, name, position, collapsed, parent_group_id}
 let isOwner = false;
 let currentInviteCode = null;
 let viewMode = 'dms';
@@ -85,6 +86,26 @@ let mentionItems = [];
 // Muted servers, channels, and DMs (IDs stored in localStorage as JSON arrays)
 var mutedServers = [];
 var mutedChannels = [];
+var blockedUsers = [];
+async function loadBlockedUsers() {
+    try {
+        const res = await authFetch('/api/blocks');
+        const data = await res.json();
+        blockedUsers = data.blocked || [];
+    } catch (_) { blockedUsers = []; }
+}
+function isUserBlocked(userId) { return blockedUsers.indexOf(userId) !== -1; }
+async function blockUser(userId) {
+    await authFetch('/api/blocks/' + userId, { method: 'PUT' });
+    blockedUsers.push(userId);
+    showToast('User blocked');
+}
+async function unblockUser(userId) {
+    await authFetch('/api/blocks/' + userId, { method: 'DELETE' });
+    blockedUsers = blockedUsers.filter(function(id) { return id !== userId; });
+    showToast('User unblocked');
+}
+
 var mutedDms = [];
 
 function loadMutedState() {
@@ -6861,6 +6882,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }).then(hideLoadingOverlay).catch(hideLoadingOverlay);
     loadFriendRequestBadge();
+    loadBlockedUsers();
     loadEmojiCache(); // Load custom emojis
     loadMyProfile(); // Load own profile for sidebar footer
     // F14: Auto-load active CSS slot from server on startup
@@ -7256,6 +7278,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 _scheduledMessages.splice(idx, 1);
                 saveScheduledMessages();
                 renderScheduledList();
+                renderSecurityScheduledList();
             } else if (action === 'delay') {
                 var mins = parseInt(btn.getAttribute('data-sch-mins'), 10) || 5;
                 var msg = _scheduledMessages[idx];
@@ -7263,6 +7286,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     msg.sendAt = new Date(new Date(msg.sendAt).getTime() + mins * 60000).toISOString();
                     saveScheduledMessages();
                     renderScheduledList();
+                    renderSecurityScheduledList();
                 }
             }
         }
@@ -7406,6 +7430,17 @@ document.addEventListener('DOMContentLoaded', () => {
                                         payload.encrypted_sender_username = _encU.ciphertext;
                                         payload.sender_username_nonce = _encU.nonce;
                                     }
+                                }
+                            } catch (_) {}
+                            // Inject profile snapshot into local cache so sender sees PFP/name immediately
+                            try {
+                                if (myProfile && user) {
+                                    if (!userDisplayNameCache[user.id]) userDisplayNameCache[user.id] = {};
+                                    userDisplayNameCache[user.id].display_name = myProfile.display_name || user.username;
+                                    if (myProfile.username_color) userDisplayNameCache[user.id].username_color = myProfile.username_color;
+                                    if (myProfile.profile_picture_file_id) userDisplayNameCache[user.id].profile_picture_file_id = myProfile.profile_picture_file_id;
+                                    if (myProfile.profile_picture_file_key) userDisplayNameCache[user.id].profile_picture_file_key = myProfile.profile_picture_file_key;
+                                    scheduleUserDisplayNameSave();
                                 }
                             } catch (_) {}
                             ws.send(JSON.stringify(payload));
@@ -10800,6 +10835,18 @@ function showServerContextMenu(e, serverId, serverName) {
     });
     menu.appendChild(clearNotifItem);
 
+    // Remove from Group (if server is in a group)
+    if (sv && sv.group_id) {
+        var removeFromGroupItem = document.createElement('div');
+        removeFromGroupItem.className = 'context-menu-item';
+        removeFromGroupItem.textContent = 'Remove from Group';
+        removeFromGroupItem.addEventListener('click', function () {
+            moveServerToGroup(serverId, null);
+            menu.remove();
+        });
+        menu.appendChild(removeFromGroupItem);
+    }
+
     document.body.appendChild(menu);
 
     // Close on click outside
@@ -11696,6 +11743,8 @@ function connectWebSocket(t) {
                     if (data.server_id === currentServerId) {
                         broadcastProfileKeySyncToServer(data.server_id);
                     }
+                    // Refresh server list for other tabs/members so the new server appears
+                    try { await refreshServerListData(); } catch (_) {}
                 }
                 break;
             case 'member_kicked':
@@ -12456,6 +12505,9 @@ function connectWebSocket(t) {
             case 'profile_key_server_sync':
                 // profile_key_server_sync is no longer sent by the server.
                 break;
+            case 'soundboard_play':
+                if (window._handleSoundboardPlay) window._handleSoundboardPlay(data);
+                break;
             case 'encrypted_notification':
             {
                 // ECDH-encrypted notification from offline replay
@@ -12975,6 +13027,12 @@ async function loadServers() {
         const res = await authFetch('/api/servers');
         servers = await res.json();
         if (!Array.isArray(servers)) servers = [];
+        // Load server groups
+        try {
+            var grpRes = await authFetch('/api/server-groups');
+            var grpData = await grpRes.json();
+            serverGroups = Array.isArray(grpData.groups) ? grpData.groups : [];
+        } catch (_) { serverGroups = []; }
         renderServerList();
         restoreMentionState();
         updateServerBadges();
@@ -13072,54 +13130,611 @@ function renderServerList() {
     const list = document.getElementById('server-list');
     list.innerHTML = '';
 
-    servers.forEach(s => {
-        const div = document.createElement('div');
-        div.className = 'server-icon' + (s.id === currentServerId ? ' active' : '');
-        // Decrypt server name using server key
+    // --- helpers ---
+    function decryptServerName(s) {
         var displayName = '';
         if (s.encrypted_name && s.name_nonce) {
             try {
-                // Try all known keys (current + history) to handle key rotations
                 displayName = tryDecryptWithAllKeys(s.id, s.encrypted_name, s.name_nonce);
                 if (displayName) s.name = displayName;
-                // Fallback: try old key saved by rotateServerKey (owner-only legacy path)
                 if (!displayName) {
                     var oldName = decryptWithOldKey(s.id, s.encrypted_name, s.name_nonce);
                     if (oldName) { displayName = oldName; s.name = oldName; }
                 }
             } catch (_) {}
         }
-        // Show server picture if available, otherwise initial letter
-        var serverPicUrl = s.server_picture_file_id ? getServerPictureUrl(s.server_picture_file_id, s.id) : null;
-        if (serverPicUrl) {
-            div.innerHTML = '<img src="' + serverPicUrl + '" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;">';
-            div.dataset.serverPic = s.server_picture_file_id;
-        } else if (s.server_picture_file_id) {
-            div.textContent = displayName ? displayName.charAt(0).toUpperCase() : '';
-            // Trigger async fetch of server picture
-            getServerPictureUrl(s.server_picture_file_id, s.id);
-        } else {
-            div.textContent = displayName ? displayName.charAt(0).toUpperCase() : '';
-        }
-        div.title = displayName;
+        return displayName || s.name || '';
+    }
+    function serverPicHtml(s) {
+        var url = s.server_picture_file_id ? getServerPictureUrl(s.server_picture_file_id, s.id) : null;
+        if (url) return '<img src="' + url + '" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;">';
+        if (s.server_picture_file_id) { getServerPictureUrl(s.server_picture_file_id, s.id); }
+        return '';
+    }
+    function makeServerIcon(s, opts) {
+        opts = opts || {};
+        var div = document.createElement('div');
+        div.className = 'server-icon' + (s.id === currentServerId ? ' active' : '');
+        var dn = decryptServerName(s);
+        var pic = serverPicHtml(s);
+        if (pic) { div.innerHTML = pic; } else { div.textContent = dn ? dn.charAt(0).toUpperCase() : ''; }
+        div.title = dn;
         div.dataset.id = s.id;
-        div.addEventListener('click', (e) => {
-            // A real user click on a server dismisses the voice channel view
-            // overlay immediately (synthetic clicks from list re-renders —
-            // isTrusted false — never close it).
-            if (e.isTrusted && window.VoiceManager && window.VoiceManager.exitVoiceChannelView) {
-                try { window.VoiceManager.exitVoiceChannelView(); } catch (_) {}
-            }
-            selectServer(s.id);
-        });
-        div.addEventListener('contextmenu', function (e) {
+        if (!opts.noSelect) {
+            div.addEventListener('click', function(e) {
+                if (e.isTrusted && window.VoiceManager && window.VoiceManager.exitVoiceChannelView) {
+                    try { window.VoiceManager.exitVoiceChannelView(); } catch (_) {}
+                }
+                selectServer(s.id);
+            });
+        }
+        div.addEventListener('contextmenu', function(e) {
             e.preventDefault();
             e.stopPropagation();
             showServerContextMenu(e, s.id, s.name);
         });
-        list.appendChild(div);
+        return div;
+    }
+
+    // --- build ordered flat list (groups expand inline, collapsed groups = single icon) ---
+    // Sort groups by position
+    var sortedGroups = (serverGroups || []).slice().sort(function(a, b) { return (a.position || 0) - (b.position || 0); });
+    // Map: groupId -> [servers sorted by position]
+    var serversByGroup = {};
+    servers.forEach(function(s) { var gid = s.group_id || ''; if (gid) { (serversByGroup[gid] = serversByGroup[gid] || []).push(s); } });
+    Object.keys(serversByGroup).forEach(function(gid) {
+        serversByGroup[gid].sort(function(a, b) { return (a.position || 0) - (b.position || 0); });
     });
-    
+
+    // Build flat ordered items: [{type:'group',group}, {type:'server',server}]
+    // Only top-level groups (no parent) go in the main list; child groups render recursively.
+    var items = [];
+    var groupedServerIds = {};
+    sortedGroups.forEach(function(g) {
+        if (!g.parent_group_id) {
+            items.push({ type: 'group', group: g });
+        }
+        (serversByGroup[g.id] || []).forEach(function(s) {
+            groupedServerIds[s.id] = true;
+            items.push({ type: 'server', server: s });
+        });
+    });
+    // Ungrouped servers (sorted by position)
+    servers.filter(function(s) { return !groupedServerIds[s.id]; })
+        .sort(function(a, b) { return (a.position || 0) - (b.position || 0); })
+        .forEach(function(s) { items.push({ type: 'server', server: s }); });
+
+    // Recursive function to render child groups inside a parent group
+    function renderChildGroups(parentId, container) {
+        var children = sortedGroups.filter(function(g) { return g.parent_group_id === parentId; });
+        children.forEach(function(g) {
+            var isCollapsed = g.collapsed;
+            var groupServers = serversByGroup[g.id] || [];
+            var childWrapper = document.createElement('div');
+            childWrapper.className = 'server-group server-group-nested' + (isCollapsed ? ' collapsed' : '');
+            childWrapper.dataset.groupId = g.id;
+            var childHeader = document.createElement('div');
+            childHeader.className = 'server-group-header';
+            if (isCollapsed && groupServers.length > 0) {
+                var grid = document.createElement('div');
+                grid.className = 'server-group-collapsed-grid';
+                grid.title = g.name + ' (' + groupServers.length + ' servers)';
+                grid.dataset.groupId = g.id;
+                var showCount = Math.min(groupServers.length, 4);
+                for (var gi = 0; gi < showCount; gi++) {
+                    var miniIcon = makeServerIcon(groupServers[gi], { noSelect: true });
+                    miniIcon.classList.add('server-group-mini');
+                    grid.appendChild(miniIcon);
+                }
+                grid.addEventListener('click', function(e) { e.stopPropagation(); toggleGroup(g.id); });
+                childHeader.appendChild(grid);
+                childHeader.addEventListener('click', function(e) { if (e.target === childHeader) toggleGroup(g.id); });
+            } else {
+                var toggle = document.createElement('div');
+                toggle.className = 'server-group-toggle';
+                toggle.textContent = '\u25BC ' + g.name;
+                toggle.addEventListener('click', function() { toggleGroup(g.id); });
+                childHeader.appendChild(toggle);
+            }
+            childHeader.addEventListener('contextmenu', function(e) { e.preventDefault(); showGroupContextMenu(e, g); });
+            childWrapper.appendChild(childHeader);
+            if (!isCollapsed) {
+                var inner = document.createElement('div');
+                inner.className = 'server-group-inner';
+                inner.dataset.groupId = g.id;
+                groupServers.forEach(function(s) { inner.appendChild(makeServerIcon(s)); });
+                childWrapper.appendChild(inner);
+                renderChildGroups(g.id, childWrapper);
+            }
+            container.appendChild(childWrapper);
+        });
+    }
+
+    // Render items
+    items.forEach(function(item) {
+        if (item.type === 'group') {
+            var g = item.group;
+            var isCollapsed = g.collapsed;
+            var groupServers = serversByGroup[g.id] || [];
+            var wrapper = document.createElement('div');
+            wrapper.className = 'server-group' + (isCollapsed ? ' collapsed' : '');
+            wrapper.dataset.groupId = g.id;
+
+            // Group header (single icon when collapsed, toggle when expanded)
+            var header = document.createElement('div');
+            header.className = 'server-group-header';
+            if (isCollapsed) {
+                // Show up to 4 server icons in a 2x2 grid
+                var grid = document.createElement('div');
+                grid.className = 'server-group-collapsed-grid';
+                grid.title = g.name + ' (' + groupServers.length + ' servers)';
+                grid.dataset.groupId = g.id;
+                var showCount = Math.min(groupServers.length, 4);
+                for (var gi = 0; gi < showCount; gi++) {
+                    var miniIcon = makeServerIcon(groupServers[gi], { noSelect: true });
+                    miniIcon.classList.add('server-group-mini');
+                    grid.appendChild(miniIcon);
+                }
+                if (groupServers.length > 4) {
+                    var moreBadge = document.createElement('div');
+                    moreBadge.className = 'server-group-more-badge';
+                    moreBadge.textContent = '+' + (groupServers.length - 4);
+                    grid.appendChild(moreBadge);
+                }
+                // Clicking collapsed group opens the group
+                grid.addEventListener('click', function(e) {
+                    e.stopPropagation();
+                    toggleGroup(g.id);
+                });
+                header.appendChild(grid);
+                // Add group indicator badge
+                var badge = document.createElement('span');
+                badge.className = 'group-badge';
+                badge.textContent = groupServers.length;
+                header.appendChild(badge);
+                // Also make the whole header clickable to toggle
+                header.addEventListener('click', function(e) {
+                    if (e.target === header) toggleGroup(g.id);
+                });
+            } else {
+                // Expanded: show group name and servers
+                var toggle = document.createElement('div');
+                toggle.className = 'server-group-toggle';
+                toggle.textContent = '\u25BC ' + g.name;
+                toggle.title = 'Click to collapse ' + g.name;
+                toggle.addEventListener('click', function() {
+                    toggleGroup(g.id);
+                });
+                header.appendChild(toggle);
+            }
+            header.addEventListener('dblclick', function(e) {
+                e.preventDefault();
+                // Double-click to rename group
+                var newName = prompt('Rename group:', g.name);
+                if (newName && newName !== g.name) {
+                    authFetch('/api/server-groups/' + g.id, {
+                        method: 'PATCH',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ name: newName })
+                    }).then(function() {
+                        g.name = newName;
+                        renderServerList();
+                    });
+                }
+            });
+            // Right-click for group context menu
+            header.addEventListener('contextmenu', function(e) {
+                e.preventDefault();
+                showGroupContextMenu(e, g);
+            });
+            wrapper.appendChild(header);
+
+            if (!isCollapsed) {
+                // Render servers inside group
+                var inner = document.createElement('div');
+                inner.className = 'server-group-inner';
+                inner.dataset.groupId = g.id;
+                groupServers.forEach(function(s) {
+                    inner.appendChild(makeServerIcon(s));
+                });
+                wrapper.appendChild(inner);
+                // Render child groups recursively
+                renderChildGroups(g.id, wrapper);
+            }
+            list.appendChild(wrapper);
+        } else if (item.type === 'server' && !item.server.group_id) {
+            list.appendChild(makeServerIcon(item.server));
+        }
+    });
+
+    // --- Server drag-to-reorder with grouping support ---
+    // 25% center zone = group with target; above/below 25% = reorder
+    function clearDragIndicators() {
+        list.querySelectorAll('.drag-over-top,.drag-over-bottom,.drag-over-group').forEach(function(el) {
+            el.classList.remove('drag-over-top', 'drag-over-bottom', 'drag-over-group');
+        });
+    }
+    function setupDraggableServer(el) {
+        el.draggable = true;
+        el.addEventListener('dragstart', function(e) {
+            var id = el.dataset.id || '';
+            e.dataTransfer.setData('text/server-id', id);
+            e.dataTransfer.effectAllowed = 'move';
+            setTimeout(function() { el.classList.add('dragging'); }, 0);
+        });
+        el.addEventListener('dragend', function() {
+            el.classList.remove('dragging');
+            clearDragIndicators();
+        });
+    }
+    function setupDropOnServerIcon(el) {
+        el.addEventListener('dragover', function(e) {
+            var isSvDrag = e.dataTransfer.types.indexOf('text/server-id') !== -1;
+            if (!isSvDrag) return;
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'move';
+            clearDragIndicators();
+            var rect = el.getBoundingClientRect();
+            var midY = rect.top + rect.height / 2;
+            var range = rect.height * 0.25;
+            if (e.clientY < midY - range) {
+                el.classList.add('drag-over-top');
+            } else if (e.clientY > midY + range) {
+                el.classList.add('drag-over-bottom');
+            } else {
+                el.classList.add('drag-over-group');
+            }
+        });
+        el.addEventListener('dragleave', function() {
+            el.classList.remove('drag-over-top', 'drag-over-bottom', 'drag-over-group');
+        });
+        el.addEventListener('drop', function(e) {
+            e.preventDefault();
+            clearDragIndicators();
+            var draggedId = e.dataTransfer.getData('text/server-id');
+            if (!draggedId || draggedId === el.dataset.id) return;
+            var rect = el.getBoundingClientRect();
+            var midY = rect.top + rect.height / 2;
+            var range = rect.height * 0.25;
+            if (e.clientY >= midY - range && e.clientY <= midY + range) {
+                // Group with this server
+                var targetGroupId = el.dataset.groupId || null;
+                if (!targetGroupId) {
+                    // Create a new group containing both
+                    createGroupWithServers(draggedId, el.dataset.id);
+                } else {
+                moveServerToGroup(draggedId, targetGroupId);
+                }
+            } else {
+                // Reorder: place above or below
+                var targetServerId = el.dataset.id;
+                var ids = getAllServerIds();
+                var fromIdx = ids.indexOf(draggedId);
+                if (fromIdx !== -1) ids.splice(fromIdx, 1);
+                var toIdx = ids.indexOf(targetServerId);
+                if (toIdx === -1) toIdx = ids.length;
+                if (e.clientY > midY + range) toIdx++;
+                ids.splice(toIdx, 0, draggedId);
+                reorderServers(ids);
+            }
+        });
+    }
+
+    // Setup drag on all server icons
+    list.querySelectorAll('.server-icon').forEach(function(el) {
+        setupDraggableServer(el);
+        setupDropOnServerIcon(el);
+    });
+
+    // Setup drag on group headers (for group reorder)
+    list.querySelectorAll('.server-group-header').forEach(function(hdr) {
+        var gId = hdr.closest('.server-group').dataset.groupId;
+        hdr.draggable = true;
+        hdr.addEventListener('dragstart', function(e) {
+            e.dataTransfer.setData('text/group-id', gId);
+            e.dataTransfer.effectAllowed = 'move';
+        });
+        hdr.addEventListener('dragover', function(e) {
+            var isGroupDrag = e.dataTransfer.types.indexOf('text/group-id') !== -1;
+            var isSvDrag = e.dataTransfer.types.indexOf('text/server-id') !== -1;
+            if (!isGroupDrag && !isSvDrag) return;
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'move';
+            clearDragIndicators();
+            var rect = hdr.getBoundingClientRect();
+            var midY = rect.top + rect.height / 2;
+            if (e.clientY < midY) {
+                hdr.classList.add('drag-over-top');
+            } else {
+                hdr.classList.add('drag-over-bottom');
+            }
+        });
+        hdr.addEventListener('dragleave', function() {
+            hdr.classList.remove('drag-over-top', 'drag-over-bottom');
+        });
+        hdr.addEventListener('drop', function(e) {
+            e.preventDefault();
+            clearDragIndicators();
+            var draggedGroupId = e.dataTransfer.getData('text/group-id');
+            var draggedServerId = e.dataTransfer.getData('text/server-id');
+            var rect = hdr.getBoundingClientRect();
+            var midY = rect.top + rect.height / 2;
+            var range = rect.height * 0.25;
+            if (draggedGroupId && draggedGroupId !== gId) {
+                if (e.clientY >= midY - range && e.clientY <= midY + range) {
+                    // Center zone: nest this group inside the target group
+                    authFetch('/api/server-groups/' + draggedGroupId + '/nest', {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ parent_group_id: gId })
+                    }).then(function() {
+                        var grp = serverGroups.find(function(g) { return g.id === draggedGroupId; });
+                        if (grp) grp.parent_group_id = gId;
+                        renderServerList();
+                    }).catch(function() {});
+                } else {
+                    // Top/Bottom zones: reorder groups
+                    var gids = serverGroups.map(function(g) { return g.id; });
+                    var fromIdx = gids.indexOf(draggedGroupId);
+                    if (fromIdx !== -1) gids.splice(fromIdx, 1);
+                    var toIdx = gids.indexOf(gId);
+                    if (toIdx === -1) toIdx = gids.length;
+                    if (e.clientY > midY + range) toIdx++;
+                    gids.splice(toIdx, 0, draggedGroupId);
+                    reorderServerGroups(gids);
+                }
+            } else if (draggedServerId) {
+                if (e.clientY >= midY - range && e.clientY <= midY + range) {
+                    // Center zone: add server to this group
+                    moveServerToGroup(draggedServerId, gId);
+                } else {
+                    // Top/Bottom zones: reorder servers
+                    var ids = getAllServerIds();
+                    var fromIdx2 = ids.indexOf(draggedServerId);
+                    if (fromIdx2 !== -1) ids.splice(fromIdx2, 1);
+                    var toIdx2 = ids.indexOf(gId);
+                    if (toIdx2 === -1) toIdx2 = ids.length;
+                    if (e.clientY > midY + range) toIdx2++;
+                    ids.splice(toIdx2, 0, draggedServerId);
+                    reorderServers(ids);
+                }
+            }
+        });
+    });
+
+    // List-level drop: handles drops in gaps
+    list.addEventListener('dragover', function(e) {
+        var isSvDrag = e.dataTransfer.types.indexOf('text/server-id') !== -1;
+        var isGroupDrag = e.dataTransfer.types.indexOf('text/group-id') !== -1;
+        if (!isSvDrag && !isGroupDrag) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+    });
+    list.addEventListener('drop', function(e) {
+        e.preventDefault();
+        clearDragIndicators();
+        var draggedId = e.dataTransfer.getData('text/server-id');
+        if (draggedId) {
+            // Find nearest server icon to determine position
+            var ids = getAllServerIds();
+            var fromIdx = ids.indexOf(draggedId);
+            if (fromIdx !== -1) ids.splice(fromIdx, 1);
+            // Drop at end
+            ids.push(draggedId);
+            reorderServers(ids);
+        }
+    });
+
+    // --- Touch-based drag for mobile ---
+    (function() {
+        var _touchDrag = { active: false, el: null, id: null, ghost: null, timer: null, startY: 0 };
+        var LONG_PRESS_MS = 350;
+        list.querySelectorAll('.server-icon').forEach(function(el) {
+            el.addEventListener('touchstart', function(e) {
+                if (!el.dataset.id) return;
+                var touch = e.touches[0];
+                _touchDrag.startY = touch.clientY;
+                _touchDrag.el = el;
+                _touchDrag.id = el.dataset.id;
+                _touchDrag.timer = setTimeout(function() {
+                    // Start drag
+                    _touchDrag.active = true;
+                    el.classList.add('dragging');
+                    // Create ghost
+                    var ghost = el.cloneNode(true);
+                    ghost.style.cssText = 'position:fixed;z-index:99999;pointer-events:none;opacity:0.85;transform:scale(1.15);transition:none;';
+                    ghost.style.left = (touch.clientX - 20) + 'px';
+                    ghost.style.top = (touch.clientY - 20) + 'px';
+                    document.body.appendChild(ghost);
+                    _touchDrag.ghost = ghost;
+                    if (navigator.vibrate) navigator.vibrate(30);
+                }, LONG_PRESS_MS);
+            }, { passive: true });
+            el.addEventListener('touchmove', function(e) {
+                if (_touchDrag.timer) {
+                    var touch = e.touches[0];
+                    if (Math.abs(touch.clientY - _touchDrag.startY) > 10) {
+                        clearTimeout(_touchDrag.timer);
+                        _touchDrag.timer = null;
+                    }
+                }
+                if (!_touchDrag.active) return;
+                e.preventDefault();
+                var touch = e.touches[0];
+                // Move ghost
+                if (_touchDrag.ghost) {
+                    _touchDrag.ghost.style.left = (touch.clientX - 20) + 'px';
+                    _touchDrag.ghost.style.top = (touch.clientY - 20) + 'px';
+                }
+                // Find drop target
+                clearDragIndicators();
+                var target = document.elementFromPoint(touch.clientX, touch.clientY);
+                if (target) {
+                    var icon = target.closest('.server-icon');
+                    if (icon && icon.dataset.id && icon.dataset.id !== _touchDrag.id) {
+                        var rect = icon.getBoundingClientRect();
+                        var midY = rect.top + rect.height / 2;
+                        var range = rect.height * 0.25;
+                        if (touch.clientY < midY - range) {
+                            icon.classList.add('drag-over-top');
+                        } else if (touch.clientY > midY + range) {
+                            icon.classList.add('drag-over-bottom');
+                        } else {
+                            icon.classList.add('drag-over-group');
+                        }
+                    }
+                }
+            }, { passive: false });
+            el.addEventListener('touchend', function(e) {
+                clearTimeout(_touchDrag.timer);
+                _touchDrag.timer = null;
+                if (!_touchDrag.active) return;
+                _touchDrag.active = false;
+                el.classList.remove('dragging');
+                if (_touchDrag.ghost) { _touchDrag.ghost.remove(); _touchDrag.ghost = null; }
+                // Find drop target
+                var touch = e.changedTouches[0];
+                var target = document.elementFromPoint(touch.clientX, touch.clientY);
+                if (target) {
+                    var icon = target.closest('.server-icon');
+                    if (icon && icon.dataset.id && icon.dataset.id !== _touchDrag.id) {
+                        var rect = icon.getBoundingClientRect();
+                        var midY = rect.top + rect.height / 2;
+                        var range = rect.height * 0.25;
+                        if (touch.clientY >= midY - range && touch.clientY <= midY + range) {
+                            var targetGroupId = icon.dataset.groupId || null;
+                            if (!targetGroupId) {
+                                createGroupWithServers(_touchDrag.id, icon.dataset.id);
+                            } else {
+                                moveServerToGroup(_touchDrag.id, targetGroupId);
+                            }
+                        } else {
+                            var ids = getAllServerIds();
+                            var fromIdx = ids.indexOf(_touchDrag.id);
+                            if (fromIdx !== -1) ids.splice(fromIdx, 1);
+                            var toIdx = ids.indexOf(icon.dataset.id);
+                            if (toIdx === -1) toIdx = ids.length;
+                            if (touch.clientY > midY + range) toIdx++;
+                            ids.splice(toIdx, 0, _touchDrag.id);
+                            reorderServers(ids);
+                        }
+                    }
+                }
+                clearDragIndicators();
+            });
+        });
+    })();
+
+    function getAllServerIds() {
+        // Collect all server IDs in DOM order (flat, across groups)
+        var result = [];
+        list.querySelectorAll('.server-icon').forEach(function(el) {
+            if (el.dataset.id) result.push(el.dataset.id);
+        });
+        return result;
+    }
+    function reorderServers(ids) {
+        servers.sort(function(a, b) { return ids.indexOf(a.id) - ids.indexOf(b.id); });
+        renderServerList();
+        authFetch('/api/servers/reorder', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ordered_ids: ids })
+        }).catch(function() {});
+    }
+    function reorderServerGroups(gids) {
+        serverGroups.sort(function(a, b) { return gids.indexOf(a.id) - gids.indexOf(b.id); });
+        renderServerList();
+        authFetch('/api/server-groups/reorder', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ordered_ids: gids })
+        }).catch(function() {});
+    }
+    function toggleGroup(groupId) {
+        var g = serverGroups.find(function(g) { return g.id === groupId; });
+        if (!g) return;
+        g.collapsed = !g.collapsed;
+        renderServerList();
+        authFetch('/api/server-groups/' + groupId + '/toggle', {
+            method: 'PATCH'
+        }).catch(function() {});
+    }
+    function moveServerToGroup(serverId, groupId) {
+        authFetch('/api/servers/' + serverId + '/group', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ group_id: groupId })
+        }).then(function() {
+            // Update local state
+            var s = servers.find(function(s) { return s.id === serverId; });
+            if (s) s.group_id = groupId;
+            renderServerList();
+        }).catch(function() {});
+    }
+    function createGroupWithServers(serverId1, serverId2) {
+        authFetch('/api/server-groups', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: 'Group' })
+        }).then(function(r) { return r.json(); }).then(function(data) {
+            if (!data.ok || !data.id) return;
+            var gid = data.id;
+            serverGroups.push({ id: gid, name: 'Group', position: serverGroups.length, collapsed: false });
+            return Promise.all([
+                moveServerToGroup(serverId1, gid),
+                moveServerToGroup(serverId2, gid)
+            ]);
+        }).catch(function() {});
+    }
+    function showGroupContextMenu(e, group) {
+        // Simple context menu for groups
+        var existing = document.getElementById('group-context-menu');
+        if (existing) existing.remove();
+        var menu = document.createElement('div');
+        menu.id = 'group-context-menu';
+        menu.className = 'context-menu';
+        menu.style.cssText = 'position:fixed;left:' + e.clientX + 'px;top:' + e.clientY + 'px;z-index:99999';
+        menu.innerHTML = '<div class="ctx-item" data-action="rename">Rename Group</div>' +
+            '<div class="ctx-item" data-action="ungroup">Ungroup All</div>' +
+            '<div class="ctx-item ctx-danger" data-action="delete">Delete Group</div>';
+        document.body.appendChild(menu);
+        menu.addEventListener('click', function(ev) {
+            var action = ev.target.dataset.action;
+            if (action === 'rename') {
+                var newName = prompt('Rename group:', group.name);
+                if (newName && newName !== group.name) {
+                    authFetch('/api/server-groups/' + group.id, {
+                        method: 'PATCH',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ name: newName })
+                    }).then(function() { group.name = newName; renderServerList(); });
+                }
+            } else if (action === 'ungroup') {
+                (serversByGroup[group.id] || []).forEach(function(s) {
+                    moveServerToGroup(s.id, null);
+                });
+            } else if (action === 'delete') {
+                // Ungroup all servers then delete the group
+                (serversByGroup[group.id] || []).forEach(function(s) {
+                    s.group_id = null;
+                });
+                authFetch('/api/server-groups/' + group.id, { method: 'DELETE' })
+                    .then(function() {
+                        serverGroups = serverGroups.filter(function(g) { return g.id !== group.id; });
+                        renderServerList();
+                    });
+            }
+            menu.remove();
+        });
+        setTimeout(function() {
+            document.addEventListener('click', function closeMenu() {
+                menu.remove();
+                document.removeEventListener('click', closeMenu);
+            }, { once: true });
+        }, 10);
+    }
+
     updateServerBadges();
     updateServerMutedUI();
 
@@ -13397,7 +14012,10 @@ async function loadChannels(serverId) {
     }
 }
 
-async function selectChannel(channelId, channelName, element) {
+function markChannelRead(channelId) {    // Mark channel as read: clear unread badge and mention count    if (typeof unreadChannels !== 'undefined' && unreadChannels) {        var idx = unreadChannels.indexOf(channelId);        if (idx !== -1) {            unreadChannels.splice(idx, 1);            updateChannelBadges();        }    }    clearUnreadChannelMentions(channelId);}
+
+async function selectChannel(channelId, channelName, element) {    markChannelRead(channelId);
+
     currentChannelId = channelId;
 
     document.querySelectorAll('.channel-item').forEach(el => el.classList.remove('active'));
@@ -14442,12 +15060,7 @@ async function appendMessage(msg) {
     // too). DMs have no owner — both members get the button (see appendDmMessage).
     var canPin = !!isOwner;    const actionsHtml = '<div class="message-actions">' +
         (canPin ? pinButtonHtml(isPinned) : '') +
-        '<button class="msg-action-btn" data-action="react" title="React">&#x1F642;</button>'
- +
-        '<button class="msg-action-btn" data-action="reply" title="Reply">&#x21A9;</button>' +
-        '<button class="msg-action-btn" data-action="forward" title="Forward to channel">&#x21AA;</button>' +
-        '<button class="msg-action-btn" data-action="forward-dm" title="Forward to DM">&#x1F4AC;</button>' +
-        '<button class="msg-action-btn" data-action="thread" title="Reply in Thread">&#x1F9F5;</button>' +
+        '<button class="msg-action-btn" data-action="react" title="React">&#x1F642;</button>' +
         (isOwn ? '<button class="msg-action-btn" data-action="edit" title="Edit">&#x270E;</button>' : '') +
         (isOwn ? '<button class="msg-action-btn" data-action="delete" title="Delete">&#x2715;</button>' : '') +
         '</div>';
@@ -14479,7 +15092,11 @@ async function appendMessage(msg) {
     // Disappearing messages: record the expiry so the shared countdown ticker
     // removes the element at 0 (the server's message_expired event is the
     // authoritative removal).
-    if (expiresAt) {
+        // F13: Message effects
+    if (msg.effect) {
+        div.classList.add('msg-effect-' + msg.effect);
+    }
+if (expiresAt) {
         div.setAttribute('data-expires-at', expiresAt);
         ensureDisappearingTicker();
     }
@@ -14853,6 +15470,118 @@ function setupMessageActions() {
         }
     });
 }
+
+// Spoiler tag click-to-reveal
+document.getElementById('message-list').addEventListener('click', function(e) {
+    var spoiler = e.target.closest('.spoiler');
+    if (spoiler) {
+        spoiler.classList.toggle('revealed');
+        e.stopPropagation();
+    }
+});
+
+// Message Right-Click Context Menu
+
+document.getElementById('message-list').addEventListener('contextmenu', function(e) {
+
+    var msgDiv = e.target.closest('.message');
+
+    if (!msgDiv) return;
+
+    e.preventDefault();
+
+    e.stopPropagation();
+
+    var msgId = msgDiv.getAttribute('data-message-id');
+
+    var senderId = msgDiv.getAttribute('data-sender-id');
+
+    var isOwn = senderId === (typeof myUserId !== 'undefined' ? myUserId : '');
+
+    var msgText = '';
+
+    var textEl = msgDiv.querySelector('.text');
+
+    if (textEl) msgText = textEl.textContent || '';
+
+    var items = [];
+
+    items.push({ label: '↩ Reply', action: function() { handleReply(msgId, msgDiv); }});
+
+    items.push({ label: '🧵 Reply in Thread', action: function() { openThreadPanel(msgId, currentChannelId); }});
+
+    items.push('---');
+
+    if (currentServerId) {
+
+        items.push({ label: '↪ Forward to Channel', action: function() { handleForward(msgId, msgDiv); }});
+
+        items.push({ label: '💬 Forward to DM', action: function() { handleForwardToDm(msgId, msgDiv); }});
+
+    }
+
+    if (currentDmChannelId) {
+
+        items.push({ label: '↪ Forward to Channel', action: function() { handleDmForwardToChannel(msgId, msgDiv); }});
+
+        items.push({ label: '💬 Forward to DM', action: function() { handleDmForwardToDm(msgId, msgDiv); }});
+
+    }
+
+    items.push('---');
+
+    if (isOwn) items.push({ label: '✎ Edit', action: function() { handleEdit(msgId, msgDiv); }});
+
+    if (isOwn) items.push({ label: '✕ Delete', danger: true, action: function() { handleDelete(msgId, msgDiv); }});
+
+    var isPinned = msgDiv.querySelector('.pin-badge');
+
+    if (isPinned) items.push({ label: '📌 Unpin', action: function() { togglePinMessage(msgId, false); }});
+
+    else if (currentServerId && isOwner) items.push({ label: '📌 Pin', action: function() { togglePinMessage(msgId, true); }});
+
+    else if (currentDmChannelId) items.push({ label: '📌 Pin', action: function() { togglePinMessage(msgId, true); }});
+
+    items.push('---');
+
+    items.push({ label: '📋 Copy Text', action: function() {
+
+        if (msgText) navigator.clipboard.writeText(msgText).then(function() { showToast('Text copied'); });
+
+    }});
+
+    items.push({ label: '🔗 Copy Message Link', action: function() {
+
+        var link = window.location.origin + '/#' + msgId;
+
+        navigator.clipboard.writeText(link).then(function() { showToast('Link copied'); });
+
+    }});
+
+    // Block/Unblock
+    if (senderId && senderId !== (typeof myUserId !== 'undefined' ? myUserId : '')) {
+        items.push('---');
+        if (isUserBlocked(senderId)) {
+            items.push({ label: 'Unblock User', action: function() { unblockUser(senderId); }});
+        } else {
+            items.push({ label: 'Block User', danger: true, action: function() { blockUser(senderId); }});
+        }
+    }
+
+    if (typeof window.showContextMenu === 'function') {
+
+        window.showContextMenu(e.clientX, e.clientY, items);
+
+    }
+
+});
+
+document.addEventListener('click', function() {
+
+    if (typeof window.dismissContextMenu === 'function') window.dismissContextMenu();
+
+});
+
 
 async function navigateToMessage(serverId, channelId, dmChannelId, messageId) {
     window.focus();
@@ -16031,6 +16760,13 @@ async function sendMessage() {
         return;
     }
 
+    // F13: Message effects
+    var _msgEffect = null;
+    var _effectMatch = content.match(/^\/(fireworks|confetti|sparkles|rain)\s+(.+)/i);
+    if (_effectMatch) {
+        _msgEffect = _effectMatch[1].toLowerCase();
+    }
+
     let plaintext = content;
     const emojiRefs = collectEmojiRefs(content);
     const mentionIds = findMentionsInText(content, currentServerMemberList);
@@ -16473,6 +17209,58 @@ function renderDmSidebar() {
         });
     });
     
+    // DM drag-to-reorder
+    document.querySelectorAll('.dm-item[data-dm-id]').forEach(function(el) {
+        el.draggable = true;
+        el.addEventListener('dragstart', function(e) {
+            e.dataTransfer.setData('text/dm-id', el.dataset.dmId);
+            e.dataTransfer.effectAllowed = 'move';
+            setTimeout(function() { el.classList.add('dragging'); }, 0);
+        });
+        el.addEventListener('dragend', function() {
+            el.classList.remove('dragging');
+            document.querySelectorAll('.dm-item.drag-over-top,.dm-item.drag-over-bottom').forEach(function(s) {
+                s.classList.remove('drag-over-top', 'drag-over-bottom');
+            });
+        });
+        el.addEventListener('dragover', function(e) {
+            var isDmDrag = e.dataTransfer.types.indexOf('text/dm-id') !== -1;
+            if (!isDmDrag) return;
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'move';
+            var rect = el.getBoundingClientRect();
+            var midY = rect.top + rect.height / 2;
+            el.classList.remove('drag-over-top', 'drag-over-bottom');
+            if (e.clientY < midY) el.classList.add('drag-over-top');
+            else el.classList.add('drag-over-bottom');
+        });
+        el.addEventListener('dragleave', function() {
+            el.classList.remove('drag-over-top', 'drag-over-bottom');
+        });
+        el.addEventListener('drop', function(e) {
+            e.preventDefault();
+            el.classList.remove('drag-over-top', 'drag-over-bottom');
+            var draggedId = e.dataTransfer.getData('text/dm-id');
+            if (!draggedId || draggedId === el.dataset.dmId) return;
+            var ids = Array.from(document.querySelectorAll('.dm-item[data-dm-id]')).map(function(d) { return d.dataset.dmId; });
+            var fromIdx = ids.indexOf(draggedId);
+            if (fromIdx !== -1) ids.splice(fromIdx, 1);
+            var toIdx = ids.indexOf(el.dataset.dmId);
+            var rect = el.getBoundingClientRect();
+            if (e.clientY > rect.top + rect.height / 2) toIdx++;
+            ids.splice(toIdx, 0, draggedId);
+            // Reorder locally
+            dmConversations.sort(function(a, b) { return ids.indexOf(a.dm_channel_id) - ids.indexOf(b.dm_channel_id); });
+            renderDmSidebar();
+            // Persist to server
+            authFetch('/api/dm/reorder', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ordered_ids: ids })
+            }).catch(function() {});
+        });
+    });
+
     // Restore DM muted UI after render
     updateDmMutedUI();
 
@@ -17282,9 +18070,6 @@ async function appendDmMessage(msg, kp, otherPublicKey) {
     const actionsHtml = '<div class="message-actions">' +
         pinButtonHtml(isPinned) +
         '<button class="msg-action-btn" data-action="react" title="React">&#x1F642;</button>' +
-        '<button class="msg-action-btn" data-action="reply" title="Reply">&#x21A9;</button>' +
-        '<button class="msg-action-btn" data-action="dm-forward" title="Forward to channel">&#x21AA;</button>' +
-        '<button class="msg-action-btn" data-action="dm-forward-dm" title="Forward to DM">&#x1F4AC;</button>' +
         (isOwn ? '<button class="msg-action-btn" data-action="edit" title="Edit">&#x270E;</button>' : '') +
         (isOwn ? '<button class="msg-action-btn" data-action="delete" title="Delete">&#x2715;</button>' : '') +
         '</div>';
@@ -20748,6 +21533,7 @@ function renderMarkdown(text) {
         t = t.replace(/\*(.+?)\*/g, '<em style="color:#d0d0d0">$1</em>');
         t = t.replace(/~~(.+?)~~/g, '<del style="color:#888">$1</del>');
         t = t.replace(/==(.+?)==/g, '<mark style="background:#5a4a18;color:#e0e0e0;padding:1px 4px;border-radius:2px">$1</mark>');
+        t = t.replace(/\|\|(.+?)\|\|/g, '<span class="spoiler" data-action="toggle-spoiler">$1</span>');
         t = t.replace(/`(.+?)`/g, '<code style="background:#2d2d2d;padding:2px 6px;border-radius:3px;font-family:monospace;color:#e06c75;font-size:12px">$1</code>');
         t = t.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" style="color:#569cd6;text-decoration:none;border-bottom:1px solid #569cd666" target="_blank" rel="noopener">$1</a>');
         t = t.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" style="max-width:100%;border-radius:4px;margin:4px 0">');

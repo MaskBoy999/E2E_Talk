@@ -2649,6 +2649,7 @@ pub async fn list_servers(
                 "server_picture_file_id_hash": s.server_picture_file_id_hash,
                 "encrypted_server_picture_key": s.encrypted_server_picture_key.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                 "server_picture_key_nonce": s.server_picture_key_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
+                "group_id": s.group_id,
             })
         })
         .collect();
@@ -3638,6 +3639,26 @@ pub async fn reorder_channels(
     }
 }
 
+/// Reorder servers in user's sidebar (any user can reorder their own).
+pub async fn reorder_servers(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    let ids: Vec<&str> = match body.get("ordered_ids").and_then(|v| v.as_array()) {
+        Some(arr) => arr.iter().filter_map(|v| v.as_str()).collect(),
+        None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "ordered_ids required"}))).into_response(),
+    };
+    let refs: Vec<&str> = ids.iter().map(|s| *s).collect();
+    match state.db.reorder_servers(&user_id, &refs) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
 /// List pinned messages for a server channel. Returns the full encrypted message
 /// rows (same shape as list_messages) so the client can decrypt + render them;
 /// the server only ever stores/returns pin metadata + ciphertext.
@@ -3702,6 +3723,77 @@ pub async fn list_channel_pins(
     (StatusCode::OK, Json(serde_json::json!(message_infos))).into_response()
 }
 
+/// Reorder DM conversations in user sidebar.
+
+/// Block a user.
+pub async fn block_user(
+    Path(blocked_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    if user_id == blocked_id {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Cannot block yourself"}))).into_response();
+    }
+    match state.db.block_user(&user_id, &blocked_id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+/// Unblock a user.
+pub async fn unblock_user(
+    Path(blocked_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    match state.db.unblock_user(&user_id, &blocked_id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+/// Get blocked user list.
+pub async fn get_blocked_users(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    match state.db.get_blocked_users(&user_id) {
+        Ok(ids) => (StatusCode::OK, Json(serde_json::json!({"blocked": ids}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn reorder_dms(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    let ids: Vec<&str> = match body.get("ordered_ids").and_then(|v| v.as_array()) {
+        Some(arr) => arr.iter().filter_map(|v| v.as_str()).collect(),
+        None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "ordered_ids required"}))).into_response(),
+    };
+    let refs: Vec<&str> = ids.iter().map(|s| *s).collect();
+    match state.db.reorder_dms(&user_id, &refs) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
 pub async fn list_messages_around(
     Path((channel_id, message_id)): Path<(String, String)>,
     headers: HeaderMap,
@@ -8838,5 +8930,430 @@ pub async fn set_self_destruct(
     match state.db.set_self_destruct_days(&user_id, days) {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true, "self_destruct_days": days }))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e }))).into_response(),
+    }
+}
+// === Soundboard Handlers ===
+
+pub async fn upload_soundboard_clip(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    let server_id = match body["server_id"].as_str() {
+        Some(id) => id,
+        None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "server_id required"}))).into_response(),
+    };
+    let name = match body["name"].as_str() {
+        Some(n) => n,
+        None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "name required"}))).into_response(),
+    };
+    let encrypted_audio = match body["encrypted_audio"].as_str() {
+        Some(a) => base64::engine::general_purpose::STANDARD.decode(a).unwrap_or_default(),
+        None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "encrypted_audio required"}))).into_response(),
+    };
+    let audio_nonce = match body["audio_nonce"].as_str() {
+        Some(n) => base64::engine::general_purpose::STANDARD.decode(n).unwrap_or_default(),
+        None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "audio_nonce required"}))).into_response(),
+    };
+    let duration_ms = body["duration_ms"].as_i64().unwrap_or(0);
+    let clip_id = uuid::Uuid::new_v4().to_string();
+    match state.db.save_soundboard_clip(&clip_id, &user_id, server_id, name, &encrypted_audio, &audio_nonce, duration_ms) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true, "clip_id": clip_id}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn list_soundboard_clips(
+    headers: HeaderMap,
+    Path(server_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    match state.db.list_soundboard_clips(&user_id, &server_id) {
+        Ok(clips) => {
+            let arr: Vec<serde_json::Value> = clips.into_iter().map(|(id, uploader, name, audio, nonce, dur)| {
+                serde_json::json!({
+                    "id": id,
+                    "user_id": uploader,
+                    "name": name,
+                    "encrypted_audio": base64::engine::general_purpose::STANDARD.encode(&audio),
+                    "audio_nonce": base64::engine::general_purpose::STANDARD.encode(&nonce),
+                    "duration_ms": dur,
+                })
+            }).collect();
+            (StatusCode::OK, Json(serde_json::json!(arr))).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+/// List all soundboard clips for the current user (per-account, not per-server).
+pub async fn list_my_soundboard_clips(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    match state.db.list_soundboard_clips_for_user(&user_id) {
+        Ok(clips) => {
+            let arr: Vec<serde_json::Value> = clips.into_iter().map(|(id, uploader, name, audio, nonce, dur)| {
+                serde_json::json!({
+                    "id": id,
+                    "user_id": uploader,
+                    "name": name,
+                    "encrypted_audio": base64::engine::general_purpose::STANDARD.encode(&audio),
+                    "audio_nonce": base64::engine::general_purpose::STANDARD.encode(&nonce),
+                    "duration_ms": dur,
+                })
+            }).collect();
+            (StatusCode::OK, Json(serde_json::json!(arr))).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn delete_soundboard_clip(
+    headers: HeaderMap,
+    Path(clip_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    match state.db.delete_soundboard_clip(&clip_id, &user_id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn mute_soundboard(
+    headers: HeaderMap,
+    Path((server_id, user_id)): Path<(String, String)>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let muted_by = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    match state.db.mute_soundboard_user(&server_id, &user_id, &muted_by) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn unmute_soundboard(
+    headers: HeaderMap,
+    Path((server_id, user_id)): Path<(String, String)>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let muted_by = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    match state.db.unmute_soundboard_user(&server_id, &user_id, &muted_by) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn list_muted_soundboard(
+    headers: HeaderMap,
+    Path(server_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let muted_by = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    match state.db.get_muted_soundboard_users(&server_id, &muted_by) {
+        Ok(ids) => (StatusCode::OK, Json(serde_json::json!({"muted": ids}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+// === Soundboard Global Mute (owner kill-switch) ===
+
+pub async fn toggle_soundboard_global_mute(
+    headers: HeaderMap,
+    Path(server_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    if !state.db.is_server_owner(&user_id, &server_id).unwrap_or(false) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Only server owner can toggle soundboard global mute"}))).into_response();
+    }
+    let muted = body["muted"].as_bool().unwrap_or(false);
+    match state.db.set_soundboard_global_mute(&server_id, muted) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true, "muted": muted}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn get_soundboard_global_mute(
+    Path(server_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match state.db.is_soundboard_global_muted(&server_id) {
+        Ok(muted) => (StatusCode::OK, Json(serde_json::json!({"muted": muted}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+// === Device Pairing Handlers ===
+
+pub async fn create_pairing_ticket(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    let public_key = match body["public_key"].as_str() {
+        Some(k) => base64::engine::general_purpose::STANDARD.decode(k).unwrap_or_default(),
+        None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "public_key required"}))).into_response(),
+    };
+    let encrypted_key_blob = match body["encrypted_key_blob"].as_str() {
+        Some(b) => base64::engine::general_purpose::STANDARD.decode(b).unwrap_or_default(),
+        None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "encrypted_key_blob required"}))).into_response(),
+    };
+    let key_blob_nonce = match body["key_blob_nonce"].as_str() {
+        Some(n) => base64::engine::general_purpose::STANDARD.decode(n).unwrap_or_default(),
+        None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "key_blob_nonce required"}))).into_response(),
+    };
+    let _ = state.db.delete_expired_pairing_tickets();
+    let ticket_id = uuid::Uuid::new_v4().to_string();
+    let expires_at = (chrono::Utc::now() + chrono::Duration::minutes(5)).format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string();
+    match state.db.create_pairing_ticket(&ticket_id, &user_id, &public_key, &encrypted_key_blob, &key_blob_nonce, &expires_at) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ticket_id": ticket_id, "expires_at": expires_at}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn get_pairing_ticket(
+    Path(ticket_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match state.db.get_pairing_ticket(&ticket_id) {
+        Ok(Some(ticket)) => {
+            (StatusCode::OK, Json(serde_json::json!({
+                "public_key": base64::engine::general_purpose::STANDARD.encode(&ticket.1),
+                "encrypted_key_blob": base64::engine::general_purpose::STANDARD.encode(&ticket.2),
+                "key_blob_nonce": base64::engine::general_purpose::STANDARD.encode(&ticket.3),
+                "expires_at": ticket.4,
+                "claimed": ticket.5.is_some(),
+            }))).into_response()
+        }
+        Ok(None) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Ticket not found or expired"}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn claim_pairing_ticket(
+    headers: HeaderMap,
+    Path(ticket_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let claimed_by = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    match state.db.claim_pairing_ticket(&ticket_id, &claimed_by) {
+        Ok(Some(owner_user_id)) => {
+            let username = state.db.get_username_by_id(&owner_user_id).unwrap_or(None).unwrap_or_default();
+            let session_id = uuid::Uuid::new_v4().to_string();
+            // Fetch the encrypted key blob so the new device can restore encryption keys
+            let key_blob_resp = state.db.get_pairing_ticket(&ticket_id)
+                .ok().flatten()
+                .map(|t| serde_json::json!({
+                    "encrypted_key_blob": base64::engine::general_purpose::STANDARD.encode(&t.2),
+                    "key_blob_nonce": base64::engine::general_purpose::STANDARD.encode(&t.3),
+                })).unwrap_or(serde_json::json!({}));
+            match auth::create_token_with_duration(
+                &owner_user_id,
+                &username,
+                &session_id,
+                &state.config.jwt_secret,
+                chrono::Duration::days(30),
+            ) {
+                Ok(token) => {
+                    let mut resp = serde_json::json!({"token": token, "user_id": owner_user_id});
+                    if let Some(blob) = key_blob_resp.get("encrypted_key_blob").and_then(|v| v.as_str()) {
+                        resp["encrypted_key_blob"] = serde_json::json!(blob);
+                    }
+                    if let Some(nonce) = key_blob_resp.get("key_blob_nonce").and_then(|v| v.as_str()) {
+                        resp["key_blob_nonce"] = serde_json::json!(nonce);
+                    }
+                    (StatusCode::OK, Json(resp)).into_response()
+                }
+                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+            }
+        }
+        Ok(None) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Ticket not found, expired, or already claimed"}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+// ─── Server groups (folders) ──────────────────────────────────────────────
+
+pub async fn list_server_groups(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    match state.db.list_server_groups(&user_id) {
+        Ok(groups) => {
+            let arr: Vec<serde_json::Value> = groups.iter().map(|(id, name, pos, collapsed, parent)| {
+                serde_json::json!({
+                    "id": id,
+                    "name": name,
+                    "position": pos,
+                    "collapsed": collapsed,
+                    "parent_group_id": parent,
+                })
+            }).collect();
+            (StatusCode::OK, Json(serde_json::json!({"groups": arr}))).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn create_server_group(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    let group_id = uuid::Uuid::new_v4().to_string();
+    let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("Group");
+    let position = body.get("position").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+    match state.db.create_server_group(&user_id, &group_id, name, position) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true, "id": group_id}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn rename_server_group(
+    Path(group_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    let name = match body.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n,
+        None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "name required"}))).into_response(),
+    };
+    match state.db.rename_server_group(&user_id, &group_id, name) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn delete_server_group(
+    Path(group_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    match state.db.delete_server_group(&user_id, &group_id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn toggle_server_group_collapsed(
+    Path(group_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    match state.db.toggle_server_group_collapsed(&user_id, &group_id) {
+        Ok(collapsed) => (StatusCode::OK, Json(serde_json::json!({"ok": true, "collapsed": collapsed}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn move_server_to_group(
+    Path(server_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    let group_id = body.get("group_id").and_then(|v| v.as_str());
+    match state.db.move_server_to_group(&user_id, &server_id, group_id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn reorder_server_groups(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    let ids: Vec<&str> = match body.get("ordered_ids").and_then(|v| v.as_array()) {
+        Some(arr) => arr.iter().filter_map(|v| v.as_str()).collect(),
+        None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "ordered_ids required"}))).into_response(),
+    };
+    let refs: Vec<&str> = ids.iter().map(|s| *s).collect();
+    match state.db.reorder_server_groups(&user_id, &refs) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn move_group_to_group(
+    Path(group_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    let parent_id = body.get("parent_group_id").and_then(|v| v.as_str());
+    match state.db.move_group_to_group(&user_id, &group_id, parent_id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
 }

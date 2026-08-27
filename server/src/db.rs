@@ -164,6 +164,7 @@ pub struct Server {
     pub server_picture_file_id_hash: Option<String>,
     pub encrypted_server_picture_key: Option<Vec<u8>>,
     pub server_picture_key_nonce: Option<Vec<u8>>,
+    pub group_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1264,6 +1265,13 @@ impl Database {
         let _ = conn.execute_batch(include_str!("../migrations/070_self_destruct.sql"));
         let _ = conn.execute_batch(include_str!("../migrations/071_vault_compression.sql"));
         let _ = conn.execute_batch(include_str!("../migrations/072_vault_disk_storage.sql"));
+        let _ = conn.execute_batch(include_str!("../migrations/073_server_order.sql"));
+        let _ = conn.execute_batch(include_str!("../migrations/074_dm_order.sql"));
+        let _ = conn.execute_batch(include_str!("../migrations/075_user_blocks.sql"));
+        let _ = conn.execute_batch(include_str!("../migrations/076_soundboard.sql"));
+        let _ = conn.execute_batch(include_str!("../migrations/077_device_pairing.sql"));
+        let _ = conn.execute_batch(include_str!("../migrations/078_soundboard_global_mute.sql"));
+        let _ = conn.execute_batch(include_str!("../migrations/079_server_groups.sql"));
 
         // Data migration: normalize legacy space-separated CURRENT_TIMESTAMP values
         // ("YYYY-MM-DD HH:MM:SS") to fixed-width RFC3339 ("YYYY-MM-DDTHH:MM:SS.000000Z")
@@ -1951,6 +1959,7 @@ impl Database {
             server_picture_file_id_hash: None,
             encrypted_server_picture_key: None,
             server_picture_key_nonce: None,
+            group_id: None,
         })
     }
 
@@ -1999,11 +2008,11 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT s.id, s.encrypted_name, s.name_nonce, s.owner_id, COALESCE(s.invite_code_hash, ''), COALESCE(s.joins_disabled, 0), s.server_picture_file_id, s.server_picture_file_id_hash, s.encrypted_server_picture_key, s.server_picture_key_nonce
+                "SELECT s.id, s.encrypted_name, s.name_nonce, s.owner_id, COALESCE(s.invite_code_hash, ''), COALESCE(s.joins_disabled, 0), s.server_picture_file_id, s.server_picture_file_id_hash, s.encrypted_server_picture_key, s.server_picture_key_nonce, s.group_id
                  FROM servers s
                  INNER JOIN server_members sm ON s.id = sm.server_id
                  WHERE sm.user_id = ?1
-                 ORDER BY s.id",
+                 ORDER BY sm.position ASC, s.id",
             )
             .map_err(|e| e.to_string())?;
         let servers = stmt
@@ -2020,6 +2029,7 @@ impl Database {
                     server_picture_file_id_hash: row.get(7)?,
                     encrypted_server_picture_key: row.get(8)?,
                     server_picture_key_nonce: row.get(9)?,
+                    group_id: row.get(10)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -2120,6 +2130,7 @@ impl Database {
                         server_picture_file_id_hash: row.get(7)?,
                         encrypted_server_picture_key: row.get(8)?,
                         server_picture_key_nonce: row.get(9)?,
+                        group_id: row.get(10).ok(),
                     })
                 },
             )
@@ -4146,7 +4157,7 @@ impl Database {
              ) other ON other.dm_channel_id = mine.dm_channel_id
              INNER JOIN users u ON u.id = other.user_id
              WHERE mine.user_id = ?1
-             ORDER BY (SELECT MAX(timestamp) FROM dm_messages WHERE dm_channel_id = dm.id) DESC NULLS LAST",
+             ORDER BY COALESCE(dm.position, 0) ASC, (SELECT MAX(timestamp) FROM dm_messages WHERE dm_channel_id = dm.id) DESC NULLS LAST",
         ).map_err(|e| e.to_string())?;
         let rows = stmt.query_map(params![user_id], |row| {
             Ok((
@@ -6036,7 +6047,7 @@ impl Database {
     pub fn list_all_servers_admin(&self) -> Result<Vec<Server>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT id, encrypted_name, name_nonce, owner_id, COALESCE(invite_code_hash, ''), COALESCE(joins_disabled, 0), COALESCE(created_at, ''), server_picture_file_id, server_picture_file_id_hash, encrypted_server_picture_key, server_picture_key_nonce FROM servers ORDER BY created_at")
+            .prepare("SELECT id, encrypted_name, name_nonce, owner_id, COALESCE(invite_code_hash, ''), COALESCE(joins_disabled, 0), COALESCE(created_at, ''), server_picture_file_id, server_picture_file_id_hash, encrypted_server_picture_key, server_picture_key_nonce, group_id FROM servers ORDER BY created_at")
             .map_err(|e| e.to_string())?;
         let servers = stmt
             .query_map([], |row| {
@@ -6052,6 +6063,7 @@ impl Database {
                     server_picture_file_id_hash: row.get(8)?,
                     encrypted_server_picture_key: row.get(9)?,
                     server_picture_key_nonce: row.get(10)?,
+                    group_id: row.get(11).ok(),
                 })
             })
             .map_err(|e| e.to_string())?
@@ -7572,6 +7584,67 @@ impl Database {
 
     // ── F14: User Custom CSS Slots ─────────────────────────────────────────────
 
+    pub fn reorder_dms(&self, user_id: &str, ordered_ids: &[&str]) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        for (i, dm_id) in ordered_ids.iter().enumerate() {
+            conn.execute(
+                "UPDATE dm_channels SET position = ?1 WHERE id = ?2",
+                rusqlite::params![i as i32, dm_id],
+            ).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    pub fn reorder_servers(&self, user_id: &str, ordered_ids: &[&str]) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        for (i, sv_id) in ordered_ids.iter().enumerate() {
+            conn.execute(
+                "UPDATE server_members SET position = ?1 WHERE user_id = ?2 AND server_id = ?3",
+                rusqlite::params![i as i32, user_id, sv_id],
+            ).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    pub fn block_user(&self, blocker_id: &str, blocked_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT OR IGNORE INTO user_blocks (blocker_id, blocked_id) VALUES (?1, ?2)",
+            rusqlite::params![blocker_id, blocked_id],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn unblock_user(&self, blocker_id: &str, blocked_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM user_blocks WHERE blocker_id = ?1 AND blocked_id = ?2",
+            rusqlite::params![blocker_id, blocked_id],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn is_blocked(&self, blocker_id: &str, blocked_id: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM user_blocks WHERE blocker_id = ?1 AND blocked_id = ?2",
+            rusqlite::params![blocker_id, blocked_id],
+            |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        Ok(count > 0)
+    }
+
+    pub fn get_blocked_users(&self, user_id: &str) -> Result<Vec<String>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT blocked_id FROM user_blocks WHERE blocker_id = ?1"
+        ).map_err(|e| e.to_string())?;
+        let ids = stmt.query_map(rusqlite::params![user_id], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok()).collect();
+        Ok(ids)
+    }
+
     pub fn get_css_slots(&self, user_id: &str) -> Result<(String, String, String, String, i64), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let (s1_css, s1_nonce) = conn
@@ -7816,8 +7889,291 @@ impl Database {
     /// Delete a user and all related data (reuses the full delete_user cleanup).
     /// Returns file IDs for the caller to clean up on-disk chunks.
     pub fn self_destruct_user(&self, user_id: &str) -> Result<Vec<String>, String> {
-        // Delegate to the comprehensive delete_user which handles all tables,
-        // including vault files, reactions, voice state, DMs, servers, etc.
         self.delete_user(user_id)
     }
+
+    // -- Soundboard --
+    pub fn save_soundboard_clip(&self, id: &str, user_id: &str, server_id: &str, name: &str, encrypted_audio: &[u8], audio_nonce: &[u8], duration_ms: i64) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO soundboard_clips (id, user_id, server_id, name, encrypted_audio, audio_nonce, duration_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![id, user_id, server_id, name, encrypted_audio, audio_nonce, duration_ms],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// List all soundboard clips for a user (across all servers).
+    pub fn list_soundboard_clips_for_user(&self, user_id: &str) -> Result<Vec<(String, String, String, Vec<u8>, Vec<u8>, i64)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT id, user_id, name, encrypted_audio, audio_nonce, duration_ms FROM soundboard_clips WHERE user_id = ?1 ORDER BY created_at DESC"
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map(rusqlite::params![user_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Vec<u8>>(3)?, row.get::<_, Vec<u8>>(4)?, row.get::<_, i64>(5)?))
+        }).map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows { out.push(r.map_err(|e| e.to_string())?); }
+        Ok(out)
+    }
+
+    pub fn list_soundboard_clips(&self, _user_id: &str, server_id: &str) -> Result<Vec<(String, String, String, Vec<u8>, Vec<u8>, i64)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT id, user_id, name, encrypted_audio, audio_nonce, duration_ms FROM soundboard_clips WHERE server_id = ?1 ORDER BY created_at DESC"
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map(rusqlite::params![server_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Vec<u8>>(3)?, row.get::<_, Vec<u8>>(4)?, row.get::<_, i64>(5)?))
+        }).map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows { out.push(r.map_err(|e| e.to_string())?); }
+        Ok(out)
+    }
+
+    pub fn delete_soundboard_clip(&self, clip_id: &str, user_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM soundboard_clips WHERE id = ?1 AND user_id = ?2",
+            rusqlite::params![clip_id, user_id],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn mute_soundboard_user(&self, server_id: &str, user_id: &str, muted_by: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT OR IGNORE INTO soundboard_mutes (server_id, user_id, muted_by) VALUES (?1, ?2, ?3)",
+            rusqlite::params![server_id, user_id, muted_by],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn unmute_soundboard_user(&self, server_id: &str, user_id: &str, muted_by: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM soundboard_mutes WHERE server_id = ?1 AND user_id = ?2 AND muted_by = ?3",
+            rusqlite::params![server_id, user_id, muted_by],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn is_soundboard_muted(&self, server_id: &str, user_id: &str, muted_by: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM soundboard_mutes WHERE server_id = ?1 AND user_id = ?2 AND muted_by = ?3",
+            rusqlite::params![server_id, user_id, muted_by],
+            |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        Ok(count > 0)
+    }
+
+    pub fn get_muted_soundboard_users(&self, server_id: &str, muted_by: &str) -> Result<Vec<String>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT user_id FROM soundboard_mutes WHERE server_id = ?1 AND muted_by = ?2"
+        ).map_err(|e| e.to_string())?;
+        let ids = stmt.query_map(rusqlite::params![server_id, muted_by], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        Ok(ids.filter_map(|r| r.ok()).collect())
+    }
+
+    // -- Soundboard global mute (owner kill-switch) --
+    pub fn set_soundboard_global_mute(&self, server_id: &str, muted: bool) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE servers SET soundboard_global_mute = ?1 WHERE id = ?2",
+            rusqlite::params![if muted { 1 } else { 0 }, server_id],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn is_soundboard_global_muted(&self, server_id: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let val: i64 = conn.query_row(
+            "SELECT COALESCE(soundboard_global_mute, 0) FROM servers WHERE id = ?1",
+            rusqlite::params![server_id],
+            |row| row.get(0),
+        ).unwrap_or(0);
+        Ok(val != 0)
+    }
+
+    // -- Device Pairing (QR-code second-device login) --
+    pub fn create_pairing_ticket(&self, id: &str, user_id: &str, public_key: &[u8], encrypted_key_blob: &[u8], key_blob_nonce: &[u8], expires_at: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO device_pairing_tickets (id, user_id, public_key, encrypted_key_blob, key_blob_nonce, expires_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![id, user_id, public_key, encrypted_key_blob, key_blob_nonce, expires_at],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn get_pairing_ticket(&self, ticket_id: &str) -> Result<Option<(String, Vec<u8>, Vec<u8>, Vec<u8>, String, Option<String>)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let result = conn.query_row(
+            "SELECT user_id, public_key, encrypted_key_blob, key_blob_nonce, expires_at, claimed_by FROM device_pairing_tickets WHERE id = ?1",
+            rusqlite::params![ticket_id],
+            |row| Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            )),
+        );
+        match result {
+            Ok(r) => Ok(Some(r)),
+            Err(_) => Ok(None),
+        }
+    }
+
+    pub fn claim_pairing_ticket(&self, ticket_id: &str, claimed_by: &str) -> Result<Option<String>, String> {
+        let ticket = self.get_pairing_ticket(ticket_id)?;
+        let ticket = match ticket {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+        if ticket.4 <= chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string() {
+            return Ok(None);
+        }
+        if ticket.5.is_some() {
+            return Ok(None);
+        }
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE device_pairing_tickets SET claimed_by = ?2 WHERE id = ?1",
+            rusqlite::params![ticket_id, claimed_by],
+        ).map_err(|e| e.to_string())?;
+        Ok(Some(ticket.0))
+    }
+
+    pub fn delete_expired_pairing_tickets(&self) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let _ = conn.execute(
+            "DELETE FROM device_pairing_tickets WHERE expires_at < datetime('now')",
+            [],
+        );
+        Ok(())
+    }
+
+    // ─── Server groups (folders) ──────────────────────────────────────
+
+    pub fn list_server_groups(&self, user_id: &str) -> Result<Vec<(String, String, i32, bool, Option<String>)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT id, name, position, collapsed, parent_group_id FROM server_groups WHERE user_id = ?1 ORDER BY position")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params![user_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i32>(2)?,
+                    row.get::<_, bool>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        let mut result = Vec::new();
+        for r in rows { result.push(r.map_err(|e| e.to_string())?); }
+        Ok(result)
+    }
+
+    pub fn create_server_group(&self, user_id: &str, group_id: &str, name: &str, position: i32) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO server_groups (id, user_id, name, position) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![group_id, user_id, name, position],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn rename_server_group(&self, user_id: &str, group_id: &str, name: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE server_groups SET name = ?3 WHERE id = ?1 AND user_id = ?2",
+            rusqlite::params![group_id, user_id, name],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn delete_server_group(&self, user_id: &str, group_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        // Move servers out of the group before deleting
+        conn.execute(
+            "UPDATE servers SET group_id = NULL WHERE group_id = ?1",
+            rusqlite::params![group_id],
+        ).map_err(|e| e.to_string())?;
+        // Also move child groups up
+        conn.execute(
+            "UPDATE server_groups SET parent_group_id = NULL WHERE parent_group_id = ?1",
+            rusqlite::params![group_id],
+        ).map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM server_groups WHERE id = ?1 AND user_id = ?2",
+            rusqlite::params![group_id, user_id],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn toggle_server_group_collapsed(&self, user_id: &str, group_id: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE server_groups SET collapsed = CASE WHEN collapsed = 0 THEN 1 ELSE 0 END WHERE id = ?1 AND user_id = ?2",
+            rusqlite::params![group_id, user_id],
+        ).map_err(|e| e.to_string())?;
+        let val: bool = conn
+            .query_row("SELECT collapsed FROM server_groups WHERE id = ?1", rusqlite::params![group_id], |row| row.get(0))
+            .map_err(|e| e.to_string())?;
+        Ok(val)
+    }
+
+    pub fn move_server_to_group(&self, user_id: &str, server_id: &str, group_id: Option<&str>) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE servers SET group_id = ?2 WHERE id = ?1",
+            rusqlite::params![server_id, group_id],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn reorder_server_groups(&self, user_id: &str, ordered_ids: &[&str]) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        for (i, gid) in ordered_ids.iter().enumerate() {
+            conn.execute(
+                "UPDATE server_groups SET position = ?1 WHERE id = ?2 AND user_id = ?3",
+                rusqlite::params![i as i32, gid, user_id],
+            ).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    pub fn move_group_to_group(&self, user_id: &str, group_id: &str, parent_id: Option<&str>) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        // Prevent circular nesting (group can't be its own parent or ancestor)
+        if let Some(pid) = parent_id {
+            if pid == group_id {
+                return Err("Cannot nest a group inside itself".into());
+            }
+            // Check for indirect cycles (parent's parent === group_id)
+            let mut check_id = pid.to_string();
+            loop {
+                let row: Result<Option<String>, _> = conn.query_row(
+                    "SELECT parent_group_id FROM server_groups WHERE id = ?1 AND user_id = ?2",
+                    rusqlite::params![check_id, user_id],
+                    |row| row.get(0),
+                );
+                match row {
+                    Ok(Some(ref next)) if next == group_id => return Err("Circular group nesting detected".into()),
+                    Ok(Some(next)) => check_id = next,
+                    _ => break,
+                }
+            }
+        }
+        conn.execute(
+            "UPDATE server_groups SET parent_group_id = ?1 WHERE id = ?2 AND user_id = ?3",
+            rusqlite::params![parent_id, group_id, user_id],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
 }

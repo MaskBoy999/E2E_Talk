@@ -491,7 +491,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, client_ip: Strin
                             }
                         }
                     }
-                    _ => {
+            _ => {
                         // Rate limit non-auth first messages per IP
                         if !WS_AUTH_RATE_LIMITER.check_and_increment(&format!("ws_auth:{}", client_ip), 10, Duration::from_secs(60)) {
                             let err = OutgoingMessage {
@@ -1398,6 +1398,38 @@ async fn handle_ws_message(
                         state.ws_manager.broadcast_to_users(&others, &typing.to_string()).await;
                     }
                     Err(_) => {}
+                }
+            }
+        }
+        "soundboard_play" => {
+            // Relay soundboard play to all voice room participants
+            let room_type = parsed.get("room_type").and_then(|s| s.as_str()).unwrap_or("server");
+            if room_type == "dm" {
+                // DM call: relay to the DM voice room
+                let dm_ch = parsed.get("dm_channel_id").and_then(|s| s.as_str()).unwrap_or("");
+                if !dm_ch.is_empty() {
+                    let target_room: Option<String> = {
+                        let rooms_lock = state.voice_rooms.read().unwrap();
+                        rooms_lock.iter()
+                            .find(|(_, rm)| rm.room_type == "dm" && rm.dm_channel_id.as_deref() == Some(dm_ch))
+                            .map(|(rid, _)| rid.clone())
+                    };
+                    if let Some(room_id) = target_room {
+                        voice_broadcast(state, &room_id, &parsed).await;
+                    }
+                }
+            } else {
+                // Server voice: relay to the server voice room
+                if let Some(sid) = parsed.get("server_id").and_then(|s| s.as_str()) {
+                    let target_room: Option<String> = {
+                        let rooms_lock = state.voice_rooms.read().unwrap();
+                        rooms_lock.iter()
+                            .find(|(_, rm)| rm.room_type == "server" && rm.server_id.as_deref() == Some(sid))
+                            .map(|(rid, _)| rid.clone())
+                    };
+                    if let Some(room_id) = target_room {
+                        voice_broadcast(state, &room_id, &parsed).await;
+                    }
                 }
             }
         }

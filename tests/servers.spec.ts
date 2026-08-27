@@ -34,11 +34,10 @@ test.describe('Step 4: Server, Channel & Invite Code Encryption', () => {
 
         // Open create server modal via the server choice button
         // First wait for the UI to fully initialize (chat.js loads servers async)
-        await page.waitForFunction(() => {
-            return document.getElementById('choice-create-server') !== null;
-        }, { timeout: 10000 });
-
-        await page.dispatchEvent('#choice-create-server', 'click');
+        await page.waitForSelector('#add-server-btn', { timeout: 10000 });
+        await page.click('#add-server-btn');
+        await page.waitForSelector('#choice-create-server', { state: 'visible', timeout: 5000 });
+        await page.click('#choice-create-server');
         await page.waitForSelector('#create-server-modal', { state: 'visible', timeout: 5000 });
 
         // Fill server name
@@ -108,11 +107,10 @@ test.describe('Step 4: Server, Channel & Invite Code Encryption', () => {
         await registerUser(page, username, password);
 
         // Create server
-        await page.waitForFunction(() => {
-            return document.getElementById('choice-create-server') !== null;
-        }, { timeout: 10000 });
-
-        await page.dispatchEvent('#choice-create-server', 'click');
+        await page.waitForSelector('#add-server-btn', { timeout: 10000 });
+        await page.click('#add-server-btn');
+        await page.waitForSelector('#choice-create-server', { state: 'visible', timeout: 5000 });
+        await page.click('#choice-create-server');
         await page.waitForSelector('#create-server-modal', { state: 'visible', timeout: 5000 });
         await page.fill('#new-server-name', 'Channel Test Server');
         await page.click('#confirm-create-server');
@@ -164,29 +162,34 @@ test.describe('Step 4: Server, Channel & Invite Code Encryption', () => {
         await registerUser(page, username, password);
 
         // Create server
-        await page.waitForFunction(() => {
-            return document.getElementById('choice-create-server') !== null;
-        }, { timeout: 10000 });
-
-        await page.dispatchEvent('#choice-create-server', 'click');
+        await page.waitForSelector('#add-server-btn', { timeout: 10000 });
+        await page.click('#add-server-btn');
+        await page.waitForSelector('#choice-create-server', { state: 'visible', timeout: 5000 });
+        await page.click('#choice-create-server');
         await page.waitForSelector('#create-server-modal', { state: 'visible', timeout: 5000 });
         await page.fill('#new-server-name', 'Key Test Server');
         await page.click('#confirm-create-server');
         // Wait for the server icon to appear (server created)
         await page.waitForSelector('.server-icon', { timeout: 10000 });
 
+        // Wait for the server key to be stored locally (set immediately after creation)
+        await page.waitForFunction(() => {
+            const E = (window as any).E2ECrypto;
+            const els = document.querySelectorAll('.server-icon:not(.add-server)');
+            if (!els.length) return false;
+            for (const el of els) {
+                const sid = (el as HTMLElement).dataset.id;
+                if (sid && E && E.getServerKey(sid) !== null) return true;
+            }
+            return false;
+        }, { timeout: 15000 });
+
         // Get server IDs from UI
         const serverIds = await page.evaluate(() => {
-            const els = document.querySelectorAll('.server-icon');
-            return Array.from(els).map(el => (el as HTMLElement).dataset.id);
+            const els = document.querySelectorAll('.server-icon:not(.add-server)');
+            return Array.from(els).map(el => (el as HTMLElement).dataset.id).filter(Boolean);
         });
         expect(serverIds.length).toBeGreaterThan(0);
-
-        // Wait for the server key to be stored (via WS key delivery)
-        await page.waitForFunction((sid: string) => {
-            const E = (window as any).E2ECrypto;
-            return E && E.getServerKey(sid) !== null;
-        }, serverIds[0], { timeout: 15000 });
 
         // Verify server key exists in localStorage
         const userStr = await page.evaluate(() => localStorage.getItem('user'));
@@ -208,11 +211,10 @@ test.describe('Step 4: Server, Channel & Invite Code Encryption', () => {
         await registerUser(page, username, password);
 
         // Create server (generates invite code)
-        await page.waitForFunction(() => {
-            return document.getElementById('choice-create-server') !== null;
-        }, { timeout: 10000 });
-
-        await page.dispatchEvent('#choice-create-server', 'click');
+        await page.waitForSelector('#add-server-btn', { timeout: 10000 });
+        await page.click('#add-server-btn');
+        await page.waitForSelector('#choice-create-server', { state: 'visible', timeout: 5000 });
+        await page.click('#choice-create-server');
         await page.waitForSelector('#create-server-modal', { state: 'visible', timeout: 5000 });
         await page.fill('#new-server-name', 'Invite Test Server');
         await page.click('#confirm-create-server');

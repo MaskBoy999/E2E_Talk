@@ -181,6 +181,7 @@
         setManualVideoLoad: setManualVideoLoad,
         setVideoWatchdogSecs: setVideoWatchdogSecs,
         getPeerDiag: function () { return collectPeerDiag(); },
+        getVoiceState: function () { return { inVoice: S.connected, channelId: S.channelId, dmChannelId: S.dmChannelId, serverId: S.serverId, roomType: S.roomType }; },
         refreshVoiceDiag: renderVoiceDiag,
         healAndRejoin: healAndRejoin,
         setMemberVolume: setMemberVolume,
@@ -492,6 +493,7 @@
         // Fullscreen is a per-call UI state only — never persisted. Every join
         // and leave resets it, so a call always starts NOT fullscreen.
         resetFullscreenState();
+        if (S.settings.hearSelf === undefined) S.settings.hearSelf = false;
         applySettingsToUI();
     }
 
@@ -561,6 +563,7 @@
         if (ns) ns.value = S.settings.noiseSuppressionMode || 'rnnoise';
         var ec = document.getElementById('voice-echo-cancellation');
         if (ec) ec.checked = !!S.settings.echoCancellation;
+        // hear-self is now a button, not a checkbox — no sync needed
         var hi = document.getElementById('voice-haptic-incoming');
         if (hi) hi.checked = S.settings.hapticIncoming !== false;
         var hw = document.getElementById('voice-haptic-waiting');
@@ -3924,6 +3927,30 @@
         playSound(S.muted ? 'mute' : 'unmute');
     }
 
+    // --- Picture-in-Picture ---
+    var _pipActive = false;
+    function togglePiP() {
+        if (_pipActive) {
+            document.exitPictureInPicture().catch(function() {});
+            _pipActive = false;
+            return;
+        }
+        // Find the active screen share or camera video
+        var video = document.querySelector('.voice-popup-wrap .remote-video-tile[data-kind="screen"]:not([style*="display:none"])')
+                 || document.querySelector('.voice-popup-wrap .remote-video-tile[data-kind="camera"]:not([style*="display:none"])')
+                 || document.querySelector('.voice-fs-wrap .remote-video-tile[data-kind="screen"]:not([style*="display:none"])')
+                 || document.querySelector('.voice-fs-wrap .remote-video-tile[data-kind="camera"]:not([style*="display:none"])');
+        if (!video || !video.srcObject) { showToast('No active video to PiP'); return; }
+        if (!document.pictureInPictureEnabled) { showToast('PiP not supported in this browser'); return; }
+        video.requestPictureInPicture().then(function() {
+            _pipActive = true;
+            video.addEventListener('leavepictureinpicture', function handler() {
+                _pipActive = false;
+                video.removeEventListener('leavepictureinpicture', handler);
+            });
+        }).catch(function(err) { console.warn('[PiP]', err); });
+    }
+
     function toggleDeafen() {
         ensureAudioCtx();
         if (S.forceDeafened) {
@@ -4709,6 +4736,11 @@
         bindClick(bar, 'voice-bar-camera', function () { toggleCamera(); });
         bindClick(bar, 'voice-bar-cam-opt', function (e) { openCamOptMenu(this); });
         bindClick(bar, 'voice-bar-screen', function () { toggleScreen(); });
+        bindClick(bar, 'voice-bar-soundboard', function () {
+            var sbOverlay = document.getElementById('soundboard-overlay');
+            if (sbOverlay) sbOverlay.style.display = 'flex';
+            if (window._loadSoundboardClips) window._loadSoundboardClips();
+        });
         bindClick(bar, 'voice-bar-leave', function () { leaveVoice(); });
         bindClick(bar, 'voice-bar-popup', function () {
             // The ☰ button redirects us INTO the voice channel view.
@@ -4797,6 +4829,7 @@
         bindClick(pop, 'voice-popup-camera', function () { toggleCamera(); });
         bindClick(pop, 'voice-popup-cam-opt', function (e) { openCamOptMenu(this); });
         bindClick(pop, 'voice-popup-screen', function () { toggleScreen(); });
+        bindClick(pop, 'voice-popup-pip', function () { togglePiP(); });
         bindClick(pop, 'voice-popup-leave', function () { leaveVoice(); });
         var pmv = pop.querySelector('#voice-popup-mic-volume');
         if (pmv) pmv.addEventListener('input', function (e) { setMicVolume(parseInt(e.target.value, 10)); });
@@ -4836,6 +4869,179 @@
         }
         var sec = document.getElementById('voice-echo-cancellation');
         if (sec) sec.addEventListener('change', function (e) { setEchoCancellation(e.target.checked); });
+        // --- Test Mic button (hear-self) ---
+        var _hearSelfBtn = document.getElementById('voice-hear-self-btn');
+        var _hearSelfMeterWrap = document.getElementById('voice-hear-self-meter-wrap');
+        var _hearSelfMeter = document.getElementById('voice-hear-self-meter');
+        var _hearSelfDb = document.getElementById('voice-hear-self-db');
+        var _hearSelfStatus = document.getElementById('voice-hear-self-status');
+        var _hearSelfNsMode = document.getElementById('voice-hear-self-ns-mode');
+        var _hearSelfGain = document.getElementById('voice-hear-self-gain');
+        var _hearSelfStream = null;
+        var _hearSelfCtx = null;
+        var _hearSelfAnalyser = null;
+        var _hearSelfRafId = null;
+        var _hearSelfSink = null;
+        var _hearSelfNsCtx = null;
+        var _hearSelfNsStream = null;
+        var _hearSelfGateTimer = null;
+
+        function startHearSelfTest() {
+            var nsMode = (S.settings && S.settings.noiseSuppressionMode) || 'rnnoise';
+            var micVol = (S.settings && S.settings.micVolume !== undefined) ? S.settings.micVolume : 100;
+            var constraints = { audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } };
+            // Update UI immediately (before async getUserMedia)
+            S.settings.hearSelf = true;
+            saveSettings();
+            if (_hearSelfBtn) { _hearSelfBtn.textContent = '\u23F9 Stop Test'; _hearSelfBtn.classList.remove('btn-primary'); _hearSelfBtn.classList.add('btn-danger'); }
+            if (_hearSelfMeterWrap) _hearSelfMeterWrap.style.display = 'block';
+            if (_hearSelfStatus) _hearSelfStatus.textContent = '\uD83D\uDD34 Starting mic...';
+            if (_hearSelfNsMode) _hearSelfNsMode.textContent = nsMode;
+            if (_hearSelfGain) _hearSelfGain.textContent = micVol + '%';
+            window._stopHearSelfTest = stopHearSelfTest;
+            navigator.mediaDevices.getUserMedia(constraints).then(function (stream) {
+                _hearSelfStream = stream;
+                var ctx = new (window.AudioContext || window.webkitAudioContext)();
+                _hearSelfCtx = ctx;
+                var source = ctx.createMediaStreamSource(stream);
+                // --- Build standalone noise suppression chain ---
+                function buildNsChain(rawSource) {
+                    if (mode === 'off') return Promise.resolve(rawSource);
+                    if (mode === 'browser') {
+                        return navigator.mediaDevices.getUserMedia({ audio: { noiseSuppression: true, echoCancellation: false, autoGainControl: false } }).then(function (nsStream) {
+                            var nsCtx2 = new (window.AudioContext || window.webkitAudioContext)();
+                            var nsSrc2 = nsCtx2.createMediaStreamSource(nsStream);
+                            var nsDest2 = nsCtx2.createMediaStreamDestination();
+                            nsSrc2.connect(nsDest2);
+                            _hearSelfNsCtx = nsCtx2;
+                            _hearSelfNsStream = nsStream;
+                            return ctx.createMediaStreamSource(nsDest2.stream);
+                        }).catch(function () { return rawSource; });
+                    }
+                    // RNNoise / RNNoise+Gate: build a standalone worklet chain
+                    if (mode === 'rnnoise' || mode === 'rnnoise-gate') {
+                        if (!window.AudioWorkletNode || !window.AudioContext) return Promise.resolve(rawSource);
+                        return Promise.resolve().then(function () {
+                            var nsCtx = new AudioContext({ sampleRate: 48000 });
+                            if (Math.abs(nsCtx.sampleRate - 48000) > 1) { try { nsCtx.close(); } catch(_){} return rawSource; }
+                            var binPromise = _nsWasmBinary ? Promise.resolve(_nsWasmBinary) :
+                                fetch('/rnnoise/sapphi-rnnoise.wasm').then(function (r) { return r.ok ? r.arrayBuffer() : null; });
+                            return binPromise.then(function (wasmBinary) {
+                                if (!wasmBinary) { try { nsCtx.close(); } catch(_){} return rawSource; }
+                                _nsWasmBinary = wasmBinary;
+                                return nsCtx.audioWorklet.addModule('/rnnoise/sapphi-worklet.js').then(function () {
+                                    var nsSrc = nsCtx.createMediaStreamSource(stream);
+                                    var worklet = new AudioWorkletNode(nsCtx, '@sapphi-red/web-noise-suppressor/rnnoise', {
+                                        numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1, channelCountMode: 'explicit',
+                                        outputChannelCount: [1],
+                                        processorOptions: { wasmBinary: wasmBinary, maxChannels: 1 },
+                                    });
+                                    var nsDest = nsCtx.createMediaStreamDestination();
+                                    nsSrc.connect(worklet);
+                                    if (mode === 'rnnoise-gate') {
+                                        var gateAnalyser = nsCtx.createAnalyser(); gateAnalyser.fftSize = 256;
+                                        var gateGain = nsCtx.createGain(); gateGain.gain.value = 1.0;
+                                        var compressor = nsCtx.createDynamicsCompressor();
+                                        compressor.threshold.value = -30; compressor.knee.value = 12;
+                                        compressor.ratio.value = 4; compressor.attack.value = 0.003; compressor.release.value = 0.15;
+                                        worklet.connect(gateAnalyser); worklet.connect(gateGain);
+                                        gateGain.connect(compressor); compressor.connect(nsDest);
+                                        var gateData = new Uint8Array(gateAnalyser.frequencyBinCount);
+                                        var _gateOpen = true, _gateCloseTime = 0;
+                                        _hearSelfGateTimer = setInterval(function () {
+                                            if (!_hearSelfCtx) { clearInterval(_hearSelfGateTimer); _hearSelfGateTimer = null; return; }
+                                            gateAnalyser.getByteTimeDomainData(gateData);
+                                            var sum = 0; for (var k = 0; k < gateData.length; k++) { var v2 = (gateData[k] - 128) / 128; sum += v2 * v2; }
+                                            var rms = Math.sqrt(sum / gateData.length) * 255;
+                                            var now = nsCtx.currentTime * 1000;
+                                            if (rms > 15) { if (!_gateOpen) { gateGain.gain.setTargetAtTime(1.0, nsCtx.currentTime, 0.005); _gateOpen = true; } _gateCloseTime = 0; }
+                                            else { if (_gateOpen && _gateCloseTime === 0) _gateCloseTime = now; if (_gateOpen && _gateCloseTime > 0 && (now - _gateCloseTime) > 200) { gateGain.gain.setTargetAtTime(0.0, nsCtx.currentTime, 0.03); _gateOpen = false; } }
+                                        }, 16);
+                                    } else {
+                                        worklet.connect(nsDest);
+                                    }
+                                    _hearSelfNsCtx = nsCtx;
+                                    _hearSelfNsStream = nsDest.stream;
+                                    return ctx.createMediaStreamSource(nsDest.stream);
+                                });
+                            });
+                        }).catch(function () { return rawSource; });
+                    }
+                    return Promise.resolve(rawSource);
+                }
+
+                buildNsChain(source).then(function (input) {
+                    // Analyser for meter
+                    var analyser = ctx.createAnalyser();
+                    analyser.fftSize = 512;
+                    input.connect(analyser);
+                    _hearSelfAnalyser = analyser;
+                    // Connect to speakers
+                    var gain = ctx.createGain();
+                    gain.gain.value = micVol / 100;
+                    _hearSelfSink = gain;
+                    input.connect(gain);
+                    gain.connect(ctx.destination);
+                    // Update meter
+                    var buf = new Uint8Array(analyser.fftSize);
+                    function updateMeter() {
+                        if (!_hearSelfAnalyser) return;
+                        analyser.getByteTimeDomainData(buf);
+                        var sum = 0;
+                        for (var i = 0; i < buf.length; i++) {
+                            var v = (buf[i] - 128) / 128;
+                            sum += v * v;
+                        }
+                        var rms = Math.sqrt(sum / buf.length);
+                        var pct = Math.min(100, Math.round(rms * 200));
+                        var db = rms > 0 ? Math.round(20 * Math.log10(rms)) : -96;
+                        if (_hearSelfMeter) _hearSelfMeter.style.width = pct + '%';
+                        if (_hearSelfDb) _hearSelfDb.textContent = db + ' dB';
+                        _hearSelfRafId = requestAnimationFrame(updateMeter);
+                    }
+                    updateMeter();
+                    if (_hearSelfStatus) _hearSelfStatus.textContent = '\uD83D\uDD34 Listening...';
+                });
+            }).catch(function (e) {
+                console.error('Hear-self mic error:', e);
+                stopHearSelfTest();
+                if (_hearSelfStatus) _hearSelfStatus.textContent = '⚠ Mic access denied';
+            });
+        }
+        function stopHearSelfTest() {
+            if (_hearSelfRafId) { cancelAnimationFrame(_hearSelfRafId); _hearSelfRafId = null; }
+            _hearSelfAnalyser = null;
+            if (_hearSelfSink) { try { _hearSelfSink.disconnect(); } catch (_) {} _hearSelfSink = null; }
+            if (_hearSelfGateTimer) { try { clearInterval(_hearSelfGateTimer); } catch (_) {} _hearSelfGateTimer = null; }
+            if (_hearSelfNsCtx) { try { _hearSelfNsCtx.close(); } catch (_) {} _hearSelfNsCtx = null; }
+            if (_hearSelfNsStream) { try { _hearSelfNsStream.getTracks().forEach(function (t) { t.stop(); }); } catch (_) {} _hearSelfNsStream = null; }
+            if (_hearSelfCtx) { try { _hearSelfCtx.close(); } catch (_) {} _hearSelfCtx = null; }
+            if (_hearSelfStream) { _hearSelfStream.getTracks().forEach(function (t) { t.stop(); }); _hearSelfStream = null; }
+            S.settings.hearSelf = false;
+            saveSettings();
+            if (_hearSelfBtn) { _hearSelfBtn.textContent = '🎤 Start Test'; _hearSelfBtn.classList.remove('btn-danger'); _hearSelfBtn.classList.add('btn-primary'); }
+            if (_hearSelfMeterWrap) _hearSelfMeterWrap.style.display = 'none';
+            if (_hearSelfMeter) _hearSelfMeter.style.width = '0%';
+            if (_hearSelfDb) _hearSelfDb.textContent = '';
+            if (_hearSelfStatus) _hearSelfStatus.textContent = '';
+            window._stopHearSelfTest = null;
+        }
+        if (_hearSelfBtn) {
+            _hearSelfBtn.addEventListener('click', function () {
+                if (S.settings.hearSelf) {
+                    stopHearSelfTest();
+                } else {
+                    startHearSelfTest();
+                }
+            });
+        }
+        // Auto-stop hear-self when settings modal closes
+        var settingsCloseBtn = document.querySelector('#settings-modal .settings-close');
+        if (settingsCloseBtn) {
+            settingsCloseBtn.addEventListener('click', function () {
+                if (S.settings.hearSelf) stopHearSelfTest();
+            });
+        }
         var shi = document.getElementById('voice-haptic-incoming');
         if (shi) shi.addEventListener('change', function (e) {
             S.settings.hapticIncoming = !!e.target.checked;
@@ -5568,6 +5774,11 @@
         bindClick(p, 'dm-call-camera', function () { toggleCamera(); });
         bindClick(p, 'dm-call-cam-opt', function (e) { openCamOptMenu(this); });
         bindClick(p, 'dm-call-screen', function () { toggleScreen(); });
+        bindClick(p, 'dm-call-soundboard', function () {
+            var sbOverlay = document.getElementById('soundboard-overlay');
+            if (sbOverlay) sbOverlay.style.display = 'flex';
+            if (window._loadSoundboardClips) window._loadSoundboardClips();
+        });
         bindClick(p, 'dm-call-end', function () { endDmCall(); });
         bindClick(p, 'dm-call-expand', function () { toggleDmExpand(); });
         bindClick(p, 'dm-call-close', function () { hideDmPanel(); });
@@ -5745,6 +5956,11 @@
         bindClick(m, 'dm-mini-bar-end', function () { endDmCall(); });
         bindClick(m, 'dm-mini-bar-mute', function () { toggleMute(); });
         bindClick(m, 'dm-mini-bar-deafen', function () { toggleDeafen(); });
+        bindClick(m, 'dm-mini-bar-soundboard', function () {
+            var sbOverlay = document.getElementById('soundboard-overlay');
+            if (sbOverlay) sbOverlay.style.display = 'flex';
+            if (window._loadSoundboardClips) window._loadSoundboardClips();
+        });
     }
 
     // ------------------------------------------------------------------
@@ -6233,6 +6449,49 @@
             menu.appendChild(row3);
         }
 
+        // Soundboard mute/unmute — available for all users on other members
+        if (!isScreen && !isVideoOnly && !isSelf && S.roomType === 'server') {
+            var sbMutedList = (window._sbMutedList || []);
+            var isSbMuted = sbMutedList.indexOf(uid) !== -1;
+            var sbBtn = document.createElement('button');
+            sbBtn.className = 'volume-menu-btn';
+            sbBtn.textContent = isSbMuted ? '🔊 Unmute Soundboard' : '🔇 Mute Soundboard';
+            sbBtn.addEventListener('click', function () {
+                var serverId = window.currentServerId;
+                var method = isSbMuted ? 'DELETE' : 'PUT';
+                fetch('/api/soundboard/mute/' + serverId + '/' + uid, {
+                    method: method,
+                    headers: Object.assign({ 'Content-Type': 'application/json' }, authHeaders()),
+                }).then(function () {
+                    if (isSbMuted) {
+                        var idx = window._sbMutedList.indexOf(uid);
+                        if (idx !== -1) window._sbMutedList.splice(idx, 1);
+                    } else {
+                        window._sbMutedList.push(uid);
+                    }
+                }).catch(function () {});
+                closeVolumeMenu();
+            });
+            menu.appendChild(sbBtn);
+        }
+
+        // Global soundboard mute toggle — server owner only
+        if (!isScreen && !isVideoOnly && S.roomType === 'server' && S.isOwner) {
+            var gMuteBtn = document.createElement('button');
+            gMuteBtn.className = 'volume-menu-btn';
+            gMuteBtn.textContent = '🔇 Disable Soundboard (All)';
+            gMuteBtn.addEventListener('click', function () {
+                var serverId = window.currentServerId;
+                fetch('/api/soundboard/global-mute/' + serverId, {
+                    method: 'PUT',
+                    headers: Object.assign({ 'Content-Type': 'application/json' }, authHeaders()),
+                    body: JSON.stringify({ muted: true }),
+                }).catch(function () {});
+                closeVolumeMenu();
+            });
+            menu.appendChild(gMuteBtn);
+        }
+
         menu.style.display = 'block';
         var x = Math.min(e.clientX, window.innerWidth - 220);
         var y = Math.min(e.clientY, window.innerHeight - 260);
@@ -6670,6 +6929,7 @@
         Object.keys(S.remoteScreenAudioEls).forEach(function (uid) {
             applyRemoteScreenVolume(uid);
         });
+        if (_hearSelfAudioEl) _hearSelfAudioEl.volume = v / 100;
     }
 
     function setNoiseSuppression(mode) {

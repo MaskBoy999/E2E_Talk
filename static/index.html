@@ -8,7 +8,7 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <link rel="manifest" href="/manifest.json">
     <title>E2E Chat</title>
-    <link rel="stylesheet" href="style.css?v=9">
+    <link rel="stylesheet" href="style.css?v=10">
 </head>
 <body>
     <!-- Loading overlay -->
@@ -184,7 +184,7 @@
                 <div class="drop-zone-hint">Supports images, videos, audio, and documents</div>
             </div>
         </div>
-    </div>
+    </div><!-- /app -->
 
     <!-- Server Choice Modal (Create or Join) -->
     <div class="modal" id="server-choice-modal" style="display:none">
@@ -952,6 +952,24 @@
                     <div id="ns-description" style="font-size:12px;color:var(--text-secondary);margin-top:6px">RNNoise + Gate chains the neural model with a noise gate and compressor for the deepest on-device suppression.</div>
                 </div>
                 <div class="settings-group">
+                    <h4>Hear Yourself (Test Mic)</h4>
+                    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+                        <button type="button" id="voice-hear-self-btn" class="btn btn-primary" style="min-width:120px">🎤 Start Test</button>
+                        <span id="voice-hear-self-status" style="font-size:13px;color:var(--text-secondary)"></span>
+                    </div>
+                    <div id="voice-hear-self-meter-wrap" style="display:none;background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:8px;padding:10px 12px;margin-top:4px">
+                        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+                            <span style="font-size:12px;color:var(--text-secondary);min-width:60px">Volume</span>
+                            <div style="flex:1;height:16px;background:var(--bg-primary);border-radius:8px;overflow:hidden;position:relative">
+                                <div id="voice-hear-self-meter" style="width:0%;height:100%;background:linear-gradient(90deg,#2ecc71,#f1c40f,#e74c3c);border-radius:8px;transition:width 60ms ease-out"></div>
+                                <div style="position:absolute;right:4px;top:0;height:100%;display:flex;align-items:center;font-size:10px;color:var(--text-muted)" id="voice-hear-self-db"></div>
+                            </div>
+                        </div>
+                        <div style="font-size:11px;color:var(--text-muted)">Noise suppression: <strong id="voice-hear-self-ns-mode"></strong> &middot; Mic gain: <strong id="voice-hear-self-gain"></strong></div>
+                    </div>
+                    <p class="settings-hint">Opens your mic with the current noise suppression so you can hear yourself. Stops automatically when you close Settings, or click Stop. Use the volume meter to check background noise levels.</p>
+                </div>
+                <div class="settings-group">
                     <h4>Echo Cancellation</h4>
                     <label style="display:flex;align-items:center;gap:8px;font-size:14px;color:var(--text-primary);cursor:pointer">
                         <input type="checkbox" id="voice-echo-cancellation" style="width:16px;height:16px;accent-color:var(--accent,#5865f2)">
@@ -959,7 +977,7 @@
                     </label>
                     <p class="settings-hint">Off by default — Chrome's AEC can gate the mic when it hears the same sound it is also playing (e.g. testing on one device with two windows, or a voice changer/external mixer). Turn it on if the other side hears their own voice echoed back.</p>
                 </div>
-                <div class="settings-group">
+<div class="settings-group">
                     <h4>Haptics</h4>
                     <label style="display:flex;align-items:center;gap:8px;font-size:14px;color:var(--text-primary);cursor:pointer">
                         <input type="checkbox" id="voice-haptic-incoming" style="width:16px;height:16px;accent-color:var(--accent,#5865f2)">
@@ -1821,6 +1839,7 @@
             <button class="voice-bar-btn" id="voice-bar-camera" title="Camera">&#128247;</button>
             <button class="voice-bar-btn voice-cam-opt" id="voice-bar-cam-opt" title="Camera options (flip / mirror / flash)">&#8942;</button>
             <button class="voice-bar-btn" id="voice-bar-screen" title="Share screen">&#128424;</button>
+            <button class="voice-bar-btn" id="voice-bar-soundboard" title="Soundboard">&#127925;</button>
             <button class="voice-bar-btn voice-bar-leave" id="voice-bar-leave" title="Leave">&#128222;</button>
         </div>
     </div>
@@ -1841,6 +1860,8 @@
             <button class="voice-popup-btn" id="voice-popup-camera" title="Camera">&#128247;</button>
             <button class="voice-popup-btn voice-cam-opt" id="voice-popup-cam-opt" title="Camera options (flip / mirror / flash)">&#8942;</button>
             <button class="voice-popup-btn" id="voice-popup-screen" title="Share screen">&#128424;</button>
+            <button class="voice-popup-btn" id="voice-popup-pip" title="Picture-in-Picture" style="font-size:18px">&#128248;</button>
+            <button class="voice-popup-btn" id="voice-popup-soundboard" title="Soundboard">&#127925;</button>
             <button class="voice-popup-btn voice-popup-leave" id="voice-popup-leave" title="Leave">&#128222;</button>
         </div>
         <div class="voice-popup-settings">
@@ -1865,6 +1886,25 @@
         </div>
     </div>
 
+    <!-- Soundboard overlay -->
+    <div class="soundboard-overlay" id="soundboard-overlay" style="display:none">
+        <div class="soundboard-panel">
+            <div class="soundboard-header">
+                <h3>Soundboard</h3>
+                <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-secondary);cursor:pointer">
+                    <input type="checkbox" id="soundboard-self-hear" style="width:14px;height:14px;accent-color:var(--accent,#5865f2)">
+                    Hear myself
+                </label>
+                <button class="soundboard-close" id="soundboard-close">&times;</button>
+            </div>
+            <div class="soundboard-upload">
+                <input type="file" id="soundboard-file" accept="audio/*" style="display:none">
+                <button class="btn-accent soundboard-upload-btn" id="soundboard-upload-btn">⬆ Upload Sound</button>
+            </div>
+            <div class="soundboard-clips" id="soundboard-clips"><div class="soundboard-empty">No sounds yet</div></div>
+        </div>
+    </div>
+
     <!-- DM call panel (top panel of the text area while in that DM; the
          &#8645; button expands it to cover the WHOLE screen) -->
     <div class="dm-call-panel" id="dm-call-panel" style="display:none">
@@ -1883,6 +1923,7 @@
             <button class="dm-call-btn" id="dm-call-camera" title="Camera">&#128247;</button>
             <button class="dm-call-btn voice-cam-opt" id="dm-call-cam-opt" title="Camera options (flip / mirror / flash)">&#8942;</button>
             <button class="dm-call-btn" id="dm-call-screen" title="Share screen">&#128424;</button>
+            <button class="dm-call-btn" id="dm-call-soundboard" title="Soundboard">&#127925;</button>
             <button class="dm-call-btn dm-call-end" id="dm-call-end" title="End call">&#128222;</button>
         </div>
         <div class="dm-call-resize" id="dm-call-resize" title="Drag to resize height"></div>
@@ -1911,6 +1952,7 @@
         </button>
         <button class="voice-bar-btn" id="dm-mini-bar-mute" title="Mute">&#127908;</button>
         <button class="voice-bar-btn" id="dm-mini-bar-deafen" title="Deafen">&#128266;</button>
+        <button class="voice-bar-btn" id="dm-mini-bar-soundboard" title="Soundboard">&#127925;</button>
         <button class="voice-bar-btn voice-bar-leave" id="dm-mini-bar-end" title="End call">&#128222;</button>
     </div>
 
@@ -2054,11 +2096,12 @@
         </div>
     </div>
 
-    <script src="secure-storage.js?v=1"></script>
-    <script src="voice.js?v=2"></script>
-    <script src="thread_categories_shortcuts.js?v=1"></script>
-    <script src="doc-preview.js?v=1"></script>
-    <script src="chat.js?v=40"></script>
+    <script src="secure-storage.js?v=2"></script>
+    <script src="voice.js?v=3"></script>
+    <script src="soundboard-pairing.js?v=3"></script>
+    <script src="thread_categories_shortcuts.js?v=2"></script>
+    <script src="doc-preview.js?v=2"></script>
+    <script src="chat.js?v=41"></script>
     <script>
     // PWA: Register service worker
     if ('serviceWorker' in navigator) {

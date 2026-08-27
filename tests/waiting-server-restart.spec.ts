@@ -103,7 +103,7 @@ test.describe('Server restart clears stale DM-call waiting state', () => {
         // --- Simulate a server restart: spawn a SECOND instance sharing the DB.
         // Its startup clears every dm_call_waiting row (the restart invariant).
         const serverDir = path.join(__dirname, '..', 'server');
-        const bin = path.join(serverDir, 'target', 'debug', process.platform === 'win32' ? 'e2e-chat.exe' : 'e2e-chat');
+        const bin = path.join(serverDir, 'target', 'release', process.platform === 'win32' ? 'e2e-chat.exe' : 'e2e-chat');
         if (!fs.existsSync(bin)) {
             throw new Error('server binary not found at ' + bin);
         }

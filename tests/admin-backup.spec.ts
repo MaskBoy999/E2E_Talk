@@ -39,7 +39,7 @@ test.describe('Admin backup encryption + raw tables (isolated server)', () => {
 
     test.beforeAll(async ({ request }) => {
         const serverDir = path.join(__dirname, '..', 'server');
-        const bin = path.join(serverDir, 'target', 'debug', process.platform === 'win32' ? 'e2e-chat.exe' : 'e2e-chat');
+        const bin = path.join(serverDir, 'target', 'release', process.platform === 'win32' ? 'e2e-chat.exe' : 'e2e-chat');
         if (!fs.existsSync(bin)) throw new Error('server binary not found at ' + bin);
         tmpDb = path.join(serverDir, `admin-bk-${Date.now()}.db`);
         child = spawn(bin, [], {
@@ -561,7 +561,7 @@ test.describe('Clear-all wipes EVERY table (isolated server)', () => {
 
     test.beforeAll(async ({ request }) => {
         const serverDir = path.join(__dirname, '..', 'server');
-        const bin = path.join(serverDir, 'target', 'debug', process.platform === 'win32' ? 'e2e-chat.exe' : 'e2e-chat');
+        const bin = path.join(serverDir, 'target', 'release', process.platform === 'win32' ? 'e2e-chat.exe' : 'e2e-chat');
         if (!fs.existsSync(bin)) throw new Error('server binary not found at ' + bin);
         tmpDb = path.join(serverDir, `admin-wipe-${Date.now()}.db`);
         child = spawn(bin, [], {
@@ -768,7 +768,7 @@ test.describe('Admin backup restores uploaded files (isolated server)', () => {
 
     test.beforeAll(async ({ request }) => {
         const serverDir = path.join(__dirname, '..', 'server');
-        const bin = path.join(serverDir, 'target', 'debug', process.platform === 'win32' ? 'e2e-chat.exe' : 'e2e-chat');
+        const bin = path.join(serverDir, 'target', 'release', process.platform === 'win32' ? 'e2e-chat.exe' : 'e2e-chat');
         if (!fs.existsSync(bin)) throw new Error('server binary not found at ' + bin);
         tmpDb = path.join(serverDir, `admin-up-${Date.now()}.db`);
         child = spawn(bin, [], {

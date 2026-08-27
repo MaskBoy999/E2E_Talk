@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>E2E Chat - Pair Device</title>
+    <link rel="stylesheet" href="style.css?v=3">
+</head>
+<body>
+    <div class="auth-container">
+        <div class="auth-card">
+            <h1>E2E Chat</h1>
+            <p class="subtitle">Pair New Device</p>
+            <div id="pairing-status" style="margin: 16px 0; text-align: center;">
+                <p>Loading pairing ticket...</p>
+            </div>
+            <div id="pairing-password-form" style="display:none; text-align: center; margin-top: 16px;">
+                <p style="color: var(--text-secondary); font-size: 13px; margin-bottom: 8px;">Enter your password to restore encryption keys:</p>
+                <input type="password" id="pairing-password" placeholder="Password" style="padding: 8px 12px; border: 1px solid var(--border-color, #444); border-radius: 6px; background: var(--input-bg, #222); color: var(--text-primary, #fff); width: 80%; max-width: 280px; margin-bottom: 8px;">
+                <br>
+                <button onclick="restoreKeys()" style="padding: 10px 24px;background:var(--accent);color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer;margin-top:8px">Restore Keys &amp; Login</button>
+                <p id="pairing-restore-error" style="color: #e74c3c; font-size: 12px; margin-top: 8px; display: none;"></p>
+            </div>
+            <div id="pairing-result" style="display:none; text-align: center;">
+                <p style="color: #2ecc71; font-size: 18px;">&#10003; Paired!</p>
+                <p style="color: var(--text-secondary); font-size: 13px;">You are now logged in. <a href="index.html">Go to Chat</a></p>
+            </div>
+        </div>
+    </div>
+    <script src="qrcode.js"></script>
+    <script src="crypto.js"></script>
+    <script>
+    (function() {
+        var params = new URLSearchParams(window.location.search);
+        var ticketId = params.get('ticket');
+        var statusEl = document.getElementById('pairing-status');
+        var resultEl = document.getElementById('pairing-result');
+        var pwForm = document.getElementById('pairing-password-form');
+        var errEl = document.getElementById('pairing-restore-error');
+        var _ticketData = null;
+
+        if (!ticketId) {
+            statusEl.innerHTML = '<p style="color:#e74c3c">No pairing ticket found in URL.</p>';
+            return;
+        }
+
+        statusEl.innerHTML = '<p>Fetching pairing ticket...</p>';
+
+        fetch('/api/pairing/' + ticketId)
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.error) {
+                    statusEl.innerHTML = '<p style="color:#e74c3c">' + data.error + '</p>';
+                    return;
+                }
+                if (data.claimed) {
+                    statusEl.innerHTML = '<p style="color:#e74c3c">This pairing link has already been used.</p>';
+                    return;
+                }
+                _ticketData = data;
+                statusEl.innerHTML = '<p>Ready to pair. This ticket will expire in ' +
+                    Math.round((new Date(data.expires_at) - Date.now()) / 60000) + ' minutes.</p>' +
+                    '<button onclick="claimTicket()" style="padding:10px 24px;background:var(--accent);color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer;margin-top:12px">Claim &amp; Login</button>';
+            })
+            .catch(function(e) {
+                statusEl.innerHTML = '<p style="color:#e74c3c">Error: ' + e.message + '</p>';
+            });
+
+        window.claimTicket = function() {
+            statusEl.innerHTML = '<p>Claiming ticket...</p>';
+            fetch('/api/pairing/' + ticketId, { method: 'POST' })
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (data.error) {
+                        statusEl.innerHTML = '<p style="color:#e74c3c">' + data.error + '</p>';
+                        return;
+                    }
+                    if (data.token) {
+                        localStorage.setItem('token', data.token);
+                        // If the server returned the encrypted key blob, prompt for password
+                        if (data.encrypted_key_blob && data.key_blob_nonce) {
+                            _ticketData = data;
+                            statusEl.innerHTML = '<p>Paired! Now restore your encryption keys.</p>';
+                            pwForm.style.display = '';
+                        } else {
+                            // No key blob — just redirect
+                            statusEl.style.display = 'none';
+                            resultEl.style.display = 'block';
+                        }
+                    }
+                })
+                .catch(function(e) {
+                    statusEl.innerHTML = '<p style="color:#e74c3c">Error: ' + e.message + '</p>';
+                });
+        };
+
+        window.restoreKeys = function() {
+            var pw = document.getElementById('pairing-password').value;
+            if (!pw) { errEl.textContent = 'Enter your password'; errEl.style.display = ''; return; }
+            errEl.style.display = 'none';
+            statusEl.innerHTML = '<p>Decrypting keys...</p>';
+            pwForm.style.display = 'none';
+
+            try {
+                // Decrypt the key blob using the password
+                var encBlob = _ticketData.encrypted_key_blob;
+                var blobNonce = _ticketData.key_blob_nonce;
+                var decrypted = E2ECrypto.decryptKeyBundle(encBlob, pw, '', blobNonce);
+                if (!decrypted) {
+                    errEl.textContent = 'Wrong password. Please try again.';
+                    errEl.style.display = '';
+                    statusEl.innerHTML = '';
+                    pwForm.style.display = '';
+                    return;
+                }
+                E2ECrypto.restoreKeyBundle(decrypted);
+                statusEl.innerHTML = '<p>Keys restored! Redirecting...</p>';
+                setTimeout(function() { window.location.href = 'index.html'; }, 1000);
+            } catch (e) {
+                console.error('Key restoration failed:', e);
+                errEl.textContent = 'Failed to restore keys: ' + e.message;
+                errEl.style.display = '';
+                statusEl.innerHTML = '';
+                pwForm.style.display = '';
+            }
+        };
+    })();
+    </script>
+</body>
+</html>
