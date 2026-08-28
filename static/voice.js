@@ -929,6 +929,8 @@
         teardownRoom();
         if (wasDm) playSound('leave');
         else if (S.connected) playSound('leave');
+        // Stop all soundboard audio when leaving voice
+        if (window._stopAllSoundboardAudio) window._stopAllSoundboardAudio();
         hideBar();
         hidePopup();
         hideDmPanel();
@@ -6473,6 +6475,32 @@
                 closeVolumeMenu();
             });
             menu.appendChild(sbBtn);
+        }
+
+        // Owner controls — Disable/Enable this member's soundboard (server owner only)
+        if (!isScreen && !isVideoOnly && !isSelf && S.roomType === 'server' && S.isOwner) {
+            var sbDisabledList = (window._sbDisabledUsers || []);
+            var isSbDisabled = sbDisabledList.indexOf(uid) !== -1;
+            var sbDisBtn = document.createElement('button');
+            sbDisBtn.className = 'volume-menu-btn';
+            sbDisBtn.textContent = isSbDisabled ? '🔊 Enable Soundboard' : '🚫 Disable Soundboard';
+            sbDisBtn.addEventListener('click', function () {
+                var serverId = window.currentServerId;
+                var method = isSbDisabled ? 'DELETE' : 'PUT';
+                fetch('/api/soundboard/disable/' + serverId + '/' + uid, {
+                    method: method,
+                    headers: Object.assign({ 'Content-Type': 'application/json' }, authHeaders()),
+                }).then(function () {
+                    if (isSbDisabled) {
+                        var idx = window._sbDisabledUsers.indexOf(uid);
+                        if (idx !== -1) window._sbDisabledUsers.splice(idx, 1);
+                    } else {
+                        window._sbDisabledUsers.push(uid);
+                    }
+                }).catch(function () {});
+                closeVolumeMenu();
+            });
+            menu.appendChild(sbDisBtn);
         }
 
         // Global soundboard mute toggle — server owner only

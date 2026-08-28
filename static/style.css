@@ -10265,7 +10265,5 @@ body.resizing-dm { cursor: ns-resize !important; user-select: none; }
 }
 
 /* Nested group: indented child groups */
-.server-group-nested { margin-left: 12px; border-left: 2px solid var(--border-color, rgba(255,255,255,0.08)); padding-left: 4px; }
-.server-group-nested .server-group-collapsed-grid { width: clamp(28px, 5vw, 38px); height: clamp(28px, 5vw, 38px); }
-.server-group-nested .server-group-toggle { font-size: 9px; }
+
 

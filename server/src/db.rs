@@ -1272,6 +1272,8 @@ impl Database {
         let _ = conn.execute_batch(include_str!("../migrations/077_device_pairing.sql"));
         let _ = conn.execute_batch(include_str!("../migrations/078_soundboard_global_mute.sql"));
         let _ = conn.execute_batch(include_str!("../migrations/079_server_groups.sql"));
+        let _ = conn.execute_batch(include_str!("../migrations/080_soundboard_per_account.sql"));
+        let _ = conn.execute_batch(include_str!("../migrations/081_soundboard_user_disable.sql"));
 
         // Data migration: normalize legacy space-separated CURRENT_TIMESTAMP values
         // ("YYYY-MM-DD HH:MM:SS") to fixed-width RFC3339 ("YYYY-MM-DDTHH:MM:SS.000000Z")
@@ -1932,20 +1934,24 @@ impl Database {
                 |row| row.get::<_, i32>(0),
             )
             .map(|c| c > 0)
-            .unwrap_or(false);
-        if has_ch_name_col && has_ch_nonce_col {
+            .unwrap_or(false);        if has_ch_name_col && has_ch_nonce_col {
             conn.execute(
                 "INSERT INTO channels (id, server_id, encrypted_name, name_nonce, type, position, category_id) VALUES (?1, ?2, ?3, ?4, 'text', 0, ?5)",
                 params![general_id, server_id, channel_encrypted_name, channel_name_nonce, text_cat_id],
-            )
-            .map_err(|e| e.to_string())?;
+            ).map_err(|e| e.to_string())?;
         } else {
             conn.execute(
                 "INSERT INTO channels (id, server_id, type, position, category_id) VALUES (?1, ?2, 'text', 0, ?3)",
                 params![general_id, server_id, text_cat_id],
-            )
-            .map_err(|e| e.to_string())?;
+            ).map_err(|e| e.to_string())?;
         }
+
+        // Create a default voice channel in the Voice Channels category
+        let voice_ch_id = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO channels (id, server_id, type, position, category_id) VALUES (?1, ?2, 'voice', 0, ?3)",
+            params![voice_ch_id, server_id, voice_cat_id],
+        ).map_err(|e| e.to_string())?;
 
         Ok(Server {
             id: server_id,
@@ -7994,6 +8000,45 @@ impl Database {
             |row| row.get(0),
         ).unwrap_or(0);
         Ok(val != 0)
+    }
+
+    // -- Per-user soundboard disable (owner can disable one user's soundboard for everyone) --
+    pub fn disable_soundboard_user(&self, server_id: &str, user_id: &str, disabled_by: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT OR IGNORE INTO soundboard_user_disabled (server_id, user_id, disabled_by) VALUES (?1, ?2, ?3)",
+            rusqlite::params![server_id, user_id, disabled_by],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn enable_soundboard_user(&self, server_id: &str, user_id: &str, disabled_by: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM soundboard_user_disabled WHERE server_id = ?1 AND user_id = ?2 AND disabled_by = ?3",
+            rusqlite::params![server_id, user_id, disabled_by],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn is_soundboard_user_disabled(&self, server_id: &str, user_id: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM soundboard_user_disabled WHERE server_id = ?1 AND user_id = ?2",
+            rusqlite::params![server_id, user_id],
+            |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        Ok(count > 0)
+    }
+
+    pub fn get_disabled_soundboard_users(&self, server_id: &str) -> Result<Vec<String>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT user_id FROM soundboard_user_disabled WHERE server_id = ?1"
+        ).map_err(|e| e.to_string())?;
+        let ids = stmt.query_map(rusqlite::params![server_id], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        Ok(ids.filter_map(|r| r.ok()).collect())
     }
 
     // -- Device Pairing (QR-code second-device login) --

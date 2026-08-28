@@ -5626,3 +5626,26 @@ Server drag-to-reorder indicators changed from left/right borders to top/bottom 
 ### 104. Pair New Device Removed
 
 Removed the entire QR-based device pairing feature (F6) including the pairing modal, pair.html page, and _addPairingButton. The feature was unnecessary since encryption keys are already restored from the server key blob on login.
+
+### 105. Server Groups Rendering Fix
+
+**Root cause**: `loadServerGroupsLocal()` in `chat.js` was clearing `group_id` on all servers when localStorage assignments were empty (fresh reload), wiping out the API data before the sync code could use it.
+
+**Fix**: Changed the `loadServerGroupsLocal()` logic to only overwrite group_ids from localStorage when the assignments object actually has data (`Object.keys(assignments).length > 0`). Removed the `else if` clause that was nullifying `s.group_id` when the server's ID wasn't in localStorage.
+
+**Files changed**: `static/chat.js`
+
+### 106. Test Suite: new-features.spec.ts (13 tests, all passing)
+
+Created comprehensive tests for:
+- Soundboard loading indicator, upload, disable toggle (play+receive blocking), persistence across reload
+- Server groups: create via API, toggle expand/collapse, nested groups, collapsed 2x2 preview with 4+ servers
+- Owner can disable/enable member soundboard via API; non-owner gets 403
+- Default voice channel created with new servers
+- Settings/voice popup soundboard checkbox sync
+
+**Test fixes**: Fixed registration helpers, invite code API paths, voice channel CSS selectors, and collapsed group toggle before assertion.
+
+### 107. Default Voice Channel on Server Creation
+
+Server now creates a default "General" voice channel in the Voice Channels category alongside the existing "General" text channel when a new server is created. Category names are encrypted the same way as channel names via `encrypted_name` + `name_nonce` columns.

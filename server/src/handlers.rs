@@ -2573,7 +2573,7 @@ pub async fn create_server(
     };
 
     let rate_key = format!("create_server:{}", user_id);
-    if !CREATE_SERVER_RATE_LIMITER.check_and_increment(&rate_key, 5, Duration::from_secs(3600)) {
+    if !CREATE_SERVER_RATE_LIMITER.check_and_increment(&rate_key, 30, Duration::from_secs(3600)) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": "Too many servers created. Try again in 1 hour."})),
@@ -9109,6 +9109,52 @@ pub async fn get_soundboard_global_mute(
 ) -> impl IntoResponse {
     match state.db.is_soundboard_global_muted(&server_id) {
         Ok(muted) => (StatusCode::OK, Json(serde_json::json!({"muted": muted}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn disable_soundboard_user(
+    headers: HeaderMap,
+    Path((server_id, target_user_id)): Path<(String, String)>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    if !state.db.is_server_owner(&user_id, &server_id).unwrap_or(false) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Only server owner can disable a user's soundboard"}))).into_response();
+    }
+    match state.db.disable_soundboard_user(&server_id, &target_user_id, &user_id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn enable_soundboard_user(
+    headers: HeaderMap,
+    Path((server_id, target_user_id)): Path<(String, String)>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    if !state.db.is_server_owner(&user_id, &server_id).unwrap_or(false) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Only server owner can enable a user's soundboard"}))).into_response();
+    }
+    match state.db.enable_soundboard_user(&server_id, &target_user_id, &user_id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn get_disabled_soundboard_users(
+    Path(server_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match state.db.get_disabled_soundboard_users(&server_id) {
+        Ok(ids) => (StatusCode::OK, Json(serde_json::json!({"users": ids}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
 }

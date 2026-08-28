@@ -1428,7 +1428,17 @@ async fn handle_ws_message(
                             .map(|(rid, _)| rid.clone())
                     };
                     if let Some(room_id) = target_room {
-                        voice_broadcast(state, &room_id, &parsed).await;
+                        // Check if this user's soundboard is disabled by the server owner
+                        let sender_disabled = if let Some(sid_str) = parsed.get("server_id").and_then(|s| s.as_str()) {
+                            state.db.is_soundboard_user_disabled(sid_str, user_id).unwrap_or(false)
+                        } else {
+                            false
+                        };
+                        if sender_disabled {
+                            // Don't relay — this user's soundboard is disabled
+                        } else {
+                            voice_broadcast(state, &room_id, &parsed).await;
+                        }
                     }
                 }
             }
