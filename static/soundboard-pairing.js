@@ -11,10 +11,49 @@
     var _sbBtn = document.getElementById('voice-popup-soundboard');
     var _sbDmBtn = document.getElementById('dm-call-soundboard');
     var _sbVoiceBarBtn = document.getElementById('voice-bar-soundboard');
-    var _sbPlaying = null; // currently playing Audio element (from overlay play button)
-    var _sbSelfHear = false; // play sounds for ourselves too
+    var _sbPlaying = null; // currently playing Audio or {source, ctx} (from overlay play button)
+    var _sbSelfHear = true; // play sounds for ourselves too (default ON)
     var _sbClipsCache = []; // cached clips for play lookups
     var _sbAllPlaying = []; // all active Audio elements (for stop-on-leave)
+    var _sbAudioCtx = null; // shared AudioContext for soundboard playback (bypasses autoplay)
+    var _sbCurrentClipId = null; // clip ID of the currently playing sound (for overlay button sync)
+
+    // Ensure a shared AudioContext for soundboard playback (bypasses browser
+    // autoplay restrictions because the context is created during a user gesture
+    // when the soundboard overlay is first opened).
+    function _ensureSbAudioCtx() {
+        if (!_sbAudioCtx) {
+            try {
+                var AC = window.AudioContext || window.webkitAudioContext;
+                if (AC) _sbAudioCtx = new AC();
+            } catch (_) {}
+        }
+        if (_sbAudioCtx && _sbAudioCtx.state === 'suspended') {
+            _sbAudioCtx.resume().catch(function () {});
+        }
+        return _sbAudioCtx;
+    }
+
+    // Play raw WAV bytes through the AudioContext (bypasses autoplay).
+    // Returns a source node that can be stopped later.
+    function _playViaAudioCtx(wavBytes, onEnded) {
+        var ctx = _ensureSbAudioCtx();
+        if (!ctx) return null;
+        try {
+            return ctx.decodeAudioData(wavBytes.buffer).then(function (buffer) {
+                var source = ctx.createBufferSource();
+                source.buffer = buffer;
+                source.connect(ctx.destination);
+                source.onended = function () {
+                    if (onEnded) onEnded();
+                };
+                source.start(0);
+                return source;
+            });
+        } catch (_) {
+            return null;
+        }
+    }
 
     // --- Per-account disable soundboard (stored in localStorage, used by Settings→Voice + voice-popup) ---
     function _isSbDisabledGlobal() {
@@ -69,11 +108,14 @@
     }
     // Expose for external checks
     window._sbIsUserMuted = _isUserMuted;
+    window._sbToggleMuteUser = _toggleMuteUser;
+    // Read-only proxy for checking membership (indexOf only)
     window._sbMutedList = { indexOf: function(uid) { return _getMutedList().indexOf(uid); } };
 
     // Wire up all soundboard open buttons
     function openSbOverlay() {
         if (_sbOverlay) _sbOverlay.style.display = 'flex';
+        _ensureSbAudioCtx(); // unlock AudioContext on user gesture
         loadSoundboardClips();
     }
     if (_sbBtn) _sbBtn.onclick = openSbOverlay;
@@ -88,9 +130,11 @@
         });
     }
 
-    // Self-hear toggle
+    // Self-hear toggle — initialize from checkbox state (default ON)
     var _sbSelfHearEl = document.getElementById('soundboard-self-hear');
     if (_sbSelfHearEl) {
+        _sbSelfHear = _sbSelfHearEl.hasAttribute('checked') ? !!_sbSelfHearEl.checked : true;
+        _sbSelfHearEl.checked = _sbSelfHear;
         _sbSelfHearEl.addEventListener('change', function () {
             _sbSelfHear = _sbSelfHearEl.checked;
         });
@@ -278,14 +322,10 @@
             });
             _sbClips.querySelectorAll('.sb-pause-btn').forEach(function (btn) {
                 btn.onclick = function () {
-                    if (_sbPlaying) {
-                        try { _sbPlaying.pause(); } catch (_) {}
-                        try { _sbPlaying.currentTime = 0; } catch (_) {}
-                        _sbPlaying = null;
-                    }
-                    _sbClips.querySelectorAll('.sb-play-btn').forEach(function (pb) { pb.style.display = ''; });
-                    _sbClips.querySelectorAll('.sb-pause-btn').forEach(function (pp) { pp.style.display = 'none'; });
-                    _sbClips.querySelectorAll('.sb-loading').forEach(function (ld) { ld.style.display = 'none'; });
+                    _stopAllSoundboardAudio();
+                    // If in voice, broadcast stop to all room members
+                    _sendSoundboardStop();
+                    _resetSbButtons();
                 };
             });
             _sbClips.querySelectorAll('.sb-delete-btn').forEach(function (btn) {
@@ -299,6 +339,43 @@
         }
     }
 
+    function _resetSbButtons() {
+        if (_sbClips) {
+            _sbClips.querySelectorAll('.sb-play-btn').forEach(function (pb) { pb.style.display = ''; });
+            _sbClips.querySelectorAll('.sb-pause-btn').forEach(function (pp) { pp.style.display = 'none'; });
+            _sbClips.querySelectorAll('.sb-loading').forEach(function (ld) { ld.style.display = 'none'; });
+        }
+    }
+
+    // Reset buttons for a specific clip by ID
+    function _resetSbOverlayForClip(clipId) {
+        if (!clipId || !_sbClips) return;
+        var clipEl = _sbClips.querySelector('.soundboard-clip[data-clip-id="' + clipId + '"]');
+        if (!clipEl) { _resetSbButtons(); return; }
+        var pb = clipEl.querySelector('.sb-play-btn');
+        var pp = clipEl.querySelector('.sb-pause-btn');
+        var ld = clipEl.querySelector('.sb-loading');
+        if (pb) pb.style.display = '';
+        if (pp) pp.style.display = 'none';
+        if (ld) ld.style.display = 'none';
+    }
+
+    // Broadcast soundboard_stop to all room members via WS
+    function _sendSoundboardStop() {
+        var w = window.ws;
+        if (!w || w.readyState !== 1) return;
+        var vs = window.VoiceManager && window.VoiceManager.getVoiceState && window.VoiceManager.getVoiceState();
+        if (!vs || !vs.inVoice) return;
+        w.send(JSON.stringify({
+            type: 'soundboard_stop',
+            user_id: window.currentUserId,
+            server_id: window.currentServerId || '',
+            channel_id: vs.channelId || '',
+            room_type: vs.roomType || 'server',
+            dm_channel_id: vs.dmChannelId || '',
+        }));
+    }
+
     function playSoundboardClip(clipId, pauseBtn, playBtn, loadBtn) {
         var clip = _sbClipsCache.find(function (c) { return c.id === clipId; });
         if (!clip) return;
@@ -307,12 +384,9 @@
             alert('Your soundboard is disabled. Go to Settings → Voice to re-enable it.');
             return;
         }
-        // Stop any currently playing from overlay
-        if (_sbPlaying) {
-            try { _sbPlaying.pause(); } catch (_) {}
-            try { _sbPlaying.currentTime = 0; } catch (_) {}
-            _sbPlaying = null;
-        }
+        // Stop any currently playing
+        _stopAllSoundboardAudio();
+        _resetSbButtons();
 
         // Show loading indicator
         if (playBtn) playBtn.style.display = 'none';
@@ -333,16 +407,21 @@
             var inVoice = window.ws && window.ws.readyState === 1 && vs && vs.inVoice;
 
             if (inVoice) {
-                // In voice: only broadcast via WS. The relay will call _handleSoundboardPlay
-                // for ALL room members including this sender (respecting _sbSelfHear toggle).
-                // This avoids double playback and ensures the hear-self toggle works correctly.
+                // In voice: broadcast via WS so ALL room members hear it.
+                // The server relays to every room member (including this sender).
+                // _handleSoundboardPlay on each client decides whether to play
+                // based on hear-self / mute settings.
+                // Show the STOP button so the user can stop playback.
                 if (loadBtn) loadBtn.style.display = 'none';
-                if (playBtn) playBtn.style.display = '';
+                if (pauseBtn) pauseBtn.style.display = '';
+                if (playBtn) playBtn.style.display = 'none';
+                _sbCurrentClipId = clipId;
                 var rawB64 = uint8ToBase64(audioBytes);
                 window.ws.send(JSON.stringify({
                     type: 'soundboard_play',
                     clip_id: clipId,
                     server_id: window.currentServerId || '',
+                    channel_id: vs.channelId || '',
                     encrypted_audio: rawB64,
                     audio_nonce: '',
                     user_id: window.currentUserId,
@@ -352,29 +431,37 @@
                 }));
             } else {
                 // Not in voice: play locally as a preview (no one else to hear it)
-                var blob = new Blob([audioBytes], { type: 'audio/wav' });
-                var url = URL.createObjectURL(blob);
-                var audio = new Audio(url);
-                _sbPlaying = audio;
-
-                if (loadBtn) loadBtn.style.display = 'none';
-                if (pauseBtn) pauseBtn.style.display = '';
-
-                audio.onended = function () {
-                    URL.revokeObjectURL(url);
-                    _sbPlaying = null;
-                    if (playBtn) playBtn.style.display = '';
-                    if (pauseBtn) pauseBtn.style.display = 'none';
-                };
-                audio.play().then(function() {
-                    if (loadBtn) loadBtn.style.display = 'none';
-                }).catch(function (e) {
-                    console.error('Play error:', e);
-                    if (loadBtn) loadBtn.style.display = 'none';
-                    if (playBtn) playBtn.style.display = '';
-                });
+                _playSbAudioLocal(audioBytes, playBtn, pauseBtn, loadBtn);
             }
         }, 50); // 50ms delay so loading indicator renders
+    }
+
+    // Play soundboard audio locally (preview or self-hear relay)
+    function _playSbAudioLocal(audioBytes, playBtn, pauseBtn, loadBtn) {
+        if (loadBtn) loadBtn.style.display = 'none';
+        if (pauseBtn) pauseBtn.style.display = '';
+
+        var blob = new Blob([audioBytes], { type: 'audio/wav' });
+        var url = URL.createObjectURL(blob);
+        var audio = new Audio(url);
+        _sbPlaying = { type: 'audio', audio: audio, url: url };
+        _sbAllPlaying.push(audio);
+
+        audio.onended = function () {
+            URL.revokeObjectURL(url);
+            var idx = _sbAllPlaying.indexOf(audio);
+            if (idx !== -1) _sbAllPlaying.splice(idx, 1);
+            if (_sbPlaying && _sbPlaying.audio === audio) _sbPlaying = null;
+            if (playBtn) playBtn.style.display = '';
+            if (pauseBtn) pauseBtn.style.display = 'none';
+        };
+        audio.play().then(function() {
+            if (loadBtn) loadBtn.style.display = 'none';
+        }).catch(function (e) {
+            console.error('Play error:', e);
+            if (loadBtn) loadBtn.style.display = 'none';
+            if (playBtn) playBtn.style.display = '';
+        });
     }
 
     async function deleteSoundboardClip(clipId) {
@@ -398,38 +485,127 @@
             // For others: skip if individually muted
             if (_isUserMuted(data.user_id)) return;
         }
+        // Deafened users should not hear any soundboard sounds
+        if (window.VoiceManager && window.VoiceManager.getState) {
+            var _vs = window.VoiceManager.getState();
+            if (_vs && _vs.deafened) return;
+        }
         try {
             var audioBytes = base64ToUint8(data.encrypted_audio);
+            // Play via AudioContext to bypass browser autoplay restrictions
+            var played = false;
+            if (_sbAudioCtx || _ensureSbAudioCtx()) {
+                _playViaAudioCtx(audioBytes, function () {
+                    // on ended: remove from tracking
+                }).then(function (source) {
+                    if (!source) return;
+                    played = true;
+                    var entry = { type: 'ctx', source: source, userId: data.user_id, clipId: data.clip_id };
+                    _sbAllPlaying.push(entry);
+                    if (data.user_id === window.currentUserId) {
+                        _sbPlaying = entry;
+                        _sbCurrentClipId = data.clip_id;
+                    }
+                }).catch(function (e) {
+                    console.error('Soundboard AudioContext play error:', e);
+                    // Fallback to HTML Audio
+                    _playSbAudioFallback(audioBytes, data.user_id, data.clip_id);
+                });
+            }
+            // Also try HTML Audio as immediate fallback (in case AudioContext fails silently)
+            // Only if AudioContext didn't succeed synchronously
+            if (!played && !_sbAudioCtx) {
+                _playSbAudioFallback(audioBytes, data.user_id, data.clip_id);
+            }
+        } catch (e) {
+            console.error('Soundboard remote play failed:', e);
+        }
+    };
+
+    function _playSbAudioFallback(audioBytes, userId, clipId) {
+        try {
             var blob = new Blob([audioBytes], { type: 'audio/wav' });
             var url = URL.createObjectURL(blob);
             var audio = new Audio(url);
-            // Track for cleanup
+            audio._sbUserId = userId;
+            audio._sbClipId = clipId;
             _sbAllPlaying.push(audio);
             audio.onended = function () {
                 URL.revokeObjectURL(url);
                 var idx = _sbAllPlaying.indexOf(audio);
                 if (idx !== -1) _sbAllPlaying.splice(idx, 1);
             };
-            // If this is from the overlay play button (self, via WS relay),
-            // set _sbPlaying so the overlay pause/stop button works
-            if (data.user_id === window.currentUserId) {
+            if (userId === window.currentUserId) {
                 _sbPlaying = audio;
+                _sbCurrentClipId = clipId;
             }
             audio.play().catch(function (e) { console.error('Remote play error:', e); });
         } catch (e) {
-            console.error('Soundboard remote play failed:', e);
+            console.error('Soundboard fallback play failed:', e);
+        }
+    }
+
+    // Listen for soundboard_stop from other users via WS
+    window._handleSoundboardStop = function (data) {
+        // Only stop sounds from a specific user
+        if (data.user_id) {
+            var stoppedClipId = null;
+            _sbAllPlaying = _sbAllPlaying.filter(function (entry) {
+                // Determine the user who owns this entry
+                var entryUserId = (entry && entry.userId) || (entry && entry._sbUserId) || null;
+                // Only stop entries from the specified user
+                if (entryUserId !== data.user_id) return true; // keep other users'
+                try {
+                    if (entry.type === 'ctx' && entry.source) {
+                        entry.source.stop();
+                    } else if (entry.pause) {
+                        entry.pause();
+                        entry.currentTime = 0;
+                    }
+                } catch (_) {}
+                return false; // remove this entry
+            });
+            if (_sbPlaying) {
+                var playingUserId = (_sbPlaying.userId) || (_sbPlaying._sbUserId) || null;
+                if (playingUserId === data.user_id) {
+                    stoppedClipId = _sbCurrentClipId;
+                    try {
+                        if (_sbPlaying.type === 'ctx' && _sbPlaying.source) {
+                            _sbPlaying.source.stop();
+                        } else if (_sbPlaying.pause) {
+                            _sbPlaying.pause();
+                            _sbPlaying.currentTime = 0;
+                        }
+                    } catch (_) {}
+                    _sbPlaying = null;
+                    _sbCurrentClipId = null;
+                }
+            }
+            // Reset buttons for the stopped clip (or all if no clip tracked)
+            if (stoppedClipId) {
+                _resetSbOverlayForClip(stoppedClipId);
+            } else {
+                _resetSbButtons();
+            }
         }
     };
 
     // Stop all soundboard audio (called on voice leave, page unload, etc.)
-    window._stopAllSoundboardAudio = function () {
-        _sbAllPlaying.forEach(function (a) {
-            try { a.pause(); } catch (_) {}
-            try { a.currentTime = 0; } catch (_) {}
+    function _stopAllSoundboardAudio() {
+        _sbAllPlaying.forEach(function (entry) {
+            try {
+                if (entry.type === 'ctx' && entry.source) {
+                    entry.source.stop();
+                } else if (entry.pause) {
+                    entry.pause();
+                    entry.currentTime = 0;
+                }
+            } catch (_) {}
         });
         _sbAllPlaying = [];
         _sbPlaying = null;
-    };
+    }
+    window._stopAllSoundboardAudio = _stopAllSoundboardAudio;
 
     function base64ToUint8(b64) {
         var binary = atob(b64);
@@ -452,6 +628,7 @@
     // Expose for WS handler and DM mini bar
     window._loadSoundboardClips = loadSoundboardClips;
     window._playSoundboardClip = playSoundboardClip;
+    window.syncDisableCheckboxes = syncDisableCheckboxes;
     Object.defineProperty(window, "_sbClipsCache", { get: function() { return _sbClipsCache; }, configurable: true });
     window._sbAllPlaying = _sbAllPlaying;
 

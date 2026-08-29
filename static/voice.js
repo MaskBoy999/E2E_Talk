@@ -1217,6 +1217,11 @@
                 var src = S.audioCtx.createMediaStreamSource(stream);
                 src.connect(S.micGain);
                 S.micGain.gain.value = S.settings.micVolume / 100;
+                // Hear-self loopback: route mic to speakers so you can hear yourself
+                if (S.settings.hearSelf) {
+                    try { S.micGain.connect(S.masterGain); } catch (_) {}
+                    S._hearSelfConnected = true;
+                }
             }
             startSpeakingDetection();
             // Build the RNNoise pipeline first so the PROCESSED track is what
@@ -1288,6 +1293,11 @@
 
     function stopMic() {
         teardownMicPipeline();
+        // Disconnect hear-self loopback before stopping mic
+        if (S._hearSelfConnected && S.audioCtx && S.micGain && S.masterGain) {
+            try { S.micGain.disconnect(S.masterGain); } catch (_) {}
+            S._hearSelfConnected = false;
+        }
         if (S.localStreams.mic) {
             S.localStreams.mic.getTracks().forEach(function (t) { try { t.stop(); } catch (_) {} });
             S.localStreams.mic = null;
@@ -3132,6 +3142,10 @@
         removeRemoteAudioEls(uid);
         delete S.remoteStreams[uid];
         removeRemoteTile(uid);
+        // Stop any soundboard sounds from the leaving user
+        if (window._handleSoundboardStop) {
+            window._handleSoundboardStop({ user_id: uid });
+        }
         renderBar();
         renderPopup();
         renderDmPanel();
@@ -3169,8 +3183,11 @@
     // person": the presence snapshot includes us, so joining a voice channel
     // lights up our own server icon too.
     function updateServerVoiceIndicators() {
+        // Individual server-icon dots — skip mini-icons inside collapsed group grids
+        // (those get their dot from the group-level indicator instead)
         var icons = document.querySelectorAll('.server-icon[data-id]');
         icons.forEach(function (icon) {
+            if (icon.closest('.server-group-collapsed-grid')) return;
             var sid = icon.getAttribute('data-id');
             if (!sid) return;
             var presence = S.serverPresence[sid];
@@ -3191,6 +3208,40 @@
                 icon.appendChild(dot);
             } else if (!active && dot) {
                 dot.remove();
+            }
+        });
+        // Group voice indicators:
+        //  Collapsed: green dot on the group header (covers the whole group)
+        //  Expanded:   dots already appear on individual server icons above
+        var groups = document.querySelectorAll('.server-group');
+        groups.forEach(function (grp) {
+            var gId = grp.dataset.groupId;
+            if (!gId) return;
+            var isCollapsed = grp.classList.contains('collapsed');
+            var groupActive = false;
+            var svIcons = grp.querySelectorAll('.server-icon[data-id]');
+            svIcons.forEach(function (icon) {
+                var sid = icon.getAttribute('data-id');
+                if (!sid || groupActive) return;
+                var presence = S.serverPresence[sid];
+                if (presence && presence.channels) {
+                    for (var i = 0; i < presence.channels.length; i++) {
+                        if ((presence.channels[i].members || []).length > 0) {
+                            groupActive = true;
+                            break;
+                        }
+                    }
+                }
+            });
+            var gDot = grp.querySelector('.group-voice-dot');
+            // Only show group-level dot when collapsed (expanded gets per-server dots)
+            if (isCollapsed && groupActive && !gDot) {
+                gDot = document.createElement('span');
+                gDot.className = 'group-voice-dot';
+                gDot.title = 'Someone is in a voice channel';
+                grp.appendChild(gDot);
+            } else if ((!isCollapsed || !groupActive) && gDot) {
+                gDot.remove();
             }
         });
     }
@@ -4908,8 +4959,8 @@
                 var source = ctx.createMediaStreamSource(stream);
                 // --- Build standalone noise suppression chain ---
                 function buildNsChain(rawSource) {
-                    if (mode === 'off') return Promise.resolve(rawSource);
-                    if (mode === 'browser') {
+                    if (nsMode === 'off') return Promise.resolve(rawSource);
+                    if (nsMode === 'browser') {
                         return navigator.mediaDevices.getUserMedia({ audio: { noiseSuppression: true, echoCancellation: false, autoGainControl: false } }).then(function (nsStream) {
                             var nsCtx2 = new (window.AudioContext || window.webkitAudioContext)();
                             var nsSrc2 = nsCtx2.createMediaStreamSource(nsStream);
@@ -4921,7 +4972,7 @@
                         }).catch(function () { return rawSource; });
                     }
                     // RNNoise / RNNoise+Gate: build a standalone worklet chain
-                    if (mode === 'rnnoise' || mode === 'rnnoise-gate') {
+                    if (nsMode === 'rnnoise' || nsMode === 'rnnoise-gate') {
                         if (!window.AudioWorkletNode || !window.AudioContext) return Promise.resolve(rawSource);
                         return Promise.resolve().then(function () {
                             var nsCtx = new AudioContext({ sampleRate: 48000 });
@@ -4940,7 +4991,7 @@
                                     });
                                     var nsDest = nsCtx.createMediaStreamDestination();
                                     nsSrc.connect(worklet);
-                                    if (mode === 'rnnoise-gate') {
+                                    if (nsMode === 'rnnoise-gate') {
                                         var gateAnalyser = nsCtx.createAnalyser(); gateAnalyser.fftSize = 256;
                                         var gateGain = nsCtx.createGain(); gateGain.gain.value = 1.0;
                                         var compressor = nsCtx.createDynamicsCompressor();
@@ -6460,17 +6511,15 @@
             sbBtn.textContent = isSbMuted ? '🔊 Unmute Soundboard' : '🔇 Mute Soundboard';
             sbBtn.addEventListener('click', function () {
                 var serverId = window.currentServerId;
+                // Update local mute list IMMEDIATELY (not in .then) so it takes effect right away
+                if (window._sbToggleMuteUser) {
+                    window._sbToggleMuteUser(uid);
+                }
+                // Also persist to server (fire-and-forget)
                 var method = isSbMuted ? 'DELETE' : 'PUT';
                 fetch('/api/soundboard/mute/' + serverId + '/' + uid, {
                     method: method,
                     headers: Object.assign({ 'Content-Type': 'application/json' }, authHeaders()),
-                }).then(function () {
-                    if (isSbMuted) {
-                        var idx = window._sbMutedList.indexOf(uid);
-                        if (idx !== -1) window._sbMutedList.splice(idx, 1);
-                    } else {
-                        window._sbMutedList.push(uid);
-                    }
                 }).catch(function () {});
                 closeVolumeMenu();
             });
@@ -6478,6 +6527,8 @@
         }
 
         // Owner controls — Disable/Enable this member's soundboard (server owner only)
+        // Merged: the per-user disable is the owner's tool; the global kill-switch
+        // lives in Settings → Voice, so there's no need for a separate context-menu button.
         if (!isScreen && !isVideoOnly && !isSelf && S.roomType === 'server' && S.isOwner) {
             var sbDisabledList = (window._sbDisabledUsers || []);
             var isSbDisabled = sbDisabledList.indexOf(uid) !== -1;
@@ -6486,38 +6537,22 @@
             sbDisBtn.textContent = isSbDisabled ? '🔊 Enable Soundboard' : '🚫 Disable Soundboard';
             sbDisBtn.addEventListener('click', function () {
                 var serverId = window.currentServerId;
+                // Update local disabled list IMMEDIATELY
+                if (isSbDisabled) {
+                    var idx = window._sbDisabledUsers.indexOf(uid);
+                    if (idx !== -1) window._sbDisabledUsers.splice(idx, 1);
+                } else {
+                    window._sbDisabledUsers.push(uid);
+                }
+                // Also persist to server (fire-and-forget)
                 var method = isSbDisabled ? 'DELETE' : 'PUT';
                 fetch('/api/soundboard/disable/' + serverId + '/' + uid, {
                     method: method,
                     headers: Object.assign({ 'Content-Type': 'application/json' }, authHeaders()),
-                }).then(function () {
-                    if (isSbDisabled) {
-                        var idx = window._sbDisabledUsers.indexOf(uid);
-                        if (idx !== -1) window._sbDisabledUsers.splice(idx, 1);
-                    } else {
-                        window._sbDisabledUsers.push(uid);
-                    }
                 }).catch(function () {});
                 closeVolumeMenu();
             });
             menu.appendChild(sbDisBtn);
-        }
-
-        // Global soundboard mute toggle — server owner only
-        if (!isScreen && !isVideoOnly && S.roomType === 'server' && S.isOwner) {
-            var gMuteBtn = document.createElement('button');
-            gMuteBtn.className = 'volume-menu-btn';
-            gMuteBtn.textContent = '🔇 Disable Soundboard (All)';
-            gMuteBtn.addEventListener('click', function () {
-                var serverId = window.currentServerId;
-                fetch('/api/soundboard/global-mute/' + serverId, {
-                    method: 'PUT',
-                    headers: Object.assign({ 'Content-Type': 'application/json' }, authHeaders()),
-                    body: JSON.stringify({ muted: true }),
-                }).catch(function () {});
-                closeVolumeMenu();
-            });
-            menu.appendChild(gMuteBtn);
         }
 
         menu.style.display = 'block';
@@ -7740,4 +7775,8 @@
         return S.serverPresence[serverId] || null;
     };
     VoiceManager.refreshChannelChips = updateChannelChips;
+    // Test-only: simulate a voice_presence WS message without a real server
+    VoiceManager.setServerPresence = function (serverId, presenceData) {
+        handleVoicePresence(Object.assign({ server_id: serverId }, presenceData));
+    };
 })();

@@ -55,7 +55,7 @@ let currentChannelId = null;
 var currentServerId = null;
 let user = null;
 let servers = [];
-let serverGroups = []; // {id, name, position, collapsed, parent_group_id}
+let serverGroups = []; // {id, name, position, collapsed, parent_group_id, color}
 // --- Server groups: stored in localStorage + synced via blob ---
 function _getServerGroupsKey() {
     return 'e2e_server_groups';
@@ -63,7 +63,7 @@ function _getServerGroupsKey() {
 function saveServerGroupsLocal() {
     try {
         var data = serverGroups.map(function(g) {
-            return { id: g.id, name: g.name, position: g.position, collapsed: g.collapsed, parent_group_id: g.parent_group_id || null };
+            return { id: g.id, name: g.name, position: g.position, collapsed: g.collapsed, parent_group_id: g.parent_group_id || null, color: g.color || null };
         });
         localStorage.setItem(_getServerGroupsKey(), JSON.stringify(data));
         // Also save per-server group_id assignments
@@ -116,9 +116,10 @@ let onlineUsers = new Set(); // user IDs currently connected via WebSocket
 // Chronological mention inbox: [{ id, serverId, channelId, dmChannelId, messageId, senderUsername, channelName, serverName, type: 'mention'|'reply'|'dm', time }]
 let mentionItems = [];
 
-// Muted servers, channels, and DMs (IDs stored in localStorage as JSON arrays)
+// Muted servers, channels, DMs, and folders (IDs stored in localStorage as JSON arrays)
 var mutedServers = [];
 var mutedChannels = [];
+var mutedFolders = [];
 var blockedUsers = [];
 async function loadBlockedUsers() {
     try {
@@ -149,10 +150,13 @@ function loadMutedState() {
         mutedChannels = c ? JSON.parse(c) : [];
         var d = localStorage.getItem('muted_dms');
         mutedDms = d ? JSON.parse(d) : [];
+        var f = localStorage.getItem('muted_folders');
+        mutedFolders = f ? JSON.parse(f) : [];
     } catch (e) {
         mutedServers = [];
         mutedChannels = [];
         mutedDms = [];
+        mutedFolders = [];
     }
 }
 
@@ -161,8 +165,21 @@ function saveMutedState() {
         localStorage.setItem('muted_servers', JSON.stringify(mutedServers));
         localStorage.setItem('muted_channels', JSON.stringify(mutedChannels));
         localStorage.setItem('muted_dms', JSON.stringify(mutedDms));
+        localStorage.setItem('muted_folders', JSON.stringify(mutedFolders));
     } catch (e) {}
     renderMutedList();
+}
+
+function isFolderMuted(folderId) {
+    return folderId && mutedFolders.indexOf(folderId) !== -1;
+}
+
+function toggleMuteFolder(folderId) {
+    var idx = mutedFolders.indexOf(folderId);
+    if (idx !== -1) mutedFolders.splice(idx, 1);
+    else mutedFolders.push(folderId);
+    saveMutedState();
+    updateServerMutedUI();
 }
 
 function renderMutedList() {
@@ -188,6 +205,12 @@ function renderMutedList() {
         var name = dmConv ? ((_cCache && _cCache.display_name) || dmConv.other_display_name || dmConv.other_username) : did.slice(0, 8);
         html += '<div class="muted-list-item"><span>🔇 DM: ' + escapeHtml(name) + '</span><button class="unmute-btn" data-type="dm" data-id="' + escapeAttr(did) + '">Unmute</button></div>';
     });
+    // Muted folders
+    mutedFolders.forEach(function (fid) {
+        var grp = serverGroups.find(function (g) { return g.id === fid; });
+        var fname = grp ? grp.name : fid.slice(0, 8);
+        html += '<div class="muted-list-item"><span>🔇 Folder: ' + escapeHtml(fname) + '</span><button class="unmute-btn" data-type="folder" data-id="' + fid + '">Unmute</button></div>';
+    });
     if (!html) {
         container.innerHTML = '<div class="muted-empty">No muted servers or channels</div>';
     } else {
@@ -200,6 +223,7 @@ function renderMutedList() {
                 if (type === 'server') toggleMuteServer(id);
                 else if (type === 'channel') toggleMuteChannel(id, null);
                 else if (type === 'dm') toggleMuteDm(id);
+                else if (type === 'folder') toggleMuteFolder(id);
             });
         });
     }
@@ -208,6 +232,11 @@ function renderMutedList() {
 function isMuted(serverId, channelId) {
     if (serverId && mutedServers.indexOf(serverId) !== -1) return true;
     if (channelId && mutedChannels.indexOf(channelId) !== -1) return true;
+    // Check folder muting: if the server belongs to a muted folder
+    if (serverId) {
+        var sv = servers.find(function(s) { return s.id === serverId; });
+        if (sv && sv.group_id && mutedFolders.indexOf(sv.group_id) !== -1) return true;
+    }
     return false;
 }
 
@@ -3105,6 +3134,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     user = JSON.parse(userStr);
+    window.currentUserId = user ? user.id : null;
     document.getElementById("current-user").textContent = user.username;
     updateSidebarFooter();
 
@@ -12541,6 +12571,9 @@ function connectWebSocket(t) {
             case 'soundboard_play':
                 if (window._handleSoundboardPlay) window._handleSoundboardPlay(data);
                 break;
+            case 'soundboard_stop':
+                if (window._handleSoundboardStop) window._handleSoundboardStop(data);
+                break;
             case 'encrypted_notification':
             {
                 // ECDH-encrypted notification from offline replay
@@ -13264,19 +13297,25 @@ function renderServerList() {
             wrapper.className = 'server-group' + (isCollapsed ? ' collapsed' : '');
             wrapper.dataset.groupId = g.id;
 
-            // Group header (single icon when collapsed, toggle when expanded)
+            // Group header
             var header = document.createElement('div');
             header.className = 'server-group-header';
+            var cornerClasses = ['corner-tl', 'corner-tr', 'corner-bl', 'corner-br'];
             if (isCollapsed) {
-                // Show up to 4 server icons in a 2x2 grid
+                // Collapsed: servers sit in corners based on order
                 var grid = document.createElement('div');
                 grid.className = 'server-group-collapsed-grid';
+                if (g.color) {
+                    grid.classList.add('folder-color');
+                    grid.style.setProperty('--folder-color', g.color);
+                }
                 grid.title = g.name + ' (' + groupServers.length + ' servers)';
                 grid.dataset.groupId = g.id;
                 var showCount = Math.min(groupServers.length, 4);
                 for (var gi = 0; gi < showCount; gi++) {
                     var miniIcon = makeServerIcon(groupServers[gi], { noSelect: true });
                     miniIcon.classList.add('server-group-mini');
+                    miniIcon.classList.add(cornerClasses[gi]);
                     grid.appendChild(miniIcon);
                 }
                 if (groupServers.length > 4) {
@@ -13285,18 +13324,15 @@ function renderServerList() {
                     moreBadge.textContent = '+' + (groupServers.length - 4);
                     grid.appendChild(moreBadge);
                 }
-                // Clicking collapsed group opens the group
                 grid.addEventListener('click', function(e) {
                     e.stopPropagation();
                     toggleGroup(g.id);
                 });
                 header.appendChild(grid);
-                // Add group indicator badge
                 var badge = document.createElement('span');
                 badge.className = 'group-badge';
                 badge.textContent = groupServers.length;
                 header.appendChild(badge);
-                // Also make the whole header clickable to toggle
                 header.addEventListener('click', function(e) {
                     if (e.target === header) toggleGroup(g.id);
                 });
@@ -13304,6 +13340,10 @@ function renderServerList() {
                 // Expanded: show group name and servers
                 var toggle = document.createElement('div');
                 toggle.className = 'server-group-toggle';
+                if (g.color) {
+                    toggle.classList.add('folder-color');
+                    toggle.style.setProperty('--folder-color', g.color);
+                }
                 toggle.textContent = '\u25BC ' + g.name;
                 toggle.title = 'Click to collapse ' + g.name;
                 toggle.addEventListener('click', function() {
@@ -13313,7 +13353,6 @@ function renderServerList() {
             }
             header.addEventListener('dblclick', function(e) {
                 e.preventDefault();
-                // Double-click to rename group
                 var newName = prompt('Rename group:', g.name);
                 if (newName && newName !== g.name) {
                     authFetch('/api/server-groups/' + g.id, {
@@ -13465,30 +13504,42 @@ function renderServerList() {
         // The whole wrapper is a drop target (group reorder + server adds)
         wrapper.addEventListener('dragover', function(e) {
             var isGroupDrag = e.dataTransfer.types.indexOf('text/group-id') !== -1;
-            var isSvDrag = e.dataTransfer.types.indexOf('text/server-id') !== -1;
+            var isSvDrag = e.dataTransfer.types.indexOf('text/server-icon') !== -1 || e.dataTransfer.types.indexOf('text/server-id') !== -1;
             if (!isGroupDrag && !isSvDrag) return;
-            // Only handle if drag is NOT over a child server-icon (those have their own handlers)
             var target = e.target;
-            if (isSvDrag && target.closest && target.closest('.server-icon')) return;
+            if (isSvDrag && target.closest && target.closest('.server-icon') && !target.closest('.server-group-header')) return;
             e.preventDefault();
             e.dataTransfer.dropEffect = 'move';
             clearDragIndicators();
             var rect = wrapper.getBoundingClientRect();
             var midY = rect.top + rect.height / 2;
-            if (e.clientY < midY) {
-                wrapper.classList.add('drag-over-top');
+            var range = rect.height * 0.25;
+            if (isGroupDrag) {
+                // Center zone (25%) = merge; top/bottom = reorder
+                if (e.clientY >= midY - range && e.clientY <= midY + range) {
+                    wrapper.classList.add('drag-over-group');
+                } else if (e.clientY < midY) {
+                    wrapper.classList.add('drag-over-top');
+                } else {
+                    wrapper.classList.add('drag-over-bottom');
+                }
             } else {
-                wrapper.classList.add('drag-over-bottom');
+                // Server drag: top/bottom = reorder, center = add to group
+                if (e.clientY >= midY - range && e.clientY <= midY + range) {
+                    wrapper.classList.add('drag-over-group');
+                } else if (e.clientY < midY) {
+                    wrapper.classList.add('drag-over-top');
+                } else {
+                    wrapper.classList.add('drag-over-bottom');
+                }
             }
         });
         wrapper.addEventListener('dragleave', function(e) {
-            // Only clear if actually leaving the wrapper (not entering a child)
             if (!wrapper.contains(e.relatedTarget)) {
-                wrapper.classList.remove('drag-over-top', 'drag-over-bottom');
+                wrapper.classList.remove('drag-over-top', 'drag-over-bottom', 'drag-over-group');
             }
         });
         wrapper.addEventListener('drop', function(e) {
-            // Don't handle if drop is on a child server-icon (they handle themselves)
             if (e.target.closest && e.target.closest('.server-icon')) return;
             e.preventDefault();
             e.stopPropagation();
@@ -13497,29 +13548,67 @@ function renderServerList() {
             var draggedServerId = e.dataTransfer.getData('text/server-id');
             var rect = wrapper.getBoundingClientRect();
             var midY = rect.top + rect.height / 2;
+            var range = rect.height * 0.25;
+            var isCenter = e.clientY >= midY - range && e.clientY <= midY + range;
             if (draggedGroupId && draggedGroupId !== gId) {
-                // Reorder groups: place dragged group above or below this group
-                var allGids = serverGroups.map(function(g) { return g.id; });
-                var fromIdx = allGids.indexOf(draggedGroupId);
-                if (fromIdx !== -1) allGids.splice(fromIdx, 1);
-                var toIdx = allGids.indexOf(gId);
-                if (toIdx === -1) toIdx = allGids.length;
-                if (e.clientY > midY) toIdx++;
-                allGids.splice(toIdx, 0, draggedGroupId);
-                allGids.forEach(function(id, i) {
-                    var grp = serverGroups.find(function(g) { return g.id === id; });
-                    if (grp) grp.position = i;
-                });
-                renderServerList();
-                saveServerGroupsLocal();
-                authFetch('/api/server-groups/reorder', {
-                    method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ ordered_ids: allGids })
-                }).catch(function() {});
+                if (isCenter) {
+                    // Merge: dragged group into this group (this = target)
+                    mergeGroups(draggedGroupId, gId);
+                } else {
+                    // Reorder groups
+                    var allGids = serverGroups.map(function(g) { return g.id; });
+                    var fromIdx = allGids.indexOf(draggedGroupId);
+                    if (fromIdx !== -1) allGids.splice(fromIdx, 1);
+                    var toIdx = allGids.indexOf(gId);
+                    if (toIdx === -1) toIdx = allGids.length;
+                    if (e.clientY > midY) toIdx++;
+                    allGids.splice(toIdx, 0, draggedGroupId);
+                    allGids.forEach(function(id, i) {
+                        var grp = serverGroups.find(function(g) { return g.id === id; });
+                        if (grp) grp.position = i;
+                    });
+                    renderServerList();
+                    saveServerGroupsLocal();
+                    authFetch('/api/server-groups/reorder', {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ ordered_ids: allGids })
+                    }).catch(function() {});
+                }
             } else if (draggedServerId) {
-                // Dragging a server onto a group (not onto a specific server inside): add to this group
-                moveServerToGroup(draggedServerId, gId);
+                if (isCenter) {
+                    // Center zone: add server to this group
+                    moveServerToGroup(draggedServerId, gId);
+                } else {
+                    // Top/bottom zone: ungroup dragged server and place before/after this group
+                    // First, find the position of this group in the global order
+                    var allGids = serverGroups.map(function(g) { return g.id; });
+                    var grpIdx = allGids.indexOf(gId);
+                    var ids = getAllServerIds();
+                    // Remove dragged from current position
+                    var fromIdx2 = ids.indexOf(draggedServerId);
+                    if (fromIdx2 !== -1) ids.splice(fromIdx2, 1);
+                    // Find position: before first server of this group (top) or after last (bottom)
+                    var groupSv = serversByGroup[gId] || [];
+                    if (groupSv.length > 0) {
+                        if (e.clientY < midY) {
+                            // Top: place before first server in this group
+                            var anchorIdx = ids.indexOf(groupSv[0].id);
+                            if (anchorIdx === -1) anchorIdx = ids.length;
+                            ids.splice(anchorIdx, 0, draggedServerId);
+                        } else {
+                            // Bottom: place after last server in this group
+                            var anchorIdx2 = ids.indexOf(groupSv[groupSv.length - 1].id);
+                            if (anchorIdx2 === -1) anchorIdx2 = ids.length - 1;
+                            ids.splice(anchorIdx2 + 1, 0, draggedServerId);
+                        }
+                    } else {
+                        ids.push(draggedServerId);
+                    }
+                    // Ungroup the dragged server
+                    moveServerToGroup(draggedServerId, null);
+                    reorderServers(ids);
+                }
             }
         });
     });
@@ -13688,13 +13777,23 @@ function renderServerList() {
         }).catch(function() {});
     }
     function moveServerToGroup(serverId, groupId) {
+        // Find the old group so we can auto-delete it if empty after move
+        var s = servers.find(function(s) { return s.id === serverId; });
+        var oldGroupId = s ? s.group_id : null;
         authFetch('/api/servers/' + serverId + '/group', {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ group_id: groupId })
         }).then(function() {
-            var s = servers.find(function(s) { return s.id === serverId; });
             if (s) s.group_id = groupId;
+            // Auto-delete the old group if it's now empty
+            if (oldGroupId && oldGroupId !== groupId) {
+                var remaining = servers.filter(function(sv) { return sv.group_id === oldGroupId; });
+                if (remaining.length === 0) {
+                    serverGroups = serverGroups.filter(function(g) { return g.id !== oldGroupId; });
+                    authFetch('/api/server-groups/' + oldGroupId, { method: 'DELETE' }).catch(function() {});
+                }
+            }
             renderServerList();
             saveServerGroupsLocal();
         }).catch(function() {});
@@ -13707,7 +13806,7 @@ function renderServerList() {
         }).then(function(r) { return r.json(); }).then(function(data) {
             if (!data.ok || !data.id) return;
             var gid = data.id;
-            serverGroups.push({ id: gid, name: 'Group', position: serverGroups.length, collapsed: false });
+            serverGroups.push({ id: gid, name: 'Group', position: serverGroups.length, collapsed: false, color: null });
             saveServerGroupsLocal();
             return Promise.all([
                 moveServerToGroup(serverId1, gid),
@@ -13716,19 +13815,72 @@ function renderServerList() {
         }).catch(function() {});
     }
     function showGroupContextMenu(e, group) {
-        // Simple context menu for groups
         var existing = document.getElementById('group-context-menu');
         if (existing) existing.remove();
         var menu = document.createElement('div');
         menu.id = 'group-context-menu';
         menu.className = 'context-menu';
         menu.style.cssText = 'position:fixed;left:' + e.clientX + 'px;top:' + e.clientY + 'px;z-index:99999';
-        menu.innerHTML = '<div class="ctx-item" data-action="rename">Rename Group</div>' +
-            '<div class="ctx-item" data-action="ungroup">Ungroup All</div>' +
-            '<div class="ctx-item ctx-danger" data-action="delete">Delete Group</div>';
+        // Color palette — Discord-like preset colors
+        var folderColors = [
+            '#5865f2', '#57f287', '#fee75c', '#eb459e',
+            '#ed4245', '#f47b67', '#e67e22', '#1abc9c',
+            '#3498db', '#9b59b6', '#e91e63', '#00bcd4'
+        ];
+        var colorHtml = '<div class="ctx-color-row">';
+        folderColors.forEach(function(c) {
+            var sel = group.color === c ? ' selected' : '';
+            colorHtml += '<div class="ctx-color-swatch' + sel + '" data-color="' + c + '" style="background:' + c + '"></div>';
+        });
+        colorHtml += '<span class="ctx-color-clear" data-color="__clear__">\u2715</span>';
+        colorHtml += '</div>';
+        var muteLabel = isFolderMuted(group.id) ? '🔊 Unmute Folder' : '🔇 Mute Folder';
+        menu.innerHTML =
+            '<div class="ctx-item" data-action="rename">\u270F Rename</div>' +
+            '<div class="ctx-item" data-action="mute-folder">' + muteLabel + '</div>' +
+            '<div class="ctx-item" data-action="mark-read">\u2714 Mark as Read</div>' +
+            colorHtml +
+            '<div class="ctx-item" data-action="ungroup">\u2B06 Ungroup All</div>' +
+            '<div class="ctx-item ctx-danger" data-action="delete">\u2716 Delete</div>';
         document.body.appendChild(menu);
+
+        // Color swatch click handler
+        menu.querySelectorAll('.ctx-color-swatch').forEach(function(sw) {
+            sw.addEventListener('click', function(ev) {
+                ev.stopPropagation();
+                var color = sw.dataset.color;
+                group.color = color || null;
+                authFetch('/api/server-groups/' + group.id, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ color: color })
+                }).then(function() {
+                    renderServerList();
+                    saveServerGroupsLocal();
+                });
+                menu.remove();
+            });
+        });
+        var clearBtn = menu.querySelector('.ctx-color-clear');
+        if (clearBtn) {
+            clearBtn.addEventListener('click', function(ev) {
+                ev.stopPropagation();
+                group.color = null;
+                authFetch('/api/server-groups/' + group.id, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ color: '' })
+                }).then(function() {
+                    renderServerList();
+                    saveServerGroupsLocal();
+                });
+                menu.remove();
+            });
+        }
+
         menu.addEventListener('click', function(ev) {
             var action = ev.target.dataset.action;
+            if (!action) return;
             if (action === 'rename') {
                 var newName = prompt('Rename group:', group.name);
                 if (newName && newName !== group.name) {
@@ -13738,11 +13890,28 @@ function renderServerList() {
                         body: JSON.stringify({ name: newName })
                     }).then(function() { group.name = newName; renderServerList(); saveServerGroupsLocal(); });
                 }
+            } else if (action === 'mute-folder') {
+                toggleMuteFolder(group.id);
+                menu.remove();
+            } else if (action === 'mark-read') {
+                // Clear notification badges on all servers in this group
+                var gServers = serversByGroup[group.id] || [];
+                gServers.forEach(function(s) {
+                    s.unread_count = 0;
+                    s.mention_count = 0;
+                });
+                renderServerList();
             } else if (action === 'ungroup') {
                 (serversByGroup[group.id] || []).forEach(function(s) {
                     moveServerToGroup(s.id, null);
                 });
-                saveServerGroupsLocal();
+                // Auto-delete empty group
+                authFetch('/api/server-groups/' + group.id, { method: 'DELETE' })
+                    .then(function() {
+                        serverGroups = serverGroups.filter(function(g) { return g.id !== group.id; });
+                        renderServerList();
+                        saveServerGroupsLocal();
+                    });
             } else if (action === 'delete') {
                 (serversByGroup[group.id] || []).forEach(function(s) {
                     s.group_id = null;
@@ -13762,6 +13931,22 @@ function renderServerList() {
                 document.removeEventListener('click', closeMenu);
             }, { once: true });
         }, 10);
+    }
+    function mergeGroups(sourceGroupId, targetGroupId) {
+        // Merge source into target: all servers move to target, source is deleted
+        var targetGroup = serverGroups.find(function(g) { return g.id === targetGroupId; });
+        if (!targetGroup) return;
+        authFetch('/api/server-groups/' + sourceGroupId + '/merge/' + targetGroupId, {
+            method: 'PUT'
+        }).then(function() {
+            // Update local state: move servers to target group
+            (serversByGroup[sourceGroupId] || []).forEach(function(s) {
+                s.group_id = targetGroupId;
+            });
+            serverGroups = serverGroups.filter(function(g) { return g.id !== sourceGroupId; });
+            renderServerList();
+            saveServerGroupsLocal();
+        }).catch(function() {});
     }
 
     updateServerBadges();
@@ -13967,6 +14152,10 @@ async function loadChannels(serverId) {
                         if (oldName) chDisplayName = oldName;
                     }
                 } catch (_) {}
+            }
+            // Fallback for existing voice/text channels without encrypted names
+            if (!chDisplayName) {
+                chDisplayName = isVoice ? 'General Voice' : '';
             }
             div.dataset.name = chDisplayName;
             if (isVoice) {
@@ -18841,6 +19030,9 @@ async function createServer() {
         // Encrypt the initial channel name "general" with the same channel key
         const encChName = E2ECrypto.aeadEncrypt('general', channelKey);
 
+        // Encrypt the default voice channel name "General Voice" with the same channel key
+        const encVoiceChName = E2ECrypto.aeadEncrypt('General Voice', channelKey);
+
         // Generate invite code client-side, send raw code (server salts & hashes)
         const inviteCode = generateCode(16);
 
@@ -18853,6 +19045,8 @@ async function createServer() {
                 name_nonce: encName.nonce,
                 channel_encrypted_name: encChName.ciphertext,
                 channel_name_nonce: encChName.nonce,
+                voice_channel_encrypted_name: encVoiceChName.ciphertext,
+                voice_channel_name_nonce: encVoiceChName.nonce,
                 invite_code: inviteCode,
             }),
         });

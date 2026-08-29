@@ -2491,7 +2491,8 @@ select.modal-input:focus {
    icon when at least one member is in a voice channel in that server. Kept
    away from the mention/unread badge (top-right) so the two never overlap.
    Updated live from the server-wide voice_presence broadcasts. */
-.server-voice-dot {
+.server-voice-dot,
+.group-voice-dot {
     position: absolute;
     bottom: -4px;
     right: -4px;
@@ -10192,7 +10193,7 @@ body.resizing-dm { cursor: ns-resize !important; user-select: none; }
 }
 
 /* Server groups */
-.server-group { margin-bottom: 2px; }
+.server-group { margin-bottom: 2px; position: relative; }
 .server-group-header { cursor: pointer; }
 .server-group-header {
     display: flex; align-items: center; justify-content: center;
@@ -10228,28 +10229,32 @@ body.resizing-dm { cursor: ns-resize !important; user-select: none; }
 .server-group-header.drag-over-top { border-top: 2px solid var(--accent, #5865f2) !important; }
 .server-group-header.drag-over-bottom { border-bottom: 2px solid var(--accent, #5865f2) !important; }
 
-/* Collapsed group: 2x2 mini-server grid */
+/* Collapsed group: 2x2 grid — servers sit in their corner based on order */
 .server-group-collapsed-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 2px;
-    width: clamp(36px, 6vw, 48px);
-    height: clamp(36px, 6vw, 48px);
+    position: relative;
+    width: clamp(42px, 7vw, 52px);
+    height: clamp(42px, 7vw, 52px);
     margin: 0 auto;
-    border-radius: 10px;
-    overflow: hidden;
-    background: var(--bg-secondary);
+    border-radius: 12px;
+    overflow: visible;
     cursor: pointer;
 }
 .server-group-collapsed-grid .server-group-mini {
-    width: 100%;
-    height: 100%;
+    position: absolute;
+    width: 24px;
+    height: 24px;
     min-width: 0;
     margin: 0;
-    border-radius: 0;
+    border-radius: 50%;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.4);
 }
+/* Position each mini-icon in its corner based on order: 0=TL, 1=TR, 2=BL, 3=BR */
+.server-group-collapsed-grid .server-group-mini.corner-tl { top: 0; left: 0; }
+.server-group-collapsed-grid .server-group-mini.corner-tr { top: 0; right: 0; left: auto; }
+.server-group-collapsed-grid .server-group-mini.corner-bl { bottom: 0; left: 0; top: auto; }
+.server-group-collapsed-grid .server-group-mini.corner-br { bottom: 0; right: 0; top: auto; left: auto; }
 .server-group-collapsed-grid .server-group-mini.active {
-    border-radius: 0;
+    border-radius: 50%;
 }
 .server-group-more-badge {
     position: absolute;
@@ -10263,7 +10268,38 @@ body.resizing-dm { cursor: ns-resize !important; user-select: none; }
     line-height: 12px;
     z-index: 1;
 }
-
-/* Nested group: indented child groups */
+/* Folder color ring on collapsed grid */
+.server-group-collapsed-grid.folder-color {
+    box-shadow: 0 0 0 2px var(--folder-color, var(--accent, #5865f2));
+}
+/* Folder color stripe on expanded header */
+.server-group-toggle.folder-color {
+    border-left: 3px solid var(--folder-color, var(--accent, #5865f2));
+    padding-left: 8px;
+}
+/* Color picker in context menu */
+.ctx-color-row {
+    display: flex;
+    gap: 4px;
+    padding: 6px 12px;
+    flex-wrap: wrap;
+}
+.ctx-color-swatch {
+    width: 20px; height: 20px;
+    border-radius: 50%;
+    border: 2px solid transparent;
+    cursor: pointer;
+    transition: transform 0.15s, border-color 0.15s;
+}
+.ctx-color-swatch:hover { transform: scale(1.2); }
+.ctx-color-swatch.selected { border-color: #fff; transform: scale(1.15); }
+.ctx-color-clear {
+    font-size: 11px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 4px;
+}
+.ctx-color-clear:hover { background: var(--bg-tertiary); }
 
 

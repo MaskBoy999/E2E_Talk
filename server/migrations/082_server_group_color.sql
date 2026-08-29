@@ -1,0 +1,1 @@
+ALTER TABLE server_groups ADD COLUMN color TEXT DEFAULT NULL;

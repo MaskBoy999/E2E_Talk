@@ -1054,6 +1054,10 @@
                 } catch (_) {}
 
             }
+            // Fallback for existing voice channels without encrypted names
+            if (!chDisplayName) {
+                chDisplayName = isVoiceCh ? 'General Voice' : '';
+            }
 
             div.dataset.name = chDisplayName;
             div.draggable = true;

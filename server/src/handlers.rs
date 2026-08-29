@@ -2560,6 +2560,8 @@ pub struct CreateServerRequest {
     pub name_nonce: Option<String>,
     pub channel_encrypted_name: Option<String>,
     pub channel_name_nonce: Option<String>,
+    pub voice_channel_encrypted_name: Option<String>,
+    pub voice_channel_name_nonce: Option<String>,
 }
 
 pub async fn create_server(
@@ -2591,8 +2593,10 @@ pub async fn create_server(
     let name_nonce_bytes = req.name_nonce.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
     let ch_enc_name_bytes = req.channel_encrypted_name.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
     let ch_name_nonce_bytes = req.channel_name_nonce.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+    let voice_ch_enc_name_bytes = req.voice_channel_encrypted_name.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+    let voice_ch_name_nonce_bytes = req.voice_channel_name_nonce.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
 
-    let server = match state.db.create_server(&user_id, &invite_code_hash, &salt, encrypted_name_bytes.as_deref(), name_nonce_bytes.as_deref(), ch_enc_name_bytes.as_deref(), ch_name_nonce_bytes.as_deref()) {
+    let server = match state.db.create_server(&user_id, &invite_code_hash, &salt, encrypted_name_bytes.as_deref(), name_nonce_bytes.as_deref(), ch_enc_name_bytes.as_deref(), ch_name_nonce_bytes.as_deref(), voice_ch_enc_name_bytes.as_deref(), voice_ch_name_nonce_bytes.as_deref()) {
         Ok(s) => s,
         Err(e) => {
             return (
@@ -9267,13 +9271,14 @@ pub async fn list_server_groups(
     };
     match state.db.list_server_groups(&user_id) {
         Ok(groups) => {
-            let arr: Vec<serde_json::Value> = groups.iter().map(|(id, name, pos, collapsed, parent)| {
+            let arr: Vec<serde_json::Value> = groups.iter().map(|(id, name, pos, collapsed, parent, color)| {
                 serde_json::json!({
                     "id": id,
                     "name": name,
                     "position": pos,
                     "collapsed": collapsed,
                     "parent_group_id": parent,
+                    "color": color,
                 })
             }).collect();
             (StatusCode::OK, Json(serde_json::json!({"groups": arr}))).into_response()
@@ -9310,14 +9315,23 @@ pub async fn rename_server_group(
         Ok(id) => id,
         Err(e) => return e.into_response(),
     };
-    let name = match body.get("name").and_then(|v| v.as_str()) {
-        Some(n) => n,
-        None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "name required"}))).into_response(),
-    };
-    match state.db.rename_server_group(&user_id, &group_id, name) {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    // Handle color update (no name required)
+    if let Some(color_val) = body.get("color") {
+        let color: Option<&str> = match color_val {
+            serde_json::Value::String(s) if !s.is_empty() => Some(s),
+            _ => None,
+        };
+        if let Err(e) = state.db.update_group_color(&user_id, &group_id, color) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
+        }
     }
+    // Handle name update
+    if let Some(name) = body.get("name").and_then(|v| v.as_str()) {
+        if let Err(e) = state.db.rename_server_group(&user_id, &group_id, name) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
+        }
+    }
+    (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
 }
 
 pub async fn delete_server_group(
@@ -9330,6 +9344,25 @@ pub async fn delete_server_group(
         Err(e) => return e.into_response(),
     };
     match state.db.delete_server_group(&user_id, &group_id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+/// Merge source folder into target folder: moves all servers, deletes source.
+pub async fn merge_server_groups(
+    Path((source_id, target_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    if source_id == target_id {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Cannot merge a group into itself"}))).into_response();
+    }
+    match state.db.merge_groups(&user_id, &source_id, &target_id) {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }

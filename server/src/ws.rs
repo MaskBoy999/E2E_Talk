@@ -1420,25 +1420,62 @@ async fn handle_ws_message(
                 }
             } else {
                 // Server voice: relay to the server voice room
-                if let Some(sid) = parsed.get("server_id").and_then(|s| s.as_str()) {
+                // Use channel_id to find the exact room (a server can have multiple voice channels)
+                let sid = parsed.get("server_id").and_then(|s| s.as_str()).unwrap_or("");
+                let ch_id = parsed.get("channel_id").and_then(|s| s.as_str()).unwrap_or("");
+                if !sid.is_empty() {
                     let target_room: Option<String> = {
                         let rooms_lock = state.voice_rooms.read().unwrap();
                         rooms_lock.iter()
-                            .find(|(_, rm)| rm.room_type == "server" && rm.server_id.as_deref() == Some(sid))
+                            .find(|(_, rm)| {
+                                rm.room_type == "server"
+                                    && rm.server_id.as_deref() == Some(sid)
+                                    && (ch_id.is_empty() || rm.channel_id.as_deref() == Some(ch_id))
+                            })
                             .map(|(rid, _)| rid.clone())
                     };
                     if let Some(room_id) = target_room {
                         // Check if this user's soundboard is disabled by the server owner
-                        let sender_disabled = if let Some(sid_str) = parsed.get("server_id").and_then(|s| s.as_str()) {
-                            state.db.is_soundboard_user_disabled(sid_str, user_id).unwrap_or(false)
-                        } else {
-                            false
-                        };
-                        if sender_disabled {
-                            // Don't relay — this user's soundboard is disabled
-                        } else {
+                        let sender_disabled = state.db.is_soundboard_user_disabled(sid, user_id).unwrap_or(false);
+                        if !sender_disabled {
                             voice_broadcast(state, &room_id, &parsed).await;
                         }
+                    }
+                }
+            }
+        }
+        "soundboard_stop" => {
+            // Relay soundboard stop to all voice room participants
+            let room_type = parsed.get("room_type").and_then(|s| s.as_str()).unwrap_or("server");
+            if room_type == "dm" {
+                let dm_ch = parsed.get("dm_channel_id").and_then(|s| s.as_str()).unwrap_or("");
+                if !dm_ch.is_empty() {
+                    let target_room: Option<String> = {
+                        let rooms_lock = state.voice_rooms.read().unwrap();
+                        rooms_lock.iter()
+                            .find(|(_, rm)| rm.room_type == "dm" && rm.dm_channel_id.as_deref() == Some(dm_ch))
+                            .map(|(rid, _)| rid.clone())
+                    };
+                    if let Some(room_id) = target_room {
+                        voice_broadcast(state, &room_id, &parsed).await;
+                    }
+                }
+            } else {
+                let sid = parsed.get("server_id").and_then(|s| s.as_str()).unwrap_or("");
+                let ch_id = parsed.get("channel_id").and_then(|s| s.as_str()).unwrap_or("");
+                if !sid.is_empty() {
+                    let target_room: Option<String> = {
+                        let rooms_lock = state.voice_rooms.read().unwrap();
+                        rooms_lock.iter()
+                            .find(|(_, rm)| {
+                                rm.room_type == "server"
+                                    && rm.server_id.as_deref() == Some(sid)
+                                    && (ch_id.is_empty() || rm.channel_id.as_deref() == Some(ch_id))
+                            })
+                            .map(|(rid, _)| rid.clone())
+                    };
+                    if let Some(room_id) = target_room {
+                        voice_broadcast(state, &room_id, &parsed).await;
                     }
                 }
             }

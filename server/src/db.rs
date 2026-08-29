@@ -1274,6 +1274,7 @@ impl Database {
         let _ = conn.execute_batch(include_str!("../migrations/079_server_groups.sql"));
         let _ = conn.execute_batch(include_str!("../migrations/080_soundboard_per_account.sql"));
         let _ = conn.execute_batch(include_str!("../migrations/081_soundboard_user_disable.sql"));
+        let _ = conn.execute_batch(include_str!("../migrations/082_server_group_color.sql"));
 
         // Data migration: normalize legacy space-separated CURRENT_TIMESTAMP values
         // ("YYYY-MM-DD HH:MM:SS") to fixed-width RFC3339 ("YYYY-MM-DDTHH:MM:SS.000000Z")
@@ -1873,7 +1874,7 @@ impl Database {
 
     // --- Servers ---
 
-    pub fn create_server(&self, owner_id: &str, invite_code_hash: &str, invite_code_salt: &str, encrypted_name: Option<&[u8]>, name_nonce: Option<&[u8]>, channel_encrypted_name: Option<&[u8]>, channel_name_nonce: Option<&[u8]>) -> Result<Server, String> {
+    pub fn create_server(&self, owner_id: &str, invite_code_hash: &str, invite_code_salt: &str, encrypted_name: Option<&[u8]>, name_nonce: Option<&[u8]>, channel_encrypted_name: Option<&[u8]>, channel_name_nonce: Option<&[u8]>, voice_channel_encrypted_name: Option<&[u8]>, voice_channel_name_nonce: Option<&[u8]>) -> Result<Server, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let server_id = Uuid::new_v4().to_string();
         let general_id = Uuid::new_v4().to_string();
@@ -1948,10 +1949,17 @@ impl Database {
 
         // Create a default voice channel in the Voice Channels category
         let voice_ch_id = uuid::Uuid::new_v4().to_string();
-        conn.execute(
-            "INSERT INTO channels (id, server_id, type, position, category_id) VALUES (?1, ?2, 'voice', 0, ?3)",
-            params![voice_ch_id, server_id, voice_cat_id],
-        ).map_err(|e| e.to_string())?;
+        if has_ch_name_col && has_ch_nonce_col && voice_channel_encrypted_name.is_some() {
+            conn.execute(
+                "INSERT INTO channels (id, server_id, encrypted_name, name_nonce, type, position, category_id) VALUES (?1, ?2, ?3, ?4, 'voice', 0, ?5)",
+                params![voice_ch_id, server_id, voice_channel_encrypted_name, voice_channel_name_nonce, voice_cat_id],
+            ).map_err(|e| e.to_string())?;
+        } else {
+            conn.execute(
+                "INSERT INTO channels (id, server_id, type, position, category_id) VALUES (?1, ?2, 'voice', 0, ?3)",
+                params![voice_ch_id, server_id, voice_cat_id],
+            ).map_err(|e| e.to_string())?;
+        }
 
         Ok(Server {
             id: server_id,
@@ -8102,10 +8110,10 @@ impl Database {
 
     // ─── Server groups (folders) ──────────────────────────────────────
 
-    pub fn list_server_groups(&self, user_id: &str) -> Result<Vec<(String, String, i32, bool, Option<String>)>, String> {
+    pub fn list_server_groups(&self, user_id: &str) -> Result<Vec<(String, String, i32, bool, Option<String>, Option<String>)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT id, name, position, collapsed, parent_group_id FROM server_groups WHERE user_id = ?1 ORDER BY position")
+            .prepare("SELECT id, name, position, collapsed, parent_group_id, color FROM server_groups WHERE user_id = ?1 ORDER BY position")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map(rusqlite::params![user_id], |row| {
@@ -8115,6 +8123,7 @@ impl Database {
                     row.get::<_, i32>(2)?,
                     row.get::<_, bool>(3)?,
                     row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
                 ))
             })
             .map_err(|e| e.to_string())?;
@@ -8141,16 +8150,36 @@ impl Database {
         Ok(())
     }
 
+    pub fn update_group_color(&self, user_id: &str, group_id: &str, color: Option<&str>) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE server_groups SET color = ?3 WHERE id = ?1 AND user_id = ?2",
+            rusqlite::params![group_id, user_id, color],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Merge source_group into target_group: move all servers, then delete source.
+    pub fn merge_groups(&self, user_id: &str, source_id: &str, target_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        // Move all servers from source to target
+        conn.execute(
+            "UPDATE servers SET group_id = ?2 WHERE group_id = ?1",
+            rusqlite::params![source_id, target_id],
+        ).map_err(|e| e.to_string())?;
+        // Delete the source group
+        conn.execute(
+            "DELETE FROM server_groups WHERE id = ?1 AND user_id = ?2",
+            rusqlite::params![source_id, user_id],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     pub fn delete_server_group(&self, user_id: &str, group_id: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         // Move servers out of the group before deleting
         conn.execute(
             "UPDATE servers SET group_id = NULL WHERE group_id = ?1",
-            rusqlite::params![group_id],
-        ).map_err(|e| e.to_string())?;
-        // Also move child groups up
-        conn.execute(
-            "UPDATE server_groups SET parent_group_id = NULL WHERE parent_group_id = ?1",
             rusqlite::params![group_id],
         ).map_err(|e| e.to_string())?;
         conn.execute(

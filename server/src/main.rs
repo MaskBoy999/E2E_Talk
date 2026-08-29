@@ -559,6 +559,7 @@ async fn main() {
         .route("/api/server-groups/reorder", put(handlers::reorder_server_groups))
         .route("/api/server-groups/{group_id}", patch(handlers::rename_server_group).delete(handlers::delete_server_group))
         .route("/api/server-groups/{group_id}/toggle", patch(handlers::toggle_server_group_collapsed))
+        .route("/api/server-groups/{source_id}/merge/{target_id}", put(handlers::merge_server_groups))
         .route("/api/servers/{server_id}/group", put(handlers::move_server_to_group))
         .route("/api/dm/reorder", put(handlers::reorder_dms))
         .route("/api/blocks", get(handlers::get_blocked_users))

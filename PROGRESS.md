@@ -5649,3 +5649,27 @@ Created comprehensive tests for:
 ### 107. Default Voice Channel on Server Creation
 
 Server now creates a default "General" voice channel in the Voice Channels category alongside the existing "General" text channel when a new server is created. Category names are encrypted the same way as channel names via `encrypted_name` + `name_nonce` columns.
+
+### 108. Folder Color, Mute, Merge & Voice Indicators
+
+**Folder custom colors**: Discord-like color picker in group context menu with 12 preset colors. Stored in `server_groups.color` column (migration 082) and rendered as a colored ring on collapsed grids and colored left border on expanded headers.
+
+**Mute Folder**: Toggle in context menu. When muted, all servers in the folder are treated as muted for notifications. Stored in `mutedFolders` array in localStorage.
+
+**Folder merging**: Drag one group onto another (center 25% zone) to merge via `PUT /api/server-groups/{source_id}/merge/{target_id}`.
+
+**Mark as Read**: Clears `unread_count` and `mention_count` on all servers in the folder.
+
+**Auto-delete empty groups**: When the last server is moved out, the group is automatically deleted.
+
+**Group voice indicators**: Green pulsing dot on collapsed group header when any server inside has voice activity. Expanded groups show per-server dots.
+
+**Collapsed grid positioning**: Servers sit in corners (TL, TR, BL, BR) based on order using absolute positioning with circular 24px mini-icons.
+
+### 109. Groups-in-Groups Removed
+
+Removed nested groups feature (parent_group_id, renderChildGroups, nest API route). Groups are now flat.
+
+### 110. Soundboard Hear-Self Fix
+
+When in voice, `playSoundboardClip()` only sends WS broadcast (no local playback). The relay handles all members including sender. All playing Audio elements tracked in `_sbAllPlaying[]`. `leaveVoice()` stops all soundboard audio automatically.
