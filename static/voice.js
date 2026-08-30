@@ -929,7 +929,8 @@
         teardownRoom();
         if (wasDm) playSound('leave');
         else if (S.connected) playSound('leave');
-        // Stop all soundboard audio when leaving voice
+        // Stop the current user's soundboard audio and notify others
+        if (window._sendSoundboardStop) window._sendSoundboardStop();
         if (window._stopAllSoundboardAudio) window._stopAllSoundboardAudio();
         hideBar();
         hidePopup();
@@ -2866,6 +2867,23 @@
         }
         updateSelfUI();
         updateChannelChips();
+
+        // Late-join soundboard sync: if a soundboard clip was already playing
+        // when we joined, pick it up from the current position
+        if (data.current_soundboard && window._handleSoundboardPlay) {
+            var sb = data.current_soundboard;
+            var elapsed = Date.now() - (sb.started_at_ms || 0);
+            // Only play if the clip hasn't finished yet (estimate 30s max)
+            if (elapsed < 30000) {
+                window._handleSoundboardPlay({
+                    user_id: sb.user_id,
+                    clip_id: sb.clip_id,
+                    temp_token: sb.temp_token,
+                    play_start_ms: sb.play_start_ms || sb.started_at_ms,
+                    _lateJoinOffset: elapsed,
+                });
+            }
+        }
 
         // Mic: auto start unless force-muted/deafened
         if (!S.muted && !S.deafened) {
@@ -4885,9 +4903,9 @@
         bindClick(pop, 'voice-popup-pip', function () { togglePiP(); });
         bindClick(pop, 'voice-popup-leave', function () { leaveVoice(); });
         var pmv = pop.querySelector('#voice-popup-mic-volume');
-        if (pmv) pmv.addEventListener('input', function (e) { setMicVolume(parseInt(e.target.value, 10)); });
+        if (pmv) pmv.addEventListener('input', function (e) { setMicVolume(parseInt(e.target.value, 10)); updateSettingsLabels(); });
         var psv = pop.querySelector('#voice-popup-speaker-volume');
-        if (psv) psv.addEventListener('input', function (e) { setSpeakerVolume(parseInt(e.target.value, 10)); });
+        if (psv) psv.addEventListener('input', function (e) { setSpeakerVolume(parseInt(e.target.value, 10)); updateSettingsLabels(); });
         var pns = pop.querySelector('#voice-popup-noise-suppression');
         if (pns) pns.addEventListener('change', function (e) { setNoiseSuppression(e.target.value); });
 
@@ -5033,6 +5051,7 @@
                     var gain = ctx.createGain();
                     gain.gain.value = micVol / 100;
                     _hearSelfSink = gain;
+                    S._hearSelfSink = gain;
                     input.connect(gain);
                     gain.connect(ctx.destination);
                     // Update meter
@@ -5064,7 +5083,7 @@
         function stopHearSelfTest() {
             if (_hearSelfRafId) { cancelAnimationFrame(_hearSelfRafId); _hearSelfRafId = null; }
             _hearSelfAnalyser = null;
-            if (_hearSelfSink) { try { _hearSelfSink.disconnect(); } catch (_) {} _hearSelfSink = null; }
+            if (_hearSelfSink) { try { _hearSelfSink.disconnect(); } catch (_) {} _hearSelfSink = null; } S._hearSelfSink = null;
             if (_hearSelfGateTimer) { try { clearInterval(_hearSelfGateTimer); } catch (_) {} _hearSelfGateTimer = null; }
             if (_hearSelfNsCtx) { try { _hearSelfNsCtx.close(); } catch (_) {} _hearSelfNsCtx = null; }
             if (_hearSelfNsStream) { try { _hearSelfNsStream.getTracks().forEach(function (t) { t.stop(); }); } catch (_) {} _hearSelfNsStream = null; }
@@ -5196,6 +5215,10 @@
         if (pmv) pmv.value = S.settings.micVolume;
         var psv = document.getElementById('voice-popup-speaker-volume');
         if (psv) psv.value = S.settings.speakerVolume;
+        var pmvV = document.getElementById('voice-popup-mic-volume-val');
+        if (pmvV) pmvV.textContent = S.settings.micVolume + '%';
+        var psvV = document.getElementById('voice-popup-speaker-volume-val');
+        if (psvV) psvV.textContent = S.settings.speakerVolume + '%';
         var pns = document.getElementById('voice-popup-noise-suppression');
         if (pns) pns.value = S.settings.noiseSuppressionMode || 'rnnoise';
         // Haptic pattern tuning sliders (Settings → Voice → Haptics).
@@ -6978,6 +7001,10 @@
         S.settings.micVolume = v;
         saveSettings();
         if (S.micGain) S.micGain.gain.value = v / 100;
+        // Live-update hear-self test gain if running
+        if (S._hearSelfSink) S._hearSelfSink.gain.value = v / 100;
+        // Update all volume labels (settings modal + voice popup)
+        if (typeof updateSettingsLabels === 'function') updateSettingsLabels();
     }
 
     function setSpeakerVolume(v) {
@@ -6993,6 +7020,7 @@
             applyRemoteScreenVolume(uid);
         });
         if (_hearSelfAudioEl) _hearSelfAudioEl.volume = v / 100;
+        if (typeof updateSettingsLabels === 'function') updateSettingsLabels();
     }
 
     function setNoiseSuppression(mode) {
@@ -7000,6 +7028,14 @@
         saveSettings();
         updateSettingsLabels();
         restartMicForSettings();
+        // Live-restart hear-self test if running so NS chain rebuilds
+        if (S.settings.hearSelf && window._stopHearSelfTest) {
+            window._stopHearSelfTest();
+            // Small delay to let the old stream tracks stop
+            setTimeout(function () {
+                if (_hearSelfBtn) _hearSelfBtn.click();
+            }, 150);
+        }
     }
 
     function setEchoCancellation(enabled) {

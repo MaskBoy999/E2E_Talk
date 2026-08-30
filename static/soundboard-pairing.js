@@ -36,7 +36,7 @@
 
     // Play raw WAV bytes through the AudioContext (bypasses autoplay).
     // Returns a source node that can be stopped later.
-    function _playViaAudioCtx(wavBytes, onEnded) {
+    function _playViaAudioCtx(wavBytes, onEnded, offsetMs) {
         var ctx = _ensureSbAudioCtx();
         if (!ctx) return null;
         try {
@@ -47,7 +47,13 @@
                 source.onended = function () {
                     if (onEnded) onEnded();
                 };
-                source.start(0);
+                var offsetSec = (offsetMs || 0) / 1000;
+                // Clamp offset to buffer duration
+                if (offsetSec > 0 && offsetSec < buffer.duration) {
+                    source.start(0, offsetSec);
+                } else {
+                    source.start(0);
+                }
                 return source;
             });
         } catch (_) {
@@ -401,39 +407,48 @@
             return;
         }
 
-        // Use setTimeout to allow the loading indicator to render before heavy decryption
-        setTimeout(function() {
+        // Use rAF to let the loading indicator paint, then proceed
+        requestAnimationFrame(function() {
             var vs = window.VoiceManager && window.VoiceManager.getVoiceState && window.VoiceManager.getVoiceState();
             var inVoice = window.ws && window.ws.readyState === 1 && vs && vs.inVoice;
 
             if (inVoice) {
-                // In voice: broadcast via WS so ALL room members hear it.
-                // The server relays to every room member (including this sender).
-                // _handleSoundboardPlay on each client decides whether to play
-                // based on hear-self / mute settings.
-                // Show the STOP button so the user can stop playback.
+                // In voice: upload audio to temp endpoint, then send just the token via WS.
+                // This avoids sending huge base64 audio through WebSocket (caused 20s+ delays).
                 if (loadBtn) loadBtn.style.display = 'none';
                 if (pauseBtn) pauseBtn.style.display = '';
                 if (playBtn) playBtn.style.display = 'none';
                 _sbCurrentClipId = clipId;
                 var rawB64 = uint8ToBase64(audioBytes);
-                window.ws.send(JSON.stringify({
-                    type: 'soundboard_play',
-                    clip_id: clipId,
-                    server_id: window.currentServerId || '',
-                    channel_id: vs.channelId || '',
-                    encrypted_audio: rawB64,
-                    audio_nonce: '',
-                    user_id: window.currentUserId,
-                    disabled: false,
-                    room_type: vs.roomType || 'server',
-                    dm_channel_id: vs.dmChannelId || '',
-                }));
+                var playStartTime = Date.now();
+                fetch('/api/soundboard/temp-play', {
+                    method: 'POST',
+                    headers: Object.assign({ 'Content-Type': 'application/json' }, authHeaders()),
+                    body: JSON.stringify({ audio: rawB64 }),
+                }).then(function(resp) { return resp.json(); }).then(function(data) {
+                    if (!data.token) throw new Error('no token');
+                    window.ws.send(JSON.stringify({
+                        type: 'soundboard_play',
+                        clip_id: clipId,
+                        temp_token: data.token,
+                        server_id: window.currentServerId || '',
+                        channel_id: vs.channelId || '',
+                        user_id: window.currentUserId,
+                        disabled: false,
+                        room_type: vs.roomType || 'server',
+                        dm_channel_id: vs.dmChannelId || '',
+                        play_start_ms: playStartTime,
+                    }));
+                }).catch(function(e) {
+                    console.error('Soundboard temp upload failed:', e);
+                    if (loadBtn) loadBtn.style.display = 'none';
+                    if (playBtn) playBtn.style.display = '';
+                });
             } else {
                 // Not in voice: play locally as a preview (no one else to hear it)
                 _playSbAudioLocal(audioBytes, playBtn, pauseBtn, loadBtn);
             }
-        }, 50); // 50ms delay so loading indicator renders
+        });
     }
 
     // Play soundboard audio locally (preview or self-hear relay)
@@ -490,16 +505,35 @@
             var _vs = window.VoiceManager.getState();
             if (_vs && _vs.deafened) return;
         }
-        try {
-            var audioBytes = base64ToUint8(data.encrypted_audio);
-            // Play via AudioContext to bypass browser autoplay restrictions
-            var played = false;
+        // Determine play source: temp_token (fast HTTP fetch) or legacy encrypted_audio
+        var playPromise;
+        if (data.temp_token) {
+            // New flow: fetch audio from temp HTTP endpoint (avoids huge WS payloads)
+            playPromise = fetch('/api/soundboard/temp-play/' + data.temp_token, { headers: authHeaders() })
+                .then(function(resp) {
+                    if (!resp.ok) throw new Error('temp audio fetch failed ' + resp.status);
+                    return resp.arrayBuffer();
+                })
+                .then(function(buf) { return new Uint8Array(buf); });
+        } else if (data.encrypted_audio) {
+            // Legacy flow or late-join: audio embedded in WS message
+            playPromise = Promise.resolve(base64ToUint8(data.encrypted_audio));
+        } else {
+            console.warn('Soundboard play: no audio source');
+            return;
+        }
+        playPromise.then(function(audioBytes) {
+            if (!audioBytes || audioBytes.length === 0) return;
+            // Compute late-join offset from play_start_ms sent by the player
+            var lateOffset = data._lateJoinOffset || 0;
+            if (!lateOffset && data.play_start_ms) {
+                lateOffset = Math.max(0, Date.now() - data.play_start_ms);
+            }
             if (_sbAudioCtx || _ensureSbAudioCtx()) {
                 _playViaAudioCtx(audioBytes, function () {
                     // on ended: remove from tracking
-                }).then(function (source) {
+                }, lateOffset).then(function (source) {
                     if (!source) return;
-                    played = true;
                     var entry = { type: 'ctx', source: source, userId: data.user_id, clipId: data.clip_id };
                     _sbAllPlaying.push(entry);
                     if (data.user_id === window.currentUserId) {
@@ -508,18 +542,14 @@
                     }
                 }).catch(function (e) {
                     console.error('Soundboard AudioContext play error:', e);
-                    // Fallback to HTML Audio
                     _playSbAudioFallback(audioBytes, data.user_id, data.clip_id);
                 });
-            }
-            // Also try HTML Audio as immediate fallback (in case AudioContext fails silently)
-            // Only if AudioContext didn't succeed synchronously
-            if (!played && !_sbAudioCtx) {
+            } else {
                 _playSbAudioFallback(audioBytes, data.user_id, data.clip_id);
             }
-        } catch (e) {
-            console.error('Soundboard remote play failed:', e);
-        }
+        }).catch(function(e) {
+            console.error('Soundboard play failed:', e);
+        });
     };
 
     function _playSbAudioFallback(audioBytes, userId, clipId) {
@@ -550,11 +580,13 @@
         // Only stop sounds from a specific user
         if (data.user_id) {
             var stoppedClipId = null;
+            var stoppedAnything = false;
             _sbAllPlaying = _sbAllPlaying.filter(function (entry) {
                 // Determine the user who owns this entry
                 var entryUserId = (entry && entry.userId) || (entry && entry._sbUserId) || null;
                 // Only stop entries from the specified user
                 if (entryUserId !== data.user_id) return true; // keep other users'
+                stoppedAnything = true;
                 try {
                     if (entry.type === 'ctx' && entry.source) {
                         entry.source.stop();
@@ -569,6 +601,7 @@
                 var playingUserId = (_sbPlaying.userId) || (_sbPlaying._sbUserId) || null;
                 if (playingUserId === data.user_id) {
                     stoppedClipId = _sbCurrentClipId;
+                    stoppedAnything = true;
                     try {
                         if (_sbPlaying.type === 'ctx' && _sbPlaying.source) {
                             _sbPlaying.source.stop();
@@ -581,29 +614,44 @@
                     _sbCurrentClipId = null;
                 }
             }
-            // Reset buttons for the stopped clip (or all if no clip tracked)
+            // Only reset buttons if we actually stopped something for this user
             if (stoppedClipId) {
                 _resetSbOverlayForClip(stoppedClipId);
-            } else {
+            } else if (stoppedAnything) {
                 _resetSbButtons();
             }
         }
     };
 
-    // Stop all soundboard audio (called on voice leave, page unload, etc.)
+    // Stop soundboard audio for the current user only (called on voice leave)
     function _stopAllSoundboardAudio() {
-        _sbAllPlaying.forEach(function (entry) {
+        var myId = window.currentUserId;
+        _sbAllPlaying = _sbAllPlaying.filter(function (entry) {
+            var entryUserId = (entry && entry.userId) || (entry && entry._sbUserId) || null;
+            // Only stop sounds played by the current user
+            if (myId && entryUserId && entryUserId !== myId) return true; // keep others'
             try {
                 if (entry.type === 'ctx' && entry.source) {
                     entry.source.stop();
                 } else if (entry.pause) {
                     entry.pause();
                     entry.currentTime = 0;
+                } else if (entry && entry.currentTime !== undefined) {
+                    // HTML Audio element
+                    entry.pause();
+                    entry.currentTime = 0;
                 }
             } catch (_) {}
+            return false; // remove this entry
         });
-        _sbAllPlaying = [];
-        _sbPlaying = null;
+        // Only clear _sbPlaying if it was the current user's sound
+        if (_sbPlaying) {
+            var playingUserId = (_sbPlaying.userId) || (_sbPlaying._sbUserId) || null;
+            if (!myId || playingUserId === myId) {
+                _sbPlaying = null;
+                _sbCurrentClipId = null;
+            }
+        }
     }
     window._stopAllSoundboardAudio = _stopAllSoundboardAudio;
 
@@ -628,9 +676,10 @@
     // Expose for WS handler and DM mini bar
     window._loadSoundboardClips = loadSoundboardClips;
     window._playSoundboardClip = playSoundboardClip;
+    window._sendSoundboardStop = _sendSoundboardStop;
     window.syncDisableCheckboxes = syncDisableCheckboxes;
     Object.defineProperty(window, "_sbClipsCache", { get: function() { return _sbClipsCache; }, configurable: true });
-    window._sbAllPlaying = _sbAllPlaying;
+    Object.defineProperty(window, '_sbAllPlaying', { get: function() { return _sbAllPlaying; }, configurable: true });
 
     // --- Per-user disabled list (owner disabled this user's soundboard for everyone) ---
     window._sbDisabledUsers = [];

@@ -35,6 +35,10 @@ pub struct AppState {
     /// (every authenticated mutation + every file-upload init) never touches
     /// the DB. Precedence per value: admin_config DB row → env var → default.
     pub runtime_tuning: std::sync::Arc<std::sync::RwLock<RuntimeTuning>>,
+    /// Temporary soundboard play audio (token → (bytes, created_at)).
+    /// Clients upload decrypted audio here, send the token via WS,
+    /// and receivers fetch via HTTP — avoids base64-enormous WS payloads.
+    pub sb_temp_play: std::sync::RwLock<std::collections::HashMap<String, (Vec<u8>, std::time::Instant)>>,
 }
 
 /// G2 limits that can be tuned at runtime from the admin panel.
@@ -427,6 +431,7 @@ async fn main() {
         ws_manager,
         voice_rooms: std::sync::RwLock::new(std::collections::HashMap::new()),
         runtime_tuning,
+        sb_temp_play: std::sync::RwLock::new(std::collections::HashMap::new()),
     });
 
     // Run orphan file cleanup on startup, then periodically every hour
@@ -586,6 +591,9 @@ async fn main() {
         .route("/api/auth/sessions/kick-all", post(handlers::kick_all_auth_sessions))
         .route("/api/key-blob", put(handlers::save_user_key_blob).get(handlers::get_user_key_blob))
         .route("/api/user/{username}", get(handlers::get_user_id))
+        // Soundboard temp play (fast audio delivery via HTTP, avoids huge WS payloads)
+        .route("/api/soundboard/temp-play", post(handlers::upload_sb_temp_play).get(handlers::sb_temp_play_cleanup))
+        .route("/api/soundboard/temp-play/{token}", get(handlers::get_sb_temp_play))
         // Soundboard
         .route("/api/soundboard", post(handlers::upload_soundboard_clip))
         .route("/api/soundboard/my", get(handlers::list_my_soundboard_clips))

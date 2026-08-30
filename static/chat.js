@@ -58,7 +58,8 @@ let servers = [];
 let serverGroups = []; // {id, name, position, collapsed, parent_group_id, color}
 // --- Server groups: stored in localStorage + synced via blob ---
 function _getServerGroupsKey() {
-    return 'e2e_server_groups';
+    var userId = (user && user.id) ? user.id : 'anon';
+    return 'e2e_server_groups_' + userId;
 }
 function saveServerGroupsLocal() {
     try {
@@ -69,10 +70,23 @@ function saveServerGroupsLocal() {
         // Also save per-server group_id assignments
         var assignments = {};
         servers.forEach(function(s) { if (s.group_id) assignments[s.id] = s.group_id; });
-        localStorage.setItem('e2e_server_group_assignments', JSON.stringify(assignments));
+        var userId = (user && user.id) ? user.id : 'anon';
+        localStorage.setItem('e2e_server_group_assignments_' + userId, JSON.stringify(assignments));
         // Trigger blob save so other devices get the update
         if (typeof scheduleKeyBlobSave === 'function') scheduleKeyBlobSave();
+        // Broadcast groups_changed to other devices via WS (debounced)
+        _broadcastGroupsChanged();
     } catch (_) {}
+}
+var _groupsChangeTimer = null;
+function _broadcastGroupsChanged() {
+    if (_groupsChangeTimer) clearTimeout(_groupsChangeTimer);
+    _groupsChangeTimer = setTimeout(function() {
+        if (window.ws && window.ws.readyState === 1) {
+            var deviceId = localStorage.getItem('e2e_device_id') || '';
+            window.ws.send(JSON.stringify({ type: 'groups_changed', device_id: deviceId }));
+        }
+    }, 500);
 }
 function loadServerGroupsLocal() {
     try {
@@ -80,7 +94,8 @@ function loadServerGroupsLocal() {
         if (Array.isArray(data) && data.length > 0) {
             serverGroups = data;
         }
-        var assignments = JSON.parse(localStorage.getItem('e2e_server_group_assignments') || '{}');
+        var userId = (user && user.id) ? user.id : 'anon';
+        var assignments = JSON.parse(localStorage.getItem('e2e_server_group_assignments_' + userId) || '{}');
         if (assignments && typeof assignments === 'object' && Object.keys(assignments).length > 0) {
             // Only overwrite group_ids if localStorage has actual data
             servers.forEach(function(s) {
@@ -3208,6 +3223,7 @@ document.addEventListener('DOMContentLoaded', () => {
         settingsModal.style.display = 'none';
         if (window._stopRingTrimPreview) window._stopRingTrimPreview();
         if (window._stopNotifTrimPreview) window._stopNotifTrimPreview();
+        if (window._stopHearSelfTest) window._stopHearSelfTest();
     });    // --- File Vault ---
     const vaultBtn = document.getElementById('vault-btn');
     const vaultModal = document.getElementById('vault-modal');
@@ -3764,6 +3780,10 @@ document.addEventListener('DOMContentLoaded', () => {
             // Previews must not keep playing when we leave the tab.
             if (window._stopRingTrimPreview) window._stopRingTrimPreview();
             if (window._stopNotifTrimPreview) window._stopNotifTrimPreview();
+            // Stop hear-self test when switching away from voice settings
+            if (tab.dataset.tab !== 'voice-settings' && window._stopHearSelfTest) {
+                window._stopHearSelfTest();
+            }
             // Fetch backup status when security tab opens.
             if (tab.dataset.tab === 'security-settings') fetchBackupStatus();
             if (tab.dataset.tab === 'user-settings') renderSecurityScheduledList();
@@ -11912,6 +11932,40 @@ function connectWebSocket(t) {
                         document.getElementById('send-btn').disabled = true;
                     }
                 }
+                break;
+            case 'groups_changed':
+                // Another device of the same account changed server groups.
+                // Re-fetch blob from server and re-apply groups.
+                if (data.device_id !== undefined) {
+                    // Skip if this is our own device
+                    var myDeviceId = localStorage.getItem('e2e_device_id') || '';
+                    if (data.device_id === myDeviceId) break;
+                }
+                try {
+                    // Re-fetch the key blob from server and re-apply groups
+                    var encPw = localStorage.getItem('e2e_encrypted_password');
+                    var devKeyStr = localStorage.getItem('e2e_device_key');
+                    if (encPw && devKeyStr) {
+                        var dk = new Uint8Array(E2ECrypto.base64ToArrayBuffer(devKeyStr));
+                        var pwB64 = E2ECrypto.decodeEncryptedFileKey(encPw, dk);
+                        if (pwB64) {
+                            var pw = atob(pwB64);
+                            var t = localStorage.getItem('token');
+                            var blobResp = await fetch('/api/key-blob', { headers: { 'Authorization': 'Bearer ' + t } });
+                            if (blobResp.ok) {
+                                var blobData = await blobResp.json();
+                                if (blobData.encrypted_blob) {
+                                    var bundle = E2ECrypto.decryptKeyBundle(blobData.encrypted_blob, pw, blobData.salt, blobData.nonce);
+                                    if (bundle) {
+                                        E2ECrypto.restoreKeyBundle(bundle);
+                                        loadServerGroupsLocal();
+                                        renderServerList();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } catch (e) { console.error('groups_changed sync error:', e); }
                 break;
             case 'server_deleted':
                 if (data.server_id) {

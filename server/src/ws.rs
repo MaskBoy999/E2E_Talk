@@ -123,6 +123,19 @@ pub struct VoiceRoom {
     // and this map is updated so a stale device's later disconnect / page-load
     // voice_leave_all can never evict the device that replaced it.
     pub device_map: HashMap<String, String>,
+    // Currently playing soundboard clip (for late-join sync).
+    // When a new member joins, they receive this so they can pick up playback
+    // from the current position instead of hearing silence.
+    pub current_soundboard: Option<SoundboardPlayback>,
+}
+
+#[derive(Clone)]
+pub struct SoundboardPlayback {
+    pub user_id: String,
+    pub clip_id: String,
+    pub temp_token: String,
+    pub started_at_ms: i64, // timestamp when playback started
+    pub duration_ms: i64,    // estimated total duration
 }
 
 fn voice_member_json(m: &VoiceMember) -> serde_json::Value {
@@ -1438,6 +1451,19 @@ async fn handle_ws_message(
                         // Check if this user's soundboard is disabled by the server owner
                         let sender_disabled = state.db.is_soundboard_user_disabled(sid, user_id).unwrap_or(false);
                         if !sender_disabled {
+                            // Store current playback state for late-join sync
+                            {
+                                let mut rooms = state.voice_rooms.write().unwrap();
+                                if let Some(room) = rooms.get_mut(&room_id) {
+                                    room.current_soundboard = Some(SoundboardPlayback {
+                                        user_id: user_id.to_string(),
+                                        clip_id: parsed.get("clip_id").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+                                        temp_token: parsed.get("temp_token").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+                                        started_at_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64,
+                                        duration_ms: 0,
+                                    });
+                                }
+                            }
                             voice_broadcast(state, &room_id, &parsed).await;
                         }
                     }
@@ -1475,6 +1501,13 @@ async fn handle_ws_message(
                             .map(|(rid, _)| rid.clone())
                     };
                     if let Some(room_id) = target_room {
+                        // Clear current playback state on stop
+                        {
+                            let mut rooms = state.voice_rooms.write().unwrap();
+                            if let Some(room) = rooms.get_mut(&room_id) {
+                                room.current_soundboard = None;
+                            }
+                        }
                         voice_broadcast(state, &room_id, &parsed).await;
                     }
                 }
@@ -1873,6 +1906,18 @@ async fn handle_ws_message(
                 .broadcast_to_users(&[user_id.to_string()], &pong.to_string())
                 .await;
         }
+        "groups_changed" => {
+            // Relay to all OTHER connections of this user (cross-device sync)
+            let device_id = parsed.get("device_id").and_then(|s| s.as_str()).unwrap_or("").to_string();
+            let msg = serde_json::json!({
+                "type": "groups_changed",
+                "device_id": device_id,
+            });
+            state
+                .ws_manager
+                .broadcast_to_users_except_device(&[user_id.to_string()], &device_id, &msg.to_string())
+                .await;
+        }
         "voice_join" => {
             handle_voice_join(parsed, state, user_id).await;
         }
@@ -2022,6 +2067,7 @@ async fn handle_voice_join(
             session_id: None,
             members: HashMap::new(),
             device_map: HashMap::new(),
+            current_soundboard: None,
         });
         // If this user is already in the room from ANOTHER device, the old
         // device(s) must be kicked before the new device is admitted — "last
@@ -2043,6 +2089,15 @@ async fn handle_voice_join(
             .values()
             .map(voice_member_json)
             .collect();
+        // Include currently playing soundboard clip for late-join sync
+        let current_sb_json = room.current_soundboard.as_ref().map(|sb| {
+            serde_json::json!({
+                "user_id": sb.user_id,
+                "clip_id": sb.clip_id,
+                "temp_token": sb.temp_token,
+                "play_start_ms": sb.started_at_ms,
+            })
+        });
         let joined = serde_json::json!({
             "type": "voice_joined",
             "room_type": room_type,
@@ -2053,6 +2108,7 @@ async fn handle_voice_join(
             "is_owner": is_owner,
             "force_muted": force_muted,
             "force_deafened": force_deafened,
+            "current_soundboard": current_sb_json,
         });
         (joined, replaced)
     };

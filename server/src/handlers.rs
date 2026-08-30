@@ -8938,6 +8938,75 @@ pub async fn set_self_destruct(
 }
 // === Soundboard Handlers ===
 
+/// POST /api/soundboard/temp-play — upload decrypted audio bytes for fast relay.
+/// Returns { "token": "..." } that receivers can GET to fetch the audio.
+pub async fn upload_sb_temp_play(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    let audio_b64 = match body.get("audio").and_then(|v| v.as_str()) {
+        Some(b) => b,
+        None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"missing audio"}))).into_response(),
+    };
+    let audio_bytes = match base64::engine::general_purpose::STANDARD.decode(audio_b64) {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"invalid base64"}))).into_response(),
+    };
+    // 60-char random hex token
+    let token = rand_hex_token(30);
+    state
+        .sb_temp_play
+        .write()
+        .unwrap()
+        .insert(token.clone(), (audio_bytes, std::time::Instant::now()));
+    // Cleanup entries older than 120s
+    {
+        let mut map = state.sb_temp_play.write().unwrap();
+        map.retain(|_, (_, created)| created.elapsed() < std::time::Duration::from_secs(120));
+    }
+    (StatusCode::OK, Json(serde_json::json!({ "token": token }))).into_response()
+}
+
+/// GET /api/soundboard/temp-play/{token} — fetch the temporarily stored audio.
+pub async fn get_sb_temp_play(
+    Path(token): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let mut map = state.sb_temp_play.write().unwrap();
+    match map.remove(&token) {
+        Some((bytes, _)) => {
+            (
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "audio/wav".to_string())],
+                bytes,
+            )
+                .into_response()
+        }
+        None => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error":"expired or invalid"}))).into_response(),
+    }
+}
+
+/// GET /api/soundboard/temp-play — cleanup old entries (admin/cron).
+pub async fn sb_temp_play_cleanup(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let before = state.sb_temp_play.read().unwrap().len();
+    state.sb_temp_play.write().unwrap().retain(|_, (_, created)| created.elapsed() < std::time::Duration::from_secs(120));
+    let after = state.sb_temp_play.read().unwrap().len();
+    (StatusCode::OK, Json(serde_json::json!({ "cleaned": before - after, "remaining": after }))).into_response()
+}
+
+fn rand_hex_token(len: usize) -> String {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    (0..len).map(|_| format!("{:02x}", rng.gen::<u8>())).collect()
+}
+
 pub async fn upload_soundboard_clip(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
