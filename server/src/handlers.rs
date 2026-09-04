@@ -2914,7 +2914,11 @@ pub async fn join_server(
         }
     };
 
-    // Broadcast member_joined to all server members
+    // Broadcast member_joined to all server members EXCEPT the joiner.
+    // The joiner already knows they joined (HTTP response) and calls loadServers()
+    // client-side. Broadcasting to the joiner too creates a race between the
+    // member_joined-triggered refreshServerListData() and the joinServer()-
+    // triggered loadServers(), which can duplicate the server in the sidebar.
     let join_msg = serde_json::json!({
         "type": "member_joined",
         "server_id": server.id,
@@ -2922,15 +2926,16 @@ pub async fn join_server(
         "raw_user_id": user_id,
     });
     if let Ok(members) = state.db.get_server_members(&server.id) {
-        let _ = state.ws_manager.broadcast_to_users(&members, &join_msg.to_string()).await;
+        let recipients: Vec<String> = members.into_iter().filter(|m| *m != user_id).collect();
+        let _ = state.ws_manager.broadcast_to_users(&recipients, &join_msg.to_string()).await;
 
         // Save pending key_needed events for offline members so the new member gets
         // the server key when someone reconnects (handles the case where all members
         // are offline at join time)
         let new_user_id = user_id.clone();
         let sid = server.id.clone();
-        for mid in &members {
-            if *mid != new_user_id && !state.ws_manager.is_user_connected(mid).await {
+        for mid in &recipients {
+            if !state.ws_manager.is_user_connected(mid).await {
                 let _ = state.db.save_pending_event(mid, &sid, "key_needed", &new_user_id);
             }
         }

@@ -13270,6 +13270,12 @@ function renderServerList() {
     const list = document.getElementById('server-list');
     list.innerHTML = '';
 
+    // Clean up any orphaned touch-drag ghost left behind by a cancelled touch
+    // or a mid-drag re-render (ghost is appended to document.body, not #server-list)
+    document.querySelectorAll('body > [style*="z-index:99999"]').forEach(function(g) {
+        if (g.style.pointerEvents === 'none') g.remove();
+    });
+
     // --- helpers ---
     function decryptServerName(s) {
         var displayName = '';
@@ -13717,7 +13723,7 @@ function renderServerList() {
                     _touchDrag.ghost = ghost;
                     if (navigator.vibrate) navigator.vibrate(30);
                 }, LONG_PRESS_MS);
-            }, { passive: true });
+            }, { passive: false });
             el.addEventListener('touchmove', function(e) {
                 if (_touchDrag.timer) {
                     var touch = e.touches[0];
@@ -13788,6 +13794,15 @@ function renderServerList() {
                         }
                     }
                 }
+                clearDragIndicators();
+            });
+            el.addEventListener('touchcancel', function() {
+                clearTimeout(_touchDrag.timer);
+                _touchDrag.timer = null;
+                if (!_touchDrag.active) return;
+                _touchDrag.active = false;
+                el.classList.remove('dragging');
+                if (_touchDrag.ghost) { _touchDrag.ghost.remove(); _touchDrag.ghost = null; }
                 clearDragIndicators();
             });
         });
