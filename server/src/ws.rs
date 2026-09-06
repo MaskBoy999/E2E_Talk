@@ -723,7 +723,7 @@ async fn handle_ws_message(
     state: &Arc<AppState>,
     user_id: &str,
 ) {
-    let parsed: serde_json::Value = match serde_json::from_str(text) {
+    let mut parsed: serde_json::Value = match serde_json::from_str(text) {
         Ok(v) => v,
         Err(_) => return,
     };
@@ -1419,15 +1419,32 @@ async fn handle_ws_message(
             let room_type = parsed.get("room_type").and_then(|s| s.as_str()).unwrap_or("server");
             if room_type == "dm" {
                 // DM call: relay to the DM voice room
-                let dm_ch = parsed.get("dm_channel_id").and_then(|s| s.as_str()).unwrap_or("");
+                let dm_ch = parsed.get("dm_channel_id").and_then(|s| s.as_str()).unwrap_or("").to_string();
                 if !dm_ch.is_empty() {
                     let target_room: Option<String> = {
                         let rooms_lock = state.voice_rooms.read().unwrap();
                         rooms_lock.iter()
-                            .find(|(_, rm)| rm.room_type == "dm" && rm.dm_channel_id.as_deref() == Some(dm_ch))
+                            .find(|(_, rm)| rm.room_type == "dm" && rm.dm_channel_id.as_deref() == Some(dm_ch.as_str()))
                             .map(|(rid, _)| rid.clone())
                     };
                     if let Some(room_id) = target_room {
+                        // Stamp authoritative start time for late-join offset math
+                        let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+                        {
+                            let mut rooms = state.voice_rooms.write().unwrap();
+                            if let Some(room) = rooms.get_mut(&room_id) {
+                                room.current_soundboard = Some(SoundboardPlayback {
+                                    user_id: user_id.to_string(),
+                                    clip_id: parsed.get("clip_id").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+                                    temp_token: parsed.get("temp_token").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+                                    started_at_ms: now_ms,
+                                    duration_ms: parsed.get("duration_ms").and_then(|v| v.as_i64()).unwrap_or(0),
+                                });
+                            }
+                        }
+                        if let Some(obj) = parsed.as_object_mut() {
+                            obj.insert("play_start_ms".to_string(), serde_json::json!(now_ms));
+                        }
                         voice_broadcast(state, &room_id, &parsed).await;
                     }
                 }
@@ -1451,7 +1468,11 @@ async fn handle_ws_message(
                         // Check if this user's soundboard is disabled by the server owner
                         let sender_disabled = state.db.is_soundboard_user_disabled(sid, user_id).unwrap_or(false);
                         if !sender_disabled {
-                            // Store current playback state for late-join sync
+                            // Store current playback state for late-join sync.
+                            // The server's clock stamps the start so late joiners
+                            // compute the offset against one authoritative clock.
+                            let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+                            let duration_ms = parsed.get("duration_ms").and_then(|v| v.as_i64()).unwrap_or(0);
                             {
                                 let mut rooms = state.voice_rooms.write().unwrap();
                                 if let Some(room) = rooms.get_mut(&room_id) {
@@ -1459,10 +1480,16 @@ async fn handle_ws_message(
                                         user_id: user_id.to_string(),
                                         clip_id: parsed.get("clip_id").and_then(|s| s.as_str()).unwrap_or("").to_string(),
                                         temp_token: parsed.get("temp_token").and_then(|s| s.as_str()).unwrap_or("").to_string(),
-                                        started_at_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64,
-                                        duration_ms: 0,
+                                        started_at_ms: now_ms,
+                                        duration_ms: duration_ms,
                                     });
                                 }
+                            }
+                            // Stamp the authoritative start time + duration into the
+                            // relayed message so every receiver computes the same offset.
+                            if let Some(obj) = parsed.as_object_mut() {
+                                obj.insert("play_start_ms".to_string(), serde_json::json!(now_ms));
+                                obj.insert("duration_ms".to_string(), serde_json::json!(duration_ms));
                             }
                             voice_broadcast(state, &room_id, &parsed).await;
                         }
@@ -1474,15 +1501,29 @@ async fn handle_ws_message(
             // Relay soundboard stop to all voice room participants
             let room_type = parsed.get("room_type").and_then(|s| s.as_str()).unwrap_or("server");
             if room_type == "dm" {
-                let dm_ch = parsed.get("dm_channel_id").and_then(|s| s.as_str()).unwrap_or("");
+                let dm_ch = parsed.get("dm_channel_id").and_then(|s| s.as_str()).unwrap_or("").to_string();
                 if !dm_ch.is_empty() {
                     let target_room: Option<String> = {
                         let rooms_lock = state.voice_rooms.read().unwrap();
                         rooms_lock.iter()
-                            .find(|(_, rm)| rm.room_type == "dm" && rm.dm_channel_id.as_deref() == Some(dm_ch))
+                            .find(|(_, rm)| rm.room_type == "dm" && rm.dm_channel_id.as_deref() == Some(dm_ch.as_str()))
                             .map(|(rid, _)| rid.clone())
                     };
                     if let Some(room_id) = target_room {
+                        // Free the temp audio on explicit stop (DM path)
+                        let stopped_token = {
+                            let mut rooms = state.voice_rooms.write().unwrap();
+                            let mut tok = String::new();
+                            if let Some(room) = rooms.get_mut(&room_id) {
+                                if let Some(sb) = room.current_soundboard.take() {
+                                    tok = sb.temp_token;
+                                }
+                            }
+                            tok
+                        };
+                        if !stopped_token.is_empty() {
+                            crate::handlers::remove_sb_temp_play(state, &stopped_token);
+                        }
                         voice_broadcast(state, &room_id, &parsed).await;
                     }
                 }
@@ -1500,16 +1541,24 @@ async fn handle_ws_message(
                             })
                             .map(|(rid, _)| rid.clone())
                     };
-                    if let Some(room_id) = target_room {
-                        // Clear current playback state on stop
-                        {
-                            let mut rooms = state.voice_rooms.write().unwrap();
-                            if let Some(room) = rooms.get_mut(&room_id) {
-                                room.current_soundboard = None;
+                        if let Some(room_id) = target_room {
+                            // Clear the room's current playback state AND free the
+                            // temp audio so it stops counting against memory.
+                            let stopped_token = {
+                                let mut rooms = state.voice_rooms.write().unwrap();
+                                let mut tok = String::new();
+                                if let Some(room) = rooms.get_mut(&room_id) {
+                                    if let Some(sb) = room.current_soundboard.take() {
+                                        tok = sb.temp_token;
+                                    }
+                                }
+                                tok
+                            };
+                            if !stopped_token.is_empty() {
+                                crate::handlers::remove_sb_temp_play(state, &stopped_token);
                             }
+                            voice_broadcast(state, &room_id, &parsed).await;
                         }
-                        voice_broadcast(state, &room_id, &parsed).await;
-                    }
                 }
             }
         }
@@ -2325,12 +2374,46 @@ async fn voice_remove_from_room(state: &Arc<AppState>, room_id: &str, user_id: &
         return;
     }
 
+    // If the user who is leaving was playing a soundboard clip, clear the
+    // room's current playback state AND tell the remaining members to stop
+    // it. Per spec: "if someone leaves it stops just for them and the sound
+    // keeps playing to all others" — that only applies to LISTENERS leaving.
+    // When the PLAYER leaves, nobody keeps playing it, so everyone stops.
+    let leaver_was_playing = {
+        let mut rooms = match state.voice_rooms.write() {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        match rooms.get_mut(room_id) {
+            Some(room) => {
+                let was_playing = room
+                    .current_soundboard
+                    .as_ref()
+                    .map(|sb| sb.user_id == user_id)
+                    .unwrap_or(false);
+                if was_playing {
+                    room.current_soundboard = None;
+                }
+                was_playing
+            }
+            None => false,
+        }
+    };
+
     // Broadcast leave + updated member list to remaining members (lock already dropped)
     let leave_msg = serde_json::json!({
         "type": "voice_member_leave",
         "user_id": user_id,
     });
     voice_broadcast(state, room_id, &leave_msg).await;
+    if leaver_was_playing {
+        // The player themselves left — their sound dies for everyone else too.
+        voice_broadcast(state, room_id, &serde_json::json!({
+            "type": "soundboard_stop",
+            "user_id": user_id,
+            "reason": "player_left",
+        })).await;
+    }
     let members_msg = serde_json::json!({
         "type": "voice_members",
         "members": remaining_members,

@@ -249,7 +249,8 @@ test.describe('All Recent Fixes', () => {
             const contentType = fetchResp.headers.get('content-type');
             const bytes = await fetchResp.arrayBuffer();
 
-            // Token should be consumed (second fetch should 404)
+            // Token is NOT one-shot: all room members (incl. late joiners within
+            // the TTL) fetch the same token, so the second fetch must also 200.
             const secondFetch = await fetch('/api/soundboard/temp-play/' + uploadData.token, {
                 headers: { 'Authorization': 'Bearer ' + token },
             });
@@ -267,8 +268,8 @@ test.describe('All Recent Fixes', () => {
         expect(result.tokenLength).toBe(60);
         expect(result.fetchStatus).toBe(200);
         expect(result.audioSize).toBeGreaterThan(0);
-        // Second fetch should be 404 (token consumed)
-        expect(result.secondFetchStatus).toBe(404);
+        // Second fetch must ALSO be 200 (shared token, not one-shot)
+        expect(result.secondFetchStatus).toBe(200);
     });
 
     test('F: Hearer-self volume slider updates live gain', async ({ page }) => {

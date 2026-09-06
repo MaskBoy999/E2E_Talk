@@ -8969,26 +8969,35 @@ pub async fn upload_sb_temp_play(
         .write()
         .unwrap()
         .insert(token.clone(), (audio_bytes, std::time::Instant::now()));
-    // Cleanup entries older than 120s
+    // Cleanup entries older than 15 min (backstop — normal cleanup happens
+    // when playback stops or the player leaves voice). Entries must survive
+    // the whole playback so late joiners can still fetch the audio.
     {
         let mut map = state.sb_temp_play.write().unwrap();
-        map.retain(|_, (_, created)| created.elapsed() < std::time::Duration::from_secs(120));
+        map.retain(|_, (_, created)| created.elapsed() < std::time::Duration::from_secs(900));
     }
     (StatusCode::OK, Json(serde_json::json!({ "token": token }))).into_response()
 }
 
 /// GET /api/soundboard/temp-play/{token} — fetch the temporarily stored audio.
+/// NOT one-shot: every room member (and every late joiner within the TTL)
+/// must be able to fetch the same token, so the entry is kept until the
+/// TTL backstop expires or an explicit stop clears it.
 pub async fn get_sb_temp_play(
     Path(token): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    let mut map = state.sb_temp_play.write().unwrap();
-    match map.remove(&token) {
-        Some((bytes, _)) => {
+    let map = state.sb_temp_play.read().unwrap();
+    match map.get(&token) {
+        Some((bytes, created)) => {
+            // Expired entries behave as missing
+            if created.elapsed() >= std::time::Duration::from_secs(900) {
+                return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error":"expired"}))).into_response();
+            }
             (
                 StatusCode::OK,
                 [(axum::http::header::CONTENT_TYPE, "audio/wav".to_string())],
-                bytes,
+                bytes.clone(),
             )
                 .into_response()
         }
@@ -8996,12 +9005,18 @@ pub async fn get_sb_temp_play(
     }
 }
 
+/// Remove a temp-play token (called when playback stops or the player leaves).
+pub fn remove_sb_temp_play(state: &Arc<AppState>, token: &str) {
+    if token.is_empty() { return; }
+    state.sb_temp_play.write().unwrap().remove(token);
+}
+
 /// GET /api/soundboard/temp-play — cleanup old entries (admin/cron).
 pub async fn sb_temp_play_cleanup(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     let before = state.sb_temp_play.read().unwrap().len();
-    state.sb_temp_play.write().unwrap().retain(|_, (_, created)| created.elapsed() < std::time::Duration::from_secs(120));
+    state.sb_temp_play.write().unwrap().retain(|_, (_, created)| created.elapsed() < std::time::Duration::from_secs(900));
     let after = state.sb_temp_play.read().unwrap().len();
     (StatusCode::OK, Json(serde_json::json!({ "cleaned": before - after, "remaining": after }))).into_response()
 }

@@ -2,6 +2,23 @@ import { test, expect } from '@playwright/test';
 
 const BASE = 'https://localhost:3443';
 
+// Voice joins need mic access — use Chromium's fake device so getUserMedia
+// resolves instantly and the voice bar actually shows (headless has no mic).
+test.use({
+    launchOptions: {
+        args: [
+            '--use-fake-device-for-media-stream',
+            '--use-fake-ui-for-media-stream',
+            '--autoplay-policy=no-user-gesture-required',
+        ],
+    },
+    // Mic permission must be granted per-context or getUserMedia hangs/denies,
+    // leaving the voice bar hidden after joining a voice channel.
+    contextOptions: {
+        permissions: ['microphone'],
+    },
+});
+
 function unique(base: string): string {
     return `${base}_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
 }
@@ -24,6 +41,12 @@ async function registerUser(page: any, username: string) {
         if (el) el.remove();
     });
     await page.waitForTimeout(500);
+    // Return the auth token + user object so callers can use u.token / u.user.id
+    return await page.evaluate((uname: string) => ({
+        token: localStorage.getItem('token'),
+        username: uname,
+        user: JSON.parse(localStorage.getItem('user') || '{}'),
+    }), username);
 }
 
 async function waitForWs(page: any, maxRetries = 60) {
@@ -62,7 +85,7 @@ async function createServerWithVoiceChannel(page: any): Promise<{ serverId: stri
         const res = await fetch(`/api/servers/${serverId}/channels`, {
             method: 'POST',
             headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ type: 'voice', encrypted_name: encName.ciphertext, name_nonce: encName.nonce }),
+            body: JSON.stringify({ channel_type: 'voice', encrypted_name: encName.ciphertext, name_nonce: encName.nonce }),
         });
         const ch = await res.json();
         return ch.id;
@@ -295,7 +318,7 @@ test.describe('Soundboard Mute/Disable (integration)', () => {
 
             // Unmute
             (window as any)._sbToggleMuteUser(testUid);
-            const unmuted = (window as any)._sbIsUserMuted(testUid);
+            const unmuted = !(window as any)._sbIsUserMuted(testUid);
 
             return { muted, unmuted };
         });
@@ -353,8 +376,9 @@ test.describe('Soundboard Mute/Disable (integration)', () => {
             (window as any)._sbToggleMuteUser(testUid);
             const isUnmuted = (window as any)._sbMutedList.indexOf(testUid) === -1;
 
-            const buttonTextOff = isUnmuted ? '✓ 🔊 Unmute Soundboard' : '🔇 Mute Soundboard';
-            const buttonClassOff = 'volume-menu-btn' + (isUnmuted ? ' active' : '');
+            // After unmuting, the button offers MUTING again (user is not muted)
+            const buttonTextOff = isUnmuted ? '🔇 Mute Soundboard' : '✓ 🔊 Unmute Soundboard';
+            const buttonClassOff = 'volume-menu-btn' + (isUnmuted ? '' : ' active');
 
             return { beforeMuted, isMuted, buttonTextOn, buttonClassOn, isUnmuted, buttonTextOff, buttonClassOff };
         });
@@ -394,8 +418,9 @@ test.describe('Soundboard Mute/Disable (integration)', () => {
             if (idx !== -1) (window as any)._sbDisabledUsers.splice(idx, 1);
             const isEnabled = !(window as any)._sbDisabledUsers.includes(testUid);
 
-            const buttonTextOff = isEnabled ? '✓ 🔊 Enable Soundboard' : '🚫 Disable Soundboard';
-            const buttonClassOff = 'volume-menu-btn' + (isEnabled ? ' active' : '');
+            // After re-enabling, the button offers DISABLING again
+            const buttonTextOff = isEnabled ? '🚫 Disable Soundboard' : '✓ 🔊 Enable Soundboard';
+            const buttonClassOff = 'volume-menu-btn' + (isEnabled ? '' : ' active');
 
             return { beforeDisabled, isDisabled, buttonTextOn, buttonClassOn, isEnabled, buttonTextOff, buttonClassOff };
         });

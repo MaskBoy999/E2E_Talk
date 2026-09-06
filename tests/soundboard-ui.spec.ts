@@ -41,10 +41,8 @@ test.describe('Soundboard + Pairing UI Integration', () => {
                 soundboardUploadBtn: !!document.getElementById('soundboard-upload-btn'),
                 soundboardFile: !!document.getElementById('soundboard-file'),
                 soundboardBtn: !!document.getElementById('voice-popup-soundboard'),
-                pairingModal: !!document.getElementById('pairing-modal'),
-                pairingCard: !!document.querySelector('.pairing-card'),
-                pairingQr: !!document.getElementById('pairing-qr'),
-                pairingStatus: !!document.getElementById('pairing-status'),
+                // F6 device pairing was removed entirely (PROGRESS.md #104)
+                pairingModalRemoved: !document.getElementById('pairing-modal'),
             };
         });
 
@@ -55,10 +53,7 @@ test.describe('Soundboard + Pairing UI Integration', () => {
         expect(elements.soundboardUploadBtn).toBe(true);
         expect(elements.soundboardFile).toBe(true);
         expect(elements.soundboardBtn).toBe(true);
-        expect(elements.pairingModal).toBe(true);
-        expect(elements.pairingCard).toBe(true);
-        expect(elements.pairingQr).toBe(true);
-        expect(elements.pairingStatus).toBe(true);
+        expect(elements.pairingModalRemoved).toBe(true);
     });
 
     test('No JS errors from soundboard-pairing.js', async ({ page }) => {
@@ -114,19 +109,17 @@ test.describe('Soundboard + Pairing UI Integration', () => {
         expect(btnInfo.text).toContain('Upload Sound');
     });
 
-    test('Pairing modal has claim button placeholder', async ({ page }) => {
-        const username = uniqueUsername('pair_claim_btn');
+    test('Pairing UI is fully removed (no orphan elements/handlers)', async ({ page }) => {
+        const username = uniqueUsername('pair_removed');
         await registerUser(page, username);
 
-        // Open pairing modal
-        await page.evaluate(() => {
-            document.getElementById('pairing-modal')!.style.display = 'flex';
-        });
-
-        // Check status text
-        const statusText = await page.evaluate(() => {
-            return document.getElementById('pairing-status')?.textContent;
-        });
-        expect(statusText).toBeTruthy();
+        const removed = await page.evaluate(() => ({
+            noModal: !document.getElementById('pairing-modal'),
+            noStatus: !document.getElementById('pairing-status'),
+            noQr: !document.getElementById('pairing-qr'),
+        }));
+        expect(removed.noModal).toBe(true);
+        expect(removed.noStatus).toBe(true);
+        expect(removed.noQr).toBe(true);
     });
 });

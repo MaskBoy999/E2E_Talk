@@ -89,7 +89,7 @@ async function createServerWithVoiceChannel(page: any): Promise<{ serverId: stri
         const res = await fetch(`/api/servers/${serverId}/channels`, {
             method: 'POST',
             headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ type: 'voice', encrypted_name: encName.ciphertext, name_nonce: encName.nonce }),
+            body: JSON.stringify({ channel_type: 'voice', encrypted_name: encName.ciphertext, name_nonce: encName.nonce }),
         });
         const ch = await res.json();
         return ch.id;

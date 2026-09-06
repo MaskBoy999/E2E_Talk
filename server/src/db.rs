@@ -1275,6 +1275,7 @@ impl Database {
         let _ = conn.execute_batch(include_str!("../migrations/080_soundboard_per_account.sql"));
         let _ = conn.execute_batch(include_str!("../migrations/081_soundboard_user_disable.sql"));
         let _ = conn.execute_batch(include_str!("../migrations/082_server_group_color.sql"));
+        let _ = conn.execute_batch(include_str!("../migrations/083_soundboard_clip_no_fk.sql"));
 
         // Data migration: normalize legacy space-separated CURRENT_TIMESTAMP values
         // ("YYYY-MM-DD HH:MM:SS") to fixed-width RFC3339 ("YYYY-MM-DDTHH:MM:SS.000000Z")

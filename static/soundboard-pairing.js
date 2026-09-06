@@ -383,7 +383,18 @@
 
     function playSoundboardClip(clipId, pauseBtn, playBtn, loadBtn) {
         var clip = _sbClipsCache.find(function (c) { return c.id === clipId; });
-        if (!clip) return;
+        if (!clip) {
+            // Not in cache yet — fetch the clip list, then retry once. Covers
+            // programmatic plays right after page load (cache still empty).
+            var retry = function () { playSoundboardClip(clipId, pauseBtn, playBtn, loadBtn); };
+            if (loadSoundboardClips) {
+                loadSoundboardClips().then(function () {
+                    var c2 = _sbClipsCache.find(function (c) { return c.id === clipId; });
+                    if (c2) retry();
+                }).catch(function () {});
+            }
+            return;
+        }
         // Check if soundboard is disabled (Settings→Voice or voice-popup toggle)
         if (_isSbDisabledGlobal()) {
             alert('Your soundboard is disabled. Go to Settings → Voice to re-enable it.');
