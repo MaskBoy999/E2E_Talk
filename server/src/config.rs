@@ -123,9 +123,15 @@ fn load_or_generate_key(env_var: &str, prefix: &str) -> String {
 
 impl Config {
     pub fn from_env() -> Self {
-        // Ensure .env exists before loading keys
-        let _ = std::fs::write(Path::new(".env"), "").ok();
-        
+        // Ensure .env exists without wiping it — the previous approach
+        // (std::fs::write("", "")) destroyed ALL user-configured env vars
+        // (DATABASE_URL, TURN_URLS, etc.) on every restart, and generated
+        // new JWT_SECRET/HMAC_KEY, invalidating every active session.
+        let env_path = Path::new(".env");
+        if !env_path.exists() {
+            let _ = std::fs::write(env_path, "").ok();
+        }
+
         let jwt_secret = load_or_generate_key("JWT_SECRET", "JWT_SECRET");
         let hmac_key = load_or_generate_key("HMAC_KEY", "HMAC_KEY");
 

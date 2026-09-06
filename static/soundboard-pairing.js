@@ -91,10 +91,9 @@
         _vpCb.addEventListener('change', function () { _setSbDisabledGlobal(_vpCb.checked); });
     }
 
-    // --- Per-user mute: stored in localStorage (like custom volume) ---
+    // --- Per-user mute: stored in localStorage (global across all servers/DMs) ---
     function _getMutedKey() {
-        var sid = window.currentServerId || '_global';
-        return 'sb_muted_' + sid;
+        return 'sb_muted';
     }
     function _getMutedList() {
         try { return JSON.parse(localStorage.getItem(_getMutedKey()) || '[]'); } catch (_) { return []; }
@@ -623,7 +622,9 @@
         }
     };
 
-    // Stop soundboard audio for the current user only (called on voice leave)
+    // Stop soundboard audio for the current user only (called on voice leave).
+    // Other users' sounds keep playing — their sounds are cleaned up when
+    // handleMemberLeave() fires on each peer's client.
     function _stopAllSoundboardAudio() {
         var myId = window.currentUserId;
         _sbAllPlaying = _sbAllPlaying.filter(function (entry) {
@@ -637,14 +638,12 @@
                     entry.pause();
                     entry.currentTime = 0;
                 } else if (entry && entry.currentTime !== undefined) {
-                    // HTML Audio element
                     entry.pause();
                     entry.currentTime = 0;
                 }
             } catch (_) {}
             return false; // remove this entry
         });
-        // Only clear _sbPlaying if it was the current user's sound
         if (_sbPlaying) {
             var playingUserId = (_sbPlaying.userId) || (_sbPlaying._sbUserId) || null;
             if (!myId || playingUserId === myId) {
@@ -653,7 +652,29 @@
             }
         }
     }
+
+    // Stop ALL soundboard audio regardless of who played it.
+    // Used when leaving a call: the user should stop hearing everything.
+    function _stopAllSoundboardAudioAll() {
+        _sbAllPlaying.forEach(function (entry) {
+            try {
+                if (entry.type === 'ctx' && entry.source) {
+                    entry.source.stop();
+                } else if (entry.pause) {
+                    entry.pause();
+                    entry.currentTime = 0;
+                } else if (entry && entry.currentTime !== undefined) {
+                    entry.pause();
+                    entry.currentTime = 0;
+                }
+            } catch (_) {}
+        });
+        _sbAllPlaying = [];
+        _sbPlaying = null;
+        _sbCurrentClipId = null;
+    }
     window._stopAllSoundboardAudio = _stopAllSoundboardAudio;
+    window._stopAllSoundboardAudioAll = _stopAllSoundboardAudioAll;
 
     function base64ToUint8(b64) {
         var binary = atob(b64);

@@ -1043,7 +1043,17 @@ const fileKeyCache = {
 const token = () => localStorage.getItem('token');
 const authFetch = (url, opts = {}) => {
     opts.headers = { ...(opts.headers || {}), 'Authorization': 'Bearer ' + token() };
-    return fetch(url, opts);
+    return fetch(url, opts).then(function(res) {
+        if (res.status === 401 && !url.includes('/login') && !url.includes('/register')) {
+            const stored = localStorage.getItem('token');
+            if (stored) {
+                localStorage.removeItem('token');
+                localStorage.removeItem('user');
+                window.location.href = 'login.html';
+            }
+        }
+        return res;
+    });
 };
 window.authFetch = authFetch;
 
@@ -11960,6 +11970,9 @@ function connectWebSocket(t) {
                                         E2ECrypto.restoreKeyBundle(bundle);
                                         loadServerGroupsLocal();
                                         renderServerList();
+                                        // Persist the merged blob so joined-server keys
+                                        // from the remote device are kept across logouts.
+                                        try { saveKeyBlobToServer(); } catch (_) {}
                                     }
                                 }
                             }
@@ -13475,16 +13488,8 @@ function renderServerList() {
             e.preventDefault();
             e.dataTransfer.dropEffect = 'move';
             clearDragIndicators();
-            var rect = el.getBoundingClientRect();
-            var midY = rect.top + rect.height / 2;
-            var range = rect.height * 0.25;
-            if (e.clientY < midY - range) {
-                el.classList.add('drag-over-top');
-            } else if (e.clientY > midY + range) {
-                el.classList.add('drag-over-bottom');
-            } else {
-                el.classList.add('drag-over-group');
-            }
+            // Always show "add to group" indicator
+            el.classList.add('drag-over-group');
         });
         el.addEventListener('dragleave', function() {
             el.classList.remove('drag-over-top', 'drag-over-bottom', 'drag-over-group');
@@ -13495,42 +13500,17 @@ function renderServerList() {
             clearDragIndicators();
             var draggedId = e.dataTransfer.getData('text/server-id');
             if (!draggedId || draggedId === el.dataset.id) return;
-            var rect = el.getBoundingClientRect();
-            var midY = rect.top + rect.height / 2;
-            var range = rect.height * 0.25;
             // Find the group this server icon belongs to (from DOM parent)
             var targetGroupId = el.dataset.groupId || null;
             if (!targetGroupId) {
                 var parentInner = el.closest('.server-group-inner');
                 if (parentInner) targetGroupId = parentInner.dataset.groupId || null;
             }
-            if (e.clientY >= midY - range && e.clientY <= midY + range) {
-                // Center zone: add server to this group (or create new group)
-                if (!targetGroupId) {
-                    createGroupWithServers(draggedId, el.dataset.id);
-                } else {
-                    moveServerToGroup(draggedId, targetGroupId);
-                }
+            // Always add dragged server to the target server's group
+            if (targetGroupId) {
+                moveServerToGroup(draggedId, targetGroupId);
             } else {
-                // Top/Bottom zones: reorder — place above or below
-                // If dropping between servers in the same group, keep in group
-                // If dropping on an ungrouped server, ungroup the dragged server
-                var targetServerId = el.dataset.id;
-                var ids = getAllServerIds();
-                var fromIdx = ids.indexOf(draggedId);
-                if (fromIdx !== -1) ids.splice(fromIdx, 1);
-                var toIdx = ids.indexOf(targetServerId);
-                if (toIdx === -1) toIdx = ids.length;
-                if (e.clientY > midY + range) toIdx++;
-                ids.splice(toIdx, 0, draggedId);
-                // If target is ungrouped, ungroup the dragged server too
-                if (!targetGroupId) {
-                    var draggedSv = servers.find(function(s) { return s.id === draggedId; });
-                    if (draggedSv && draggedSv.group_id) {
-                        moveServerToGroup(draggedId, null); // ungroup
-                    }
-                }
-                reorderServers(ids);
+                createGroupWithServers(draggedId, el.dataset.id);
             }
         });
     }
@@ -13584,14 +13564,8 @@ function renderServerList() {
                     wrapper.classList.add('drag-over-bottom');
                 }
             } else {
-                // Server drag: top/bottom = reorder, center = add to group
-                if (e.clientY >= midY - range && e.clientY <= midY + range) {
-                    wrapper.classList.add('drag-over-group');
-                } else if (e.clientY < midY) {
-                    wrapper.classList.add('drag-over-top');
-                } else {
-                    wrapper.classList.add('drag-over-bottom');
-                }
+                // Server drag: always show as "add to group" regardless of position
+                wrapper.classList.add('drag-over-group');
             }
         });
         wrapper.addEventListener('dragleave', function(e) {
@@ -13636,39 +13610,8 @@ function renderServerList() {
                     }).catch(function() {});
                 }
             } else if (draggedServerId) {
-                if (isCenter) {
-                    // Center zone: add server to this group
-                    moveServerToGroup(draggedServerId, gId);
-                } else {
-                    // Top/bottom zone: ungroup dragged server and place before/after this group
-                    // First, find the position of this group in the global order
-                    var allGids = serverGroups.map(function(g) { return g.id; });
-                    var grpIdx = allGids.indexOf(gId);
-                    var ids = getAllServerIds();
-                    // Remove dragged from current position
-                    var fromIdx2 = ids.indexOf(draggedServerId);
-                    if (fromIdx2 !== -1) ids.splice(fromIdx2, 1);
-                    // Find position: before first server of this group (top) or after last (bottom)
-                    var groupSv = serversByGroup[gId] || [];
-                    if (groupSv.length > 0) {
-                        if (e.clientY < midY) {
-                            // Top: place before first server in this group
-                            var anchorIdx = ids.indexOf(groupSv[0].id);
-                            if (anchorIdx === -1) anchorIdx = ids.length;
-                            ids.splice(anchorIdx, 0, draggedServerId);
-                        } else {
-                            // Bottom: place after last server in this group
-                            var anchorIdx2 = ids.indexOf(groupSv[groupSv.length - 1].id);
-                            if (anchorIdx2 === -1) anchorIdx2 = ids.length - 1;
-                            ids.splice(anchorIdx2 + 1, 0, draggedServerId);
-                        }
-                    } else {
-                        ids.push(draggedServerId);
-                    }
-                    // Ungroup the dragged server
-                    moveServerToGroup(draggedServerId, null);
-                    reorderServers(ids);
-                }
+                // Always add server to this group (regardless of drop position)
+                moveServerToGroup(draggedServerId, gId);
             }
         });
     });
@@ -13746,16 +13689,8 @@ function renderServerList() {
                 if (target) {
                     var icon = target.closest('.server-icon');
                     if (icon && icon.dataset.id && icon.dataset.id !== _touchDrag.id) {
-                        var rect = icon.getBoundingClientRect();
-                        var midY = rect.top + rect.height / 2;
-                        var range = rect.height * 0.25;
-                        if (touch.clientY < midY - range) {
-                            icon.classList.add('drag-over-top');
-                        } else if (touch.clientY > midY + range) {
-                            icon.classList.add('drag-over-bottom');
-                        } else {
-                            icon.classList.add('drag-over-group');
-                        }
+                        // Always show "add to group" indicator
+                        icon.classList.add('drag-over-group');
                     }
                 }
             }, { passive: false });
@@ -13772,25 +13707,16 @@ function renderServerList() {
                 if (target) {
                     var icon = target.closest('.server-icon');
                     if (icon && icon.dataset.id && icon.dataset.id !== _touchDrag.id) {
-                        var rect = icon.getBoundingClientRect();
-                        var midY = rect.top + rect.height / 2;
-                        var range = rect.height * 0.25;
-                        if (touch.clientY >= midY - range && touch.clientY <= midY + range) {
-                            var targetGroupId = icon.dataset.groupId || null;
-                            if (!targetGroupId) {
-                                createGroupWithServers(_touchDrag.id, icon.dataset.id);
-                            } else {
-                                moveServerToGroup(_touchDrag.id, targetGroupId);
-                            }
+                        // Always add dragged server to the target server's group
+                        var targetGroupId = icon.dataset.groupId || null;
+                        if (!targetGroupId) {
+                            var parentInner = icon.closest('.server-group-inner');
+                            if (parentInner) targetGroupId = parentInner.dataset.groupId || null;
+                        }
+                        if (targetGroupId) {
+                            moveServerToGroup(_touchDrag.id, targetGroupId);
                         } else {
-                            var ids = getAllServerIds();
-                            var fromIdx = ids.indexOf(_touchDrag.id);
-                            if (fromIdx !== -1) ids.splice(fromIdx, 1);
-                            var toIdx = ids.indexOf(icon.dataset.id);
-                            if (toIdx === -1) toIdx = ids.length;
-                            if (touch.clientY > midY + range) toIdx++;
-                            ids.splice(toIdx, 0, _touchDrag.id);
-                            reorderServers(ids);
+                            createGroupWithServers(_touchDrag.id, icon.dataset.id);
                         }
                     }
                 }

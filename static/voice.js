@@ -923,15 +923,18 @@
 
     function leaveVoice() {
         var wasDm = S.roomType === 'dm';
+        var wasConnected = S.connected;
+        // Stop ALL soundboard audio BEFORE teardown so we can still read voice state
+        // for the WS stop message and so _sbAllPlaying is cleared while S is still valid.
+        if (window._stopAllSoundboardAudioAll) window._stopAllSoundboardAudioAll();
+        else if (window._stopAllSoundboardAudio) window._stopAllSoundboardAudio();
         if (S.connected || S.roomType) {
             send({ type: 'voice_leave', room_type: S.roomType || 'server', channel_id: S.channelId || '', dm_channel_id: S.dmChannelId || '' });
+            // Send soundboard stop to room members (must happen BEFORE teardownRoom clears S)
+            if (window._sendSoundboardStop) window._sendSoundboardStop();
         }
         teardownRoom();
-        if (wasDm) playSound('leave');
-        else if (S.connected) playSound('leave');
-        // Stop the current user's soundboard audio and notify others
-        if (window._sendSoundboardStop) window._sendSoundboardStop();
-        if (window._stopAllSoundboardAudio) window._stopAllSoundboardAudio();
+        if (wasDm || wasConnected) playSound('leave');
         hideBar();
         hidePopup();
         hideDmPanel();
@@ -6530,13 +6533,17 @@
             var sbMutedList = (window._sbMutedList || []);
             var isSbMuted = sbMutedList.indexOf(uid) !== -1;
             var sbBtn = document.createElement('button');
-            sbBtn.className = 'volume-menu-btn';
-            sbBtn.textContent = isSbMuted ? '🔊 Unmute Soundboard' : '🔇 Mute Soundboard';
+            sbBtn.className = 'volume-menu-btn' + (isSbMuted ? ' active' : '');
+            sbBtn.textContent = isSbMuted ? '✓ 🔊 Unmute Soundboard' : '🔇 Mute Soundboard';
             sbBtn.addEventListener('click', function () {
                 var serverId = window.currentServerId;
                 // Update local mute list IMMEDIATELY (not in .then) so it takes effect right away
                 if (window._sbToggleMuteUser) {
                     window._sbToggleMuteUser(uid);
+                }
+                // Stop any currently playing sounds from this user immediately
+                if (window._handleSoundboardStop) {
+                    window._handleSoundboardStop({ user_id: uid });
                 }
                 // Also persist to server (fire-and-forget)
                 var method = isSbMuted ? 'DELETE' : 'PUT';
@@ -6556,8 +6563,8 @@
             var sbDisabledList = (window._sbDisabledUsers || []);
             var isSbDisabled = sbDisabledList.indexOf(uid) !== -1;
             var sbDisBtn = document.createElement('button');
-            sbDisBtn.className = 'volume-menu-btn';
-            sbDisBtn.textContent = isSbDisabled ? '🔊 Enable Soundboard' : '🚫 Disable Soundboard';
+            sbDisBtn.className = 'volume-menu-btn' + (isSbDisabled ? ' active' : '');
+            sbDisBtn.textContent = isSbDisabled ? '✓ 🔊 Enable Soundboard' : '🚫 Disable Soundboard';
             sbDisBtn.addEventListener('click', function () {
                 var serverId = window.currentServerId;
                 // Update local disabled list IMMEDIATELY
@@ -6566,6 +6573,10 @@
                     if (idx !== -1) window._sbDisabledUsers.splice(idx, 1);
                 } else {
                     window._sbDisabledUsers.push(uid);
+                }
+                // Stop any currently playing sounds from this user immediately
+                if (window._handleSoundboardStop) {
+                    window._handleSoundboardStop({ user_id: uid });
                 }
                 // Also persist to server (fire-and-forget)
                 var method = isSbDisabled ? 'DELETE' : 'PUT';

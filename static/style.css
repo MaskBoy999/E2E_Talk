@@ -327,6 +327,7 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     align-items: center;
     gap: clamp(4px, 0.8vw, 8px);
     width: 100%;
+    padding-top: 4px;
 }
 
 .server-icon {
@@ -9643,6 +9644,7 @@ body.resizing-dm { cursor: ns-resize !important; user-select: none; }
 }
 .volume-menu-btn:hover { background: #2c2c46; }
 .volume-menu-btn.danger { color: #ff6b6b; }
+.volume-menu-btn.active { color: #4fc3f7; background: rgba(79, 195, 247, 0.1); }
 .volume-menu-view-label {
     font-size: 11px; font-weight: 700;
     color: var(--text-faint, #777);
@@ -10193,7 +10195,7 @@ body.resizing-dm { cursor: ns-resize !important; user-select: none; }
 }
 
 /* Server groups */
-.server-group { margin-bottom: 2px; position: relative; }
+.server-group { margin-bottom: 8px; margin-top: 4px; position: relative; }
 .server-group-header { cursor: pointer; }
 .server-group-header {
     display: flex; align-items: center; justify-content: center;
@@ -10209,8 +10211,8 @@ body.resizing-dm { cursor: ns-resize !important; user-select: none; }
 }
 .server-group-inner {
     display: flex; flex-direction: column; align-items: center;
-    gap: 2px; padding: 4px 2px;
-    border: 1px solid var(--border-color, rgba(255,255,255,0.1));
+    gap: 2px; padding: 6px 4px;
+    border: 1px solid var(--folder-color, var(--border-color, rgba(255,255,255,0.1)));
     border-radius: 12px;
     margin: 2px 4px 4px;
     background: rgba(0,0,0,0.15);
@@ -10226,8 +10228,6 @@ body.resizing-dm { cursor: ns-resize !important; user-select: none; }
     box-shadow: inset 0 0 0 2px var(--accent, #5865f2);
     border-radius: 12px;
 }
-.server-group-header.drag-over-top { border-top: 2px solid var(--accent, #5865f2) !important; }
-.server-group-header.drag-over-bottom { border-bottom: 2px solid var(--accent, #5865f2) !important; }
 
 /* Collapsed group: 2x2 grid — servers sit in their corner based on order */
 .server-group-collapsed-grid {
@@ -10236,7 +10236,7 @@ body.resizing-dm { cursor: ns-resize !important; user-select: none; }
     height: clamp(42px, 7vw, 52px);
     margin: 0 auto;
     border-radius: 12px;
-    overflow: visible;
+    overflow: hidden;
     cursor: pointer;
 }
 .server-group-collapsed-grid .server-group-mini {
@@ -10270,7 +10270,8 @@ body.resizing-dm { cursor: ns-resize !important; user-select: none; }
 }
 /* Folder color ring on collapsed grid */
 .server-group-collapsed-grid.folder-color {
-    box-shadow: 0 0 0 2px var(--folder-color, var(--accent, #5865f2));
+    box-shadow: 0 0 0 2px var(--folder-color, var(--accent, #5865f2)),
+                0 0 0 4px rgba(0,0,0,0.25);
 }
 /* Folder color stripe on expanded header */
 .server-group-toggle.folder-color {
