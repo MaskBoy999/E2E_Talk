@@ -2145,6 +2145,7 @@ async fn handle_voice_join(
                 "clip_id": sb.clip_id,
                 "temp_token": sb.temp_token,
                 "play_start_ms": sb.started_at_ms,
+                "duration_ms": sb.duration_ms,
             })
         });
         let joined = serde_json::json!({
@@ -2408,11 +2409,19 @@ async fn voice_remove_from_room(state: &Arc<AppState>, room_id: &str, user_id: &
     voice_broadcast(state, room_id, &leave_msg).await;
     if leaver_was_playing {
         // The player themselves left — their sound dies for everyone else too.
-        voice_broadcast(state, room_id, &serde_json::json!({
+        let stop_msg = serde_json::json!({
             "type": "soundboard_stop",
             "user_id": user_id,
             "reason": "player_left",
-        })).await;
+        });
+        voice_broadcast(state, room_id, &stop_msg).await;
+        // Also broadcast to ALL connections of this user (all devices).
+        // This stops the sound on other devices of the same account that
+        // are NOT in the voice room — without this they keep playing.
+        state
+            .ws_manager
+            .broadcast_to_users(&[user_id.to_string()], &stop_msg.to_string())
+            .await;
     }
     let members_msg = serde_json::json!({
         "type": "voice_members",

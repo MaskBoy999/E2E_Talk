@@ -7,7 +7,7 @@
 // 3. Push notification handling
 // =====================================================================
 
-const CACHE_NAME = 'e2e-chat-v1';
+const CACHE_NAME = 'e2e-chat-v2';
 const STATIC_ASSETS = [
     '/',
     '/index.html',
@@ -56,6 +56,24 @@ self.addEventListener('fetch', (event) => {
                     headers: { 'Content-Type': 'application/json' },
                 });
             })
+        );
+        return;
+    }
+
+    // HTML shells: network-first so deploys land immediately. Caching the
+    // app shell cache-first meant a stale index.html (and its old ?v= script
+    // URLs) could be served for weeks — code fixes appeared to "not apply".
+    if (event.request.mode === 'navigate' || url.pathname === '/index.html' || url.pathname === '/login.html' || url.pathname === '/') {
+        event.respondWith(
+            fetch(event.request)
+                .then((response) => {
+                    if (response.ok) {
+                        const clone = response.clone();
+                        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+                    }
+                    return response;
+                })
+                .catch(() => caches.match(event.request).then((c) => c || caches.match('/index.html')))
         );
         return;
     }

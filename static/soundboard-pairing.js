@@ -35,29 +35,95 @@
     }
 
     // Play raw WAV bytes through the AudioContext (bypasses autoplay).
-    // Returns a source node that can be stopped later.
-    function _playViaAudioCtx(wavBytes, onEnded, offsetMs) {
+    // `offsetProvider` is either a number (ms) or — preferred — a FUNCTION
+    // returning the current position in ms. Passing a function lets us sample
+    // the position right before the source starts (i.e. AFTER fetch + decode),
+    // so the time spent decrypting/downloading/decoding counts toward the
+    // late-join offset and everyone stays in sync with the room.
+    // Returns a promise resolving to the source node, or null when the clip
+    // was already over (offset past the end) — in that case onEnded still
+    // fires so callers clean up their state.
+    function _playViaAudioCtx(wavBytes, onEnded, offsetProvider) {
         var ctx = _ensureSbAudioCtx();
-        if (!ctx) return null;
-        try {
-            return ctx.decodeAudioData(wavBytes.buffer).then(function (buffer) {
-                var source = ctx.createBufferSource();
+        if (!ctx) return Promise.reject(new Error('no AudioContext'));
+        // If the context is suspended, wait for resume() to complete before
+        // decoding — source.start() on a suspended context silently queues
+        // without playing, so the user hears nothing. When already running,
+        // skip the extra Promise microtask to avoid timing regressions.
+        var decode = function (c) {
+            return c.decodeAudioData(wavBytes.buffer).then(function (buffer) {
+                var getMs = (typeof offsetProvider === 'function') ? offsetProvider : function () { return offsetProvider || 0; };
+                var offsetSec = Math.max(0, (getMs() || 0) / 1000);
+                if (offsetSec >= buffer.duration) {
+                    if (onEnded) { try { onEnded(); } catch (_) {} }
+                    return null;
+                }
+                var source = c.createBufferSource();
                 source.buffer = buffer;
-                source.connect(ctx.destination);
+                source.connect(c.destination);
                 source.onended = function () {
                     if (onEnded) onEnded();
                 };
-                var offsetSec = (offsetMs || 0) / 1000;
-                // Clamp offset to buffer duration
-                if (offsetSec > 0 && offsetSec < buffer.duration) {
-                    source.start(0, offsetSec);
-                } else {
-                    source.start(0);
-                }
+                source.start(0, offsetSec);
                 return source;
             });
-        } catch (_) {
-            return null;
+        };
+        if (ctx.state === 'suspended') {
+            return ctx.resume().then(function () { return decode(ctx); }).catch(function () { return decode(ctx); });
+        }
+        return decode(ctx);
+    }
+
+    // Called when a relayed clip finishes naturally (or is skipped because the
+    // position was past its end). Removes the tracking entry and — for our own
+    // plays — restores the overlay's play button so the stale stop button
+    // doesn't linger after the sound ended.
+    function _sbOnClipEnded(userId, clipId) {
+        // Only act if a live entry still exists — a manual stop already removed
+        // it (source.stop() also fires onended, so this prevents double cleanup
+        // and a duplicate soundboard_stop broadcast).
+        var hadLive = _sbAllPlaying.some(function (entry) {
+            var eUserId = (entry && entry.userId) || (entry && entry._sbUserId) || null;
+            var eClipId = (entry && entry.clipId) || (entry && entry._sbClipId) || null;
+            return eUserId === userId && eClipId === clipId;
+        });
+        if (!hadLive) return;
+        _sbAllPlaying = _sbAllPlaying.filter(function (entry) {
+            var eUserId = (entry && entry.userId) || (entry && entry._sbUserId) || null;
+            var eClipId = (entry && entry.clipId) || (entry && entry._sbClipId) || null;
+            return !(eUserId === userId && eClipId === clipId);
+        });
+        // If this user has no more entries in _sbAllPlaying, clear the playing indicator
+        var stillPlaying = _sbAllPlaying.some(function (e) { return ((e && e.userId) || (e && e._sbUserId) || null) === userId; });
+        if (!stillPlaying) _sbSetPlaying(userId, false);
+        if (_sbPlaying && !(_sbPlaying.type === 'audio')) {
+            var pUserId = (_sbPlaying.userId) || (_sbPlaying._sbUserId) || null;
+            var pClipId = (_sbPlaying.clipId) || (_sbPlaying._sbClipId) || null;
+            if (pUserId === userId && pClipId === clipId) {
+                _sbPlaying = null;
+                _sbCurrentClipId = null;
+            }
+        }
+        if (userId === window.currentUserId && clipId) {
+            _resetSbOverlayForClip(clipId);
+            // Tell the room the clip is over so the server clears its playback
+            // state (late joiners won't try to sync to a finished clip).
+            var w = window.ws;
+            if (w && w.readyState === 1) {
+                var vs = window.VoiceManager && window.VoiceManager.getVoiceState && window.VoiceManager.getVoiceState();
+                if (vs && vs.inVoice) {
+                    try {
+                        w.send(JSON.stringify({
+                            type: 'soundboard_stop',
+                            user_id: window.currentUserId,
+                            server_id: window.currentServerId || '',
+                            channel_id: vs.channelId || '',
+                            room_type: vs.roomType || 'server',
+                            dm_channel_id: vs.dmChannelId || '',
+                        }));
+                    } catch (_) {}
+                }
+            }
         }
     }
 
@@ -291,57 +357,71 @@
 
     async function loadSoundboardClips() {
         if (!_sbClips) return;
-        // Show loading state while fetching
+        // Show loading state while fetching (only if cache is empty)
         if (_sbClipsCache.length === 0) {
             _sbClips.innerHTML = '<div class="soundboard-empty" style="animation:sbPulse 1.2s ease-in-out infinite">Loading sounds...</div>';
         }
         try {
             var resp = await fetch('/api/soundboard/my', { headers: authHeaders() });
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
             var clips = await resp.json();
-            _sbClipsCache = Array.isArray(clips) ? clips : [];
-            if (_sbClipsCache.length === 0) {
-                _sbClips.innerHTML = '<div class="soundboard-empty">No sounds yet. Upload an audio file to get started!</div>';
-                return;
-            }
-            var html = '';
-            _sbClipsCache.forEach(function (clip) {
-                html += '<div class="soundboard-clip" data-clip-id="' + clip.id + '">' +
-                    '<div class="soundboard-clip-info"><span class="soundboard-clip-name">' + escapeHtml(clip.name) + '</span>' +
-                    '<span class="soundboard-clip-dur">' + (clip.duration_ms / 1000).toFixed(1) + 's</span></div>' +
-                    '<div class="soundboard-clip-actions">' +
-                    '<button class="sb-play-btn" title="Play">&#9654;</button>' +
-                    '<button class="sb-pause-btn" title="Pause/Stop" style="display:none">&#9724;</button>' +
-                    '<button class="sb-loading" style="display:none;font-size:14px;color:var(--accent)">&#8987;</button>' +
-                    '<button class="sb-delete-btn" title="Delete">&#128465;</button>' +
-                    '</div></div>';
-            });
-            _sbClips.innerHTML = html;
-            _sbClips.querySelectorAll('.sb-play-btn').forEach(function (btn) {
-                btn.onclick = function () {
-                    var clipId = btn.closest('.soundboard-clip').dataset.clipId;
-                    var clipEl = btn.closest('.soundboard-clip');
-                    var pauseBtn = clipEl.querySelector('.sb-pause-btn');
-                    var loadBtn = clipEl.querySelector('.sb-loading');
-                    playSoundboardClip(clipId, pauseBtn, btn, loadBtn);
-                };
-            });
-            _sbClips.querySelectorAll('.sb-pause-btn').forEach(function (btn) {
-                btn.onclick = function () {
-                    _stopAllSoundboardAudio();
-                    // If in voice, broadcast stop to all room members
-                    _sendSoundboardStop();
-                    _resetSbButtons();
-                };
-            });
-            _sbClips.querySelectorAll('.sb-delete-btn').forEach(function (btn) {
-                btn.onclick = function () {
-                    var clipId = btn.closest('.soundboard-clip').dataset.clipId;
-                    deleteSoundboardClip(clipId);
-                };
-            });
+            if (!Array.isArray(clips)) throw new Error('bad response');
+            _sbClipsCache = clips;
+            renderSbClips();
         } catch (e) {
             console.error('Load soundboard clips error:', e);
+            // On failure, keep the old cache — only wipe on success.
+            // If we have cached clips, re-render them (stale list > empty list).
+            if (_sbClipsCache.length > 0) {
+                renderSbClips();
+            } else if (_sbClips) {
+                _sbClips.innerHTML = '<div class="soundboard-empty">Couldn\'t load sounds. Tap to retry.</div>';
+                _sbClips.onclick = function () { _sbClips.onclick = null; loadSoundboardClips(); };
+            }
         }
+    }
+
+    function renderSbClips() {
+        if (!_sbClips) return;
+        if (_sbClipsCache.length === 0) {
+            _sbClips.innerHTML = '<div class="soundboard-empty">No sounds yet. Upload an audio file to get started!</div>';
+            return;
+        }
+        var html = '';
+        _sbClipsCache.forEach(function (clip) {
+            html += '<div class="soundboard-clip" data-clip-id="' + clip.id + '">' +
+                '<div class="soundboard-clip-info"><span class="soundboard-clip-name">' + escapeHtml(clip.name) + '</span>' +
+                '<span class="soundboard-clip-dur">' + (clip.duration_ms / 1000).toFixed(1) + 's</span></div>' +
+                '<div class="soundboard-clip-actions">' +
+                '<button class="sb-play-btn" title="Play">&#9654;</button>' +
+                '<button class="sb-pause-btn" title="Pause/Stop" style="display:none">&#9724;</button>' +
+                '<button class="sb-loading" style="display:none;font-size:14px;color:var(--accent)">&#8987;</button>' +
+                '<button class="sb-delete-btn" title="Delete">&#128465;</button>' +
+                '</div></div>';
+        });
+        _sbClips.innerHTML = html;
+        _sbClips.querySelectorAll('.sb-play-btn').forEach(function (btn) {
+            btn.onclick = function () {
+                var clipId = btn.closest('.soundboard-clip').dataset.clipId;
+                var clipEl = btn.closest('.soundboard-clip');
+                var pauseBtn = clipEl.querySelector('.sb-pause-btn');
+                var loadBtn = clipEl.querySelector('.sb-loading');
+                playSoundboardClip(clipId, pauseBtn, btn, loadBtn);
+            };
+        });
+        _sbClips.querySelectorAll('.sb-pause-btn').forEach(function (btn) {
+            btn.onclick = function () {
+                _stopAllSoundboardAudio();
+                _sendSoundboardStop();
+                _resetSbButtons();
+            };
+        });
+        _sbClips.querySelectorAll('.sb-delete-btn').forEach(function (btn) {
+            btn.onclick = function () {
+                var clipId = btn.closest('.soundboard-clip').dataset.clipId;
+                deleteSoundboardClip(clipId);
+            };
+        });
     }
 
     function _resetSbButtons() {
@@ -448,6 +528,9 @@
                         room_type: vs.roomType || 'server',
                         dm_channel_id: vs.dmChannelId || '',
                         play_start_ms: playStartTime,
+                        // Real clip length so late joiners can skip clips that
+                        // already finished instead of replaying them from 0.
+                        duration_ms: (clip.duration_ms || 0),
                     }));
                 }).catch(function(e) {
                     console.error('Soundboard temp upload failed:', e);
@@ -505,7 +588,17 @@
         if (data.disabled) return;
         // For self: only play if hear-self is toggled on
         if (data.user_id === window.currentUserId) {
-            if (!_sbSelfHear) return;
+            if (!_sbSelfHear) {
+                // We still need the overlay's stop button to flip back when our
+                // clip ends naturally — schedule the cleanup with the known
+                // duration (always sent now). No audio is played for us.
+                var d = data.duration_ms || 0;
+                var cid = data.clip_id;
+                if (d > 0 && cid) {
+                    setTimeout(function () { _sbOnClipEnded(data.user_id, cid); }, d + 250);
+                }
+                return;
+            }
         } else {
             // For others: skip if individually muted
             if (_isUserMuted(data.user_id)) return;
@@ -514,6 +607,28 @@
         if (window.VoiceManager && window.VoiceManager.getState) {
             var _vs = window.VoiceManager.getState();
             if (_vs && _vs.deafened) return;
+        }
+        // Multi-device gate: only the device actually IN the target voice room
+        // plays the sound. A second device of the same account that is NOT in
+        // the call must ignore the relay — otherwise it plays audio that
+        // nobody can stop (the stop broadcast only reaches room members).
+        var _vsRoom = window.VoiceManager && window.VoiceManager.getVoiceState && window.VoiceManager.getVoiceState();
+        if (_vsRoom && _vsRoom.inVoice) {
+            var _sameRoom = false;
+            if ((data.room_type || 'server') === 'dm') {
+                _sameRoom = _vsRoom.roomType === 'dm' && _vsRoom.dmChannelId && _vsRoom.dmChannelId === data.dm_channel_id;
+            } else {
+                _sameRoom = _vsRoom.roomType !== 'dm' && _vsRoom.serverId && _vsRoom.serverId === data.server_id;
+            }
+            if (!_sameRoom) return; // play is for a different room
+        } else if (!(data._lateJoinOffset >= 0)) {
+            // Not in voice and not a late-join synthetic call → ignore
+            return;
+        }
+        // Mute suppress: store the play data so unmute can resume (like late join)
+        if (data.user_id !== window.currentUserId && _isUserMuted(data.user_id)) {
+            _sbSuppressedPlays[data.user_id] = data;
+            return;
         }
         // Determine play source: temp_token (fast HTTP fetch) or legacy encrypted_audio
         var playPromise;
@@ -534,15 +649,33 @@
         }
         playPromise.then(function(audioBytes) {
             if (!audioBytes || audioBytes.length === 0) return;
-            // Compute late-join offset from play_start_ms sent by the player
-            var lateOffset = data._lateJoinOffset || 0;
-            if (!lateOffset && data.play_start_ms) {
-                lateOffset = Math.max(0, Date.now() - data.play_start_ms);
-            }
+            // Track this user as actively playing (for the indicator badge)
+            _sbSetPlaying(data.user_id, true);
+            // Late-join offset is sampled lazily (as a function) so it is read
+            // right before the source actually starts — AFTER the fetch above
+            // and AFTER decodeAudioData. That way fetch + decrypt + decode
+            // time counts toward the offset and we start at the position the
+            // room is actually at, not the position when the message arrived.
+            var durationMs = data.duration_ms || 0;
+            var offsetProvider = function () {
+                // Prefer the authoritative server-stamped start time and
+                // recompute every call — this is what makes fetch + decrypt
+                // + decode time count toward the offset. _lateJoinOffset is
+                // only a fallback for messages without a timestamp.
+                if (data.play_start_ms) {
+                    return Math.max(0, Date.now() - data.play_start_ms);
+                }
+                return data._lateJoinOffset || 0;
+            };
+            // Quick skip: if we already know the duration and the offset is
+            // clearly past it, don't even bother decoding.
+            var earlyOff = offsetProvider();
+            if (durationMs > 0 && earlyOff >= durationMs) return;
             if (_sbAudioCtx || _ensureSbAudioCtx()) {
                 _playViaAudioCtx(audioBytes, function () {
-                    // on ended: remove from tracking
-                }, lateOffset).then(function (source) {
+                    // Clip finished naturally (or was skipped: past the end)
+                    _sbOnClipEnded(data.user_id, data.clip_id);
+                }, offsetProvider).then(function (source) {
                     if (!source) return;
                     var entry = { type: 'ctx', source: source, userId: data.user_id, clipId: data.clip_id };
                     _sbAllPlaying.push(entry);
@@ -552,7 +685,9 @@
                     }
                 }).catch(function (e) {
                     console.error('Soundboard AudioContext play error:', e);
-                    _playSbAudioFallback(audioBytes, data.user_id, data.clip_id);
+                    // Fall back to Audio() element — pass the current offset
+                    // so late-joiners still hear from the right position.
+                    _playSbAudioFallback(audioBytes, data.user_id, data.clip_id, offsetProvider());
                 });
             } else {
                 _playSbAudioFallback(audioBytes, data.user_id, data.clip_id);
@@ -562,18 +697,22 @@
         });
     };
 
-    function _playSbAudioFallback(audioBytes, userId, clipId) {
+    function _playSbAudioFallback(audioBytes, userId, clipId, startOffsetMs) {
         try {
             var blob = new Blob([audioBytes], { type: 'audio/wav' });
             var url = URL.createObjectURL(blob);
             var audio = new Audio(url);
             audio._sbUserId = userId;
             audio._sbClipId = clipId;
+            if (startOffsetMs && startOffsetMs > 0) {
+                audio.currentTime = startOffsetMs / 1000;
+            }
             _sbAllPlaying.push(audio);
             audio.onended = function () {
                 URL.revokeObjectURL(url);
                 var idx = _sbAllPlaying.indexOf(audio);
                 if (idx !== -1) _sbAllPlaying.splice(idx, 1);
+                _sbOnClipEnded(userId, clipId);
             };
             if (userId === window.currentUserId) {
                 _sbPlaying = audio;
@@ -589,6 +728,8 @@
     window._handleSoundboardStop = function (data) {
         // Only stop sounds from a specific user
         if (data.user_id) {
+            _sbSetPlaying(data.user_id, false);
+            delete _sbSuppressedPlays[data.user_id];
             var stoppedClipId = null;
             var stoppedAnything = false;
             _sbAllPlaying = _sbAllPlaying.filter(function (entry) {
@@ -624,11 +765,11 @@
                     _sbCurrentClipId = null;
                 }
             }
-            // Only reset buttons if we actually stopped something for this user
+            // Only reset buttons for the CURRENT user's clip — never wipe
+            // another user's stop across all overlay buttons (that hides the
+            // active pause button while self-hear audio keeps playing).
             if (stoppedClipId) {
                 _resetSbOverlayForClip(stoppedClipId);
-            } else if (stoppedAnything) {
-                _resetSbButtons();
             }
         }
     };
@@ -714,6 +855,32 @@
     Object.defineProperty(window, '_sbAllPlaying', { get: function() { return _sbAllPlaying; }, configurable: true });
 
     // --- Per-user disabled list (owner disabled this user's soundboard for everyone) ---
+    // --- Per-user suppression tracking (for mute→unmute resume like late-join) ---
+    var _sbSuppressedPlays = {}; // userId -> data (last play message, kept while muted)
+    window._sbResumeForUser = function (userId) {
+        var data = _sbSuppressedPlays[userId];
+        if (!data) return;
+        delete _sbSuppressedPlays[userId];
+        // Only resume if the clip hasn't finished: compute remaining time
+        var dur = data.duration_ms || 0;
+        var start = data.play_start_ms || 0;
+        if (dur > 0 && start > 0 && (Date.now() - start) >= dur) return; // already over
+        // Replay via the normal path — offset is recomputed lazily so it
+        // lands at the current position (like a late join).
+        window._handleSoundboardPlay(data);
+    };
+    window._sbPlayingUsers = {}; // userId -> true (who is currently playing)
+    window._sbOnSbPlayingChanged = null; // callback set by voice.js
+    function _sbSetPlaying(userId, playing) {
+        if (playing) {
+            window._sbPlayingUsers[userId] = true;
+        } else {
+            delete window._sbPlayingUsers[userId];
+        }
+        if (window._sbOnSbPlayingChanged) window._sbOnSbPlayingChanged();
+    }
+    window._sbSetPlaying = _sbSetPlaying;
+
     window._sbDisabledUsers = [];
     window._loadDisabledSoundboardUsers = async function () {
         var sid = window.currentServerId;

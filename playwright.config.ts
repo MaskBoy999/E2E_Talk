@@ -12,6 +12,9 @@ export default defineConfig({
         baseURL: 'https://localhost:3443',
         headless: true,
         ignoreHTTPSErrors: true,
+        // Service workers (the app's PWA SW) cache the app shell — in tests we
+        // must ALWAYS hit the network so code fixes are actually exercised.
+        serviceWorkers: 'block',
     },
     webServer: {
         command: 'cd server && cargo run --release 2>&1',

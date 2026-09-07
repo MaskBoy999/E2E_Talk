@@ -523,12 +523,13 @@ test.describe('Soundboard 3-Browser: Two-user integration', () => {
         await inviteAndJoin(page1, page2, u1.token, u2.token, serverId);
 
         // Simulate u2 playing — u1 hears it
-        await page1.evaluate(({ userId, clipId }: any) => {
+        await page1.evaluate(({ userId, clipId, serverId }: any) => {
             if ((window as any)._handleSoundboardPlay) {
-                (window as any)._handleSoundboardPlay({ user_id: userId, clip_id: clipId, encrypted_audio: 'fake', disabled: false });
+                (window as any)._handleSoundboardPlay({ user_id: userId, clip_id: clipId, encrypted_audio: 'fake', disabled: false, server_id: serverId, room_type: 'server', _lateJoinOffset: 0 });
             }
-        }, { userId: u2.user.id, clipId: 'test-clip' });
+        }, { userId: u2.user.id, clipId: 'test-clip', serverId });
 
+        await page1.waitForFunction(() => (window as any)._sbAllPlaying.length > 0, { timeout: 5000 });
         const u1HasSound = await page1.evaluate(() => (window as any)._sbAllPlaying.length);
         expect(u1HasSound).toBeGreaterThan(0);
 
@@ -619,7 +620,7 @@ test.describe('Soundboard 3-Browser: Two-user integration', () => {
         // Simulate another user's sounds playing on u1's client
         await page1.evaluate(({ userId, clipId }: any) => {
             if ((window as any)._handleSoundboardPlay) {
-                (window as any)._handleSoundboardPlay({ user_id: userId, clip_id: clipId, encrypted_audio: 'fake', disabled: false });
+                (window as any)._handleSoundboardPlay({ user_id: userId, clip_id: clipId, encrypted_audio: 'fake', disabled: false, _lateJoinOffset: 0 });
             }
         }, { userId: 'leaving-user', clipId: 'clip-a' });
 

@@ -442,6 +442,17 @@
 
     window.VoiceManager = VoiceManager;
 
+    // Soundboard playing indicator: refresh badges in-place when a user
+    // starts or stops playing a sound.
+    window._sbOnSbPlayingChanged = function () {
+        // Update badges for every visible member row + DM tile
+        Object.keys(S.members || {}).forEach(function (uid) {
+            updateMemberBadgesInPlace(uid);
+        });
+        // Also update self
+        updateMemberBadgesInPlace(getSelfId());
+    };
+
     // ------------------------------------------------------------------
     // Init / wiring
     // ------------------------------------------------------------------
@@ -2872,18 +2883,30 @@
         updateChannelChips();
 
         // Late-join soundboard sync: if a soundboard clip was already playing
-        // when we joined, pick it up from the current position
+        // when we joined, pick it up from the current position. The offset is
+        // NOT computed here — _handleSoundboardPlay samples Date.now() lazily
+        // right before playback starts, so fetch + decrypt + decode time is
+        // included and we land exactly where the room is.
         if (data.current_soundboard && window._handleSoundboardPlay) {
             var sb = data.current_soundboard;
-            var elapsed = Date.now() - (sb.started_at_ms || 0);
-            // Only play if the clip hasn't finished yet (estimate 30s max)
-            if (elapsed < 30000) {
+            var startedMs = sb.play_start_ms || sb.started_at_ms || 0;
+            var durMs = sb.duration_ms || 0;
+            // Skip clips that have definitely finished (duration known).
+            // No 30s hardcoded cap — duration_ms comes from the real clip.
+            var elapsedNow = Date.now() - startedMs;
+            if (!(durMs > 0 && elapsedNow >= durMs)) {
                 window._handleSoundboardPlay({
                     user_id: sb.user_id,
                     clip_id: sb.clip_id,
                     temp_token: sb.temp_token,
-                    play_start_ms: sb.play_start_ms || sb.started_at_ms,
-                    _lateJoinOffset: elapsed,
+                    play_start_ms: startedMs,
+                    duration_ms: durMs,
+                    _lateJoinOffset: elapsedNow > 0 ? elapsedNow : 0,
+                    // Room identity for the multi-device gate
+                    room_type: S.roomType || 'server',
+                    server_id: S.serverId || '',
+                    channel_id: S.channelId || '',
+                    dm_channel_id: S.dmChannelId || '',
                 });
             }
         }
@@ -5321,6 +5344,10 @@
         else if (m.deafened) html += ' <span class="' + prefix + '-badge" title="Deafened">🔈</span>';
         if (m.camera) html += ' <span class="' + prefix + '-badge" title="Camera">📷</span>';
         if (m.screen) html += ' <span class="' + prefix + '-badge" title="Screen">🖥️</span>';
+        // Soundboard playing indicator — shows who is playing a sound so you know who to mute
+        if (window._sbPlayingUsers && window._sbPlayingUsers[m.user_id]) {
+            html += ' <span class="' + prefix + '-badge sb-playing-indicator" title="Playing soundboard">🎵</span>';
+        }
         return html;
     }
 
@@ -6500,7 +6527,7 @@
                 if (s) s.value = '100';
                 var ci = menu.querySelector('.volume-menu-custom-input');
                 if (ci) ci.value = '100';
-                closeVolumeMenu();
+                // Don't close menu — just update the display in place
             });
             menu.appendChild(resetBtn);
         }
@@ -6514,17 +6541,33 @@
             var row1 = document.createElement('button');
             row1.className = 'volume-menu-btn';
             row1.textContent = m.force_muted ? '🔓 Unmute' : '🔇 Server Mute';
-            row1.addEventListener('click', function () { ownerControl(m.force_muted ? 'unmute' : 'mute', uid); closeVolumeMenu(); });
+            row1.addEventListener('click', function () {
+                var wasMuted = !!m.force_muted;
+                ownerControl(wasMuted ? 'unmute' : 'mute', uid);
+                // Flip label in place — don't close menu
+                m.force_muted = !wasMuted;
+                row1.textContent = m.force_muted ? '🔓 Unmute' : '🔇 Server Mute';
+                row1.className = 'volume-menu-btn' + (m.force_muted ? ' active' : '');
+            });
             menu.appendChild(row1);
             var row2 = document.createElement('button');
             row2.className = 'volume-menu-btn';
             row2.textContent = m.force_deafened ? '🔓 Undeafen' : '🔈 Server Deafen';
-            row2.addEventListener('click', function () { ownerControl(m.force_deafened ? 'undeafen' : 'deafen', uid); closeVolumeMenu(); });
+            row2.addEventListener('click', function () {
+                var wasDeaf = !!m.force_deafened;
+                ownerControl(wasDeaf ? 'undeafen' : 'deafen', uid);
+                m.force_deafened = !wasDeaf;
+                row2.textContent = m.force_deafened ? '🔓 Undeafen' : '🔈 Server Deafen';
+                row2.className = 'volume-menu-btn' + (m.force_deafened ? ' active' : '');
+            });
             menu.appendChild(row2);
             var row3 = document.createElement('button');
             row3.className = 'volume-menu-btn danger';
             row3.textContent = '👢 Kick';
-            row3.addEventListener('click', function () { ownerControl('kick', uid); closeVolumeMenu(); });
+            row3.addEventListener('click', function () {
+                ownerControl('kick', uid);
+                // Don't close menu — let the member row disappear on its own
+            });
             menu.appendChild(row3);
         }
 
@@ -6537,21 +6580,37 @@
             sbBtn.textContent = isSbMuted ? '✓ 🔊 Unmute Soundboard' : '🔇 Mute Soundboard';
             sbBtn.addEventListener('click', function () {
                 var serverId = window.currentServerId;
-                // Update local mute list IMMEDIATELY (not in .then) so it takes effect right away
+                // Update local mute list IMMEDIATELY (not in .then) so it takes
+                // effect right away. _sbToggleMuteUser returns true if the user
+                // is NOW muted (the closure's isSbMuted goes stale after the
+                // first click — always derive the new state from the toggle).
+                var nowMuted = false;
                 if (window._sbToggleMuteUser) {
-                    window._sbToggleMuteUser(uid);
+                    nowMuted = window._sbToggleMuteUser(uid);
                 }
-                // Stop any currently playing sounds from this user immediately
-                if (window._handleSoundboardStop) {
+                // Stop any currently playing sounds from this user immediately,
+                // but ONLY when muting. On unmute we must NOT call
+                // _handleSoundboardStop because it deletes _sbSuppressedPlays[uid]
+                // before _sbResumeForUser can read it — which kills the resume.
+                if (nowMuted && window._handleSoundboardStop) {
                     window._handleSoundboardStop({ user_id: uid });
                 }
                 // Also persist to server (fire-and-forget)
-                var method = isSbMuted ? 'DELETE' : 'PUT';
+                var method = nowMuted ? 'PUT' : 'DELETE';
+                var _sbAuthToken = localStorage.getItem('token') || '';
                 fetch('/api/soundboard/mute/' + serverId + '/' + uid, {
                     method: method,
-                    headers: Object.assign({ 'Content-Type': 'application/json' }, authHeaders()),
+                    headers: Object.assign({ 'Content-Type': 'application/json' }, _sbAuthToken ? { Authorization: 'Bearer ' + _sbAuthToken } : {}),
                 }).catch(function () {});
-                closeVolumeMenu();
+                // On UNMUTE: resume this user's soundboard sound if one was
+                // suppressed while they were muted (like a late join).
+                if (!nowMuted && window._sbResumeForUser) {
+                    window._sbResumeForUser(uid);
+                }
+                // Update the indicator IN PLACE — the menu stays open and the
+                // ✓ label flips without needing to reopen it.
+                sbBtn.className = 'volume-menu-btn' + (nowMuted ? ' active' : '');
+                sbBtn.textContent = nowMuted ? '✓ 🔊 Unmute Soundboard' : '🔇 Mute Soundboard';
             });
             menu.appendChild(sbBtn);
         }
@@ -6567,24 +6626,36 @@
             sbDisBtn.textContent = isSbDisabled ? '✓ 🔊 Enable Soundboard' : '🚫 Disable Soundboard';
             sbDisBtn.addEventListener('click', function () {
                 var serverId = window.currentServerId;
-                // Update local disabled list IMMEDIATELY
-                if (isSbDisabled) {
-                    var idx = window._sbDisabledUsers.indexOf(uid);
-                    if (idx !== -1) window._sbDisabledUsers.splice(idx, 1);
+                // Update local disabled list IMMEDIATELY, then derive the new
+                // state from the array itself (closure state goes stale).
+                var idx = window._sbDisabledUsers.indexOf(uid);
+                if (idx !== -1) {
+                    window._sbDisabledUsers.splice(idx, 1);
                 } else {
                     window._sbDisabledUsers.push(uid);
                 }
-                // Stop any currently playing sounds from this user immediately
-                if (window._handleSoundboardStop) {
+                var nowDisabled = window._sbDisabledUsers.indexOf(uid) !== -1;
+                // Stop sounds only when DISABLE-ing. On enable, do NOT call
+                // _handleSoundboardStop — it deletes _sbSuppressedPlays[uid]
+                // before _sbResumeForUser can read it (same bug as mute).
+                if (nowDisabled && window._handleSoundboardStop) {
                     window._handleSoundboardStop({ user_id: uid });
                 }
                 // Also persist to server (fire-and-forget)
-                var method = isSbDisabled ? 'DELETE' : 'PUT';
+                var method = nowDisabled ? 'PUT' : 'DELETE';
+                var _sbAuthToken2 = localStorage.getItem('token') || '';
                 fetch('/api/soundboard/disable/' + serverId + '/' + uid, {
                     method: method,
-                    headers: Object.assign({ 'Content-Type': 'application/json' }, authHeaders()),
+                    headers: Object.assign({ 'Content-Type': 'application/json' }, _sbAuthToken2 ? { Authorization: 'Bearer ' + _sbAuthToken2 } : {}),
                 }).catch(function () {});
-                closeVolumeMenu();
+                // On ENABLE: resume this user's soundboard sound if one was
+                // suppressed while they were disabled (like a late join).
+                if (!nowDisabled && window._sbResumeForUser) {
+                    window._sbResumeForUser(uid);
+                }
+                // Update the indicator IN PLACE — menu stays open, label flips.
+                sbDisBtn.className = 'volume-menu-btn' + (nowDisabled ? ' active' : '');
+                sbDisBtn.textContent = nowDisabled ? '✓ 🔊 Enable Soundboard' : '🚫 Disable Soundboard';
             });
             menu.appendChild(sbDisBtn);
         }
