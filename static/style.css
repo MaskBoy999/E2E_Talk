@@ -2100,6 +2100,18 @@ select.modal-input:focus {
     align-items: center;
     gap: 10px;
     padding: 8px 12px;
+    transition: background 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+    border-left: 3px solid transparent;
+}
+.dm-list .dm-item:hover {
+    background: rgba(79, 195, 247, 0.08);
+    transform: translateX(3px);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+    border-left-color: var(--accent);
+}
+.dm-list .dm-item:active {
+    transform: translateX(1px);
+    box-shadow: none;
 }
 
 .dm-avatar {
@@ -2115,6 +2127,11 @@ select.modal-input:focus {
     font-size: 14px;
     overflow: visible;
     flex-shrink: 0;
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+.dm-item:hover .dm-avatar {
+    transform: scale(1.1);
+    box-shadow: 0 0 10px rgba(79, 195, 247, 0.4);
 }
 
 .dm-avatar img {
@@ -2203,19 +2220,20 @@ select.modal-input:focus {
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 36px;
-    height: 36px;
+    width: 40px;
+    height: 40px;
     border-radius: 50%;
     background: transparent;
     cursor: pointer;
-    transition: background 0.15s, border-radius 0.15s;
+    transition: background 0.15s ease, border-radius 0.15s ease, transform 0.15s ease;
     margin: 2px auto;
     color: var(--text-muted);
 }
 .mentions-strip-btn:hover {
     background: var(--hover-bg);
     border-radius: 30%;
-    color: var(--text-primary);
+    color: var(--accent);
+    transform: scale(1.1);
 }
 .mentions-strip-btn.active {
     background: var(--accent);
@@ -2225,6 +2243,28 @@ select.modal-input:focus {
 
 .dm-strip-btn {
     position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    background: transparent;
+    cursor: pointer;
+    transition: background 0.15s ease, border-radius 0.15s ease, transform 0.15s ease;
+    color: var(--text-muted);
+    margin: 2px auto;
+}
+.dm-strip-btn:hover {
+    background: var(--hover-bg);
+    border-radius: 30%;
+    color: var(--accent);
+    transform: scale(1.1);
+}
+.dm-strip-btn.active {
+    background: var(--accent);
+    border-radius: 30%;
+    color: #fff;
 }
 
 .badge {

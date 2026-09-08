@@ -10735,6 +10735,28 @@ function setupMentionsInboxEvents() {
             closeMentionsInbox();
             if (messageId) navigateToMessage(serverId, channelId, dmChannelId, messageId);
         });
+        list.addEventListener('contextmenu', function (e) {
+            var itemEl = e.target.closest('.mention-inbox-item');
+            if (!itemEl) return;
+            e.preventDefault();
+            e.stopPropagation();
+            var idx = Array.from(list.querySelectorAll('.mention-inbox-item')).indexOf(itemEl);
+            var items = [
+                { label: '\u2714 Mark as Read', action: function () {
+                    if (idx >= 0 && idx < mentionItems.length) {
+                        mentionItems.splice(idx, 1);
+                        saveMentionState();
+                        renderMentionsInbox();
+                        updateMentionsBadge();
+                    }
+                }},
+                '---',
+                { label: '\u2714 Mark All as Read', action: function () { clearAllMentionItems(); }}
+            ];
+            if (typeof window.showContextMenu === 'function') {
+                window.showContextMenu(e.clientX, e.clientY, items);
+            }
+        });
     }
     var closeBtn = document.getElementById('close-mentions-inbox');
     if (closeBtn) closeBtn.addEventListener('click', closeMentionsInbox);
@@ -10749,6 +10771,17 @@ function initMentionsInbox() {
         btn.addEventListener('click', function (e) {
             e.stopPropagation();
             openMentionsInbox();
+        });
+        btn.addEventListener('contextmenu', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            var unreadCount = mentionItems.length;
+            var items = [
+                { label: '\u2714 Mark All as Read' + (unreadCount > 0 ? ' (' + unreadCount + ')' : ''), action: function () { clearAllMentionItems(); }}
+            ];
+            if (typeof window.showContextMenu === 'function') {
+                window.showContextMenu(e.clientX, e.clientY, items);
+            }
         });
     }
     setupMentionsInboxEvents();
