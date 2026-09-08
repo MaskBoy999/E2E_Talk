@@ -1276,6 +1276,8 @@
             });
             menu.appendChild(el);
         });
+        menu.style.left = x + 'px';
+        menu.style.top = y + 'px';
         document.body.appendChild(menu);
         // Keep menu on screen (check all edges)
         var rect = menu.getBoundingClientRect();
