@@ -8626,6 +8626,22 @@ body.streamer-mode .dm-forward-item:hover {
     filter: none;
     user-select: auto;
 }
+/* Blur category/group names, vault file names, and soundboard clip names */
+body.streamer-mode .server-group-toggle,
+body.streamer-mode .channel-category-header,
+body.streamer-mode .vault-file-name,
+body.streamer-mode .soundboard-clip-name {
+    filter: blur(4px);
+    transition: filter 0.15s ease;
+    user-select: none;
+}
+body.streamer-mode .server-group-toggle:hover,
+body.streamer-mode .channel-category-header:hover,
+body.streamer-mode .vault-file-name:hover,
+body.streamer-mode .soundboard-clip-name:hover {
+    filter: none;
+    user-select: auto;
+}
 /* ===== Keyboard Shortcuts Display ===== */
 .shortcuts-list {
     display: flex;

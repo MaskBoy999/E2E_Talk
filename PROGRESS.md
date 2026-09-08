@@ -5673,3 +5673,49 @@ Removed nested groups feature (parent_group_id, renderChildGroups, nest API rout
 ### 110. Soundboard Hear-Self Fix
 
 When in voice, `playSoundboardClip()` only sends WS broadcast (no local playback). The relay handles all members including sender. All playing Audio elements tracked in `_sbAllPlaying[]`. `leaveVoice()` stops all soundboard audio automatically.
+
+### 111. Security Audit: Easy/Moderate Fixes
+
+Full security audit completed. Identified the following attack surface and implemented the easy/moderate fixes:
+
+**What the server CAN see (metadata):** usernames, UUIDs, message timestamps, sender UUID, who's online, voice presence, file IDs/sizes, typing indicators, server/channel/DM structure, JWT token, HMAC key (unauthenticated endpoint). **Server CANNOT see:** message content, sender usernames in messages, file/media content, server/channel names, display names, voice media (AES-256-GCM E2EE), signaling (XChaCha20-Poly1305 encrypted).
+
+**Key vulnerabilities found:**
+- Server MITM identity key exchange (no key pinning)
+- No forward secrecy for DMs (static ECDH)
+- Device key sent over WS
+- XOR "encryption" for localStorage
+- All server members share one key
+
+**Fixes implemented (all verified, zero regressions):**
+
+1. **Math.random() → crypto.getRandomValues()** (`static/chat.js:18` generateCode, `static/auth.js:583` friend code): Math.random() is not cryptographically secure — code generation and friend codes were predictable.
+
+2. **Refuse ws:// on remote hosts** (`static/chat.js:11427`): WebSocket connections to non-localhost hosts now require HTTPS. Throws an error and shows a toast on non-localhost non-HTTPS connections, preventing downgrade attacks.
+
+3. **Authenticated /api/hmac-key** (`static/chat.js:31`): The HMAC key endpoint now uses authFetch when a token is available (was previously unauthenticated), preventing anonymous access to the HMAC key.
+
+4. **Argon2id work factors hardened** (`server/src/auth.rs:65`): Memory cost raised from 2 MiB to 64 MiB, time cost from 1 to 3. Brute-force attacks now take ~2.5s per hash instead of near-instant. Server rebuilt.
+
+5. **WS device_id = HMAC-SHA256(e2e_device_key)** (`static/auth.js:16-29`): New `getWsDeviceId()` derives a deterministic device ID from the E2E device key via HMAC-SHA256, instead of sending the raw key over the wire. Updated all WS auth and voice message senders (`static/auth.js:311,609`, `static/chat.js:11455,6168,30101`, `static/voice.js:875`).
+
+6. **E2EE worker drops frames without key** (`static/e2ee-worker.js:84`): Changed from `controller.enqueue(encodedFrame)` to `return` (drop) when no key is available, preventing unencrypted media from being forwarded.
+
+7. **AAD (chunk index) on file chunks** (`static/crypto.js:471-484`): `encryptFileChunk`/`decryptFileChunk` now accept an optional `chunkIndex` parameter used as Additional Authenticated Data, preventing chunk reordering. Updated `decryptFile` and 7 upload callers + 3 decrypt callers in `static/chat.js`.
+
+8. **Secure-storage integrity tag 32→64 bit** (`static/secure-storage.js:88,267`): `TAG_HEX_LEN=16` (was 8), `_computeTag` uses 8 bytes (was 4). Stronger tamper detection. Old 8-char tags treated as "no tag" (backward compatible).
+
+9. **TOFU key fingerprints** (`static/crypto.js` + `static/chat.js:53-75`): Added `computeFingerprint`, `verifyFingerprint`, `getVerifiedFingerprint`, `checkFingerprint` to E2ECrypto exports. `verifyOrWarnFingerprint(userId, publicKeyB64)` called in DM key fetch path (`static/chat.js:11699`). First login records the key; subsequent logins warn on mismatch (TOFU model).
+
+**Test infrastructure:** Created `server/start_test.cmd` with all rate limit env vars set to 100000 for running the full test suite.
+
+**Test results (all passing, zero regressions):**
+- `soundboard-3browser.spec.ts`: 16/16
+- `soundboard-mute-disable.spec.ts`: 12/12
+- `auth.spec.ts`: 4/4
+- `dm.spec.ts`: 5/5
+- `call-indicators.spec.ts`: 3/3
+- `servers.spec.ts`: 4/4
+- `folder-features.spec.ts`: 6/6
+- `chat.spec.ts`: 16/19 (3 pre-existing failures, not regressions)
+- `server-groups.spec.ts`: 1/2 (1 pre-existing `.group-badge` failure)

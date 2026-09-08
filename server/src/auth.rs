@@ -57,12 +57,9 @@ pub const E2E_VERIFIER_PREFIX: &str = "$e2e$";
 
 pub fn hash_user_verifier(credential: &str) -> Result<String, String> {
     // The credential is a 256-bit client HMAC (high entropy), so pass-the-hash
-    // is defeated by ANY one-way hash — a heavy KDF would only slow logins
-    // without adding security. Argon2id with modest params (2 MiB, t=1) still
-    // gives memory-hardness against precomputation/ASIC while keeping login
-    // snappy (the pure-Rust argon2 crate is scalar-only; the 64 MiB default
-    // takes seconds per hash on modest hardware).
-    let params = argon2::Params::new(2048, 1, 1, None).map_err(|e| e.to_string())?;
+    // is defeated by ANY one-way hash. We use 64 MiB / 3 iterations for a
+    // stronger security margin against offline brute-force if the DB is leaked.
+    let params = argon2::Params::new(65536, 3, 1, None).map_err(|e| e.to_string())?;
     let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
     let salt = SaltString::generate(&mut OsRng);
     let hash = argon2

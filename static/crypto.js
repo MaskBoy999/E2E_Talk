@@ -468,15 +468,17 @@ var E2ECrypto = (() => {
 
     // ---- File Encryption (XChaCha20-Poly1305 chunked) ----
     function generateFileKey() { return randomBytes(32); }
-    function encryptFileChunk(fileKey, plaintextChunk) {
-        const enc = _aeadEncryptRaw(plaintextChunk, fileKey, null, null);
+    function encryptFileChunk(fileKey, plaintextChunk, chunkIndex) {
+        const aad = chunkIndex != null ? new TextEncoder().encode('chunk:' + chunkIndex) : null;
+        const enc = _aeadEncryptRaw(plaintextChunk, fileKey, aad, null);
         return concatBuffers(enc.nonce, enc.ciphertext);
     }
-    function decryptFileChunk(fileKey, encryptedChunk) {
+    function decryptFileChunk(fileKey, encryptedChunk, chunkIndex) {
         if (encryptedChunk.length < 40) throw new Error('Encrypted chunk too short');
         const nonce = encryptedChunk.slice(0, 24);
         const ct = encryptedChunk.slice(24);
-        return _aeadDecryptRaw(ct, fileKey, null, nonce);
+        const aad = chunkIndex != null ? new TextEncoder().encode('chunk:' + chunkIndex) : null;
+        return _aeadDecryptRaw(ct, fileKey, aad, nonce);
     }
 
     // Decrypt a complete file (all chunks concatenated) with the given file key.
@@ -497,7 +499,7 @@ var E2ECrypto = (() => {
                 chunkData = encBytes.slice(start);
             }
             if (chunkData.length < 40) throw new Error('Encrypted chunk too short');
-            const decrypted = decryptFileChunk(fileKey, chunkData);
+            const decrypted = decryptFileChunk(fileKey, chunkData, i);
             decryptedChunks.push(decrypted);
         }
         let totalLength = 0;
@@ -801,6 +803,35 @@ var E2ECrypto = (() => {
         },
         // Secure memory erasure (S7)
         secureZero: _secureZero,
+
+        // Identity key fingerprints (TOFU verification)
+        computeFingerprint: function(publicKeyBytes) {
+            // SHA-256 of the public key, formatted as groups of 4 hex chars
+            var hash = sodium.crypto_hash_sha256(publicKeyBytes instanceof Uint8Array ? publicKeyBytes : new Uint8Array(publicKeyBytes));
+            var hex = '';
+            for (var i = 0; i < 32; i++) {
+                hex += ('0' + hash[i].toString(16)).slice(-2);
+            }
+            // Format as 8 groups of 4 chars: AAAA-BBBB-CCCC-...
+            return hex.match(/.{1,4}/g).join('-');
+        },
+        verifyFingerprint: function(userId, fingerprint) {
+            try {
+                var key = 'e2e_verified_fp_' + userId;
+                localStorage.setItem(key, fingerprint);
+            } catch (_) {}
+        },
+        getVerifiedFingerprint: function(userId) {
+            try {
+                return localStorage.getItem('e2e_verified_fp_' + userId) || null;
+            } catch (_) { return null; }
+        },
+        checkFingerprint: function(userId, publicKeyBytes) {
+            var verified = localStorage.getItem('e2e_verified_fp_' + userId);
+            if (!verified) return null; // no prior verification
+            var current = E2ECrypto.computeFingerprint(publicKeyBytes);
+            return verified === current;
+        },
 
         // Soundboard byte-level encryption
         encryptBytesForServer: encryptBytesForServer,

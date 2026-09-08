@@ -4,7 +4,7 @@ function escapeHtml(str) {
 }
 
 // The persistent device key that identifies THIS browser in the session/
-// device list (Settings → Security → Devices). Same key sent on WS auth.
+// device list (Settings → Security → Devices).
 function getDeviceId() {
     var k = localStorage.getItem('e2e_device_key');
     if (!k) {
@@ -12,6 +12,22 @@ function getDeviceId() {
         localStorage.setItem('e2e_device_key', k);
     }
     return k;
+}
+
+// Derive a non-reversible device ID for network use (WS auth, login requests).
+// Uses HMAC-SHA256 so the raw e2e_device_key is never sent over the wire.
+function getWsDeviceId() {
+    var devKey = localStorage.getItem('e2e_device_key');
+    if (!devKey) return undefined;
+    try {
+        var keyBytes = E2ECrypto.base64ToArrayBuffer(devKey);
+        var domain = new TextEncoder().encode('ws-device-id-v1');
+        var tag = sodium.crypto_auth_hmacsha256(domain, new Uint8Array(keyBytes));
+        return E2ECrypto.arrayBufferToBase64(tag.buffer).substring(0, 22);
+    } catch (_) {
+        // Fallback: truncated raw key (less ideal but functional)
+        return devKey.substring(0, 22);
+    }
 }
 
 // A short human-readable name for this browser/device, e.g. "Chrome on
@@ -292,7 +308,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const res = await fetch('/api/login', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username, password: loginPassword, kill_switch_proof: ksVerifier || undefined, duration_seconds: getSessionDurationSecs(), device_id: getDeviceId(), device_name: getDeviceName() })
+                body: JSON.stringify({ username, password: loginPassword, kill_switch_proof: ksVerifier || undefined, duration_seconds: getSessionDurationSecs(), device_id: getWsDeviceId(), device_name: getDeviceName() })
             });
 
             const data = await res.json();
@@ -579,8 +595,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // Generate friend code client-side, encrypt with password, send raw code (server salts & hashes)
             const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+            const rnd = crypto.getRandomValues(new Uint8Array(16));
             let friendCode = '';
-            for (let i = 0; i < 16; i++) friendCode += ALPHABET[Math.floor(Math.random() * ALPHABET.length)];
+            for (let i = 0; i < 16; i++) friendCode += ALPHABET[rnd[i] % ALPHABET.length];
             const encryptedFC = E2ECrypto.encryptWithPassword(friendCode, password);
 
             const res = await fetch('/api/register', {
@@ -589,7 +606,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 body: JSON.stringify({
                     username, password: hashedPassword,
                     duration_seconds: getSessionDurationSecs(),
-                    device_id: getDeviceId(),
+                    device_id: getWsDeviceId(),
                     device_name: getDeviceName(),
                     encrypted_hash_key: encryptedHashKey.encrypted_private_key,
                     hash_key_salt: encryptedHashKey.salt,

@@ -82,18 +82,14 @@ addEventListener('rtctransform', (event) => {
             const t0 = Date.now();
             try {
                 if (!myKey) {
-                    // Frames arriving at a transform with no key: forwarded
-                    // UNENCRYPTED → the decoder gets ciphertext → concealment /
-                    // black. Counts discriminate a key-timing bug (transform
-                    // runs but keyless) from a wiring bug (transform never
-                    // receives frames at all — the one-sided audio signature).
+                    // No key yet: DROP the frame rather than forwarding
+                    // unencrypted bytes to the decoder or server/peers.
                     if (operation === 'decrypt') {
                         if (encodedFrame.type !== undefined) __dbg.decNoKey++;
                     } else {
                         __dbg.encNoKey++;
                     }
-                    controller.enqueue(encodedFrame);
-                    return;
+                    return; // drop — key will arrive shortly, next frames will encrypt/decrypt
                 }
                 // Start the video keyframe timer on the first video frame
                 // (RTCEncodedVideoFrame has `.type`; audio frames don't).

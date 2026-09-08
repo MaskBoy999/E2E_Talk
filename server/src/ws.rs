@@ -1967,6 +1967,19 @@ async fn handle_ws_message(
                 .broadcast_to_users_except_device(&[user_id.to_string()], &device_id, &msg.to_string())
                 .await;
         }
+        "blob_updated" => {
+            // Relay to all OTHER connections of this user so they re-fetch the
+            // updated key blob (server keys, DM keys, file keys, profiles, etc.)
+            let device_id = parsed.get("device_id").and_then(|s| s.as_str()).unwrap_or("").to_string();
+            let msg = serde_json::json!({
+                "type": "blob_updated",
+                "device_id": device_id,
+            });
+            state
+                .ws_manager
+                .broadcast_to_users_except_device(&[user_id.to_string()], &device_id, &msg.to_string())
+                .await;
+        }
         "voice_join" => {
             handle_voice_join(parsed, state, user_id).await;
         }

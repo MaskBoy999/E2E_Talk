@@ -14,8 +14,9 @@ window.showToast = function showToast(msg) {
 
 function generateCode(len) {
     const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    const rnd = crypto.getRandomValues(new Uint8Array(len));
     let code = '';
-    for (let i = 0; i < len; i++) code += ALPHABET[Math.floor(Math.random() * ALPHABET.length)];
+    for (let i = 0; i < len; i++) code += ALPHABET[rnd[i] % ALPHABET.length];
     return code;
 }
 
@@ -28,7 +29,7 @@ async function ensureHmacKey() {
     if (_hmacKeyFetchPromise) return _hmacKeyFetchPromise;
     _hmacKeyFetchPromise = (async function () {
         try {
-            var res = await fetch('/api/hmac-key');
+            var res = token() ? await authFetch('/api/hmac-key') : await fetch('/api/hmac-key');
             if (res.ok) {
                 var data = await res.json();
                 if (data.hmac_key) {
@@ -48,6 +49,27 @@ async function ensureHmacKey() {
     } finally {
         _hmacKeyFetchPromise = null;
     }
+}
+
+// TOFU fingerprint verification: when fetching an identity public key,
+// check against a previously-verified fingerprint. Shows a warning on
+// mismatch (potential MITM). First-use: stores fingerprint automatically.
+function verifyOrWarnFingerprint(userId, publicKeyB64) {
+    if (!userId || !publicKeyB64 || !E2ECrypto || !E2ECrypto.computeFingerprint) return;
+    try {
+        var pubBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(publicKeyB64));
+        var currentFp = E2ECrypto.computeFingerprint(pubBytes);
+        var verifiedFp = E2ECrypto.getVerifiedFingerprint(userId);
+        if (verifiedFp) {
+            if (verifiedFp !== currentFp) {
+                showToast('⚠ Security warning: identity key changed for ' + userId + '. Possible MITM attack.');
+                console.warn('FINGERPRINT MISMATCH for', userId, '- expected', verifiedFp, 'got', currentFp);
+            }
+        } else {
+            // First use: auto-verify (Trust On First Use)
+            E2ECrypto.verifyFingerprint(userId, currentFp);
+        }
+    } catch (_) {}
 }
 
 let ws = null;
@@ -87,6 +109,18 @@ function _broadcastGroupsChanged() {
             window.ws.send(JSON.stringify({ type: 'groups_changed', device_id: deviceId }));
         }
     }, 500);
+}
+var _blobUpdateTimer = null;
+var _suppressBlobBroadcast = false;
+function _broadcastBlobUpdated() {
+    if (_suppressBlobBroadcast) return;
+    if (_blobUpdateTimer) clearTimeout(_blobUpdateTimer);
+    _blobUpdateTimer = setTimeout(function() {
+        if (window.ws && window.ws.readyState === 1) {
+            var deviceId = localStorage.getItem('e2e_device_id') || '';
+            window.ws.send(JSON.stringify({ type: 'blob_updated', device_id: deviceId }));
+        }
+    }, 1000);
 }
 function loadServerGroupsLocal() {
     try {
@@ -517,6 +551,8 @@ function saveKeyBlobToServer() {
                 salt: enc.salt,
                 nonce: enc.nonce,
             })
+        }).then(function() {
+            _broadcastBlobUpdated();
         }).catch(function(err) {
             console.error('saveKeyBlobToServer: HTTP PUT failed', err);
         });
@@ -3350,7 +3386,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const CHUNK = 65536;
             const chunks = [];
             for (let i = 0; i < compressed.length; i += CHUNK) {
-                chunks.push(E2ECrypto.encryptFileChunk(fileKey, compressed.slice(i, i + CHUNK)));
+                chunks.push(E2ECrypto.encryptFileChunk(fileKey, compressed.slice(i, i + CHUNK), chunks.length));
             }
             let totalLen = 0;
             for (const c of chunks) totalLen += c.length;
@@ -6164,7 +6200,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Custom session duration chosen in settings (clamped 1min–30 days;
                 // the server clamps again defensively).
                 var durationSecs = getSessionDurationSecs();
-                var devId = localStorage.getItem('e2e_device_key');
+                var devId = typeof getWsDeviceId === 'function' ? getWsDeviceId() : localStorage.getItem('e2e_device_key');
                 const res = await fetch('/api/reauth', {
                     method: 'POST',
                     headers: {
@@ -6874,7 +6910,14 @@ document.addEventListener('DOMContentLoaded', () => {
         var sdSelect = document.getElementById('self-destruct-days');
         var sdSaveBtn = document.getElementById('self-destruct-save-btn');
         var sdStatus = document.getElementById('self-destruct-status');
+        var sdPwSection = document.getElementById('self-destruct-password-section');
+        var sdPwInput = document.getElementById('self-destruct-password');
+        var sdConfirmBtn = document.getElementById('self-destruct-confirm-btn');
+        var sdCancelBtn = document.getElementById('self-destruct-cancel-btn');
+        var sdTogglePw = document.getElementById('toggle-self-destruct-password');
         if (!sdSelect || !sdSaveBtn) return;
+
+        var _pendingDays = 0;
 
         // Load current setting
         async function loadSelfDestruct() {
@@ -6887,30 +6930,80 @@ document.addEventListener('DOMContentLoaded', () => {
             } catch (_) {}
         }
 
+        function resetPwInputs() {
+            if (sdPwInput) { sdPwInput.type = 'password'; sdPwInput.value = ''; }
+            if (sdTogglePw) { sdTogglePw.innerHTML = '&#128065;'; sdTogglePw.classList.remove('active'); }
+        }
+
+        function setSdStatus(msg, kind) {
+            if (!sdStatus) return;
+            sdStatus.textContent = msg;
+            sdStatus.style.color = kind === 'error' ? 'var(--danger,#ed4245)' : (kind === 'success' ? '#43b581' : 'var(--text-muted)');
+        }
+
+        // Toggle password visibility
+        if (sdTogglePw) {
+            sdTogglePw.addEventListener('click', function () {
+                if (!sdPwInput) return;
+                var visible = sdPwInput.type === 'text';
+                sdPwInput.type = visible ? 'password' : 'text';
+                this.innerHTML = visible ? '&#128065;' : '&#128064;';
+                this.classList.toggle('active', !visible);
+            });
+        }
+
+        // Save button: show password section instead of confirm()
         sdSaveBtn.addEventListener('click', async function () {
             var days = parseInt(sdSelect.value, 10) || 0;
-            if (days > 0) {
-                if (!confirm('Enable self-destruct? Your account will be permanently deleted after ' + days + ' days of inactivity (no sign-in).')) return;
-            }
-            try {
-                var res = await authFetch('/api/me/self-destruct', {
-                    method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ self_destruct_days: days })
-                });
-                var data = await res.json();
-                if (res.ok) {
-                    sdStatus.textContent = days > 0 ? 'Self-destruct set: account deletes after ' + days + ' days of inactivity' : 'Self-destruct disabled';
-                    sdStatus.style.color = 'var(--accent,#4fc3f7)';
-                } else {
-                    sdStatus.textContent = data.error || 'Failed to save';
+            _pendingDays = days;
+            setSdStatus('', '');
+            resetPwInputs();
+            sdPwSection.style.display = 'block';
+            if (sdPwInput) sdPwInput.focus();
+        });
+
+        // Cancel: hide password section
+        if (sdCancelBtn) {
+            sdCancelBtn.addEventListener('click', function () {
+                sdPwSection.style.display = 'none';
+                resetPwInputs();
+                setSdStatus('', '');
+            });
+        }
+
+        // Confirm: send request with password
+        if (sdConfirmBtn) {
+            sdConfirmBtn.addEventListener('click', async function () {
+                var pw = sdPwInput ? sdPwInput.value : '';
+                if (!pw) { setSdStatus('Enter your password to confirm', 'error'); return; }
+                var days = _pendingDays;
+                if (days > 0) {
+                    if (!confirm('Enable self-destruct? Your account will be permanently deleted after ' + days + ' days of inactivity (no sign-in).')) return;
+                }
+                setSdStatus('Saving…', '');
+                try {
+                    var current_password = await computeHashedPasswordGlobal(pw);
+                    var res = await authFetch('/api/me/self-destruct', {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ self_destruct_days: days, current_password: current_password })
+                    });
+                    var data = await res.json();
+                    if (res.ok) {
+                        sdStatus.textContent = days > 0 ? 'Self-destruct set: account deletes after ' + days + ' days of inactivity' : 'Self-destruct disabled';
+                        sdStatus.style.color = 'var(--accent,#4fc3f7)';
+                        sdPwSection.style.display = 'none';
+                        resetPwInputs();
+                    } else {
+                        sdStatus.textContent = data.error || 'Failed to save';
+                        sdStatus.style.color = 'var(--danger,#ed4245)';
+                    }
+                } catch (e) {
+                    sdStatus.textContent = 'Server not reachable';
                     sdStatus.style.color = 'var(--danger,#ed4245)';
                 }
-            } catch (e) {
-                sdStatus.textContent = 'Server not reachable';
-                sdStatus.style.color = 'var(--danger,#ed4245)';
-            }
-        });
+            });
+        }
 
         // Load on security tab open
         loadSelfDestruct();
@@ -11425,8 +11518,14 @@ var _wsReconnectTimer = null;
 
 function connectWebSocket(t) {
     const isSecure = window.location.protocol === 'https:';
-    if (!isSecure && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
-        console.warn('WARNING: WebSocket running over unencrypted ws://. Use HTTPS for secure connections.');
+    const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+    if (!isSecure && !isLocal) {
+        console.error('REFUSED: WebSocket requires HTTPS (wss://). Plain ws:// is not allowed on remote hosts.');
+        showToast('Secure connection required. Please use HTTPS.');
+        return;
+    }
+    if (!isSecure && isLocal) {
+        console.warn('WARNING: WebSocket running over unencrypted ws:// on localhost. Use HTTPS for production.');
     }
     // Clear any pending reconnection timer so we don't cascade reconnects
     if (_wsReconnectTimer) {
@@ -11445,7 +11544,7 @@ function connectWebSocket(t) {
     window.ws = ws;
 
     ws.onopen = () => {
-        var devId = localStorage.getItem('e2e_device_key');
+        var devId = typeof getWsDeviceId === 'function' ? getWsDeviceId() : localStorage.getItem('e2e_device_key');
         var lastSeen = localStorage.getItem('e2e_last_seen') || undefined;
         // Send the CURRENT token from localStorage, falling back to the one we
         // were given: if a re-auth replaced the session between page load and
@@ -11669,6 +11768,7 @@ function connectWebSocket(t) {
                                 const res = await authFetch('/api/identity/' + currentDmOtherUser.id);
                                 const d = await res.json();
                                 otherPubKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(d.identity_public_key));
+                                verifyOrWarnFingerprint(currentDmOtherUser.id, d.identity_public_key);
                                 // Reuse fetched otherPubKey to decrypt sender_username
                                 if (data.message.encrypted_sender_username && data.message.sender_username_nonce && kp) {
                                     try {
@@ -11970,15 +12070,54 @@ function connectWebSocket(t) {
                                         E2ECrypto.restoreKeyBundle(bundle);
                                         loadServerGroupsLocal();
                                         renderServerList();
-                                        // Persist the merged blob so joined-server keys
-                                        // from the remote device are kept across logouts.
-                                        try { saveKeyBlobToServer(); } catch (_) {}
+                                        // No re-save needed: restoreKeyBundle is additive.
                                     }
                                 }
                             }
                         }
                     }
                 } catch (e) { console.error('groups_changed sync error:', e); }
+                break;
+            case 'blob_updated':
+                // Another device saved a new key blob. Re-fetch and restore all
+                // keys so server keys, DM keys, file keys, profiles, etc. are
+                // all up-to-date on this device.
+                if (data.device_id !== undefined) {
+                    var _myDevId = localStorage.getItem('e2e_device_id') || '';
+                    if (data.device_id === _myDevId) break;
+                }
+                (async function() {
+                    try {
+                        var _encPw = localStorage.getItem('e2e_encrypted_password');
+                        var _devKeyStr = localStorage.getItem('e2e_device_key');
+                        if (!_encPw || !_devKeyStr) return;
+                        var _dk = new Uint8Array(E2ECrypto.base64ToArrayBuffer(_devKeyStr));
+                        var _pwB64 = E2ECrypto.decodeEncryptedFileKey(_encPw, _dk);
+                        if (!_pwB64) return;
+                        var _pw = atob(_pwB64);
+                        var _t = localStorage.getItem('token');
+                        var _blobResp = await fetch('/api/key-blob', { headers: { 'Authorization': 'Bearer ' + _t } });
+                        if (!_blobResp.ok) return;
+                        var _blobData = await _blobResp.json();
+                        if (!_blobData.encrypted_blob) return;
+                        var _bundle = E2ECrypto.decryptKeyBundle(_blobData.encrypted_blob, _pw, _blobData.salt, _blobData.nonce);
+                        if (!_bundle) return;
+                        E2ECrypto.restoreKeyBundle(_bundle);
+                        loadServerGroupsLocal();
+                        renderServerList();
+                        // Re-render DM list if DM keys changed
+                        if (typeof renderDmSidebar === 'function') renderDmSidebar();
+                        // Refresh current server's channel list if viewing one
+                        // (server keys are already in the restored bundle)
+                        if (currentServerId) {
+                            if (typeof loadChannels === 'function') await loadChannels(currentServerId);
+                        }
+                        // No re-save needed: restoreKeyBundle is additive (only sets
+                        // keys, doesn't delete), so remote keys are preserved in
+                        // localStorage. The next natural saveKeyBlobToServer() call
+                        // will include them.
+                    } catch (e) { console.error('blob_updated sync error:', e); }
+                })();
                 break;
             case 'server_deleted':
                 if (data.server_id) {
@@ -13356,7 +13495,13 @@ function renderServerList() {
         });
     });
     // Ungrouped servers (sorted by position)
-    servers.filter(function(s) { return !groupedServerIds[s.id]; })
+    // Also include servers whose group_id points to a non-existent group (orphaned)
+    servers.filter(function(s) {
+        if (!groupedServerIds[s.id]) return true; // not in any group
+        // In a group but the group doesn't exist in sortedGroups — orphaned
+        var gid = s.group_id || '';
+        return !sortedGroups.some(function(g) { return g.id === gid; });
+    })
         .sort(function(a, b) { return (a.position || 0) - (b.position || 0); })
         .forEach(function(s) { items.push({ type: 'server', server: s }); });
 
@@ -24096,7 +24241,7 @@ async function uploadFileToServer(file) {
         const start = i * CHUNK_SIZE;
         const end = Math.min(start + CHUNK_SIZE, file.size);
         const chunkData = new Uint8Array(await file.slice(start, end).arrayBuffer());
-        const encryptedChunk = E2ECrypto.encryptFileChunk(fileKey, chunkData);
+        const encryptedChunk = E2ECrypto.encryptFileChunk(fileKey, chunkData, i);
         const chunkRes = await authFetch('/api/files/' + file_id + '/chunk/' + i, {
             method: 'POST',
             headers: { 'Content-Type': 'application/octet-stream' },
@@ -24709,7 +24854,7 @@ async function downloadAndDecryptFile(fileId, fileKeyB64, mimeType, fileSize) {
             chunkData = data.slice(start);
         }
         if (chunkData.length < 40) throw new Error('Encrypted chunk too short');
-        const decrypted = E2ECrypto.decryptFileChunk(fileKey, chunkData);
+        const decrypted = E2ECrypto.decryptFileChunk(fileKey, chunkData, i);
         decryptedChunks.push(decrypted);
     }
 
@@ -24748,7 +24893,7 @@ async function downloadAndDecryptStickerData(fileId, fileKey, mimeType) {
             chunkData = data.slice(start);
         }
         if (chunkData.length < 40) throw new Error('Encrypted chunk too short');
-        const decrypted = E2ECrypto.decryptFileChunk(fileKey, chunkData);
+        const decrypted = E2ECrypto.decryptFileChunk(fileKey, chunkData, i);
         decryptedChunks.push(decrypted);
     }
 
@@ -26787,7 +26932,7 @@ async function sendStickerMessage(sticker) {
                 const start = i * CHUNK_SIZE;
                 const end = Math.min(start + CHUNK_SIZE, decrypted.length);
                 const chunkData = decrypted.slice(start, end);
-                const encryptedChunk = E2ECrypto.encryptFileChunk(freshKey, chunkData);
+                const encryptedChunk = E2ECrypto.encryptFileChunk(freshKey, chunkData, i);
                 const chunkRes = await authFetch('/api/files/' + newFileId + '/chunk/' + i, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/octet-stream' },
@@ -27371,7 +27516,7 @@ async function processAndUploadSticker() {
             const start = i * CHUNK_SIZE;
             const end = Math.min(start + CHUNK_SIZE, fileData.length);
             const chunkData = fileData.slice(start, end);
-            const encryptedChunk = E2ECrypto.encryptFileChunk(fileKey, chunkData);
+            const encryptedChunk = E2ECrypto.encryptFileChunk(fileKey, chunkData, i);
             if (progressText) progressText.textContent = 'Uploading... (' + (i + 1) + '/' + totalChunks + ')';
             if (progressFill) progressFill.style.width = (15 + Math.round(75 * (i + 1) / totalChunks)) + '%';
             const chunkRes = await authFetch('/api/files/' + file_id + '/chunk/' + i, {
@@ -27713,7 +27858,7 @@ async function decryptProfilePicData(fileKey, data) {
             return null;
         }
         try {
-            const decrypted = E2ECrypto.decryptFileChunk(fileKey, chunkData);
+            const decrypted = E2ECrypto.decryptFileChunk(fileKey, chunkData, i);
             decryptedChunks.push(decrypted);
         } catch (e) {
             return null; // Decryption failed - not encrypted or wrong key
@@ -28686,7 +28831,7 @@ async function processAndUploadProfilePic() {
             var chunkData = bytes.slice(start, end);
             
             // Encrypt chunk
-            var encryptedChunk = E2ECrypto.encryptFileChunk(fileKey, chunkData);
+            var encryptedChunk = E2ECrypto.encryptFileChunk(fileKey, chunkData, i);
             
             var chunkRes = await authFetch('/api/files/' + fileId + '/chunk/' + i, {
                 method: 'POST',
@@ -28832,7 +28977,7 @@ async function processAndUploadServerPicture() {
             var start = i * CHUNK_SIZE;
             var end = Math.min(start + CHUNK_SIZE, bytes.length);
             var chunkData = bytes.slice(start, end);
-            var encryptedChunk = E2ECrypto.encryptFileChunk(fileKey, chunkData);
+            var encryptedChunk = E2ECrypto.encryptFileChunk(fileKey, chunkData, i);
             var chunkRes = await authFetch('/api/files/' + fileId + '/chunk/' + i, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/octet-stream' },
@@ -30080,7 +30225,7 @@ async function verifyStoredPassword() {
             var res = await authFetch('/api/reauth', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ password: sendPassword, device_id: localStorage.getItem('e2e_device_key') || undefined, device_name: getDeviceName() })
+                body: JSON.stringify({ password: sendPassword, device_id: (typeof getWsDeviceId === 'function' ? getWsDeviceId() : undefined) || localStorage.getItem('e2e_device_key') || undefined, device_name: getDeviceName() })
             });
             if (res.ok) {
                 // Update the auth token from the reauth response (extends session)
@@ -30949,7 +31094,7 @@ async function uploadBannerImage(file) {
         var start = i * CHUNK_SIZE;
         var end = Math.min(start + CHUNK_SIZE, file.size);
         var chunkData = new Uint8Array(await file.slice(start, end).arrayBuffer());
-        var encryptedChunk = E2ECrypto.encryptFileChunk(fileKey, chunkData);
+        var encryptedChunk = E2ECrypto.encryptFileChunk(fileKey, chunkData, i);
         var chunkRes = await authFetch('/api/files/' + fileId + '/chunk/' + i, {
             method: 'POST',
             headers: { 'Content-Type': 'application/octet-stream' },

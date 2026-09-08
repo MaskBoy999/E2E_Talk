@@ -84,8 +84,8 @@
     var LOCAL_KEY_NAME = 'e2e_local_storage_key';
     var MAGIC = '~';  // single magic byte prepended to encrypted values
 
-    // Length of the plaintext checksum tag in hex chars (4 bytes → 8 nibbles)
-    var TAG_HEX_LEN = 8;
+    // Length of the plaintext checksum tag in hex chars (8 bytes → 16 nibbles)
+    var TAG_HEX_LEN = 16;
 
     // Cached encryption/decryption key as a Uint8Array
     var _key = null;
@@ -261,14 +261,14 @@
     }
 
     /**
-     * Compute an 8-hex-char integrity tag for a plaintext string.
-     * Derived from the first 4 bytes of _mixHash(utf8 bytes).
+     * Compute a 16-hex-char integrity tag for a plaintext string.
+     * Derived from the first 8 bytes of _mixHash(utf8 bytes).
      */
     function _computeTag(plaintext) {
         var bytes = new TextEncoder().encode(plaintext);
         var hash = _mixHash(bytes);
         var hex = '';
-        for (var i = 0; i < 4; i++) {
+        for (var i = 0; i < 8; i++) {
             var b = hash[i];
             hex += '0123456789abcdef'[(b >> 4) & 0xf];
             hex += '0123456789abcdef'[b & 0xf];

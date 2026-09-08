@@ -1551,15 +1551,9 @@
 
         'focus_composer': { key: '/', shift: false, ctrl: false, label: 'Focus Message Composer' },
 
-        'edit_last_message': { key: 'e', shift: false, ctrl: false, label: 'Edit Last Message' },
-
-        'reply_to_last': { key: 'r', shift: false, ctrl: false, label: 'Reply to Last Message' },
-
         'toggle_upload': { key: 'u', shift: false, ctrl: false, label: 'Open Upload' },
 
-        'toggle_emoji_picker': { key: 'e', shift: true, ctrl: false, label: 'Toggle Emoji Picker' },
-
-        'new_server': { key: 'n', shift: true, ctrl: true, label: 'Create/Join Server' }
+        'toggle_emoji_picker': { key: 'e', shift: true, ctrl: false, label: 'Toggle Emoji Picker' }
 
     };
 
@@ -1879,9 +1873,7 @@
                 navigateServerNav(action === 'nav_next_server' ? 1 : -1);
 
                 break;
-
-
-            case 'focus_composer':
+            case 'focus_composer':
 
                 var msgInput = document.getElementById('message-input');
 
@@ -1890,43 +1882,19 @@
                 break;
 
 
-            case 'edit_last_message':
 
-                editOwnLastMessage();
-
-                break;
-
-
-            case 'reply_to_last':
-
-                replyToLastMessage();
-
-                break;
-
-
-            case 'toggle_upload':
-
+            case 'toggle_upload':
                 var attachBtn = document.getElementById('attach-btn');
 
                 if (attachBtn) attachBtn.click();
 
                 break;
 
-
-            case 'toggle_emoji_picker':
+            case 'toggle_emoji_picker':
 
                 var emojiBtn = document.getElementById('sticker-btn');
 
                 if (emojiBtn) emojiBtn.click();
-
-                break;
-
-
-            case 'new_server':
-
-                var addBtn = document.getElementById('add-server-btn');
-
-                if (addBtn) addBtn.click();
 
                 break;
 

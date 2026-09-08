@@ -8934,6 +8934,21 @@ pub async fn set_self_destruct(
         Ok(id) => id,
         Err(e) => return e.into_response(),
     };
+    let current_password = match body.get("current_password").and_then(|v| v.as_str()) {
+        Some(p) => p,
+        None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Password required"}))).into_response(),
+    };
+    let stored_hash = match state.db.get_password_hash_by_id(&user_id) {
+        Ok(h) => h,
+        Err(_) => return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "User not found"}))).into_response(),
+    };
+    let valid = match verify_user_password_and_upgrade(&state, &user_id, &stored_hash, current_password) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    if !valid {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Wrong password"}))).into_response();
+    }
     let days = body["self_destruct_days"].as_i64().unwrap_or(0);
     let days = if days < 0 { 0 } else if days > 365 { 365 } else { days };
     match state.db.set_self_destruct_days(&user_id, days) {

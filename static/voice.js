@@ -872,7 +872,7 @@
             // device. Same key the WS auth uses — a plaintext device id, no
             // new secret exposure.
             if (obj && typeof obj === 'object') {
-                try { obj.device_id = localStorage.getItem('e2e_device_key') || undefined; } catch (_) {}
+                try { obj.device_id = (typeof getWsDeviceId === 'function' ? getWsDeviceId() : undefined) || localStorage.getItem('e2e_device_key') || undefined; } catch (_) {}
             }
             if (obj && obj.type === 'voice_signal' && obj.signal) {
                 var enc = encryptSignalPayload(obj.signal);

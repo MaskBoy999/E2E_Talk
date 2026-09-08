@@ -848,6 +848,16 @@
                         </select>
                         <button class="btn-reauth-confirm" id="self-destruct-save-btn" style="font-size:12px;padding:6px 14px;">Save</button>
                     </div>
+                    <div id="self-destruct-password-section" style="display:none;margin-top:10px;">
+                        <div class="auth-input-row" style="margin-bottom:8px;">
+                            <input type="password" id="self-destruct-password" placeholder="Enter your password to confirm" class="modal-input auth-code-input" style="flex:1;" autocomplete="current-password" />
+                            <button type="button" class="toggle-visibility-btn" id="toggle-self-destruct-password" title="Show/Hide">&#128065;</button>
+                        </div>
+                        <div style="display:flex;gap:8px;margin-top:6px;">
+                            <button class="btn-reauth-confirm" id="self-destruct-confirm-btn" style="font-size:12px;padding:6px 14px;">Confirm</button>
+                            <button class="btn-delete-account" id="self-destruct-cancel-btn" style="font-size:12px;padding:6px 14px;background:var(--text-muted,#888);color:#fff;">Cancel</button>
+                        </div>
+                    </div>
                     <p id="self-destruct-status" style="margin-top:8px;font-size:13px;"></p>
                 </div>
                 <div class="settings-group">
