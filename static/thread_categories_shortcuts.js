@@ -2574,6 +2574,7 @@
                 html += '<button id="css-import-backup" style="padding:10px 20px;border-radius:8px;border:2px solid #7c4dff;background:rgba(124,77,255,0.1);color:#b388ff;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">\ud83d\udce5 Import Backup</button>';
             } else {
                 html += '<button id="css-copy" style="padding:10px 20px;border-radius:8px;border:none;background:linear-gradient(135deg,#4fc3f7,#29b6f6);color:#fff;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s;box-shadow:0 2px 8px rgba(79,195,247,0.3)">\ud83d\udccb Copy CSS</button>';
+                html += '<button id="css-refresh" style="padding:10px 20px;border-radius:8px;border:2px solid #4fc3f7;background:transparent;color:#4fc3f7;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">\ud83d\udd04 Refresh</button>';
             }
 
             html += '</div>';
@@ -2717,6 +2718,26 @@
                 });
             }
 
+            // Refresh (re-fetch style.css for Default slot)
+            var refreshBtn = document.getElementById('css-refresh');
+            if (refreshBtn) {
+                refreshBtn.addEventListener('click', function () {
+                    invalidateCssSlotCache();
+                    refreshBtn.textContent = '\u23f3 Loading\u2026';
+                    refreshBtn.disabled = true;
+                    fetchDefaultCss().then(function (css) {
+                        var ta = document.getElementById('custom-css-textarea');
+                        if (ta) {
+                            ta.value = css;
+                            ta.style.height = 'auto';
+                            ta.style.height = Math.min(ta.scrollHeight, 600) + 'px';
+                        }
+                        refreshBtn.textContent = '\u2705 Refreshed!';
+                        setTimeout(function () { refreshBtn.textContent = '\ud83d\udd04 Refresh'; refreshBtn.disabled = false; }, 1500);
+                    });
+                });
+            }
+
             // Edit slot button
             var editBtn = document.getElementById('css-edit-slot');
             if (editBtn) {
@@ -2798,5 +2819,6 @@
     }
     window.renderCustomCssSettings = renderCustomCssSettings;
     window.applyCustomCss = applyCustomCss;
+    window.invalidateCssSlotCache = invalidateCssSlotCache;
 
 })();

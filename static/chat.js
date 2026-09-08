@@ -3264,6 +3264,14 @@ document.addEventListener('DOMContentLoaded', () => {
         renderSessionLog();
         renderDevicesPanel();
         renderSecurityScheduledList();
+        // Invalidate CSS cache so default slot always shows fresh style.css
+        if (typeof window.invalidateCssSlotCache === 'function') window.invalidateCssSlotCache();
+        // Re-render CSS tab if it's currently active so it always shows fresh style.css
+        var cssTab = settingsModal.querySelector('.settings-tab[data-tab="custom-css-settings"]');
+        if (cssTab && cssTab.classList.contains('active') && typeof renderCustomCssSettings === 'function') {
+            var cc = document.getElementById('custom-css-editor-container');
+            if (cc) renderCustomCssSettings(cc);
+        }
     });
     document.getElementById('close-settings').addEventListener('click', () => {
         settingsModal.style.display = 'none';
