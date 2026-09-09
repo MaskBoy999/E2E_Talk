@@ -137,10 +137,279 @@ document.addEventListener('DOMContentLoaded', () => {
         loadAllData();
     }
 
+});  // close DOMContentLoaded — functions below are global
+
+var _pendingPreToken = null;
+var _admin2faMode = 'enroll';
+
+// Check 2FA status when admin panel loads and update button label
+function updateAdmin2faButton() {
+    var btn = document.getElementById('admin-2fa-panel-btn');
+    if (!btn) return;
+    var token = sessionStorage.getItem('admin_token') || '';
+    fetch('/api/admin/2fa/status', { headers: { 'Authorization': 'Bearer ' + token } })
+        .then(function (r) {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        })
+        .then(function (data) {
+            if (data.enabled) {
+                btn.textContent = '2FA: ON';
+                btn.style.background = '#2e7d32';
+            } else {
+                btn.textContent = '2FA: OFF';
+                btn.style.background = '#555';
+            }
+        })
+        .catch(function (e) {
+            console.error('2FA status check failed:', e);
+            btn.textContent = '2FA: OFF (err)';
+            btn.style.background = '#555';
+        });
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('admin-2fa-panel-btn').addEventListener('click', function () {
+        var token = sessionStorage.getItem('admin_token') || '';
+        fetch('/api/admin/2fa/status', { headers: { 'Authorization': 'Bearer ' + token } })
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                var modal = document.getElementById('admin-2fa-modal');
+                var titleEl = document.getElementById('admin-2fa-modal-title');
+                var hintEl = document.getElementById('admin-2fa-modal-hint');
+                var qrEl = document.getElementById('admin-2fa-qr');
+                var secretEl = document.getElementById('admin-2fa-secret');
+                var codesWrap = document.getElementById('admin-2fa-codes-wrap');
+                var codeInput = document.getElementById('admin-2fa-code-input');
+                var errEl = document.getElementById('admin-2fa-error');
+                var submitBtn = document.getElementById('admin-2fa-submit');
+
+                codeInput.value = '';
+                errEl.style.display = 'none';
+
+                if (data.enabled) {
+                    _admin2faMode = 'disable';
+                    titleEl.textContent = 'Disable Admin 2FA';
+                    hintEl.textContent = 'Enter a code from your authenticator app to disable 2FA.';
+                    qrEl.style.display = 'none';
+                    secretEl.style.display = 'none';
+                    codesWrap.style.display = 'none';
+                    codeInput.placeholder = 'Enter 6-digit code';
+                    codeInput.maxLength = 6;
+                    codeInput.style.letterSpacing = '2px';
+                    codeInput.style.fontFamily = 'monospace';
+                    submitBtn.textContent = 'Disable';
+                    submitBtn.style.background = 'linear-gradient(135deg,#c62828,#b71c1c)';
+                } else {
+                    _admin2faMode = 'enroll';
+                    modal.dataset.step = '';
+                    titleEl.textContent = 'Enable Admin 2FA';
+                    hintEl.textContent = 'Enter your admin password to start enrollment.';
+                    qrEl.style.display = 'none';
+                    secretEl.style.display = 'none';
+                    codesWrap.style.display = 'none';
+                    codeInput.placeholder = 'Enter admin password';
+                    codeInput.maxLength = 128;
+                    codeInput.style.letterSpacing = '0';
+                    codeInput.style.fontFamily = 'inherit';
+                    submitBtn.textContent = 'Start Enrollment';
+                    submitBtn.style.background = 'linear-gradient(135deg,#4caf50,#388e3c)';
+                }
+                modal.style.display = 'flex';
+            })
+            .catch(function () {});
+    });
+
+    document.getElementById('admin-2fa-cancel').addEventListener('click', function () {
+        document.getElementById('admin-2fa-modal').style.display = 'none';
+    });
+    document.getElementById('admin-2fa-modal').addEventListener('click', function (e) {
+        if (e.target.id === 'admin-2fa-modal') document.getElementById('admin-2fa-modal').style.display = 'none';
+    });
+
+    document.getElementById('admin-2fa-submit').addEventListener('click', function () {
+        var codeInput = document.getElementById('admin-2fa-code-input');
+        var errEl = document.getElementById('admin-2fa-error');
+        var val = codeInput.value.trim();
+        errEl.style.display = 'none';
+
+        if (_admin2faMode === 'enroll') {
+            var modal = document.getElementById('admin-2fa-modal');
+            if (modal.dataset.step === 'verify-code') {
+                // Code verification step — send 6-digit TOTP code
+                if (!val || val.length !== 6) { errEl.textContent = 'Enter a 6-digit code'; errEl.style.display = 'block'; return; }
+                var btnCode = this;
+                btnCode.disabled = true;
+                btnCode.textContent = 'Verifying...';
+                fetch('/api/admin/2fa/verify-enroll', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ code: val })
+                })
+                .then(function (r) { return r.json(); })
+                .then(function (data) {
+                    btnCode.disabled = false;
+                    if (!data.ok) {
+                        errEl.textContent = data.error || 'Invalid code';
+                        errEl.style.display = 'block';
+                        btnCode.textContent = 'Verify';
+                        return;
+                    }
+                    alert('Admin 2FA enabled!');
+                    modal.style.display = 'none';
+                    updateAdmin2faButton();
+                })
+                .catch(function () {
+                    errEl.textContent = 'Server is not running';
+                    errEl.style.display = 'block';
+                    btnCode.disabled = false;
+                    btnCode.textContent = 'Verify';
+                });
+            } else {
+                // Password step — verify password then show QR
+                if (!val) { errEl.textContent = 'Enter your admin password'; errEl.style.display = 'block'; return; }
+                var btnPass = this;
+                btnPass.disabled = true;
+                btnPass.textContent = 'Starting...';
+                fetch('/api/admin/2fa/enroll', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password: val })
+                })
+                .then(function (r) { return r.json(); })
+                .then(function (data) {
+                    btnPass.disabled = false;
+                    if (data.error) {
+                        errEl.textContent = data.error;
+                        errEl.style.display = 'block';
+                        btnPass.textContent = 'Start Enrollment';
+                        return;
+                    }
+                    document.getElementById('admin-2fa-modal-title').textContent = 'Scan QR Code';
+                    document.getElementById('admin-2fa-modal-hint').textContent = 'Scan this QR code in your authenticator app, then enter a code to verify.';
+                    var qrEl = document.getElementById('admin-2fa-qr');
+                    qrEl.innerHTML = '';
+                    try {
+                        var qr = qrcode(0, 'M');
+                        qr.addData(data.otpauth_url);
+                        qr.make();
+                        qrEl.innerHTML = qr.createImgTag(4, 8);
+                    } catch (_) {
+                        qrEl.textContent = 'QR unavailable — enter the secret manually.';
+                    }
+                    qrEl.style.display = '';
+                    var secretEl = document.getElementById('admin-2fa-secret');
+                    secretEl.textContent = 'Secret: ' + data.secret_base32;
+                    secretEl.style.display = '';
+                    var codesWrap = document.getElementById('admin-2fa-codes-wrap');
+                    var codesEl = document.getElementById('admin-2fa-codes');
+                    codesEl.innerHTML = '';
+                    data.recovery_codes.forEach(function (c) {
+                        var span = document.createElement('span');
+                        span.textContent = c;
+                        span.style.cssText = 'background:#0f0f23;border:1px solid #333;border-radius:4px;padding:4px 8px;font-family:monospace;font-size:12px;color:#e0e0e0';
+                        codesEl.appendChild(span);
+                    });
+                    codesWrap.style.display = '';
+                    codeInput.value = '';
+                    codeInput.placeholder = 'Enter 6-digit code';
+                    codeInput.maxLength = 6;
+                    codeInput.style.letterSpacing = '2px';
+                    codeInput.style.fontFamily = 'monospace';
+                    btnPass.textContent = 'Verify';
+                    modal.dataset.step = 'verify-code';
+                })
+                .catch(function () {
+                    errEl.textContent = 'Server is not running';
+                    errEl.style.display = 'block';
+                    btnPass.disabled = false;
+                    btnPass.textContent = 'Start Enrollment';
+                });
+            }
+        } else {
+            // Disable mode — need TOTP code
+            if (!val || val.length !== 6) { errEl.textContent = 'Enter a 6-digit code'; errEl.style.display = 'block'; return; }
+            var btn3 = this;
+            btn3.disabled = true;
+            btn3.textContent = 'Disabling...';
+            fetch('/api/admin/2fa/disable', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ code: val })
+            })
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                btn3.disabled = false;
+                if (!data.ok) {
+                    errEl.textContent = data.error || 'Invalid code';
+                    errEl.style.display = 'block';
+                    btn3.textContent = 'Disable';
+                    return;
+                }
+                alert('Admin 2FA disabled!');
+                document.getElementById('admin-2fa-modal').style.display = 'none';
+                updateAdmin2faButton();
+            })
+            .catch(function () {
+                errEl.textContent = 'Server is not running';
+                errEl.style.display = 'block';
+                btn3.disabled = false;
+                btn3.textContent = 'Disable';
+            });
+        }
+    });
+
+    // Copy recovery codes
+    document.getElementById('admin-2fa-copy-codes').addEventListener('click', function () {
+        var codesEl = document.getElementById('admin-2fa-codes');
+        var codes = Array.from(codesEl.querySelectorAll('span')).map(function (s) { return s.textContent; });
+        navigator.clipboard.writeText(codes.join('\n')).then(function () {
+            document.getElementById('admin-2fa-copy-codes').textContent = 'Copied!';
+            setTimeout(function () { document.getElementById('admin-2fa-copy-codes').textContent = 'Copy Codes'; }, 1500);
+        });
+    });
+
     document.getElementById('admin-login-form').addEventListener('submit', async (e) => {
         e.preventDefault();
         const password = document.getElementById('admin-password').value;
         const btn = document.getElementById('admin-login-btn');
+        const codeRow = document.getElementById('admin-2fa-code-row');
+        const codeInput = document.getElementById('admin-2fa-code');
+
+        // If 2FA code row is visible, we're in the second step
+        if (codeRow.style.display !== 'none' && codeInput.value.trim()) {
+            btn.disabled = true;
+            btn.textContent = 'Verifying...';
+            try {
+                const res = await fetch('/api/admin/verify-2fa', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ code: codeInput.value.trim(), pre_token: _pendingPreToken })
+                });
+                const data = await res.json();
+                if (!data.ok) {
+                    showError(data.error || 'Invalid code');
+                    btn.disabled = false;
+                    btn.textContent = 'Verify';
+                    codeInput.value = '';
+                    return;
+                }
+                sessionStorage.setItem('admin_auth', 'true');
+                sessionStorage.setItem('admin_token', data.token || '');
+                _pendingPreToken = null;
+                codeRow.style.display = 'none';
+                codeInput.value = '';
+                document.getElementById('admin-login-2fa-hint').style.display = 'none';
+                showPanel();
+                loadAllData();
+            } catch (err) {
+                showError('Server is not running');
+                btn.disabled = false;
+                btn.textContent = 'Verify';
+            }
+            return;
+        }
+
         btn.disabled = true;
         btn.textContent = 'Connecting...';
         try {
@@ -173,6 +442,16 @@ document.addEventListener('DOMContentLoaded', () => {
                 showError('Password set! Now login with it.');
                 document.getElementById('error-message').style.color = '#4caf50';
                 btn.disabled = false;
+                return;
+            }
+            if (data.requires_2fa) {
+                _pendingPreToken = data.pre_token;
+                codeRow.style.display = '';
+                document.getElementById('admin-login-2fa-hint').style.display = '';
+                codeInput.value = '';
+                codeInput.focus();
+                btn.disabled = false;
+                btn.textContent = 'Verify';
                 return;
             }
             sessionStorage.setItem('admin_auth', 'true');
@@ -472,6 +751,7 @@ function showError(msg) {
 function showPanel() {
     document.getElementById('admin-login').style.display = 'none';
     document.getElementById('admin-panel').style.display = 'block';
+    if (typeof updateAdmin2faButton === 'function') updateAdmin2faButton();
 }
 
 function escapeHtml(str) {

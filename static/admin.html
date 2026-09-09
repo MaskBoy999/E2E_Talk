@@ -69,11 +69,15 @@
         <div id="admin-login" class="auth-card">
             <h1>Admin Panel</h1>
             <p id="admin-login-subtitle" class="subtitle">Enter admin password</p>
+            <div id="admin-login-2fa-hint" class="subtitle" style="display:none;color:#4fc3f7;margin-bottom:8px">2FA code required</div>
             <div id="error-message" class="error" style="display: none;"></div>
             <form id="admin-login-form" autocomplete="off">
                 <div class="auth-input-row">
                     <input type="password" id="admin-password" placeholder="Admin password" required autocomplete="off" class="auth-code-input">
                     <button type="button" class="toggle-visibility-btn" id="toggle-admin-password" title="Show/Hide">&#128065;</button>
+                </div>
+                <div id="admin-2fa-code-row" style="display:none" class="auth-input-row">
+                    <input type="text" id="admin-2fa-code" placeholder="6-digit code" maxlength="6" pattern="[0-9]{6}" autocomplete="off" class="auth-code-input" style="letter-spacing:2px;font-family:monospace">
                 </div>
                 <button type="submit" id="admin-login-btn">Access Panel</button>
             </form>
@@ -97,6 +101,7 @@
             <div class="admin-header">
                 <h1>Admin Panel</h1>
                 <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                    <button id="admin-2fa-panel-btn" style="font-size:12px;padding:8px 14px;background:#1565c0;color:#fff;border:none;border-radius:4px;cursor:pointer">2FA: Checking...</button>
                     <button id="runtime-limits-btn" class="btn-download" style="font-size:12px;padding:8px 14px;background:#5865F2;color:#fff;border:none;border-radius:4px;cursor:pointer">⚙ Runtime Limits</button>
                     <button id="export-db-btn" class="btn-download" style="font-size:12px;padding:8px 14px;background:#1565c0;color:#fff;border:none;border-radius:4px;cursor:pointer">📥 Export DB</button>
                     <button id="import-db-btn" class="btn-upload" style="font-size:12px;padding:8px 14px;background:#2e7d32;color:#fff;border:none;border-radius:4px;cursor:pointer">📤 Import DB</button>
@@ -783,6 +788,29 @@
         </div>
     </div>
 
+    <!-- Admin 2FA Settings Modal -->
+    <div id="admin-2fa-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:99998;align-items:center;justify-content:center">
+        <div style="background:var(--bg-secondary,#1a1a2e);border:1px solid var(--border-color,#333);border-radius:12px;padding:24px;max-width:440px;width:90%;max-height:80vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.5)">
+            <h3 style="margin:0 0 16px;color:var(--text-primary,#e0e0e0);font-size:16px" id="admin-2fa-modal-title">Admin 2FA</h3>
+            <p style="color:var(--text-muted,#888);font-size:13px;margin:0 0 12px" id="admin-2fa-modal-hint"></p>
+            <div id="admin-2fa-qr" style="text-align:center;margin-bottom:12px"></div>
+            <div id="admin-2fa-secret" style="background:var(--bg-primary,#12122b);border:1px solid var(--border-color,#333);border-radius:6px;padding:10px;margin-bottom:12px;font-family:monospace;font-size:12px;color:var(--text-primary,#e0e0e0);word-break:break-all;display:none"></div>
+            <div id="admin-2fa-codes-wrap" style="margin-bottom:12px;display:none">
+                <div style="color:var(--text-muted,#888);font-size:12px;margin-bottom:6px">Recovery codes (save these!):</div>
+                <div id="admin-2fa-codes" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+                <button id="admin-2fa-copy-codes" style="margin-top:8px;padding:4px 10px;border:1px solid #333;border-radius:4px;background:transparent;color:#888;cursor:pointer;font-size:11px">Copy Codes</button>
+            </div>
+            <div style="display:flex;gap:8px;margin-bottom:8px">
+                <input type="text" id="admin-2fa-code-input" placeholder="Enter 6-digit code" maxlength="6" pattern="[0-9]{6}" autocomplete="off" style="flex:1;padding:10px 12px;border:1px solid #333;border-radius:6px;background:#12122b;color:#e0e0e0;font-size:13px;font-family:monospace;letter-spacing:2px">
+            </div>
+            <div id="admin-2fa-error" style="color:#f44336;font-size:12px;margin-bottom:12px;display:none"></div>
+            <div style="display:flex;gap:8px;justify-content:flex-end">
+                <button id="admin-2fa-cancel" style="padding:8px 16px;border:1px solid #333;border-radius:6px;background:transparent;color:#888;cursor:pointer;font-size:13px">Cancel</button>
+                <button id="admin-2fa-submit" style="padding:8px 16px;border:none;border-radius:6px;background:linear-gradient(135deg,#4caf50,#388e3c);color:#fff;font-weight:600;font-size:13px;cursor:pointer">Verify</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Busy overlay: shown during export/import/validate so the admin knows
          the long encryption/upload is still working (it can take a while for
          a large database) and is not stuck. -->
@@ -791,6 +819,7 @@
         <div id="admin-busy-label" style="color:#fff;font-size:14px;font-family:var(--font,inherit);max-width:420px;text-align:center">Working…</div>
     </div>
 
+    <script src="qrcode.js"></script>
     <script src="libsodium-sumo.js"></script>
     <script src="libsodium-wrappers.js"></script>
     <script src="crypto.js?v=8"></script>

@@ -308,6 +308,19 @@ fn store_admin_token(token: String) {
     map.insert(token, Instant::now() + Duration::from_secs(24 * 3600));
 }
 
+fn store_admin_pre_token(token: String) {
+    let mut guard = get_admin_tokens();
+    let map = guard.get_or_insert_with(HashMap::new);
+    map.insert(token, Instant::now() + Duration::from_secs(300)); // 5 min TTL
+}
+
+fn remove_admin_token(token: &str) {
+    let mut guard = get_admin_tokens();
+    if let Some(map) = guard.as_mut() {
+        map.remove(token);
+    }
+}
+
 pub(crate) fn extract_user(headers: &HeaderMap, state: &AppState) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
     // Prefer the Authorization: Bearer header over the HttpOnly cookie.
     // A stale/expired HttpOnly cookie from a previous login session can
@@ -4414,6 +4427,14 @@ pub async fn admin_login(
     };
 
     if valid {
+        // If 2FA is enabled, return a short-lived pre-token instead of the real admin token.
+        // The client must then submit a TOTP code to /api/admin/verify-2fa to get the real token.
+        if state.db.admin_2fa_enabled().unwrap_or(false) {
+            let pre_token = uuid::Uuid::new_v4().to_string();
+            store_admin_pre_token(pre_token.clone());
+            log_admin_action(&state, "admin_login_2fa_pending", None, &headers);
+            return (StatusCode::OK, Json(serde_json::json!({"ok": true, "requires_2fa": true, "pre_token": pre_token}))).into_response();
+        }
         let admin_token = uuid::Uuid::new_v4().to_string();
         store_admin_token(admin_token.clone());
         log_admin_action(&state, "admin_login", None, &headers);
@@ -4426,6 +4447,62 @@ pub async fn admin_login(
         )
             .into_response()
     }
+}
+
+#[derive(Deserialize)]
+pub struct AdminVerify2FaRequest {
+    pub code: String,
+    pub pre_token: String,
+}
+
+pub async fn admin_verify_2fa(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AdminVerify2FaRequest>,
+) -> impl IntoResponse {
+    // Validate pre-token exists (it was issued during password verification)
+    let guard = get_admin_tokens();
+    let map = match guard.as_ref() {
+        Some(m) => m,
+        None => {
+            return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Invalid or expired session"}))).into_response();
+        }
+    };
+    match map.get(&req.pre_token) {
+        Some(expiry) if *expiry > Instant::now() => {}
+        _ => return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Invalid or expired session"}))).into_response(),
+    }
+    drop(guard);
+
+    // Verify TOTP code
+    let secret_row = match state.db.get_admin_totp() {
+        Ok(Some(r)) => r,
+        _ => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "2FA not configured"}))).into_response(),
+    };
+    let secret = match totp::decrypt_secret(&secret_row.0, &secret_row.1, &state.config.jwt_secret) {
+        Ok(s) => s,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let mut code_valid = totp::verify_totp(&secret, &req.code, 1);
+    if !code_valid {
+        // Try recovery codes
+        let code_hash = totp::hash_recovery_code(&secret_row.2, &req.code);
+        let codes = state.db.list_admin_recovery_hashes().unwrap_or_default();
+        let found = codes.iter().any(|(h, used)| h == &code_hash && !*used);
+        if found {
+            code_valid = true;
+            let _ = state.db.mark_admin_recovery_used(&code_hash);
+        }
+    }
+    if !code_valid {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Invalid code"}))).into_response();
+    }
+
+    // Remove the pre-token and issue the real admin token
+    remove_admin_token(&req.pre_token);
+    let admin_token = uuid::Uuid::new_v4().to_string();
+    store_admin_token(admin_token.clone());
+    log_admin_action(&state, "admin_login_2fa_complete", None, &HeaderMap::new());
+    (StatusCode::OK, Json(serde_json::json!({"ok": true, "token": admin_token}))).into_response()
 }
 
 pub async fn admin_list_users(
@@ -4508,6 +4585,144 @@ pub async fn admin_disable_user_2fa(
     }
     log_admin_action(&state, "admin_disable_2fa", Some(&user_id), &headers);
     (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+}
+
+// --- Admin panel 2FA (protects admin login itself) ---
+
+pub async fn admin_2fa_status(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let enabled = state.db.admin_2fa_enabled().unwrap_or(false);
+    (StatusCode::OK, Json(serde_json::json!({"enabled": enabled}))).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct AdminEnroll2FaRequest {
+    pub password: String,
+}
+
+pub async fn admin_enroll_2fa(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AdminEnroll2FaRequest>,
+) -> impl IntoResponse {
+    if state.db.admin_2fa_enabled().unwrap_or(false) {
+        return (StatusCode::CONFLICT, Json(serde_json::json!({"error": "2FA is already enabled"}))).into_response();
+    }
+    // Verify admin password before allowing enrollment
+    let stored_hash = match state.db.get_admin_password_hash() {
+        Ok(Some(h)) => h,
+        _ => return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Admin password not configured"}))).into_response(),
+    };
+    let valid = match auth::verify_password(&req.password, &stored_hash) {
+        Ok(v) => v,
+        Err(_) => return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Wrong password"}))).into_response(),
+    };
+    if !valid {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Wrong password"}))).into_response();
+    }
+
+    let secret = totp::generate_secret();
+    let salt: String = {
+        use rand::Rng;
+        rand::thread_rng().gen::<[u8; 16]>().iter().map(|b| format!("{:02x}", b)).collect()
+    };
+    let codes = totp::generate_recovery_codes(8);
+    {
+        let mut pending = PENDING_2FA_ENROLL.lock().unwrap();
+        pending.insert("admin".to_string(), (secret.clone(), salt, codes.clone(), Instant::now()));
+    }
+    let otpauth = totp::otpauth_uri("E2E Chat", "admin", &secret);
+    (StatusCode::OK, Json(serde_json::json!({
+        "secret_base32": secret,
+        "otpauth_url": otpauth,
+        "recovery_codes": codes,
+    }))).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct AdminVerifyEnroll2FaRequest {
+    pub code: String,
+}
+
+pub async fn admin_verify_enroll_2fa(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AdminVerifyEnroll2FaRequest>,
+) -> impl IntoResponse {
+    let entry = {
+        let mut pending = PENDING_2FA_ENROLL.lock().unwrap();
+        match pending.get("admin") {
+            Some((secret, salt, codes, exp)) => {
+                if Instant::now().duration_since(*exp) > PENDING_2FA_TTL {
+                    pending.remove("admin");
+                    return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Enrollment expired. Please start over."}))).into_response();
+                }
+                (secret.clone(), salt.clone(), codes.clone())
+            }
+            None => {
+                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "No pending enrollment. Please start over."}))).into_response();
+            }
+        }
+    };
+    if !totp::verify_totp(&entry.0, &req.code, 1) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Invalid code"}))).into_response();
+    }
+    let (ct, nonce) = match totp::encrypt_secret(&entry.0, &state.config.jwt_secret) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    if let Err(e) = state.db.save_admin_totp(&ct, &nonce, &entry.1) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
+    }
+    let hashes: Vec<String> = entry.2.iter()
+        .map(|c| totp::hash_recovery_code(&entry.1, c))
+        .collect();
+    if let Err(e) = state.db.save_admin_recovery_hashes(&hashes) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
+    }
+    {
+        let mut pending = PENDING_2FA_ENROLL.lock().unwrap();
+        pending.remove("admin");
+    }
+    (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct AdminDisable2FaRequest {
+    pub code: String,
+}
+
+pub async fn admin_disable_self_2fa(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AdminDisable2FaRequest>,
+) -> impl IntoResponse {
+    if !state.db.admin_2fa_enabled().unwrap_or(false) {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "2FA is not enabled"}))).into_response();
+    }
+    let secret_row = match state.db.get_admin_totp() {
+        Ok(Some(r)) => r,
+        _ => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "2FA not configured"}))).into_response(),
+    };
+    let secret = match totp::decrypt_secret(&secret_row.0, &secret_row.1, &state.config.jwt_secret) {
+        Ok(s) => s,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let mut code_valid = totp::verify_totp(&secret, &req.code, 1);
+    if !code_valid {
+        let code_hash = totp::hash_recovery_code(&secret_row.2, &req.code);
+        let codes = state.db.list_admin_recovery_hashes().unwrap_or_default();
+        let found = codes.iter().any(|(h, used)| h == &code_hash && !*used);
+        if found {
+            code_valid = true;
+            let _ = state.db.mark_admin_recovery_used(&code_hash);
+        }
+    }
+    if !code_valid {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Invalid code"}))).into_response();
+    }
+    if let Err(e) = state.db.delete_admin_totp() {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
+    }
+    (StatusCode::OK, Json(serde_json::json!({"ok": true, "enabled": false}))).into_response()
 }
 
 pub async fn admin_delete_user(

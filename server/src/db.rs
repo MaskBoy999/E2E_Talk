@@ -1213,6 +1213,8 @@ impl Database {
         let _ = conn.execute_batch(include_str!("../migrations/055_admin_audit.sql"));
         // Migration 056: TOTP 2FA (encrypted secret) + one-time recovery codes.
         let _ = conn.execute_batch(include_str!("../migrations/056_2fa.sql"));
+        // Migration 057: admin_2fa tables (no FK to users — admin isn't a real user)
+        let _ = conn.execute_batch(include_str!("../migrations/057_admin_2fa.sql"));
         // Migration 057 (F4): drop dead X3DH-era tables (sessions / user_devices /
         // prekey_bundles) — 0 rows, no code references left.
         let _ = conn.execute_batch(include_str!("../migrations/057_drop_legacy_x3dh.sql"));
@@ -5919,6 +5921,80 @@ impl Database {
             .map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM recovery_codes WHERE user_id = ?1", params![user_id])
             .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    // --- Admin 2FA (separate tables, no FK to users) ---
+
+    pub fn admin_2fa_enabled(&self) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM admin_2fa", [], |row| row.get(0))
+            .map_err(|e| e.to_string())?;
+        Ok(count > 0)
+    }
+
+    pub fn save_admin_totp(&self, secret_encrypted: &str, nonce: &str, salt: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT OR REPLACE INTO admin_2fa (id, secret_encrypted, nonce, salt) VALUES (1, ?1, ?2, ?3)",
+            params![secret_encrypted, nonce, salt],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn get_admin_totp(&self) -> Result<Option<(String, String, String)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let result = conn.query_row(
+            "SELECT secret_encrypted, nonce, salt FROM admin_2fa WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        );
+        match result {
+            Ok(row) => Ok(Some(row)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    pub fn delete_admin_totp(&self) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM admin_2fa", []).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM admin_recovery_codes", []).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn save_admin_recovery_hashes(&self, hashes: &[String]) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        for h in hashes {
+            conn.execute(
+                "INSERT OR REPLACE INTO admin_recovery_codes (code_hash) VALUES (?1)",
+                params![h],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    pub fn list_admin_recovery_hashes(&self) -> Result<Vec<(String, bool)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT code_hash, used FROM admin_recovery_codes")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get::<_, i64>(1)? != 0)))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    }
+
+    pub fn mark_admin_recovery_used(&self, hash: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE admin_recovery_codes SET used = 1, used_at = datetime('now') WHERE code_hash = ?1",
+            params![hash],
+        )
+        .map_err(|e| e.to_string())?;
         Ok(())
     }
 
