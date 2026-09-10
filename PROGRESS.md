@@ -5719,3 +5719,54 @@ Full security audit completed. Identified the following attack surface and imple
 - `folder-features.spec.ts`: 6/6
 - `chat.spec.ts`: 16/19 (3 pre-existing failures, not regressions)
 - `server-groups.spec.ts`: 1/2 (1 pre-existing `.group-badge` failure)
+
+### 112. Voice Latency Optimizations (5 Opus/jitter tweaks, ~30-70ms savings)
+
+Five client-side optimizations in `static/voice.js` targeting Opus codec parameters and
+WebRTC transport settings. **None touch encryption** — Tailscale, DTLS-SRTP, AES-256-GCM
+E2EE, and signaling E2EE all remain identical. The server is never involved in media.
+
+| # | What | Where in voice.js | Savings |
+|---|------|-------------------|---------|
+| 1 | **Opus ptime 20ms→10ms** | `mungeSdp()` applied in `createOffer` (L1830) + both `createAnswer` paths (L2715, L2746) | ~10ms encode wait |
+| 2 | **Jitter buffer target 40-80ms→20ms** | `handleRemoteTrack()` audio receiver — `e.receiver.jitterBufferTarget = 20` (L2247) | ~20-60ms buffer |
+| 3 | **Sender network priority 'low'→'high'** | `addLocalTracks()` — `sender.getParameters()` → `encodings[0].networkPriority = 'high'` (L1899) | Voice gets bandwidth first under congestion |
+| 4 | **Opus FEC enabled** (`useinbandfec=1`) | `mungeSdp()` — prevents 50-200ms spikes on packet loss | Loss resilience |
+| 5 | **maxplaybackrate=16000** | `mungeSdp()` — concentrates bitrate on voice band (0-8kHz) | ~7-9 kbps saved |
+
+**Implementation:** new `mungeSdp(sdp)` function (L1456) rewrites the Opus `fmtp` line
+in SDP: `ptime=10;minptime=10;useinbandfec=1;maxplaybackrate=16000`. Applied in
+`createOffer` and both `createAnswer` paths (normal + glare/rollback). Jitter buffer
+hint set on the receiver's `jitterBufferTarget` property. Network priority set via
+`sender.getParameters()` → `encodings[0].networkPriority = 'high'` on each audio sender.
+
+**Expected improvement:** ~30-70ms latency reduction on a good network (from ~100-170ms
+down to ~60-100ms one-way). Extra bandwidth: ~7-9 kbps (negligible).
+
+**Encryption untouched:** `mungeSdp` only modifies the Opus codec parameters in the SDP
+—it never touches encryption keys, transforms, or any E2EE-related SDP attributes. The
+DTLS-SRTP handshake, AES-256-GCM insertable streams, signaling E2EE (XChaCha20-Poly1305),
+and Tailscale/WireGuard tunnel all remain identical.
+
+### 113. Voice Audio E2E Test (programmatic oscillator, no fake-mic flag)
+
+New test `tests/voice-audio-e2e.spec.ts` — two tests that verify actual audio flows
+end-to-end between real users, using a programmatic 440 Hz oscillator injected **after**
+the call connects (not from browser launch):
+
+| Test | What it does | How it verifies |
+|------|-------------|-----------------|
+| **DM call: programmatic 440 Hz oscillator** | Creates 2 users, DM call, injects oscillator via `replaceTrack()`/`addTrack()` after call connects | Records remote MediaStream, decodes PCM, asserts: zeroCrossFreq ≈ 440 Hz, silentPct < 2%, rmsCV < 0.3 |
+| **Server voice channel: audio bytes arrive** | Creates server + voice channel, 2 users join, injects oscillator | Same recording + PCM analysis |
+
+Key improvements over old const-tone tests:
+- No `--use-file-for-fake-audio-capture` — tone is injected programmatically after the
+  call connects, not from browser launch
+- No headed Chrome required — works in headless Playwright Chromium with
+  `--use-fake-device-for-media-stream`
+- No pre-generated WAV file — oscillator runs in-browser
+- Actually creates 2 accounts and tests if they hear the sound in both DM calls and
+  server voice channels
+
+**Results:** DM call: `zeroCrossFreq: 441.7 Hz`, `rmsCV: 0.02`, `silentPct: 0%`.
+Server channel: `zeroCrossFreq: 441.8 Hz`, `rmsCV: 0.025`, `silentPct: 0%`. Both pass.

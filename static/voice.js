@@ -1450,6 +1450,21 @@
     // ------------------------------------------------------------------
     // WebRTC mesh peers
     // ------------------------------------------------------------------
+
+    // Voice latency optimizations (tune Opus + jitter buffer).
+    // These do NOT touch E2EE — encryption stays identical.
+    function mungeSdp(sdp) {
+        // 1. ptime=10: send 10ms Opus frames instead of 20ms (saves ~10ms encode wait)
+        // 2. useinbandfec=1: Opus forward error correction (prevents 50-200ms spikes on packet loss)
+        // 3. maxplaybackrate=16000: concentrate bitrate on voice band (0-8kHz)
+        return sdp.replace(/a=fmtp:(\d+) (.*)/g, function (match, pt, params) {
+            if (params.indexOf('opus') !== -1 || params.indexOf('minptime') !== -1 || params.indexOf('useinbandfec') !== -1) {
+                return 'a=fmtp:' + pt + ' ptime=10;minptime=10;useinbandfec=1;maxplaybackrate=16000';
+            }
+            return match;
+        });
+    }
+
     function createPeer(uid) {
         if (S.peers[uid]) return S.peers[uid];
         var pc = new RTCPeerConnection({
@@ -1812,6 +1827,7 @@
             pc._makingOffer = true;
             pc._negotiationQueued = false;
             pc.createOffer().then(function (offer) {
+                offer.sdp = mungeSdp(offer.sdp);
                 return pc.setLocalDescription(offer);
             }).then(function () {
                 send({
@@ -1872,24 +1888,42 @@
         function senderOccupied(s, track) {
             return (s.track && s.track.id === track.id) || (s._voiceNulled && s._voiceNulled.id === track.id);
         }
+        // Optimization 3: Set high network priority on senders so voice/audio
+        // streams get bandwidth first when the network is congested.
+        function setSenderPriority(track) {
+            try {
+                var sender = pc.getSenders().find(function (s) { return s.track === track; });
+                if (sender && sender.getParameters) {
+                    sender.getParameters().then(function (params) {
+                        if (params.encodings && params.encodings[0]) {
+                            params.encodings[0].networkPriority = 'high';
+                            sender.setParameters(params);
+                        }
+                    }).catch(function () {});
+                }
+            } catch (_) {}
+        }
         if (S.localStreams.mic && !S.muted && !S.deafened) {
             // Prefer the RNNoise-processed track when active; otherwise the
             // raw mic track.
             var at = (S.localStreams.processedMic && S.localStreams.processedMic.getAudioTracks()[0]) || S.localStreams.mic.getAudioTracks()[0];
             if (at && !pc.getSenders().find(function (s) { return (s.track && s.track.kind === 'audio') || (s._voiceNulled && s._voiceNulled.kind === 'audio'); })) {
                 pc.addTrack(at, new MediaStream([at]));
+                setSenderPriority(at);
             }
         }
         if (S.localStreams.camera && S.cameraOn) {
             var vt = S.localStreams.camera.getVideoTracks()[0];
             if (vt && !pc.getSenders().find(function (s) { return senderOccupied(s, vt); })) {
                 pc.addTrack(vt, new MediaStream([vt]));
+                setSenderPriority(vt);
             }
         }
         if (S.localStreams.screen && S.screenOn) {
             var st = S.localStreams.screen.getVideoTracks()[0];
             if (st && !pc.getSenders().find(function (s) { return senderOccupied(s, st); })) {
                 pc.addTrack(st, new MediaStream([st]));
+                setSenderPriority(st);
             }
             // Screen-share audio (tab/system): sent as its own track so the
             // receiver can mix it separately from the mic (per-member screen
@@ -1898,6 +1932,7 @@
             var sat = S.localStreams.screen.getAudioTracks()[0];
             if (sat && !pc.getSenders().find(function (s) { return senderOccupied(s, sat); })) {
                 pc.addTrack(sat, new MediaStream([sat]));
+                setSenderPriority(sat);
             }
         }
     }
@@ -2206,6 +2241,13 @@
             if (!applyRecvE2EE(e.receiver)) {
                 queueRecvE2EE(e.receiver, e.track.id);
             }
+            // Optimization 2: Hint the jitter buffer to target 20ms (default is 40-80ms).
+            // This is a minimum target — NetEQ still adapts upward on bad networks.
+            try {
+                if (e.receiver && 'jitterBufferTarget' in e.receiver) {
+                    e.receiver.jitterBufferTarget = 20;
+                }
+            } catch (_) {}
             S.remoteStreams[uid] = S.remoteStreams[uid] || {};
             var mic = S.remoteStreams[uid].audio;
             var scA = S.remoteStreams[uid].screenAudio;
@@ -2670,6 +2712,7 @@
                     flushPendingIce(pc);
                     return pc.createAnswer();
                 }).then(function (answer) {
+                    answer.sdp = mungeSdp(answer.sdp);
                     return pc.setLocalDescription(answer);
                 }).then(function () {
                     send({
@@ -2700,6 +2743,7 @@
                         flushPendingIce(pc);
                         return pc.createAnswer();
                     }).then(function (answer) {
+                        answer.sdp = mungeSdp(answer.sdp);
                         tuneVideoSenders(pc);
                         return pc.setLocalDescription(answer);
                     }).then(function () {

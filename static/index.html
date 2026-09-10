@@ -94,6 +94,7 @@
 <symbol id="icon-rotate-right" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></symbol>
 <symbol id="icon-reset" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></symbol>
 <symbol id="icon-ear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8.5a6.5 6.5 0 1 1 13 0c0 6-6 6-6 10.5"/><path d="M15 8.5a2.5 2.5 0 0 0-5 0v1a2 2 0 0 0 4 0"/></symbol>
+<symbol id="icon-qrcode" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="8" height="8" rx="1"/><rect x="14" y="2" width="8" height="8" rx="1"/><rect x="2" y="14" width="8" height="8" rx="1"/><rect x="14" y="14" width="4" height="4" rx="0.5"/><rect x="20" y="14" width="2" height="2" rx="0.25"/><rect x="14" y="20" width="2" height="2" rx="0.25"/><rect x="20" y="20" width="2" height="2" rx="0.25"/><rect x="5" y="5" width="2" height="2" rx="0.25"/><rect x="17" y="5" width="2" height="2" rx="0.25"/><rect x="5" y="17" width="2" height="2" rx="0.25"/></symbol>
 </svg>
     <script>
     /* icon(name, size) — returns inline SVG referencing the inlined sprite.
@@ -336,15 +337,15 @@
             <div class="identity-key-box">
                 <span class="key-value" id="invite-code-display">••••••••••••••••</span>
                 <button class="key-action-btn" id="toggle-invite-btn" title="Show/Hide"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>
-                <button class="key-action-btn" id="copy-invite-btn" title="Copy">&#128203;</button>
-                <button class="key-action-btn" id="invite-qr-btn" title="Show QR Code">&#128247;</button>
+                <button class="key-action-btn" id="copy-invite-btn" title="Copy"><svg class="ui-icon" width="14" height="14"><use href="#icon-copy"/></svg></button>
+                <button class="key-action-btn" id="invite-qr-btn" title="Show QR Code"><svg class="ui-icon" width="14" height="14"><use href="#icon-qrcode"/></svg></button>
             </div>
             <div id="invite-qr-container" class="qr-code-container" style="display:none;margin-top:10px;">
                 <div id="invite-qr-canvas" class="qr-code-canvas"></div>
                 <p class="qr-warning"><svg class="ui-icon" width="14" height="14"><use href="#icon-warning"/></svg> This shows the invite code. Only show to trusted people.</p>
                 <div class="qr-actions">
                     <button id="hide-invite-qr-btn" class="key-action-btn">Hide QR Code</button>
-                    <button id="export-invite-qr-btn" class="key-action-btn qr-export-btn">⬇ Export QR</button>
+                    <button id="export-invite-qr-btn" class="key-action-btn qr-export-btn"><svg class="ui-icon" width="14" height="14"><use href="#icon-download"/></svg> Export QR</button>
                 </div>
             </div>
             <div class="modal-actions">
