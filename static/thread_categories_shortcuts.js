@@ -73,7 +73,7 @@
 
         panel.innerHTML = '<div class="thread-panel-header">' +
 
-            '<span class="thread-panel-title">🧵 Thread</span>' +
+            '<span class="thread-panel-title">' + icon('pin') + ' Thread</span>' +
 
             '<button class="thread-panel-close" id="thread-panel-close-btn">&times;</button>' +
 
@@ -85,7 +85,7 @@
 
             '<input type="text" id="thread-input" class="thread-input" placeholder="Reply to thread..." />' +
 
-            '<button id="thread-send-btn" class="thread-send-btn">➤</button>' +
+            '<button id="thread-send-btn" class="thread-send-btn">' + icon('send') + '</button>' +
 
             '</div>';
 
@@ -323,7 +323,7 @@
 
         threadItem.className = 'context-menu-item';
 
-        threadItem.textContent = '🧵 Reply in Thread';
+        threadItem.innerHTML = icon('pin') + ' Reply in Thread';
 
         threadItem.addEventListener('click', function () {
 
@@ -1156,7 +1156,7 @@
 
             var nameSpan = document.createElement('span');
 
-            nameSpan.textContent = (isVoiceCh ? '🔊 ' : '# ') + chDisplayName;
+            nameSpan.innerHTML = (isVoiceCh ? icon('volume-on') + ' ' : '# ') + chDisplayName;
 
             nameSpan.style.flex = '1';
 
@@ -1808,7 +1808,7 @@
 
                     if (typeof applyStreamerMode === 'function') applyStreamerMode(st.checked);
 
-                    _showToast(st.checked ? '🔴 Streamer Mode ON' : '✅ Streamer Mode OFF');
+                    _showToast(st.checked ? icon('live') + ' Streamer Mode ON' : icon('check') + ' Streamer Mode OFF');
 
                 }
 
@@ -1828,7 +1828,7 @@
 
                     else if (currentDmChannelId && typeof loadDmMessages === 'function') loadDmMessages(currentDmChannelId);
 
-                    _showToast(cb.checked ? '✅ Media Previews ON' : '❌ Media Previews OFF');
+                    _showToast(cb.checked ? icon('check') + ' Media Previews ON' : icon('close') + ' Media Previews OFF');
 
                 }
 
@@ -2484,8 +2484,8 @@
 
             var slots = [
                 { id: 0, label: 'Default', desc: 'App default stylesheet', hasContent: true, color: '#666' },
-                { id: 1, label: 'Slot 1', desc: slot1Has ? '\ud83d\udcbe Saved custom CSS' : 'Empty slot', hasContent: slot1Has, color: '#4fc3f7' },
-                { id: 2, label: 'Slot 2', desc: slot2Has ? '\ud83d\udcbe Saved custom CSS' : 'Empty slot', hasContent: slot2Has, color: '#7c4dff' }
+                { id: 1, label: 'Slot 1', desc: slot1Has ? icon('check-circle') + ' Saved custom CSS' : 'Empty slot', hasContent: slot1Has, color: '#4fc3f7' },
+                { id: 2, label: 'Slot 2', desc: slot2Has ? icon('check-circle') + ' Saved custom CSS' : 'Empty slot', hasContent: slot2Has, color: '#7c4dff' }
             ];
 
             slots.forEach(function (s) {
@@ -2562,19 +2562,19 @@
             html += '<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">';
 
             if (isEditing && parseInt(isEditing) === activeSlot) {
-                html += '<button id="css-save-slot" style="padding:10px 20px;border-radius:8px;border:none;background:linear-gradient(135deg,#4fc3f7,#29b6f6);color:#fff;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s;box-shadow:0 2px 8px rgba(79,195,247,0.3)">\ud83d\udcbe Save & Apply</button>';
-                html += '<button id="css-preview" style="padding:10px 20px;border-radius:8px;border:2px solid #4fc3f7;background:transparent;color:#4fc3f7;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">\ud83d\udc41\ufe0f Preview</button>';
-                html += '<button id="css-import-file" style="padding:10px 20px;border-radius:8px;border:2px solid #666;background:rgba(255,255,255,0.05);color:#ccc;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">\ud83d\udcc1 Import .css</button>';
-                html += '<button id="css-cancel-edit" style="padding:10px 20px;border-radius:8px;border:2px solid #888;background:rgba(255,255,255,0.05);color:#ccc;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">\u21a9\ufe0f Cancel</button>';
-                html += '<button id="css-clear-slot" style="padding:10px 20px;border-radius:8px;border:2px solid #f44336;background:rgba(244,67,54,0.1);color:#f44336;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">\ud83d\uddd1\ufe0f Clear Slot</button>';
+                html += '<button id="css-save-slot" style="padding:10px 20px;border-radius:8px;border:none;background:linear-gradient(135deg,#4fc3f7,#29b6f6);color:#fff;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s;box-shadow:0 2px 8px rgba(79,195,247,0.3)">' + icon('check') + ' Save & Apply</button>';
+                html += '<button id="css-preview" style="padding:10px 20px;border-radius:8px;border:2px solid #4fc3f7;background:transparent;color:#4fc3f7;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">' + icon('eye') + ' Preview</button>';
+                html += '<button id="css-import-file" style="padding:10px 20px;border-radius:8px;border:2px solid #666;background:rgba(255,255,255,0.05);color:#ccc;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">' + icon('upload') + ' Import .css</button>';
+                html += '<button id="css-cancel-edit" style="padding:10px 20px;border-radius:8px;border:2px solid #888;background:rgba(255,255,255,0.05);color:#ccc;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">' + icon('close') + ' Cancel</button>';
+                html += '<button id="css-clear-slot" style="padding:10px 20px;border-radius:8px;border:2px solid #f44336;background:rgba(244,67,54,0.1);color:#f44336;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">' + icon('trash') + ' Clear Slot</button>';
             } else if (activeSlot > 0) {
-                html += '<button id="css-copy" style="padding:10px 20px;border-radius:8px;border:none;background:linear-gradient(135deg,#4fc3f7,#29b6f6);color:#fff;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s;box-shadow:0 2px 8px rgba(79,195,247,0.3)">\ud83d\udccb Copy CSS</button>';
-                html += '<button id="css-edit-slot" style="padding:10px 20px;border-radius:8px;border:2px solid #e0e0e0;background:rgba(224,224,224,0.1);color:#e0e0e0;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">\u270f\ufe0f Edit</button>';
-                html += '<button id="css-export" style="padding:10px 20px;border-radius:8px;border:2px solid #7c4dff;background:rgba(124,77,255,0.1);color:#b388ff;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">\ud83d\udce4 Export</button>';
-                html += '<button id="css-import-backup" style="padding:10px 20px;border-radius:8px;border:2px solid #7c4dff;background:rgba(124,77,255,0.1);color:#b388ff;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">\ud83d\udce5 Import Backup</button>';
+                html += '<button id="css-copy" style="padding:10px 20px;border-radius:8px;border:none;background:linear-gradient(135deg,#4fc3f7,#29b6f6);color:#fff;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s;box-shadow:0 2px 8px rgba(79,195,247,0.3)">' + icon('copy') + ' Copy CSS</button>';
+                html += '<button id="css-edit-slot" style="padding:10px 20px;border-radius:8px;border:2px solid #e0e0e0;background:rgba(224,224,224,0.1);color:#e0e0e0;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">' + icon('edit') + ' Edit</button>';
+                html += '<button id="css-export" style="padding:10px 20px;border-radius:8px;border:2px solid #7c4dff;background:rgba(124,77,255,0.1);color:#b388ff;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">' + icon('download') + ' Export</button>';
+                html += '<button id="css-import-backup" style="padding:10px 20px;border-radius:8px;border:2px solid #7c4dff;background:rgba(124,77,255,0.1);color:#b388ff;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">' + icon('upload') + ' Import Backup</button>';
             } else {
-                html += '<button id="css-copy" style="padding:10px 20px;border-radius:8px;border:none;background:linear-gradient(135deg,#4fc3f7,#29b6f6);color:#fff;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s;box-shadow:0 2px 8px rgba(79,195,247,0.3)">\ud83d\udccb Copy CSS</button>';
-                html += '<button id="css-refresh" style="padding:10px 20px;border-radius:8px;border:2px solid #4fc3f7;background:transparent;color:#4fc3f7;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">\ud83d\udd04 Refresh</button>';
+                html += '<button id="css-copy" style="padding:10px 20px;border-radius:8px;border:none;background:linear-gradient(135deg,#4fc3f7,#29b6f6);color:#fff;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s;box-shadow:0 2px 8px rgba(79,195,247,0.3)">' + icon('copy') + ' Copy CSS</button>';
+                html += '<button id="css-refresh" style="padding:10px 20px;border-radius:8px;border:2px solid #4fc3f7;background:transparent;color:#4fc3f7;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">' + icon('refresh') + ' Refresh</button>';
             }
 
             html += '</div>';
@@ -2710,8 +2710,8 @@
                     if (ta) {
                         copyToClipboard(ta.value).then(function (ok) {
                             if (ok) {
-                                copyBtn.textContent = '\u2705 Copied!';
-                                setTimeout(function () { copyBtn.textContent = '\ud83d\udccb Copy CSS'; }, 2000);
+                                copyBtn.innerHTML = icon('check') + ' Copied!';
+                                setTimeout(function () { copyBtn.innerHTML = icon('copy') + ' Copy CSS'; }, 2000);
                             }
                         });
                     }

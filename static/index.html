@@ -11,6 +11,97 @@
     <link rel="stylesheet" href="style.css?v=10">
 </head>
 <body>
+    <!-- Inlined SVG icon sprite (hidden, referenced via <use href="#icon-name">) -->
+    <svg xmlns="http://www.w3.org/2000/svg" style="display:none">
+<symbol id="icon-camera" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></symbol>
+<symbol id="icon-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></symbol>
+<symbol id="icon-video" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></symbol>
+<symbol id="icon-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></symbol>
+<symbol id="icon-mic-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="1" y1="1" x2="23" y2="23"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"/><path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2c0 .76-.13 1.49-.35 2.17"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></symbol>
+<symbol id="icon-edit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></symbol>
+<symbol id="icon-image" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></symbol>
+<symbol id="icon-pin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 2h6l-1 7h3l-5 5-5-5h3z"/></symbol>
+<symbol id="icon-send" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></symbol>
+<symbol id="icon-download" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></symbol>
+<symbol id="icon-upload" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></symbol>
+<symbol id="icon-file" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></symbol>
+<symbol id="icon-package" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></symbol>
+<symbol id="icon-code" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></symbol>
+<symbol id="icon-terminal" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></symbol>
+<symbol id="icon-database" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></symbol>
+<symbol id="icon-globe" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></symbol>
+<symbol id="icon-book" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></symbol>
+<symbol id="icon-bar-chart" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="16"/></symbol>
+<symbol id="icon-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></symbol>
+<symbol id="icon-flip" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></symbol>
+<symbol id="icon-volume-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></symbol>
+<symbol id="icon-volume-on" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></symbol>
+<symbol id="icon-live" viewBox="0 0 24 24"><circle cx="12" cy="12" r="6" fill="#ed4245"/><circle cx="12" cy="12" r="6" fill="none" stroke="#ed4245" stroke-width="1.5" opacity="0.5"><animate attributeName="r" values="6;10;6" dur="2s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.5;0;0.5" dur="2s" repeatCount="indefinite"/></circle></symbol>
+<symbol id="icon-lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></symbol>
+<symbol id="icon-shield" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></symbol>
+<symbol id="icon-brush" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18.37 2.63a2.121 2.121 0 0 1 3 3L14 13l-4 1 1-4 7.37-7.37z"/><path d="M9 14.5c-1.5 1-3 2.5-3 4.5 2 0 3.5-1.5 4.5-3"/></symbol>
+<symbol id="icon-airbrush" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="7" cy="5" r="1"/><circle cx="11" cy="3" r="1"/><circle cx="5" cy="8" r="1"/><circle cx="9" cy="6" r="1"/><circle cx="3" cy="6" r="1"/><path d="M14 11l-3 3a5 5 0 0 0-2 4v2h8v-2a5 5 0 0 0-2-4l-1-1"/><line x1="14" y1="4" x2="14" y2="11"/></symbol>
+<symbol id="icon-crop" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6.13 1L6 16a2 2 0 0 0 2 2h15"/><path d="M1 6.13L16 6a2 2 0 0 1 2 2v15"/></symbol>
+<symbol id="icon-mirror" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v14c0 1.1.9 2 2 2h3"/><path d="M16 3h3a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-3"/><line x1="12" y1="2" x2="12" y2="22" stroke-dasharray="2 2"/></symbol>
+<symbol id="icon-cut" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><line x1="20" y1="4" x2="8.12" y2="15.88"/><line x1="14.47" y1="14.48" x2="20" y2="20"/><line x1="8.12" y1="8.12" x2="12" y2="12"/></symbol>
+<symbol id="icon-reverse" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></symbol>
+<symbol id="icon-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></symbol>
+<symbol id="icon-user" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></symbol>
+<symbol id="icon-warning" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></symbol>
+<symbol id="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></symbol>
+<symbol id="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></symbol>
+<symbol id="icon-trash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></symbol>
+<symbol id="icon-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></symbol>
+<symbol id="icon-lightbulb" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6"/><path d="M10 22h4"/><path d="M15.09 14c.18-.98.65-1.74 1.41-2.5A4.65 4.65 0 0 0 18 8 6 6 0 0 0 6 8c0 1 .23 2.23 1.5 3.5A4.61 4.61 0 0 1 8.91 14"/></symbol>
+<symbol id="icon-monitor" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></symbol>
+<symbol id="icon-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></symbol>
+<symbol id="icon-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></symbol>
+<symbol id="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></symbol>
+<symbol id="icon-check-circle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></symbol>
+<symbol id="icon-refresh-alt" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><polyline points="23 20 23 14 17 14"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/></symbol>
+<symbol id="icon-phone" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></symbol>
+<symbol id="icon-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></symbol>
+<symbol id="icon-eye-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></symbol>
+<symbol id="icon-gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></symbol>
+<symbol id="icon-menu" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></symbol>
+<symbol id="icon-clipboard" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></symbol>
+<symbol id="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
+<symbol id="icon-save" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></symbol>
+<symbol id="icon-music" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></symbol>
+<symbol id="icon-flash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></symbol>
+<symbol id="icon-record" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="4" fill="currentColor"/></symbol>
+<symbol id="icon-stop" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/></symbol>
+<symbol id="icon-more" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"/><circle cx="12" cy="5" r="1"/><circle cx="12" cy="19" r="1"/></symbol>
+<symbol id="icon-expand" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></symbol>
+<symbol id="icon-reply" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></symbol>
+<symbol id="icon-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></symbol>
+<symbol id="icon-play" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="5 3 19 12 5 21 5 3"/></symbol>
+<symbol id="icon-chevron-left" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></symbol>
+<symbol id="icon-chevron-right" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></symbol>
+<symbol id="icon-chevron-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></symbol>
+<symbol id="icon-chevrons-right" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="13 17 18 12 13 7"/><polyline points="6 17 11 12 6 7"/></symbol>
+<symbol id="icon-undo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></symbol>
+<symbol id="icon-redo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></symbol>
+<symbol id="icon-merge" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 19H5c-1 0-2-1-2-2V7c0-1 1-2 2-2h3"/><path d="M16 5h3c1 0 2 1 2 2v10c0 1-1 2-2 2h-3"/><line x1="12" y1="4" x2="12" y2="20"/></symbol>
+<symbol id="icon-name" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></symbol>
+<symbol id="icon-arrow-up-right" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/></symbol>
+<symbol id="icon-kick" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></symbol>
+<symbol id="icon-ban" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></symbol>
+<symbol id="icon-unlock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></symbol>
+<symbol id="icon-maximize" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></symbol>
+<symbol id="icon-minimize" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/></symbol>
+<symbol id="icon-rotate-left" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></symbol>
+<symbol id="icon-rotate-right" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></symbol>
+<symbol id="icon-reset" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></symbol>
+<symbol id="icon-ear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8.5a6.5 6.5 0 1 1 13 0c0 6-6 6-6 10.5"/><path d="M15 8.5a2.5 2.5 0 0 0-5 0v1a2 2 0 0 0 4 0"/></symbol>
+</svg>
+    <script>
+    /* icon(name, size) — returns inline SVG referencing the inlined sprite.
+       Usage: icon('camera') → <svg class="ui-icon" width="16" height="16"><use href="#icon-camera"/></svg> */
+    function icon(name, size) {
+        return '<svg class="ui-icon" width="' + (size || 16) + '" height="' + (size || 16) + '" aria-hidden="true"><use href="#icon-' + name + '"/></svg>';
+    }
+    </script>
     <!-- Loading overlay -->
     <div class="loading-overlay" id="loading-overlay">
         <div class="loading-spinner"></div>
@@ -30,8 +121,8 @@
             </div>
             <div class="app-bg-edit-actions">
                 <div class="app-bg-mode-toggle" id="app-bg-mode-toggle" title="While editing: drag the picture, or interact with the app normally">
-                    <button class="app-bg-mode-btn active" data-mode="drag">✋ Move</button>
-                    <button class="app-bg-mode-btn" data-mode="interact">🖐 Interact</button>
+                    <button class="app-bg-mode-btn active" data-mode="drag"><svg class="ui-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9l-3 3 3 3"/><path d="M9 5l3-3 3 3"/><path d="M15 19l-3 3-3-3"/><path d="M19 9l3 3-3 3"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="12" y1="2" x2="12" y2="22"/></svg> Move</button>
+                    <button class="app-bg-mode-btn" data-mode="interact"><svg class="ui-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 11V6a2 2 0 0 0-4 0v5"/><path d="M14 10V4a2 2 0 0 0-4 0v6"/><path d="M10 10.5V6a2 2 0 0 0-4 0v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/></svg> Interact</button>
                 </div>
                 <button class="btn btn-primary" id="app-bg-edit-done">Done</button>
             </div>
@@ -61,8 +152,8 @@
             <div class="dm-strip-btn" id="dm-strip-btn" title="Direct Messages">
                 <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z"/></svg>
                 <span class="badge" id="dm-strip-badge" style="display:none"></span>
-                <span class="dm-strip-waiting" id="dm-strip-waiting" style="display:none" title="Call waiting">&#128222;</span>
-                <span class="dm-strip-for-us" id="dm-strip-for-us" style="display:none" title="Someone is waiting for you to join their call">&#128222;</span>
+                <span class="dm-strip-waiting" id="dm-strip-waiting" style="display:none" title="Call waiting"><svg class="ui-icon" width="14" height="14"><use href="#icon-phone"/></svg></span>
+                <span class="dm-strip-for-us" id="dm-strip-for-us" style="display:none" title="Someone is waiting for you to join their call"><svg class="ui-icon" width="14" height="14"><use href="#icon-phone"/></svg></span>
             </div>
             <div class="mentions-strip-btn" id="mentions-strip-btn" title="Notifications">
                 <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.89 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>
@@ -78,7 +169,7 @@
             <div class="sidebar-header">
                 <h2 id="server-name">Select a server</h2>
                 <div class="sidebar-header-actions">
-                    <button class="server-settings-btn" id="server-settings-btn" style="display:none" title="Server Settings">&#9881;</button>
+                    <button class="server-settings-btn" id="server-settings-btn" style="display:none" title="Server Settings"><svg class="ui-icon" width="16" height="16"><use href="#icon-gear"/></svg></button>
                     <button class="invite-btn" id="invite-btn" title="Invite someone" style="display:none">+</button>
                     <button class="sidebar-close" id="sidebar-close">&times;</button>
                 </div>
@@ -90,12 +181,12 @@
                     <div class="footer-user-name">
                         <span id="current-user"></span>
                         <span class="username-sub" id="footer-username-sub"></span>
-                        <span id="streamer-badge" class="streamer-live-badge" style="display:none">🔴 LIVE</span>
+                        <span id="streamer-badge" class="streamer-live-badge" style="display:none"><svg class="ui-icon" width="10" height="10"><use href="#icon-live"/></svg> LIVE</span>
                     </div>
                 </div>
                 <div class="footer-actions">
-                    <button id="vault-btn" class="settings-gear" title="File Vault">&#128274;</button>
-                    <button id="settings-btn" class="settings-gear" title="Settings">&#9881;</button>
+                    <button id="vault-btn" class="settings-gear" title="File Vault"><svg class="ui-icon" width="16" height="16"><use href="#icon-lock"/></svg></button>
+                    <button id="settings-btn" class="settings-gear" title="Settings"><svg class="ui-icon" width="16" height="16"><use href="#icon-gear"/></svg></button>
                 </div>
             </div>
         </div>
@@ -107,17 +198,17 @@
         <div class="main">
             <div class="mention-toast" id="mention-toast" style="display:none"></div>
             <div class="chat-header">
-                <button class="hamburger" id="hamburger">&#9776;</button>
+                <button class="hamburger" id="hamburger"><svg class="ui-icon" width="16" height="16"><use href="#icon-menu"/></svg></button>
                 <h3 id="channel-name">Select a channel</h3>
-                <button class="pins-btn" id="pins-btn" style="display:none" title="Pinned messages">&#128204;</button>
-                <button class="search-header-btn" id="search-header-btn" style="display:none" title="Search this conversation (Ctrl+K for all)">&#128269;</button>
-                <button class="members-toggle" id="members-toggle" title="Members">&#9776;</button>
+                <button class="pins-btn" id="pins-btn" style="display:none" title="Pinned messages"><svg class="ui-icon" width="16" height="16"><use href="#icon-pin"/></svg></button>
+                <button class="search-header-btn" id="search-header-btn" style="display:none" title="Search this conversation (Ctrl+K for all)"><svg class="ui-icon" width="16" height="16"><use href="#icon-search"/></svg></button>
+                <button class="members-toggle" id="members-toggle" title="Members"><svg class="ui-icon" width="16" height="16"><use href="#icon-menu"/></svg></button>
             </div>
             <!-- Persistent DM-call waiting banner: shows when someone is waiting
                  in a DM call for this chat. Survives page refreshes (the server
                  persists the waiting state and it rides along in the DM list). -->
             <div class="dm-waiting-banner" id="dm-waiting-banner" style="display:none">
-                <span class="dm-waiting-icon">&#128222;</span>
+                <span class="dm-waiting-icon"><svg class="ui-icon" width="16" height="16"><use href="#icon-phone"/></svg></span>
                 <span class="dm-waiting-text" id="dm-waiting-text">Waiting for the other person to join the call…</span>
                 <button class="dm-waiting-join" id="dm-waiting-join-btn">Join Call</button>
             </div>
@@ -151,15 +242,15 @@
                 <div class="attach-wrap">
                     <button class="attach-btn" id="attach-btn" title="Attach file">+</button>
                     <div class="attach-popup" id="attach-popup" style="display:none">
-                        <button class="attach-popup-item" data-action="upload">📁 Upload Files</button>
-                        <button class="attach-popup-item" data-action="vault-send">&#128274; Send from Vault</button>
-                        <button class="attach-popup-item" data-action="photo">📷 Take Photo</button>
-                        <button class="attach-popup-item" data-action="record-video">🎥 Record Video</button>
-                        <button class="attach-popup-item" data-action="record-audio">🎤 Record Audio</button>
-                        <button class="attach-popup-item" data-action="poll">&#x1F5F3;&#xFE0F; Create Poll</button>
-                        <button class="attach-popup-item" data-action="schedule">&#x23F0; Schedule Message</button>
+                        <button class="attach-popup-item" data-action="upload"><svg class="ui-icon" width="14" height="14"><use href="#icon-folder"/></svg> Upload Files</button>
+
+                        <button class="attach-popup-item" data-action="photo"><svg class="ui-icon" width="14" height="14"><use href="#icon-camera"/></svg> Take Photo</button>
+                        <button class="attach-popup-item" data-action="record-video"><svg class="ui-icon" width="14" height="14"><use href="#icon-video"/></svg> Record Video</button>
+                        <button class="attach-popup-item" data-action="record-audio"><svg class="ui-icon" width="14" height="14"><use href="#icon-mic"/></svg> Record Audio</button>
+                        <button class="attach-popup-item" data-action="poll"><svg class="ui-icon" width="14" height="14"><use href="#icon-check-circle"/></svg> Create Poll</button>
+                        <button class="attach-popup-item" data-action="schedule"><svg class="ui-icon" width="14" height="14"><use href="#icon-clock"/></svg> Schedule Message</button>
                         <div class="disappear-popup-wrap">
-                            <button class="attach-popup-item" id="disappear-btn" title="Disappearing messages">&#x23F1;&#xFE0F; Disappearing messages</button>
+                            <button class="attach-popup-item" id="disappear-btn" title="Disappearing messages"><svg class="ui-icon" width="14" height="14"><use href="#icon-clock"/></svg> Disappearing messages</button>
                             <div class="disappear-menu" id="disappear-menu" style="display:none">
                                 <button class="disappear-option" data-ttl="0">Off</button>
                                 <button class="disappear-option" data-ttl="5">5 seconds</button>
@@ -170,7 +261,7 @@
                         </div>
                     </div>
                 </div>
-                <button class="sticker-btn" id="sticker-btn" title="Emojis, Stickers, GIFs">&#x1F600;</button>
+                <button class="sticker-btn" id="sticker-btn" title="Emojis, Stickers, GIFs"><svg class="ui-icon" width="16" height="16"><use href="#icon-image"/></svg></button>
                 <input type="file" id="file-input" style="display:none" multiple>
                 <textarea id="message-input" placeholder="Type a message..." disabled rows="1" style="resize:none;overflow-y:auto;min-height:36px;max-height:120px;padding:8px 12px;"></textarea>
                 <button id="send-btn" disabled>Send</button>
@@ -179,7 +270,7 @@
         <!-- Drop Zone Overlay (inside chat-body for proper positioning) -->
         <div class="drop-zone-overlay" id="drop-zone-overlay">
             <div class="drop-zone-content">
-                <div class="drop-zone-icon">&#128228;</div>
+                <div class="drop-zone-icon"><svg class="ui-icon" width="32" height="32"><use href="#icon-upload"/></svg></div>
                 <div class="drop-zone-text">Drop files here to upload</div>
                 <div class="drop-zone-hint">Supports images, videos, audio, and documents</div>
             </div>
@@ -198,7 +289,7 @@
                     <span class="server-choice-desc">Start a new server for your team or friends</span>
                 </button>
                 <button class="server-choice-btn" id="choice-join-server">
-                    <span class="server-choice-icon">🔗</span>
+                    <span class="server-choice-icon"><svg class="ui-icon" width="14" height="14"><use href="#icon-link"/></svg></span>
                     <span class="server-choice-label">Join Server</span>
                     <span class="server-choice-desc">Enter an invite code to join an existing server</span>
                 </button>
@@ -225,11 +316,11 @@
         <div class="modal-content">
             <div class="code-input-row">
                 <input type="password" id="invite-code-input" placeholder="Enter invite code" maxlength="20" class="code-input">
-                <button type="button" class="toggle-visibility-btn" id="toggle-invite-code-visibility" title="Show/Hide">&#128065;</button>
+                <button type="button" class="toggle-visibility-btn" id="toggle-invite-code-visibility" title="Show/Hide"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>
             </div>
             <div class="qr-import-section">
-                <button id="join-import-qr-btn" class="btn-import-qr">📷 Import QR Code</button>
-                <button id="join-scan-qr-btn" class="btn-import-qr">📸 Scan QR Code</button>
+                        <button id="join-import-qr-btn" class="btn-import-qr"><svg class="ui-icon" width="14" height="14"><use href="#icon-upload"/></svg> Import QR Code</button>
+                        <button id="join-scan-qr-btn" class="btn-import-qr"><svg class="ui-icon" width="14" height="14"><use href="#icon-search"/></svg> Scan QR Code</button>
                 <input type="file" id="join-qr-file-input" accept="image/*" style="display:none">
             </div>
             <div class="modal-actions">
@@ -244,13 +335,13 @@
         <div class="modal-content">
             <div class="identity-key-box">
                 <span class="key-value" id="invite-code-display">••••••••••••••••</span>
-                <button class="key-action-btn" id="toggle-invite-btn" title="Show/Hide">&#128065;</button>
+                <button class="key-action-btn" id="toggle-invite-btn" title="Show/Hide"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>
                 <button class="key-action-btn" id="copy-invite-btn" title="Copy">&#128203;</button>
                 <button class="key-action-btn" id="invite-qr-btn" title="Show QR Code">&#128247;</button>
             </div>
             <div id="invite-qr-container" class="qr-code-container" style="display:none;margin-top:10px;">
                 <div id="invite-qr-canvas" class="qr-code-canvas"></div>
-                <p class="qr-warning">⚠️ This shows the invite code. Only show to trusted people.</p>
+                <p class="qr-warning"><svg class="ui-icon" width="14" height="14"><use href="#icon-warning"/></svg> This shows the invite code. Only show to trusted people.</p>
                 <div class="qr-actions">
                     <button id="hide-invite-qr-btn" class="key-action-btn">Hide QR Code</button>
                     <button id="export-invite-qr-btn" class="key-action-btn qr-export-btn">⬇ Export QR</button>
@@ -332,8 +423,8 @@
                             <span id="server-settings-pic-fallback">#</span>
                         </div>
                         <div>
-                            <button class="btn btn-sm" id="server-picture-upload-btn" style="font-size:12px;padding:5px 12px;">🖼️ Upload Picture</button>
-                            <button class="btn btn-sm" id="server-picture-remove-btn" style="font-size:12px;padding:5px 12px;display:none;color:var(--danger);">❌ Remove Picture</button>
+                            <button class="btn btn-sm" id="server-picture-upload-btn" style="font-size:12px;padding:5px 12px;"><svg class="ui-icon" width="12" height="12"><use href="#icon-image"/></svg> Upload Picture</button>
+                            <button class="btn btn-sm" id="server-picture-remove-btn" style="font-size:12px;padding:5px 12px;display:none;color:var(--danger);"><svg class="ui-icon" width="12" height="12"><use href="#icon-close"/></svg> Remove Picture</button>
                             <p style="margin-top:4px;font-size:11px;color:var(--text-muted)">Crop a square region. Max 420×420 px.</p>
                         </div>
                     </div>
@@ -382,11 +473,11 @@
             <h3 style="margin-bottom:12px;color:var(--accent)">Add Friend</h3>
             <div class="code-input-row">
                 <input type="password" id="friend-code-input" placeholder="Enter friend code" maxlength="20" class="code-input" style="text-transform:uppercase;letter-spacing:2px;">
-                <button type="button" class="toggle-visibility-btn" id="toggle-friend-code-visibility" title="Show/Hide">&#128065;</button>
+                <button type="button" class="toggle-visibility-btn" id="toggle-friend-code-visibility" title="Show/Hide"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>
             </div>
             <div class="qr-import-section">
-                <button id="friend-import-qr-btn" class="btn-import-qr">📷 Import QR Code</button>
-                <button id="friend-scan-qr-btn" class="btn-import-qr">📸 Scan QR Code</button>
+                        <button id="friend-import-qr-btn" class="btn-import-qr"><svg class="ui-icon" width="14" height="14"><use href="#icon-upload"/></svg> Import QR Code</button>
+                        <button id="friend-scan-qr-btn" class="btn-import-qr"><svg class="ui-icon" width="14" height="14"><use href="#icon-search"/></svg> Scan QR Code</button>
                 <input type="file" id="friend-qr-file-input" accept="image/*" style="display:none">
             </div>
             <div id="add-friend-error" style="color:var(--danger);margin-bottom:12px;display:none;font-size:13px"></div>
@@ -434,7 +525,7 @@
                 </div>
                 <div class="qr-scanner-text">Position QR code inside the circle</div>
             </div>
-            <button id="qr-scanner-flip" class="qr-scanner-flip-btn" title="Flip Camera">🔄</button>
+            <button id="qr-scanner-flip" class="qr-scanner-flip-btn" title="Flip Camera"><svg class="ui-icon" width="16" height="16"><use href="#icon-flip"/></svg></button>
         </div>
     </div>
 
@@ -466,7 +557,7 @@
                     </div>
                     
                     <div style="margin-top:8px;">
-                        <button class="btn-profile-action" id="settings-open-profile-btn" style="color:var(--accent);border-color:var(--accent);">👤 Open Profile</button>
+                        <button class="btn-profile-action" id="settings-open-profile-btn" style="color:var(--accent);border-color:var(--accent);"><svg class="ui-icon" width="14" height="14"><use href="#icon-user"/></svg> Open Profile</button>
                     </div>
                 </div>
 
@@ -482,13 +573,13 @@
                 <div class="settings-group">
                     <h4>Clear All Local Data</h4>
                     <p class="settings-hint">Clears all stored logins, keys, settings, cookies, and cached data. Use this if you encounter login or account issues such as constraint errors when creating a new account after logging out.</p>
-                    <button class="btn-delete-account" id="clear-all-data-btn">🗑️ Clear All Data &amp; Sign Out</button>
+                        <button class="btn-delete-account" id="clear-all-data-btn"><svg class="ui-icon" width="14" height="14"><use href="#icon-trash"/></svg> Clear All Data &amp; Sign Out</button>
                 </div>
                 <div class="settings-group">
                     <h4>Scheduled Messages</h4>
                     <p class="settings-hint">Pending messages waiting to be sent. Cancel or delay them. They are stored locally and sent automatically at the scheduled time.</p>
                     <div id="user-scheduled-list" class="scheduled-list-container">
-                        <div class="sch-empty-state">⏰ No scheduled messages</div>
+                        <div class="sch-empty-state"><svg class="ui-icon" width="16" height="16"><use href="#icon-clock"/></svg> No scheduled messages</div>
                     </div>
                 </div>
             </div>
@@ -533,8 +624,8 @@
                     <h4>Theme Mode</h4>
                     <p class="settings-hint">Switch between dark and light mode. Custom colors apply to both modes.</p>
                     <div class="theme-mode-row">
-                        <button class="theme-mode-btn active" id="theme-mode-dark" data-mode="dark">🌙 Dark</button>
-                        <button class="theme-mode-btn" id="theme-mode-light" data-mode="light">☀️ Light</button>
+                        <button class="theme-mode-btn active" id="theme-mode-dark" data-mode="dark"><svg class="ui-icon" width="14" height="14"><use href="#icon-moon"/></svg> Dark</button>
+                        <button class="theme-mode-btn" id="theme-mode-light" data-mode="light"><svg class="ui-icon" width="14" height="14"><use href="#icon-sun"/></svg> Light</button>
                     </div>
                 </div>
                 <div class="settings-group" style="padding-bottom:12px;border-bottom:1px solid var(--bg-border);margin-top:16px">
@@ -542,8 +633,8 @@
                     <p class="settings-hint">Put a photo behind the whole app. It is stored only on this device, so each device can have its own. Use the sliders to tune how the picture looks behind each section.</p>
                     <div class="app-bg-row">
                         <input type="file" id="app-bg-file" accept="image/*" style="display:none">
-                        <button class="btn btn-primary" id="app-bg-upload-btn">📷 Choose Image</button>
-                        <button class="btn btn-secondary" id="app-bg-edit-btn" style="display:none">✏️ Edit</button>
+                        <button class="btn btn-primary" id="app-bg-upload-btn"><svg class="ui-icon" width="14" height="14"><use href="#icon-image"/></svg> Choose Image</button>
+                        <button class="btn btn-secondary" id="app-bg-edit-btn" style="display:none"><svg class="ui-icon" width="14" height="14"><use href="#icon-edit"/></svg> Edit</button>
                         <button class="btn btn-danger" id="app-bg-remove-btn" style="display:none">Remove</button>
                         <div class="app-bg-thumb" id="app-bg-thumb" style="display:none"></div>
                     </div>
@@ -571,8 +662,8 @@
                     <h4>Appearance Backup</h4>
                     <p class="settings-hint">Export your accent color, background color, theme mode, and app background (picture + position/zoom/per-section settings) to an encrypted file, or import one here. Everything is device-local — nothing is stored on the server.</p>
                     <div class="app-bg-row">
-                        <button class="btn btn-secondary" id="theme-export-btn">⬇️ Export</button>
-                        <button class="btn btn-secondary" id="theme-import-btn">⬆️ Import</button>
+                        <button class="btn btn-secondary" id="theme-export-btn"><svg class="ui-icon" width="14" height="14"><use href="#icon-download"/></svg> Export</button>
+                        <button class="btn btn-secondary" id="theme-import-btn"><svg class="ui-icon" width="14" height="14"><use href="#icon-upload"/></svg> Import</button>
                     </div>
                 </div>
                 <div class="settings-group">
@@ -607,7 +698,7 @@
                     <label class="settings-toggle">
                         <input type="checkbox" id="streamer-mode-toggle">
                         <span class="toggle-slider"></span>
-                        <span class="toggle-label">Enable Streamer Mode &#128250;</span>
+                        <span class="toggle-label">Enable Streamer Mode <svg class="ui-icon" width="14" height="14"><use href="#icon-video"/></svg></span>
                     </label>
                     <p class="settings-hint">Hides all message content behind a "Reveal" button, disables message previews in the DM sidebar, and prevents auto-loading of media. Click any message to reveal its content. Perfect for screensharing or streaming.</p>
                 </div>
@@ -632,7 +723,7 @@
                         <button class="btn btn-primary" id="notif-sound-upload-btn">Choose Audio File</button>
                         <button class="btn btn-secondary" id="notif-sound-test-btn">Test Sound</button>
                         <button class="btn btn-danger" id="notif-sound-stop-btn" style="display:none">Stop</button>
-                        <button class="btn btn-secondary" id="notif-sound-record-btn">🎤 Record</button>
+                        <button class="btn btn-secondary" id="notif-sound-record-btn"><svg class="ui-icon" width="14" height="14"><use href="#icon-mic"/></svg> Record</button>
                         <button class="btn btn-danger" id="notif-sound-reset-btn">Reset to Default</button>
                     </div>
                     <div id="notif-sound-recording" style="display:none;margin-top:8px;padding:8px 12px;background:rgba(244,67,54,0.1);border-radius:6px;border:1px solid rgba(244,67,54,0.3);font-size:13px;color:var(--text-primary);">
@@ -658,7 +749,7 @@
                             <div style="font-size:11px;color:var(--text-muted);" id="notif-trim-len-label">10s</div>
                         </div>
                         <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
-                            <button class="btn btn-secondary" id="notif-trim-preview-btn">▶ Preview</button>
+                            <button class="btn btn-secondary" id="notif-trim-preview-btn"><svg class="ui-icon" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="5 3 19 12 5 21 5 3"/></svg> Preview</button>
                             <button class="btn btn-primary" id="notif-trim-save-btn">Save This Part</button>
                             <button class="btn btn-secondary" id="notif-trim-cancel-btn">Cancel</button>
                         </div>
@@ -771,7 +862,7 @@
                         <div style="display:flex;align-items:center;gap:8px;">
                             <div class="auth-input-row" style="flex:1;margin-bottom:0;">
                                 <input type="password" id="reauth-password" placeholder="Enter your password" class="modal-input auth-code-input" />
-                                <button type="button" class="toggle-visibility-btn" id="toggle-reauth-password" title="Show/Hide">&#128065;</button>
+                                <button type="button" class="toggle-visibility-btn" id="toggle-reauth-password" title="Show/Hide"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>
                             </div>
                             <button class="btn-reauth-confirm" id="reauth-confirm-btn" style="white-space:nowrap;font-size:13px;padding:8px 16px;margin:0;">Confirm</button>
                         </div>
@@ -785,15 +876,15 @@
                     <div id="password-change-section" style="display:none;margin-top:10px;">
                         <div class="auth-input-row" style="margin-bottom:8px;">
                             <input type="password" id="change-pw-current" placeholder="Current password" class="modal-input auth-code-input" autocomplete="current-password" style="flex:1;" />
-                            <button type="button" class="toggle-visibility-btn" id="toggle-change-pw-current" title="Show/Hide">&#128065;</button>
+                            <button type="button" class="toggle-visibility-btn" id="toggle-change-pw-current" title="Show/Hide"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>
                         </div>
                         <div class="auth-input-row" style="margin-bottom:8px;">
                             <input type="password" id="change-pw-new" placeholder="New password (min 8 characters)" class="modal-input auth-code-input" autocomplete="new-password" style="flex:1;" />
-                            <button type="button" class="toggle-visibility-btn" id="toggle-change-pw-new" title="Show/Hide">&#128065;</button>
+                            <button type="button" class="toggle-visibility-btn" id="toggle-change-pw-new" title="Show/Hide"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>
                         </div>
                         <div class="auth-input-row" style="margin-bottom:8px;">
                             <input type="password" id="change-pw-confirm" placeholder="Confirm new password" class="modal-input auth-code-input" autocomplete="new-password" style="flex:1;" />
-                            <button type="button" class="toggle-visibility-btn" id="toggle-change-pw-confirm" title="Show/Hide">&#128065;</button>
+                            <button type="button" class="toggle-visibility-btn" id="toggle-change-pw-confirm" title="Show/Hide"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>
                         </div>
                         <button class="btn-reauth-confirm" id="change-pw-confirm-btn" style="font-size:13px;padding:8px 16px;">Change Password</button>
                     </div>
@@ -819,15 +910,15 @@
                     <div id="kill-switch-set-section" style="display:none;margin-top:10px;">
                         <div class="auth-input-row" style="margin-bottom:8px;">
                             <input type="password" id="kill-switch-pw" placeholder="Kill switch password (min 8 characters)" class="modal-input auth-code-input" style="flex:1;" autocomplete="new-password" />
-                            <button type="button" class="toggle-visibility-btn" id="toggle-kill-switch-pw" title="Show/Hide">&#128065;</button>
+                            <button type="button" class="toggle-visibility-btn" id="toggle-kill-switch-pw" title="Show/Hide"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>
                         </div>
                         <div class="auth-input-row" style="margin-bottom:8px;">
                             <input type="password" id="kill-switch-pw-confirm" placeholder="Confirm kill switch password" class="modal-input auth-code-input" style="flex:1;" autocomplete="new-password" />
-                            <button type="button" class="toggle-visibility-btn" id="toggle-kill-switch-pw-confirm" title="Show/Hide">&#128065;</button>
+                            <button type="button" class="toggle-visibility-btn" id="toggle-kill-switch-pw-confirm" title="Show/Hide"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>
                         </div>
                         <div class="auth-input-row" style="margin-bottom:8px;">
                             <input type="password" id="kill-switch-current" placeholder="Current password (to confirm)" class="modal-input auth-code-input" style="flex:1;" autocomplete="current-password" />
-                            <button type="button" class="toggle-visibility-btn" id="toggle-kill-switch-current" title="Show/Hide">&#128065;</button>
+                            <button type="button" class="toggle-visibility-btn" id="toggle-kill-switch-current" title="Show/Hide"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>
                         </div>
                         <button class="btn-reauth-confirm" id="kill-switch-save-btn" style="font-size:13px;padding:8px 16px;">Arm Kill Switch</button>
                     </div>
@@ -851,7 +942,7 @@
                     <div id="self-destruct-password-section" style="display:none;margin-top:10px;">
                         <div class="auth-input-row" style="margin-bottom:8px;">
                             <input type="password" id="self-destruct-password" placeholder="Enter your password to confirm" class="modal-input auth-code-input" style="flex:1;" autocomplete="current-password" />
-                            <button type="button" class="toggle-visibility-btn" id="toggle-self-destruct-password" title="Show/Hide">&#128065;</button>
+                            <button type="button" class="toggle-visibility-btn" id="toggle-self-destruct-password" title="Show/Hide"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>
                         </div>
                         <div style="display:flex;gap:8px;margin-top:6px;">
                             <button class="btn-reauth-confirm" id="self-destruct-confirm-btn" style="font-size:12px;padding:6px 14px;">Confirm</button>
@@ -877,22 +968,22 @@
                 </div>
 
                 <div class="settings-group">
-                    <h4>🔐 Restore from Server Backup</h4>
+                    <h4><svg class="ui-icon" width="16" height="16"><use href="#icon-shield"/></svg> Restore from Server Backup</h4>
                     <p class="settings-hint">Lost your device or cleared browser data? Enter your account password to restore all encryption keys (identity, server keys, media caches, friend code) from the server backup. This only works if you have a key backup saved (created automatically at login/registration).</p>
                     <p class="settings-hint" id="backup-status-line" style="margin-top:8px;font-weight:600;">Checking backup status…</p>
                     <div id="backup-age-warning" style="display:none;margin-top:8px;padding:10px 14px;border-radius:8px;font-size:13px;background:rgba(250,166,26,0.1);border:1px solid rgba(250,166,26,0.3);color:#faa61a;"></div>
                     <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap;">
-                        <button class="btn-reauth" id="save-backup-now-btn">&#128190; Save Backup Now</button>
-                        <button class="btn-reauth" id="restore-backup-btn">&#128260; Restore Keys from Backup</button>
+                        <button class="btn-reauth" id="save-backup-now-btn"><svg class="ui-icon" width="14" height="14"><use href="#icon-download"/></svg> Save Backup Now</button>
+                        <button class="btn-reauth" id="restore-backup-btn"><svg class="ui-icon" width="14" height="14"><use href="#icon-refresh"/></svg> Restore Keys from Backup</button>
                     </div>
                     <p id="save-backup-status" style="margin-top:6px;font-size:13px;"></p>
                     <div id="restore-backup-section" style="display:none;margin-top:10px;">
                         <div class="auth-input-row" style="margin-bottom:8px;">
                             <input type="password" id="restore-backup-password" placeholder="Enter your password" class="modal-input auth-code-input" style="flex:1;" autocomplete="current-password" />
-                            <button type="button" class="toggle-visibility-btn" id="toggle-restore-backup-password" title="Show/Hide">&#128065;</button>
+                            <button type="button" class="toggle-visibility-btn" id="toggle-restore-backup-password" title="Show/Hide"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>
                         </div>
                         <div style="display:flex;gap:8px;">
-                            <button class="btn-reauth-confirm" id="restore-backup-confirm-btn" style="font-size:13px;padding:8px 16px;">&#128260; Restore</button>
+                            <button class="btn-reauth-confirm" id="restore-backup-confirm-btn" style="font-size:13px;padding:8px 16px;"><svg class="ui-icon" width="14" height="14"><use href="#icon-refresh"/></svg> Restore</button>
                             <button class="btn-reauth" id="restore-backup-cancel-btn" style="font-size:13px;padding:8px 16px;">Cancel</button>
                         </div>
                     </div>
@@ -905,7 +996,7 @@
                     <div id="delete-account-section" style="display:none;margin-top:10px;">
                         <div class="auth-input-row" style="margin-bottom:8px;">
                             <input type="password" id="delete-account-password" placeholder="Enter your password to confirm deletion" class="modal-input auth-code-input" style="flex:1;" autocomplete="current-password" />
-                            <button type="button" class="toggle-visibility-btn" id="toggle-delete-account-password" title="Show/Hide">&#128065;</button>
+                            <button type="button" class="toggle-visibility-btn" id="toggle-delete-account-password" title="Show/Hide"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>
                         </div>
                         <p class="settings-hint" style="color:var(--danger,#ed4245);margin-bottom:8px;">This permanently deletes your account, all messages, servers, files, and keys. It cannot be undone.</p>
                         <button class="btn-reauth-confirm" id="delete-account-confirm-btn" style="background:var(--danger,#ed4245);color:#fff;">Permanently Delete</button>
@@ -964,7 +1055,7 @@
                 <div class="settings-group">
                     <h4>Hear Yourself (Test Mic)</h4>
                     <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
-                        <button type="button" id="voice-hear-self-btn" class="btn btn-primary" style="min-width:120px">🎤 Start Test</button>
+                        <button type="button" id="voice-hear-self-btn" class="btn btn-primary" style="min-width:120px"><svg class="ui-icon" width="14" height="14"><use href="#icon-mic"/></svg> Start Test</button>
                         <span id="voice-hear-self-status" style="font-size:13px;color:var(--text-secondary)"></span>
                     </div>
                     <div id="voice-hear-self-meter-wrap" style="display:none;background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:8px;padding:10px 12px;margin-top:4px">
@@ -1144,7 +1235,7 @@
                         <button class="btn btn-primary" id="ringtone-upload-btn">Choose Audio File</button>
                         <button class="btn btn-secondary" id="ringtone-test-btn">Test Ringtone</button>
                         <button class="btn btn-danger" id="ringtone-stop-btn" style="display:none">Stop</button>
-                        <button class="btn btn-secondary" id="ringtone-record-btn">🎤 Record</button>
+                        <button class="btn btn-secondary" id="ringtone-record-btn"><svg class="ui-icon" width="14" height="14"><use href="#icon-mic"/></svg> Record</button>
                         <button class="btn btn-danger" id="ringtone-reset-btn">Reset to Default</button>
                     </div>
                     <div id="ringtone-recording" style="display:none;margin-top:8px;padding:8px 12px;background:rgba(244,67,54,0.1);border-radius:6px;border:1px solid rgba(244,67,54,0.3);font-size:13px;color:var(--text-primary);">
@@ -1170,7 +1261,7 @@
                             <div style="font-size:11px;color:var(--text-muted);" id="ringtone-trim-len-label">10s</div>
                         </div>
                         <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
-                            <button class="btn btn-secondary" id="ringtone-trim-preview-btn">▶ Preview</button>
+                            <button class="btn btn-secondary" id="ringtone-trim-preview-btn"><svg class="ui-icon" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="5 3 19 12 5 21 5 3"/></svg> Preview</button>
                             <button class="btn btn-primary" id="ringtone-trim-save-btn">Save This Part</button>
                             <button class="btn btn-secondary" id="ringtone-trim-cancel-btn">Cancel</button>
                         </div>
@@ -1193,14 +1284,14 @@
     <!-- File Vault Modal -->
     <div class="modal" id="vault-modal" style="display:none">
         <div class="modal-content" style="max-width:560px">
-            <h3>&#128274; File Vault</h3>
+            <h3><svg class="ui-icon" width="16" height="16"><use href="#icon-lock"/></svg> File Vault</h3>
             <p class="settings-hint" style="margin-bottom:12px">Your personal encrypted file vault. Files are encrypted client-side and stored on the server.</p>
             <div class="vault-quota" id="vault-quota" style="margin-bottom:12px">
                 <div class="vault-quota-bar"><div class="vault-quota-fill" id="vault-quota-fill"></div></div>
                 <span class="vault-quota-text" id="vault-quota-text"></span>
             </div>
             <div style="display:flex;gap:8px;margin-bottom:12px">
-                <button class="btn btn-primary" id="vault-upload-btn">&#128228; Upload File</button>
+                <button class="btn btn-primary" id="vault-upload-btn"><svg class="ui-icon" width="16" height="16"><use href="#icon-upload"/></svg> Upload File</button>
                 <input type="file" id="vault-file-input" style="display:none" multiple>
             </div>
             <div id="vault-upload-progress" style="display:none;margin-bottom:8px">
@@ -1220,7 +1311,7 @@
     <!-- Vault Send Picker Modal -->
     <div class="modal" id="vault-send-modal" style="display:none">
         <div class="modal-content" style="max-width:500px">
-            <h3>&#128274; Send from Vault</h3>
+            <h3><svg class="ui-icon" width="16" height="16"><use href="#icon-lock"/></svg> Send from Vault</h3>
             <p class="settings-hint" style="margin-bottom:12px">Select a file from your encrypted vault to send in this conversation.</p>
             <input type="text" id="vault-send-search" placeholder="Search files..." style="width:100%;padding:6px 10px;margin-bottom:8px;border:1px solid var(--border,#333);border-radius:6px;background:var(--bg-secondary,#1a1a2e);color:var(--text,#e0e0e0);font-size:13px;box-sizing:border-box;">
             <div id="vault-send-file-list" class="vault-file-list" style="max-height:300px;overflow-y:auto;margin-bottom:12px"></div>
@@ -1234,7 +1325,7 @@
     <div class="modal" id="upload-modal" style="display:none">
         <div class="modal-content" style="max-width:480px;position:relative;overflow:visible">
             <div class="modal-drop-overlay" id="modal-drop-overlay">
-                <div class="modal-drop-icon">📂</div>
+                <div class="modal-drop-icon"><svg class="ui-icon" width="48" height="48"><use href="#icon-folder"/></svg></div>
                 <div class="modal-drop-text">Drop files here to add</div>
             </div>
             <h3 style="margin-bottom:12px;color:var(--accent)">Upload File</h3>
@@ -1248,10 +1339,10 @@
             </div>
             <div id="upload-error" style="color:var(--danger);margin-bottom:12px;display:none;font-size:13px"></div>
             <div id="upload-quick-actions" class="upload-quick-actions" style="display:none">
-                <button class="upload-action-btn" id="upload-btn-edit" title="Edit">✏️</button>
-                <button class="upload-action-btn" id="upload-btn-mirror" title="Mirror">🪞</button>
-                <button class="upload-action-btn" id="upload-btn-rotate-left" title="Rotate Left">↺</button>
-                <button class="upload-action-btn" id="upload-btn-rotate-right" title="Rotate Right">↻</button>
+                <button class="upload-action-btn" id="upload-btn-edit" title="Edit"><svg class="ui-icon" width="14" height="14"><use href="#icon-edit"/></svg></button>
+                <button class="upload-action-btn" id="upload-btn-mirror" title="Mirror"><svg class="ui-icon" width="14" height="14"><use href="#icon-mirror"/></svg></button>
+                <button class="upload-action-btn" id="upload-btn-rotate-left" title="Rotate Left"><svg class="ui-icon" width="14" height="14"><use href="#icon-flip"/></svg></button>
+                <button class="upload-action-btn" id="upload-btn-rotate-right" title="Rotate Right"><svg class="ui-icon" width="14" height="14" style="transform:scaleX(-1)"><use href="#icon-flip"/></svg></button>
             </div>
             <div class="modal-actions" style="gap:8px;flex-wrap:wrap;justify-content:space-between">
                 <button class="btn-cancel" id="add-more-files" style="border-color:var(--accent);color:var(--accent)">+ Add Files</button>
@@ -1270,12 +1361,12 @@
             <div class="photo-edit-header">
                 <span class="photo-edit-title">Edit Photo</span>
                 <div class="photo-edit-tools">
-                    <button class="photo-tool-btn active" id="photo-tool-brush" title="Brush">🖌️</button>
-                    <button class="photo-tool-btn" id="photo-tool-airbrush" title="Airbrush">💨</button>
-                    <button class="photo-tool-btn" id="photo-tool-crop" title="Crop">⬔</button>
-                    <button class="photo-tool-btn" id="photo-btn-mirror" title="Mirror">🪞</button>
-                    <button class="photo-tool-btn" id="photo-btn-rotate-left" title="Rotate Left">↺</button>
-                    <button class="photo-tool-btn" id="photo-btn-rotate-right" title="Rotate Right">↻</button>
+                    <button class="photo-tool-btn active" id="photo-tool-brush" title="Brush"><svg class="ui-icon" width="14" height="14"><use href="#icon-brush"/></svg></button>
+                    <button class="photo-tool-btn" id="photo-tool-airbrush" title="Airbrush"><svg class="ui-icon" width="14" height="14"><use href="#icon-airbrush"/></svg></button>
+                    <button class="photo-tool-btn" id="photo-tool-crop" title="Crop"><svg class="ui-icon" width="14" height="14"><use href="#icon-crop"/></svg></button>
+                    <button class="photo-tool-btn" id="photo-btn-mirror" title="Mirror"><svg class="ui-icon" width="14" height="14"><use href="#icon-mirror"/></svg></button>
+                    <button class="photo-tool-btn" id="photo-btn-rotate-left" title="Rotate Left"><svg class="ui-icon" width="14" height="14"><use href="#icon-flip"/></svg></button>
+                    <button class="photo-tool-btn" id="photo-btn-rotate-right" title="Rotate Right"><svg class="ui-icon" width="14" height="14" style="transform:scaleX(-1)"><use href="#icon-flip"/></svg></button>
                 </div>
                 <div class="photo-edit-history">
                     <button class="photo-history-btn" id="photo-undo" title="Undo" disabled>↶</button>
@@ -1322,11 +1413,11 @@
             <div class="video-edit-header">
                 <span class="video-edit-title">Edit Video</span>
                 <div class="video-edit-tools">
-                    <button class="photo-tool-btn" id="video-tool-crop" title="Crop">⬔</button>
-                    <button class="photo-tool-btn" id="video-tool-cut" title="Cut">✂️</button>
-                    <button class="photo-tool-btn" id="video-btn-mirror" title="Mirror">🪞</button>
-                    <button class="photo-tool-btn" id="video-btn-rotate-left" title="Rotate Left">↺</button>
-                    <button class="photo-tool-btn" id="video-btn-rotate-right" title="Rotate Right">↻</button>
+                    <button class="photo-tool-btn" id="video-tool-crop" title="Crop"><svg class="ui-icon" width="14" height="14"><use href="#icon-crop"/></svg></button>
+                    <button class="photo-tool-btn" id="video-tool-cut" title="Cut"><svg class="ui-icon" width="14" height="14"><use href="#icon-cut"/></svg></button>
+                    <button class="photo-tool-btn" id="video-btn-mirror" title="Mirror"><svg class="ui-icon" width="14" height="14"><use href="#icon-mirror"/></svg></button>
+                    <button class="photo-tool-btn" id="video-btn-rotate-left" title="Rotate Left"><svg class="ui-icon" width="14" height="14"><use href="#icon-flip"/></svg></button>
+                    <button class="photo-tool-btn" id="video-btn-rotate-right" title="Rotate Right"><svg class="ui-icon" width="14" height="14" style="transform:scaleX(-1)"><use href="#icon-flip"/></svg></button>
                 </div>
                 <div class="photo-edit-history">
                     <button class="photo-history-btn" id="video-undo" title="Undo" disabled>↶</button>
@@ -1392,7 +1483,7 @@
             <div class="audio-edit-header">
                 <span class="audio-edit-title">Edit Audio</span>
                 <div class="audio-edit-tools">
-                    <button class="photo-tool-btn" id="audio-btn-mirror" title="Reverse (mirror) the audio">🔁</button>
+                    <button class="photo-tool-btn" id="audio-btn-mirror" title="Reverse (mirror) the audio"><svg class="ui-icon" width="14" height="14"><use href="#icon-reverse"/></svg></button>
                     <button class="photo-history-btn" id="audio-undo" title="Undo" disabled>↶</button>
                     <button class="photo-history-btn" id="audio-redo" title="Redo" disabled>↷</button>
                 </div>
@@ -1440,7 +1531,7 @@
         <button class="media-viewer-close" id="media-viewer-close">&times;</button>
         <div class="media-viewer-content" id="media-viewer-content"></div>
         <div class="video-controls" id="video-controls" style="display:none">
-            <button class="video-ctrl-btn" id="vc-play-pause" title="Play/Pause">&#9654;</button>
+                <button class="video-ctrl-btn" id="vc-play-pause" title="Play/Pause"><svg class="ui-icon" width="16" height="16"><use href="#icon-play"/></svg></button>
             <div class="video-progress-wrap" id="video-progress-wrap">
                 <div class="video-progress-bg">
                     <div class="video-progress-buffered" id="vc-buffered"></div>
@@ -1458,7 +1549,7 @@
         </div>
         <!-- Audio Controls (for inline audio playback) -->
         <div class="audio-controls" id="audio-controls" style="display:none">
-            <button class="video-ctrl-btn" id="ac-play-pause" title="Play/Pause">&#9654;</button>
+                <button class="video-ctrl-btn" id="ac-play-pause" title="Play/Pause"><svg class="ui-icon" width="16" height="16"><use href="#icon-play"/></svg></button>
             <div class="video-progress-wrap" id="audio-progress-wrap">
                 <div class="video-progress-bg">
                     <div class="video-progress-buffered" id="ac-buffered"></div>
@@ -1507,7 +1598,7 @@
     <div class="sticker-panel" id="sticker-panel" style="display:none">
         <div class="sticker-panel-tabs">
             <button class="sticker-tab active" data-tab="emojis">&#x1F600;</button>
-            <button class="sticker-tab" data-tab="stickers">&#x1F3A8;</button>
+            <button class="sticker-tab" data-tab="stickers"><svg class="ui-icon" width="16" height="16"><use href="#icon-image"/></svg></button>
             <button class="sticker-tab" data-tab="gifs">GIF</button>
             <button class="sticker-tab" data-tab="upload">+</button>
         </div>
@@ -1524,8 +1615,8 @@
     <div class="modal" id="pins-modal" style="display:none">
         <div class="modal-content">
             <div class="pins-modal-header">
-                <h3>📌 Pinned Messages</h3>
-                <button class="pins-modal-close" id="close-pins-modal" title="Close">&#10005;</button>
+                <h3><svg class="ui-icon" width="16" height="16"><use href="#icon-pin"/></svg> Pinned Messages</h3>
+                <button class="pins-modal-close" id="close-pins-modal" title="Close"><svg class="ui-icon" width="16" height="16"><use href="#icon-close"/></svg></button>
             </div>
             <div id="pins-list" class="pins-list"></div>
         </div>
@@ -1552,7 +1643,7 @@
             <!-- Step 1: Choose file prompt -->
             <div id="sticker-upload-step-choose" style="text-align:center;padding:30px 20px;">
                 <div class="sticker-upload-dropzone" id="sticker-upload-dropzone" style="cursor:pointer;border:2px dashed #3a3a5a;border-radius:12px;padding:40px 20px;transition:all .2s;">
-                    <div style="font-size:48px;margin-bottom:12px;">📷</div>
+                    <div style="font-size:48px;margin-bottom:12px;"><svg class="ui-icon" width="48" height="48"><use href="#icon-camera"/></svg></div>
                     <div style="color:#888;font-size:14px;">Click to choose an image or GIF</div>
                     <div style="color:#666;font-size:12px;margin-top:6px;">Cropped to square at original resolution • GIFs uploaded as-is</div>
                 </div>
@@ -1617,7 +1708,7 @@
             <div id="appearance-pw-error" style="color:var(--danger);margin-bottom:12px;display:none;font-size:13px"></div>
             <div class="modal-actions" style="gap:8px;flex-wrap:wrap">
                 <button class="btn-cancel" id="appearance-pw-cancel-btn">Cancel</button>
-                <button class="btn-invite" id="appearance-pw-confirm-btn">&#128274; Confirm</button>
+                <button class="btn-invite" id="appearance-pw-confirm-btn"><svg class="ui-icon" width="14" height="14"><use href="#icon-lock"/></svg> Confirm</button>
             </div>
         </div>
     </div>
@@ -1651,7 +1742,7 @@
             <div id="css-pw-error" style="color:var(--danger);margin-bottom:12px;display:none;font-size:13px"></div>
             <div class="modal-actions" style="gap:8px;flex-wrap:wrap">
                 <button class="btn-cancel" id="css-pw-cancel-btn">Cancel</button>
-                <button class="btn-invite" id="css-pw-confirm-btn">&#128274; Confirm</button>
+                <button class="btn-invite" id="css-pw-confirm-btn"><svg class="ui-icon" width="14" height="14"><use href="#icon-lock"/></svg> Confirm</button>
             </div>
         </div>
     </div>
@@ -1670,8 +1761,8 @@
             <div id="fc-password-success" style="color:#4caf50;margin-bottom:12px;display:none;font-size:13px"></div>
             <div class="modal-actions" style="gap:8px;flex-wrap:wrap">
                 <button class="btn-cancel" id="fc-cancel-btn">Cancel</button>
-                <button class="btn-invite" id="fc-recover-btn" style="background:#ff9800;border-color:#ff9800">&#128274; Recover Code</button>
-                <button class="btn-invite" id="fc-regenerate-btn">&#128260; Generate New</button>
+                <button class="btn-invite" id="fc-recover-btn" style="background:#ff9800;border-color:#ff9800"><svg class="ui-icon" width="14" height="14"><use href="#icon-lock"/></svg> Recover Code</button>
+                <button class="btn-invite" id="fc-regenerate-btn"><svg class="ui-icon" width="14" height="14"><use href="#icon-refresh"/></svg> Generate New</button>
             </div>
         </div>
     </div>
@@ -1741,7 +1832,7 @@
                             <label>Profile Picture</label>
                             <div class="profile-upload-actions">
                                 <button class="btn btn-primary" id="profile-avatar-upload-btn">📷 Choose</button>
-                                <button class="btn btn-danger" id="profile-avatar-remove-btn" style="display:none">✕</button>
+                                <button class="btn btn-danger" id="profile-avatar-remove-btn" style="display:none"><svg class="ui-icon" width="14" height="14"><use href="#icon-close"/></svg></button>
                             </div>
                             <input type="file" id="profile-avatar-file-input" accept="image/*" style="display:none">
                         </div>
@@ -1749,7 +1840,7 @@
                             <label>Banner</label>
                             <div class="profile-upload-actions">
                                 <button class="btn btn-primary" id="profile-banner-upload-btn">📷 Choose</button>
-                                <button class="btn btn-danger" id="profile-banner-remove-btn" style="display:none">✕</button>
+                                <button class="btn btn-danger" id="profile-banner-remove-btn" style="display:none"><svg class="ui-icon" width="14" height="14"><use href="#icon-close"/></svg></button>
                             </div>
                             <input type="file" id="profile-banner-file-input" accept="image/*" style="display:none">
                         </div>
@@ -1767,7 +1858,7 @@
                         </div>
                         <div class="profile-crop-actions">
                             <button class="btn-cancel" id="profile-banner-crop-cancel">Cancel</button>
-                            <button class="btn-invite" id="profile-banner-crop-confirm">✓ Apply</button>
+                            <button class="btn-invite" id="profile-banner-crop-confirm"><svg class="ui-icon" width="14" height="14"><use href="#icon-check"/></svg> Apply</button>
                         </div>
                     </div>
                     <!-- Crop container for PFP -->
@@ -1782,7 +1873,7 @@
                         </div>
                         <div class="profile-crop-actions">
                             <button class="btn-cancel" id="profile-pfp-crop-cancel">Cancel</button>
-                            <button class="btn-invite" id="profile-pfp-crop-confirm">✓ Apply</button>
+                            <button class="btn-invite" id="profile-pfp-crop-confirm"><svg class="ui-icon" width="14" height="14"><use href="#icon-check"/></svg> Apply</button>
                         </div>
                     </div>
 
@@ -1849,38 +1940,38 @@
     <div class="voice-bar" id="voice-bar" style="display:none">
         <div class="voice-bar-top">
             <span class="voice-bar-name" id="voice-bar-name">Voice Connected</span>
-            <button class="voice-bar-btn" id="voice-bar-popup" title="Show members">&#9776;</button>
+            <button class="voice-bar-btn" id="voice-bar-popup" title="Show members"><svg class="ui-icon" width="16" height="16"><use href="#icon-menu"/></svg></button>
         </div>
         <div class="voice-bar-controls">
-            <button class="voice-bar-btn" id="voice-bar-mute" title="Mute">&#127908;</button>
-            <button class="voice-bar-btn" id="voice-bar-deafen" title="Deafen">&#128266;</button>
-            <button class="voice-bar-btn" id="voice-bar-camera" title="Camera">&#128247;</button>
-            <button class="voice-bar-btn voice-cam-opt" id="voice-bar-cam-opt" title="Camera options (flip / mirror / flash)">&#8942;</button>
-            <button class="voice-bar-btn" id="voice-bar-screen" title="Share screen">&#128424;</button>
-            <button class="voice-bar-btn" id="voice-bar-soundboard" title="Soundboard">&#127925;</button>
-            <button class="voice-bar-btn voice-bar-leave" id="voice-bar-leave" title="Leave">&#128222;</button>
+            <button class="voice-bar-btn" id="voice-bar-mute" title="Mute"><svg class="ui-icon" width="16" height="16"><use href="#icon-mic"/></svg></button>
+            <button class="voice-bar-btn" id="voice-bar-deafen" title="Deafen"><svg class="ui-icon" width="16" height="16"><use href="#icon-volume-on"/></svg></button>
+            <button class="voice-bar-btn" id="voice-bar-camera" title="Camera"><svg class="ui-icon" width="16" height="16"><use href="#icon-camera"/></svg></button>
+            <button class="voice-bar-btn voice-cam-opt" id="voice-bar-cam-opt" title="Camera options (flip / mirror / flash)"><svg class="ui-icon" width="16" height="16"><use href="#icon-more"/></svg></button>
+            <button class="voice-bar-btn" id="voice-bar-screen" title="Share screen"><svg class="ui-icon" width="16" height="16"><use href="#icon-monitor"/></svg></button>
+            <button class="voice-bar-btn" id="voice-bar-soundboard" title="Soundboard"><svg class="ui-icon" width="16" height="16"><use href="#icon-music"/></svg></button>
+            <button class="voice-bar-btn voice-bar-leave" id="voice-bar-leave" title="Leave"><svg class="ui-icon" width="16" height="16"><use href="#icon-phone"/></svg></button>
         </div>
     </div>
 
     <!-- Server voice channel view (top panel in the text area; member list + controls) -->
     <div class="voice-popup" id="voice-popup" style="display:none">
         <div class="voice-popup-header">
-            <span class="voice-popup-title">&#128266; <span id="voice-popup-name">Voice Channel</span></span>
+            <span class="voice-popup-title"><svg class="ui-icon" width="16" height="16"><use href="#icon-volume-on"/></svg> <span id="voice-popup-name">Voice Channel</span></span>
             <div class="voice-popup-actions">
-                <button class="voice-popup-fullscreen" id="voice-popup-fullscreen" title="Full screen">&#8645;</button>
+                <button class="voice-popup-fullscreen" id="voice-popup-fullscreen" title="Full screen"><svg class="ui-icon" width="16" height="16"><use href="#icon-expand"/></svg></button>
                 <button class="voice-popup-close" id="voice-popup-close" title="Close">&times;</button>
             </div>
         </div>
         <div class="voice-popup-members" id="voice-popup-members"></div>
         <div class="voice-popup-controls">
-            <button class="voice-popup-btn" id="voice-popup-mute" title="Mute">&#127908;</button>
-            <button class="voice-popup-btn" id="voice-popup-deafen" title="Deafen">&#128266;</button>
-            <button class="voice-popup-btn" id="voice-popup-camera" title="Camera">&#128247;</button>
-            <button class="voice-popup-btn voice-cam-opt" id="voice-popup-cam-opt" title="Camera options (flip / mirror / flash)">&#8942;</button>
-            <button class="voice-popup-btn" id="voice-popup-screen" title="Share screen">&#128424;</button>
-            <button class="voice-popup-btn" id="voice-popup-pip" title="Picture-in-Picture" style="font-size:18px">&#128248;</button>
-            <button class="voice-popup-btn" id="voice-popup-soundboard" title="Soundboard">&#127925;</button>
-            <button class="voice-popup-btn voice-popup-leave" id="voice-popup-leave" title="Leave">&#128222;</button>
+            <button class="voice-popup-btn" id="voice-popup-mute" title="Mute"><svg class="ui-icon" width="16" height="16"><use href="#icon-mic"/></svg></button>
+            <button class="voice-popup-btn" id="voice-popup-deafen" title="Deafen"><svg class="ui-icon" width="16" height="16"><use href="#icon-volume-on"/></svg></button>
+            <button class="voice-popup-btn" id="voice-popup-camera" title="Camera"><svg class="ui-icon" width="16" height="16"><use href="#icon-camera"/></svg></button>
+            <button class="voice-popup-btn voice-cam-opt" id="voice-popup-cam-opt" title="Camera options (flip / mirror / flash)"><svg class="ui-icon" width="16" height="16"><use href="#icon-more"/></svg></button>
+            <button class="voice-popup-btn" id="voice-popup-screen" title="Share screen"><svg class="ui-icon" width="16" height="16"><use href="#icon-monitor"/></svg></button>
+            <button class="voice-popup-btn" id="voice-popup-pip" title="Picture-in-Picture"><svg class="ui-icon" width="16" height="16"><use href="#icon-expand"/></svg></button>
+            <button class="voice-popup-btn" id="voice-popup-soundboard" title="Soundboard"><svg class="ui-icon" width="16" height="16"><use href="#icon-music"/></svg></button>
+            <button class="voice-popup-btn voice-popup-leave" id="voice-popup-leave" title="Leave"><svg class="ui-icon" width="16" height="16"><use href="#icon-phone"/></svg></button>
         </div>
         <div class="voice-popup-settings">
             <div class="voice-popup-setting-row">
@@ -1933,43 +2024,43 @@
     </div>
 
     <!-- DM call panel (top panel of the text area while in that DM; the
-         &#8645; button expands it to cover the WHOLE screen) -->
+         expand button expands it to cover the WHOLE screen) -->
     <div class="dm-call-panel" id="dm-call-panel" style="display:none">
         <div class="dm-call-header">
-            <span class="dm-call-header-title">&#128222; In call with <b id="dm-call-name">…</b></span>
+            <span class="dm-call-header-title"><svg class="ui-icon" width="14" height="14"><use href="#icon-phone"/></svg> In call with <b id="dm-call-name">…</b></span>
             <div class="dm-call-header-actions">
-                <button class="dm-call-expand" id="dm-call-expand" title="Expand to full screen">&#8645;</button>
-                <button class="dm-call-close" id="dm-call-close" title="Close panel">&#10005;</button>
+                <button class="dm-call-expand" id="dm-call-expand" title="Expand to full screen"><svg class="ui-icon" width="16" height="16"><use href="#icon-expand"/></svg></button>
+                <button class="dm-call-close" id="dm-call-close" title="Close panel">&times;</button>
             </div>
         </div>
         <div class="dm-call-body" id="dm-call-body"></div>
         <div class="dm-call-self" id="dm-call-self"></div>
         <div class="dm-call-controls">
-            <button class="dm-call-btn" id="dm-call-mute" title="Mute">&#127908;</button>
-            <button class="dm-call-btn" id="dm-call-deafen" title="Deafen">&#128266;</button>
-            <button class="dm-call-btn" id="dm-call-camera" title="Camera">&#128247;</button>
-            <button class="dm-call-btn voice-cam-opt" id="dm-call-cam-opt" title="Camera options (flip / mirror / flash)">&#8942;</button>
-            <button class="dm-call-btn" id="dm-call-screen" title="Share screen">&#128424;</button>
-            <button class="dm-call-btn" id="dm-call-soundboard" title="Soundboard">&#127925;</button>
-            <button class="dm-call-btn dm-call-end" id="dm-call-end" title="End call">&#128222;</button>
+            <button class="dm-call-btn" id="dm-call-mute" title="Mute"><svg class="ui-icon" width="16" height="16"><use href="#icon-mic"/></svg></button>
+            <button class="dm-call-btn" id="dm-call-deafen" title="Deafen"><svg class="ui-icon" width="16" height="16"><use href="#icon-volume-on"/></svg></button>
+            <button class="dm-call-btn" id="dm-call-camera" title="Camera"><svg class="ui-icon" width="16" height="16"><use href="#icon-camera"/></svg></button>
+            <button class="dm-call-btn voice-cam-opt" id="dm-call-cam-opt" title="Camera options (flip / mirror / flash)"><svg class="ui-icon" width="16" height="16"><use href="#icon-more"/></svg></button>
+            <button class="dm-call-btn" id="dm-call-screen" title="Share screen"><svg class="ui-icon" width="16" height="16"><use href="#icon-monitor"/></svg></button>
+            <button class="dm-call-btn" id="dm-call-soundboard" title="Soundboard"><svg class="ui-icon" width="16" height="16"><use href="#icon-music"/></svg></button>
+            <button class="dm-call-btn dm-call-end" id="dm-call-end" title="End call"><svg class="ui-icon" width="16" height="16"><use href="#icon-phone"/></svg></button>
         </div>
         <div class="dm-call-resize" id="dm-call-resize" title="Drag to resize height"></div>
     </div>
 
     <!-- Camera options dropdown (flip / flash) — opened from the
-         &#8942; button in any call's control row; closes on outside click.
+         more button in any call's control row; closes on outside click.
          Mirror moved to the right-click menu on any camera/screen tile
          (including your own). -->
     <div class="voice-cam-opt-menu" id="voice-cam-opt-menu" style="display:none">
-        <button type="button" id="cam-opt-flip" title="Flip camera">&#128260; Flip camera</button>
-        <button type="button" id="cam-opt-flash" title="Flash">&#9889; Flash</button>
+        <button type="button" id="cam-opt-flip" title="Flip camera"><svg class="ui-icon" width="14" height="14"><use href="#icon-flip"/></svg> Flip camera</button>
+        <button type="button" id="cam-opt-flash" title="Flash"><svg class="ui-icon" width="14" height="14"><use href="#icon-flash"/></svg> Flash</button>
     </div>
 
     <!-- White-screen flash (for cameras without torch, e.g. the selfie
          camera): covers the whole app with a white layer + a button to turn
          it off. Works in voice channels and DM calls alike. -->
     <div class="camera-flash-overlay" id="camera-flash-overlay" style="display:none">
-        <button type="button" id="camera-flash-off" title="Turn off flash">&#9889; Turn off flash</button>
+        <button type="button" id="camera-flash-off" title="Turn off flash"><svg class="ui-icon" width="14" height="14"><use href="#icon-flash"/></svg> Turn off flash</button>
     </div>
 
     <!-- DM mini bar (persists when you switch to another chat) -->
@@ -1977,10 +2068,10 @@
         <button class="dm-mini-bar-body" id="dm-mini-bar-body">
             <span class="dm-mini-bar-name" id="dm-mini-bar-name">In call</span>
         </button>
-        <button class="voice-bar-btn" id="dm-mini-bar-mute" title="Mute">&#127908;</button>
-        <button class="voice-bar-btn" id="dm-mini-bar-deafen" title="Deafen">&#128266;</button>
-        <button class="voice-bar-btn" id="dm-mini-bar-soundboard" title="Soundboard">&#127925;</button>
-        <button class="voice-bar-btn voice-bar-leave" id="dm-mini-bar-end" title="End call">&#128222;</button>
+        <button class="voice-bar-btn" id="dm-mini-bar-mute" title="Mute"><svg class="ui-icon" width="16" height="16"><use href="#icon-mic"/></svg></button>
+        <button class="voice-bar-btn" id="dm-mini-bar-deafen" title="Deafen"><svg class="ui-icon" width="16" height="16"><use href="#icon-volume-on"/></svg></button>
+        <button class="voice-bar-btn" id="dm-mini-bar-soundboard" title="Soundboard"><svg class="ui-icon" width="16" height="16"><use href="#icon-music"/></svg></button>
+        <button class="voice-bar-btn voice-bar-leave" id="dm-mini-bar-end" title="End call"><svg class="ui-icon" width="16" height="16"><use href="#icon-phone"/></svg></button>
     </div>
 
     <!-- Incoming DM call bar -->
@@ -2001,7 +2092,7 @@
                 <p style="color:var(--text-muted);font-size:13px;margin-bottom:10px;">Confirm your password to begin enrollment.</p>
                 <div class="auth-input-row" style="margin-bottom:10px;">
                     <input type="password" id="twofa-password" placeholder="Password" autocomplete="off" class="modal-input auth-code-input" style="flex:1;" />
-                    <button type="button" class="toggle-visibility-btn" id="toggle-twofa-password" title="Show/Hide">&#128065;</button>
+                    <button type="button" class="toggle-visibility-btn" id="toggle-twofa-password" title="Show/Hide"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>
                 </div>
                 <button class="btn-invite" id="twofa-start-btn">Begin enrollment</button>
                 <p id="twofa-password-error" style="color:var(--danger);display:none;font-size:13px;margin-top:8px;"></p>
@@ -2016,7 +2107,7 @@
                 <div id="twofa-recovery-codes"></div>
                 <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap;">
                     <button class="btn-invite" id="twofa-copy-codes" style="font-size:12px;padding:6px 12px;">Copy codes</button>
-                    <button class="btn-invite" id="twofa-save-codes" style="font-size:12px;padding:6px 12px;">&#11015; Save codes</button>
+                    <button class="btn-invite" id="twofa-save-codes" style="font-size:12px;padding:6px 12px;"><svg class="ui-icon" width="12" height="12"><use href="#icon-download"/></svg> Save codes</button>
                     <span id="twofa-copy-status" style="font-size:12px;color:var(--text-muted);"></span>
                 </div>
                 <p style="color:var(--text-muted);font-size:13px;margin-bottom:6px;">Enter the 6-digit code from your app to confirm:</p>
@@ -2088,7 +2179,7 @@
             <p style="color:var(--text-muted);font-size:13px;margin-bottom:10px;" id="kick-all-confirm-desc">This device stays signed in. Every other device is signed out immediately &mdash; including from voice channels and calls &mdash; and will need to sign in again.</p>
             <div class="auth-input-row" style="margin-bottom:10px;">
                 <input type="password" id="kick-all-password" placeholder="Enter your password to confirm" class="modal-input auth-code-input" style="flex:1;" autocomplete="current-password" />
-                <button type="button" class="toggle-visibility-btn" id="toggle-kick-all-password" title="Show/Hide">&#128065;</button>
+                <button type="button" class="toggle-visibility-btn" id="toggle-kick-all-password" title="Show/Hide"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>
             </div>
             <p id="kick-all-error" style="color:var(--danger,#ed4245);font-size:13px;margin-bottom:10px;display:none;"></p>
             <div class="modal-actions">

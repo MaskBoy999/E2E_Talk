@@ -279,7 +279,7 @@
             }
             var name = memberDisplayName(uid, local);
             var nameStyle = memberNameStyle(uid);
-            var selfMark = (local.is_owner ? ' 👑' : '') + (isSelf ? ' (you)' : '');
+            var selfMark = (local.is_owner ? ' ' + icon('shield') : '') + (isSelf ? ' (you)' : '');
             // Server voice popup rows
             document.querySelectorAll('.voice-member-row[data-uid="' + uid + '"]').forEach(function (row) {
                 var av = row.querySelector('.voice-member-avatar');
@@ -4848,21 +4848,21 @@
     function renderBar() {
         var micBtn = el('voice-bar-mute');
         if (micBtn) {
-            micBtn.textContent = S.muted ? '🔇' : '🎤';
+            micBtn.innerHTML = S.muted ? icon('volume-off') : icon('mic');
             micBtn.classList.toggle('active', S.muted);
             micBtn.classList.toggle('locked', S.forceMuted);
             micBtn.title = S.forceMuted ? 'Server muted' : (S.muted ? 'Unmute' : 'Mute');
         }
         var deafBtn = el('voice-bar-deafen');
         if (deafBtn) {
-            deafBtn.textContent = S.deafened ? '🔇' : '🔈';
+            deafBtn.innerHTML = S.deafened ? icon('volume-off') : icon('volume-on');
             deafBtn.classList.toggle('active', S.deafened);
             deafBtn.classList.toggle('locked', S.forceDeafened);
             deafBtn.title = S.forceDeafened ? 'Server deafened' : (S.deafened ? 'Undeafen' : 'Deafen');
         }
         var camBtn = el('voice-bar-camera');
         if (camBtn) {
-            camBtn.textContent = S.cameraOn ? '🎥' : '📷';
+            camBtn.innerHTML = S.cameraOn ? icon('video') : icon('camera');
             camBtn.classList.toggle('active', S.cameraOn);
         }
         var scrBtn = el('voice-bar-screen');
@@ -5103,7 +5103,7 @@
             }).catch(function (e) {
                 console.error('Hear-self mic error:', e);
                 stopHearSelfTest();
-                if (_hearSelfStatus) _hearSelfStatus.textContent = '⚠ Mic access denied';
+                if (_hearSelfStatus) _hearSelfStatus.innerHTML = icon('warning') + ' Mic access denied';
             });
         }
         function stopHearSelfTest() {
@@ -5117,7 +5117,7 @@
             if (_hearSelfStream) { _hearSelfStream.getTracks().forEach(function (t) { t.stop(); }); _hearSelfStream = null; }
             S.settings.hearSelf = false;
             saveSettings();
-            if (_hearSelfBtn) { _hearSelfBtn.textContent = '🎤 Start Test'; _hearSelfBtn.classList.remove('btn-danger'); _hearSelfBtn.classList.add('btn-primary'); }
+            if (_hearSelfBtn) { _hearSelfBtn.innerHTML = icon('mic') + ' Start Test'; _hearSelfBtn.classList.remove('btn-danger'); _hearSelfBtn.classList.add('btn-primary'); }
             if (_hearSelfMeterWrap) _hearSelfMeterWrap.style.display = 'none';
             if (_hearSelfMeter) _hearSelfMeter.style.width = '0%';
             if (_hearSelfDb) _hearSelfDb.textContent = '';
@@ -5338,12 +5338,12 @@
     // the only speaking indicator).
     function memberBadges(m, prefix) {
         var html = '';
-        if (m.force_muted) html += ' <span class="' + prefix + '-badge locked" title="Server muted">🔒🔇</span>';
-        else if (m.muted) html += ' <span class="' + prefix + '-badge" title="Muted">🔇</span>';
-        if (m.force_deafened) html += ' <span class="' + prefix + '-badge locked" title="Server deafened">🔒🔈</span>';
-        else if (m.deafened) html += ' <span class="' + prefix + '-badge" title="Deafened">🔈</span>';
-        if (m.camera) html += ' <span class="' + prefix + '-badge" title="Camera">📷</span>';
-        if (m.screen) html += ' <span class="' + prefix + '-badge" title="Screen">🖥️</span>';
+        if (m.force_muted) html += ' <span class="' + prefix + '-badge locked" title="Server muted">' + icon('lock') + icon('volume-off') + '</span>';
+        else if (m.muted) html += ' <span class="' + prefix + '-badge" title="Muted">' + icon('volume-off') + '</span>';
+        if (m.force_deafened) html += ' <span class="' + prefix + '-badge locked" title="Server deafened">' + icon('lock') + icon('volume-off') + '</span>';
+        else if (m.deafened) html += ' <span class="' + prefix + '-badge" title="Deafened">' + icon('volume-off') + '</span>';
+        if (m.camera) html += ' <span class="' + prefix + '-badge" title="Camera">' + icon('camera') + '</span>';
+        if (m.screen) html += ' <span class="' + prefix + '-badge" title="Screen">' + icon('monitor') + '</span>';
         // Soundboard playing indicator — shows who is playing a sound so you know who to mute
         if (window._sbPlayingUsers && window._sbPlayingUsers[m.user_id]) {
             html += ' <span class="' + prefix + '-badge sb-playing-indicator" title="Playing soundboard">🎵</span>';
@@ -5625,7 +5625,7 @@
                 holder.type = 'button';
                 holder.className = 'voice-feed-load-btn';
                 holder.setAttribute('data-feed', key);
-                holder.innerHTML = '<span class="voice-feed-load-ico">&#9654;</span><span class="voice-feed-load-lbl">' +
+                holder.innerHTML = '<svg class="ui-icon" width="14" height="14"><use href="#icon-play"/></svg><span class="voice-feed-load-lbl">' +
                     (kind === 'screen' ? 'Load screen' : 'Load camera') + '</span>';
                 holder.addEventListener('click', function () {
                     markFeedLoaded(uid, kind);
@@ -5678,7 +5678,7 @@
                     unloadBtn.className = 'voice-feed-unload-btn';
                     unloadBtn.setAttribute('data-feed', key);
                     unloadBtn.title = 'Stop receiving this feed — the sender stops sending it to you (tap Load to resume)';
-                    unloadBtn.textContent = '✕';
+                    unloadBtn.innerHTML = icon('close');
                     unloadBtn.addEventListener('click', function (e) {
                         e.stopPropagation();
                         unloadFeed(uid, kind);
@@ -5840,7 +5840,7 @@
         p.classList.toggle('expanded', !!S.dmCallExpanded);
         var btn = el('dm-call-expand');
         if (btn) {
-            btn.textContent = S.dmCallExpanded ? '\u2921' : '\u2922';
+            btn.innerHTML = S.dmCallExpanded ? icon('minimize') : icon('maximize');
             btn.title = S.dmCallExpanded ? 'Collapse — show chat below' : 'Expand — cover the whole screen';
         }
     }
@@ -5861,7 +5861,7 @@
         p.classList.toggle('fullscreen', !!S.voiceFullscreen);
         var btn = el('voice-popup-fullscreen');
         if (btn) {
-            btn.textContent = S.voiceFullscreen ? '\u2921' : '\u2922';
+            btn.innerHTML = S.voiceFullscreen ? icon('minimize') : icon('maximize');
             btn.title = S.voiceFullscreen ? 'Exit full screen' : 'Full screen';
         }
     }
@@ -6311,7 +6311,7 @@
         chip.className = 'voice-tile-reset-view';
         chip.setAttribute('data-feed', key);
         chip.title = 'This feed is mirrored/rotated for you — click to reset';
-        chip.innerHTML = '<span class="voice-tile-reset-ico">&#8635;</span><span class="voice-tile-reset-lbl">Reset view</span>';
+        chip.innerHTML = '<svg class="ui-icon" width="14" height="14"><use href="#icon-refresh-alt"/></svg><span class="voice-tile-reset-lbl">Reset view</span>';
         chip.addEventListener('click', function (e) {
             e.stopPropagation();
             setTileViewTransform(uid, kind, 'reset', 0);
@@ -6362,7 +6362,7 @@
         btnMirror.type = 'button';
         btnMirror.className = 'volume-menu-view-btn' + (tState.mirror ? ' active' : '');
         btnMirror.title = 'Mirror horizontally (always horizontal, independent of rotation)';
-        btnMirror.textContent = '⇋ Mirror';
+        btnMirror.innerHTML = icon('mirror') + ' Mirror';
         btnMirror.addEventListener('click', function (ev) {
             ev.stopPropagation();
             setTileViewTransform(uid, viewKind, 'mirror', !tState.mirror);
@@ -6374,7 +6374,7 @@
         btnRotL.type = 'button';
         btnRotL.className = 'volume-menu-view-btn';
         btnRotL.title = 'Rotate 90° left';
-        btnRotL.textContent = '⟲ 90°';
+        btnRotL.innerHTML = icon('rotate-left') + ' 90&deg;';
         btnRotL.addEventListener('click', function (ev) {
             ev.stopPropagation();
             setTileViewTransform(uid, viewKind, 'rot', (tState.rot || 0) - 90);
@@ -6385,7 +6385,7 @@
         btnRotR.type = 'button';
         btnRotR.className = 'volume-menu-view-btn';
         btnRotR.title = 'Rotate 90° right';
-        btnRotR.textContent = '⟳ 90°';
+        btnRotR.innerHTML = icon('rotate-right') + ' 90&deg;';
         btnRotR.addEventListener('click', function (ev) {
             ev.stopPropagation();
             setTileViewTransform(uid, viewKind, 'rot', (tState.rot || 0) + 90);
@@ -6396,7 +6396,7 @@
         btnViewReset.type = 'button';
         btnViewReset.className = 'volume-menu-view-btn';
         btnViewReset.title = 'Reset view (no mirror, no rotation)';
-        btnViewReset.textContent = '↺ Reset';
+        btnViewReset.innerHTML = icon('reset') + ' Reset';
         btnViewReset.addEventListener('click', function (ev) {
             ev.stopPropagation();
             setTileViewTransform(uid, viewKind, 'reset', 0);
@@ -6520,7 +6520,7 @@
             // Reset this member's volume back to 100% (clears the per-user override)
             var resetBtn = document.createElement('button');
             resetBtn.className = 'volume-menu-btn';
-            resetBtn.textContent = '↺ Reset volume (100%)';
+            resetBtn.innerHTML = icon('reset') + ' Reset volume (100%)';
             resetBtn.addEventListener('click', function () {
                 applyVol(uid, 100);
                 var s = menu.querySelector('.volume-menu-slider');
@@ -6540,30 +6540,30 @@
             var m = S.members[uid];
             var row1 = document.createElement('button');
             row1.className = 'volume-menu-btn';
-            row1.textContent = m.force_muted ? '🔓 Unmute' : '🔇 Server Mute';
+            row1.innerHTML = m.force_muted ? icon('unlock') + ' Unmute' : icon('volume-off') + ' Server Mute';
             row1.addEventListener('click', function () {
                 var wasMuted = !!m.force_muted;
                 ownerControl(wasMuted ? 'unmute' : 'mute', uid);
                 // Flip label in place — don't close menu
                 m.force_muted = !wasMuted;
-                row1.textContent = m.force_muted ? '🔓 Unmute' : '🔇 Server Mute';
+            row1.innerHTML = m.force_muted ? icon('volume-on') + ' Unmute' : icon('volume-off') + ' Server Mute';
                 row1.className = 'volume-menu-btn' + (m.force_muted ? ' active' : '');
             });
             menu.appendChild(row1);
             var row2 = document.createElement('button');
             row2.className = 'volume-menu-btn';
-            row2.textContent = m.force_deafened ? '🔓 Undeafen' : '🔈 Server Deafen';
+            row2.innerHTML = m.force_deafened ? icon('unlock') + ' Undeafen' : icon('volume-off') + ' Server Deafen';
             row2.addEventListener('click', function () {
                 var wasDeaf = !!m.force_deafened;
                 ownerControl(wasDeaf ? 'undeafen' : 'deafen', uid);
                 m.force_deafened = !wasDeaf;
-                row2.textContent = m.force_deafened ? '🔓 Undeafen' : '🔈 Server Deafen';
+                row2.innerHTML = m.force_deafened ? icon('unlock') + ' Undeafen' : icon('volume-off') + ' Server Deafen';
                 row2.className = 'volume-menu-btn' + (m.force_deafened ? ' active' : '');
             });
             menu.appendChild(row2);
             var row3 = document.createElement('button');
             row3.className = 'volume-menu-btn danger';
-            row3.textContent = '👢 Kick';
+            row3.innerHTML = icon('kick') + ' Kick';
             row3.addEventListener('click', function () {
                 ownerControl('kick', uid);
                 // Don't close menu — let the member row disappear on its own
@@ -6577,7 +6577,7 @@
             var isSbMuted = sbMutedList.indexOf(uid) !== -1;
             var sbBtn = document.createElement('button');
             sbBtn.className = 'volume-menu-btn' + (isSbMuted ? ' active' : '');
-            sbBtn.textContent = isSbMuted ? '✓ 🔊 Unmute Soundboard' : '🔇 Mute Soundboard';
+            sbBtn.innerHTML = isSbMuted ? icon('check') + ' ' + icon('volume-on') + ' Unmute Soundboard' : icon('volume-off') + ' Mute Soundboard';
             sbBtn.addEventListener('click', function () {
                 var serverId = window.currentServerId;
                 // Update local mute list IMMEDIATELY (not in .then) so it takes
@@ -6610,7 +6610,7 @@
                 // Update the indicator IN PLACE — the menu stays open and the
                 // ✓ label flips without needing to reopen it.
                 sbBtn.className = 'volume-menu-btn' + (nowMuted ? ' active' : '');
-                sbBtn.textContent = nowMuted ? '✓ 🔊 Unmute Soundboard' : '🔇 Mute Soundboard';
+                sbBtn.innerHTML = nowMuted ? icon('check') + ' ' + icon('volume-on') + ' Unmute Soundboard' : icon('volume-off') + ' Mute Soundboard';
             });
             menu.appendChild(sbBtn);
         }
@@ -6623,7 +6623,7 @@
             var isSbDisabled = sbDisabledList.indexOf(uid) !== -1;
             var sbDisBtn = document.createElement('button');
             sbDisBtn.className = 'volume-menu-btn' + (isSbDisabled ? ' active' : '');
-            sbDisBtn.textContent = isSbDisabled ? '✓ 🔊 Enable Soundboard' : '🚫 Disable Soundboard';
+            sbDisBtn.innerHTML = isSbDisabled ? icon('check') + ' ' + icon('volume-on') + ' Enable Soundboard' : icon('close') + ' Disable Soundboard';
             sbDisBtn.addEventListener('click', function () {
                 var serverId = window.currentServerId;
                 // Update local disabled list IMMEDIATELY, then derive the new
@@ -6655,7 +6655,7 @@
                 }
                 // Update the indicator IN PLACE — menu stays open, label flips.
                 sbDisBtn.className = 'volume-menu-btn' + (nowDisabled ? ' active' : '');
-                sbDisBtn.textContent = nowDisabled ? '✓ 🔊 Enable Soundboard' : '🚫 Disable Soundboard';
+                sbDisBtn.innerHTML = nowDisabled ? icon('check') + ' ' + icon('volume-on') + ' Enable Soundboard' : icon('close') + ' Disable Soundboard';
             });
             menu.appendChild(sbDisBtn);
         }
@@ -6934,14 +6934,14 @@
         ['voice-bar-mute', 'voice-popup-mute', 'dm-call-mute', 'dm-mini-bar-mute'].forEach(function (id) {
             var b = el(id);
             if (!b) return;
-            b.textContent = S.muted ? '🔇' : '🎤';
+            b.innerHTML = S.muted ? icon('volume-off') : icon('mic');
             b.classList.toggle('active', S.muted);
             b.classList.toggle('locked', S.forceMuted);
         });
         ['voice-bar-deafen', 'voice-popup-deafen', 'dm-call-deafen', 'dm-mini-bar-deafen'].forEach(function (id) {
             var b = el(id);
             if (!b) return;
-            b.textContent = S.deafened ? '🙉' : '🔈';
+            b.innerHTML = S.deafened ? icon('volume-off') : icon('volume-on');
             b.classList.toggle('active', S.deafened);
             b.classList.toggle('locked', S.forceDeafened);
         });
@@ -7033,12 +7033,12 @@
                 }
 
                 var badges = '';
-                if (m.force_muted) badges += '<span class="vc-badge locked" title="Server muted">🔒🔇</span>';
-                else if (m.muted) badges += '<span class="vc-badge" title="Muted">🔇</span>';
-                if (m.force_deafened) badges += '<span class="vc-badge locked" title="Server deafened">🔒🔈</span>';
-                else if (m.deafened) badges += '<span class="vc-badge" title="Deafened">🔈</span>';
-                if (m.camera) badges += '<span class="vc-badge" title="Camera">📷</span>';
-                if (m.screen) badges += '<span class="vc-badge" title="Screen">🖥️</span>';
+                if (m.force_muted) badges += '<span class="vc-badge locked" title="Server muted">' + icon('lock') + icon('volume-off') + '</span>';
+                else if (m.muted) badges += '<span class="vc-badge" title="Muted">' + icon('volume-off') + '</span>';
+                if (m.force_deafened) badges += '<span class="vc-badge locked" title="Server deafened">' + icon('lock') + icon('volume-off') + '</span>';
+                else if (m.deafened) badges += '<span class="vc-badge" title="Deafened">' + icon('volume-off') + '</span>';
+                if (m.camera) badges += '<span class="vc-badge" title="Camera">' + icon('camera') + '</span>';
+                if (m.screen) badges += '<span class="vc-badge" title="Screen">' + icon('monitor') + '</span>';
 
                 var chipStyle = memberNameStyle(m.user_id);
                 var isSelfChip = m.user_id === getSelfId();
@@ -7355,13 +7355,13 @@
             if (r) {
                 if (k === 'video' && r.tracks > 0 && r.frames === 0) {
                     if (r.packets === 0) {
-                        reasons.push('⚠ Black feed: the sender is not sending this camera/screen to you (0 packets). If “Load each camera / screen share manually” is ON, click the <b>Load</b> button on their tile. If it’s OFF, their feed to you is stalled — the receiver watchdog renegotiates automatically, or ask them to toggle their camera/screen, or rejoin the call.');
+                        reasons.push('' + icon('warning') + ' Black feed: the sender is not sending this camera/screen to you (0 packets). If “Load each camera / screen share manually” is ON, click the <b>Load</b> button on their tile. If it’s OFF, their feed to you is stalled — the receiver watchdog renegotiates automatically, or ask them to toggle their camera/screen, or rejoin the call.');
                     } else {
-                        reasons.push('⚠ Black feed: packets arrive but nothing decodes — a codec/key issue; the receiver watchdog heals it automatically (Reconnecting video…), or rejoin the call.');
+                        reasons.push('' + icon('warning') + ' Black feed: packets arrive but nothing decodes — a codec/key issue; the receiver watchdog heals it automatically (Reconnecting video…), or rejoin the call.');
                     }
                 }
                 if (k === 'video' && r.tracks > 0 && !r.transform) {
-                    reasons.push('⚠ E2EE decrypt transform missing on this feed — encrypted frames can’t decode (black). The watchdog re-applies it automatically, or press <b>Rejoin &amp; heal</b>.');
+                    reasons.push('' + icon('warning') + ' E2EE decrypt transform missing on this feed — encrypted frames can’t decode (black). The watchdog re-applies it automatically, or press <b>Rejoin &amp; heal</b>.');
                 }
                 // Accumulated m-lines: a member has at most ONE mic audio + ONE
                 // screen-share audio, and at most camera + screen video. More
@@ -7370,17 +7370,17 @@
                 // the renderer, so surface them.
                 var maxRecv = k === 'audio' ? 2 : 2;
                 if (r.tracks > maxRecv) {
-                    reasons.push('⚠ ' + r.tracks + ' ' + k + ' receivers on this peer — accumulated m-lines from repeated camera/screen/mute toggles. The watchdog renegotiates to clean them up; if they persist, press <b>Rejoin &amp; heal</b>.');
+                    reasons.push('' + icon('warning') + ' ' + r.tracks + ' ' + k + ' receivers on this peer — accumulated m-lines from repeated camera/screen/mute toggles. The watchdog renegotiates to clean them up; if they persist, press <b>Rejoin &amp; heal</b>.');
                 }
                 if (k === 'audio' && r.tracks > 0 && r.frames === 0 && r.packets > 0) {
                     reasons.push('ℹ Audio packets arrive but frames read 0 — usually a Chrome audio-stats quirk, not a problem, if you can hear them.');
                 }
             }
             if (s && k === 'audio' && s.tracks > 0 && !s.transform) {
-                reasons.push('⚠ Your mic is being sent WITHOUT end-to-end encryption. Mute + unmute once (restarts the mic on the same line) or rejoin the call to restore the encrypt transform.');
+                reasons.push('' + icon('warning') + ' Your mic is being sent WITHOUT end-to-end encryption. Mute + unmute once (restarts the mic on the same line) or rejoin the call to restore the encrypt transform.');
             }
             if (s && k === 'video' && s.tracks > 0 && s.frames === 0) {
-                reasons.push('⚠ Your camera to this peer is not encoding — toggle your camera off/on.');
+                reasons.push('' + icon('warning') + ' Your camera to this peer is not encoding — toggle your camera off/on.');
             }
             // One-way E2EE gap: the worker shows frames DO flow through the
             // transforms on one side but the OTHER direction's counters never
@@ -7391,7 +7391,7 @@
             if (k === 'audio' && r && r.tracks > 0 && r.transform) {
                 var st = window.__voiceE2eeStats && window.__voiceE2eeStats.last;
                 if (st && st.decA === 0 && st.encA > 0) {
-                    reasons.push('⚠ One-way E2EE gap: incoming audio decrypts 0 frames while the other side encrypts ' + st.encA + ' — Chrome attached the decrypt transform but never invokes it; this direction is flowing as PLAINTEXT. The watchdog re-negotiates to heal it (Reconnecting media…), or press <b>Rejoin &amp; heal</b>.');
+                    reasons.push('' + icon('warning') + ' One-way E2EE gap: incoming audio decrypts 0 frames while the other side encrypts ' + st.encA + ' — Chrome attached the decrypt transform but never invokes it; this direction is flowing as PLAINTEXT. The watchdog re-negotiates to heal it (Reconnecting media…), or press <b>Rejoin &amp; heal</b>.');
                 }
             }
         });
@@ -7401,7 +7401,7 @@
             if (p.receivers[k] && p.receivers[k].tracks > 0 && !p.receivers[k].transform) missing.push('recv ' + k);
         });
         if (missing.length && !reasons.some(function (x) { return x.indexOf('rejoin the call to restore it') !== -1 || x.indexOf('restore the encrypt transform') !== -1; })) {
-            reasons.push('⚠ E2EE transform missing on: ' + missing.join(', ') + ' — rejoin the call to restore full end-to-end encryption.');
+            reasons.push('' + icon('warning') + ' E2EE transform missing on: ' + missing.join(', ') + ' — rejoin the call to restore full end-to-end encryption.');
         }
         return reasons;
     }
@@ -7412,11 +7412,11 @@
             var s = p.senders[k];
             var r = p.receivers[k];
             if (s) {
-                var warn = (k === 'video' && s.tracks > 0 && s.frames === 0) ? ' <span style="color:#f0b232">⚠ no frames encoded (they see you black?)</span>' : '';
+                var warn = (k === 'video' && s.tracks > 0 && s.frames === 0) ? ' <span style="color:#f0b232">' + icon('warning') + ' no frames encoded (they see you black?)</span>' : '';
                 html += '<div style="padding-left:12px">send ' + k + (s.tracks > 1 ? ' ×' + s.tracks : '') + ': frames ' + s.frames + ' · pkts ' + s.packets + ' · loss ' + s.loss + ' · ' + fmtBytes(s.bytes) + ' · [E2EE ' + (s.transform ? '<span style="color:#57f287">✓</span>' : '<span style="color:#f23f42">✗</span>') + ']' + (s.trackStates.length ? ' · ' + s.trackStates.join(',') : '') + warn + '</div>';
             }
             if (r) {
-                var warn2 = (k === 'video' && r.tracks > 0 && r.frames === 0) ? ' <span style="color:#f0b232">⚠ no frames decoded (black feed)</span>' : '';
+                var warn2 = (k === 'video' && r.tracks > 0 && r.frames === 0) ? ' <span style="color:#f0b232">' + icon('warning') + ' no frames decoded (black feed)</span>' : '';
                 html += '<div style="padding-left:12px">recv ' + k + (r.tracks > 1 ? ' ×' + r.tracks : '') + ': frames ' + r.frames + ' · pkts ' + r.packets + ' · loss ' + r.loss + ' · ' + fmtBytes(r.bytes) + ' · [E2EE ' + (r.transform ? '<span style="color:#57f287">✓</span>' : '<span style="color:#f23f42">✗</span>') + ']' + (r.trackStates.length ? ' · ' + r.trackStates.join(',') : '') + warn2 + '</div>';
             }
         });

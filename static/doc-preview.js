@@ -149,7 +149,7 @@ var DocPreview = (function () {
         header.innerHTML = '<span style="color:var(--text-primary,#eee);font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">' +
             escapeHtml(title) + '</span>';
         var closeBtn = document.createElement('button');
-        closeBtn.textContent = '✕';
+        closeBtn.innerHTML = '<svg class="ui-icon" width="16" height="16"><use href="#icon-close"/></svg>';
         closeBtn.style.cssText = 'background:none;border:none;color:var(--text-muted,#999);font-size:20px;cursor:pointer;padding:4px 8px;margin-left:8px';
 
         closeBtn.onclick = closeDocModal;
@@ -494,7 +494,7 @@ var DocPreview = (function () {
             bar.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:8px 16px;border-bottom:1px solid var(--bg-border,#444);position:sticky;top:0;background:var(--bg-secondary,#2a2a3e);z-index:1';
             bar.innerHTML = '<span style="font-size:12px;color:var(--text-muted);font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">' + escapeHtml(path) + '</span>';
             var closeBtn = document.createElement('button');
-            closeBtn.textContent = '✕';
+        closeBtn.innerHTML = '<svg class="ui-icon" width="16" height="16"><use href="#icon-close"/></svg>';
             closeBtn.style.cssText = 'background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:16px;padding:2px 6px;flex-shrink:0';
             closeBtn.onclick = function () { previewPane.style.display = 'none'; previewPane.innerHTML = ''; };
             bar.appendChild(closeBtn);
@@ -832,7 +832,7 @@ var DocPreview = (function () {
         } catch (e) {
             console.error('Document preview error:', e);
             container.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-muted)">' +
-                '<div style="font-size:32px;margin-bottom:12px">⚠️</div>' +
+                '<div style="margin-bottom:12px">' + icon('warning') + '</div>' +
                 '<div>Failed to render document</div>' +
                 '<div style="font-size:12px;margin-top:8px;color:var(--text-faint)">' + escapeHtml(e.message) + '</div>' +
                 '</div>';
@@ -936,13 +936,13 @@ var DocPreview = (function () {
         // Header
         var header = document.createElement('div');
         header.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:10px 16px;background:#1a1a2e;border-bottom:1px solid #333;flex-shrink:0';
-        header.innerHTML = '<span style="color:#eee;font-weight:600;font-size:14px">✏️ PDF Editor — ' + escapeHtml(filename) + '</span>';
+        header.innerHTML = '<span style="color:#eee;font-weight:600;font-size:14px">' + icon('edit') + ' PDF Editor — ' + escapeHtml(filename) + '</span>';
         var headerBtns = document.createElement('div');
         headerBtns.style.cssText = 'display:flex;gap:8px;align-items:center';
 
         // Undo/Redo
-        var undoBtn = pdfEditorBtn('↩️', 'Undo', function () { pdfEditorUndo(); });
-        var redoBtn = pdfEditorBtn('↪️', 'Redo', function () { pdfEditorRedo(); });
+        var undoBtn = pdfEditorBtn('icon-undo', 'Undo', function () { pdfEditorUndo(); });
+        var redoBtn = pdfEditorBtn('icon-redo', 'Redo', function () { pdfEditorRedo(); });
         headerBtns.appendChild(undoBtn);
         headerBtns.appendChild(redoBtn);
 
@@ -952,18 +952,18 @@ var DocPreview = (function () {
         headerBtns.appendChild(sep);
 
         // Merge button
-        var mergeBtn = pdfEditorBtn('📎', 'Merge PDF', function () { pdfEditorMerge(); });
+        var mergeBtn = pdfEditorBtn('icon-merge', 'Merge PDF', function () { pdfEditorMerge(); });
         headerBtns.appendChild(mergeBtn);
 
         // Export button
         var exportBtn = document.createElement('button');
-        exportBtn.textContent = '💾 Save & Download';
+        exportBtn.innerHTML = icon('download') + ' Save & Download';
         exportBtn.style.cssText = 'padding:6px 16px;border-radius:6px;border:none;background:linear-gradient(135deg,#4fc3f7,#29b6f6);color:#fff;font-weight:600;font-size:13px;cursor:pointer';
         exportBtn.onclick = function () { pdfEditorExport(); };
         headerBtns.appendChild(exportBtn);
 
         // Close button
-        var closeBtn = pdfEditorBtn('✕', 'Close', function () { pdfEditorClose(); });
+        var closeBtn = pdfEditorBtn('icon-close', 'Close', function () { pdfEditorClose(); });
         headerBtns.appendChild(closeBtn);
 
         header.appendChild(headerBtns);
@@ -998,8 +998,8 @@ var DocPreview = (function () {
         var toolBtns = [
             { icon: '🔄', label: 'Rotate Left', action: function () { pdfEditorRotate(-90); } },
             { icon: '🔄', label: 'Rotate Right', action: function () { pdfEditorRotate(90); } },
-            { icon: '🗑️', label: 'Delete Page', action: function () { pdfEditorDeletePage(); } },
-            { icon: '📋', label: 'Duplicate Page', action: function () { pdfEditorDuplicatePage(); } },
+            { icon: 'icon-trash', label: 'Delete Page', action: function () { pdfEditorDeletePage(); } },
+            { icon: 'icon-clipboard', label: 'Duplicate Page', action: function () { pdfEditorDuplicatePage(); } },
         ];
         toolBtns.forEach(function (t) {
             var btn = pdfEditorToolBtn(t.icon, t.label, t.action);
@@ -1036,7 +1036,7 @@ var DocPreview = (function () {
         cropLabel.textContent = 'Crop';
         rightPanel.appendChild(cropLabel);
 
-        var cropBtn = pdfEditorToolBtn('✂️', 'Crop Page', function () { pdfEditorCrop(); });
+        var cropBtn = pdfEditorToolBtn('icon-crop', 'Crop Page', function () { pdfEditorCrop(); });
         rightPanel.appendChild(cropBtn);
 
         main.appendChild(rightPanel);
@@ -1064,9 +1064,9 @@ var DocPreview = (function () {
         document.removeEventListener('keydown', _pdfEditorEscHandler);
     }
 
-    function pdfEditorBtn(icon, title, onclick) {
+    function pdfEditorBtn(iconId, title, onclick) {
         var btn = document.createElement('button');
-        btn.textContent = icon;
+        btn.innerHTML = '<svg class="ui-icon" width="16" height="16"><use href="#' + iconId + '"/></svg>';
         btn.title = title;
         btn.style.cssText = 'background:rgba(255,255,255,0.1);border:1px solid #444;color:#ccc;width:32px;height:32px;border-radius:6px;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center';
         btn.onclick = onclick;
@@ -1079,7 +1079,7 @@ var DocPreview = (function () {
         btn.title = label;
         btn.onmouseenter = function () { btn.style.background = 'rgba(255,255,255,0.1)'; };
         btn.onmouseleave = function () { btn.style.background = 'rgba(255,255,255,0.05)'; };
-        btn.innerHTML = '<span style="font-size:16px;flex-shrink:0">' + icon + '</span><span>' + label + '</span>';
+        btn.innerHTML = '<span style="flex-shrink:0"><svg class="ui-icon" width="14" height="14"><use href="#' + icon + '"/></svg></span><span>' + label + '</span>';
         btn.onclick = onclick;
         return btn;
     }
@@ -1477,10 +1477,10 @@ var DocPreview = (function () {
         var drawBar = document.createElement('div');
         drawBar.style.cssText = 'position:absolute;bottom:16px;left:50%;transform:translateX(-50%);display:flex;gap:8px;z-index:11;background:rgba(0,0,0,0.8);padding:8px 12px;border-radius:8px';
         var confirmDraw = document.createElement('button');
-        confirmDraw.textContent = '✅ Apply';
+        confirmDraw.innerHTML = icon('check') + ' Apply';
         confirmDraw.style.cssText = 'padding:6px 14px;border:none;background:#4caf50;color:#fff;border-radius:6px;cursor:pointer;font-weight:600';
         var cancelDraw = document.createElement('button');
-        cancelDraw.textContent = '❌ Cancel';
+        cancelDraw.innerHTML = icon('close') + ' Cancel';
         cancelDraw.style.cssText = 'padding:6px 14px;border:none;background:#f44336;color:#fff;border-radius:6px;cursor:pointer;font-weight:600';
 
         confirmDraw.onclick = async function () {

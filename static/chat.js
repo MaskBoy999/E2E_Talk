@@ -1,4 +1,4 @@
-    console.log('chat.js v26 loaded - proportional contrast glow');
+﻿    console.log('chat.js v26 loaded - proportional contrast glow');
 
 // Global toast notification
 window.showToast = function showToast(msg) {
@@ -239,26 +239,26 @@ function renderMutedList() {
     mutedServers.forEach(function (sid) {
         var sv = servers.find(function (s) { return s.id === sid; });
         var name = sv ? sv.name : sid.slice(0, 8);
-        html += '<div class="muted-list-item"><span>🔇 Server: ' + escapeHtml(name) + '</span><button class="unmute-btn" data-type="server" data-id="' + sid + '">Unmute</button></div>';
+        html += '<div class="muted-list-item"><span>' + icon('volume-off') + ' Server: ' + escapeHtml(name) + '</span><button class="unmute-btn" data-type="server" data-id="' + sid + '">Unmute</button></div>';
     });
     // Muted channels
     mutedChannels.forEach(function (cid) {
         var chEl = document.querySelector('.channel-item[data-id="' + cid + '"]');
         var name = chEl ? chEl.dataset.name : cid.slice(0, 8);
-        html += '<div class="muted-list-item"><span>🔇 Channel: #' + escapeHtml(name) + '</span><button class="unmute-btn" data-type="channel" data-id="' + cid + '">Unmute</button></div>';
+        html += '<div class="muted-list-item"><span>' + icon('volume-off') + ' Channel: #' + escapeHtml(name) + '</span><button class="unmute-btn" data-type="channel" data-id="' + cid + '">Unmute</button></div>';
     });
     // Muted DMs
     mutedDms.forEach(function (did) {
         var dmConv = dmConversations.find(function (c) { return c.dm_channel_id === did; });
         var _cCache = dmConv ? userDisplayNameCache[dmConv.other_user_id] : null;
         var name = dmConv ? ((_cCache && _cCache.display_name) || dmConv.other_display_name || dmConv.other_username) : did.slice(0, 8);
-        html += '<div class="muted-list-item"><span>🔇 DM: ' + escapeHtml(name) + '</span><button class="unmute-btn" data-type="dm" data-id="' + escapeAttr(did) + '">Unmute</button></div>';
+        html += '<div class="muted-list-item"><span>' + icon('volume-off') + ' DM: ' + escapeHtml(name) + '</span><button class="unmute-btn" data-type="dm" data-id="' + escapeAttr(did) + '">Unmute</button></div>';
     });
     // Muted folders
     mutedFolders.forEach(function (fid) {
         var grp = serverGroups.find(function (g) { return g.id === fid; });
         var fname = grp ? grp.name : fid.slice(0, 8);
-        html += '<div class="muted-list-item"><span>🔇 Folder: ' + escapeHtml(fname) + '</span><button class="unmute-btn" data-type="folder" data-id="' + fid + '">Unmute</button></div>';
+        html += '<div class="muted-list-item"><span>' + icon('volume-off') + ' Folder: ' + escapeHtml(fname) + '</span><button class="unmute-btn" data-type="folder" data-id="' + fid + '">Unmute</button></div>';
     });
     if (!html) {
         container.innerHTML = '<div class="muted-empty">No muted servers or channels</div>';
@@ -1402,7 +1402,7 @@ function prepareKickModal(title, desc) {
     var pwEl = document.getElementById('kick-all-password');
     if (pwEl) { pwEl.type = 'password'; pwEl.value = ''; }
     var tgl = document.getElementById('toggle-kick-all-password');
-    if (tgl) { tgl.innerHTML = '&#128065;'; tgl.classList.remove('active'); }
+    if (tgl) { tgl.innerHTML = icon('eye'); tgl.classList.remove('active'); }
     var errEl = document.getElementById('kick-all-error');
     if (errEl) errEl.style.display = 'none';
 }
@@ -3043,7 +3043,7 @@ function hideTypingIndicator() {
 function pinButtonHtml(isPinned) {
     // The glyph stays 📌 in both states; the gold `pinned` class is the visual
     // "already pinned" indicator.
-    return '<button class="msg-action-btn' + (isPinned ? ' pinned' : '') + '" data-action="' + (isPinned ? 'unpin' : 'pin') + '" title="' + (isPinned ? 'Unpin' : 'Pin') + '">&#128204;</button>';
+    return '<button class="msg-action-btn' + (isPinned ? ' pinned' : '') + '" data-action="' + (isPinned ?      'unpin' : 'pin') + '" title="' + (isPinned ? 'Unpin' : 'Pin') + '">' + icon('pin') + '</button>';
 }
 
 function togglePinMessage(messageId, pin) {
@@ -3067,7 +3067,7 @@ function setMessagePinned(messageId, pinned) {
             var badge = document.createElement('span');
             badge.className = 'pin-badge';
             badge.title = 'Pinned message';
-            badge.textContent = '📌';
+            badge.innerHTML = icon('pin');
             var header = msgEl.querySelector('.content .header') || msgEl.querySelector('.content');
             if (header) header.appendChild(badge);
         }
@@ -3556,8 +3556,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 '<div class="vault-file-meta">' + formatFileSize(size) + (date ? ' • ' + date : '') + '</div>' +
                 '</div>' +
                 '<div class="vault-file-actions">' +
-                '<button class="vault-dl-btn" title="Download">⬇</button>' +
-                '<button class="vault-delete-btn" title="Delete">🗑</button>' +
+                '<button class="vault-dl-btn" title="Download">' + icon('download') + '</button>' +
+                '<button class="vault-delete-btn" title="Delete">' + icon('trash') + '</button>' +
                 '</div>' +
                 '</div>';
         }).join('');
@@ -3696,7 +3696,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 '<div class="vault-file-meta">' + formatFileSize(size) + (date ? ' • ' + date : '') + '</div>' +
                 '</div>' +
                 '<div class="vault-file-actions">' +
-                '<button class="vault-send-btn" title="Send to chat">📤</button>' +
+                '<button class="vault-send-btn" title="Send to chat">' + icon('send') + '</button>' +
                 '</div>' +
                 '</div>';
         }).join('');
@@ -3861,19 +3861,19 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             var res = await authFetch('/api/key-blob');
             if (res.status === 404) {
-                el.innerHTML = '⚠️ No key backup found on server. <span style="font-weight:normal;color:var(--text-muted)">(Keys are saved automatically at login and registration.)</span>';
+                el.innerHTML = icon('warning') + ' No key backup found on server. <span style="font-weight:normal;color:var(--text-muted)">(Keys are saved automatically at login and registration.)</span>';
                 el.style.color = '#faa61a';
                 return;
             }
             if (!res.ok) {
-                el.textContent = '⚠️ Could not check backup status.';
+                el.textContent = 'Could not check backup status.';
                 el.style.color = '#faa61a';
                 return;
             }
             var data = await res.json();
             var hasBlob = !!(data.encrypted_blob);
             if (!hasBlob) {
-                el.innerHTML = '⚠️ No key backup found on server. <span style="font-weight:normal;color:var(--text-muted)">(Keys are saved automatically at login and registration.)</span>';
+                el.innerHTML = icon('warning') + ' No key backup found on server. <span style="font-weight:normal;color:var(--text-muted)">(Keys are saved automatically at login and registration.)</span>';
                 el.style.color = '#faa61a';
                 return;
             }
@@ -3889,7 +3889,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     else timeStr = Math.floor(diff / 86400000) + 'd ago';
                 } catch (_) { timeStr = data.updated_at; }
             }
-            el.innerHTML = '✅ Key backup exists on server' + (timeStr ? ' <span style="font-weight:normal;color:var(--text-muted)">(last saved ' + timeStr + ')</span>' : '');
+            el.innerHTML = icon('check') + ' Key backup exists on server' + (timeStr ? ' <span style="font-weight:normal;color:var(--text-muted)">(last saved ' + timeStr + ')</span>' : '');
             el.style.color = '#43b581';
             // Show age warning if backup is over 30 days old
             var ageEl = document.getElementById('backup-age-warning');
@@ -3899,7 +3899,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     var ageDays = Math.floor((Date.now() - backupMs) / 86400000);
                     if (ageDays >= 30) {
                         ageEl.style.display = 'block';
-                        ageEl.innerHTML = '⚠️ Your backup is ' + ageDays + ' days old. Consider saving a new backup to ensure other devices can restore your keys. <button id="backup-age-save-btn" style="margin-left:8px;padding:4px 12px;border-radius:6px;border:1px solid #faa61a;background:transparent;color:#faa61a;cursor:pointer;font-size:12px;">Save Now</button>';
+                        ageEl.innerHTML = icon('warning') + ' Your backup is ' + ageDays + ' days old. Consider saving a new backup to ensure other devices can restore your keys. <button id="backup-age-save-btn" style="margin-left:8px;padding:4px 12px;border-radius:6px;border:1px solid #faa61a;background:transparent;color:#faa61a;cursor:pointer;font-size:12px;">Save Now</button>';
                         // Wire the button
                         var saveBtn = document.getElementById('backup-age-save-btn');
                         if (saveBtn) {
@@ -4333,7 +4333,7 @@ document.addEventListener('DOMContentLoaded', () => {
         var removeBtn = document.getElementById('app-bg-remove-btn');
         var thumb = document.getElementById('app-bg-thumb');
         var controls = document.getElementById('app-bg-controls');
-        if (uploadBtn) uploadBtn.textContent = has ? '📷 Change Image' : '📷 Choose Image';
+        if (uploadBtn) uploadBtn.innerHTML = has ? icon('image') + ' Change Image' : icon('image') + ' Choose Image';
         if (removeBtn) removeBtn.style.display = has ? '' : 'none';
         var editBtn = document.getElementById('app-bg-edit-btn');
         if (editBtn) editBtn.style.display = (has && isAppBgDesktop()) ? '' : 'none';
@@ -5992,7 +5992,7 @@ document.addEventListener('DOMContentLoaded', () => {
         var inp = document.getElementById('delete-account-password');
         if (inp) { inp.type = 'password'; inp.value = ''; }
         var tgl = document.getElementById('toggle-delete-account-password');
-        if (tgl) { tgl.innerHTML = '&#128065;'; tgl.classList.remove('active'); }
+        if (tgl) { tgl.innerHTML = icon('eye'); tgl.classList.remove('active'); }
     }
     if (deleteAcctBtn && deleteAcctSection) {
         deleteAcctBtn.addEventListener('click', function () {
@@ -6175,7 +6175,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 reauthPasswordInput.value = '';
             }
             if (reauthToggleBtn) {
-                reauthToggleBtn.innerHTML = '&#128065;';
+                reauthToggleBtn.innerHTML = icon('eye');
                 reauthToggleBtn.classList.remove('active');
             }
         });
@@ -6260,7 +6260,7 @@ document.addEventListener('DOMContentLoaded', () => {
             var inp = document.getElementById(id);
             if (inp) { inp.type = 'password'; inp.value = ''; }
             var tgl = document.getElementById('toggle-' + id);
-            if (tgl) { tgl.innerHTML = '&#128065;'; tgl.classList.remove('active'); }
+            if (tgl) { tgl.innerHTML = icon('eye'); tgl.classList.remove('active'); }
         });
     }
     function setChangePwStatus(msg, kind) {
@@ -6421,7 +6421,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (saveBackupNowBtn) {
         saveBackupNowBtn.addEventListener('click', async function () {
             saveBackupNowBtn.disabled = true;
-            saveBackupNowBtn.innerHTML = '⏳ Saving...';
+            saveBackupNowBtn.innerHTML = icon('refresh') + ' Saving...';
             if (saveBackupStatus) { saveBackupStatus.textContent = 'Encrypting keys...'; saveBackupStatus.style.color = 'var(--text-muted)'; }
             try {
                 var encPw = localStorage.getItem('e2e_encrypted_password');
@@ -6442,14 +6442,14 @@ document.addEventListener('DOMContentLoaded', () => {
                     body: JSON.stringify({ encrypted_blob: enc.encrypted_private_key, salt: enc.salt, nonce: enc.nonce })
                 });
                 if (!res.ok) throw new Error('Server returned ' + res.status);
-                if (saveBackupStatus) { saveBackupStatus.textContent = '✅ Backup saved! (' + Object.keys(bundle).length + ' keys encrypted)'; saveBackupStatus.style.color = '#43b581'; }
+                if (saveBackupStatus) { saveBackupStatus.textContent = 'Backup saved! (' + Object.keys(bundle).length + ' keys encrypted)'; saveBackupStatus.style.color = '#43b581'; }
                 // Refresh the status indicator
                 fetchBackupStatus();
             } catch (e) {
-                if (saveBackupStatus) { saveBackupStatus.textContent = '❌ ' + (e.message || 'Save failed'); saveBackupStatus.style.color = 'var(--danger)'; }
+                if (saveBackupStatus) { saveBackupStatus.textContent = (e.message || 'Save failed'); saveBackupStatus.style.color = 'var(--danger)'; }
             } finally {
                 saveBackupNowBtn.disabled = false;
-                saveBackupNowBtn.innerHTML = '&#128190; Save Backup Now';
+                saveBackupNowBtn.innerHTML = icon('download') + ' Save Backup Now';
             }
         });
     }
@@ -6467,7 +6467,7 @@ document.addEventListener('DOMContentLoaded', () => {
         restoreBackupToggle.addEventListener('click', function () {
             var visible = restoreBackupPassword.type === 'text';
             restoreBackupPassword.type = visible ? 'password' : 'text';
-            restoreBackupToggle.innerHTML = visible ? '&#128065;' : '&#128064;';
+            restoreBackupToggle.innerHTML = visible ? icon('eye') : icon('eye-off');
             restoreBackupToggle.classList.toggle('active', !visible);
         });
     }
@@ -6494,17 +6494,17 @@ document.addEventListener('DOMContentLoaded', () => {
         restoreBackupConfirmBtn.addEventListener('click', async function () {
             var pw = restoreBackupPassword ? restoreBackupPassword.value.trim() : '';
             if (!pw) {
-                if (restoreBackupStatus) { restoreBackupStatus.textContent = '❌ Please enter your password.'; restoreBackupStatus.style.color = 'var(--danger)'; }
+                if (restoreBackupStatus) { restoreBackupStatus.textContent = 'Please enter your password.'; restoreBackupStatus.style.color = 'var(--danger)'; }
                 return;
             }
             restoreBackupConfirmBtn.disabled = true;
-            restoreBackupConfirmBtn.innerHTML = '⏳ Restoring...';
+            restoreBackupConfirmBtn.innerHTML = icon('refresh') + ' Restoring...';
             try {
                 // Ensure encrypted password exists for _secReKey
                 if (!localStorage.getItem('e2e_encrypted_password')) {
                     storeEncryptedPassword(pw);
                 }
-                if (restoreBackupStatus) { restoreBackupStatus.textContent = '⏳ Fetching key backup from server...'; restoreBackupStatus.style.color = 'var(--text-muted)'; }
+                if (restoreBackupStatus) { restoreBackupStatus.textContent = 'Fetching key backup from server...'; restoreBackupStatus.style.color = 'var(--text-muted)'; }
                 var blobRes = await authFetch('/api/key-blob');
                 if (!blobRes.ok) {
                     var errData = null;
@@ -6515,7 +6515,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (!blobData.encrypted_blob || !blobData.salt || !blobData.nonce) {
                     throw new Error('No key backup found on server. Keys are saved automatically at login and registration.');
                 }
-                if (restoreBackupStatus) restoreBackupStatus.textContent = '⏳ Decrypting key backup...';
+                if (restoreBackupStatus) restoreBackupStatus.textContent = 'Decrypting key backup...';
                 var bundle = E2ECrypto.decryptKeyBundle(blobData.encrypted_blob, pw, blobData.salt, blobData.nonce);
                 if (!bundle) throw new Error('Wrong password or corrupted backup.');
                 E2ECrypto.restoreKeyBundle(bundle);
@@ -6530,14 +6530,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 // Save updated blob back so newly joined servers are included
                 saveKeyBlobToServer();
-                if (restoreBackupStatus) { restoreBackupStatus.textContent = '✅ Keys restored successfully! All encryption keys, media caches, and friend code have been recovered.'; restoreBackupStatus.style.color = '#43b581'; }
+                if (restoreBackupStatus) { restoreBackupStatus.textContent = 'Keys restored successfully! All encryption keys, media caches, and friend code have been recovered.'; restoreBackupStatus.style.color = '#43b581'; }
                 // Clear password field
                 if (restoreBackupPassword) restoreBackupPassword.value = '';
             } catch (e) {
-                if (restoreBackupStatus) { restoreBackupStatus.textContent = '❌ ' + (e.message || 'Recovery failed'); restoreBackupStatus.style.color = 'var(--danger)'; }
+                if (restoreBackupStatus) { restoreBackupStatus.textContent = (e.message || 'Recovery failed'); restoreBackupStatus.style.color = 'var(--danger)'; }
             } finally {
                 restoreBackupConfirmBtn.disabled = false;
-                restoreBackupConfirmBtn.innerHTML = '&#128260; Restore';
+                restoreBackupConfirmBtn.innerHTML = icon('refresh') + ' Restore';
             }
         });
     }
@@ -6558,7 +6558,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 var pwInput = document.getElementById('twofa-password');
                 if (pwInput) { pwInput.type = 'password'; pwInput.value = ''; }
                 var tgl = document.getElementById('toggle-twofa-password');
-                if (tgl) { tgl.innerHTML = '&#128065;'; tgl.classList.remove('active'); }
+                if (tgl) { tgl.innerHTML = icon('eye'); tgl.classList.remove('active'); }
             }
             el.style.display = 'flex';
         }
@@ -6825,7 +6825,7 @@ document.addEventListener('DOMContentLoaded', () => {
             var inp = document.getElementById(id);
             if (inp) { inp.type = 'password'; inp.value = ''; }
             var tgl = document.getElementById('toggle-' + id);
-            if (tgl) { tgl.innerHTML = '&#128065;'; tgl.classList.remove('active'); }
+            if (tgl) { tgl.innerHTML = icon('eye'); tgl.classList.remove('active'); }
         });
     }
     async function loadKillSwitchStatus() {
@@ -6940,7 +6940,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         function resetPwInputs() {
             if (sdPwInput) { sdPwInput.type = 'password'; sdPwInput.value = ''; }
-            if (sdTogglePw) { sdTogglePw.innerHTML = '&#128065;'; sdTogglePw.classList.remove('active'); }
+            if (sdTogglePw) { sdTogglePw.innerHTML = icon('eye'); sdTogglePw.classList.remove('active'); }
         }
 
         function setSdStatus(msg, kind) {
@@ -7449,7 +7449,7 @@ document.addEventListener('DOMContentLoaded', () => {
             var ch = msg.channelId ? 'Channel' : (msg.dmOtherUsername ? 'DM \u2192 ' + msg.dmOtherUsername : 'DM');
             html += '<div class="sch-item">' +
                 '<div class="sch-info"><span class="sch-time">' + ts + '</span> <span class="sch-dest">' + ch + '</span><div class="sch-preview">' + (msg.text || '').substring(0, 50) + '</div></div>' +
-                '<button class="sch-cancel-btn" data-sch-action="cancel" data-sch-idx="' + i + '" title="Cancel">\u2715</button>' +
+                '<button class="sch-cancel-btn" data-sch-action="cancel" data-sch-idx="' + i + '" title="Cancel">' + icon('close') + '</button>' +
                 '</div>';
         });
         if (!_scheduledMessages.length) html = '<div class="sch-empty">No scheduled messages</div>';
@@ -7495,7 +7495,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // Reload from localStorage in case it was modified externally
         loadScheduledMessages();
         if (!_scheduledMessages.length) {
-            list.innerHTML = '<div class="sch-empty-state">\u23F0 No scheduled messages</div>';
+            list.innerHTML = '<div class="sch-empty-state">' + icon('clock') + ' No scheduled messages</div>';
             return;
         }
         var html = '';
@@ -7506,20 +7506,20 @@ document.addEventListener('DOMContentLoaded', () => {
             var mins = Math.max(0, Math.round(diff / 60000));
             var timeLabel = mins < 60 ? mins + 'm' : Math.floor(mins / 60) + 'h ' + (mins % 60) + 'm';
             var ts = d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-            var ch = msg.channelId ? '\u{1F4AC} Channel' : (msg.dmOtherUsername ? '\u{1F4AC} DM \u2192 ' + msg.dmOtherUsername : '\u{1F4AC} DM');
+            var ch = msg.channelId ? icon('send') + ' Channel' : (msg.dmOtherUsername ? icon('send') + ' DM \u2192 ' + msg.dmOtherUsername : icon('send') + ' DM');
             var urgencyClass = diff < 300000 ? ' sch-item-urgent' : diff < 3600000 ? ' sch-item-soon' : '';
             html += '<div class="sch-item' + urgencyClass + '">' +
-                '<div class="sch-item-icon">\u{1F4DD}</div>' +
+                '<div class="sch-item-icon">' + icon('edit') + '</div>' +
                 '<div class="sch-info">' +
                     '<div class="sch-top-row"><span class="sch-time">' + ts + '</span><span class="sch-countdown">in ' + timeLabel + '</span></div>' +
                     '<div class="sch-dest">' + ch + '</div>' +
                     '<div class="sch-preview">\u201C' + (msg.text || '').substring(0, 60) + '\u201D</div>' +
                 '</div>' +
                 '<div class="sch-actions">' +
-                    '<button class="sch-action-btn" data-sch-action="delay" data-sch-idx="' + i + '" data-sch-mins="5" title="Delay 5 min">\u23F0 +5m</button>' +
-                    '<button class="sch-action-btn" data-sch-action="delay" data-sch-idx="' + i + '" data-sch-mins="30" title="Delay 30 min">\u23F0 +30m</button>' +
-                    '<button class="sch-action-btn" data-sch-action="delay" data-sch-idx="' + i + '" data-sch-mins="60" title="Delay 1 hour">\u23F0 +1h</button>' +
-                    '<button class="sch-action-btn sch-action-cancel" data-sch-action="cancel" data-sch-idx="' + i + '" title="Cancel">\u2715</button>' +
+                    '<button class="sch-action-btn" data-sch-action="delay" data-sch-idx="' + i + '" data-sch-mins="5" title="Delay 5 min">' + icon('clock') + ' +5m</button>' +
+                    '<button class="sch-action-btn" data-sch-action="delay" data-sch-idx="' + i + '" data-sch-mins="30" title="Delay 30 min">' + icon('clock') + ' +30m</button>' +
+                    '<button class="sch-action-btn" data-sch-action="delay" data-sch-idx="' + i + '" data-sch-mins="60" title="Delay 1 hour">' + icon('clock') + ' +1h</button>' +
+                    '<button class="sch-action-btn sch-action-cancel" data-sch-action="cancel" data-sch-idx="' + i + '" title="Cancel">' + icon('close') + '</button>' +
                 '</div>' +
                 '</div>';
         });
@@ -7897,22 +7897,22 @@ document.addEventListener('DOMContentLoaded', () => {
                 + '</div>'
                 // Resolution selector for photo
                 + '<div class="camera-res-row" style="display:flex;align-items:center;justify-content:center;gap:6px;margin-top:8px;padding:0 16px;">'
-                + '<span style="color:#888;font-size:11px;">📺</span>'
+                + '<span style="color:#888;font-size:11px;">' + icon('monitor') + '</span>'
                 + '<button class="camera-res-btn" data-res="720p" style="background:rgba(255,255,255,0.2);border:1px solid rgba(255,255,255,0.3);border-radius:4px;color:#fff;padding:4px 10px;font-size:11px;cursor:pointer;transition:all 0.15s;font-weight:600;">720p</button>'
                 + '<button class="camera-res-btn" data-res="1080p" style="background:transparent;border:1px solid rgba(255,255,255,0.2);border-radius:4px;color:#aaa;padding:4px 10px;font-size:11px;cursor:pointer;transition:all 0.15s;">1080p</button>'
                 + '<button class="camera-res-btn" data-res="4K" style="background:transparent;border:1px solid rgba(255,255,255,0.2);border-radius:4px;color:#aaa;padding:4px 10px;font-size:11px;cursor:pointer;transition:all 0.15s;">4K</button>'
                 + '</div>'
                 + '<div class="camera-zoom-row" style="display:none;align-items:center;justify-content:center;gap:8px;margin-top:8px;padding:0 20px;">'
-                + '<span style="color:#888;font-size:11px;">🔍</span>'
+                + '<span style="color:#888;font-size:11px;">' + icon('search') + '</span>'
                 + '<input type="range" id="camera-zoom-slider" min="1" max="3" step="0.1" value="1" style="flex:1;max-width:140px;height:4px;-webkit-appearance:none;appearance:none;background:#555;border-radius:2px;outline:none;cursor:pointer;">'
                 + '<span id="camera-zoom-label" style="color:#aaa;font-size:11px;min-width:28px;text-align:center;">1.0×</span>'
                 + '</div>'
                 + '<div style="display:flex;align-items:center;justify-content:center;gap:16px;margin-top:4px;padding:0 10px;">'
-                + '<button class="camera-flash-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:42px;height:42px;aspect-ratio:1;flex-shrink:0;color:#aaa;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.15s;" title="Flash">☀️</button>'
-                + '<button class="camera-mirror-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:42px;height:42px;aspect-ratio:1;flex-shrink:0;color:#aaa;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.15s;" title="Mirror">↔</button>'
-                + '<button class="camera-flip-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:42px;height:42px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;">🔄</button>'
+                + '<button class="camera-flash-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:42px;height:42px;aspect-ratio:1;flex-shrink:0;color:#aaa;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.15s;" title="Flash">' + icon('flash') + '</button>'
+                + '<button class="camera-mirror-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:42px;height:42px;aspect-ratio:1;flex-shrink:0;color:#aaa;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.15s;" title="Mirror">' + icon('mirror') + '</button>'
+                + '<button class="camera-flip-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:42px;height:42px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;">' + icon('flip') + '</button>'
                 + '<button class="camera-capture-btn" style="background:#fff;border:none;border-radius:50%;width:56px;height:56px;aspect-ratio:1;flex-shrink:0;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 4px rgba(255,255,255,0.3);transition:transform 0.1s;"><div style="width:46px;height:46px;border-radius:50%;background:#fff;border:2px solid #333;"></div></button>'
-                + '<button class="camera-cancel-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:42px;height:42px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;">✕</button>'
+                + '<button class="camera-cancel-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:42px;height:42px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;">' + icon('close') + '</button>'
                 + '</div></div>';
             document.body.appendChild(_cameraCaptureModal);
             _cameraCaptureVideo = _cameraCaptureModal.querySelector('#camera-capture-video');
@@ -7927,7 +7927,7 @@ document.addEventListener('DOMContentLoaded', () => {
             _cameraBrightnessCtrl = document.createElement('div');
             _cameraBrightnessCtrl.id = 'camera-brightness-ctrl';
             _cameraBrightnessCtrl.style.cssText = 'display:none;position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:2004;background:rgba(0,0,0,0.6);border-radius:10px;padding:8px 16px;align-items:center;gap:8px;';
-            _cameraBrightnessCtrl.innerHTML = '<span style="color:#FFD700;font-size:14px;">💡</span>'
+            _cameraBrightnessCtrl.innerHTML = '<span style="color:#FFD700;font-size:14px;">' + icon('lightbulb') + '</span>'
                 + '<input type="range" id="camera-flash-intensity" min="0" max="100" step="1" value="35" style="width:120px;height:4px;-webkit-appearance:none;appearance:none;background:#555;border-radius:2px;outline:none;cursor:pointer;">'
                 + '<span id="camera-flash-intensity-label" style="color:#FFD700;font-size:12px;min-width:32px;text-align:center;">35%</span>';
             document.body.appendChild(_cameraBrightnessCtrl);
@@ -8126,9 +8126,9 @@ document.addEventListener('DOMContentLoaded', () => {
             _cameraPhotoPreviewEl.innerHTML = '<div class="camera-capture-content" style="position:relative;width:100%;max-width:500px;margin:auto;text-align:center;">'
                 + '<img id="camera-photo-preview-img" style="width:100%;max-height:70vh;border-radius:12px;object-fit:contain;background:#000;">'
                 + '<div style="display:flex;align-items:center;justify-content:center;gap:40px;margin-top:16px;padding:0 20px;">'
-                + '<button class="camera-retake-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:48px;height:48px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;">↩ Retake</button>'
-                + '<button class="camera-accept-btn" style="background:#4caf50;border:none;border-radius:50%;width:64px;height:64px;aspect-ratio:1;flex-shrink:0;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 4px rgba(76,175,80,0.3);transition:transform 0.1s;"><div style="width:54px;height:54px;border-radius:50%;background:#4caf50;border:2px solid #fff;display:flex;align-items:center;justify-content:center;color:#fff;font-size:28px;">✓</div></button>'
-                + '<button class="camera-cancel-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:48px;height:48px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;">✕</button>'
+                + '<button class="camera-retake-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:48px;height:48px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;">' + icon('refresh') + ' Retake</button>'
+                + '<button class="camera-accept-btn" style="background:#4caf50;border:none;border-radius:50%;width:64px;height:64px;aspect-ratio:1;flex-shrink:0;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 4px rgba(76,175,80,0.3);transition:transform 0.1s;"><div style="width:54px;height:54px;border-radius:50%;background:#4caf50;border:2px solid #fff;display:flex;align-items:center;justify-content:center;color:#fff;font-size:28px;">' + icon('check') + '</div></button>'
+                + '<button class="camera-cancel-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:48px;height:48px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;">' + icon('close') + '</button>'
                 + '</div></div>';
             document.body.appendChild(_cameraPhotoPreviewEl);
             
@@ -8540,25 +8540,25 @@ document.addEventListener('DOMContentLoaded', () => {
                 + '<video id="video-rec-preview" autoplay playsinline muted style="width:100%;max-height:55vh;border-radius:12px;object-fit:contain;background:#000;"></video>'
                 // Zoom row
                 + '<div class="video-rec-zoom-row" style="display:none;align-items:center;justify-content:center;gap:8px;margin-top:8px;padding:0 20px;">'
-                + '<span style="color:#888;font-size:11px;">🔍</span>'
+                + '<span style="color:#888;font-size:11px;">' + icon('search') + '</span>'
                 + '<input type="range" id="video-rec-zoom-slider" min="1" max="3" step="0.1" value="1" style="flex:1;max-width:140px;height:4px;-webkit-appearance:none;appearance:none;background:#555;border-radius:2px;outline:none;cursor:pointer;">'
                 + '<span id="video-rec-zoom-label" style="color:#aaa;font-size:11px;min-width:28px;text-align:center;">1.0×</span>'
                 + '</div>'
                 // Resolution selector
                 + '<div class="video-rec-res-row" style="display:flex;align-items:center;justify-content:center;gap:6px;margin-top:8px;padding:0 16px;">'
-                + '<span style="color:#888;font-size:11px;">📺</span>'
+                + '<span style="color:#888;font-size:11px;">' + icon('monitor') + '</span>'
                 + '<button class="video-rec-res-btn" data-res="720p" style="background:rgba(255,255,255,0.2);border:1px solid rgba(255,255,255,0.3);border-radius:4px;color:#fff;padding:4px 10px;font-size:11px;cursor:pointer;transition:all 0.15s;font-weight:600;">720p</button>'
                 + '<button class="video-rec-res-btn" data-res="1080p" style="background:transparent;border:1px solid rgba(255,255,255,0.2);border-radius:4px;color:#aaa;padding:4px 10px;font-size:11px;cursor:pointer;transition:all 0.15s;">1080p</button>'
                 + '<button class="video-rec-res-btn" data-res="4K" style="background:transparent;border:1px solid rgba(255,255,255,0.2);border-radius:4px;color:#aaa;padding:4px 10px;font-size:11px;cursor:pointer;transition:all 0.15s;">4K</button>'
                 + '</div>'
                 + '<div style="display:flex;align-items:center;justify-content:center;gap:14px;margin-top:4px;padding:0 16px;">'
                 + '<span id="video-rec-timer" style="color:#fff;font-size:16px;font-weight:600;min-width:60px;font-variant-numeric:tabular-nums;">0:00</span>'
-                + '<button id="video-rec-flash-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:40px;height:40px;aspect-ratio:1;flex-shrink:0;color:#aaa;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.15s;" title="Flash">☀️</button>'
-                + '<button id="video-rec-mirror-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:40px;height:40px;aspect-ratio:1;flex-shrink:0;color:#aaa;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.15s;" title="Mirror">↔</button>'
-                + '<button id="video-rec-flip-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:40px;height:40px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;" title="Flip camera">🔄</button>'
+                + '<button id="video-rec-flash-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:40px;height:40px;aspect-ratio:1;flex-shrink:0;color:#aaa;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.15s;" title="Flash">' + icon('sun') + '</button>'
+                + '<button id="video-rec-mirror-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:40px;height:40px;aspect-ratio:1;flex-shrink:0;color:#aaa;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.15s;" title="Mirror">' + icon('mirror') + '</button>'
+                + '<button id="video-rec-flip-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:40px;height:40px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;" title="Flip camera">' + icon('flip') + '</button>'
                 + '<button id="video-rec-toggle-btn" style="background:#f44336;border:none;border-radius:50%;width:64px;height:64px;aspect-ratio:1;flex-shrink:0;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 4px rgba(244,67,54,0.3);transition:all 0.15s;"><div style="width:28px;height:28px;border-radius:50%;background:#fff;"></div></button>'
-                + '<button id="video-rec-finish-btn" style="display:none;background:#4caf50;border:none;border-radius:50%;width:48px;height:48px;aspect-ratio:1;flex-shrink:0;cursor:pointer;align-items:center;justify-content:center;box-shadow:0 0 0 4px rgba(76,175,80,0.3);transition:all 0.15s;color:#fff;font-size:22px;">✓</button>'
-                + '<button class="video-rec-cancel" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:40px;height:40px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;">✕</button>'
+                + '<button id="video-rec-finish-btn" style="display:none;background:#4caf50;border:none;border-radius:50%;width:48px;height:48px;aspect-ratio:1;flex-shrink:0;cursor:pointer;align-items:center;justify-content:center;box-shadow:0 0 0 4px rgba(76,175,80,0.3);transition:all 0.15s;color:#fff;font-size:22px;">' + icon('check') + '</button>'
+                + '<button class="video-rec-cancel" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:40px;height:40px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;">' + icon('close') + '</button>'
                 + '</div></div>';
             document.body.appendChild(_videoRecModal);
             _videoRecVideo = _videoRecModal.querySelector('#video-rec-preview');
@@ -8572,7 +8572,7 @@ document.addEventListener('DOMContentLoaded', () => {
             _videoBrightnessCtrl = document.createElement('div');
             _videoBrightnessCtrl.id = 'video-rec-brightness-ctrl';
             _videoBrightnessCtrl.style.cssText = 'display:none;position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:2003;background:rgba(0,0,0,0.6);border-radius:10px;padding:8px 16px;align-items:center;gap:8px;';
-            _videoBrightnessCtrl.innerHTML = '<span style="color:#FFD700;font-size:14px;">💡</span>'
+            _videoBrightnessCtrl.innerHTML = '<span style="color:#FFD700;font-size:14px;">' + icon('lightbulb') + '</span>'
                 + '<input type="range" id="video-rec-flash-intensity" min="0" max="100" step="1" value="25" style="width:120px;height:4px;-webkit-appearance:none;appearance:none;background:#555;border-radius:2px;outline:none;cursor:pointer;">'
                 + '<span id="video-rec-flash-intensity-label" style="color:#FFD700;font-size:12px;min-width:32px;text-align:center;">25%</span>';
             document.body.appendChild(_videoBrightnessCtrl);
@@ -8721,9 +8721,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 + '<video id="video-rec-preview-playback" autoplay loop playsinline muted style="width:100%;max-height:60vh;border-radius:12px;object-fit:contain;background:#000;"></video>'
                 + '<div id="video-rec-preview-duration" style="color:#aaa;font-size:12px;margin-top:6px;"></div>'
                 + '<div style="display:flex;align-items:center;justify-content:center;gap:40px;margin-top:16px;padding:0 20px;">'
-                + '<button class="video-rec-preview-retake" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:48px;height:48px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;">↩ Retake</button>'
-                + '<button class="video-rec-preview-accept" style="background:#4caf50;border:none;border-radius:50%;width:64px;height:64px;aspect-ratio:1;flex-shrink:0;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 4px rgba(76,175,80,0.3);transition:transform 0.1s;"><div style="width:54px;height:54px;border-radius:50%;background:#4caf50;border:2px solid #fff;display:flex;align-items:center;justify-content:center;color:#fff;font-size:28px;">✓</div></button>'
-                + '<button class="video-rec-preview-cancel" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:48px;height:48px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;">✕</button>'
+                + '<button class="video-rec-preview-retake" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:48px;height:48px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;">' + icon('refresh') + ' Retake</button>'
+                + '<button class="video-rec-preview-accept" style="background:#4caf50;border:none;border-radius:50%;width:64px;height:64px;aspect-ratio:1;flex-shrink:0;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 4px rgba(76,175,80,0.3);transition:transform 0.1s;"><div style="width:54px;height:54px;border-radius:50%;background:#4caf50;border:2px solid #fff;display:flex;align-items:center;justify-content:center;color:#fff;font-size:28px;">' + icon('check') + '</div></button>'
+                + '<button class="video-rec-preview-cancel" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:48px;height:48px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;">' + icon('close') + '</button>'
                 + '</div></div>';
             document.body.appendChild(_videoRecPreviewEl);
             
@@ -9488,7 +9488,7 @@ document.addEventListener('DOMContentLoaded', () => {
         toggleInviteCodeVis.addEventListener('click', () => {
             inviteCodeVisible = !inviteCodeVisible;
             inviteCodeInput.type = inviteCodeVisible ? 'text' : 'password';
-            toggleInviteCodeVis.innerHTML = inviteCodeVisible ? '&#128064;' : '&#128065;';
+            toggleInviteCodeVis.innerHTML = inviteCodeVisible ? icon('eye-off') : icon('eye');
         });
     }
 
@@ -9609,7 +9609,7 @@ document.addEventListener('DOMContentLoaded', () => {
         toggleFriendCodeVis.addEventListener('click', () => {
             friendCodeVisible = !friendCodeVisible;
             friendCodeInput.type = friendCodeVisible ? 'text' : 'password';
-            toggleFriendCodeVis.innerHTML = friendCodeVisible ? '&#128064;' : '&#128065;';
+            toggleFriendCodeVis.innerHTML = friendCodeVisible ? icon('eye-off') : icon('eye');
         });
     }
 
@@ -10239,7 +10239,7 @@ function showMissedActivityNotification(newDms, newServerMsgs) {
     // Show the toast
     var toast = document.getElementById('mention-toast');
     if (toast) {
-        toast.textContent = '📬 ' + msg;
+        toast.textContent = icon('send') + ' ' + msg;
         toast.style.display = 'block';
         toast.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
         toast.onclick = function () {
@@ -10675,11 +10675,11 @@ function renderMentionsInbox() {
     var html = '';
     for (var i = 0; i < mentionItems.length; i++) {
         var item = mentionItems[i];
-        var icon = '';
+        var iconText = '';
         var iconClass = 'mention-inbox-icon';
-        if (item.type === 'mention') { icon = '@'; iconClass += ' mention'; }
-        else if (item.type === 'reply') { icon = '↩'; iconClass += ' reply'; }
-        else { icon = '💬'; iconClass += ' dm'; }
+        if (item.type === 'mention') { iconText = '@'; iconClass += ' mention'; }
+        else if (item.type === 'reply') { iconText = '↩'; iconClass += ' reply'; }
+        else { iconText = icon('send'); iconClass += ' dm'; }
         var title = item.senderUsername;
         var senderAvatar = '';
         if (item.senderId && item.senderProfilePic) {
@@ -10711,7 +10711,7 @@ function renderMentionsInbox() {
             else timeStr = Math.floor(diffMin / 1440) + 'd';
         } catch (_) { timeStr = ''; }
         html += '<div class="mention-inbox-item" data-server-id="' + (item.serverId || '') + '" data-channel-id="' + (item.channelId || '') + '" data-dm-channel-id="' + (item.dmChannelId || '') + '" data-message-id="' + item.messageId + '">' +
-            (senderAvatar || '<div class="' + iconClass + '">' + icon + '</div>') +
+            (senderAvatar || '<div class="' + iconClass + '">' + iconText + '</div>') +
             '<div class="mention-inbox-body">' +
                 '<div class="mention-inbox-title">' + escapeHtml(title) + '</div>' +
                 '<div class="mention-inbox-subtitle">' + (item.type === 'dm' ? 'Sent you a message' : item.type === 'reply' ? 'Replied to you in ' : 'Mentioned you in ') + (item.type === 'dm' ? '' : escapeHtml(subtitle)) + '</div>' +
@@ -10850,7 +10850,7 @@ function showDmContextMenu(e, dmChannelId, otherUsername) {
     // DM mute toggle
     var muteItem = document.createElement('div');
     muteItem.className = 'context-menu-item';
-    muteItem.textContent = isMutedDm ? '🔇 Unmute DM with ' + otherUsername : '🔇 Mute DM with ' + otherUsername;
+    muteItem.innerHTML = isMutedDm ? icon('volume-on') + ' Unmute DM with ' + escapeHtml(otherUsername) : icon('volume-off') + ' Mute DM with ' + escapeHtml(otherUsername);
     muteItem.addEventListener('click', function () {
         toggleMuteDm(dmChannelId);
         menu.remove();
@@ -14015,7 +14015,7 @@ function renderServerList() {
         });
         colorHtml += '<span class="ctx-color-clear" data-color="__clear__">\u2715</span>';
         colorHtml += '</div>';
-        var muteLabel = isFolderMuted(group.id) ? '🔊 Unmute Folder' : '🔇 Mute Folder';
+        var muteLabel = isFolderMuted(group.id) ? icon('volume-on') + ' Unmute Folder' : icon('volume-off') + ' Mute Folder';
         menu.innerHTML =
             '<div class="ctx-item" data-action="rename">\u270F Rename</div>' +
             '<div class="ctx-item" data-action="mute-folder">' + muteLabel + '</div>' +
@@ -14497,7 +14497,7 @@ function ensureJumpToBottomButton() {
     if (!_jumpToBottomBtn) {
         _jumpToBottomBtn = document.createElement('button');
         _jumpToBottomBtn.className = 'jump-to-bottom';
-        _jumpToBottomBtn.innerHTML = '<span class="arrow">&#9660;</span> Jump to latest';
+        _jumpToBottomBtn.innerHTML = '<svg class="ui-icon" width="10" height="10"><use href="#icon-chevron-down"/></svg> Jump to latest';
         _jumpToBottomBtn.setAttribute('aria-label', 'Jump to latest messages');
         _jumpToBottomBtn.addEventListener('click', function () {
             _pinnedToBottom = true;
@@ -15443,7 +15443,7 @@ async function appendMessage(msg) {
     if (expiresAt) {
         try {
             var _expRemain = new Date(expiresAt.replace(/\.(\d{3})\d*Z/, '.$1Z')).getTime() - Date.now();
-            contentHtml = '<div class="disappearing-banner">🕐 <span class="disappearing-timer">' + formatDisappearingTime(_expRemain) + '</span></div>' + contentHtml;
+            contentHtml = '<div class="disappearing-banner">' + icon('clock') + ' <span class="disappearing-timer">' + formatDisappearingTime(_expRemain) + '</span></div>' + contentHtml;
         } catch (_) {}
     }
 
@@ -15481,7 +15481,7 @@ async function appendMessage(msg) {
         '<div class="content">' +
             '<div class="header">' +
                 '<span class="display-name"' + (senderColor ? ' style="color:' + senderColor + ';text-shadow:' + getDisplayNameTextShadow(senderColor, senderBorderColor) + '"' : '') + '>' + escapeHtml(displayName) + '</span>' +
-                (isPinned ? '<span class="pin-badge" title="Pinned message">&#128204;</span>' : '') +
+                (isPinned ? '<span class="pin-badge" title="Pinned message">' + icon('pin') + '</span>' : '') +
             '</div>' +
             wrappedContent +
             reactionsHtml +
@@ -15710,7 +15710,7 @@ async function loadStickerPreview(container, stickerData) {
         const dlBtn = document.createElement('button');
         dlBtn.className = 'media-download-btn';
         dlBtn.title = 'Download';
-        dlBtn.textContent = '⬇';
+        dlBtn.innerHTML = icon('download');
         dlBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             downloadBlobAs(url, stickerData.sticker_name || 'sticker', stickerData.mime_type || 'image/png');
@@ -15907,51 +15907,51 @@ document.getElementById('message-list').addEventListener('contextmenu', function
 
     var items = [];
 
-    items.push({ label: '↩ Reply', action: function() { handleReply(msgId, msgDiv); }});
+    items.push({ label: icon('reply') + ' Reply', action: function() { handleReply(msgId, msgDiv); }});
 
-    items.push({ label: '🧵 Reply in Thread', action: function() { openThreadPanel(msgId, currentChannelId); }});
+    items.push({ label: icon('pin') + ' Reply in Thread', action: function() { openThreadPanel(msgId, currentChannelId); }});
 
     items.push('---');
 
     if (currentServerId) {
 
-        items.push({ label: '↪ Forward to Channel', action: function() { handleForward(msgId, msgDiv); }});
+        items.push({ label: icon('reply') + ' Forward to Channel', action: function() { handleForward(msgId, msgDiv); }});
 
-        items.push({ label: '💬 Forward to DM', action: function() { handleForwardToDm(msgId, msgDiv); }});
+        items.push({ label: icon('send') + ' Forward to DM', action: function() { handleForwardToDm(msgId, msgDiv); }});
 
     }
 
     if (currentDmChannelId) {
 
-        items.push({ label: '↪ Forward to Channel', action: function() { handleDmForwardToChannel(msgId, msgDiv); }});
+        items.push({ label: icon('reply') + ' Forward to Channel', action: function() { handleDmForwardToChannel(msgId, msgDiv); }});
 
-        items.push({ label: '💬 Forward to DM', action: function() { handleDmForwardToDm(msgId, msgDiv); }});
+        items.push({ label: icon('send') + ' Forward to DM', action: function() { handleDmForwardToDm(msgId, msgDiv); }});
 
     }
 
     items.push('---');
 
-    if (isOwn) items.push({ label: '✎ Edit', action: function() { handleEdit(msgId, msgDiv); }});
+    if (isOwn) items.push({ label: icon('edit') + ' Edit', action: function() { handleEdit(msgId, msgDiv); }});
 
-    if (isOwn) items.push({ label: '✕ Delete', danger: true, action: function() { handleDelete(msgId, msgDiv); }});
+    if (isOwn) items.push({ label: icon('close') + ' Delete', danger: true, action: function() { handleDelete(msgId, msgDiv); }});
 
     var isPinned = msgDiv.querySelector('.pin-badge');
 
-    if (isPinned) items.push({ label: '📌 Unpin', action: function() { togglePinMessage(msgId, false); }});
+    if (isPinned) items.push({ label: icon('pin') + ' Unpin', action: function() { togglePinMessage(msgId, false); }});
 
-    else if (currentServerId && isOwner) items.push({ label: '📌 Pin', action: function() { togglePinMessage(msgId, true); }});
+    else if (currentServerId && isOwner) items.push({ label: icon('pin') + ' Pin', action: function() { togglePinMessage(msgId, true); }});
 
-    else if (currentDmChannelId) items.push({ label: '📌 Pin', action: function() { togglePinMessage(msgId, true); }});
+    else if (currentDmChannelId) items.push({ label: icon('pin') + ' Pin', action: function() { togglePinMessage(msgId, true); }});
 
     items.push('---');
 
-    items.push({ label: '📋 Copy Text', action: function() {
+    items.push({ label: icon('copy') + ' Copy Text', action: function() {
 
         if (msgText) navigator.clipboard.writeText(msgText).then(function() { showToast('Text copied'); });
 
     }});
 
-    items.push({ label: '🔗 Copy Message Link', action: function() {
+    items.push({ label: icon('link') + ' Copy Message Link', action: function() {
 
         var link = window.location.origin + '/#' + msgId;
 
@@ -17474,19 +17474,19 @@ function renderDmSidebar() {
     let html = '<div class="dm-header">';
     html += '<div class="identity-key-box" style="margin-bottom:10px">';
     html += '<span class="key-value" id="my-friend-code">••••••••••••••••</span>';
-    html += '<button class="key-action-btn" id="toggle-friend-code-btn" title="Show/Hide">&#128065;</button>';
-    html += '<button class="key-action-btn" id="copy-friend-code-btn" title="Copy">&#128203;</button>';
-    html += '<button class="key-action-btn" id="friend-qr-btn" title="Show QR Code">&#128247;</button>';
-    html += '<button class="key-action-btn" id="get-friend-code-btn" title="Get friend code from server">&#128274;</button>';
-    html += '<button class="key-action-btn" id="regen-friend-code-btn" title="Generate new friend code" style="color:#ff9800;">&#128260;</button>';
+    html += '<button class="key-action-btn" id="toggle-friend-code-btn" title="Show/Hide">' + icon('eye') + '</button>';
+    html += '<button class="key-action-btn" id="copy-friend-code-btn" title="Copy">' + icon('copy') + '</button>';
+    html += '<button class="key-action-btn" id="friend-qr-btn" title="Show QR Code">' + icon('camera') + '</button>';
+    html += '<button class="key-action-btn" id="get-friend-code-btn" title="Get friend code from server">' + icon('lock') + '</button>';
+    html += '<button class="key-action-btn" id="regen-friend-code-btn" title="Generate new friend code" style="color:#ff9800;">' + icon('refresh') + '</button>';
     html += '</div>';
     html += '<div id="friend-code-status" class="friend-code-status" style="font-size:11px;color:#888;margin-top:4px;text-align:center;"></div>';
     html += '<div id="friend-qr-container" class="qr-code-container" style="display:none;margin-top:10px;margin-bottom:10px;">';
     html += '<div id="friend-qr-canvas" class="qr-code-canvas"></div>';
-    html += '<p class="qr-warning">⚠️ This shows your friend code. Only show to trusted people.</p>';
+    html += '<p class="qr-warning">' + icon('warning') + ' This shows your friend code. Only show to trusted people.</p>';
     html += '<div class="qr-actions">';
     html += '<button id="hide-friend-qr-btn" class="key-action-btn">Hide QR Code</button>';
-    html += '<button id="export-friend-qr-btn" class="key-action-btn qr-export-btn">⬇ Export QR</button>';
+    html += '<button id="export-friend-qr-btn" class="key-action-btn qr-export-btn">' + icon('download') + ' Export QR</button>';
     html += '</div>';
     html += '</div>';
     html += '<div class="dm-actions">';
@@ -17820,19 +17820,19 @@ function updateDmStripWaiting() {
         el.style.display = 'flex';
         el.classList.add('calling');
         el.classList.remove('connected');
-        el.textContent = '\uD83D\uDCDE'; // 📞
+        el.innerHTML = icon('phone');
         el.title = 'Call ringing';
     } else if (state === 'waiting') {
         el.style.display = 'flex';
         el.classList.remove('calling');
         el.classList.remove('connected');
-        el.textContent = '\uD83D\uDCDE'; // 📞
+        el.innerHTML = icon('phone');
         el.title = 'In a call — waiting for the other person';
     } else if (state === 'connected') {
         el.style.display = 'flex';
         el.classList.remove('calling');
         el.classList.add('connected');
-        el.textContent = '\uD83C\uDFA4'; // 🎤
+        el.innerHTML = icon('mic');
         el.title = 'In a call';
     } else {
         el.style.display = 'none';
@@ -18500,7 +18500,7 @@ async function appendDmMessage(msg, kp, otherPublicKey) {
     if (expiresAt) {
         try {
             var _expRemain = new Date(expiresAt.replace(/\.(\d{3})\d*Z/, '.$1Z')).getTime() - Date.now();
-            contentHtml = '<div class="disappearing-banner">🕐 <span class="disappearing-timer">' + formatDisappearingTime(_expRemain) + '</span></div>' + contentHtml;
+            contentHtml = '<div class="disappearing-banner">' + icon('clock') + ' <span class="disappearing-timer">' + formatDisappearingTime(_expRemain) + '</span></div>' + contentHtml;
         } catch (_) {}
     }
 
@@ -18523,7 +18523,7 @@ async function appendDmMessage(msg, kp, otherPublicKey) {
         '<div class="content">' +
             '<div class="header">' +
                 '<span class="display-name"' + (senderColor ? ' style="color:' + senderColor + ';text-shadow:' + getDisplayNameTextShadow(senderColor, senderBorderColor) + '"' : '') + '>' + escapeHtml(displayName) + '</span>' +
-                (isPinned ? '<span class="pin-badge" title="Pinned message">&#128204;</span>' : '') +
+                (isPinned ? '<span class="pin-badge" title="Pinned message">' + icon('pin') + '</span>' : '') +
             '</div>' +
             wrappedContent +
             editedHtml +
@@ -18879,8 +18879,8 @@ async function loadMembers(serverId) {
             let actionBtns = '';
             if (isOwner && !isMemberOwner && m.id !== user.id) {
                 actionBtns =
-                    '<button class="btn-kick" data-action="kick" data-user-id="' + escapeAttr(m.id) + '" data-username="' + escapeAttr(m.username) + '" title="Kick">&#10005;</button>' +
-                    '<button class="btn-ban" data-action="ban" data-user-id="' + escapeAttr(m.id) + '" data-username="' + escapeAttr(m.username) + '" title="Ban">&#9888;</button>';
+                    '<button class="btn-kick" data-action="kick" data-user-id="' + escapeAttr(m.id) + '" data-username="' + escapeAttr(m.username) + '" title="Kick"><svg class="ui-icon" width="12" height="12"><use href="#icon-close"/></svg></button>' +
+                    '<button class="btn-ban" data-action="ban" data-user-id="' + escapeAttr(m.id) + '" data-username="' + escapeAttr(m.username) + '" title="Ban"><svg class="ui-icon" width="12" height="12"><use href="#icon-warning"/></svg></button>';
             }
             var _mCache = userDisplayNameCache[m.id];
             var memberDisplayName = (_mCache && _mCache.display_name) || m.display_name || m.username || '?';
@@ -19361,8 +19361,8 @@ async function showInviteModal() {
     copyBtn.onclick = () => {
         copyToClipboard(display.dataset.value).then((copied) => {
             if (!copied) return;
-            copyBtn.textContent = '✓';
-            setTimeout(() => { copyBtn.innerHTML = '&#128203;'; }, 1500);
+            copyBtn.innerHTML = icon('check');
+            setTimeout(() => { copyBtn.innerHTML = icon('copy'); }, 1500);
         });
     };
 
@@ -19549,8 +19549,8 @@ async function loadMyFriendCode() {
                 if (!el.dataset.value) return;
                 copyToClipboard(el.dataset.value).then((copied) => {
                     if (!copied) return;
-                    copyBtn.textContent = '✓';
-                    setTimeout(() => { copyBtn.innerHTML = '&#128203;'; }, 1500);
+                    copyBtn.innerHTML = icon('check');
+                    setTimeout(() => { copyBtn.innerHTML = icon('copy'); }, 1500);
                 });
             };
             // QR Code for friend code
@@ -19655,14 +19655,14 @@ async function showFriendCodePasswordModal() {
     var regenBtn = document.getElementById('fc-regenerate-btn');
     var recoverBtn = document.getElementById('fc-recover-btn');
     if (identityMissing) {
-        if (title) title.textContent = '🔑 Key Recovery';
+        if (title) title.innerHTML = icon('lock') + ' Key Recovery';
         if (desc) desc.innerHTML = 'Your encryption keys need to be recovered. Enter your <strong>account password</strong> to restore them from the server backup.';
-        if (recoverBtn) recoverBtn.innerHTML = '&#128274; Recover Keys';
+        if (recoverBtn) recoverBtn.innerHTML = icon('lock') + ' Recover Keys';
         if (regenBtn) regenBtn.style.display = 'none';
     } else {
-        if (title) title.textContent = '🔒 Friend Code Access';
+        if (title) title.innerHTML = icon('lock') + ' Friend Code Access';
         if (desc) desc.innerHTML = 'Your friend code is encrypted. Enter your <strong>account password</strong> to access it.';
-        if (recoverBtn) recoverBtn.innerHTML = '&#128274; Recover Code';
+        if (recoverBtn) recoverBtn.innerHTML = icon('lock') + ' Recover Code';
         if (regenBtn) regenBtn.style.display = '';
     }
     
@@ -22085,52 +22085,43 @@ function normalizeAudioMimeType(mime) {
 }
 
 function getFileIcon(mimeType, filename) {
-    if (!mimeType) return '📄';
-    if (mimeType.startsWith('image/')) return '🖼️';
-    if (mimeType.startsWith('video/')) return '🎬';
-    if (mimeType.startsWith('audio/')) return '🎵';
-    if (mimeType.includes('pdf')) return '📕';
-    if (mimeType.includes('zip') || mimeType.includes('rar') || mimeType.includes('tar') || mimeType.includes('gzip')) return '📦';
-    if (mimeType.includes('word') || mimeType.includes('document')) return '📝';
-    if (mimeType.includes('sheet') || mimeType.includes('excel')) return '📊';
-    if (mimeType.includes('presentation') || mimeType.includes('powerpoint')) return '📽️';
+    if (!mimeType) return icon('file');
+    if (mimeType.startsWith('image/')) return icon('image');
+    if (mimeType.startsWith('video/')) return icon('video');
+    if (mimeType.startsWith('audio/')) return icon('music');
+    if (mimeType.includes('pdf')) return icon('file');
+    if (mimeType.includes('zip') || mimeType.includes('rar') || mimeType.includes('tar') || mimeType.includes('gzip')) return icon('package');
+    if (mimeType.includes('word') || mimeType.includes('document')) return icon('file');
+    if (mimeType.includes('sheet') || mimeType.includes('excel')) return icon('bar-chart');
+    if (mimeType.includes('presentation') || mimeType.includes('powerpoint')) return icon('video');
 
     const ext = filename ? filename.split('.').pop().toLowerCase() : '';
-    const iconMap = {
-        'js': '🟨', 'mjs': '🟨', 'jsx': '⚛️',
-        'ts': '🔷', 'tsx': '⚛️',
-        'py': '🐍', 'pyw': '🐍',
-        'c': '©️', 'h': '©️',
-        'cpp': '➕', 'cxx': '➕', 'cc': '➕', 'hpp': '➕',
-        'java': '☕',
-        'rs': '🦀',
-        'go': '🐹',
-        'sh': '🖥️', 'bash': '🖥️', 'zsh': '🖥️',
-        'sql': '🗃️',
-        'html': '🌐', 'htm': '🌐',
-        'css': '🎨',
-        'json': '📋',
-        'xml': '📋',
-        'rb': '💎',
-        'php': '🐘',
-        'swift': '🐦',
-        'kt': '🟣',
-        'cs': '🟩',
-        'lua': '🌙',
-        'pl': '🐪',
-        'r': '📈',
-        'm': '🍎', 'mm': '🍎',
-        'yaml': '⚙️', 'yml': '⚙️',
-        'toml': '⚙️',
-        'md': '📖', 'mdx': '📖', 'markdown': '📖',
-        'txt': '📄', 'log': '📄',
-        'csv': '📊',
-        'svg': '🎨',
-        'dockerfile': '🐳', 'docker-compose': '🐳',
-        'env': '🔒',
-        'ini': '⚙️', 'cfg': '⚙️', 'conf': '⚙️',
+    const extIcons = {
+        'js': 'code', 'mjs': 'code', 'jsx': 'code',
+        'ts': 'code', 'tsx': 'code',
+        'py': 'code', 'pyw': 'code',
+        'c': 'code', 'h': 'code',
+        'cpp': 'code', 'cxx': 'code', 'cc': 'code', 'hpp': 'code',
+        'java': 'code',
+        'rs': 'code',
+        'go': 'code',
+        'sh': 'terminal', 'bash': 'terminal', 'zsh': 'terminal',
+        'sql': 'database',
+        'html': 'globe', 'htm': 'globe',
+        'css': 'brush',
+        'json': 'code', 'xml': 'code',
+        'rb': 'code', 'php': 'code', 'swift': 'code', 'kt': 'code', 'cs': 'code',
+        'lua': 'code', 'pl': 'code', 'r': 'code', 'm': 'code', 'mm': 'code',
+        'yaml': 'settings', 'yml': 'settings', 'toml': 'settings',
+        'md': 'book', 'mdx': 'book', 'markdown': 'book',
+        'txt': 'file', 'log': 'file',
+        'csv': 'bar-chart',
+        'svg': 'image',
+        'dockerfile': 'package', 'docker-compose': 'package',
+        'env': 'lock',
+        'ini': 'settings', 'cfg': 'settings', 'conf': 'settings',
     };
-    return iconMap[ext] || '📄';
+    return icon(extIcons[ext] || 'file');
 }
 
 // ===== Drag and Drop =====
@@ -22394,9 +22385,9 @@ function renderUploadPreview() {
     // Gallery nav
     if (selectedFiles.length > 1) {
         const navHtml = '<div class="upload-gallery">' +
-            '<button class="gallery-nav-btn" id="gallery-prev" ' + (currentFileIndex === 0 ? 'disabled' : '') + '>&#8249;</button>' +
+            '<button class="gallery-nav-btn" id="gallery-prev" ' + (currentFileIndex === 0 ? 'disabled' : '') + '><svg class="ui-icon" width="16" height="16"><use href="#icon-chevron-left"/></svg></button>' +
             '<span class="gallery-counter">' + (currentFileIndex + 1) + ' / ' + selectedFiles.length + '</span>' +
-            '<button class="gallery-nav-btn" id="gallery-next" ' + (currentFileIndex === selectedFiles.length - 1 ? 'disabled' : '') + '>&#8250;</button>' +
+            '<button class="gallery-nav-btn" id="gallery-next" ' + (currentFileIndex === selectedFiles.length - 1 ? 'disabled' : '') + '><svg class="ui-icon" width="16" height="16"><use href="#icon-chevron-right"/></svg></button>' +
             '</div>';
         preview.insertAdjacentHTML('beforebegin', navHtml);
         document.getElementById('gallery-prev').addEventListener('click', () => { if (currentFileIndex > 0) { currentFileIndex--; renderUploadPreview(); _showUploadQuickActions(); } });
@@ -23364,7 +23355,7 @@ function _videoCutTogglePreview() {
     var startT = Math.max(0.001, Math.min(s.cutStart * dur, dur - 0.001));
     var endT = Math.max(startT + 0.001, Math.min(s.cutEnd * dur, dur));
     _videoPreviewPlaying = true;
-    if (btn) { btn.textContent = '⏸ Stop Preview'; btn.classList.add('active'); }
+    if (btn) { btn.innerHTML = icon('stop') + ' Stop Preview'; btn.classList.add('active'); }
     s.video.muted = false;
     var ph = document.getElementById('video-cut-playhead');
     if (ph) ph.style.display = 'block';
@@ -23389,7 +23380,7 @@ function _videoCutStopPreview() {
     _videoPreviewPlaying = false;
     if (_videoPreviewRAF) { cancelAnimationFrame(_videoPreviewRAF); _videoPreviewRAF = null; }
     var btn = document.getElementById('video-cut-play');
-    if (btn) { btn.textContent = '▶ Preview'; btn.classList.remove('active'); }
+    if (btn) { btn.innerHTML = icon('play') + ' Preview'; btn.classList.remove('active'); }
     var ph = document.getElementById('video-cut-playhead');
     if (ph) ph.style.display = 'none';
     if (!s.video) return;
@@ -23826,7 +23817,7 @@ function _audioCutTogglePreview() {
     _audioPreviewSource = src;
     src.onended = function() { if (_audioPreviewPlaying) _audioCutStopPreview(); };
     _audioPreviewPlaying = true;
-    if (btn) { btn.textContent = '⏸ Stop Preview'; btn.classList.add('active'); }
+    if (btn) { btn.innerHTML = icon('stop') + ' Stop Preview'; btn.classList.add('active'); }
     var ph = document.getElementById('audio-cut-playhead');
     if (ph) ph.style.display = 'block';
     var t0 = ctx.currentTime;
@@ -23845,7 +23836,7 @@ function _audioCutStopPreview() {
     if (_audioPreviewTimer) { clearInterval(_audioPreviewTimer); _audioPreviewTimer = null; }
     if (_audioPreviewSource) { try { _audioPreviewSource.stop(); } catch (e) {} _audioPreviewSource = null; }
     var btn = document.getElementById('audio-cut-play');
-    if (btn) { btn.textContent = '▶ Preview'; btn.classList.remove('active'); }
+    if (btn) { btn.innerHTML = icon('play') + ' Preview'; btn.classList.remove('active'); }
     var ph = document.getElementById('audio-cut-playhead');
     if (ph) ph.style.display = 'none';
     var dur = (s.buffer && s.buffer.duration > 0) ? s.buffer.duration : 1;
@@ -24136,12 +24127,12 @@ function openTextEditorModal(file) {
                 + '</div>'
                 + '<div style="padding:12px 20px;border-top:1px solid #333;display:flex;justify-content:space-between;align-items:center">'
                 + '<div style="display:flex;gap:8px">'
-                + '<button id="text-edit-undo" style="padding:6px 14px;border:1px solid #555;background:#2a2a3e;color:#e0e0e0;border-radius:6px;cursor:pointer;font-size:13px">↩ Undo</button>'
-                + '<button id="text-edit-redo" style="padding:6px 14px;border:1px solid #555;background:#2a2a3e;color:#e0e0e0;border-radius:6px;cursor:pointer;font-size:13px">↪ Redo</button>'
+                + '<button id="text-edit-undo" style="padding:6px 14px;border:1px solid #555;background:#2a2a3e;color:#e0e0e0;border-radius:6px;cursor:pointer;font-size:13px">' + icon('undo') + ' Undo</button>'
+                + '<button id="text-edit-redo" style="padding:6px 14px;border:1px solid #555;background:#2a2a3e;color:#e0e0e0;border-radius:6px;cursor:pointer;font-size:13px">' + icon('redo') + ' Redo</button>'
                 + '<span id="text-edit-info" style="color:#888;font-size:12px;margin-left:8px"></span></div>'
                 + '<div style="display:flex;gap:8px">'
                 + '<button id="text-edit-cancel" style="padding:8px 18px;border:none;background:#f44336;color:#fff;border-radius:6px;cursor:pointer;font-weight:600;font-size:13px">Cancel</button>'
-                + '<button id="text-edit-confirm" style="padding:8px 18px;border:none;background:#4caf50;color:#fff;border-radius:6px;cursor:pointer;font-weight:600;font-size:13px">✅ Save & Upload</button>'
+                + '<button id="text-edit-confirm" style="padding:8px 18px;border:none;background:#4caf50;color:#fff;border-radius:6px;cursor:pointer;font-weight:600;font-size:13px">' + icon('check') + ' Save & Upload</button>'
                 + '</div></div></div>';
             document.body.appendChild(modal);
             // Event handlers
@@ -24452,7 +24443,7 @@ function buildFileCardHtml(fileData) {
             'data-file-mime="' + escapeAttr(fileData.mime_type) + '" ' +
             'data-file-size="' + fileData.file_size + '">' +
             '<div class="audio-file-header">' +
-                '<span class="audio-file-icon">🎵</span>' +
+                '<span class="audio-file-icon">' + icon('music') + '</span>' +
                 '<span class="audio-file-name">' + escapeHtml(fileData.filename) + '</span>' +
                 '<span class="audio-file-meta">' + formatFileSize(fileData.file_size) + '</span>' +
                 '<button class="file-download-btn audio-download-btn" title="Download">⬇</button>' +
@@ -24485,7 +24476,7 @@ function buildFileCardHtml(fileData) {
         'data-file-mime="' + escapeAttr(fileData.mime_type) + '" ' +
         'data-file-size="' + fileData.file_size + '">' +
         '<button class="file-download-btn" title="Download">⬇</button>' +
-        (isDoc ? '<button class="file-doc-preview-btn" title="Preview document">👁️</button>' : '') +
+        (isDoc ? '<button class="file-doc-preview-btn" title="Preview document">' + icon('eye') + '</button>' : '') +
 
         '<div class="file-details">' +
             '<div class="file-name">' + icon + ' ' + escapeHtml(fileData.filename) + '</div>' +
@@ -24558,9 +24549,9 @@ function buildMultiFileCardHtml(files) {
 
     // Navigation arrows
     html += '<div class="msg-gallery-nav">';
-    html += '<button class="msg-gallery-btn msg-gallery-prev" data-dir="-1" disabled>&#8249;</button>';
+    html += '<button class="msg-gallery-btn msg-gallery-prev" data-dir="-1" disabled><svg class="ui-icon" width="16" height="16"><use href="#icon-chevron-left"/></svg></button>';
     html += '<span class="msg-gallery-counter">1 / ' + files.length + '</span>';
-    html += '<button class="msg-gallery-btn msg-gallery-next" data-dir="1">&#8250;</button>';
+    html += '<button class="msg-gallery-btn msg-gallery-next" data-dir="1"><svg class="ui-icon" width="16" height="16"><use href="#icon-chevron-right"/></svg></button>';
     html += '</div>';
 
     // File items container - only one visible at a time
@@ -24767,7 +24758,7 @@ async function loadMediaPreview(container, fileData) {
             });
             const playOverlay = document.createElement('div');
             playOverlay.className = 'video-play-overlay';
-            playOverlay.textContent = '▶';
+            playOverlay.innerHTML = icon('play');
             container.appendChild(video);
             container.appendChild(playOverlay);
         } else if (isAudio) {
@@ -24786,7 +24777,7 @@ async function loadMediaPreview(container, fileData) {
             const loopBtn = document.createElement('button');
             loopBtn.type = 'button';
             loopBtn.className = 'inline-loop-btn';
-            loopBtn.innerHTML = '&#128257;';
+            loopBtn.innerHTML = icon('refresh');
             loopBtn.title = 'Loop';
             loopBtn.onclick = () => {
                 audio.loop = !audio.loop;
@@ -24799,7 +24790,7 @@ async function loadMediaPreview(container, fileData) {
         } else if (isText) {
             try {
                 if (fileData.file_size > 512 * 1024) {
-                    container.innerHTML = '<div class="file-type-icon">📄</div>';
+                    container.innerHTML = '<div class="file-type-icon">' + icon('file') + '</div>';
                     return;
                 }
                 const text = await blob.text();
@@ -24812,7 +24803,7 @@ async function loadMediaPreview(container, fileData) {
                 // Fullscreen button overlay
                 const fsBtn = document.createElement('button');
                 fsBtn.className = 'text-fullscreen-btn';
-                fsBtn.innerHTML = '&#x26F6;';
+                fsBtn.innerHTML = icon('maximize');
                 fsBtn.title = 'View full text';
                 fsBtn.addEventListener('click', (e) => {
                     e.stopPropagation();
@@ -24841,7 +24832,7 @@ async function loadMediaPreview(container, fileData) {
                 // Store full text for gallery access
                 container.dataset.fullText = text;
             } catch (_) {
-                container.innerHTML = '<div class="file-type-icon">📄</div>';
+                container.innerHTML = '<div class="file-type-icon">' + icon('file') + '</div>';
             }
         } else if (isDoc) {
             // Document preview — show file info with preview button (don't auto-open modal)
@@ -24866,7 +24857,7 @@ async function loadMediaPreview(container, fileData) {
         }
     } catch (e) {
         console.warn('Failed to load media preview:', e);
-        container.innerHTML = '<div class="file-type-icon">' + (isImage ? '🖼️' : isVideo ? '🎬' : isAudio ? '🎵' : '📄') + '</div>';
+        container.innerHTML = '<div class="file-type-icon">' + (isImage ? icon('image') : isVideo ? icon('video') : isAudio ? icon('music') : icon('file')) + '</div>';
     }
 }
 
@@ -25256,7 +25247,7 @@ function openMediaViewer(url, type, fileData, galleryItems) {
 
         const prevBtn = document.createElement('button');
         prevBtn.className = 'gallery-nav-btn-viewer gallery-nav-prev';
-        prevBtn.innerHTML = '&#8249;';
+        prevBtn.innerHTML = '<svg class="ui-icon" width="24" height="24"><use href="#icon-chevron-left"/></svg>';
         prevBtn.title = 'Previous';
         prevBtn.style.cssText = 'position:absolute;left:12px;top:50%;transform:translateY(-50%);z-index:10002;width:48px;height:48px;background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.2);border-radius:50%;color:#fff;font-size:28px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s';
         if (viewerCurrentIndex === 0) { prevBtn.classList.add('disabled'); }
@@ -25265,7 +25256,7 @@ function openMediaViewer(url, type, fileData, galleryItems) {
 
         const nextBtn = document.createElement('button');
         nextBtn.className = 'gallery-nav-btn-viewer gallery-nav-next';
-        nextBtn.innerHTML = '&#8250;';
+        nextBtn.innerHTML = '<svg class="ui-icon" width="24" height="24"><use href="#icon-chevron-right"/></svg>';
         nextBtn.title = 'Next';
         nextBtn.style.cssText = 'position:absolute;right:12px;top:50%;transform:translateY(-50%);z-index:10002;width:48px;height:48px;background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.2);border-radius:50%;color:#fff;font-size:28px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s';
         if (viewerCurrentIndex === viewerMediaItems.length - 1) { nextBtn.classList.add('disabled'); }
@@ -25405,7 +25396,7 @@ function updateGalleryNav() {
 
     const prevBtn = document.createElement('button');
     prevBtn.className = 'gallery-nav-btn-viewer gallery-nav-prev';
-    prevBtn.innerHTML = '&#8249;';
+    prevBtn.innerHTML = '<svg class="ui-icon" width="24" height="24"><use href="#icon-chevron-left"/></svg>';
     prevBtn.title = 'Previous';
     prevBtn.style.cssText = 'position:absolute;left:12px;top:50%;transform:translateY(-50%);z-index:10002;width:48px;height:48px;background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.2);border-radius:50%;color:#fff;font-size:28px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s';
     if (viewerCurrentIndex === 0) { prevBtn.classList.add('disabled'); }
@@ -25414,7 +25405,7 @@ function updateGalleryNav() {
 
     const nextBtn = document.createElement('button');
     nextBtn.className = 'gallery-nav-btn-viewer gallery-nav-next';
-    nextBtn.innerHTML = '&#8250;';
+    nextBtn.innerHTML = '<svg class="ui-icon" width="24" height="24"><use href="#icon-chevron-right"/></svg>';
     nextBtn.title = 'Next';
     nextBtn.style.cssText = 'position:absolute;right:12px;top:50%;transform:translateY(-50%);z-index:10002;width:48px;height:48px;background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.2);border-radius:50%;color:#fff;font-size:28px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s';
     if (viewerCurrentIndex === viewerMediaItems.length - 1) { nextBtn.classList.add('disabled'); }
@@ -25488,7 +25479,7 @@ function setupVideoControls(video) {
         };
     }
 
-    playPauseBtn.innerHTML = '▶';
+    playPauseBtn.innerHTML = icon('play');
 
     playPauseBtn.onclick = () => {
         if (video.paused) { video.play(); } else { video.pause(); }
@@ -25500,8 +25491,8 @@ function setupVideoControls(video) {
         if (video.paused) { video.play(); } else { video.pause(); }
     };
 
-    video.addEventListener('play', () => { playPauseBtn.innerHTML = '⏸'; });
-    video.addEventListener('pause', () => { playPauseBtn.innerHTML = '▶'; });
+    video.addEventListener('play', () => { playPauseBtn.innerHTML = icon('stop'); });
+    video.addEventListener('pause', () => { playPauseBtn.innerHTML = icon('play'); });
 
     video.addEventListener('timeupdate', () => {
         if (!video.duration) return;
@@ -25603,11 +25594,11 @@ function setupVideoControls(video) {
 function updateVolumeIcon(btn, volume) {
     if (!btn) return;
     if (volume === 0 || volume === undefined) {
-        btn.innerHTML = '&#128263;'; // muted
+        btn.innerHTML = icon('volume-off'); // muted
     } else if (volume < 0.5) {
-        btn.innerHTML = '&#128265;'; // low
+        btn.innerHTML = icon('volume-on'); // low
     } else {
-        btn.innerHTML = '&#128266;'; // high
+        btn.innerHTML = icon('volume-on'); // high
     }
 }
 
@@ -25645,14 +25636,14 @@ function setupAudioControls(audio) {
         };
     }
 
-    playPauseBtn.innerHTML = '▶';
+    playPauseBtn.innerHTML = icon('play');
 
     playPauseBtn.onclick = () => {
         if (audio.paused) { audio.play(); } else { audio.pause(); }
     };
 
-    audio.addEventListener('play', () => { playPauseBtn.innerHTML = '⏸'; });
-    audio.addEventListener('pause', () => { playPauseBtn.innerHTML = '▶'; });
+    audio.addEventListener('play', () => { playPauseBtn.innerHTML = icon('stop'); });
+    audio.addEventListener('pause', () => { playPauseBtn.innerHTML = icon('play'); });
 
     audio.addEventListener('timeupdate', () => {
         if (!audio.duration) return;
@@ -26024,7 +26015,7 @@ function setupPollButton() {
         del.type = 'button';
         del.className = 'poll-option-remove';
         del.title = 'Remove option';
-        del.textContent = '✕';
+        del.innerHTML = icon('close');
         del.addEventListener('click', function () {
             if (optionsList.querySelectorAll('.poll-option-row').length <= 2) return;
             row.remove();
@@ -26142,7 +26133,7 @@ function renderEmojiGrid(container, searchQuery) {
         searchInput.placeholder = 'Search emojis...';
         var clearBtn = document.createElement('button');
         clearBtn.className = 'emoji-search-clear';
-        clearBtn.textContent = '✕';
+        clearBtn.innerHTML = icon('close');
         clearBtn.style.display = 'none';
         searchInput.addEventListener('input', function() {
             renderEmojiGrid(container, this.value);
@@ -26251,14 +26242,14 @@ function renderEmojiGrid(container, searchQuery) {
                                 }
                             })
                             .catch(() => {
-                                if (!item.querySelector('img')) item.textContent = '?';
+                                if (!item.querySelector('img')) item.innerHTML = icon('folder');
                             });
                     } else {
-                        if (!item.querySelector('img')) item.textContent = '?';
+                        if (!item.querySelector('img')) item.innerHTML = icon('folder');
                     }
                 }
             } else {
-                if (!item.querySelector('img')) item.textContent = '?';
+                if (!item.querySelector('img')) item.innerHTML = icon('folder');
             }
 
             item.addEventListener('click', () => {
@@ -26687,7 +26678,7 @@ function renderStickerGrid(container) {
         searchInput.placeholder = 'Search stickers...';
         const clearBtn = document.createElement('button');
         clearBtn.className = 'emoji-search-clear';
-        clearBtn.textContent = '✕';
+        clearBtn.innerHTML = icon('close');
         clearBtn.style.display = 'none';
         clearBtn.title = 'Clear search';
         searchBar.appendChild(searchInput);
@@ -26750,7 +26741,7 @@ function renderStickerItems(grid, stickers) {
 
         // Delete button — always visible on touch devices, hover-only on desktop
         const delBtn = document.createElement('button');
-        delBtn.innerHTML = '&#128465;';
+        delBtn.innerHTML = icon('trash');
         delBtn.title = 'Delete sticker';
         delBtn.className = 'sticker-del-btn';
         delBtn.style.cssText = 'position:absolute;top:2px;right:2px;width:24px;height:24px;border-radius:50%;background:rgba(244,67,54,0.9);color:#fff;border:2px solid rgba(255,255,255,0.3);font-size:12px;line-height:20px;text-align:center;cursor:pointer;z-index:3;padding:0;' + 
@@ -26791,7 +26782,7 @@ function renderGifPanel(container, searchQuery) {
         });
         var clearBtn = document.createElement('button');
         clearBtn.className = 'emoji-search-clear';
-        clearBtn.textContent = '✕';
+        clearBtn.innerHTML = icon('close');
         clearBtn.style.display = 'none';
         clearBtn.title = 'Clear search';
         clearBtn.addEventListener('click', function() {
@@ -26858,7 +26849,7 @@ function renderGifPanel(container, searchQuery) {
 
             // Delete button — always visible on touch devices, hover-only on desktop
             const delBtn = document.createElement('button');
-            delBtn.innerHTML = '&#128465;';
+            delBtn.innerHTML = icon('trash');
             delBtn.title = 'Delete GIF';
             delBtn.style.cssText = 'position:absolute;top:2px;right:2px;width:24px;height:24px;border-radius:50%;background:rgba(244,67,54,0.9);color:#fff;border:2px solid rgba(255,255,255,0.3);font-size:12px;line-height:20px;text-align:center;cursor:pointer;z-index:3;padding:0;' + 
                 (isTouchDevice ? '' : 'opacity:0.4;transition:opacity 0.15s;');
@@ -27135,8 +27126,8 @@ function renderUploadStickerPanel(container) {
     wrap.style.cssText = 'padding:16px;text-align:center;';
     wrap.innerHTML = '<p style="color:#888;font-size:13px;margin-bottom:12px;">Add to your personal collection</p>' +
         '<div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">' +
-        '<button id="sticker-upload-trigger" style="background:var(--accent);color:var(--bg-primary);border:none;padding:10px 18px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;">🖼️ Upload Sticker</button>' +
-        '<button id="gif-upload-trigger" style="background:#2a6a3a;color:#fff;border:none;padding:10px 18px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;">🎬 Upload GIF</button>' +
+        '<button id="sticker-upload-trigger" style="background:var(--accent);color:var(--bg-primary);border:none;padding:10px 18px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;">' + icon('image') + ' Upload Sticker</button>' +
+        '<button id="gif-upload-trigger" style="background:#2a6a3a;color:#fff;border:none;padding:10px 18px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;">' + icon('video') + ' Upload GIF</button>' +
         '<button id="emoji-upload-trigger" style="background:#6a3a8a;color:#fff;border:none;padding:10px 18px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;">😊 Upload Emoji</button>' +
         '</div>' +
         '<p style="color:#666;font-size:11px;margin-top:10px;">Emoji: small inline images • use :emoji_name: in messages to insert</p>' +
@@ -28612,13 +28603,13 @@ function handleDecryptedNotification(notifData) {
         var attempts = notifData.attempts || '?';
         var ip = notifData.ip || 'unknown';
         var ts = notifData.timestamp || '';
-        var title = '⚠️ Security Alert';
+        var title = icon('warning') + ' Security Alert';
         var body = 'Someone failed to log in to your account ' + attempts + ' time' + (attempts === 1 ? '' : 's') + ' from IP ' + ip + '.';
         showBrowserNotification(title, body, null);
         // Show in-app toast for immediate visibility
         var toast = document.createElement('div');
         toast.style.cssText = 'position:fixed;top:20px;left:50%;transform:translateX(-50%);z-index:99999;background:#ff4444;color:#fff;padding:12px 24px;border-radius:8px;font-size:14px;box-shadow:0 4px 12px rgba(0,0,0,0.3);max-width:500px;text-align:center;transition:opacity 0.3s;cursor:pointer;';
-        toast.textContent = '⚠️ ' + body;
+        toast.innerHTML = icon('warning') + ' ' + body;
         toast.onclick = function() { toast.style.opacity = '0'; setTimeout(function() { toast.remove(); }, 350); };
         document.body.appendChild(toast);
         setTimeout(function() { toast.style.opacity = '0'; setTimeout(function() { toast.remove(); }, 350); }, 12000);

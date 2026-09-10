@@ -112,10 +112,10 @@ function renderPaginationControls(tab) {
     html += '<option value="All"' + (pageSize === Infinity ? ' selected' : '') + '>All</option>';
     html += '</select>';
     html += '<button class="pag-btn" data-tab="' + tab + '" data-dir="first" ' + (p <= 0 ? 'disabled' : '') + '>&#171;</button>';
-    html += '<button class="pag-btn" data-tab="' + tab + '" data-dir="prev" ' + (p <= 0 ? 'disabled' : '') + '>&#8249;</button>';
+    html += '<button class="pag-btn" data-tab="' + tab + '" data-dir="prev" ' + (p <= 0 ? 'disabled' : '') + '><svg class="ui-icon" width="14" height="14"><use href="#icon-chevron-left"/></svg></button>';
     html += '<span class="pag-info">Page ' + (p + 1) + ' of ' + totalPages + ' (' + total + ' records)</span>';
-    html += '<button class="pag-btn" data-tab="' + tab + '" data-dir="next" ' + (p >= totalPages - 1 ? 'disabled' : '') + '>&#8250;</button>';
-    html += '<button class="pag-btn" data-tab="' + tab + '" data-dir="last" ' + (p >= totalPages - 1 ? 'disabled' : '') + '>&#187;</button>';
+    html += '<button class="pag-btn" data-tab="' + tab + '" data-dir="next" ' + (p >= totalPages - 1 ? 'disabled' : '') + '><svg class="ui-icon" width="14" height="14"><use href="#icon-chevron-right"/></svg></button>';
+    html += '<button class="pag-btn" data-tab="' + tab + '" data-dir="last" ' + (p >= totalPages - 1 ? 'disabled' : '') + '><svg class="ui-icon" width="14" height="14"><use href="#icon-chevrons-right"/></svg></button>';
     html += '</div>';
     container.innerHTML = html;
 }
@@ -1922,13 +1922,13 @@ function showImportResults(data, allowImport, uploadsData) {
     const totalBytes = data.total_size_bytes != null ? data.total_size_bytes :
         (data.tables || []).reduce((sum, t) => sum + (t.size_bytes || 0), 0) || null;
 
-    let summaryText = (data.integrity_ok ? '✅ Integrity check passed' : '⚠️ Integrity check found problems') +
+    let summaryText = (data.integrity_ok ? icon('check') + ' Integrity check passed' : icon('warning') + ' Integrity check found problems') +
         ' · ' + tableCount + ' tables · ' + totalRows + ' rows · ' + formatBytes(totalBytes) + ' total';
     if (uploadsData) {
         const missing = uploadsData.missing_rows || 0;
         const upOk = uploadsData.ok && missing === 0;
         summaryText += ' · Uploaded files: ' + (uploadsData.files || 0) + ' (' + formatBytes(uploadsData.bytes || 0) + ')' +
-            (missing > 0 ? ' · ⚠️ ' + missing + ' file(s) have no DB row (would be swept)' : '');
+            (missing > 0 ? ' · ' + icon('warning') + ' ' + missing + ' file(s) have no DB row (would be swept)' : '');
         if (!upOk) summary.style.color = '#faa61a';
     }
     summary.textContent = summaryText;

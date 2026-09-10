@@ -486,7 +486,7 @@
 
         // Show loading indicator
         if (playBtn) playBtn.style.display = 'none';
-        if (loadBtn) { loadBtn.style.display = ''; loadBtn.textContent = '⏳'; }
+        if (loadBtn) { loadBtn.style.display = ''; loadBtn.innerHTML = icon('check'); }
 
         // Decrypt with identity key
         var audioBytes = _decryptSbClip(clip);
