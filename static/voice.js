@@ -4834,10 +4834,10 @@
                 el2.style.bottom = '0';
                 el2.style.height = 'auto'; // override the CSS 52vh so top+bottom win
             }
-        });
-        ['voice-bar', 'dm-mini-bar'].forEach(function (id) {
+        });        ['voice-bar', 'dm-mini-bar'].forEach(function (id) {
             var el2 = document.getElementById(id);
             if (!el2) return;
+
             var key = id === 'voice-bar' ? 'voice_bar_pos' : 'dm_mini_bar_pos';
             if (localStorage.getItem(key)) return; // user dragged it — keep position
             // Snap back to the default corner: clear inline top/bottom so the
@@ -6090,11 +6090,6 @@
             if (window._loadSoundboardClips) window._loadSoundboardClips();
         });
         bindClick(p, 'dm-call-end', function () { endDmCall(); });
-        bindClick(p, 'dm-call-goto', function () {
-            if (S.dmChannelId && typeof selectDmChannel === 'function') {
-                try { selectDmChannel(S.dmChannelId, S.dmCallPartner ? S.dmCallPartner.id : null, S.dmCallPartner ? S.dmCallPartner.username : null, null); } catch (_) {}
-            }
-        });
         bindClick(p, 'dm-call-expand', function () { toggleDmExpand(); });
         bindClick(p, 'dm-call-close', function () { hideDmPanel(); });
         initDmResize();

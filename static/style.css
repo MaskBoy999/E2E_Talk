@@ -9374,13 +9374,13 @@ video.remote-video-tile.mirrored {
     box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
 }
 .dm-call-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
     padding: 8px 14px;
     font-size: 14px;
     color: var(--text-primary, #e0e0e0);
     border-bottom: 1px solid var(--bg-border, #2a2a4a);
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
 }
 .dm-call-header-right {
     display: flex;
@@ -9420,20 +9420,6 @@ video.remote-video-tile.mirrored {
     transition: background 0.15s ease, color 0.15s ease;
 }
 .dm-call-close:hover { color: #fff; background: rgba(255, 255, 255, 0.08); }
-.dm-call-goto-btn {
-    background: none;
-    border: none;
-    color: var(--text-muted, #888);
-    font-size: 15px;
-    cursor: pointer;
-    padding: 2px 6px;
-    border-radius: 6px;
-    line-height: 1;
-    flex-shrink: 0;
-    margin-left: auto;
-    transition: background 0.15s ease, color 0.15s ease;
-}
-.dm-call-goto-btn:hover { color: #fff; background: rgba(255, 255, 255, 0.08); }
 /* Expanded DM call + fullscreen voice view: cover the ENTIRE viewport
    (left/top/bottom are set inline by syncOverlayBounds) so you see only the
    call — handy on phones to watch your own camera + screen and the other
@@ -9666,6 +9652,23 @@ body.resizing-dm { cursor: ns-resize !important; user-select: none; }
     display: flex;
     align-items: center;
     gap: 6px;
+    /* Mirror the voice bar's top row: title left, ☰ pushed to the far right
+       edge — the hamburger lines up like the voice channel bar's instead of
+       hugging the title text. */
+    justify-content: space-between;
+}
+.dm-mini-bar-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.dm-mini-bar-body { min-width: 0; }
+/* The ☰ header buttons in the floating voice bar + DM mini bar: their rounded
+   square comes from bg-contrast alone, which vanishes on low-contrast themes
+   (the box looked missing). A hairline border keeps it visible everywhere. */
+#voice-bar-popup,
+#dm-mini-bar-goto {
+    border: 1px solid var(--bg-border, #2a2a4a);
 }
 .dm-mini-bar-controls {
     display: flex;

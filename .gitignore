@@ -91,3 +91,9 @@ NUL
 # Agent skill customizations (local)
 .agents/
 AGENTS.md
+
+# Ad-hoc probe scripts + screenshots (debug artifacts)
+probe-*.js
+*.png
+!tests/**/*.png
+!static/icons/*.png

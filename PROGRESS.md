@@ -5810,3 +5810,42 @@ based on the number of **active (hearing)** participants:
 - Mode switching: `recalcAudioMode()` called on every member join/leave/deafen
 - All encryption uses existing room key (E2EE maintained — server only sees
   opaque ciphertext)
+
+### 115. DM Header Hamburger Alignment + Mini Bar ☰ Match (voice bar look)
+
+**Problem 1 — DM call panel:** the header hamburger (☰) was jammed against the
+panel's right edge while the mic button (first control in the centered controls
+row) had breathing room from the left. The existing `alignDmHeaderHamburger()`
+had the right algorithm (measure mic's left offset, mirror it as header
+padding-right — verified diff 0.00px at 827/1100/1440/1920px) but it barely
+ever ran:
+- `toggleDmExpand()` never re-aligned after expand/collapse (fullscreen moves
+  the panel's left edge to 0, changing the mic offset)
+- `syncOverlayBounds()` repositioned the panel (resize, sidebar drift) without
+  re-aligning
+- the window-resize listener measured the HIDDEN panel (all rects 0) and
+  persisted `paddingRight: 0`, clobbering alignment until the next show
+
+**Fixes (static/voice.js):**
+- `alignDmHeaderHamburger()` skips when panel is hidden or not laid out
+  (no more 0px clobber), rounds to whole pixels
+- `syncOverlayBounds()` calls it at the end — every bounds change re-mirrors
+- `toggleDmExpand()` re-aligns via requestAnimationFrame (after layout flush)
+
+**Problem 2 — DM mini bar ("In call with…" / "Waiting for…" floating card):**
+the ☰ hugged the title text (top row had `gap: 6px`, no space-between) and its
+rounded-square box came from bg-contrast alone, which vanishes on low-contrast
+themes (looked bare, unlike the voice bar's boxed ☰).
+
+**Fixes (static/style.css, v=11):**
+- `.dm-mini-bar-top` → `justify-content: space-between` (title left, ☰ pinned
+  right, matching the voice bar)
+- `.dm-mini-bar-name` ellipsis + `.dm-mini-bar-body { min-width: 0 }` so long
+  names can't push the ☰
+- `#voice-bar-popup, #dm-mini-bar-goto { border: 1px solid var(--bg-border) }`
+  — hairline border keeps the ☰ box visible on every theme (voice bar too)
+
+**Test:** `tests/dm-header-align.spec.ts` (5 tests, all passing) — symmetry
+at 3 viewport widths via real `startDmCall` flow, expand/collapse re-align,
+mid-call resize re-align, hidden-panel resize doesn't clobber padding,
+mini-bar ☰ right-edge alignment + visible border.
