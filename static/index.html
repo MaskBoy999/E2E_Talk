@@ -1148,6 +1148,15 @@
                     <p class="settings-hint">After the app has been backgrounded this long, repeating ring buzzes are skipped (0 disables the background check). Buzzes resume the moment you return to the app.</p>
                 </div>
                 <div class="settings-group">
+                    <h4>Video Transmission</h4>
+                    <p class="settings-hint">How your camera and screen share are sent in server voice channels. DM calls always use P2P mesh.</p>
+                    <label class="settings-checkbox-label" style="margin-top:8px;display:flex;align-items:center;gap:8px;font-size:14px;color:var(--text-primary);cursor:pointer">
+                        <input type="checkbox" id="voice-video-mesh-mode" style="width:16px;height:16px;accent-color:var(--accent,#5865f2)">
+                        Use P2P mesh for video (lower latency, less reliable at scale)
+                    </label>
+                    <p class="settings-hint">When off (default), video is relayed through the server — better quality and works with any number of participants. When on, video is sent directly to each peer like audio — lower latency (~50ms faster) but each peer needs to receive a separate copy.</p>
+                </div>
+                <div class="settings-group">
                     <h4>Video Quality</h4>
                     <p class="settings-hint">Applied to DM calls and voice channels. <strong>Send</strong> = the resolution you capture at; <strong>Receive</strong> = the resolution others send you (per person). Lower resolutions use less bandwidth and avoid the glitchy/torn artifacts. Defaults are deliberately low.</p>
                     <label class="settings-checkbox-label" style="margin-top:4px;"><span style="font-size:12px;color:var(--text-muted)">Send — camera:</span></label>
@@ -2029,9 +2038,10 @@
     <div class="dm-call-panel" id="dm-call-panel" style="display:none">
         <div class="dm-call-header">
             <span class="dm-call-header-title"><svg class="ui-icon" width="14" height="14"><use href="#icon-phone"/></svg> In call with <b id="dm-call-name">…</b></span>
-            <div class="dm-call-header-actions">
+            <div class="dm-call-header-right">
                 <button class="dm-call-expand" id="dm-call-expand" title="Expand to full screen"><svg class="ui-icon" width="16" height="16"><use href="#icon-expand"/></svg></button>
                 <button class="dm-call-close" id="dm-call-close" title="Close panel">&times;</button>
+                <button class="dm-call-goto-btn" id="dm-call-goto" title="Go to conversation"><svg class="ui-icon" width="16" height="16"><use href="#icon-menu"/></svg></button>
             </div>
         </div>
         <div class="dm-call-body" id="dm-call-body"></div>
@@ -2055,6 +2065,8 @@
     <div class="voice-cam-opt-menu" id="voice-cam-opt-menu" style="display:none">
         <button type="button" id="cam-opt-flip" title="Flip camera"><svg class="ui-icon" width="14" height="14"><use href="#icon-flip"/></svg> Flip camera</button>
         <button type="button" id="cam-opt-flash" title="Flash"><svg class="ui-icon" width="14" height="14"><use href="#icon-flash"/></svg> Flash</button>
+        <button type="button" id="cam-opt-video-mode" title="Toggle video between server relay and P2P mesh"><svg class="ui-icon" width="14" height="14"><use href="#icon-monitor"/></svg> <span id="cam-opt-video-mode-label">Video: Server relay</span></button>
+        <button type="button" id="cam-opt-audio-mode" title="Toggle audio between server relay and P2P mesh"><svg class="ui-icon" width="14" height="14"><use href="#icon-volume-on"/></svg> <span id="cam-opt-audio-mode-label">Audio: Auto</span></button>
     </div>
 
     <!-- White-screen flash (for cameras without torch, e.g. the selfie
@@ -2066,13 +2078,21 @@
 
     <!-- DM mini bar (persists when you switch to another chat) -->
     <div class="dm-mini-bar" id="dm-mini-bar" style="display:none">
-        <button class="dm-mini-bar-body" id="dm-mini-bar-body">
-            <span class="dm-mini-bar-name" id="dm-mini-bar-name">In call</span>
-        </button>
-        <button class="voice-bar-btn" id="dm-mini-bar-mute" title="Mute"><svg class="ui-icon" width="16" height="16"><use href="#icon-mic"/></svg></button>
-        <button class="voice-bar-btn" id="dm-mini-bar-deafen" title="Deafen"><svg class="ui-icon" width="16" height="16"><use href="#icon-volume-on"/></svg></button>
-        <button class="voice-bar-btn" id="dm-mini-bar-soundboard" title="Soundboard"><svg class="ui-icon" width="16" height="16"><use href="#icon-music"/></svg></button>
-        <button class="voice-bar-btn voice-bar-leave" id="dm-mini-bar-end" title="End call"><svg class="ui-icon" width="16" height="16"><use href="#icon-phone"/></svg></button>
+        <div class="dm-mini-bar-top">
+            <button class="dm-mini-bar-body" id="dm-mini-bar-body">
+                <span class="dm-mini-bar-name" id="dm-mini-bar-name">In call</span>
+            </button>
+            <button class="voice-bar-btn" id="dm-mini-bar-goto" title="Go to conversation"><svg class="ui-icon" width="16" height="16"><use href="#icon-menu"/></svg></button>
+        </div>
+        <div class="dm-mini-bar-controls">
+            <button class="voice-bar-btn" id="dm-mini-bar-mute" title="Mute"><svg class="ui-icon" width="16" height="16"><use href="#icon-mic"/></svg></button>
+            <button class="voice-bar-btn" id="dm-mini-bar-deafen" title="Deafen"><svg class="ui-icon" width="16" height="16"><use href="#icon-volume-on"/></svg></button>
+            <button class="voice-bar-btn" id="dm-mini-bar-camera" title="Camera"><svg class="ui-icon" width="16" height="16"><use href="#icon-camera"/></svg></button>
+            <button class="voice-bar-btn voice-cam-opt" id="dm-mini-bar-cam-opt" title="Camera options"><svg class="ui-icon" width="16" height="16"><use href="#icon-more"/></svg></button>
+            <button class="voice-bar-btn" id="dm-mini-bar-screen" title="Share screen"><svg class="ui-icon" width="16" height="16"><use href="#icon-monitor"/></svg></button>
+            <button class="voice-bar-btn" id="dm-mini-bar-soundboard" title="Soundboard"><svg class="ui-icon" width="16" height="16"><use href="#icon-music"/></svg></button>
+            <button class="voice-bar-btn voice-bar-leave" id="dm-mini-bar-end" title="End call"><svg class="ui-icon" width="16" height="16"><use href="#icon-phone"/></svg></button>
+        </div>
     </div>
 
     <!-- Incoming DM call bar -->

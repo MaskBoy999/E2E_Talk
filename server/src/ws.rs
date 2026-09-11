@@ -2016,6 +2016,9 @@ async fn handle_ws_message(
         "voice_control" => {
             handle_voice_control(parsed, state, user_id).await;
         }
+        "voice_media_relay" => {
+            handle_voice_media_relay(parsed, state, user_id).await;
+        }
         "dm_call_ring" => {
             handle_dm_call_ring(parsed, state, user_id).await;
         }
@@ -2722,6 +2725,89 @@ async fn handle_voice_signal(
         "dm_channel_id": if dm_channel_id.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(dm_channel_id) },
     });
     send_to_user(state, &to_user_id, &relay).await;
+}
+
+/// Relay an encrypted video/audio frame from one room member to all others.
+/// The frame is opaque ciphertext — the server never decrypts it.
+async fn handle_voice_media_relay(
+    parsed: serde_json::Value,
+    state: &Arc<AppState>,
+    user_id: &str,
+) {
+    let room_type = parsed.get("room_type").and_then(|t| t.as_str()).unwrap_or("server").to_string();
+    let channel_id = parsed.get("channel_id").and_then(|c| c.as_str()).unwrap_or("").to_string();
+    let dm_channel_id = parsed.get("dm_channel_id").and_then(|c| c.as_str()).unwrap_or("").to_string();
+    let room_id = voice_room_id(&room_type, &channel_id, &dm_channel_id);
+    let kind = parsed.get("kind").and_then(|k| k.as_str()).unwrap_or("video").to_string();
+    let frame = match parsed.get("frame") {
+        Some(f) => f.clone(),
+        None => return,
+    };
+
+    // Rate limit: 60 frames/sec per user (generous for 5 fps video + audio)
+    if !VOICE_SIGNAL_LIMITER.check_and_increment(
+        &format!("voice_media:{}", user_id),
+        3000,
+        Duration::from_secs(10),
+    ) {
+        return;
+    }
+
+    // Sender must be in the room
+    let is_member = {
+        let rooms = match state.voice_rooms.read() {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        match rooms.get(&room_id) {
+            Some(room) => room.members.contains_key(user_id),
+            None => false,
+        }
+    };
+    if !is_member {
+        return;
+    }
+
+    // Drop frames from force-muted users (audio) — video is always relayed
+    // so screen shares / cameras are visible regardless of mute state.
+    if kind == "audio" {
+        let muted = {
+            let rooms = match state.voice_rooms.read() {
+                Ok(r) => r,
+                Err(_) => return,
+            };
+            rooms.get(&room_id)
+                .and_then(|room| room.members.get(user_id))
+                .map(|m| m.force_muted || m.muted)
+                .unwrap_or(true)
+        };
+        if muted {
+            return;
+        }
+    }
+
+    let relay = serde_json::json!({
+        "type": "voice_media_relay",
+        "from_user_id": user_id,
+        "kind": kind,
+        "frame": frame,
+        "room_type": room_type,
+        "channel_id": if channel_id.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(channel_id) },
+        "dm_channel_id": if dm_channel_id.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(dm_channel_id) },
+    });
+
+    // Collect member IDs (excluding sender) under read lock, then broadcast
+    let ids: Vec<String> = {
+        let rooms = match state.voice_rooms.read() {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        match rooms.get(&room_id) {
+            Some(room) => room.members.keys().filter(|id| id.as_str() != user_id).cloned().collect(),
+            None => return,
+        }
+    };
+    state.ws_manager.broadcast_to_users(&ids, &relay.to_string()).await;
 }
 
 async fn handle_voice_control(

@@ -5770,3 +5770,43 @@ Key improvements over old const-tone tests:
 
 **Results:** DM call: `zeroCrossFreq: 441.7 Hz`, `rmsCV: 0.02`, `silentPct: 0%`.
 Server channel: `zeroCrossFreq: 441.8 Hz`, `rmsCV: 0.025`, `silentPct: 0%`. Both pass.
+
+### 114. Server-Side Media Relay with Dynamic Mesh/Relay Switching
+
+Server voice channels now dynamically switch between WebRTC mesh and server relay
+based on the number of **active (hearing)** participants:
+
+| Media type | ≤5 active participants | >5 active participants |
+|------------|----------------------|----------------------|
+| **Video (camera + screen)** | Server relay via WebSocket | Server relay via WebSocket |
+| **Audio** | WebRTC mesh (P2P) | Server relay via WebSocket |
+| **Screen audio** | WebRTC mesh (P2P) | WebRTC mesh (P2P) |
+
+**Key design decisions:**
+- **Video is ALWAYS server relay** in server voice channels — bandwidth is the
+  bottleneck for video, so each participant uploads 1 copy to the server which
+  relays it to all others
+- **Audio uses mesh for ≤5 people** — latency matters more for audio, and 5 peers
+  is manageable in a full mesh
+- **Active participants** = people who are NOT deafened (deafened users can't hear
+  or talk, so they don't count toward the threshold)
+- **Server-muted users DO count** — they can hear but not talk
+- **DM calls always use full WebRTC mesh** — no server relay for DM calls
+
+**Dynamic switching:**
+- When someone joins, leaves, deafens, or undeafens, the mode is recalculated
+  live without dropping the call
+- Audio switches between WebRTC mesh and WebSocket relay as the count crosses 5
+- Video stays on relay mode throughout (server voice channels only)
+- Server-owner force-deafen also triggers mode recalc
+
+**Implementation:**
+- Server: `handle_voice_media_relay` in ws.rs receives encrypted frames and
+  relays to all room members except the sender (rate-limited to 300 frames/10s)
+- Client: Canvas frame capture at ~5fps → JPEG → XChaCha20-Poly1305 encryption
+  → WebSocket send; receive → decrypt → `<img>` element
+- Audio relay: ScriptProcessorNode captures PCM Int16 → encrypt → WebSocket;
+  receive → decrypt → AudioBuffer playback via per-member GainNode
+- Mode switching: `recalcAudioMode()` called on every member join/leave/deafen
+- All encryption uses existing room key (E2EE maintained — server only sees
+  opaque ciphertext)

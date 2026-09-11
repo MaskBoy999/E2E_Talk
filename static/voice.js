@@ -116,6 +116,10 @@
             // feed shows a "Load" button (per user AND per kind) and is
             // attached only when clicked. Right-click menus are unaffected.
             manualVideoLoad: false,
+            // When ON, camera/screen use WebRTC P2P mesh instead of server
+            // relay in server voice channels. Lower latency (~50ms) but each
+            // peer needs a separate copy. DM calls always use mesh.
+            videoMeshMode: false,
             // Black-feed auto-recovery: seconds of zero encoded frames before
             // the per-sender watchdog forces a renegotiation (a dropped
             // negotiation can leave a camera/screen feed black). 0 = off.
@@ -144,6 +148,12 @@
         sigRecvEncrypted: 0,
         sigRecvPlain: 0,
         _lastSigWarnKey: null,
+        // Per-user manual mesh/relay overrides. uid → 'auto' | 'mesh' | 'relay'.
+        // When set to 'mesh' or 'relay', that choice persists regardless of the
+        // automatic threshold-based switching. 'auto' (or absent) means the
+        // system decides based on active participant count.
+        _audioModeOverrides: {},
+        _videoModeOverrides: {},
     };
 
     var e2eeWorker = null;
@@ -179,6 +189,13 @@
         setSendRes: setSendRes,
         setRecvRes: setRecvRes,
         setManualVideoLoad: setManualVideoLoad,
+        setVideoMeshMode: setVideoMeshMode,
+        startCamera: startCamera,
+        stopCamera: stopCamera,
+        setSelfAudioMode: setSelfAudioMode,
+        setSelfVideoMode: setSelfVideoMode,
+        resolveAudioMode: resolveAudioMode,
+        resolveVideoMode: resolveVideoMode,
         setVideoWatchdogSecs: setVideoWatchdogSecs,
         getPeerDiag: function () { return collectPeerDiag(); },
         getVoiceState: function () { return { inVoice: S.connected, channelId: S.channelId, dmChannelId: S.dmChannelId, serverId: S.serverId, roomType: S.roomType }; },
@@ -427,8 +444,6 @@
                 var pc = S.peers[uid];
                 if (!pc || !pc.getSenders) return null;
                 return pc.getSenders().map(function (s) {
-                    // A gated sender has track === null; report the HELD
-                    // track's kind so callers can match it by media type.
                     var held = s.track || s._voiceNulled;
                     return {
                         kind: held ? held.kind : 'none',
@@ -437,6 +452,10 @@
                     };
                 });
             },
+            // Per-user mode overrides (for tests)
+            audioOverrides: function () { return JSON.parse(JSON.stringify(S._audioModeOverrides)); },
+            videoOverrides: function () { return JSON.parse(JSON.stringify(S._videoModeOverrides)); },
+            lastAudioMode: function () { return S._lastAudioMode; },
         },
     };
 
@@ -625,6 +644,12 @@
         if (rs) rs.value = S.settings.recvScreenRes || 480;
         var ml = document.getElementById('voice-manual-video-load');
         if (ml) ml.checked = !!S.settings.manualVideoLoad;
+        var vm = document.getElementById('voice-video-mesh-mode');
+        if (vm) {
+            var _selfId = getSelfId();
+            var _effectiveMode = _selfId ? resolveVideoMode(_selfId) : autoVideoMode();
+            vm.checked = _effectiveMode === 'mesh';
+        }
         var wd = document.getElementById('voice-video-watchdog-secs');
         if (wd) wd.value = String(S.settings.videoWatchdogSecs || 0);
         updateSettingsLabels();
@@ -1004,7 +1029,12 @@
         if (prevDmChannelId) {
             clearWaitingMarkerForChannel(prevDmChannelId);
         }
+        S._lastAudioMode = null;
+        S._audioModeOverrides = {};
+        S._videoModeOverrides = {};
         closeAllPeers();
+        stopAllVideoRelays();
+        stopAudioRelay();
         stopLocalMedia();
         stopSpeakingDetection();
         hideVideoReconnect();
@@ -1343,7 +1373,12 @@
                 S.cameraOn = true;
                 var cvt = stream.getVideoTracks()[0];
                 if (cvt) { try { cvt.contentHint = 'motion'; } catch (_) {} }
-                addLocalTracksToAllPeers();
+                if (useVideoRelay()) {
+                    // Server voice channel: relay video via WebSocket
+                    startVideoRelay(stream, 'camera');
+                } else {
+                    addLocalTracksToAllPeers();
+                }
                 sendVoiceState();
                 renderSelfPreview();
                 renderPopup();
@@ -1359,17 +1394,11 @@
     function stopCamera() {
         if (S.localStreams.camera) {
             S.localStreams.camera.getTracks().forEach(function (t) { try { t.stop(); } catch (_) {} });
-            // Remove the track from every peer BEFORE nulling the stream —
-            // removeTrackFromAllPeers('camera') matches via isTrackKind() which
-            // needs S.localStreams.camera to still be set. (Nulling first used
-            // to leave a dead camera sender behind, which flipCamera's
-            // stop→start cycle then duplicated.)
             removeTrackFromAllPeers('camera');
             S.localStreams.camera = null;
         }
+        stopVideoRelay('camera');
         S.cameraOn = false;
-        // Flash off — the torch dies with the stream, and the white overlay
-        // must never linger after the camera is turned off.
         setCameraFlashOn(false);
         sendVoiceState();
         renderSelfPreview();
@@ -1404,20 +1433,28 @@
             .then(function (stream) {
                 S.localStreams.screen = stream;
                 S.screenOn = true;
-                // A screen stream should always carry a video track, but guard
-                // anyway — if this line throws (e.g. an audio-only capture in
-                // tests), addLocalTracksToAllPeers below would never run and
-                // the screen audio would silently never be sent.
                 var svt = stream.getVideoTracks()[0];
                 if (svt) {
-                    // 'detail' biases the encoder toward keeping text crisp
-                    // (Discord-style screenshare hint) instead of motion.
                     try { svt.contentHint = 'detail'; } catch (_) {}
                     svt.addEventListener('ended', function () {
                         stopScreen();
                     });
                 }
-                addLocalTracksToAllPeers();
+                if (useVideoRelay()) {
+                    // Server voice channel: relay screen video via WebSocket.
+                    // Screen AUDIO still goes through WebRTC (via addLocalTracksToAllPeers).
+                    startVideoRelay(stream, 'screen');
+                    // Add only audio tracks to peers (video is relayed)
+                    var audioTracks = stream.getAudioTracks();
+                    for (var uid in S.peers) {
+                        var pc = S.peers[uid];
+                        audioTracks.forEach(function (track) {
+                            try { pc.addTrack(track, stream); } catch (_) {}
+                        });
+                    }
+                } else {
+                    addLocalTracksToAllPeers();
+                }
                 sendVoiceState();
                 renderSelfPreview();
                 renderPopup();
@@ -1433,12 +1470,10 @@
     function stopScreen() {
         if (S.localStreams.screen) {
             S.localStreams.screen.getTracks().forEach(function (t) { try { t.stop(); } catch (_) {} });
-            // Remove BOTH the screen video + audio tracks BEFORE nulling the
-            // stream (removeTrackFromAllPeers('screen') matches against
-            // S.localStreams.screen.getTracks()).
             removeTrackFromAllPeers('screen');
             S.localStreams.screen = null;
         }
+        stopVideoRelay('screen');
         S.screenOn = false;
         sendVoiceState();
         renderSelfPreview();
@@ -1913,17 +1948,21 @@
             }
         }
         if (S.localStreams.camera && S.cameraOn) {
-            var vt = S.localStreams.camera.getVideoTracks()[0];
-            if (vt && !pc.getSenders().find(function (s) { return senderOccupied(s, vt); })) {
-                pc.addTrack(vt, new MediaStream([vt]));
-                setSenderPriority(vt);
+            if (!useVideoRelay()) {
+                var vt = S.localStreams.camera.getVideoTracks()[0];
+                if (vt && !pc.getSenders().find(function (s) { return senderOccupied(s, vt); })) {
+                    pc.addTrack(vt, new MediaStream([vt]));
+                    setSenderPriority(vt);
+                }
             }
         }
         if (S.localStreams.screen && S.screenOn) {
-            var st = S.localStreams.screen.getVideoTracks()[0];
-            if (st && !pc.getSenders().find(function (s) { return senderOccupied(s, st); })) {
-                pc.addTrack(st, new MediaStream([st]));
-                setSenderPriority(st);
+            if (!useVideoRelay()) {
+                var st = S.localStreams.screen.getVideoTracks()[0];
+                if (st && !pc.getSenders().find(function (s) { return senderOccupied(s, st); })) {
+                    pc.addTrack(st, new MediaStream([st]));
+                    setSenderPriority(st);
+                }
             }
             // Screen-share audio (tab/system): sent as its own track so the
             // receiver can mix it separately from the mic (per-member screen
@@ -2462,6 +2501,7 @@
             });
         }
         delete S.remoteAudioEls[uid];
+        cleanupMemberGain(uid);
     }
 
     function applyRemoteVolume(uid) {
@@ -2503,6 +2543,10 @@
         els.forEach(function (el, i) {
             el.volume = Math.max(0, Math.min(1, vol - i));
         });
+        // Also update relay audio gain node
+        if (_relayGainNodes[uid]) {
+            _relayGainNodes[uid].gain.value = Math.max(0, Math.min(2, vol));
+        }
     }
 
     function playRemoteAudio(uid) {
@@ -2862,6 +2906,9 @@
             case 'dm_call_end':
                 handleDmCallEnd(data);
                 break;
+            case 'voice_media_relay':
+                handleMediaRelay(data);
+                break;
             default:
                 return false;
         }
@@ -2925,6 +2972,7 @@
         }
         updateSelfUI();
         updateChannelChips();
+        recalcAudioMode();
 
         // Late-join soundboard sync: if a soundboard clip was already playing
         // when we joined, pick it up from the current position. The offset is
@@ -3090,6 +3138,7 @@
         renderPopup();
         renderDmPanel();
         updateChannelChips();
+        recalcAudioMode();
     }
 
     function handleMemberUpdate(member) {
@@ -3123,6 +3172,10 @@
             (prev.loaded_feeds || []).join(',') !== (member.loaded_feeds || []).join(',') ||
             (prev.unloaded_feeds || []).join(',') !== (member.unloaded_feeds || []).join(',');
         S.members[member.user_id] = member;
+        // Check if deafen state changed for any member — recalc audio mode
+        if (prev && prev.deafened !== member.deafened) {
+            recalcAudioMode();
+        }
         // The member changed their RECEIVE resolution — re-tune our sender for
         // them so we send exactly what they asked for (per-receiver scaling).
         if (!isSelf && prev &&
@@ -3143,6 +3196,7 @@
             S.muted = !!member.muted;
             S.deafened = !!member.deafened;
             updateSelfUI();
+            recalcAudioMode();
         }
         if (mediaChanged) {
             // The state broadcast may have arrived AFTER the video tracks
@@ -3176,7 +3230,21 @@
         // Server popup rows
         document.querySelectorAll('.voice-member-row[data-uid="' + uid + '"]').forEach(function (row) {
             var st = row.querySelector('.voice-member-status');
-            if (st) st.innerHTML = memberBadges(local, 'vm');
+            if (st) {
+                var html = memberBadges(local, 'vm');
+                // Re-include mode badges (status badges alone would wipe them)
+                if (S.roomType === 'server' && S.connected) {
+                    var audioMode = resolveAudioMode(uid);
+                    var videoMode = resolveVideoMode(uid);
+                    var audioOv = S._audioModeOverrides[uid];
+                    var videoOv = S._videoModeOverrides[uid];
+                    var audioIsManual = audioOv === 'mesh' || audioOv === 'relay';
+                    var videoIsManual = videoOv === 'mesh' || videoOv === 'relay';
+                    html += ' <span class="voice-mode-badge mode-' + audioMode + (isSelf ? ' is-self' : '') + '" data-mode-kind="audio" data-uid="' + esc(uid) + '" title="Audio: ' + audioMode + (audioIsManual ? ' (manual)' : ' (auto)') + '">' + (audioMode === 'mesh' ? 'M' : 'R') + '</span>';
+                    html += ' <span class="voice-mode-badge mode-' + videoMode + (isSelf ? ' is-self' : '') + '" data-mode-kind="video" data-uid="' + esc(uid) + '" title="Video: ' + videoMode + (videoIsManual ? ' (manual)' : ' (auto)') + '">' + (videoMode === 'mesh' ? 'M' : 'R') + '</span>';
+                }
+                st.innerHTML = html;
+            }
         });
         // DM tiles
         document.querySelectorAll('.dm-call-tile[data-uid="' + uid + '"]').forEach(function (tile) {
@@ -3238,6 +3306,7 @@
         renderPopup();
         renderDmPanel();
         updateChannelChips();
+        recalcAudioMode();
     }
 
     // A server-wide voice presence snapshot (who is in each voice channel and
@@ -4114,6 +4183,7 @@
             applyRemoteScreenVolume(uid);
         });
         sendVoiceState();
+        recalcAudioMode();
         updateSelfUI();
         playSound(S.deafened ? 'deafen' : 'undeafen');
     }
@@ -4182,12 +4252,13 @@
     // mirror close it immediately; flash closes it too (the white overlay
     // itself becomes the "flash is on" indicator).
     function openCamOptMenu(anchor) {
-        if (!S.cameraOn) {
-            showToast('Turn the camera on first.');
-            return;
-        }
         var menu = el('voice-cam-opt-menu');
         if (!menu) return;
+        // Disable camera-only options when camera is off
+        var flip = el('cam-opt-flip');
+        var flash = el('cam-opt-flash');
+        if (flip) flip.style.opacity = S.cameraOn ? '1' : '0.4';
+        if (flash) flash.style.opacity = S.cameraOn ? '1' : '0.4';
         updateCamOptMenuState();
         menu.style.display = 'flex';
         var r = anchor.getBoundingClientRect();
@@ -4216,6 +4287,28 @@
     function updateCamOptMenuState() {
         var flash = el('cam-opt-flash');
         if (flash) flash.classList.toggle('active', !!S.cameraFlash);
+        var isDm = S.roomType === 'dm';
+        // Hide mesh/relay options in DM calls (always mesh)
+        var videoMode = el('cam-opt-video-mode');
+        var audioMode = el('cam-opt-audio-mode');
+        if (videoMode) videoMode.style.display = isDm ? 'none' : '';
+        if (audioMode) audioMode.style.display = isDm ? 'none' : '';
+        // Video mode label
+        var vlabel = el('cam-opt-video-mode-label');
+        if (vlabel) {
+            var selfId = getSelfId();
+            var vMode = selfId ? resolveVideoMode(selfId) : autoVideoMode();
+            var vManual = selfId && (S._videoModeOverrides[selfId] === 'mesh' || S._videoModeOverrides[selfId] === 'relay');
+            vlabel.textContent = 'Video: ' + (vMode === 'mesh' ? 'P2P mesh' : 'Server relay') + (vManual ? ' (manual)' : '');
+        }
+        // Audio mode label
+        var alabel = el('cam-opt-audio-mode-label');
+        if (alabel) {
+            var selfId2 = getSelfId();
+            var aMode = selfId2 ? resolveAudioMode(selfId2) : autoAudioMode();
+            var aManual = selfId2 && (S._audioModeOverrides[selfId2] === 'mesh' || S._audioModeOverrides[selfId2] === 'relay');
+            alabel.textContent = 'Audio: ' + (aMode === 'mesh' ? 'P2P mesh' : 'Server relay') + (aManual ? ' (manual)' : '');
+        }
     }
 
     function bindCamOptMenu() {
@@ -4223,8 +4316,26 @@
         if (!menu) return;
         var flip = el('cam-opt-flip');
         var flash = el('cam-opt-flash');
+        var videoMode = el('cam-opt-video-mode');
+        var audioMode = el('cam-opt-audio-mode');
         if (flip) flip.addEventListener('click', function (e) { e.stopPropagation(); flipCamera(); closeCamOptMenu(); });
         if (flash) flash.addEventListener('click', function (e) { e.stopPropagation(); toggleCameraFlash(); });
+        if (videoMode) videoMode.addEventListener('click', function (e) {
+            e.stopPropagation();
+            var selfId = getSelfId();
+            var cur = selfId ? (S._videoModeOverrides[selfId] || 'auto') : 'auto';
+            var next = cur === 'auto' ? 'mesh' : cur === 'mesh' ? 'relay' : 'auto';
+            setSelfVideoMode(next);
+            updateCamOptMenuState();
+        });
+        if (audioMode) audioMode.addEventListener('click', function (e) {
+            e.stopPropagation();
+            var selfId = getSelfId();
+            var cur = selfId ? (S._audioModeOverrides[selfId] || 'auto') : 'auto';
+            var next = cur === 'auto' ? 'mesh' : cur === 'mesh' ? 'relay' : 'auto';
+            setSelfAudioMode(next);
+            updateCamOptMenuState();
+        });
         var off = el('camera-flash-off');
         if (off) off.addEventListener('click', function () { setCameraFlashOn(false); });
     }
@@ -4892,7 +5003,7 @@
     function renderBar() {
         var micBtn = el('voice-bar-mute');
         if (micBtn) {
-            micBtn.innerHTML = S.muted ? icon('volume-off') : icon('mic');
+            micBtn.innerHTML = S.muted ? icon('mic-off') : icon('mic');
             micBtn.classList.toggle('active', S.muted);
             micBtn.classList.toggle('locked', S.forceMuted);
             micBtn.title = S.forceMuted ? 'Server muted' : (S.muted ? 'Unmute' : 'Mute');
@@ -5262,6 +5373,8 @@
         if (rs) rs.addEventListener('change', function (e) { setRecvRes('screen', e.target.value); });
         var ml = document.getElementById('voice-manual-video-load');
         if (ml) ml.addEventListener('change', function (e) { setManualVideoLoad(e.target.checked); });
+        var vm = document.getElementById('voice-video-mesh-mode');
+        if (vm) vm.addEventListener('change', function (e) { setVideoMeshMode(e.target.checked); });
         var wd = document.getElementById('voice-video-watchdog-secs');
         if (wd) wd.addEventListener('change', function (e) { setVideoWatchdogSecs(e.target.value); });
         // Call diagnostics (Settings → Voice → Advanced)
@@ -5289,6 +5402,12 @@
         if (pmvV) pmvV.textContent = S.settings.micVolume + '%';
         var psvV = document.getElementById('voice-popup-speaker-volume-val');
         if (psvV) psvV.textContent = S.settings.speakerVolume + '%';
+        var vm = document.getElementById('voice-video-mesh-mode');
+        if (vm) {
+            var _selfId2 = getSelfId();
+            var _effectiveMode2 = _selfId2 ? resolveVideoMode(_selfId2) : autoVideoMode();
+            vm.checked = _effectiveMode2 === 'mesh';
+        }
         var pns = document.getElementById('voice-popup-noise-suppression');
         if (pns) pns.value = S.settings.noiseSuppressionMode || 'rnnoise';
         // Haptic pattern tuning sliders (Settings → Voice → Haptics).
@@ -5382,8 +5501,8 @@
     // the only speaking indicator).
     function memberBadges(m, prefix) {
         var html = '';
-        if (m.force_muted) html += ' <span class="' + prefix + '-badge locked" title="Server muted">' + icon('lock') + icon('volume-off') + '</span>';
-        else if (m.muted) html += ' <span class="' + prefix + '-badge" title="Muted">' + icon('volume-off') + '</span>';
+        if (m.force_muted) html += ' <span class="' + prefix + '-badge locked" title="Server muted">' + icon('lock') + icon('mic-off') + '</span>';
+        else if (m.muted) html += ' <span class="' + prefix + '-badge" title="Muted">' + icon('mic-off') + '</span>';
         if (m.force_deafened) html += ' <span class="' + prefix + '-badge locked" title="Server deafened">' + icon('lock') + icon('volume-off') + '</span>';
         else if (m.deafened) html += ' <span class="' + prefix + '-badge" title="Deafened">' + icon('volume-off') + '</span>';
         if (m.camera) html += ' <span class="' + prefix + '-badge" title="Camera">' + icon('camera') + '</span>';
@@ -5414,7 +5533,22 @@
         html += memberAvatarHtml(uid, local, name, 'voice-member-avatar');
         html += '<div class="voice-member-info">';
         html += '<span class="voice-member-name"' + (nameStyle ? ' style="' + nameStyle + '"' : '') + '>' + esc(name) + (local.is_owner ? ' 👑' : '') + (isSelf ? ' (you)' : '') + '</span>';
-        html += '<span class="voice-member-status">' + memberBadges(local, 'vm') + '</span>';
+        // Per-user mode badges: show audio + video transmission mode.
+        // Self gets clickable badges to toggle; others see indicators.
+        if (S.roomType === 'server' && S.connected) {
+            var audioMode = resolveAudioMode(uid);
+            var videoMode = resolveVideoMode(uid);
+            var audioOv = S._audioModeOverrides[uid];
+            var videoOv = S._videoModeOverrides[uid];
+            var audioIsManual = audioOv === 'mesh' || audioOv === 'relay';
+            var videoIsManual = videoOv === 'mesh' || videoOv === 'relay';
+            html += '<span class="voice-member-status">' + memberBadges(local, 'vm');
+            html += ' <span class="voice-mode-badge mode-' + audioMode + (isSelf ? ' is-self' : '') + '" data-mode-kind="audio" data-uid="' + esc(uid) + '" title="Audio: ' + audioMode + (audioIsManual ? ' (manual)' : ' (auto)') + '">' + (audioMode === 'mesh' ? 'M' : 'R') + '</span>';
+            html += ' <span class="voice-mode-badge mode-' + videoMode + (isSelf ? ' is-self' : '') + '" data-mode-kind="video" data-uid="' + esc(uid) + '" title="Video: ' + videoMode + (videoIsManual ? ' (manual)' : ' (auto)') + '">' + (videoMode === 'mesh' ? 'M' : 'R') + '</span>';
+            html += '</span>';
+        } else {
+            html += '<span class="voice-member-status">' + memberBadges(local, 'vm') + '</span>';
+        }
         html += '</div></div>';
         // Call button on every OTHER member's row — starts a DM call with them
         // (they leave the voice channel if they accept).
@@ -5519,6 +5653,32 @@
                 callMemberFromVoice(uid, m ? (m.username || '') : '');
             });
         });
+        // Mode badge click → cycle through auto/mesh/relay (self only).
+        // Others just see the indicator; clicking does nothing.
+        // Uses event delegation on the list container so clicks survive
+        // innerHTML replacement from updateMemberBadgesInPlace.
+        // Guard: only bind the delegation listener once.
+        if (!list._modeBadgeDelegationBound) {
+            list._modeBadgeDelegationBound = true;
+            list.addEventListener('click', function (e) {
+                var badge = e.target.closest('.voice-mode-badge.is-self');
+                if (!badge) return;
+                e.preventDefault();
+                e.stopPropagation();
+                var kind = badge.getAttribute('data-mode-kind');
+                var uid = badge.getAttribute('data-uid');
+                if (uid !== getSelfId()) return;
+                if (kind === 'audio') {
+                    var cur = S._audioModeOverrides[uid] || 'auto';
+                    var next = cur === 'auto' ? 'mesh' : cur === 'mesh' ? 'relay' : 'auto';
+                    setSelfAudioMode(next);
+                } else if (kind === 'video') {
+                    var cur = S._videoModeOverrides[uid] || 'auto';
+                    var next = cur === 'auto' ? 'mesh' : cur === 'mesh' ? 'relay' : 'auto';
+                    setSelfVideoMode(next);
+                }
+            });
+        }
         wireVoiceMedia(list);
     }
 
@@ -5930,6 +6090,11 @@
             if (window._loadSoundboardClips) window._loadSoundboardClips();
         });
         bindClick(p, 'dm-call-end', function () { endDmCall(); });
+        bindClick(p, 'dm-call-goto', function () {
+            if (S.dmChannelId && typeof selectDmChannel === 'function') {
+                try { selectDmChannel(S.dmChannelId, S.dmCallPartner ? S.dmCallPartner.id : null, S.dmCallPartner ? S.dmCallPartner.username : null, null); } catch (_) {}
+            }
+        });
         bindClick(p, 'dm-call-expand', function () { toggleDmExpand(); });
         bindClick(p, 'dm-call-close', function () { hideDmPanel(); });
         initDmResize();
@@ -6103,9 +6268,17 @@
                 try { selectDmChannel(S.dmChannelId, S.dmCallPartner ? S.dmCallPartner.id : null, S.dmCallPartner ? S.dmCallPartner.username : null, null); } catch (_) {}
             }
         });
+        bindClick(m, 'dm-mini-bar-goto', function () {
+            if (S.dmChannelId && typeof selectDmChannel === 'function') {
+                try { selectDmChannel(S.dmChannelId, S.dmCallPartner ? S.dmCallPartner.id : null, S.dmCallPartner ? S.dmCallPartner.username : null, null); } catch (_) {}
+            }
+        });
         bindClick(m, 'dm-mini-bar-end', function () { endDmCall(); });
         bindClick(m, 'dm-mini-bar-mute', function () { toggleMute(); });
         bindClick(m, 'dm-mini-bar-deafen', function () { toggleDeafen(); });
+        bindClick(m, 'dm-mini-bar-camera', function () { toggleCamera(); });
+        bindClick(m, 'dm-mini-bar-cam-opt', function (e) { openCamOptMenu(this); });
+        bindClick(m, 'dm-mini-bar-screen', function () { toggleScreen(); });
         bindClick(m, 'dm-mini-bar-soundboard', function () {
             var sbOverlay = document.getElementById('soundboard-overlay');
             if (sbOverlay) sbOverlay.style.display = 'flex';
@@ -6978,7 +7151,7 @@
         ['voice-bar-mute', 'voice-popup-mute', 'dm-call-mute', 'dm-mini-bar-mute'].forEach(function (id) {
             var b = el(id);
             if (!b) return;
-            b.innerHTML = S.muted ? icon('volume-off') : icon('mic');
+            b.innerHTML = S.muted ? icon('mic-off') : icon('mic');
             b.classList.toggle('active', S.muted);
             b.classList.toggle('locked', S.forceMuted);
         });
@@ -6989,22 +7162,22 @@
             b.classList.toggle('active', S.deafened);
             b.classList.toggle('locked', S.forceDeafened);
         });
-        ['voice-bar-camera', 'voice-popup-camera', 'dm-call-camera'].forEach(function (id) {
+        ['voice-bar-camera', 'voice-popup-camera', 'dm-call-camera', 'dm-mini-bar-camera'].forEach(function (id) {
             var b = el(id);
             if (!b) return;
             b.classList.toggle('active', S.cameraOn);
         });
-        ['voice-bar-screen', 'voice-popup-screen', 'dm-call-screen'].forEach(function (id) {
+        ['voice-bar-screen', 'voice-popup-screen', 'dm-call-screen', 'dm-mini-bar-screen'].forEach(function (id) {
             var b = el(id);
             if (!b) return;
             b.classList.toggle('active', S.screenOn);
         });
-        // Camera options button (opens the flip/mirror/flash dropdown) —
-        // enabled only while the camera is on.
-        ['voice-bar-cam-opt', 'voice-popup-cam-opt', 'dm-call-cam-opt'].forEach(function (id) {
+        // Camera options button (opens the flip/mirror/flash/audio/video mode dropdown) —
+        // always enabled so video mesh mode toggle is accessible without camera.
+        ['voice-bar-cam-opt', 'voice-popup-cam-opt', 'dm-call-cam-opt', 'dm-mini-bar-cam-opt'].forEach(function (id) {
             var b = el(id);
             if (!b) return;
-            b.disabled = !S.cameraOn;
+            b.disabled = false;
         });
         // Keep the dropdown's own option states fresh (active mirror/flash).
         updateCamOptMenuState();
@@ -7077,8 +7250,8 @@
                 }
 
                 var badges = '';
-                if (m.force_muted) badges += '<span class="vc-badge locked" title="Server muted">' + icon('lock') + icon('volume-off') + '</span>';
-                else if (m.muted) badges += '<span class="vc-badge" title="Muted">' + icon('volume-off') + '</span>';
+                if (m.force_muted) badges += '<span class="vc-badge locked" title="Server muted">' + icon('lock') + icon('mic-off') + '</span>';
+                else if (m.muted) badges += '<span class="vc-badge" title="Muted">' + icon('mic-off') + '</span>';
                 if (m.force_deafened) badges += '<span class="vc-badge locked" title="Server deafened">' + icon('lock') + icon('volume-off') + '</span>';
                 else if (m.deafened) badges += '<span class="vc-badge" title="Deafened">' + icon('volume-off') + '</span>';
                 if (m.camera) badges += '<span class="vc-badge" title="Camera">' + icon('camera') + '</span>';
@@ -7212,6 +7385,463 @@
         retuneAllVideoSenders();
     }
 
+    // ------------------------------------------------------------------
+    // Video relay: canvas capture → encrypt → WebSocket → server → peers
+    // ------------------------------------------------------------------
+    // When relay mode is active, video frames are captured from the local
+    // camera/screen track via a canvas, JPEG-encoded, AES-GCM encrypted
+    // with the room key, and sent as WebSocket messages. The server relays
+    // them to all room members. This replaces WebRTC video tracks for
+    // server voice channels (audio stays on WebRTC mesh).
+    //
+    // Benefits: server handles bandwidth for video distribution, each
+    // participant only uploads 1 copy of their video to the server.
+    // Trade-off: slightly higher latency (~100ms vs ~50ms for P2P video)
+    // but video quality/scale is prioritized.
+
+    S._relayTimers = {};   // { camera: intervalId, screen: intervalId }
+    var _relayCanvases = {}; // { camera: canvas, screen: canvas }
+
+    // Determine whether to use relay mode for video in the current room.
+    // Server voice channels use relay; DM calls use WebRTC mesh.
+    function useVideoRelay() {
+        if (S.roomType !== 'server' || !S.connected) return false;
+        var selfId = getSelfId();
+        var mode = resolveVideoMode(selfId);
+        return mode === 'relay';
+    }
+
+    // Start capturing frames from a MediaStream and relaying them via WebSocket.
+    // kind = 'camera' | 'screen'
+    function startVideoRelay(stream, kind) {
+        if (!useVideoRelay()) return;
+        if (S._relayTimers[kind]) return; // already running
+
+        var fps = S.settings.relayVideoFps || 5;
+        var maxH = S.settings[kind === 'screen' ? 'sendScreenRes' : 'sendCameraRes'] || (kind === 'screen' ? 480 : 360);
+        var w = resW(maxH);
+        var h = maxH;
+
+        var canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        var ctx = canvas.getContext('2d');
+        _relayCanvases[kind] = canvas;
+
+        var video = document.createElement('video');
+        video.srcObject = stream;
+        video.muted = true;
+        video.playsInline = true;
+        video.width = w;
+        video.height = h;
+        video.play().catch(function () {});
+
+        // Wait for the video to have dimensions before starting the loop
+        var startLoop = function () {
+            if (S._relayTimers[kind]) return;
+            S._relayTimers[kind] = setInterval(function () {
+                if (!S.connected || !S.roomKeyB64) return;
+                try {
+                    ctx.drawImage(video, 0, 0, w, h);
+                    canvas.toBlob(function (blob) {
+                        if (!blob || blob.size < 100) return;
+                        var reader = new FileReader();
+                        reader.onload = function () {
+                            var raw = new Uint8Array(reader.result);
+                            var keyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(S.roomKeyB64));
+                            var enc = E2ECrypto.aeadEncrypt(raw, keyBytes);
+                            send({
+                                type: 'voice_media_relay',
+                                room_type: S.roomType,
+                                channel_id: S.channelId || '',
+                                dm_channel_id: S.dmChannelId || '',
+                                kind: kind,
+                                frame: { e: enc.ciphertext, n: enc.nonce },
+                            });
+                        };
+                        reader.readAsArrayBuffer(blob);
+                    }, 'image/jpeg', S.settings.relayVideoQuality || 0.6);
+                } catch (_) {}
+            }, 1000 / fps);
+        };
+
+        // Start when video has enough metadata
+        if (video.readyState >= 2) {
+            startLoop();
+        } else {
+            video.addEventListener('loadeddata', startLoop, { once: true });
+            // Fallback: start after 1s even if metadata hasn't loaded
+            setTimeout(startLoop, 1000);
+        }
+    }
+
+    // Stop the relay capture loop for a given kind.
+    function stopVideoRelay(kind) {
+        if (S._relayTimers[kind]) {
+            clearInterval(S._relayTimers[kind]);
+            delete S._relayTimers[kind];
+        }
+        delete _relayCanvases[kind];
+    }
+
+    // Stop all relay capture loops.
+    function stopAllVideoRelays() {
+        stopVideoRelay('camera');
+        stopVideoRelay('screen');
+    }
+
+    // Handle an incoming relayed video frame from the server.
+    // Decrypts the frame and renders it as an <img> element.
+    function handleMediaRelay(data) {
+        var fromUid = data.from_user_id;
+        var kind = data.kind; // 'camera' | 'screen' | 'audio'
+        var frame = data.frame;
+        if (!fromUid || !frame || !frame.e || !frame.n) return;
+        if (fromUid === getSelfId()) return;
+
+        // Decrypt the frame
+        var keyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(S.roomKeyB64));
+        var plaintext;
+        try {
+            plaintext = E2ECrypto.aeadDecrypt(frame.e, keyBytes, frame.n);
+        } catch (_) { return; }
+        var blob = new Blob([plaintext], { type: 'image/jpeg' });
+        var url = URL.createObjectURL(blob);
+
+        if (kind === 'audio') {
+            handleRelayedAudioFrame(fromUid, plaintext);
+            return;
+        }
+
+        // Video frame — render as <img> in the appropriate tile
+        var tile = document.querySelector('.remote-video-tile[data-uid="' + fromUid + '"][data-kind="' + kind + '"]');
+        if (tile && tile.tagName === 'IMG') {
+            var oldUrl = tile.src;
+            tile.src = url;
+            if (oldUrl && oldUrl.startsWith('blob:')) URL.revokeObjectURL(oldUrl);
+        } else {
+            var container = document.querySelector('.voice-member-media[data-uid="' + fromUid + '"]')
+                || document.querySelector('.remote-video-tile[data-uid="' + fromUid + '"]');
+            if (container) {
+                var old = container.querySelector('.remote-video-tile[data-kind="' + kind + '"]');
+                if (old) {
+                    if (old.src && old.src.startsWith('blob:')) URL.revokeObjectURL(old.src);
+                    old.remove();
+                }
+                var img = document.createElement('img');
+                img.src = url;
+                img.className = 'remote-video-tile';
+                img.setAttribute('data-uid', fromUid);
+                img.setAttribute('data-kind', kind);
+                img.style.cssText = 'width:100%;max-height:200px;object-fit:contain;border-radius:4px;cursor:pointer;';
+                img.addEventListener('click', function () { toggleFullscreen(img); });
+                container.appendChild(img);
+            }
+        }
+
+        if (!S.members[fromUid]) S.members[fromUid] = {};
+        S.members[fromUid][kind === 'camera' ? 'camera' : 'screen'] = true;
+        S.members[fromUid]['_relay_' + kind] = Date.now();
+    }
+
+    // Handle relayed audio frames (for rooms >5 people).
+    // Decodes and plays the audio via a temporary AudioContext.
+    function handleRelayedAudioFrame(fromUid, pcmData) {
+        // Store the raw PCM data for the audio playback pipeline
+        if (!S.relayedAudio) S.relayedAudio = {};
+        S.relayedAudio[fromUid] = { data: pcmData, ts: Date.now() };
+    }
+
+    // Expose relay controls
+    function startRelayForStream(stream, kind) {
+        if (useVideoRelay()) {
+            // Don't add video tracks to WebRTC peers — relay instead
+            startVideoRelay(stream, kind);
+            return true; // relayed
+        }
+        return false; // not relayed, use WebRTC
+    }
+
+    // ------------------------------------------------------------------
+    // Dynamic mesh/relay mode switching
+    // ------------------------------------------------------------------
+    // Server voice channels switch between mesh and relay based on the
+    // number of ACTIVE (hearing) participants:
+    //   - Video: ALWAYS server relay (quality over latency)
+    //   - Audio ≤5 active: WebRTC mesh (lowest latency)
+    //   - Audio >5 active: Server relay via WebSocket
+    // Deafened users don't count toward the threshold (they can't hear
+    // or talk), so server-muted users DO count (they can hear but not talk).
+    // Switching happens live without dropping the call.
+
+    var MESH_THRESHOLD = 5; // max active participants for mesh audio
+
+    // Count active (hearing) participants in the current room.
+    // Active = not deafened (can hear AND talk). Deafened users are excluded
+    // because they can't send or receive audio, so they don't need mesh peers.
+    function countActiveParticipants() {
+        var count = 0;
+        for (var uid in S.members) {
+            var m = S.members[uid];
+            if (!m.deafened && !m.force_deafened) count++;
+        }
+        // Always include self
+        if (!S.deafened) count = Math.max(count, 1);
+        return count;
+    }
+
+    // Determine the auto-selected audio mode based on participant count.
+    function autoAudioMode() {
+        if (S.roomType !== 'server' || !S.connected) return 'mesh';
+        return countActiveParticipants() > MESH_THRESHOLD ? 'relay' : 'mesh';
+    }
+
+    // Resolve the effective audio mode for a given user.
+    // Checks per-user override first, falls back to auto mode.
+    // Only self uid is affected by overrides (others' modes are their own).
+    function resolveAudioMode(uid) {
+        var selfId = getSelfId();
+        if (uid === selfId) {
+            var ov = S._audioModeOverrides[uid];
+            if (ov === 'mesh' || ov === 'relay') return ov;
+        }
+        return autoAudioMode();
+    }
+
+    // Determine the auto-selected video mode.
+    function autoVideoMode() {
+        if (S.roomType !== 'server' || !S.connected) return 'mesh';
+        return S.settings.videoMeshMode ? 'mesh' : 'relay';
+    }
+
+    // Resolve the effective video mode for a given user.
+    function resolveVideoMode(uid) {
+        var selfId = getSelfId();
+        if (uid === selfId) {
+            var ov = S._videoModeOverrides[uid];
+            if (ov === 'mesh' || ov === 'relay') return ov;
+        }
+        return autoVideoMode();
+    }
+
+    // Current mode state
+    S._lastAudioMode = null; // 'mesh' | 'relay' | null (initial)
+
+    // Check if the mode needs to switch and apply it.
+    function recalcAudioMode() {
+        if (S.roomType !== 'server' || !S.connected) return;
+
+        var selfId = getSelfId();
+        var newMode = resolveAudioMode(selfId);
+        var oldMode = S._lastAudioMode;
+
+        if (newMode === oldMode) return; // no change
+
+        S._lastAudioMode = newMode;
+        console.log('[Relay] Audio mode: ' + newMode + ' (active: ' + countActiveParticipants() + '/' + Object.keys(S.members).length + ')');
+
+        if (newMode === 'relay') {
+            switchAudioToRelay();
+        } else {
+            switchAudioToMesh();
+        }
+        // Update mode badges in the member list
+        renderPopup();
+    }
+
+    // Set a per-user audio mode override for self. 'auto' clears the override.
+    function setSelfAudioMode(mode) {
+        var selfId = getSelfId();
+        if (!selfId) return;
+        if (mode === 'auto') {
+            delete S._audioModeOverrides[selfId];
+        } else {
+            S._audioModeOverrides[selfId] = mode;
+        }
+        recalcAudioMode();
+        renderPopup();
+        showToast('Audio mode: ' + mode + (mode === 'auto' ? ' (auto)' : ' (manual)'));
+    }
+
+    // Set a per-user video mode override for self. 'auto' clears the override.
+    function setSelfVideoMode(mode) {
+        var selfId = getSelfId();
+        if (!selfId) return;
+        if (mode === 'auto') {
+            delete S._videoModeOverrides[selfId];
+        } else {
+            S._videoModeOverrides[selfId] = mode;
+        }
+        // Apply video mode change immediately
+        var effective = resolveVideoMode(selfId);
+        var currentlyRelaying = useVideoRelay();
+        if (effective === 'relay' && !currentlyRelaying) {
+            // Switch to relay: stop WebRTC video, start relay
+            for (var uid in S.peers) {
+                var pc = S.peers[uid];
+                if (!pc || !pc.getSenders) continue;
+                pc.getSenders().forEach(function (sender) {
+                    if (sender.track && sender.track.kind === 'video') {
+                        sender.replaceTrack(null).catch(function () {});
+                        sender._videoNulled = sender.track;
+                    }
+                });
+            }
+            if (S.localStreams.camera && S.cameraOn) startVideoRelay(S.localStreams.camera, 'camera');
+            if (S.localStreams.screen && S.screenOn) startVideoRelay(S.localStreams.screen, 'screen');
+        } else if (effective === 'mesh' && currentlyRelaying) {
+            // Switch to mesh: stop relay, restore WebRTC video
+            stopAllVideoRelays();
+            for (var uid in S.peers) {
+                addLocalTracks(S.peers[uid]);
+            }
+        }
+        updateCamOptMenuState();
+        renderPopup();
+        showToast('Video mode: ' + mode + (mode === 'auto' ? ' (auto)' : ' (manual)'));
+    }
+
+    // Switch audio from WebRTC mesh to WebSocket relay.
+    function switchAudioToRelay() {
+        console.log('[Relay] Switching audio to server relay (> ' + MESH_THRESHOLD + ' active)');
+        // Mute the mic sender on all WebRTC peers (keep the m-line but
+        // send silence). The relay pipeline picks up the audio instead.
+        for (var uid in S.peers) {
+            var pc = S.peers[uid];
+            if (!pc || !pc.getSenders) continue;
+            pc.getSenders().forEach(function (sender) {
+                if (sender.track && sender.track.kind === 'audio') {
+                    sender.replaceTrack(null).catch(function () {});
+                    sender._voiceNulled = sender.track;
+                }
+            });
+        }
+        // Start the audio relay capture loop
+        startAudioRelay();
+        showToast('Audio switched to server relay (' + countActiveParticipants() + ' active)');
+    }
+
+    // Switch audio from WebSocket relay back to WebRTC mesh.
+    function switchAudioToMesh() {
+        console.log('[Relay] Switching audio to WebRTC mesh (≤ ' + MESH_THRESHOLD + ' active)');
+        // Stop the audio relay capture loop
+        stopAudioRelay();
+        // Restore the mic track on all WebRTC peers
+        if (S.localStreams.mic) {
+            var at = (S.localStreams.processedMic && S.localStreams.processedMic.getAudioTracks()[0])
+                || S.localStreams.mic.getAudioTracks()[0];
+            if (at) {
+                for (var uid in S.peers) {
+                    var pc = S.peers[uid];
+                    if (!pc || !pc.getSenders) continue;
+                    pc.getSenders().forEach(function (sender) {
+                        if (sender.track === null || sender._voiceNulled) {
+                            sender.replaceTrack(at).catch(function () {});
+                            delete sender._voiceNulled;
+                        }
+                    });
+                }
+            }
+        }
+        showToast('Audio switched to WebRTC mesh (' + countActiveParticipants() + ' active)');
+    }
+
+    // Audio relay capture loop: captures mic PCM, encrypts, sends via WebSocket.
+    var _audioRelayTimer = null;
+
+    function startAudioRelay() {
+        if (_audioRelayTimer) return;
+        if (!S.localStreams.mic) return;
+
+        // Use ScriptProcessorNode (widely supported) to capture raw PCM
+        var stream = S.localStreams.processedMic || S.localStreams.mic;
+        var audioCtx = ensureAudioCtx();
+        var source = audioCtx.createMediaStreamSource(stream);
+        var processor = audioCtx.createScriptProcessor(1024, 1, 1); // 1024 samples at 48kHz ≈ 21ms
+
+        processor.onaudioprocess = function (e) {
+            if (!S.connected || !S.roomKeyB64 || S.muted || S.deafened) return;
+            var pcm = e.inputBuffer.getChannelData(0); // Float32 [-1, 1]
+            // Convert to Int16
+            var int16 = new Int16Array(pcm.length);
+            for (var i = 0; i < pcm.length; i++) {
+                var s = Math.max(-1, Math.min(1, pcm[i]));
+                int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+            }
+            // Encode as raw bytes
+            var raw = new Uint8Array(int16.buffer);
+            // Encrypt with room key
+            var keyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(S.roomKeyB64));
+            var enc = E2ECrypto.aeadEncrypt(raw, keyBytes);
+            send({
+                type: 'voice_media_relay',
+                room_type: S.roomType,
+                channel_id: S.channelId || '',
+                dm_channel_id: S.dmChannelId || '',
+                kind: 'audio',
+                frame: { e: enc.ciphertext, n: enc.nonce },
+            });
+        };
+
+        source.connect(processor);
+        processor.connect(audioCtx.destination); // Required for ScriptProcessorNode to work
+        _audioRelayTimer = { source: source, processor: processor };
+    }
+
+    function stopAudioRelay() {
+        if (_audioRelayTimer) {
+            try {
+                _audioRelayTimer.processor.disconnect();
+                _audioRelayTimer.source.disconnect();
+            } catch (_) {}
+            _audioRelayTimer = null;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Relayed audio playback
+    // ------------------------------------------------------------------
+    var _relayGainNodes = {}; // uid → GainNode
+
+    function getOrCreateMemberGain(uid) {
+        if (_relayGainNodes[uid]) return _relayGainNodes[uid];
+        var ctx = ensureAudioCtx();
+        var gain = ctx.createGain();
+        var vol = remoteVolumeFor(uid);
+        gain.gain.value = Math.max(0, Math.min(2, vol));
+        gain.connect(ctx.destination);
+        _relayGainNodes[uid] = gain;
+        return gain;
+    }
+
+    function cleanupMemberGain(uid) {
+        if (_relayGainNodes[uid]) {
+            try { _relayGainNodes[uid].disconnect(); } catch (_) {}
+            delete _relayGainNodes[uid];
+        }
+    }
+
+    // Play relayed audio frames by converting Int16 PCM to AudioBuffer and playing.
+    function handleRelayedAudioFrame(fromUid, rawPcmBytes) {
+        try {
+            var audioCtx = ensureAudioCtx();
+            // Raw bytes are Int16 PCM at 48kHz mono
+            var int16 = new Int16Array(rawPcmBytes.buffer);
+            var float32 = new Float32Array(int16.length);
+            for (var i = 0; i < int16.length; i++) {
+                float32[i] = int16[i] / (int16[i] < 0 ? 0x8000 : 0x7FFF);
+            }
+            var buffer = audioCtx.createBuffer(1, float32.length, 48000);
+            buffer.getChannelData(0).set(float32);
+            var node = audioCtx.createBufferSource();
+            node.buffer = buffer;
+            // Route through per-member gain node
+            var gain = getOrCreateMemberGain(fromUid);
+            node.connect(gain);
+            node.start();
+        } catch (_) {}
+    }
+
     // Change the resolution OTHERS send to us (per-receiver: each peer scales
     // its sender for this member down to the requested height). Broadcast in
     // voice_state so every peer applies it, then re-tune our own senders too
@@ -7250,6 +7880,40 @@
         // Toggling changes what feeds this viewer is willing to receive —
         // broadcast so every sender re-gates accordingly.
         if (S.connected) sendVoiceState();
+    }
+
+    function setVideoMeshMode(on) {
+        S.settings.videoMeshMode = !!on;
+        saveSettings();
+        updateSettingsLabels();
+        updateCamOptMenuState();
+        if (!S.connected) return;
+        // Update the per-user video override to match the global setting
+        var selfId = getSelfId();
+        if (selfId) {
+            S._videoModeOverrides[selfId] = on ? 'mesh' : 'relay';
+        }
+        if (on) {
+            stopAllVideoRelays();
+            for (var uid in S.peers) {
+                addLocalTracks(S.peers[uid]);
+            }
+            showToast('Video mode: P2P mesh (lower latency)');
+        } else {
+            for (var uid in S.peers) {
+                var pc = S.peers[uid];
+                if (!pc || !pc.getSenders) continue;
+                pc.getSenders().forEach(function (sender) {
+                    if (sender.track && sender.track.kind === 'video') {
+                        sender.replaceTrack(null).catch(function () {});
+                    }
+                });
+            }
+            if (S.localStreams.camera && S.cameraOn) startVideoRelay(S.localStreams.camera, 'camera');
+            if (S.localStreams.screen && S.screenOn) startVideoRelay(S.localStreams.screen, 'screen');
+            showToast('Video mode: server relay (better quality)');
+        }
+        renderPopup();
     }
 
     function retuneAllVideoSenders() {
