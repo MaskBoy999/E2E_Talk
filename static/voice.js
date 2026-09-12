@@ -154,6 +154,9 @@
         // system decides based on active participant count.
         _audioModeOverrides: {},
         _videoModeOverrides: {},
+        // Relay video frame blob URLs: { 'uid_kind': blobUrl }
+        // Stored so renderPopup() can re-inject <img> tiles after rebuilding.
+        _relayVideoFrames: {},
     };
 
     var e2eeWorker = null;
@@ -662,29 +665,32 @@
         if (!S.audioCtx) {
             try {
                 var AC = window.AudioContext || window.webkitAudioContext;
-                if (!AC) return;
+                if (!AC) return null;
                 S.audioCtx = new AC();
                 S.masterGain = S.audioCtx.createGain();
                 S.masterGain.gain.value = S.settings.speakerVolume / 100;
                 S.masterGain.connect(S.audioCtx.destination);
                 S.micGain = S.audioCtx.createGain();
                 S.micGain.gain.value = S.settings.micVolume / 100;
-            } catch (_) {}
+            } catch (_) { return null; }
         }
         if (S.audioCtx && S.audioCtx.state === 'suspended') {
             S.audioCtx.resume().catch(function () {});
         }
-        // Keep the context alive when the tab regains focus/visibility
-        document.addEventListener('visibilitychange', function () {
-            if (!document.hidden && S.audioCtx && S.audioCtx.state === 'suspended') {
-                S.audioCtx.resume().catch(function () {});
-            }
-        });
-        document.addEventListener('focus', function () {
-            if (S.audioCtx && S.audioCtx.state === 'suspended') {
-                S.audioCtx.resume().catch(function () {});
-            }
-        }, true);
+        if (!S._audioCtxListenersAttached) {
+            S._audioCtxListenersAttached = true;
+            document.addEventListener('visibilitychange', function () {
+                if (!document.hidden && S.audioCtx && S.audioCtx.state === 'suspended') {
+                    S.audioCtx.resume().catch(function () {});
+                }
+            });
+            document.addEventListener('focus', function () {
+                if (S.audioCtx && S.audioCtx.state === 'suspended') {
+                    S.audioCtx.resume().catch(function () {});
+                }
+            }, true);
+        }
+        return S.audioCtx;
     }
 
     // ------------------------------------------------------------------
@@ -5603,6 +5609,47 @@
         syncAllResetViewChips();
     }
 
+    // Re-inject relay video <img> tiles after renderPopup() rebuilds all tiles
+    // as <video> elements. Called from renderPopup() and renderDmPanel().
+    function reInjectRelayFrames() {
+        var frames = S._relayVideoFrames;
+        if (!frames) return;
+        var count = 0;
+        for (var key in frames) {
+            var parts = key.split('_');
+            var uid = parts[0];
+            var kind = parts[1];
+            var url = frames[key];
+            if (!url || !uid || !kind) continue;
+            // Skip if relay img already exists and is visible
+            var existing = document.querySelector('img.relay-video[data-uid="' + uid + '"][data-kind="' + kind + '"]');
+            if (existing && existing.offsetWidth > 0) continue;
+            // Find the <video> tile to replace
+            var videoTile = document.querySelector('video.remote-video-tile[data-uid="' + uid + '"][data-kind="' + kind + '"]');
+            if (!videoTile) continue;
+            var parent = videoTile.parentElement;
+            if (!parent) continue;
+            // Remove any old relay img for this uid+kind
+            var oldImg = parent.querySelector('img.relay-video[data-uid="' + uid + '"][data-kind="' + kind + '"]');
+            if (oldImg) {
+                if (oldImg.src && oldImg.src.startsWith('blob:')) URL.revokeObjectURL(oldImg.src);
+                oldImg.remove();
+            }
+            // Create the relay img and insert it BEFORE the hidden <video>
+            var img = document.createElement('img');
+            img.src = url;
+            img.className = 'remote-video-tile relay-video';
+            img.setAttribute('data-uid', uid);
+            img.setAttribute('data-kind', kind);
+            img.style.cssText = 'display:block !important;width:100% !important;height:100% !important;max-height:96px;object-fit:contain;border-radius:4px;cursor:pointer;background:#000;';
+            img.addEventListener('click', function () { toggleFullscreen(img); });
+            parent.insertBefore(img, videoTile);
+            videoTile.style.display = 'none';
+            count++;
+        }
+        if (count > 0) console.log('[Relay] re-injected ' + count + ' relay frame(s)');
+    }
+
     function renderPopup() {
         var list = el('voice-popup-members');
         if (!list) return;
@@ -5621,6 +5668,9 @@
             html = '<div class="voice-member-empty">No one here yet</div>';
         }
         list.innerHTML = html;
+        // Re-inject relay video frames — renderPopup() rebuilds all tiles as
+        // <video> elements, destroying relay <img> elements each time.
+        reInjectRelayFrames();
         // A member-row rebuild wipes the reconnect chip in the self row's media
         // container — re-apply if the watchdog notice is currently showing.
         syncVideoReconnectChips();
@@ -6084,6 +6134,7 @@
         bindClick(p, 'dm-call-camera', function () { toggleCamera(); });
         bindClick(p, 'dm-call-cam-opt', function (e) { openCamOptMenu(this); });
         bindClick(p, 'dm-call-screen', function () { toggleScreen(); });
+        bindClick(p, 'dm-call-pip', function () { togglePiP(); });
         bindClick(p, 'dm-call-soundboard', function () {
             var sbOverlay = document.getElementById('soundboard-overlay');
             if (sbOverlay) sbOverlay.style.display = 'flex';
@@ -6163,6 +6214,8 @@
         });
         if (!html) html = '<div class="dm-call-empty">Waiting for the other person…</div>';
         body.innerHTML = html;
+        // Re-inject relay video frames after tile rebuild
+        reInjectRelayFrames();
 
         // Wire remote tiles — the tile element IS the <video>
         body.querySelectorAll('.remote-video-tile').forEach(function (video) {
@@ -7495,13 +7548,12 @@
         if (fromUid === getSelfId()) return;
 
         // Decrypt the frame
+        if (!S.roomKeyB64) return;
         var keyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(S.roomKeyB64));
         var plaintext;
         try {
             plaintext = E2ECrypto.aeadDecrypt(frame.e, keyBytes, frame.n);
         } catch (_) { return; }
-        var blob = new Blob([plaintext], { type: 'image/jpeg' });
-        var url = URL.createObjectURL(blob);
 
         if (kind === 'audio') {
             handleRelayedAudioFrame(fromUid, plaintext);
@@ -7509,42 +7561,44 @@
         }
 
         // Video frame — render as <img> in the appropriate tile
-        var tile = document.querySelector('.remote-video-tile[data-uid="' + fromUid + '"][data-kind="' + kind + '"]');
-        if (tile && tile.tagName === 'IMG') {
-            var oldUrl = tile.src;
-            tile.src = url;
+        var blob = new Blob([plaintext], { type: 'image/jpeg' });
+        var url = URL.createObjectURL(blob);
+        var frameKey = fromUid + '_' + kind;
+
+        // Store URL for re-injection after renderPopup rebuilds
+        if (S._relayVideoFrames[frameKey]) {
+            URL.revokeObjectURL(S._relayVideoFrames[frameKey]);
+        }
+        S._relayVideoFrames[frameKey] = url;
+
+        // Find existing relay <img> tile to update
+        var existingImg = document.querySelector('img.remote-video-tile[data-uid="' + fromUid + '"][data-kind="' + kind + '"]');
+        if (existingImg) {
+            var oldUrl = existingImg.src;
+            existingImg.src = url;
             if (oldUrl && oldUrl.startsWith('blob:')) URL.revokeObjectURL(oldUrl);
         } else {
-            var container = document.querySelector('.voice-member-media[data-uid="' + fromUid + '"]')
-                || document.querySelector('.remote-video-tile[data-uid="' + fromUid + '"]');
-            if (container) {
-                var old = container.querySelector('.remote-video-tile[data-kind="' + kind + '"]');
-                if (old) {
-                    if (old.src && old.src.startsWith('blob:')) URL.revokeObjectURL(old.src);
-                    old.remove();
-                }
+            // First relay frame — hide the <video> tile (mesh placeholder) and inject <img>
+            var videoTile = document.querySelector('video.remote-video-tile[data-uid="' + fromUid + '"][data-kind="' + kind + '"]');
+            var parent = videoTile ? videoTile.parentElement : null;
+            if (videoTile) {
+                videoTile.style.display = 'none';
+            }
+            if (parent) {
                 var img = document.createElement('img');
                 img.src = url;
-                img.className = 'remote-video-tile';
+                img.className = 'remote-video-tile relay-video';
                 img.setAttribute('data-uid', fromUid);
                 img.setAttribute('data-kind', kind);
-                img.style.cssText = 'width:100%;max-height:200px;object-fit:contain;border-radius:4px;cursor:pointer;';
+                img.style.cssText = 'display:block !important;width:100% !important;height:100% !important;max-height:96px;object-fit:contain;border-radius:4px;cursor:pointer;background:#000;';
                 img.addEventListener('click', function () { toggleFullscreen(img); });
-                container.appendChild(img);
+                parent.insertBefore(img, videoTile);
             }
         }
 
         if (!S.members[fromUid]) S.members[fromUid] = {};
         S.members[fromUid][kind === 'camera' ? 'camera' : 'screen'] = true;
         S.members[fromUid]['_relay_' + kind] = Date.now();
-    }
-
-    // Handle relayed audio frames (for rooms >5 people).
-    // Decodes and plays the audio via a temporary AudioContext.
-    function handleRelayedAudioFrame(fromUid, pcmData) {
-        // Store the raw PCM data for the audio playback pipeline
-        if (!S.relayedAudio) S.relayedAudio = {};
-        S.relayedAudio[fromUid] = { data: pcmData, ts: Date.now() };
     }
 
     // Expose relay controls
@@ -7779,7 +7833,11 @@
         };
 
         source.connect(processor);
-        processor.connect(audioCtx.destination); // Required for ScriptProcessorNode to work
+        // Connect to a silent gain node (required for ScriptProcessorNode to fire events)
+        var silent = audioCtx.createGain();
+        silent.gain.value = 0;
+        processor.connect(silent);
+        silent.connect(audioCtx.destination);
         _audioRelayTimer = { source: source, processor: processor };
     }
 

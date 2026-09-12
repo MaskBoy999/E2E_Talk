@@ -9352,6 +9352,18 @@ video.remote-video-tile.mirrored {
     border: 1px solid var(--bg-border, #2a2a4a);
     object-fit: contain;
 }
+/* Relay video tiles (<img> replacing <video>) — must override flex/video rules */
+.relay-video {
+    display: block !important;
+    width: 100% !important;
+    height: 100% !important;
+    max-height: 96px !important;
+    max-width: none !important;
+    border-radius: 4px;
+    object-fit: contain;
+    background: #000;
+    cursor: pointer;
+}
 
 /* ---- DM call panel (its own view at the TOP of the text area, below the
    chat header — the chat stays visible underneath; expanded covers the
