@@ -1059,6 +1059,16 @@
         });
         S._relayAudioQueues = {};
         stopAllVideoRelays();
+        // Revoke any remaining relay video blob URLs to prevent memory leak
+        if (S._relayVideoFrames) {
+            Object.keys(S._relayVideoFrames).forEach(function (fk) {
+                var url = S._relayVideoFrames[fk];
+                if (url && url.startsWith('blob:')) {
+                    try { URL.revokeObjectURL(url); } catch (_) {}
+                }
+            });
+        }
+        S._relayVideoFrames = {};
         stopAudioRelay();
         stopLocalMedia();
         stopSpeakingDetection();
@@ -3146,6 +3156,7 @@
                 try { _pc.close(); } catch (_) {}
                 delete S.peers[uid];
                 removeRemoteAudioEls(uid);
+                removeRemoteScreenAudioEls(uid);
                 delete S.remoteStreams[uid];
                 removeRemoteTile(uid);
             }
@@ -3343,6 +3354,7 @@
             delete S.peers[uid];
         }
         removeRemoteAudioEls(uid);
+        removeRemoteScreenAudioEls(uid);
         delete S.remoteStreams[uid];
         removeRemoteTile(uid);
         // Stop any soundboard sounds from the leaving user
@@ -7548,14 +7560,17 @@
         // Wait for the video to have dimensions before starting the loop
         var startLoop = function () {
             if (S._relayTimers[kind]) return;
-            var running = true;
+            // Store running flag on _relayCanvases so stopVideoRelay() can
+            // stop the loop even if an async toBlob() callback is in flight.
+            var state = { running: true, video: video };
+            _relayCanvases[kind] = state;
             S._relayTimers[kind] = true; // mark as active
             var busy = false; // guard: skip frame if previous still processing
             var reusableKeyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(S.roomKeyB64));
             var scheduleNext = function () {
-                if (!running || !S.connected || !S.roomKeyB64) { S._relayTimers[kind] = null; running = false; return; }
+                if (!state.running || !S.connected || !S.roomKeyB64) { S._relayTimers[kind] = null; state.running = false; return; }
                 S._relayTimers[kind] = setTimeout(function () {
-                    if (!S.connected || !S.roomKeyB64) { S._relayTimers[kind] = null; running = false; return; }
+                    if (!state.running || !S.connected || !S.roomKeyB64) { S._relayTimers[kind] = null; state.running = false; return; }
                     if (busy) { scheduleNext(); return; } // previous frame still processing
                     busy = true;
                     try {
@@ -7564,6 +7579,13 @@
                             if (!blob || blob.size < 100) { busy = false; scheduleNext(); return; }
                             blob.arrayBuffer().then(function (buf) {
                                 busy = false;
+                                // Backpressure: skip frame if WS send buffer is
+                                // backed up (>512KB) to prevent memory buildup.
+                                var w = getWs();
+                                if (w && w.bufferedAmount > 512 * 1024) {
+                                    scheduleNext();
+                                    return;
+                                }
                                 var raw = new Uint8Array(buf);
                                 var enc = E2ECrypto.aeadEncrypt(raw, reusableKeyBytes);
                                 send({
@@ -7598,6 +7620,16 @@
         if (S._relayTimers[kind]) {
             clearTimeout(S._relayTimers[kind]);
             delete S._relayTimers[kind];
+        }
+        // Stop the running loop — this invalidates any in-flight toBlob()
+        // callbacks so they won't reschedule the loop.
+        var state = _relayCanvases[kind];
+        if (state && state.running !== undefined) {
+            state.running = false;
+        }
+        // Release the hidden video element's stream reference
+        if (state && state.video) {
+            try { state.video.srcObject = null; } catch (_) {}
         }
         delete _relayCanvases[kind];
     }
