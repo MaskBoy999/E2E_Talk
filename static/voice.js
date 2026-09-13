@@ -3157,6 +3157,7 @@
                 delete S.peers[uid];
                 removeRemoteAudioEls(uid);
                 removeRemoteScreenAudioEls(uid);
+                cleanupMemberGain(uid);
                 delete S.remoteStreams[uid];
                 removeRemoteTile(uid);
             }
@@ -3355,6 +3356,7 @@
         }
         removeRemoteAudioEls(uid);
         removeRemoteScreenAudioEls(uid);
+        cleanupMemberGain(uid);
         delete S.remoteStreams[uid];
         removeRemoteTile(uid);
         // Stop any soundboard sounds from the leaving user
@@ -3494,6 +3496,7 @@
         }
         removeRemoteAudioEls(uid);
         removeRemoteScreenAudioEls(uid);
+        cleanupMemberGain(uid);
         delete S.remoteStreams[uid];
         removeRemoteTile(uid);
     }
@@ -8030,6 +8033,10 @@
         try {
             var audioCtx = ensureAudioCtx();
             if (!audioCtx) return;
+            // Ignore frames from users who have already left — prevents
+            // re-creating a queue + ScriptProcessor for a departing user
+            // (stale audio / "random sounds" after teardown).
+            if (!S.members[fromUid]) return;
 
             // Convert Int16 PCM to Float32
             var int16 = new Int16Array(rawPcmBytes.buffer, rawPcmBytes.byteOffset, rawPcmBytes.byteLength / 2);
