@@ -1044,6 +1044,20 @@
         S._audioModeOverrides = {};
         S._videoModeOverrides = {};
         closeAllPeers();
+        // Bulk-kill any relay audio nodes that survived closeAllPeers (relay
+        // users may not have S.remoteAudioEls entries, so per-uid cleanup
+        // in removeRemoteAudioEls would miss them).
+        Object.keys(_relayPlaybackTimers).forEach(function (uid) {
+            var t = _relayPlaybackTimers[uid];
+            if (t.processor) { try { t.processor.disconnect(); } catch (_) {} }
+            if (t.silent) { try { t.silent.disconnect(); } catch (_) {} }
+            delete _relayPlaybackTimers[uid];
+        });
+        Object.keys(_relayGainNodes).forEach(function (uid) {
+            try { _relayGainNodes[uid].disconnect(); } catch (_) {}
+            delete _relayGainNodes[uid];
+        });
+        S._relayAudioQueues = {};
         stopAllVideoRelays();
         stopAudioRelay();
         stopLocalMedia();
@@ -7536,19 +7550,22 @@
             if (S._relayTimers[kind]) return;
             var running = true;
             S._relayTimers[kind] = true; // mark as active
+            var busy = false; // guard: skip frame if previous still processing
+            var reusableKeyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(S.roomKeyB64));
             var scheduleNext = function () {
                 if (!running || !S.connected || !S.roomKeyB64) { S._relayTimers[kind] = null; running = false; return; }
                 S._relayTimers[kind] = setTimeout(function () {
                     if (!S.connected || !S.roomKeyB64) { S._relayTimers[kind] = null; running = false; return; }
+                    if (busy) { scheduleNext(); return; } // previous frame still processing
+                    busy = true;
                     try {
                         ctx.drawImage(video, 0, 0, w, h);
                         canvas.toBlob(function (blob) {
-                            if (!blob || blob.size < 100) { scheduleNext(); return; }
-                            var reader = new FileReader();
-                            reader.onload = function () {
-                                var raw = new Uint8Array(reader.result);
-                                var keyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(S.roomKeyB64));
-                                var enc = E2ECrypto.aeadEncrypt(raw, keyBytes);
+                            if (!blob || blob.size < 100) { busy = false; scheduleNext(); return; }
+                            blob.arrayBuffer().then(function (buf) {
+                                busy = false;
+                                var raw = new Uint8Array(buf);
+                                var enc = E2ECrypto.aeadEncrypt(raw, reusableKeyBytes);
                                 send({
                                     type: 'voice_media_relay',
                                     room_type: S.roomType,
@@ -7558,10 +7575,9 @@
                                     frame: { e: enc.ciphertext, n: enc.nonce },
                                 });
                                 scheduleNext();
-                            };
-                            reader.readAsArrayBuffer(blob);
+                            }).catch(function () { busy = false; scheduleNext(); });
                         }, 'image/jpeg', S.settings.relayVideoQuality || 0.6);
-                    } catch (_) { scheduleNext(); }
+                    } catch (_) { busy = false; scheduleNext(); }
                 }, Math.max(16, 1000 / fps));
             };
             scheduleNext();
@@ -7852,6 +7868,20 @@
         console.log('[Relay] Switching audio to WebRTC mesh (≤ ' + MESH_THRESHOLD + ' active)');
         // Stop the audio relay capture loop
         stopAudioRelay();
+        // Kill all relay PLAYBACK receivers — their ScriptProcessors are
+        // still outputting stale audio to ctx.destination. Without this,
+        // both relay and mesh audio play simultaneously → "random sounds".
+        Object.keys(_relayPlaybackTimers).forEach(function (uid) {
+            var t = _relayPlaybackTimers[uid];
+            if (t.processor) { try { t.processor.disconnect(); } catch (_) {} }
+            if (t.silent) { try { t.silent.disconnect(); } catch (_) {} }
+            delete _relayPlaybackTimers[uid];
+        });
+        Object.keys(_relayGainNodes).forEach(function (uid) {
+            try { _relayGainNodes[uid].disconnect(); } catch (_) {}
+            delete _relayGainNodes[uid];
+        });
+        S._relayAudioQueues = {};
         // Restore the mic track on all WebRTC peers
         if (S.localStreams.mic) {
             var at = (S.localStreams.processedMic && S.localStreams.processedMic.getAudioTracks()[0])
@@ -7952,7 +7982,13 @@
             delete _relayGainNodes[uid];
         }
         if (_relayPlaybackTimers[uid]) {
-            clearTimeout(_relayPlaybackTimers[uid]);
+            var t = _relayPlaybackTimers[uid];
+            if (t.processor) {
+                try { t.processor.disconnect(); } catch (_) {}
+            }
+            if (t.silent) {
+                try { t.silent.disconnect(); } catch (_) {}
+            }
             delete _relayPlaybackTimers[uid];
         }
         delete S._relayAudioQueues[uid];
@@ -7964,24 +8000,37 @@
             if (!audioCtx) return;
 
             // Convert Int16 PCM to Float32
-            var int16 = new Int16Array(rawPcmBytes.buffer);
+            var int16 = new Int16Array(rawPcmBytes.buffer, rawPcmBytes.byteOffset, rawPcmBytes.byteLength / 2);
             var float32 = new Float32Array(int16.length);
             for (var i = 0; i < int16.length; i++) {
                 float32[i] = int16[i] / (int16[i] < 0 ? 0x8000 : 0x7FFF);
             }
 
-            // Initialize queue for this user
+            // Initialize ring-buffer + ScriptProcessorNode for this user
             if (!S._relayAudioQueues[fromUid]) {
-                S._relayAudioQueues[fromUid] = { queue: [], nextPlayTime: 0 };
+                S._relayAudioQueues[fromUid] = {
+                    ring: new Float32Array(RELAY_SAMPLE_RATE), // 1s ring buffer
+                    writePos: 0,
+                    readPos: 0,
+                };
                 startRelayPlayback(fromUid);
             }
 
             var q = S._relayAudioQueues[fromUid];
-            q.queue.push({ float32: float32, ts: audioCtx.currentTime });
-
-            // Cap queue to prevent memory buildup (drop oldest if >10 frames)
-            while (q.queue.length > 10) {
-                q.queue.shift();
+            var len = float32.length;
+            // Compute available space from position difference — avoids
+            // reading the shared 'buffered' counter which races with the
+            // consumer thread.
+            var avail = (q.writePos - q.readPos + q.ring.length) % q.ring.length;
+            var free = q.ring.length - avail;
+            // Drop incoming frame if buffer is full — NEVER touch readPos from
+            // the producer thread (it is exclusively owned by the consumer's
+            // onaudioprocess callback on the audio rendering thread).
+            if (len > free) return;
+            // Write incoming samples into the ring buffer
+            for (var i = 0; i < len; i++) {
+                q.ring[q.writePos] = float32[i];
+                q.writePos = (q.writePos + 1) % q.ring.length;
             }
         } catch (_) {}
     }
@@ -7991,45 +8040,57 @@
         var ctx = ensureAudioCtx();
         if (!ctx) return;
 
-        function scheduleFrame() {
-            try {
-                var q = S._relayAudioQueues[uid];
-                if (!q || !q.queue.length) {
-                    // Queue empty — check again in 5ms
-                    _relayPlaybackTimers[uid] = setTimeout(scheduleFrame, 5);
-                    return;
+        var q = S._relayAudioQueues[uid];
+        if (!q) return;
+
+        var FRAME = 2048;
+        var processor = ctx.createScriptProcessor(FRAME, 0, 1);
+        var primed = false;
+        var silentCount = 0;
+
+        processor.onaudioprocess = function (e) {
+            var output = e.outputBuffer.getChannelData(0);
+            var q = S._relayAudioQueues[uid];
+            if (!q) { output.fill(0); return; }
+            // Derive available samples from positions (avoids data race on
+            // the shared 'buffered' counter between main and audio threads).
+            var avail = (q.writePos - q.readPos + q.ring.length) % q.ring.length;
+            if (avail < FRAME) {
+                output.fill(0);
+                silentCount++;
+                // Auto-cleanup: if outputting silence for >3s, this user
+                // stopped sending — disconnect the processor to free resources.
+                if (silentCount > 70) { // ~3s at 42.7ms per 2048-sample callback
+                    cleanupMemberGain(uid);
                 }
-                var gain = getOrCreateMemberGain(uid);
-                var now = ctx.currentTime;
-
-                // Initialize playback time on first call or after a long gap
-                if (q.nextPlayTime === 0 || q.nextPlayTime < now - 0.2) {
-                    // Start playing this frame after a short buffer delay
-                    q.nextPlayTime = now + RELAY_JITTER_MS / 1000;
-                }
-
-                var frame = q.queue.shift();
-                var duration = frame.float32.length / RELAY_SAMPLE_RATE;
-
-                var buffer = ctx.createBuffer(1, frame.float32.length, RELAY_SAMPLE_RATE);
-                buffer.getChannelData(0).set(frame.float32);
-                var node = ctx.createBufferSource();
-                node.buffer = buffer;
-                node.connect(gain);
-                node.start(Math.max(q.nextPlayTime, now));
-
-                q.nextPlayTime += duration;
-
-                // Schedule next check right before this frame ends
-                var msUntilNext = Math.max(1, (q.nextPlayTime - ctx.currentTime - 0.005) * 1000);
-                _relayPlaybackTimers[uid] = setTimeout(scheduleFrame, Math.min(msUntilNext, 20));
-            } catch (_) {
-                _relayPlaybackTimers[uid] = setTimeout(scheduleFrame, 10);
+                return;
             }
-        }
+            silentCount = 0;
+            // Prime: skip ahead to reduce initial latency jitter
+            if (!primed) {
+                if (avail > FRAME * 4) {
+                    var skip = avail - FRAME * 2;
+                    q.readPos = (q.readPos + skip) % q.ring.length;
+                }
+                primed = true;
+            }
+            // Read from ring buffer into output — seamless, no frame boundaries
+            for (var i = 0; i < FRAME; i++) {
+                output[i] = q.ring[q.readPos];
+                q.readPos = (q.readPos + 1) % q.ring.length;
+            }
+        };
 
-        // Start after buffering a couple frames
-        _relayPlaybackTimers[uid] = setTimeout(scheduleFrame, RELAY_JITTER_MS);
+        var gain = getOrCreateMemberGain(uid);
+        // Connect: processor → gain → destination (silent playback through gain node)
+        processor.connect(gain);
+        // ScriptProcessorNode needs to be connected to destination to fire
+        var silent = ctx.createGain();
+        silent.gain.value = 0;
+        processor.connect(silent);
+        silent.connect(ctx.destination);
+
+        _relayPlaybackTimers[uid] = { processor: processor, silent: silent };
     }
 
     // Change the resolution OTHERS send to us (per-receiver: each peer scales
@@ -8592,6 +8653,7 @@
             var handler = function () {
                 if (!document.fullscreenElement) {
                     document.removeEventListener('fullscreenchange', handler);
+                    el.removeEventListener('click', clickExit);
                     if (el._fsNoWrap) {
                         el._fsNoWrap = false;
                         reattachTileStream(el);
@@ -8600,6 +8662,11 @@
                     }
                 }
             };
+            // Click anywhere on the element to exit fullscreen (mobile-friendly)
+            var clickExit = function () {
+                document.exitFullscreen().catch(function () {});
+            };
+            el.addEventListener('click', clickExit);
             document.addEventListener('fullscreenchange', handler);
         }).catch(function () {
             // Element-level fullscreen blocked — fall back to CSS overlay wrapper
