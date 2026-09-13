@@ -112,6 +112,7 @@
             sendScreenRes: 480,
             recvCameraRes: 360,
             recvScreenRes: 480,
+            relayVideoFps: 30,
             // When ON, remote camera/screen feeds are NOT auto-loaded: each
             // feed shows a "Load" button (per user AND per kind) and is
             // attached only when clicked. Right-click menus are unaffected.
@@ -157,6 +158,8 @@
         // Relay video frame blob URLs: { 'uid_kind': blobUrl }
         // Stored so renderPopup() can re-inject <img> tiles after rebuilding.
         _relayVideoFrames: {},
+        // Relay audio jitter buffer queues: uid → { queue: [...], nextPlayTime: number }
+        _relayAudioQueues: {},
     };
 
     var e2eeWorker = null;
@@ -645,6 +648,8 @@
         if (rc) rc.value = S.settings.recvCameraRes || 360;
         var rs = document.getElementById('voice-recv-screen-res');
         if (rs) rs.value = S.settings.recvScreenRes || 480;
+        var rf = document.getElementById('voice-relay-video-fps');
+        if (rf) rf.value = S.settings.relayVideoFps || 30;
         var ml = document.getElementById('voice-manual-video-load');
         if (ml) ml.checked = !!S.settings.manualVideoLoad;
         var vm = document.getElementById('voice-video-mesh-mode');
@@ -3168,7 +3173,9 @@
             // Track ids change on track restarts (camera flip, screen restart)
             // even when the on/off flags don't — re-slot so the right feed
             // lands in the right tile.
-            (!isSelf && (prev.camera_track_id !== member.camera_track_id || prev.screen_track_id !== member.screen_track_id));
+            (!isSelf && (prev.camera_track_id !== member.camera_track_id || prev.screen_track_id !== member.screen_track_id)) ||
+            // Audio/video mode changes update the M/R badge in the member row
+            (prev.audio_mode !== member.audio_mode || prev.video_mode !== member.video_mode);
         // What THIS member is willing to receive changed: manual-load
         // loaded/unloaded feeds, or they deafened/undeafened. Re-gate our
         // senders for them so we stop/start sending exactly what they watch.
@@ -3178,6 +3185,26 @@
             (prev.loaded_feeds || []).join(',') !== (member.loaded_feeds || []).join(',') ||
             (prev.unloaded_feeds || []).join(',') !== (member.unloaded_feeds || []).join(',');
         S.members[member.user_id] = member;
+        // Clean up stale relay video frames when sender turns off camera/screen
+        if (!isSelf && prev) {
+            ['camera', 'screen'].forEach(function (k) {
+                if (prev[k] && !member[k]) {
+                    var fk = member.user_id + '_' + k;
+                    if (S._relayVideoFrames[fk]) {
+                        URL.revokeObjectURL(S._relayVideoFrames[fk]);
+                        delete S._relayVideoFrames[fk];
+                    }
+                    // Remove the stale relay <img> if present
+                    var staleImg = document.querySelector('img.relay-video[data-uid="' + member.user_id + '"][data-kind="' + k + '"]');
+                    if (staleImg) {
+                        var vid = document.querySelector('video.remote-video-tile[data-uid="' + member.user_id + '"][data-kind="' + k + '"]');
+                        if (vid) vid.style.display = '';
+                        if (staleImg.src && staleImg.src.startsWith('blob:')) URL.revokeObjectURL(staleImg.src);
+                        staleImg.remove();
+                    }
+                }
+            });
+        }
         // Check if deafen state changed for any member — recalc audio mode
         if (prev && prev.deafened !== member.deafened) {
             recalcAudioMode();
@@ -4354,6 +4381,7 @@
         // slot (or vice versa) and "look wrong" until a renegotiation.
         var camTrack = S.localStreams.camera && S.localStreams.camera.getVideoTracks()[0];
         var scrTrack = S.localStreams.screen && S.localStreams.screen.getVideoTracks()[0];
+        var selfId = getSelfId();
         send({
             type: 'voice_state',
             room_type: S.roomType,
@@ -4366,6 +4394,9 @@
             speaking: S.speaking,
             camera_track_id: camTrack ? camTrack.id : null,
             screen_track_id: scrTrack ? scrTrack.id : null,
+            // Broadcast self audio/video mode so peers can show M/R badges
+            audio_mode: selfId ? (S._audioModeOverrides[selfId] || 'auto') : 'auto',
+            video_mode: selfId ? (S._videoModeOverrides[selfId] || 'auto') : 'auto',
             // Receive-resolution preference: every peer scales its sender for
             // THIS member down to these heights (per-receiver quality).
             recv_camera_res: S.settings.recvCameraRes || 360,
@@ -5377,6 +5408,8 @@
         if (rc) rc.addEventListener('change', function (e) { setRecvRes('camera', e.target.value); });
         var rs = document.getElementById('voice-recv-screen-res');
         if (rs) rs.addEventListener('change', function (e) { setRecvRes('screen', e.target.value); });
+        var rf = document.getElementById('voice-relay-video-fps');
+        if (rf) rf.addEventListener('change', function (e) { S.settings.relayVideoFps = Math.max(1, Math.min(30, parseInt(e.target.value) || 30)); saveSettings(); });
         var ml = document.getElementById('voice-manual-video-load');
         if (ml) ml.addEventListener('change', function (e) { setManualVideoLoad(e.target.checked); });
         var vm = document.getElementById('voice-video-mesh-mode');
@@ -5621,9 +5654,23 @@
             var kind = parts[1];
             var url = frames[key];
             if (!url || !uid || !kind) continue;
-            // Skip if relay img already exists and is visible
+            // Skip if relay img already exists and is visible (including in fullscreen wrap)
             var existing = document.querySelector('img.relay-video[data-uid="' + uid + '"][data-kind="' + kind + '"]');
-            if (existing && existing.offsetWidth > 0) continue;
+            if (existing && (existing.offsetWidth > 0 || existing.closest('.voice-fs-wrap'))) {
+                // If the relay img is in a fullscreen wrap, its _fsOrigParent may
+                // be stale (destroyed by renderPopup). Re-home it to the new tile.
+                if (existing.closest('.voice-fs-wrap')) {
+                    var newTile = document.querySelector('video.remote-video-tile[data-uid="' + uid + '"][data-kind="' + kind + '"]');
+                    if (newTile && newTile.parentElement) {
+                        existing._fsOrigParent = newTile.parentElement;
+                        existing._fsOrigNext = null;
+                        // Hide the mesh <video> so the relay <img> takes over
+                        // when restored from fullscreen
+                        newTile.style.display = 'none';
+                    }
+                }
+                continue;
+            }
             // Find the <video> tile to replace
             var videoTile = document.querySelector('video.remote-video-tile[data-uid="' + uid + '"][data-kind="' + kind + '"]');
             if (!videoTile) continue;
@@ -5642,7 +5689,7 @@
             img.setAttribute('data-uid', uid);
             img.setAttribute('data-kind', kind);
             img.style.cssText = 'display:block !important;width:100% !important;height:100% !important;max-height:96px;object-fit:contain;border-radius:4px;cursor:pointer;background:#000;';
-            img.addEventListener('click', function () { toggleFullscreen(img); });
+            (function (el) { el.addEventListener('click', function () { toggleFullscreen(el); }); })(img);
             parent.insertBefore(img, videoTile);
             videoTile.style.display = 'none';
             count++;
@@ -7465,7 +7512,7 @@
         if (!useVideoRelay()) return;
         if (S._relayTimers[kind]) return; // already running
 
-        var fps = S.settings.relayVideoFps || 5;
+        var fps = S.settings.relayVideoFps || 30;
         var maxH = S.settings[kind === 'screen' ? 'sendScreenRes' : 'sendCameraRes'] || (kind === 'screen' ? 480 : 360);
         var w = resW(maxH);
         var h = maxH;
@@ -7487,30 +7534,37 @@
         // Wait for the video to have dimensions before starting the loop
         var startLoop = function () {
             if (S._relayTimers[kind]) return;
-            S._relayTimers[kind] = setInterval(function () {
-                if (!S.connected || !S.roomKeyB64) return;
-                try {
-                    ctx.drawImage(video, 0, 0, w, h);
-                    canvas.toBlob(function (blob) {
-                        if (!blob || blob.size < 100) return;
-                        var reader = new FileReader();
-                        reader.onload = function () {
-                            var raw = new Uint8Array(reader.result);
-                            var keyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(S.roomKeyB64));
-                            var enc = E2ECrypto.aeadEncrypt(raw, keyBytes);
-                            send({
-                                type: 'voice_media_relay',
-                                room_type: S.roomType,
-                                channel_id: S.channelId || '',
-                                dm_channel_id: S.dmChannelId || '',
-                                kind: kind,
-                                frame: { e: enc.ciphertext, n: enc.nonce },
-                            });
-                        };
-                        reader.readAsArrayBuffer(blob);
-                    }, 'image/jpeg', S.settings.relayVideoQuality || 0.6);
-                } catch (_) {}
-            }, 1000 / fps);
+            var running = true;
+            S._relayTimers[kind] = true; // mark as active
+            var scheduleNext = function () {
+                if (!running || !S.connected || !S.roomKeyB64) { S._relayTimers[kind] = null; running = false; return; }
+                S._relayTimers[kind] = setTimeout(function () {
+                    if (!S.connected || !S.roomKeyB64) { S._relayTimers[kind] = null; running = false; return; }
+                    try {
+                        ctx.drawImage(video, 0, 0, w, h);
+                        canvas.toBlob(function (blob) {
+                            if (!blob || blob.size < 100) { scheduleNext(); return; }
+                            var reader = new FileReader();
+                            reader.onload = function () {
+                                var raw = new Uint8Array(reader.result);
+                                var keyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(S.roomKeyB64));
+                                var enc = E2ECrypto.aeadEncrypt(raw, keyBytes);
+                                send({
+                                    type: 'voice_media_relay',
+                                    room_type: S.roomType,
+                                    channel_id: S.channelId || '',
+                                    dm_channel_id: S.dmChannelId || '',
+                                    kind: kind,
+                                    frame: { e: enc.ciphertext, n: enc.nonce },
+                                });
+                                scheduleNext();
+                            };
+                            reader.readAsArrayBuffer(blob);
+                        }, 'image/jpeg', S.settings.relayVideoQuality || 0.6);
+                    } catch (_) { scheduleNext(); }
+                }, Math.max(16, 1000 / fps));
+            };
+            scheduleNext();
         };
 
         // Start when video has enough metadata
@@ -7526,7 +7580,7 @@
     // Stop the relay capture loop for a given kind.
     function stopVideoRelay(kind) {
         if (S._relayTimers[kind]) {
-            clearInterval(S._relayTimers[kind]);
+            clearTimeout(S._relayTimers[kind]);
             delete S._relayTimers[kind];
         }
         delete _relayCanvases[kind];
@@ -7590,8 +7644,8 @@
                 img.className = 'remote-video-tile relay-video';
                 img.setAttribute('data-uid', fromUid);
                 img.setAttribute('data-kind', kind);
-                img.style.cssText = 'display:block !important;width:100% !important;height:100% !important;max-height:96px;object-fit:contain;border-radius:4px;cursor:pointer;background:#000;';
-                img.addEventListener('click', function () { toggleFullscreen(img); });
+                img.style.cssText = 'display:block !important;height:100% !important;width:auto !important;max-width:46%;object-fit:contain;border-radius:8px;cursor:pointer;background:#000;border:1px solid var(--bg-border, #2a2a4a);';
+                (function (el) { el.addEventListener('click', function () { toggleFullscreen(el); }); })(img);
                 parent.insertBefore(img, videoTile);
             }
         }
@@ -7653,6 +7707,10 @@
         if (uid === selfId) {
             var ov = S._audioModeOverrides[uid];
             if (ov === 'mesh' || ov === 'relay') return ov;
+        } else {
+            // For remote users, use the mode they broadcast via voice_state
+            var m = S.members[uid];
+            if (m && (m.audio_mode === 'mesh' || m.audio_mode === 'relay')) return m.audio_mode;
         }
         return autoAudioMode();
     }
@@ -7669,6 +7727,10 @@
         if (uid === selfId) {
             var ov = S._videoModeOverrides[uid];
             if (ov === 'mesh' || ov === 'relay') return ov;
+        } else {
+            // For remote users, use the mode they broadcast via voice_state
+            var m = S.members[uid];
+            if (m && (m.video_mode === 'mesh' || m.video_mode === 'relay')) return m.video_mode;
         }
         return autoVideoMode();
     }
@@ -7707,6 +7769,7 @@
         } else {
             S._audioModeOverrides[selfId] = mode;
         }
+        sendVoiceState();
         recalcAudioMode();
         renderPopup();
         showToast('Audio mode: ' + mode + (mode === 'auto' ? ' (auto)' : ' (manual)'));
@@ -7721,6 +7784,7 @@
         } else {
             S._videoModeOverrides[selfId] = mode;
         }
+        sendVoiceState();
         // Apply video mode change immediately
         var effective = resolveVideoMode(selfId);
         var currentlyRelaying = useVideoRelay();
@@ -7742,6 +7806,19 @@
             // Switch to mesh: stop relay, restore WebRTC video
             stopAllVideoRelays();
             for (var uid in S.peers) {
+                var pc2 = S.peers[uid];
+                if (pc2 && pc2.getSenders) {
+                    pc2.getSenders().forEach(function (sender) {
+                        if (sender.track && sender.track.kind === 'video') {
+                            // Remove existing video sender so addLocalTracks can re-add cleanly
+                            try { pc2.removeTrack(sender); } catch (_) {}
+                        } else if (sender._voiceNulled && sender._voiceNulled.kind === 'video') {
+                            // Nulled video sender from relay — remove its m-line
+                            try { pc2.removeTrack(sender); } catch (_) {}
+                            sender._voiceNulled = null;
+                        }
+                    });
+                }
                 addLocalTracks(S.peers[uid]);
             }
         }
@@ -7802,24 +7879,21 @@
         if (_audioRelayTimer) return;
         if (!S.localStreams.mic) return;
 
-        // Use ScriptProcessorNode (widely supported) to capture raw PCM
         var stream = S.localStreams.processedMic || S.localStreams.mic;
         var audioCtx = ensureAudioCtx();
         var source = audioCtx.createMediaStreamSource(stream);
-        var processor = audioCtx.createScriptProcessor(1024, 1, 1); // 1024 samples at 48kHz ≈ 21ms
+        // 2048 samples at 48kHz ≈ 43ms — bigger buffer = fewer packets, smoother relay
+        var processor = audioCtx.createScriptProcessor(2048, 1, 1);
 
         processor.onaudioprocess = function (e) {
             if (!S.connected || !S.roomKeyB64 || S.muted || S.deafened) return;
-            var pcm = e.inputBuffer.getChannelData(0); // Float32 [-1, 1]
-            // Convert to Int16
+            var pcm = e.inputBuffer.getChannelData(0);
             var int16 = new Int16Array(pcm.length);
             for (var i = 0; i < pcm.length; i++) {
                 var s = Math.max(-1, Math.min(1, pcm[i]));
                 int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
             }
-            // Encode as raw bytes
             var raw = new Uint8Array(int16.buffer);
-            // Encrypt with room key
             var keyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(S.roomKeyB64));
             var enc = E2ECrypto.aeadEncrypt(raw, keyBytes);
             send({
@@ -7852,9 +7926,13 @@
     }
 
     // ------------------------------------------------------------------
-    // Relayed audio playback
+    // Relayed audio playback — jitter buffer
     // ------------------------------------------------------------------
     var _relayGainNodes = {}; // uid → GainNode
+    var _relayPlaybackTimers = {}; // uid → intervalId
+    var RELAY_SAMPLE_RATE = 48000;
+    var RELAY_FRAME_SAMPLES = 2048; // must match sender buffer size
+    var RELAY_JITTER_MS = 60; // buffer 60ms before playing (≈1.5 frames)
 
     function getOrCreateMemberGain(uid) {
         if (_relayGainNodes[uid]) return _relayGainNodes[uid];
@@ -7864,6 +7942,7 @@
         gain.gain.value = Math.max(0, Math.min(2, vol));
         gain.connect(ctx.destination);
         _relayGainNodes[uid] = gain;
+        window.__relayGainNodes = _relayGainNodes;
         return gain;
     }
 
@@ -7872,27 +7951,85 @@
             try { _relayGainNodes[uid].disconnect(); } catch (_) {}
             delete _relayGainNodes[uid];
         }
+        if (_relayPlaybackTimers[uid]) {
+            clearTimeout(_relayPlaybackTimers[uid]);
+            delete _relayPlaybackTimers[uid];
+        }
+        delete S._relayAudioQueues[uid];
     }
 
-    // Play relayed audio frames by converting Int16 PCM to AudioBuffer and playing.
     function handleRelayedAudioFrame(fromUid, rawPcmBytes) {
         try {
             var audioCtx = ensureAudioCtx();
-            // Raw bytes are Int16 PCM at 48kHz mono
+            if (!audioCtx) return;
+
+            // Convert Int16 PCM to Float32
             var int16 = new Int16Array(rawPcmBytes.buffer);
             var float32 = new Float32Array(int16.length);
             for (var i = 0; i < int16.length; i++) {
                 float32[i] = int16[i] / (int16[i] < 0 ? 0x8000 : 0x7FFF);
             }
-            var buffer = audioCtx.createBuffer(1, float32.length, 48000);
-            buffer.getChannelData(0).set(float32);
-            var node = audioCtx.createBufferSource();
-            node.buffer = buffer;
-            // Route through per-member gain node
-            var gain = getOrCreateMemberGain(fromUid);
-            node.connect(gain);
-            node.start();
+
+            // Initialize queue for this user
+            if (!S._relayAudioQueues[fromUid]) {
+                S._relayAudioQueues[fromUid] = { queue: [], nextPlayTime: 0 };
+                startRelayPlayback(fromUid);
+            }
+
+            var q = S._relayAudioQueues[fromUid];
+            q.queue.push({ float32: float32, ts: audioCtx.currentTime });
+
+            // Cap queue to prevent memory buildup (drop oldest if >10 frames)
+            while (q.queue.length > 10) {
+                q.queue.shift();
+            }
         } catch (_) {}
+    }
+
+    function startRelayPlayback(uid) {
+        if (_relayPlaybackTimers[uid]) return;
+        var ctx = ensureAudioCtx();
+        if (!ctx) return;
+
+        function scheduleFrame() {
+            try {
+                var q = S._relayAudioQueues[uid];
+                if (!q || !q.queue.length) {
+                    // Queue empty — check again in 5ms
+                    _relayPlaybackTimers[uid] = setTimeout(scheduleFrame, 5);
+                    return;
+                }
+                var gain = getOrCreateMemberGain(uid);
+                var now = ctx.currentTime;
+
+                // Initialize playback time on first call or after a long gap
+                if (q.nextPlayTime === 0 || q.nextPlayTime < now - 0.2) {
+                    // Start playing this frame after a short buffer delay
+                    q.nextPlayTime = now + RELAY_JITTER_MS / 1000;
+                }
+
+                var frame = q.queue.shift();
+                var duration = frame.float32.length / RELAY_SAMPLE_RATE;
+
+                var buffer = ctx.createBuffer(1, frame.float32.length, RELAY_SAMPLE_RATE);
+                buffer.getChannelData(0).set(frame.float32);
+                var node = ctx.createBufferSource();
+                node.buffer = buffer;
+                node.connect(gain);
+                node.start(Math.max(q.nextPlayTime, now));
+
+                q.nextPlayTime += duration;
+
+                // Schedule next check right before this frame ends
+                var msUntilNext = Math.max(1, (q.nextPlayTime - ctx.currentTime - 0.005) * 1000);
+                _relayPlaybackTimers[uid] = setTimeout(scheduleFrame, Math.min(msUntilNext, 20));
+            } catch (_) {
+                _relayPlaybackTimers[uid] = setTimeout(scheduleFrame, 10);
+            }
+        }
+
+        // Start after buffering a couple frames
+        _relayPlaybackTimers[uid] = setTimeout(scheduleFrame, RELAY_JITTER_MS);
     }
 
     // Change the resolution OTHERS send to us (per-receiver: each peer scales
@@ -8428,9 +8565,9 @@
     // continues decoding seamlessly.
     function toggleFullscreen(el) {
         if (!el) return;
+        // If the element is already inside a voice-fs-wrap, restore it
         var activeWrap = el.closest ? el.closest('.voice-fs-wrap') : null;
         if (activeWrap) {
-            // Already fullscreened — restore the tile to its original slot.
             restoreFromFsWrap(activeWrap, el);
             if (document.fullscreenElement) {
                 document.exitFullscreen().catch(function () {});
@@ -8438,54 +8575,61 @@
             return;
         }
         if (document.fullscreenElement && !document.querySelector('.voice-fs-wrap')) {
-            // Something else is fullscreened — leave it alone.
             return;
         }
-        // Remember where the element lives so it can be restored exactly — the
-        // old code relied on fullscreenchange alone, which never fires when the
-        // browser declines/stubs the request (embedded contexts, tests), leaving
-        // the <video> stuck in the black wrapper forever.
+        // If another element is already fullscreened via voice-fs-wrap, restore it first
+        var existingFs = document.querySelector('.voice-fs-wrap');
+        if (existingFs) {
+            var existingEl = existingFs.firstElementChild;
+            if (existingEl) restoreFromFsWrap(existingFs, existingEl);
+        }
         el._fsOrigParent = el.parentNode;
         el._fsOrigNext = el.nextSibling;
-        var wrap = document.createElement('div');
-        wrap.className = 'voice-fs-wrap';
-        wrap.appendChild(el);
-        document.body.appendChild(wrap);
-        // Re-apply the per-viewer mirror/rotate transform now that the element
-        // lives in the fullscreen wrap (the tile-mode dims don't apply there).
-        if (el.dataset) applyTileTransform(el, el.dataset.uid, el.dataset.kind);
-        // Move the "Reset view" hint chip into the fullscreen wrap with the tile.
-        if (el.dataset) syncResetViewChips(el.dataset.uid, el.dataset.kind);
-        var restored = false;
-        var restore = function () {
-            if (restored) return;
-            restored = true;
-            document.removeEventListener('fullscreenchange', handler);
-            if (el.parentNode === wrap) {
-                moveTileBack(el);
-            }
-            if (wrap.parentNode) wrap.remove();
-            reattachTileStream(el);
-            // Back in the tile — restore the tile-mode dims (swap/scaled).
-            if (el.dataset) applyTileTransform(el, el.dataset.uid, el.dataset.kind);
-            // Bring the "Reset view" hint chip back to the tile with the video.
-            if (el.dataset) syncResetViewChips(el.dataset.uid, el.dataset.kind);
-        };
-        // Register BEFORE requestFullscreen: fullscreenchange also fires when
-        // ENTERING fullscreen, so only restore when it is genuinely not active.
-        var handler = function () {
-            if (!document.fullscreenElement) restore();
-        };
-        document.addEventListener('fullscreenchange', handler);
-        wrap.requestFullscreen().then(function () {
-            // The promise resolved but the browser may still not have entered
-            // fullscreen (denied/stubbed). If so, put the tile back — otherwise
-            // the video stays frozen in the wrapper ("fullscreen stuck" bug).
-            setTimeout(function () {
-                if (!document.fullscreenElement) restore();
-            }, 400);
+        // Try element-level fullscreen on the element directly
+        el.requestFullscreen().then(function () {
+            // True element-level fullscreen succeeded — no wrapper needed
+            el._fsNoWrap = true;
+            var handler = function () {
+                if (!document.fullscreenElement) {
+                    document.removeEventListener('fullscreenchange', handler);
+                    if (el._fsNoWrap) {
+                        el._fsNoWrap = false;
+                        reattachTileStream(el);
+                        if (el.dataset) applyTileTransform(el, el.dataset.uid, el.dataset.kind);
+                        if (el.dataset) syncResetViewChips(el.dataset.uid, el.dataset.kind);
+                    }
+                }
+            };
+            document.addEventListener('fullscreenchange', handler);
         }).catch(function () {
-            restore();
+            // Element-level fullscreen blocked — fall back to CSS overlay wrapper
+            var wrap = document.createElement('div');
+            wrap.className = 'voice-fs-wrap';
+            wrap.appendChild(el);
+            document.body.appendChild(wrap);
+            if (el.dataset) applyTileTransform(el, el.dataset.uid, el.dataset.kind);
+            if (el.dataset) syncResetViewChips(el.dataset.uid, el.dataset.kind);
+            var restored = false;
+            var restore = function () {
+                if (restored) return;
+                restored = true;
+                document.removeEventListener('fullscreenchange', handler);
+                if (el.parentNode === wrap) {
+                    moveTileBack(el);
+                }
+                if (wrap.parentNode) wrap.remove();
+                reattachTileStream(el);
+                if (el.dataset) applyTileTransform(el, el.dataset.uid, el.dataset.kind);
+                if (el.dataset) syncResetViewChips(el.dataset.uid, el.dataset.kind);
+            };
+            var handler = function () {
+                if (!document.fullscreenElement) restore();
+            };
+            document.addEventListener('fullscreenchange', handler);
+            // Also allow clicking the wrap background to exit
+            wrap.addEventListener('click', function (e) {
+                if (e.target === wrap) restore();
+            });
         });
     }
 

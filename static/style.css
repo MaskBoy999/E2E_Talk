@@ -9352,17 +9352,18 @@ video.remote-video-tile.mirrored {
     border: 1px solid var(--bg-border, #2a2a4a);
     object-fit: contain;
 }
-/* Relay video tiles (<img> replacing <video>) — must override flex/video rules */
+/* Relay video tiles (<img> replacing <video>) — match mesh tile proportions */
 .relay-video {
     display: block !important;
-    width: 100% !important;
     height: 100% !important;
-    max-height: 96px !important;
-    max-width: none !important;
-    border-radius: 4px;
+    width: auto !important;
+    max-width: 46% !important;
+    max-height: none !important;
     object-fit: contain;
+    border-radius: 8px;
     background: #000;
     cursor: pointer;
+    border: 1px solid var(--bg-border, #2a2a4a);
 }
 
 /* ---- DM call panel (its own view at the TOP of the text area, below the
@@ -9557,7 +9558,8 @@ body.resizing-dm { cursor: ns-resize !important; user-select: none; }
 }
 .voice-fs-wrap video,
 .voice-fs-wrap video.remote-video-tile,
-.voice-fs-wrap video.voice-self-video {
+.voice-fs-wrap video.voice-self-video,
+.voice-fs-wrap img.relay-video {
     width: 100% !important;
     height: 100% !important;
     max-width: none !important;

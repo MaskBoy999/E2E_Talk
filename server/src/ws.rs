@@ -109,6 +109,10 @@ pub struct VoiceMember {
     pub manual_video_load: bool,
     pub loaded_feeds: Vec<String>,
     pub unloaded_feeds: Vec<String>,
+    // Audio/video mode override broadcast by the member (auto/mesh/relay).
+    // Peers read these to show M/R badges next to each member's name.
+    pub audio_mode: String,
+    pub video_mode: String,
 }
 
 pub struct VoiceRoom {
@@ -157,6 +161,8 @@ fn voice_member_json(m: &VoiceMember) -> serde_json::Value {
         "manual_video_load": m.manual_video_load,
         "loaded_feeds": m.loaded_feeds,
         "unloaded_feeds": m.unloaded_feeds,
+        "audio_mode": m.audio_mode,
+        "video_mode": m.video_mode,
     })
 }
 
@@ -2113,6 +2119,8 @@ async fn handle_voice_join(
         manual_video_load: false,
         loaded_feeds: Vec::new(),
         unloaded_feeds: Vec::new(),
+        audio_mode: "auto".to_string(),
+        video_mode: "auto".to_string(),
     };
 
     // All room mutation happens inside a scope so the write guard (and its &mut
@@ -2633,6 +2641,16 @@ async fn handle_voice_state(
                 .collect()
         })
         .unwrap_or_default();
+    let audio_mode = parsed
+        .get("audio_mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("auto")
+        .to_string();
+    let video_mode = parsed
+        .get("video_mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("auto")
+        .to_string();
 
     let (member, server_id) = {
         let mut rooms = match state.voice_rooms.write() {
@@ -2660,6 +2678,8 @@ async fn handle_voice_state(
         m.manual_video_load = manual_video_load;
         m.loaded_feeds = loaded_feeds;
         m.unloaded_feeds = unloaded_feeds;
+        m.audio_mode = audio_mode;
+        m.video_mode = video_mode;
         let server_id = room.server_id.clone().unwrap_or_default();
         (m.clone(), server_id)
     };
