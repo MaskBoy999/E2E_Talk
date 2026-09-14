@@ -450,6 +450,7 @@
             // held (nulled) because the receiver isn't watching / can't hear.
             isFeedLoaded: isFeedLoaded,
             unloadFeed: unloadFeed,
+            loadFeed: function (uid, kind) { markFeedLoaded(uid, kind); applyScreenAudioGate(uid); applyFeedPlaceholders(); if (S.connected) sendVoiceState(); },
             setTileTransform: function (uid, kind, action, val) {
                 setTileViewTransform(uid, kind, action, val);
                 return true;
@@ -8116,12 +8117,16 @@
     function switchAudioToRelay() {
         console.log('[Relay] Switching audio to server relay (> ' + MESH_THRESHOLD + ' active)');
         // Mute the mic sender on all WebRTC peers (keep the m-line but
-        // send silence). The relay pipeline picks up the audio instead.
+        // send silence). Screen audio stays on WebRTC — it's low-bandwidth
+        // and the receiver needs per-member volume control via <audio> elements.
+        var screenAudioTrack = (S.localStreams.screen && S.localStreams.screen.getAudioTracks()[0]) || null;
         for (var uid in S.peers) {
             var pc = S.peers[uid];
             if (!pc || !pc.getSenders) continue;
             pc.getSenders().forEach(function (sender) {
                 if (sender.track && sender.track.kind === 'audio') {
+                    // Skip screen audio — keep it on WebRTC mesh
+                    if (screenAudioTrack && sender.track.id === screenAudioTrack.id) return;
                     sender.replaceTrack(null).catch(function () {});
                     sender._voiceNulled = sender.track;
                 }
