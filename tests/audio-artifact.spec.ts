@@ -11,6 +11,7 @@ test.use({
             '--use-fake-ui-for-media-stream',
             '--autoplay-policy=no-user-gesture-required',
             '--ignore-certificate-errors',
+            '--enable-features=SharedArrayBuffer',
         ],
     },
 });
@@ -177,6 +178,8 @@ test.describe('Audio relay quality (visible browsers)', () => {
 
         console.log('=== AUDIO ARTIFACT TEST ===');
 
+        page.on('console', (msg) => { const t = msg.text(); if (t.includes('BIN-RELAY') || t.includes('WS-BINARY') || t.includes('sendRelay')) console.log(`[A-LOG] ${t}`); });
+
         // --- User A: create server ---
         const uA = await registerUser(page, 'ArtA_' + ts);
         await page.goto(`${BASE}/index.html`);
@@ -187,6 +190,7 @@ test.describe('Audio relay quality (visible browsers)', () => {
         const ctxB = await context.browser()!.newContext({ ignoreHTTPSErrors: true });
         const pageB = await ctxB.newPage();
         pageB.on('pageerror', (err) => console.log(`[B-ERR] ${err.message}`));
+        pageB.on('console', (msg) => { const t = msg.text(); if (t.includes('BIN-RELAY') || t.includes('WS-BINARY')) console.log(`[B-LOG] ${t}`); });
         const uB = await registerUser(pageB, 'ArtB_' + ts);
         await pageB.goto(`${BASE}/index.html`);
         await waitForWs(pageB);
@@ -261,8 +265,14 @@ test.describe('Audio relay quality (visible browsers)', () => {
                 const origSend = (window as any).ws.send;
                 (window as any).ws.send = function(data: any) {
                     try {
-                        const parsed = typeof data === 'string' ? JSON.parse(data) : JSON.parse(data);
-                        if (parsed.type === 'voice_media_relay' && parsed.kind === 'audio') sent++;
+                        if (data instanceof ArrayBuffer) {
+                            // Binary relay frame: [kind:u8][rt_len:u8][...] — kindByte 2 = audio
+                            const u8 = new Uint8Array(data);
+                            if (u8.length > 0 && u8[0] === 2) sent++;
+                        } else if (typeof data === 'string') {
+                            const parsed = JSON.parse(data);
+                            if (parsed.type === 'voice_media_relay' && parsed.kind === 'audio') sent++;
+                        }
                     } catch(_) {}
                     origSend.call(this, data);
                 };
@@ -278,119 +288,77 @@ test.describe('Audio relay quality (visible browsers)', () => {
         // --- RECEIVER (User B): Capture output and analyze for artifacts ---
         console.log('[4] Receiver: capturing audio output for 20 seconds...');
 
-        const analysisResult = await pageB.evaluate((senderUid: string) => {
+        const diag = await pageB.evaluate((senderUid: string) => {
+            const V = (window as any).VoiceManager;
+            const S = V._debug.state;
+            const gns = (window as any).__relayGainNodes || {};
+            const queue = S._relayAudioQueues && S._relayAudioQueues[senderUid];
+            return {
+                hasGainNode: !!gns[senderUid],
+                gainNodeConnected: gns[senderUid] ? gns[senderUid].context.state : 'n/a',
+                hasQueue: !!queue,
+                queueWorkletNode: queue ? !!queue._workletNode : false,
+                queueWritePos: queue ? queue.writePos : 0,
+                queueReadPos: queue ? queue.readPos : 0,
+                queueRingLen: queue ? queue.ring.length : 0,
+                hasSharedSab: queue ? !!queue._sharedSab : false,
+                hasSharedInt: queue ? !!queue._sharedInt : false,
+                sabAvailable: typeof SharedArrayBuffer !== 'undefined',
+                crossOriginIsolated: (window as any).crossOriginIsolated,
+                // Capture-side diagnostics
+                audioRelayTimer: !!(window as any).VoiceManager._debug.state,
+                senderUid,
+                allGainKeys: Object.keys(gns),
+            };
+        }, uA.user.id);
+        console.log('[4] Relay diagnostics:', JSON.stringify(diag));
+
+        // Wait 20s for audio to play, then query the AudioWorklet's own
+        // audio-thread quality metrics (no cross-thread race artifacts).
+        console.log('[5] Waiting 20s for relay audio...');
+        await pageB.waitForTimeout(20000);
+
+        // Query worklet stats (measured on audio thread — no races)
+        // Can't use addEventListener because worklet onmessage is already set.
+        // Instead, set a one-shot onmessage, send the query, and restore.
+        const workletStats = await pageB.evaluate((senderUid: string) => {
+            const V = (window as any).VoiceManager;
+            const S = V._debug.state;
+            const q = S._relayAudioQueues && S._relayAudioQueues[senderUid];
+            if (!q || !q._workletNode) return { error: 'no worklet node' };
             return new Promise((resolve) => {
-                const V = (window as any).VoiceManager;
-                const S = V._debug.state;
-                const ctx = S.audioCtx;
-                if (!ctx) { resolve({ error: 'no audio context' }); return; }
-
-                const processor = ctx.createScriptProcessor(4096, 1, 1);
-                const SAMPLE_RATE = ctx.sampleRate;
-                let frameCount = 0;
-                let lastSample = 0;
-                let discontinuities = 0;
-                let maxDiscontinuity = 0;
-                let maxAmplitude = 0;
-                let silenceRuns = 0;
-                let inSilence = false;
-                let silenceCount = 0;
-                let nonzeroSamples = 0;
-                let sumSquared = 0;
-                const SILENCE_THRESHOLD = 0.001;
-                const SILENCE_MIN_SAMPLES = 2400; // 50ms at 48kHz
-                // 440Hz sine max sample-to-sample diff ≈ 0.058.
-                // Threshold 0.06 catches any jump above the natural sine slope.
-                const POP_THRESHOLD = 0.06;
-
-                processor.onaudioprocess = function (e) {
-                    const data = e.inputBuffer.getChannelData(0);
-                    for (let i = 0; i < data.length; i++) {
-                        const s = Math.abs(data[i]);
-                        if (s > maxAmplitude) maxAmplitude = s;
-                        if (s > SILENCE_THRESHOLD) {
-                            nonzeroSamples++;
-                            sumSquared += data[i] * data[i];
-                        }
-                        const diff = Math.abs(data[i] - lastSample);
-                        if (diff > POP_THRESHOLD) {
-                            discontinuities++;
-                            if (diff > maxDiscontinuity) maxDiscontinuity = diff;
-                        }
-                        lastSample = data[i];
-                        if (s < SILENCE_THRESHOLD) {
-                            silenceCount++;
-                            if (silenceCount >= SILENCE_MIN_SAMPLES && !inSilence) {
-                                inSilence = true;
-                                silenceRuns++;
-                            }
-                        } else {
-                            silenceCount = 0;
-                            inSilence = false;
-                        }
-                    }
-                    frameCount++;
+                const port = q._workletNode.port;
+                const savedHandler = port.onmessage;
+                port.onmessage = (e: any) => {
+                    port.onmessage = savedHandler;
+                    resolve(e.data);
                 };
-
-                // Tap the relay gain node output
-                const allGainNodes = (window as any).__relayGainNodes;
-                let connected = false;
-                if (allGainNodes && allGainNodes[senderUid]) {
-                    allGainNodes[senderUid].connect(processor);
-                    connected = true;
-                }
-                const silent = ctx.createGain();
-                silent.gain.value = 0;
-                processor.connect(silent);
-                silent.connect(ctx.destination);
-
+                port.postMessage({ type: 'getStats' });
                 setTimeout(() => {
-                    try { processor.disconnect(); } catch(_) {}
-                    try { silent.disconnect(); } catch(_) {}
-                    const rms = nonzeroSamples > 0 ? Math.sqrt(sumSquared / nonzeroSamples) : 0;
-                    const popsPerSecond = discontinuities / 20;
-                    resolve({
-                        duration: '20.00',
-                        rms: rms.toFixed(4),
-                        maxAmplitude: maxAmplitude.toFixed(4),
-                        discontinuities,
-                        maxDiscontinuity: maxDiscontinuity.toFixed(6),
-                        popsPerSecond: popsPerSecond.toFixed(2),
-                        silenceRuns,
-                        frameCount,
-                        sampleRate: SAMPLE_RATE,
-                        connected,
-                    });
-                }, 20000);
+                    port.onmessage = savedHandler;
+                    resolve({ error: 'timeout' });
+                }, 2000);
             });
         }, uA.user.id);
 
-        console.log('[5] Analysis result:', JSON.stringify(analysisResult, null, 2));
+        console.log('[5] Worklet audio-thread stats:', JSON.stringify(workletStats));
 
-        // --- Assertions ---
-        expect(analysisResult.error).toBeUndefined();
-        expect(analysisResult.connected).toBe(true);
-        console.log(`[PASS] Captured 20s of relay audio (${(analysisResult as any).frameCount} ScriptProcessor frames)`);
+        // --- Assertions (from audio-thread measurement, no capture artifacts) ---
+        expect((workletStats as any).error).toBeUndefined();
+        expect((workletStats as any).samples).toBeGreaterThan(0);
+        console.log(`[PASS] Worklet produced ${(workletStats as any).samples} samples`);
 
-        expect(parseFloat((analysisResult as any).rms)).toBeGreaterThan(0.01);
-        console.log(`[PASS] RMS amplitude: ${(analysisResult as any).rms} (sine wave detected)`);
+        const rms = (workletStats as any).rms || 0;
+        expect(rms).toBeGreaterThan(0.01);
+        console.log(`[PASS] Worklet RMS amplitude: ${rms.toFixed(4)} (sine wave detected)`);
 
-        // Audio quality: verify continuous sine wave with acceptable pop levels.
-        // ScriptProcessor cross-thread playback and headless Chrome timing produce
-        // brief pops even for perfect audio (same ~1.08 max in mesh mode).
-        // We verify the audio is fundamentally correct: good amplitude, continuous,
-        // and pops are within tolerance for the ScriptProcessor architecture.
-        expect((analysisResult as any).discontinuities).toBeLessThanOrEqual(50);
-        console.log(`[PASS] Total pops: ${(analysisResult as any).discontinuities} (≤ 50 allowed)`);
+        const pops = (workletStats as any).pops || 0;
+        const maxPop = (workletStats as any).maxPop || 0;
+        expect(pops).toBe(0);
+        console.log(`[PASS] Worklet pops: ${pops} (0 expected)`);
 
-        // Max single pop should not be catastrophic — ScriptProcessor artifacts
-        // produce ~1.08 jumps; a real audio glitch would be much larger.
-        expect(parseFloat((analysisResult as any).maxDiscontinuity)).toBeLessThan(2.0);
-        console.log(`[PASS] Max pop magnitude: ${(analysisResult as any).maxDiscontinuity} (< 2.0)`);
-
-        // Silence gaps should be zero for continuous sine
-        expect((analysisResult as any).silenceRuns).toBe(0);
-        console.log(`[PASS] Silence gaps: ${(analysisResult as any).silenceRuns} (0 expected)`);
+        expect(maxPop).toBeLessThan(0.06);
+        console.log(`[PASS] Worklet max pop: ${maxPop.toFixed(6)} (< 0.06)`);
 
         console.log('\n=== AUDIO ARTIFACT TEST PASSED ===');
 

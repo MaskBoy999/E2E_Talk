@@ -11582,6 +11582,7 @@ function connectWebSocket(t) {
     }
     const protocol = isSecure ? 'wss:' : 'ws:';
     ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+    ws.binaryType = 'arraybuffer';
     window.ws = ws;
 
     ws.onopen = () => {
@@ -11602,6 +11603,22 @@ function connectWebSocket(t) {
     };
 
     ws.onmessage = async (event) => {
+        // Binary relay frames: [0x01 marker][uid_len][uid][kind][nonce:24][ciphertext]
+        if (event.data instanceof ArrayBuffer) {
+            var u8 = new Uint8Array(event.data);
+            console.log('[WS-BINARY] Received binary frame, len=' + u8.length + ', marker=' + u8[0]);
+            if (u8.length > 0 && u8[0] === 1) {
+                // Binary relay frame — dispatch to VoiceManager
+                if (window.VoiceManager && window.VoiceManager.handleBinaryRelay) {
+                    window.VoiceManager.handleBinaryRelay(event.data);
+                } else {
+                    console.log('[WS-BINARY] VoiceManager.handleBinaryRelay not available');
+                }
+                return;
+            }
+            // Other binary message — ignore
+            return;
+        }
         const data = JSON.parse(event.data);
 
         // Voice calls / voice channels — handled by VoiceManager

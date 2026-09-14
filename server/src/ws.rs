@@ -22,6 +22,14 @@ use chrono::Utc;
 use crate::auth;
 use crate::AppState;
 
+/// Message variant for the WebSocket channel: either text (JSON) or raw binary.
+/// Relay frames use Binary to skip JSON serialization/deserialization entirely.
+#[derive(Clone)]
+pub enum WsMessage {
+    Text(String),
+    Binary(Vec<u8>),
+}
+
 /// Compute the fixed-width RFC3339 expiry for a disappearing-message TTL in
 /// seconds (same format as message timestamps so lexicographic comparison
 /// works). None when ttl_seconds is absent or outside the 5s..24h bounds.
@@ -240,7 +248,7 @@ async fn voice_broadcast_server_presence(state: &Arc<AppState>, server_id: &str)
 }
 
 pub struct WsManager {
-    connections: tokio::sync::RwLock<std::collections::HashMap<u64, (String, Option<String>, mpsc::UnboundedSender<String>)>>,
+    connections: tokio::sync::RwLock<std::collections::HashMap<u64, (String, Option<String>, mpsc::UnboundedSender<WsMessage>)>>,
 }
 
 impl WsManager {
@@ -250,7 +258,7 @@ impl WsManager {
         }
     }
 
-    pub async fn add_connection(&self, user_id: String, device_id: Option<String>, sender: mpsc::UnboundedSender<String>) -> u64 {
+    pub async fn add_connection(&self, user_id: String, device_id: Option<String>, sender: mpsc::UnboundedSender<WsMessage>) -> u64 {
         // Remove any existing connection for this device
         if let Some(ref dev_id) = device_id {
             let mut conns = self.connections.write().await;
@@ -274,7 +282,7 @@ impl WsManager {
         let mut ids = Vec::new();
         for (id, (uid, _did, sender)) in conns.iter() {
             if uid == user_id {
-                let _ = sender.send(message.to_string());
+                let _ = sender.send(WsMessage::Text(message.to_string()));
                 ids.push(*id);
             }
         }
@@ -293,7 +301,7 @@ impl WsManager {
         let conns = self.connections.read().await;
         for (uid, did, sender) in conns.values() {
             if uid == user_id && did.as_deref() == Some(device_id) {
-                let _ = sender.send(message.to_string());
+                let _ = sender.send(WsMessage::Text(message.to_string()));
             }
         }
     }
@@ -302,7 +310,18 @@ impl WsManager {
         let conns = self.connections.read().await;
         for (uid, _did, sender) in conns.values() {
             if user_ids.contains(uid) {
-                let _ = sender.send(message.to_string());
+                let _ = sender.send(WsMessage::Text(message.to_string()));
+            }
+        }
+    }
+
+    /// Broadcast binary data to the given users. Used for relay frames to avoid
+    /// JSON serialization/deserialization overhead.
+    pub async fn broadcast_binary_to_users(&self, user_ids: &[String], data: Vec<u8>) {
+        let conns = self.connections.read().await;
+        for (uid, _did, sender) in conns.values() {
+            if user_ids.contains(uid) {
+                let _ = sender.send(WsMessage::Binary(data.clone()));
             }
         }
     }
@@ -317,7 +336,7 @@ impl WsManager {
             if user_ids.contains(uid) {
                 let is_excluded = !exclude_device.is_empty() && did.as_deref() == Some(exclude_device);
                 if !is_excluded {
-                    let _ = sender.send(message.to_string());
+                    let _ = sender.send(WsMessage::Text(message.to_string()));
                 }
             }
         }
@@ -326,7 +345,7 @@ impl WsManager {
     pub async fn broadcast_to_server(&self, _server_id: &str, message: &str) {
         let conns = self.connections.read().await;
         for (_conn_id, _did, sender) in conns.values() {
-            let _ = sender.send(message.to_string());
+            let _ = sender.send(WsMessage::Text(message.to_string()));
         }
     }
 
@@ -345,7 +364,7 @@ impl WsManager {
     pub async fn broadcast_all(&self, message: &str) {
         let conns = self.connections.read().await;
         for (_, _, sender) in conns.values() {
-            let _ = sender.send(message.to_string());
+            let _ = sender.send(WsMessage::Text(message.to_string()));
         }
     }
 }
@@ -636,7 +655,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, client_ip: Strin
         }
     }
 
-    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    let (tx, mut rx) = mpsc::unbounded_channel::<WsMessage>();
 
     let conn_id = state.ws_manager.add_connection(user_id.clone(), device_id.clone(), tx).await;
 
@@ -652,7 +671,11 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, client_ip: Strin
 
     let mut send_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            if sender.send(Message::Text(msg.into())).await.is_err() {
+            let ws_msg = match msg {
+                WsMessage::Text(s) => Message::Text(s.into()),
+                WsMessage::Binary(b) => Message::Binary(b.into()),
+            };
+            if sender.send(ws_msg).await.is_err() {
                 break;
             }
         }
@@ -666,6 +689,9 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, client_ip: Strin
             match msg {
                 Message::Text(text) => {
                     handle_ws_message(text.as_str(), &state_clone, &user_id_clone).await;
+                }
+                Message::Binary(data) => {
+                    handle_ws_binary(&data, &state_clone, &user_id_clone).await;
                 }
                 Message::Close(_) => break,
                 _ => {}
@@ -726,6 +752,195 @@ pub(crate) async fn deliver_encrypted_notification(
             let _ = state.db.save_pending_notification(uid, notification_type, payload, state.config.hmac_key.as_bytes());
         }
     }
+}
+
+// ========================= Binary WebSocket protocol =========================
+// Relay frames use a compact binary format to avoid JSON serialization overhead.
+//
+// Client → Server binary relay frame:
+//   [kind: u8]                 0=camera, 1=screen, 2=audio
+//   [room_type_len: u8]
+//   [room_type: utf8]
+//   [channel_id_len: u16 LE]
+//   [channel_id: utf8]
+//   [dm_channel_id_len: u16 LE]
+//   [dm_channel_id: utf8]
+//   [nonce: 24 bytes]
+//   [ciphertext: remaining bytes]
+//
+// Server → Client binary relay frame:
+//   [0x01: marker]             identifies this as a binary relay frame
+//   [from_user_id_len: u8]
+//   [from_user_id: utf8]
+//   [kind: u8]
+//   [nonce: 24 bytes]
+//   [ciphertext: remaining bytes]
+
+fn read_u8(data: &[u8], pos: &mut usize) -> Option<u8> {
+    if *pos >= data.len() { return None; }
+    let v = data[*pos];
+    *pos += 1;
+    Some(v)
+}
+
+fn read_u16_le(data: &[u8], pos: &mut usize) -> Option<u16> {
+    if *pos + 2 > data.len() { return None; }
+    let v = u16::from_le_bytes([data[*pos], data[*pos + 1]]);
+    *pos += 2;
+    Some(v)
+}
+
+fn read_bytes<'a>(data: &'a [u8], pos: &mut usize, len: usize) -> Option<&'a [u8]> {
+    if *pos + len > data.len() { return None; }
+    let slice = &data[*pos..*pos + len];
+    *pos += len;
+    Some(slice)
+}
+
+fn kind_to_str(kind: u8) -> &'static str {
+    match kind {
+        0 => "camera",
+        1 => "screen",
+        2 => "audio",
+        _ => "camera",
+    }
+}
+
+fn str_to_kind(s: &str) -> u8 {
+    match s {
+        "camera" => 0,
+        "screen" => 1,
+        "audio" => 2,
+        _ => 0,
+    }
+}
+
+/// Encode a user ID + kind + nonce + ciphertext into the server→client binary
+/// relay frame format. Returns a pre-allocated Vec<u8>.
+fn encode_binary_relay_out(from_uid: &str, kind: u8, nonce: &[u8], ciphertext: &[u8]) -> Vec<u8> {
+    let uid_bytes = from_uid.as_bytes();
+    let total = 1 + 1 + uid_bytes.len() + 1 + nonce.len() + ciphertext.len();
+    let mut out = Vec::with_capacity(total);
+    out.push(0x01); // relay marker
+    out.push(uid_bytes.len() as u8);
+    out.extend_from_slice(uid_bytes);
+    out.push(kind);
+    out.extend_from_slice(nonce);
+    out.extend_from_slice(ciphertext);
+    out
+}
+
+/// Handle an incoming binary WebSocket message. Only relay frames use binary;
+/// everything else falls through to the text handler.
+async fn handle_ws_binary(
+    data: &[u8],
+    state: &Arc<AppState>,
+    user_id: &str,
+) {
+    if data.is_empty() { return; }
+
+    // Binary relay frames from client: first byte is kind (0/1/2).
+    // We verify it's a valid kind before proceeding.
+    let mut pos = 0;
+    let kind_byte = match read_u8(data, &mut pos) {
+        Some(k) if k <= 2 => k,
+        _ => return,
+    };
+    let kind_str = kind_to_str(kind_byte);
+
+    // room_type_len (u8)
+    let rt_len = match read_u8(data, &mut pos) {
+        Some(l) => l as usize,
+        None => return,
+    };
+    let room_type = match read_bytes(data, &mut pos, rt_len) {
+        Some(b) => match std::str::from_utf8(b) { Ok(s) => s.to_string(), Err(_) => return },
+        None => return,
+    };
+
+    // channel_id_len (u16 LE)
+    let ci_len = match read_u16_le(data, &mut pos) {
+        Some(l) => l as usize,
+        None => return,
+    };
+    let channel_id = match read_bytes(data, &mut pos, ci_len) {
+        Some(b) => match std::str::from_utf8(b) { Ok(s) => s.to_string(), Err(_) => return },
+        None => return,
+    };
+
+    // dm_channel_id_len (u16 LE)
+    let di_len = match read_u16_le(data, &mut pos) {
+        Some(l) => l as usize,
+        None => return,
+    };
+    let dm_channel_id = match read_bytes(data, &mut pos, di_len) {
+        Some(b) => match std::str::from_utf8(b) { Ok(s) => s.to_string(), Err(_) => return },
+        None => return,
+    };
+
+    // nonce (24 bytes)
+    let nonce = match read_bytes(data, &mut pos, 24) {
+        Some(b) => b,
+        None => return,
+    };
+
+    // ciphertext = remaining bytes
+    let ciphertext = &data[pos..];
+
+    let room_id = voice_room_id(&room_type, &channel_id, &dm_channel_id);
+
+    // Rate limit
+    if !VOICE_SIGNAL_LIMITER.check_and_increment(
+        &format!("voice_media:{}", user_id),
+        3000,
+        Duration::from_secs(10),
+    ) {
+        return;
+    }
+
+    // Sender must be in the room
+    let is_member = {
+        let rooms = match state.voice_rooms.read() {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        match rooms.get(&room_id) {
+            Some(room) => room.members.contains_key(user_id),
+            None => false,
+        }
+    };
+    if !is_member { return; }
+
+    // Drop audio from muted users
+    if kind_str == "audio" {
+        let muted = {
+            let rooms = match state.voice_rooms.read() {
+                Ok(r) => r,
+                Err(_) => return,
+            };
+            rooms.get(&room_id)
+                .and_then(|room| room.members.get(user_id))
+                .map(|m| m.force_muted || m.muted)
+                .unwrap_or(true)
+        };
+        if muted { return; }
+    }
+
+    // Collect member IDs (excluding sender)
+    let ids: Vec<String> = {
+        let rooms = match state.voice_rooms.read() {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        match rooms.get(&room_id) {
+            Some(room) => room.members.keys().filter(|id| id.as_str() != user_id).cloned().collect(),
+            None => return,
+        }
+    };
+
+    // Build server→client binary relay frame: [0x01][uid_len][uid][kind][nonce][ciphertext]
+    let binary_frame = encode_binary_relay_out(user_id, kind_byte, nonce, ciphertext);
+    state.ws_manager.broadcast_binary_to_users(&ids, binary_frame).await;
 }
 
 async fn handle_ws_message(

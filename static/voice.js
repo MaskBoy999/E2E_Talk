@@ -170,6 +170,7 @@
     var VoiceManager = {
         init: init,
         onWsMessage: onWsMessage,
+        handleBinaryRelay: handleBinaryRelay,
         onViewChanged: onViewChanged,
         navigateToVoiceChannel: navigateToVoiceChannel,
         exitVoiceChannelView: exitVoiceChannelView,
@@ -938,6 +939,59 @@
                 }
             }
             w.send(JSON.stringify(payload));
+        }
+    }
+
+    // Binary relay protocol: encode/decode relay frames as binary to avoid
+    // JSON serialization overhead on both client and server.
+    //
+    // Client → Server:  [kind:u8][rt_len:u8][rt][ci_len:u16LE][ci][di_len:u16LE][di][nonce:24][ciphertext]
+    // Server → Client:  [0x01 marker][uid_len:u8][uid][kind:u8][nonce:24][ciphertext]
+
+    function encodeRelayBinary(kindStr, nonce, ciphertext) {
+        var kindByte = kindStr === 'screen' ? 1 : kindStr === 'audio' ? 2 : 0;
+        var rt = (S.roomType || 'server');
+        var ci = (S.channelId || '');
+        var di = (S.dmChannelId || '');
+        var rtBytes = new TextEncoder().encode(rt);
+        var ciBytes = new TextEncoder().encode(ci);
+        var diBytes = new TextEncoder().encode(di);
+        var nonceBytes = (typeof nonce === 'string') ? new Uint8Array(E2ECrypto.base64ToArrayBuffer(nonce)) : nonce;
+        var total = 1 + 1 + rtBytes.length + 2 + ciBytes.length + 2 + diBytes.length + 24 + ciphertext.length;
+        var buf = new ArrayBuffer(total);
+        var view = new DataView(buf);
+        var u8 = new Uint8Array(buf);
+        var pos = 0;
+        u8[pos++] = kindByte;
+        u8[pos++] = rtBytes.length;
+        u8.set(rtBytes, pos); pos += rtBytes.length;
+        view.setUint16(pos, ciBytes.length, true); pos += 2;
+        u8.set(ciBytes, pos); pos += ciBytes.length;
+        view.setUint16(pos, diBytes.length, true); pos += 2;
+        u8.set(diBytes, pos); pos += diBytes.length;
+        u8.set(nonceBytes, pos); pos += 24;
+        u8.set(ciphertext, pos);
+        return buf;
+    }
+
+    function decodeRelayBinaryIn(data) {
+        // Server → Client: [0x01][uid_len][uid][kind][nonce:24][ciphertext]
+        var u8 = new Uint8Array(data);
+        var pos = 0;
+        if (u8[pos++] !== 1) return null; // not a relay marker
+        var uidLen = u8[pos++];
+        var uid = new TextDecoder().decode(u8.slice(pos, pos + uidLen)); pos += uidLen;
+        var kindByte = u8[pos++];
+        var kindStr = kindByte === 1 ? 'screen' : kindByte === 2 ? 'audio' : 'camera';
+        var nonce = u8.slice(pos, pos + 24); pos += 24;
+        var ciphertext = u8.slice(pos);
+        return { fromUid: uid, kind: kindStr, nonce: nonce, ciphertext: ciphertext };
+    }
+
+    function sendRelayBinary(kindStr, nonce, ciphertext) {
+        var w = getWs();
+        if (w && w.readyState === WebSocket.OPEN) {
+            w.send(encodeRelayBinary(kindStr, nonce, ciphertext));
         }
     }
 
@@ -7592,14 +7646,7 @@
                                 }
                                 var raw = new Uint8Array(buf);
                                 var enc = E2ECrypto.aeadEncrypt(raw, reusableKeyBytes);
-                                send({
-                                    type: 'voice_media_relay',
-                                    room_type: S.roomType,
-                                    channel_id: S.channelId || '',
-                                    dm_channel_id: S.dmChannelId || '',
-                                    kind: kind,
-                                    frame: { e: enc.ciphertext, n: enc.nonce },
-                                });
+                                sendRelayBinary(kind, enc.nonce, new Uint8Array(E2ECrypto.base64ToArrayBuffer(enc.ciphertext)));
                                 busy = false;
                             }).catch(function () { busy = false; });
                         }, 'image/jpeg', S.settings.relayVideoQuality || 0.6);
@@ -7655,6 +7702,69 @@
     function stopAllVideoRelays() {
         stopVideoRelay('camera');
         stopVideoRelay('screen');
+    }
+
+    // Handle incoming binary relay frame from server.
+    // Format: [0x01 marker][uid_len:u8][uid][kind:u8][nonce:24][ciphertext]
+    function handleBinaryRelay(arrayBuffer) {
+        try {
+            var decoded = decodeRelayBinaryIn(arrayBuffer);
+            if (!decoded) { console.log('[BIN-RELAY] decode failed'); return; }
+            if (decoded.fromUid === getSelfId()) return;
+            if (!S.roomKeyB64) { console.log('[BIN-RELAY] no roomKeyB64'); return; }
+            var keyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(S.roomKeyB64));
+            var plaintext;
+            try {
+                plaintext = E2ECrypto.aeadDecrypt(
+                    E2ECrypto.arrayBufferToBase64(decoded.ciphertext.buffer),
+                    keyBytes,
+                    E2ECrypto.arrayBufferToBase64(decoded.nonce.buffer)
+                );
+            } catch (e) { console.log('[BIN-RELAY] decrypt failed:', e); return; }
+
+            if (decoded.kind === 'audio') {
+                console.log('[BIN-RELAY] audio frame from', decoded.fromUid, 'len=' + plaintext.length);
+                handleRelayedAudioFrame(decoded.fromUid, plaintext);
+                return;
+            }
+
+            // Video frame — render as <img>
+            var blob = new Blob([plaintext], { type: 'image/jpeg' });
+            var url = URL.createObjectURL(blob);
+            var frameKey = decoded.fromUid + '_' + decoded.kind;
+
+            if (S._relayVideoFrames[frameKey]) {
+                URL.revokeObjectURL(S._relayVideoFrames[frameKey]);
+            }
+            S._relayVideoFrames[frameKey] = url;
+
+            var existingImg = document.querySelector('img.remote-video-tile[data-uid="' + decoded.fromUid + '"][data-kind="' + decoded.kind + '"]');
+            if (existingImg) {
+                var oldUrl = existingImg.src;
+                existingImg.src = url;
+                if (oldUrl && oldUrl.startsWith('blob:')) URL.revokeObjectURL(oldUrl);
+            } else {
+                var videoTile = document.querySelector('video.remote-video-tile[data-uid="' + decoded.fromUid + '"][data-kind="' + decoded.kind + '"]');
+                var parent = videoTile ? videoTile.parentElement : null;
+                if (videoTile) {
+                    videoTile.style.display = 'none';
+                }
+                if (parent) {
+                    var img = document.createElement('img');
+                    img.src = url;
+                    img.className = 'remote-video-tile relay-video';
+                    img.setAttribute('data-uid', decoded.fromUid);
+                    img.setAttribute('data-kind', decoded.kind);
+                    img.style.cssText = 'display:block !important;height:100% !important;width:auto !important;max-width:46%;object-fit:contain;border-radius:8px;cursor:pointer;background:#000;border:1px solid var(--bg-border, #2a2a4a);';
+                    (function (el) { el.addEventListener('click', function () { toggleFullscreen(el); }); })(img);
+                    parent.insertBefore(img, videoTile);
+                }
+            }
+
+            if (!S.members[decoded.fromUid]) S.members[decoded.fromUid] = {};
+            S.members[decoded.fromUid][decoded.kind === 'camera' ? 'camera' : 'screen'] = true;
+            S.members[decoded.fromUid]['_relay_' + decoded.kind] = Date.now();
+        } catch (_) {}
     }
 
     // Handle an incoming relayed video frame from the server.
@@ -7961,6 +8071,11 @@
     // Audio relay capture loop: captures mic PCM, encrypts, sends via WebSocket.
     var _audioRelayTimer = null;
 
+    var _relayCaptureSab = null; // SharedArrayBuffer for capture worklet → main thread
+    var _relayCaptureInt = null; // Int32 view (writePos at [0], readPos at [1])
+    var _relayCaptureFloat = null; // Float32 view starting at byte 8
+    var _relayCapturePoll = null; // interval for polling capture SAB
+
     function startAudioRelay() {
         if (_audioRelayTimer) return;
         if (!S.localStreams.mic) return;
@@ -7969,13 +8084,86 @@
         var audioCtx = ensureAudioCtx();
         if (!audioCtx) return;
         var source = audioCtx.createMediaStreamSource(stream);
-        // 2048 samples at 48kHz ≈ 43ms — bigger buffer = fewer packets, smoother relay
-        var processor = audioCtx.createScriptProcessor(2048, 1, 1);
 
+        // SharedArrayBuffer for lock-free capture → main thread communication.
+        // Worklet writes samples on the audio thread; main thread polls and sends.
+        var SAB_SIZE = 8 + RELAY_SAMPLE_RATE * 4; // header + 1 second of Float32
+        if (typeof SharedArrayBuffer !== 'undefined' && audioCtx.audioWorklet) {
+            _relayCaptureSab = new SharedArrayBuffer(SAB_SIZE);
+            _relayCaptureInt = new Int32Array(_relayCaptureSab);
+            _relayCaptureFloat = new Float32Array(_relayCaptureSab, 8);
+            Atomics.store(_relayCaptureInt, 0, 0); // writePos
+            Atomics.store(_relayCaptureInt, 1, 0); // readPos
+
+            var startCaptureWorklet = function () {
+                var node = new AudioWorkletNode(audioCtx, 'relay-capture-processor', {
+                    processorOptions: { sharedBuffer: _relayCaptureSab }
+                });
+                source.connect(node);
+                var silent = audioCtx.createGain();
+                silent.gain.value = 0;
+                node.connect(silent);
+                silent.connect(audioCtx.destination);
+                _audioRelayTimer = { source: source, node: node, silent: silent };
+
+                // Poll the SAB every 10ms and send captured audio
+                _relayCapturePoll = setInterval(function () {
+                    try {
+                        if (!S.connected || !S.roomKeyB64 || S.muted || S.deafened) return;
+                        var w = getWs();
+                        if (!w || w.readyState !== WebSocket.OPEN) return;
+                        if (w.bufferedAmount > 256 * 1024) return;
+
+                        var readPos = Atomics.load(_relayCaptureInt, 1);
+                        var writePos = Atomics.load(_relayCaptureInt, 0);
+                        var ringLen = _relayCaptureFloat.length;
+                        var avail = (writePos - readPos + ringLen) % ringLen;
+                        if (avail < RELAY_FRAME_SAMPLES) return;
+
+                        // Read RELAY_FRAME_SAMPLES (2048) from the SAB
+                        var pcm = new Float32Array(RELAY_FRAME_SAMPLES);
+                        for (var i = 0; i < RELAY_FRAME_SAMPLES; i++) {
+                            pcm[i] = _relayCaptureFloat[(readPos + i) % ringLen];
+                        }
+                        Atomics.store(_relayCaptureInt, 1, (readPos + RELAY_FRAME_SAMPLES) % ringLen);
+
+                        var int16 = new Int16Array(pcm.length);
+                        for (var i = 0; i < pcm.length; i++) {
+                            var s = Math.max(-1, Math.min(1, pcm[i]));
+                            int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                        }
+                        var raw = new Uint8Array(int16.buffer);
+                        var keyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(S.roomKeyB64));
+                        var enc = E2ECrypto.aeadEncrypt(raw, keyBytes);
+                        sendRelayBinary('audio', enc.nonce, new Uint8Array(E2ECrypto.base64ToArrayBuffer(enc.ciphertext)));
+                    } catch (_) {}
+                }, 10);
+            };
+
+            // Load capture worklet module with timeout fallback
+            var fallbackTimer = setTimeout(function () {
+                console.warn('[VOICE] Capture AudioWorklet addModule timed out, using ScriptProcessor fallback');
+                startAudioRelayFallback(source, audioCtx);
+            }, 2000);
+            audioCtx.audioWorklet.addModule('relay-capture-processor.js').then(function () {
+                clearTimeout(fallbackTimer);
+                startCaptureWorklet();
+            }).catch(function (e) {
+                clearTimeout(fallbackTimer);
+                console.warn('[VOICE] Capture AudioWorklet addModule failed:', e, 'using ScriptProcessor fallback');
+                startAudioRelayFallback(source, audioCtx);
+            });
+        } else {
+            startAudioRelayFallback(source, audioCtx);
+        }
+    }
+
+    function startAudioRelayFallback(source, audioCtx) {
+        // ScriptProcessor fallback (legacy path — may have sample-skip issues)
+        var processor = audioCtx.createScriptProcessor(2048, 1, 1);
         processor.onaudioprocess = function (e) {
             try {
                 if (!S.connected || !S.roomKeyB64 || S.muted || S.deafened) return;
-                // Backpressure: skip frame if WS send buffer is backed up
                 var w = getWs();
                 if (!w || w.readyState !== WebSocket.OPEN) return;
                 if (w.bufferedAmount > 256 * 1024) return;
@@ -7988,19 +8176,10 @@
                 var raw = new Uint8Array(int16.buffer);
                 var keyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(S.roomKeyB64));
                 var enc = E2ECrypto.aeadEncrypt(raw, keyBytes);
-                send({
-                    type: 'voice_media_relay',
-                    room_type: S.roomType,
-                    channel_id: S.channelId || '',
-                    dm_channel_id: S.dmChannelId || '',
-                    kind: 'audio',
-                    frame: { e: enc.ciphertext, n: enc.nonce },
-                });
+                sendRelayBinary('audio', enc.nonce, new Uint8Array(E2ECrypto.base64ToArrayBuffer(enc.ciphertext)));
             } catch (_) {}
         };
-
         source.connect(processor);
-        // Connect to a silent gain node (required for ScriptProcessorNode to fire events)
         var silent = audioCtx.createGain();
         silent.gain.value = 0;
         processor.connect(silent);
@@ -8009,9 +8188,20 @@
     }
 
     function stopAudioRelay() {
+        if (_relayCapturePoll) {
+            clearInterval(_relayCapturePoll);
+            _relayCapturePoll = null;
+        }
+        _relayCaptureSab = null;
+        _relayCaptureInt = null;
+        _relayCaptureFloat = null;
         if (_audioRelayTimer) {
             try {
-                _audioRelayTimer.processor.disconnect();
+                if (_audioRelayTimer.processor) _audioRelayTimer.processor.disconnect();
+                if (_audioRelayTimer.node) {
+                    try { _audioRelayTimer.node.port.postMessage({ type: 'stop' }); } catch (_) {}
+                    _audioRelayTimer.node.disconnect();
+                }
                 _audioRelayTimer.source.disconnect();
                 if (_audioRelayTimer.silent) _audioRelayTimer.silent.disconnect();
             } catch (_) {}
@@ -8025,8 +8215,25 @@
     var _relayGainNodes = {}; // uid → GainNode
     var _relayPlaybackTimers = {}; // uid → intervalId
     var RELAY_SAMPLE_RATE = 48000;
-    var RELAY_FRAME_SAMPLES = 2048; // must match sender buffer size
+    var RELAY_FRAME_SAMPLES = 2048; // must match sender buffer size (2048 = ~43ms at 48kHz)
     var RELAY_JITTER_MS = 60; // buffer 60ms before playing (≈1.5 frames)
+    var RELAY_RING_LEN = RELAY_SAMPLE_RATE * 3; // 3 seconds of ring buffer
+
+    // SharedArrayBuffer layout for lock-free main-thread → AudioWorklet communication:
+    //   Int32[0] = writePos  (main thread writes via Atomics.store)
+    //   Int32[1] = readPos   (worklet writes via Atomics.store)
+    //   Float32[2..] = ring buffer samples
+    var RELAY_SHARED_HEADER_BYTES = 8; // 2 x Int32
+
+    function createRelaySharedBuffer() {
+        if (typeof SharedArrayBuffer === 'undefined') return null;
+        var byteLength = RELAY_SHARED_HEADER_BYTES + RELAY_RING_LEN * 4;
+        var sab = new SharedArrayBuffer(byteLength);
+        var intView = new Int32Array(sab);
+        Atomics.store(intView, 0, 0); // writePos = 0
+        Atomics.store(intView, 1, 0); // readPos = 0
+        return sab;
+    }
 
     function getOrCreateMemberGain(uid) {
         if (_relayGainNodes[uid]) return _relayGainNodes[uid];
@@ -8047,6 +8254,10 @@
         }
         if (_relayPlaybackTimers[uid]) {
             var t = _relayPlaybackTimers[uid];
+            if (t.node) {
+                try { t.node.port.postMessage({ type: 'stop' }); } catch (_) {}
+                try { t.node.disconnect(); } catch (_) {}
+            }
             if (t.processor) {
                 try { t.processor.disconnect(); } catch (_) {}
             }
@@ -8071,19 +8282,49 @@
             }
 
             if (!S._relayAudioQueues[fromUid]) {
+                var sharedSab = createRelaySharedBuffer();
                 S._relayAudioQueues[fromUid] = {
-                    ring: new Float32Array(RELAY_SAMPLE_RATE * 3),
+                    ring: new Float32Array(RELAY_RING_LEN),
                     writePos: 0,
                     readPos: 0,
+                    _workletNode: null,
+                    _sharedSab: sharedSab,
+                    _sharedInt: sharedSab ? new Int32Array(sharedSab) : null,
+                    _sharedFloat: sharedSab ? new Float32Array(sharedSab, RELAY_SHARED_HEADER_BYTES) : null,
                 };
                 startRelayPlayback(fromUid);
             }
 
             var q = S._relayAudioQueues[fromUid];
+
+            // Lock-free path: write directly to SharedArrayBuffer + Atomics.store.
+            // No postMessage — data is in shared memory the instant writePos advances.
+            if (q._sharedSab && q._sharedFloat && q._sharedInt) {
+                var ringLen = RELAY_RING_LEN;
+                var writePos = Atomics.load(q._sharedInt, 0);
+                var readPos = Atomics.load(q._sharedInt, 1);
+                var avail = (writePos - readPos + ringLen) % ringLen;
+                var free = ringLen - avail;
+                if (float32.length > free) return; // drop frame if full
+                for (var i = 0; i < float32.length; i++) {
+                    q._sharedFloat[writePos] = float32[i];
+                    writePos = (writePos + 1) % ringLen;
+                }
+                Atomics.store(q._sharedInt, 0, writePos); // publish samples atomically
+                return;
+            }
+
+            // Fallback: postMessage path (SharedArrayBuffer unavailable)
+            if (q._workletNode) {
+                q._workletNode.port.postMessage({ samples: float32 });
+                return;
+            }
+
+            // Worklet not ready yet — buffer in the ring (single-threaded, no race)
             var len = float32.length;
-            var avail = (q.writePos - q.readPos + q.ring.length) % q.ring.length;
-            var free = q.ring.length - avail;
-            if (len > free) return;
+            var avail2 = (q.writePos - q.readPos + q.ring.length) % q.ring.length;
+            var free2 = q.ring.length - avail2;
+            if (len > free2) return;
             for (var i = 0; i < len; i++) {
                 q.ring[q.writePos] = float32[i];
                 q.writePos = (q.writePos + 1) % q.ring.length;
@@ -8096,6 +8337,72 @@
         var ctx = ensureAudioCtx();
         if (!ctx) return;
 
+        var q = S._relayAudioQueues[uid];
+        if (!q) return;
+
+        // Ensure the AudioWorklet module is loaded (one-time async).
+        // After addModule resolves, all subsequent addModule calls are instant.
+        var startNode = function () {
+            if (_relayPlaybackTimers[uid]) return; // already started
+
+            // Pass SharedArrayBuffer via processorOptions for lock-free communication.
+            // The worklet reads directly from shared memory — no postMessage on audio thread.
+            var nodeOpts = { processorOptions: {} };
+            if (q._sharedSab) {
+                nodeOpts.processorOptions.sharedBuffer = q._sharedSab;
+            }
+            var node = new AudioWorkletNode(ctx, 'relay-audio-processor', nodeOpts);
+            var silent = ctx.createGain();
+            silent.gain.value = 0;
+
+            var gain = getOrCreateMemberGain(uid);
+            node.connect(gain);
+            node.connect(silent);
+            silent.connect(ctx.destination);
+
+            q._workletNode = node;
+            _relayPlaybackTimers[uid] = { node: node, silent: silent };
+
+            // If SharedArrayBuffer is in use, the worklet reads directly from shared memory.
+            // Only feed initial data via postMessage for the fallback (non-SAB) path.
+            if (!q._sharedSab) {
+                var len = (q.writePos - q.readPos + q.ring.length) % q.ring.length;
+                if (len > 0) {
+                    var chunk = new Float32Array(len);
+                    for (var i = 0; i < len; i++) {
+                        chunk[i] = q.ring[q.readPos];
+                        q.readPos = (q.readPos + 1) % q.ring.length;
+                    }
+                    node.port.postMessage({ samples: chunk });
+                }
+            }
+        };
+
+        if (ctx.audioWorklet) {
+            // addModule is idempotent — resolves instantly if already loaded.
+            // Add a timeout: some environments (headless Chrome, self-signed certs)
+            // may hang the fetch without resolving or rejecting.
+            var fallbackTimer = setTimeout(function () {
+                console.warn('[VOICE] AudioWorklet addModule timed out, using ScriptProcessor fallback for', uid);
+                startRelayPlaybackFallback(uid);
+            }, 2000);
+            ctx.audioWorklet.addModule('relay-audio-processor.js').then(function () {
+                clearTimeout(fallbackTimer);
+                startNode();
+            }).catch(function (e) {
+                clearTimeout(fallbackTimer);
+                console.warn('[VOICE] AudioWorklet addModule failed:', e, 'using ScriptProcessor fallback for', uid);
+                startRelayPlaybackFallback(uid);
+            });
+        } else {
+            startRelayPlaybackFallback(uid);
+        }
+    }
+
+    function startRelayPlaybackFallback(uid) {
+        if (_relayPlaybackTimers[uid]) return;
+        var ctx = ensureAudioCtx();
+        if (!ctx) return;
         var q = S._relayAudioQueues[uid];
         if (!q) return;
 
@@ -8122,7 +8429,6 @@
                 wasSilent = true;
                 prevTail = 0;
                 silentCount++;
-                if (silentCount > 70) { cleanupMemberGain(uid); }
                 return;
             }
             silentCount = 0;

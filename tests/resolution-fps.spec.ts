@@ -463,9 +463,14 @@ test.describe('Resolution and FPS settings', () => {
                 const origSend = (window as any).ws.send;
                 (window as any).ws.send = function (data: any) {
                     try {
-                        const parsed = typeof data === 'string' ? JSON.parse(data) : data;
-                        if (parsed.type === 'voice_media_relay' && parsed.kind === 'camera') {
-                            (S as any)._testFrameCount++;
+                        if (data instanceof ArrayBuffer) {
+                            const u8 = new Uint8Array(data);
+                            if (u8.length > 0 && u8[0] === 0) (S as any)._testFrameCount++;
+                        } else if (typeof data === 'string') {
+                            const parsed = JSON.parse(data);
+                            if (parsed.type === 'voice_media_relay' && parsed.kind === 'camera') {
+                                (S as any)._testFrameCount++;
+                            }
                         }
                     } catch (_) {}
                     origSend.call(this, data);

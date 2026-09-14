@@ -324,6 +324,8 @@ async fn serve_static(
             headers.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
             headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
             headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
+            headers.insert("cross-origin-opener-policy", HeaderValue::from_static("same-origin"));
+            headers.insert("cross-origin-embedder-policy", HeaderValue::from_static("require-corp"));
             headers.insert("strict-transport-security", HeaderValue::from_static(
                 "max-age=31536000; includeSubDomains; preload"
             ));
