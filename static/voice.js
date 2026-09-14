@@ -73,6 +73,12 @@
             speakerVolume: 100,
             noiseSuppressionMode: 'rnnoise', // 'off' | 'browser' | 'rnnoise'
             echoCancellation: false,          // Chrome's AEC on the mic (default OFF)
+            // Audio quality (Settings → Voice → Audio Quality). Send = the
+            // capture sample rate / Opus bitrate for the mic; receive = the
+            // max playback rate requested from senders (mesh) or the relay
+            // ring buffer sample rate. Values: 'low' | 'medium' | 'high' | 'ultra'.
+            sendAudioQuality: 'medium',       // default 16 kHz ~32 kbps
+            recvAudioQuality: 'medium',       // default 16 kHz playback
             // Haptic cues (mobile). hapticIncoming: vibrate when a NEW
             // incoming ring starts (notice a call on silent mode).
             // hapticWaiting: vibrate when the ring flips to the waiting state
@@ -112,7 +118,8 @@
             sendScreenRes: 480,
             recvCameraRes: 360,
             recvScreenRes: 480,
-            relayVideoFps: 30,
+            relayVideoFps: 15,
+            relayVideoQuality: 0.6,
             // When ON, remote camera/screen feeds are NOT auto-loaded: each
             // feed shows a "Load" button (per user AND per kind) and is
             // attached only when clicked. Right-click menus are unaffected.
@@ -600,6 +607,10 @@
         if (ns) ns.value = S.settings.noiseSuppressionMode || 'rnnoise';
         var ec = document.getElementById('voice-echo-cancellation');
         if (ec) ec.checked = !!S.settings.echoCancellation;
+        var saq = document.getElementById('voice-send-audio-quality');
+        if (saq) saq.value = S.settings.sendAudioQuality || 'medium';
+        var raq = document.getElementById('voice-recv-audio-quality');
+        if (raq) raq.value = S.settings.recvAudioQuality || 'medium';
         // hear-self is now a button, not a checkbox — no sync needed
         var hi = document.getElementById('voice-haptic-incoming');
         if (hi) hi.checked = S.settings.hapticIncoming !== false;
@@ -650,7 +661,9 @@
         var rs = document.getElementById('voice-recv-screen-res');
         if (rs) rs.value = S.settings.recvScreenRes || 480;
         var rf = document.getElementById('voice-relay-video-fps');
-        if (rf) rf.value = S.settings.relayVideoFps || 30;
+        if (rf) rf.value = S.settings.relayVideoFps || 15;
+        var jq = document.getElementById('voice-relay-jpeg-quality');
+        if (jq) jq.value = S.settings.relayVideoQuality || 0.6;
         var ml = document.getElementById('voice-manual-video-load');
         if (ml) ml.checked = !!S.settings.manualVideoLoad;
         var vm = document.getElementById('voice-video-mesh-mode');
@@ -949,7 +962,7 @@
     // Server → Client:  [0x01 marker][uid_len:u8][uid][kind:u8][nonce:24][ciphertext]
 
     function encodeRelayBinary(kindStr, nonce, ciphertext) {
-        var kindByte = kindStr === 'screen' ? 1 : kindStr === 'audio' ? 2 : 0;
+        var kindByte = kindStr === 'screen' ? 1 : kindStr === 'audio' ? 2 : kindStr === 'audio_low' ? 3 : kindStr === 'audio_med' ? 4 : kindStr === 'audio_high' ? 5 : kindStr === 'audio_ultra' ? 6 : 0;
         var rt = (S.roomType || 'server');
         var ci = (S.channelId || '');
         var di = (S.dmChannelId || '');
@@ -982,7 +995,7 @@
         var uidLen = u8[pos++];
         var uid = new TextDecoder().decode(u8.slice(pos, pos + uidLen)); pos += uidLen;
         var kindByte = u8[pos++];
-        var kindStr = kindByte === 1 ? 'screen' : kindByte === 2 ? 'audio' : 'camera';
+        var kindStr = kindByte === 1 ? 'screen' : kindByte === 2 ? 'audio' : kindByte === 3 ? 'audio_low' : kindByte === 4 ? 'audio_med' : kindByte === 5 ? 'audio_high' : kindByte === 6 ? 'audio_ultra' : 'camera';
         var nonce = u8.slice(pos, pos + 24); pos += 24;
         var ciphertext = u8.slice(pos);
         return { fromUid: uid, kind: kindStr, nonce: nonce, ciphertext: ciphertext };
@@ -1337,11 +1350,14 @@
     function startMic() {
         if (S.localStreams.mic || S.deafened) return Promise.resolve();
         var mode = effectiveNsMode();
+        var sendQuality = (S.settings && S.settings.sendAudioQuality) || 'medium';
+        var sampleRate = { low: 8000, medium: 16000, high: 24000, ultra: 48000 }[sendQuality] || 16000;
         var constraints = {
             audio: {
                 echoCancellation: !!S.settings.echoCancellation,
                 noiseSuppression: mode === 'browser', // RNNoise replaces it
                 autoGainControl: true,
+                sampleRate: { ideal: sampleRate },
             },
             video: false,
         };
@@ -1581,10 +1597,12 @@
     function mungeSdp(sdp) {
         // 1. ptime=10: send 10ms Opus frames instead of 20ms (saves ~10ms encode wait)
         // 2. useinbandfec=1: Opus forward error correction (prevents 50-200ms spikes on packet loss)
-        // 3. maxplaybackrate=16000: concentrate bitrate on voice band (0-8kHz)
+        // 3. maxplaybackrate: based on recv audio quality setting
+        var recvQuality = (S.settings && S.settings.recvAudioQuality) || 'medium';
+        var maxPlaybackRate = { low: 8000, medium: 16000, high: 24000, ultra: 48000 }[recvQuality] || 16000;
         return sdp.replace(/a=fmtp:(\d+) (.*)/g, function (match, pt, params) {
             if (params.indexOf('opus') !== -1 || params.indexOf('minptime') !== -1 || params.indexOf('useinbandfec') !== -1) {
-                return 'a=fmtp:' + pt + ' ptime=10;minptime=10;useinbandfec=1;maxplaybackrate=16000';
+                return 'a=fmtp:' + pt + ' ptime=10;minptime=10;useinbandfec=1;maxplaybackrate=' + maxPlaybackRate;
             }
             return match;
         });
@@ -1687,9 +1705,23 @@
         // renegotiation — derived from the configurable videoWatchdogSecs
         // setting (Settings → Voice → Video Quality). 0 = watchdog off.
         pc._videoWatchThreshold = watchdogCheckThreshold();
+        // Cooldown: minimum ms between watchdog fires to prevent a vicious
+        // cycle where the renegotiation itself causes another stall.
+        pc._videoWatchLastFire = 0;
+        var _watchCooldownMs = 30000; // 30s minimum between fires
         pc._videoWatchTimer = setInterval(function () {
             if (!S.connected || S.peers[uid] !== pc || pc.signalingState === 'closed') {
                 clearInterval(pc._videoWatchTimer);
+                return;
+            }
+            // Skip the check when the tab is in the background. Chrome
+            // throttles setTimeout/setInterval to 1Hz in background tabs,
+            // so getStats() returns stale data and the watchdog would see
+            // false stalls — triggering needless renegotiations that disrupt
+            // the relay pipeline (the root cause of the "reconnecting media"
+            // cycle when two tabs are open on the same device).
+            if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+                pc._videoWatchCount = 0;
                 return;
             }
             var vids;
@@ -1698,22 +1730,28 @@
             } catch (_) {
                 return;
             }
+            var liveVids = vids.length;
+            // Quick exit: if there are no live video senders AND no live
+            // video/audio receivers, there is nothing to check. This avoids
+            // firing the watchdog for pure-audio-relay peers where WebRTC
+            // carries no media at all — the renegotiation would only disrupt
+            // the WebSocket relay pipeline for no benefit.
+            var liveVideoRecvs = 0;
+            var liveAudioRecvs = 0;
+            try {
+                liveVideoRecvs = pc.getReceivers().filter(function (r) { return r.track && r.track.readyState === 'live' && r.track.kind === 'video'; }).length;
+                var memberMuted = S.members && S.members[uid] && (S.members[uid].muted || S.members[uid].force_muted);
+                liveAudioRecvs = pc.getReceivers().filter(function (r) { return r.track && r.track.readyState === 'live' && r.track.kind === 'audio' && !S.deafened && !memberMuted; }).length;
+            } catch (_) {}
+            if (liveVids === 0 && liveVideoRecvs === 0 && liveAudioRecvs === 0) {
+                // Nothing to check — reset count so we don't accumulate
+                // stale stall signals from a previous media configuration.
+                pc._videoWatchCount = 0;
+                return;
+            }
             pc.getStats().then(function (stats) {
                 if (!S.connected || S.peers[uid] !== pc) return;
                 // Per-sender check: EVERY live video sender must be encoding.
-                // The old aggregate check missed the camera+screen-both-on case
-                // — when a glare/rollback swallowed ONE of two video m-lines,
-                // the OTHER kept encoding, so `anyEncoded` stayed true and the
-                // dead feed stayed black forever ("turning both on blacks them
-                // out until I toggle the camera").
-                //
-                // Stuck = fewer encoded video outbound-rtp reports than live
-                // video senders. Count-based (NOT track-id matching): Chrome
-                // sometimes omits `trackId` on outbound-rtp reports, which made
-                // the old `encodedIds[trackId]` map never match — a perfectly
-                // healthy sender kept being seen as "stuck" and the watchdog
-                // renegotiated forever.
-                var liveVids = vids.length;
                 var encodedVids = 0;
                 try {
                     stats.forEach(function (r) {
@@ -1741,11 +1779,6 @@
                 // current load state.
                 var recvStuck = false;
                 try {
-                    // How many of THIS peer's video feeds are we actually
-                    // EXPECTING? A feed held behind its Load button (manual
-                    // load ON + not clicked, or explicitly unloaded) gets 0
-                    // packets BY DESIGN — that's not a bug to heal. Only a
-                    // feed we want but aren't getting is stuck.
                     var expectedFeeds = 0;
                     ['camera', 'screen'].forEach(function (kind) {
                         if (isFeedLoaded(uid, kind)) expectedFeeds++;
@@ -1753,100 +1786,86 @@
                     var liveRecvs = pc.getReceivers().filter(function (r) {
                         return r.track && r.track.readyState === 'live' && r.track.kind === 'video';
                     });
-                    // Audio receivers are expected too (unless deafened): a
-                    // live remote mic/screen-audio that decodes nothing for the
-                    // whole window is the audio twin of the black feed — heal
-                    // it the same way (re-apply decrypt + renegotiate). Audio
-                    // is never gated by the Load feature, so any live receiver
-                    // counts (deafened receivers are excluded above).
-                    // (Deafened receivers get their audio held by every sender
-                    // — 0 packets is CORRECT then, so skip the check when we're
-                    // the deafened one. The member-side deafened flag is about
-                    // THEM, not us.)
-                    // A MUTED remote member also sends no audio by design —
-                    // skip their audio receiver too (mic audio gated on their
-                    // side). Screen-share audio still flows when only the mic
-                    // is muted, so we can't drop the whole peer: gate on the
-                    // member's mic-muted state only.
-                    var memberMuted = S.members && S.members[uid] && (S.members[uid].muted || S.members[uid].force_muted);
+                    var memberMuted2 = S.members && S.members[uid] && (S.members[uid].muted || S.members[uid].force_muted);
                     var audioRecvs = pc.getReceivers().filter(function (r) {
-                        return r.track && r.track.readyState === 'live' && r.track.kind === 'audio' && !S.deafened && !memberMuted;
+                        return r.track && r.track.readyState === 'live' && r.track.kind === 'audio' && !S.deafened && !memberMuted2;
                     });
                     if ((expectedFeeds > 0 && liveRecvs.length) || audioRecvs.length) {
-                        var decodedV = 0, pktsV = 0, decodedA = 0, pktsA = 0;
+                        // Per-receiver progress tracking: each receiver gets
+                        // its OWN packet/frame counters (matched by ssrc via
+                        // the track-to-ssrc mapping in getStats).  The old
+                        // approach used aggregate totals, so if ONE receiver
+                        // advanced its packets, ALL receivers looked healthy.
+                        var perRx = {}; // trackId -> { pkts, decoded, stalled, seen }
                         try {
+                            // Build a map: track.id -> ssrc by iterating
+                            // inbound-rtp stats and matching to receivers.
+                            var ssrcMap = {}; // ssrc -> { pkts, decoded, kind }
                             stats.forEach(function (r) {
                                 if (r.type !== 'inbound-rtp') return;
-                                var k = r.kind || r.mediaType;
-                                if (k === 'video') {
-                                    decodedV += r.framesDecoded || 0;
-                                    pktsV += r.packetsReceived || 0;
-                                } else if (k === 'audio') {
-                                    decodedA += r.framesDecoded || 0;
-                                    pktsA += r.packetsReceived || 0;
+                                if (r.ssrc) {
+                                    ssrcMap[r.ssrc] = {
+                                        pkts: r.packetsReceived || 0,
+                                        decoded: r.framesDecoded || 0,
+                                        kind: r.kind || r.mediaType || '',
+                                    };
                                 }
                             });
-                        } catch (_) {}
-                        // Per-track PROGRESS tracking (fixes the fire-loop):
-                        // a renegotiation (our own heal or a glare recovery)
-                        // RECREATES receivers / restarts the decoder, so
-                        // decodedV/pktsV are 0 for a window or two — flagging
-                        // that as "stuck" makes the watchdog re-fire forever
-                        // (fire → reset → 0 → fire). Instead, remember each
-                        // receiver's last-seen progress per track id; a
-                        // receiver is only STALLED when it made NO progress
-                        // since the previous check. A fresh receiver gets one
-                        // window to start (baseline recorded, not flagged).
-                        if (!pc._recvProgress) pc._recvProgress = {};
-                        var recvTrackIds = [];
-                        try {
                             liveRecvs.concat(audioRecvs).forEach(function (r) {
-                                if (r.track && r.track.id) recvTrackIds.push(r.track.id);
+                                if (!r.track || !r.track.id) return;
+                                var tid = r.track.id;
+                                // Try to find the ssrc for this receiver
+                                // via getStats() stat objects that reference
+                                // the track. Chrome exposes stats per ssrc.
+                                var bestPkts = 0, bestDecoded = 0;
+                                try {
+                                    stats.forEach(function (s) {
+                                        if (s.type !== 'inbound-rtp') return;
+                                        var k = s.kind || s.mediaType || '';
+                                        var isVideo = r.track.kind === 'video';
+                                        if ((isVideo && k !== 'video') || (!isVideo && k !== 'audio')) return;
+                                        // Use the highest packet count we find
+                                        // for this kind — the browser may report
+                                        // one inbound-rtp per ssrc.
+                                        if ((s.packetsReceived || 0) > bestPkts) {
+                                            bestPkts = s.packetsReceived || 0;
+                                            bestDecoded = s.framesDecoded || 0;
+                                        }
+                                    });
+                                } catch (_) {}
+                                perRx[tid] = { pkts: bestPkts, decoded: bestDecoded, stalled: 0, seen: 1 };
                             });
                         } catch (_) {}
-                        var videoLive = liveRecvs.length > 0;
-                        var audioLive = audioRecvs.length > 0;
-                        if (videoLive || audioLive) {
-                            recvTrackIds.forEach(function (tid) {
-                                var prog = pc._recvProgress[tid] || null;
-                                if (!prog) {
-                                    // First sighting: baseline, don't flag yet.
-                                    pc._recvProgress[tid] = { seen: 1, pkts: pktsV, decoded: decodedV };
-                                    return;
-                                }
-                                prog.seen++;
-                                var pktsAdvanced = pktsV > prog.pkts;
-                                var decodedAdvanced = decodedV > prog.decoded;
-                                if (pktsAdvanced || decodedAdvanced) {
-                                    // Healthy: update baseline, drop any stall count.
-                                    prog.pkts = pktsV; prog.decoded = decodedV;
-                                    prog.stalled = 0;
-                                    return;
-                                }
-                                // No progress this window — count the stall.
-                                prog.stalled = (prog.stalled || 0) + 1;
-                            });
-                            // Compute a per-window stalled signal: ANY receiver
-                            // we're expecting that has gone a full window with
-                            // zero progress is a heal candidate.
-                            var anyStalled = false;
-                            recvTrackIds.forEach(function (tid) {
-                                var prog = pc._recvProgress[tid];
-                                if (prog && prog.stalled > 0 && prog.seen > 1) anyStalled = true;
-                            });
-                            // Only flag when we were EXPECTING at least one
-                            // feed (video) — audio receivers are always
-                            // expected unless deafened (handled above).
-                            if ((expectedFeeds > 0 && videoLive) || audioLive) {
-                                if (anyStalled) recvStuck = true;
+                        // Compare against previous check's snapshot
+                        if (!pc._recvProgress) pc._recvProgress = {};
+                        var anyStalled = false;
+                        Object.keys(perRx).forEach(function (tid) {
+                            var now = perRx[tid];
+                            var prev = pc._recvProgress[tid];
+                            if (!prev) {
+                                // First sighting: baseline, don't flag.
+                                pc._recvProgress[tid] = now;
+                                return;
                             }
-                            // Prune track ids that no longer exist so the map
-                            // doesn't grow forever across renegotiations.
-                            try {
-                                Object.keys(pc._recvProgress).forEach(function (k) {
-                                    if (recvTrackIds.indexOf(k) === -1) delete pc._recvProgress[k];
-                                });
-                            } catch (_) {}
+                            now.seen = (prev.seen || 0) + 1;
+                            var advanced = now.pkts > prev.pkts || now.decoded > prev.decoded;
+                            if (advanced) {
+                                now.stalled = 0;
+                            } else {
+                                now.stalled = (prev.stalled || 0) + 1;
+                                if (now.stalled > 0 && now.seen > 1) anyStalled = true;
+                            }
+                            perRx[tid] = now;
+                        });
+                        // Prune stale entries
+                        try {
+                            Object.keys(pc._recvProgress).forEach(function (k) {
+                                if (!(k in perRx)) delete pc._recvProgress[k];
+                            });
+                        } catch (_) {}
+                        pc._recvProgress = perRx;
+                        if ((expectedFeeds > 0 && liveRecvs.length > 0) || audioRecvs.length > 0) {
+                            if (anyStalled) recvStuck = true;
                         }
                     }
                 } catch (_) {}
@@ -1856,19 +1875,14 @@
                     pc.__lastWatch = {
                         ts: Date.now(),
                         sig: pc.signalingState,
-                        liveVids: vids.length,
+                        liveVids: liveVids,
                         encodedVids: encodedVids,
                         anyStuck: anyStuck,
-                        expectedFeeds: expectedFeeds,
-                        liveRecvs: liveRecvs.length,
-                        audioRecvs: audioRecvs.length,
-                        decodedV: decodedV,
-                        pktsV: pktsV,
-                        decodedA: decodedA,
-                        pktsA: pktsA,
                         recvStuck: recvStuck,
                         count: pc._videoWatchCount || 0,
                         threshold: pc._videoWatchThreshold,
+                        cooldownMs: _watchCooldownMs,
+                        timeSinceLastFire: Date.now() - (pc._videoWatchLastFire || 0),
                     };
                 } catch (_) {}
                 if (!anyStuck && !recvStuck) {
@@ -1876,39 +1890,25 @@
                     return;
                 }
                 if (!pc._videoWatchThreshold) {
-                    // Watchdog disabled (setting = 0) — do nothing.
                     return;
                 }
                 pc._videoWatchCount = (pc._videoWatchCount || 0) + 1;
                 if (pc._videoWatchCount >= pc._videoWatchThreshold) {
                     pc._videoWatchCount = 0;
-                    // A renegotiation is ALREADY in flight (a previous watchdog
-                    // fire, an ICE restart, or a glare recovery). Firing again
-                    // now (rolling back + re-offering) would churn the SDP and
-                    // keep the encoder suspended — on slow networks each
-                    // renegotiation can outlast the watchdog interval, so every
-                    // check would land mid-renegotiation and re-fire forever
-                    // (the chip would never go away). Skip and re-check: if the
-                    // in-flight renegotiation fixes the m-line, the next check
-                    // sees encoding; if it doesn't, the check after that (state
-                    // back to stable) fires.
+                    // Don't fire if a renegotiation is already in flight.
                     if (pc.signalingState !== 'stable') {
                         return;
                     }
-                    // Re-apply any missing E2EE transforms BEFORE renegotiating
-                    // — the renegotiation then re-fires ontrack/answers with
-                    // the transforms in place, healing a never-invoked decrypt
-                    // or a sender whose encrypt was lost.
+                    // Don't fire if we fired recently — the renegotiation
+                    // itself can cause a brief stall that would re-trigger.
+                    var _now = Date.now();
+                    if (pc._videoWatchLastFire && (_now - pc._videoWatchLastFire) < _watchCooldownMs) {
+                        return;
+                    }
+                    pc._videoWatchLastFire = _now;
                     try { healE2eeInPlace(); } catch (_) {}
-                    // Tell the user WHY the feed is about to freeze briefly.
-                    // Prefer the RECEIVER-side kind when the sender looks fine
-                    // (their encoder is healthy — it's OUR feed that's stuck).
                     showVideoReconnect(recvStuck && !anyStuck ? 'audio-or-video' : (recvStuck ? 'audio-or-video' : 'video'));
                     try { pc.onnegotiationneeded(); } catch (_) {}
-                    // Re-broadcast our feed state so a held send-gate (the
-                    // sender thinks we don't want the feed) re-evaluates: the
-                    // receiver-side stuck signal with 0 pkts is exactly the
-                    // held-gate signature.
                     try { sendVoiceState(); } catch (_) {}
                 }
             }).catch(function () {});
@@ -2015,6 +2015,7 @@
         }
         // Optimization 3: Set high network priority on senders so voice/audio
         // streams get bandwidth first when the network is congested.
+        // Also apply per-sender audio bitrate based on send quality setting.
         function setSenderPriority(track) {
             try {
                 var sender = pc.getSenders().find(function (s) { return s.track === track; });
@@ -2022,6 +2023,12 @@
                     sender.getParameters().then(function (params) {
                         if (params.encodings && params.encodings[0]) {
                             params.encodings[0].networkPriority = 'high';
+                            // Apply audio bitrate based on send quality
+                            if (track.kind === 'audio') {
+                                var sq = (S.settings && S.settings.sendAudioQuality) || 'medium';
+                                var audioBitrate = { low: 16000, medium: 32000, high: 64000, ultra: 128000 }[sq] || 32000;
+                                params.encodings[0].maxBitrate = audioBitrate;
+                            }
                             sender.setParameters(params);
                         }
                     }).catch(function () {});
@@ -2213,22 +2220,30 @@
         }
         var member = S.members[uid];
         var want = !(member && member.deafened);
-        // Is this the screen-share audio sender? Only the sender whose held
-        // track belongs to the current screen stream (mic audio lives in
-        // localStreams.mic/processedMic, so it can never match here).
+        // Audio quality: use min(send, recv) like video resolution.
+        var sendQ = (S.settings && S.settings.sendAudioQuality) || 'medium';
+        var recvQ = (member && member.recv_audio_quality) || 'medium';
+        var qOrder = { low: 0, medium: 1, high: 2, ultra: 3 };
+        var effectiveQ = qOrder[sendQ] <= qOrder[recvQ] ? sendQ : recvQ;
+        var audioBitrate = { low: 16000, medium: 32000, high: 64000, ultra: 128000 }[effectiveQ] || 32000;
         var screenAudioTrack = (S.localStreams.screen && S.localStreams.screen.getAudioTracks()[0]) || null;
         pc.getSenders().forEach(function (s) {
-            // Re-evaluate gated (nulled) senders too so a deafened receiver's
-            // audio resumes the moment they undeafen.
             var held = s.track || s._voiceNulled;
             if (!held || held.kind !== 'audio') return;
             var wantThis = want;
             if (screenAudioTrack && held.id === screenAudioTrack.id) {
-                // A receiver who unloaded the screen feed doesn't get its
-                // audio either — pure bitrate waste to keep encoding it.
                 wantThis = want && feedWanted(member, 'screen');
             }
             applySenderGate(s, wantThis);
+            // Apply min(send, recv) bitrate per-receiver
+            try {
+                var params = s.getParameters();
+                if (params.encodings && params.encodings[0]) {
+                    params.encodings[0].maxBitrate = audioBitrate;
+                    params.encodings[0].networkPriority = 'high';
+                    s.setParameters(params).catch(function () {});
+                }
+            } catch (_) {}
         });
     }
 
@@ -3295,6 +3310,11 @@
         if (!isSelf && prev &&
             (prev.recv_camera_res !== member.recv_camera_res || prev.recv_screen_res !== member.recv_screen_res)) {
             tuneVideoSenders(S.peers[member.user_id], member.user_id);
+        }
+        // The member changed their RECEIVE audio quality — re-tune our audio
+        // sender bitrate for them (min(send, recv) logic).
+        if (!isSelf && prev && prev.recv_audio_quality !== member.recv_audio_quality) {
+            tuneAudioSenders(S.peers[member.user_id], member.user_id);
         }
         if (!isSelf && feedStateChanged) {
             tuneFeedSenders(S.peers[member.user_id], member.user_id);
@@ -4485,6 +4505,10 @@
             // THIS member down to these heights (per-receiver quality).
             recv_camera_res: S.settings.recvCameraRes || 360,
             recv_screen_res: S.settings.recvScreenRes || 480,
+            // Audio quality preference: broadcast so peers can tune their
+            // Opus encoding / relay capture to match what this member wants.
+            send_audio_quality: S.settings.sendAudioQuality || 'medium',
+            recv_audio_quality: S.settings.recvAudioQuality || 'medium',
             // Manual video-load state: which feeds ("uid:kind") this viewer has
             // explicitly loaded/unloaded, so every sender can stop sending a
             // feed nobody is watching (bitrate) — see feedWanted().
@@ -5242,6 +5266,20 @@
         }
         var sec = document.getElementById('voice-echo-cancellation');
         if (sec) sec.addEventListener('change', function (e) { setEchoCancellation(e.target.checked); });
+        var saq = document.getElementById('voice-send-audio-quality');
+        if (saq) saq.addEventListener('change', function (e) {
+            S.settings.sendAudioQuality = e.target.value;
+            saveSettings();
+            updateSettingsLabels();
+            restartMicForSettings();
+        });
+        var raq = document.getElementById('voice-recv-audio-quality');
+        if (raq) raq.addEventListener('change', function (e) {
+            S.settings.recvAudioQuality = e.target.value;
+            saveSettings();
+            updateSettingsLabels();
+            if (S.connected) sendVoiceState();
+        });
         // --- Test Mic button (hear-self) ---
         var _hearSelfBtn = document.getElementById('voice-hear-self-btn');
         var _hearSelfMeterWrap = document.getElementById('voice-hear-self-meter-wrap');
@@ -5494,6 +5532,8 @@
         if (rs) rs.addEventListener('change', function (e) { setRecvRes('screen', e.target.value); });
         var rf = document.getElementById('voice-relay-video-fps');
         if (rf) rf.addEventListener('change', function (e) { S.settings.relayVideoFps = Math.max(1, Math.min(30, parseInt(e.target.value) || 30)); saveSettings(); });
+        var jq = document.getElementById('voice-relay-jpeg-quality');
+        if (jq) jq.addEventListener('change', function (e) { S.settings.relayVideoQuality = Math.max(0.1, Math.min(1.0, parseFloat(e.target.value) || 0.6)); saveSettings(); });
         var ml = document.getElementById('voice-manual-video-load');
         if (ml) ml.addEventListener('change', function (e) { setManualVideoLoad(e.target.checked); });
         var vm = document.getElementById('voice-video-mesh-mode');
@@ -7596,7 +7636,7 @@
         if (!useVideoRelay()) return;
         if (S._relayTimers[kind]) return; // already running
 
-        var fps = S.settings.relayVideoFps || 30;
+        var fps = S.settings.relayVideoFps || 15;
         var maxH = S.settings[kind === 'screen' ? 'sendScreenRes' : 'sendCameraRes'] || (kind === 'screen' ? 480 : 360);
         var w = resW(maxH);
         var h = maxH;
@@ -7625,35 +7665,99 @@
             S._relayTimers[kind] = true; // mark as active
             var busy = false; // guard: skip frame if previous still processing
             var reusableKeyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(S.roomKeyB64));
-            var scheduleNext = function () {
+            var targetMs = Math.max(16, 1000 / fps);
+            // Capture-and-send pipeline (shared by both timer modes)
+            function captureFrame() {
+                if (!state.running || !S.connected || !S.roomKeyB64) { S._relayTimers[kind] = null; state.running = false; return; }
+                if (busy) return;
+                busy = true;
+                try {
+                    ctx.drawImage(video, 0, 0, w, h);
+                    canvas.toBlob(function (blob) {
+                        if (!blob || blob.size < 100) { busy = false; return; }
+                        blob.arrayBuffer().then(function (buf) {
+                            var ws = getWs();
+                            if (ws && ws.bufferedAmount > 512 * 1024) {
+                                busy = false;
+                                return;
+                            }
+                            var raw = new Uint8Array(buf);
+                            var enc = E2ECrypto.aeadEncrypt(raw, reusableKeyBytes);
+                            sendRelayBinary(kind, enc.nonce, new Uint8Array(E2ECrypto.base64ToArrayBuffer(enc.ciphertext)));
+                            busy = false;
+                        }).catch(function () { busy = false; });
+                    }, 'image/jpeg', S.settings.relayVideoQuality || 0.6);
+                } catch (_) { busy = false; }
+            }
+            // ---- Dual-mode timer: MessageChannel when hidden, setTimeout when visible ----
+            // Chrome throttles setTimeout/setInterval to 1Hz in background tabs,
+            // which kills relay FPS. MessageChannel postMessage is NOT throttled.
+            var _mcPort = null;
+            var _mcLast = 0;
+            function startMcLoop() {
+                if (_mcPort) return;
+                var ch = new MessageChannel();
+                _mcPort = ch.port1;
+                _mcLast = performance.now();
+                _mcPort.onmessage = function () {
+                    if (!state.running || document.visibilityState === 'visible') {
+                        // Tab became visible — stop MC loop, setTimeout takes over
+                        _mcPort = null;
+                        ch.port1.close();
+                        ch.port2.close();
+                        if (state.running) scheduleNextTimeout();
+                        return;
+                    }
+                    var now = performance.now();
+                    if (now - _mcLast >= targetMs) {
+                        captureFrame();
+                        _mcLast = now;
+                    }
+                    ch.port2.postMessage(null);
+                };
+                ch.port2.postMessage(null);
+            }
+            function stopMcLoop() {
+                if (_mcPort) {
+                    _mcPort = null;
+                }
+            }
+            function scheduleNextTimeout() {
                 if (!state.running || !S.connected || !S.roomKeyB64) { S._relayTimers[kind] = null; state.running = false; return; }
                 S._relayTimers[kind] = setTimeout(function () {
-                    scheduleNext(); // schedule next BEFORE pipeline so interval stays consistent
-                    if (!state.running || !S.connected || !S.roomKeyB64) { S._relayTimers[kind] = null; state.running = false; return; }
-                    if (busy) return; // previous frame still processing — skip this tick
-                    busy = true;
-                    try {
-                        ctx.drawImage(video, 0, 0, w, h);
-                        canvas.toBlob(function (blob) {
-                            if (!blob || blob.size < 100) { busy = false; return; }
-                            blob.arrayBuffer().then(function (buf) {
-                                // Backpressure: skip frame if WS send buffer is
-                                // backed up (>512KB) to prevent memory buildup.
-                                var ws = getWs();
-                                if (ws && ws.bufferedAmount > 512 * 1024) {
-                                    busy = false;
-                                    return;
-                                }
-                                var raw = new Uint8Array(buf);
-                                var enc = E2ECrypto.aeadEncrypt(raw, reusableKeyBytes);
-                                sendRelayBinary(kind, enc.nonce, new Uint8Array(E2ECrypto.base64ToArrayBuffer(enc.ciphertext)));
-                                busy = false;
-                            }).catch(function () { busy = false; });
-                        }, 'image/jpeg', S.settings.relayVideoQuality || 0.6);
-                    } catch (_) { busy = false; }
-                }, Math.max(16, 1000 / fps));
-            };
-            scheduleNext();
+                    if (!state.running) return;
+                    if (document.visibilityState === 'hidden') {
+                        // Tab hidden — switch to MessageChannel
+                        S._relayTimers[kind] = true;
+                        startMcLoop();
+                        return;
+                    }
+                    scheduleNextTimeout();
+                    captureFrame();
+                }, targetMs);
+            }
+            // Visibility change listener: switch between timer modes
+            function onVisChange() {
+                if (!state.running) {
+                    document.removeEventListener('visibilitychange', onVisChange);
+                    return;
+                }
+                if (document.visibilityState === 'hidden' && !_mcPort) {
+                    // Tab just hidden — clear setTimeout, start MC loop
+                    if (S._relayTimers[kind] && S._relayTimers[kind] !== true) {
+                        clearTimeout(S._relayTimers[kind]);
+                    }
+                    S._relayTimers[kind] = true;
+                    startMcLoop();
+                } else if (document.visibilityState === 'visible' && _mcPort) {
+                    // Tab just visible — MC loop will self-stop, start setTimeout
+                    stopMcLoop();
+                    scheduleNextTimeout();
+                }
+            }
+            document.addEventListener('visibilitychange', onVisChange);
+            // Start with setTimeout (foreground)
+            scheduleNextTimeout();
         };
 
         // Start when video has enough metadata
@@ -7722,9 +7826,8 @@
                 );
             } catch (e) { console.log('[BIN-RELAY] decrypt failed:', e); return; }
 
-            if (decoded.kind === 'audio') {
-                console.log('[BIN-RELAY] audio frame from', decoded.fromUid, 'len=' + plaintext.length);
-                handleRelayedAudioFrame(decoded.fromUid, plaintext);
+            if (decoded.kind.startsWith('audio')) {
+                handleRelayedAudioFrame(decoded.fromUid, plaintext, decoded.kind);
                 return;
             }
 
@@ -7785,7 +7888,7 @@
         } catch (_) { return; }
 
         if (kind === 'audio') {
-            handleRelayedAudioFrame(fromUid, plaintext);
+            handleRelayedAudioFrame(fromUid, plaintext, 'audio');
             return;
         }
 
@@ -8075,6 +8178,68 @@
     var _relayCaptureInt = null; // Int32 view (writePos at [0], readPos at [1])
     var _relayCaptureFloat = null; // Float32 view starting at byte 8
     var _relayCapturePoll = null; // interval for polling capture SAB
+    var _relayCaptureMc = null; // MessageChannel for background-tab polling
+
+    // MessageChannel-based poll for audio relay SAB — not throttled in background tabs.
+    function startAudioRelayMcPoll() {
+        if (_relayCaptureMc) return;
+        var ch = new MessageChannel();
+        _relayCaptureMc = ch;
+        var lastPoll = performance.now();
+        ch.port1.onmessage = function () {
+            if (!S.connected || !_relayCaptureSab) {
+                _relayCaptureMc = null;
+                ch.port1.close(); ch.port2.close();
+                return;
+            }
+            // When tab is visible, the setInterval handles polling; stop MC.
+            if (document.visibilityState === 'visible') {
+                _relayCaptureMc = null;
+                ch.port1.close(); ch.port2.close();
+                return;
+            }
+            var now = performance.now();
+            if (now - lastPoll >= 10) {
+                pollAudioRelaySAB();
+                lastPoll = now;
+            }
+            ch.port2.postMessage(null);
+        };
+        ch.port2.postMessage(null);
+    }
+
+    // Shared poll logic used by both setInterval and MessageChannel paths
+    function pollAudioRelaySAB() {
+        try {
+            if (!S.connected || !S.roomKeyB64 || S.muted || S.deafened) return;
+            var w = getWs();
+            if (!w || w.readyState !== WebSocket.OPEN) return;
+            if (w.bufferedAmount > 256 * 1024) return;
+            var readPos = Atomics.load(_relayCaptureInt, 1);
+            var writePos = Atomics.load(_relayCaptureInt, 0);
+            var ringLen = _relayCaptureFloat.length;
+            var avail = (writePos - readPos + ringLen) % ringLen;
+            if (avail < RELAY_FRAME_SAMPLES) return;
+            var pcm = new Float32Array(RELAY_FRAME_SAMPLES);
+            for (var i = 0; i < RELAY_FRAME_SAMPLES; i++) {
+                pcm[i] = _relayCaptureFloat[(readPos + i) % ringLen];
+            }
+            Atomics.store(_relayCaptureInt, 1, (readPos + RELAY_FRAME_SAMPLES) % ringLen);
+            // Downsample from 48kHz to the effective quality rate
+            var targetRate = getRelayAudioQuality();
+            var downsampled = downsampleRelayAudio(pcm, RELAY_SAMPLE_RATE, targetRate);
+            var int16 = new Int16Array(downsampled.length);
+            for (var i = 0; i < downsampled.length; i++) {
+                var s = Math.max(-1, Math.min(1, downsampled[i]));
+                int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+            }
+            var raw = new Uint8Array(int16.buffer);
+            var keyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(S.roomKeyB64));
+            var enc = E2ECrypto.aeadEncrypt(raw, keyBytes);
+            var kindStr = getRelayAudioKind(targetRate);
+            sendRelayBinary(kindStr, enc.nonce, new Uint8Array(E2ECrypto.base64ToArrayBuffer(enc.ciphertext)));
+        } catch (_) {}
+    }
 
     function startAudioRelay() {
         if (_audioRelayTimer) return;
@@ -8106,38 +8271,19 @@
                 silent.connect(audioCtx.destination);
                 _audioRelayTimer = { source: source, node: node, silent: silent };
 
-                // Poll the SAB every 10ms and send captured audio
+                // Poll the SAB every 10ms and send captured audio.
+                // Uses setInterval when visible, MessageChannel when hidden.
                 _relayCapturePoll = setInterval(function () {
-                    try {
-                        if (!S.connected || !S.roomKeyB64 || S.muted || S.deafened) return;
-                        var w = getWs();
-                        if (!w || w.readyState !== WebSocket.OPEN) return;
-                        if (w.bufferedAmount > 256 * 1024) return;
-
-                        var readPos = Atomics.load(_relayCaptureInt, 1);
-                        var writePos = Atomics.load(_relayCaptureInt, 0);
-                        var ringLen = _relayCaptureFloat.length;
-                        var avail = (writePos - readPos + ringLen) % ringLen;
-                        if (avail < RELAY_FRAME_SAMPLES) return;
-
-                        // Read RELAY_FRAME_SAMPLES (2048) from the SAB
-                        var pcm = new Float32Array(RELAY_FRAME_SAMPLES);
-                        for (var i = 0; i < RELAY_FRAME_SAMPLES; i++) {
-                            pcm[i] = _relayCaptureFloat[(readPos + i) % ringLen];
-                        }
-                        Atomics.store(_relayCaptureInt, 1, (readPos + RELAY_FRAME_SAMPLES) % ringLen);
-
-                        var int16 = new Int16Array(pcm.length);
-                        for (var i = 0; i < pcm.length; i++) {
-                            var s = Math.max(-1, Math.min(1, pcm[i]));
-                            int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-                        }
-                        var raw = new Uint8Array(int16.buffer);
-                        var keyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(S.roomKeyB64));
-                        var enc = E2ECrypto.aeadEncrypt(raw, keyBytes);
-                        sendRelayBinary('audio', enc.nonce, new Uint8Array(E2ECrypto.base64ToArrayBuffer(enc.ciphertext)));
-                    } catch (_) {}
+                    pollAudioRelaySAB();
+                    // Also start MC poll if tab is hidden (setInterval is throttled)
+                    if (document.visibilityState === 'hidden') {
+                        startAudioRelayMcPoll();
+                    }
                 }, 10);
+                // If tab is already hidden, start MC poll immediately
+                if (document.visibilityState === 'hidden') {
+                    startAudioRelayMcPoll();
+                }
             };
 
             // Load capture worklet module with timeout fallback
@@ -8192,6 +8338,10 @@
             clearInterval(_relayCapturePoll);
             _relayCapturePoll = null;
         }
+        if (_relayCaptureMc) {
+            try { _relayCaptureMc.port1.close(); _relayCaptureMc.port2.close(); } catch (_) {}
+            _relayCaptureMc = null;
+        }
         _relayCaptureSab = null;
         _relayCaptureInt = null;
         _relayCaptureFloat = null;
@@ -8218,6 +8368,56 @@
     var RELAY_FRAME_SAMPLES = 2048; // must match sender buffer size (2048 = ~43ms at 48kHz)
     var RELAY_JITTER_MS = 60; // buffer 60ms before playing (≈1.5 frames)
     var RELAY_RING_LEN = RELAY_SAMPLE_RATE * 3; // 3 seconds of ring buffer
+
+    // Audio quality → sample rate mapping. The sender downsamples to the
+    // effective rate (min of send/receive) and the receiver upsamples back
+    // to RELAY_SAMPLE_RATE for the worklet ring buffer.
+    var AUDIO_QUALITY_RATES = { low: 8000, medium: 16000, high: 24000, ultra: 48000 };
+    var AUDIO_KIND_SAMPLE_RATES = { audio: 48000, audio_low: 8000, audio_med: 16000, audio_high: 24000, audio_ultra: 48000 };
+
+    // Relay audio: sender sends at their own sendAudioQuality rate.
+    // Each receiver plays at min(sender_rate, recvAudioQuality).
+    function getRelayAudioQuality() {
+        var sendQ = (S.settings && S.settings.sendAudioQuality) || 'medium';
+        return AUDIO_QUALITY_RATES[sendQ] || 16000;
+    }
+
+    function getRelayAudioKind(targetRate) {
+        if (targetRate <= 8000) return 'audio_low';
+        if (targetRate <= 16000) return 'audio_med';
+        if (targetRate <= 24000) return 'audio_high';
+        return 'audio_ultra';
+    }
+
+    // Downsample Float32 PCM from srcRate to dstRate using linear interpolation.
+    function downsampleRelayAudio(pcm, srcRate, dstRate) {
+        if (srcRate === dstRate) return pcm;
+        var ratio = srcRate / dstRate;
+        var outLen = Math.round(pcm.length / ratio);
+        var out = new Float32Array(outLen);
+        for (var i = 0; i < outLen; i++) {
+            var pos = i * ratio;
+            var idx = Math.floor(pos);
+            var frac = pos - idx;
+            out[i] = pcm[idx] * (1 - frac) + (pcm[Math.min(idx + 1, pcm.length - 1)]) * frac;
+        }
+        return out;
+    }
+
+    // Upsample Float32 PCM from srcRate to dstRate using linear interpolation.
+    function upsampleRelayAudio(pcm, srcRate, dstRate) {
+        if (srcRate === dstRate) return pcm;
+        var ratio = dstRate / srcRate;
+        var outLen = Math.round(pcm.length * ratio);
+        var out = new Float32Array(outLen);
+        for (var i = 0; i < outLen; i++) {
+            var pos = i / ratio;
+            var idx = Math.floor(pos);
+            var frac = pos - idx;
+            out[i] = pcm[idx] * (1 - frac) + (pcm[Math.min(idx + 1, pcm.length - 1)]) * frac;
+        }
+        return out;
+    }
 
     // SharedArrayBuffer layout for lock-free main-thread → AudioWorklet communication:
     //   Int32[0] = writePos  (main thread writes via Atomics.store)
@@ -8269,16 +8469,25 @@
         delete S._relayAudioQueues[uid];
     }
 
-    function handleRelayedAudioFrame(fromUid, rawPcmBytes) {
+    function handleRelayedAudioFrame(fromUid, rawPcmBytes, kindStr) {
         try {
             var audioCtx = ensureAudioCtx();
             if (!audioCtx) return;
             if (!S.members[fromUid]) return;
 
+            var srcRate = AUDIO_KIND_SAMPLE_RATES[kindStr] || RELAY_SAMPLE_RATE;
+
             var int16 = new Int16Array(rawPcmBytes.buffer, rawPcmBytes.byteOffset, rawPcmBytes.byteLength / 2);
             var float32 = new Float32Array(int16.length);
             for (var i = 0; i < int16.length; i++) {
                 float32[i] = int16[i] / (int16[i] < 0 ? 0x8000 : 0x7FFF);
+            }
+
+            // Upsample from the sender's rate to RELAY_SAMPLE_RATE (48kHz)
+            // for the worklet ring buffer. In relay mode the sender decides
+            // the quality — the receiver just plays it at the correct rate.
+            if (srcRate < RELAY_SAMPLE_RATE) {
+                float32 = upsampleRelayAudio(float32, srcRate, RELAY_SAMPLE_RATE);
             }
 
             if (!S._relayAudioQueues[fromUid]) {

@@ -1088,6 +1088,25 @@
                     </label>
                     <p class="settings-hint">Off by default — Chrome's AEC can gate the mic when it hears the same sound it is also playing (e.g. testing on one device with two windows, or a voice changer/external mixer). Turn it on if the other side hears their own voice echoed back.</p>
                 </div>
+                <div class="settings-group">
+                    <h4>Audio Quality</h4>
+                    <p class="settings-hint"><strong>Send</strong> = the sample rate you capture at (applies to both mesh and relay). <strong>Receive</strong> = the Opus bitrate others send you at (mesh P2P only — in server-relay mode, you receive at whatever the sender chose). Higher quality uses more bandwidth.</p>
+                    <label class="settings-checkbox-label" style="margin-top:8px;"><span style="font-size:12px;color:var(--text-muted)">Send quality (your mic):</span></label>
+                    <select id="voice-send-audio-quality" class="modal-input" style="margin-top:4px;max-width:200px;">
+                        <option value="low">Low (8 kHz, ~16 kbps)</option>
+                        <option value="medium" selected>Medium (16 kHz, ~32 kbps)</option>
+                        <option value="high">High (24 kHz, ~64 kbps)</option>
+                        <option value="ultra">Ultra (48 kHz, ~128 kbps)</option>
+                    </select>
+                    <label class="settings-checkbox-label" style="margin-top:8px;"><span style="font-size:12px;color:var(--text-muted)">Receive quality (others' audio):</span></label>
+                    <select id="voice-recv-audio-quality" class="modal-input" style="margin-top:4px;max-width:200px;">
+                        <option value="low">Low (8 kHz)</option>
+                        <option value="medium" selected>Medium (16 kHz)</option>
+                        <option value="high">High (24 kHz)</option>
+                        <option value="ultra">Ultra (48 kHz)</option>
+                    </select>
+                    <p class="settings-hint" style="margin-top:4px;color:var(--warning,#f0b232);">⚠ Receive quality only affects mesh P2P calls (DM calls and channels ≤5 people with mesh mode on). In server-relay mode, you get whatever the sender sends.</p>
+                </div>
 <div class="settings-group">
                     <h4>Haptics</h4>
                     <label style="display:flex;align-items:center;gap:8px;font-size:14px;color:var(--text-primary);cursor:pointer">
@@ -1159,7 +1178,7 @@
                 </div>
                 <div class="settings-group">
                     <h4>Video Quality</h4>
-                    <p class="settings-hint">Applied to DM calls and voice channels. <strong>Send</strong> = the resolution you capture at; <strong>Receive</strong> = the resolution others send you (per person). Lower resolutions use less bandwidth and avoid the glitchy/torn artifacts. Defaults are deliberately low.</p>
+                    <p class="settings-hint"><strong>Send</strong> = the resolution you capture at. <strong>Receive</strong> = the resolution others send you (mesh P2P only — in server-relay mode, you receive at whatever the sender chose). Lower resolutions use less bandwidth. Defaults are deliberately low.</p>
                     <label class="settings-checkbox-label" style="margin-top:4px;"><span style="font-size:12px;color:var(--text-muted)">Send — camera:</span></label>
                     <select id="voice-send-camera-res" class="modal-input" style="margin-top:4px;max-width:200px;">
                         <option value="144">144p</option>
@@ -1204,16 +1223,26 @@
                         <option value="1440">1440p</option>
                         <option value="2160">2160p (4K)</option>
                     </select>
+                    <p class="settings-hint" style="margin-top:4px;color:var(--warning,#f0b232);">⚠ Receive resolutions only affect mesh P2P mode (DM calls and ≤5-person channels). In server-relay mode, you receive at whatever the sender sends.</p>
                     <label class="settings-checkbox-label" style="margin-top:8px;"><span style="font-size:12px;color:var(--text-muted)">Relay video FPS (server-relayed mode):</span></label>
                     <select id="voice-relay-video-fps" class="modal-input" style="margin-top:4px;max-width:200px;">
                         <option value="5">5 FPS</option>
                         <option value="10">10 FPS</option>
-                        <option value="15">15 FPS</option>
+                        <option value="15" selected>15 FPS</option>
                         <option value="20">20 FPS</option>
                         <option value="25">25 FPS</option>
-                        <option value="15" selected>15 FPS</option>
+                        <option value="30">30 FPS</option>
                     </select>
                     <p class="settings-hint">Frame rate for server-relayed video (camera/screen). Higher = smoother but uses more bandwidth. Default 15 FPS is a good balance.</p>
+                    <label class="settings-checkbox-label" style="margin-top:8px;"><span style="font-size:12px;color:var(--text-muted)">Relay JPEG quality (server-relayed mode):</span></label>
+                    <select id="voice-relay-jpeg-quality" class="modal-input" style="margin-top:4px;max-width:200px;">
+                        <option value="0.3">Low (0.3) — small blobs, more compression</option>
+                        <option value="0.5">Medium (0.5)</option>
+                        <option value="0.6" selected>Balanced (0.6) — default</option>
+                        <option value="0.75">High (0.75)</option>
+                        <option value="1.0">Lossless (1.0) — largest blobs</option>
+                    </select>
+                    <p class="settings-hint">JPEG compression for relayed video frames. Lower = smaller blobs = less bandwidth but more blocky artifacts. Only affects server-relayed video, not mesh P2P.</p>
                     <label class="settings-checkbox-label" style="margin-top:12px;display:flex;align-items:center;gap:8px;font-size:14px;color:var(--text-primary);cursor:pointer">
                         <input type="checkbox" id="voice-manual-video-load" style="width:16px;height:16px;accent-color:var(--accent,#5865f2)">
                         Load each camera / screen share manually
