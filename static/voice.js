@@ -1041,6 +1041,7 @@
             clearWaitingMarkerForChannel(prevDmChannelId);
         }
         S._lastAudioMode = null;
+        if (_recalcAudioTimer) { clearTimeout(_recalcAudioTimer); _recalcAudioTimer = null; }
         S._audioModeOverrides = {};
         S._videoModeOverrides = {};
         closeAllPeers();
@@ -7573,20 +7574,20 @@
             var scheduleNext = function () {
                 if (!state.running || !S.connected || !S.roomKeyB64) { S._relayTimers[kind] = null; state.running = false; return; }
                 S._relayTimers[kind] = setTimeout(function () {
+                    scheduleNext(); // schedule next BEFORE pipeline so interval stays consistent
                     if (!state.running || !S.connected || !S.roomKeyB64) { S._relayTimers[kind] = null; state.running = false; return; }
-                    if (busy) { scheduleNext(); return; } // previous frame still processing
+                    if (busy) return; // previous frame still processing — skip this tick
                     busy = true;
                     try {
                         ctx.drawImage(video, 0, 0, w, h);
                         canvas.toBlob(function (blob) {
-                            if (!blob || blob.size < 100) { busy = false; scheduleNext(); return; }
+                            if (!blob || blob.size < 100) { busy = false; return; }
                             blob.arrayBuffer().then(function (buf) {
-                                busy = false;
                                 // Backpressure: skip frame if WS send buffer is
                                 // backed up (>512KB) to prevent memory buildup.
-                                var w = getWs();
-                                if (w && w.bufferedAmount > 512 * 1024) {
-                                    scheduleNext();
+                                var ws = getWs();
+                                if (ws && ws.bufferedAmount > 512 * 1024) {
+                                    busy = false;
                                     return;
                                 }
                                 var raw = new Uint8Array(buf);
@@ -7599,10 +7600,10 @@
                                     kind: kind,
                                     frame: { e: enc.ciphertext, n: enc.nonce },
                                 });
-                                scheduleNext();
-                            }).catch(function () { busy = false; scheduleNext(); });
+                                busy = false;
+                            }).catch(function () { busy = false; });
                         }, 'image/jpeg', S.settings.relayVideoQuality || 0.6);
-                    } catch (_) { busy = false; scheduleNext(); }
+                    } catch (_) { busy = false; }
                 }, Math.max(16, 1000 / fps));
             };
             scheduleNext();
@@ -7613,13 +7614,26 @@
             startLoop();
         } else {
             video.addEventListener('loadeddata', startLoop, { once: true });
-            // Fallback: start after 1s even if metadata hasn't loaded
-            setTimeout(startLoop, 1000);
+            // Fallback: start after 1s even if metadata hasn't loaded.
+            // Store handle so stopVideoRelay can cancel it (prevents ghost
+            // relay restarting on a dead video element after rapid toggle).
+            var fallbackTimer = setTimeout(startLoop, 1000);
+            var existing = _relayCanvases[kind];
+            if (existing && existing.running !== undefined) {
+                existing._fallbackTimer = fallbackTimer;
+            } else {
+                _relayCanvases[kind] = { _fallbackTimer: fallbackTimer };
+            }
         }
     }
 
     // Stop the relay capture loop for a given kind.
     function stopVideoRelay(kind) {
+        // Cancel any pending fallback timer that would restart a dead relay
+        var existing = _relayCanvases[kind];
+        if (existing && existing._fallbackTimer) {
+            clearTimeout(existing._fallbackTimer);
+        }
         if (S._relayTimers[kind]) {
             clearTimeout(S._relayTimers[kind]);
             delete S._relayTimers[kind];
@@ -7788,27 +7802,34 @@
 
     // Current mode state
     S._lastAudioMode = null; // 'mesh' | 'relay' | null (initial)
+    var _recalcAudioTimer = null; // debounce timer for rapid mode switches
 
     // Check if the mode needs to switch and apply it.
+    // Debounced: rapid member changes within 200ms collapse into one switch,
+    // preventing destructive relay↔mesh flip-flopping that leaks audio nodes.
     function recalcAudioMode() {
         if (S.roomType !== 'server' || !S.connected) return;
+        if (_recalcAudioTimer) clearTimeout(_recalcAudioTimer);
+        _recalcAudioTimer = setTimeout(function () {
+            _recalcAudioTimer = null;
+            if (S.roomType !== 'server' || !S.connected) return;
+            var selfId = getSelfId();
+            var newMode = resolveAudioMode(selfId);
+            var oldMode = S._lastAudioMode;
 
-        var selfId = getSelfId();
-        var newMode = resolveAudioMode(selfId);
-        var oldMode = S._lastAudioMode;
+            if (newMode === oldMode) return; // no change
 
-        if (newMode === oldMode) return; // no change
+            S._lastAudioMode = newMode;
+            console.log('[Relay] Audio mode: ' + newMode + ' (active: ' + countActiveParticipants() + '/' + Object.keys(S.members).length + ')');
 
-        S._lastAudioMode = newMode;
-        console.log('[Relay] Audio mode: ' + newMode + ' (active: ' + countActiveParticipants() + '/' + Object.keys(S.members).length + ')');
-
-        if (newMode === 'relay') {
-            switchAudioToRelay();
-        } else {
-            switchAudioToMesh();
-        }
-        // Update mode badges in the member list
-        renderPopup();
+            if (newMode === 'relay') {
+                switchAudioToRelay();
+            } else {
+                switchAudioToMesh();
+            }
+            // Update mode badges in the member list
+            renderPopup();
+        }, 100);
     }
 
     // Set a per-user audio mode override for self. 'auto' clears the override.
@@ -7946,29 +7967,36 @@
 
         var stream = S.localStreams.processedMic || S.localStreams.mic;
         var audioCtx = ensureAudioCtx();
+        if (!audioCtx) return;
         var source = audioCtx.createMediaStreamSource(stream);
         // 2048 samples at 48kHz ≈ 43ms — bigger buffer = fewer packets, smoother relay
         var processor = audioCtx.createScriptProcessor(2048, 1, 1);
 
         processor.onaudioprocess = function (e) {
-            if (!S.connected || !S.roomKeyB64 || S.muted || S.deafened) return;
-            var pcm = e.inputBuffer.getChannelData(0);
-            var int16 = new Int16Array(pcm.length);
-            for (var i = 0; i < pcm.length; i++) {
-                var s = Math.max(-1, Math.min(1, pcm[i]));
-                int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-            }
-            var raw = new Uint8Array(int16.buffer);
-            var keyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(S.roomKeyB64));
-            var enc = E2ECrypto.aeadEncrypt(raw, keyBytes);
-            send({
-                type: 'voice_media_relay',
-                room_type: S.roomType,
-                channel_id: S.channelId || '',
-                dm_channel_id: S.dmChannelId || '',
-                kind: 'audio',
-                frame: { e: enc.ciphertext, n: enc.nonce },
-            });
+            try {
+                if (!S.connected || !S.roomKeyB64 || S.muted || S.deafened) return;
+                // Backpressure: skip frame if WS send buffer is backed up
+                var w = getWs();
+                if (!w || w.readyState !== WebSocket.OPEN) return;
+                if (w.bufferedAmount > 256 * 1024) return;
+                var pcm = e.inputBuffer.getChannelData(0);
+                var int16 = new Int16Array(pcm.length);
+                for (var i = 0; i < pcm.length; i++) {
+                    var s = Math.max(-1, Math.min(1, pcm[i]));
+                    int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                }
+                var raw = new Uint8Array(int16.buffer);
+                var keyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(S.roomKeyB64));
+                var enc = E2ECrypto.aeadEncrypt(raw, keyBytes);
+                send({
+                    type: 'voice_media_relay',
+                    room_type: S.roomType,
+                    channel_id: S.channelId || '',
+                    dm_channel_id: S.dmChannelId || '',
+                    kind: 'audio',
+                    frame: { e: enc.ciphertext, n: enc.nonce },
+                });
+            } catch (_) {}
         };
 
         source.connect(processor);
@@ -7977,7 +8005,7 @@
         silent.gain.value = 0;
         processor.connect(silent);
         silent.connect(audioCtx.destination);
-        _audioRelayTimer = { source: source, processor: processor };
+        _audioRelayTimer = { source: source, processor: processor, silent: silent };
     }
 
     function stopAudioRelay() {
@@ -7985,6 +8013,7 @@
             try {
                 _audioRelayTimer.processor.disconnect();
                 _audioRelayTimer.source.disconnect();
+                if (_audioRelayTimer.silent) _audioRelayTimer.silent.disconnect();
             } catch (_) {}
             _audioRelayTimer = null;
         }
@@ -8033,22 +8062,17 @@
         try {
             var audioCtx = ensureAudioCtx();
             if (!audioCtx) return;
-            // Ignore frames from users who have already left — prevents
-            // re-creating a queue + ScriptProcessor for a departing user
-            // (stale audio / "random sounds" after teardown).
             if (!S.members[fromUid]) return;
 
-            // Convert Int16 PCM to Float32
             var int16 = new Int16Array(rawPcmBytes.buffer, rawPcmBytes.byteOffset, rawPcmBytes.byteLength / 2);
             var float32 = new Float32Array(int16.length);
             for (var i = 0; i < int16.length; i++) {
                 float32[i] = int16[i] / (int16[i] < 0 ? 0x8000 : 0x7FFF);
             }
 
-            // Initialize ring-buffer + ScriptProcessorNode for this user
             if (!S._relayAudioQueues[fromUid]) {
                 S._relayAudioQueues[fromUid] = {
-                    ring: new Float32Array(RELAY_SAMPLE_RATE), // 1s ring buffer
+                    ring: new Float32Array(RELAY_SAMPLE_RATE * 3),
                     writePos: 0,
                     readPos: 0,
                 };
@@ -8057,16 +8081,9 @@
 
             var q = S._relayAudioQueues[fromUid];
             var len = float32.length;
-            // Compute available space from position difference — avoids
-            // reading the shared 'buffered' counter which races with the
-            // consumer thread.
             var avail = (q.writePos - q.readPos + q.ring.length) % q.ring.length;
             var free = q.ring.length - avail;
-            // Drop incoming frame if buffer is full — NEVER touch readPos from
-            // the producer thread (it is exclusively owned by the consumer's
-            // onaudioprocess callback on the audio rendering thread).
             if (len > free) return;
-            // Write incoming samples into the ring buffer
             for (var i = 0; i < len; i++) {
                 q.ring[q.writePos] = float32[i];
                 q.writePos = (q.writePos + 1) % q.ring.length;
@@ -8084,46 +8101,47 @@
 
         var FRAME = 2048;
         var processor = ctx.createScriptProcessor(FRAME, 0, 1);
-        var primed = false;
         var silentCount = 0;
+        var wasSilent = true;
+        var prevTail = 0;
 
         processor.onaudioprocess = function (e) {
             var output = e.outputBuffer.getChannelData(0);
             var q = S._relayAudioQueues[uid];
             if (!q) { output.fill(0); return; }
-            // Derive available samples from positions (avoids data race on
-            // the shared 'buffered' counter between main and audio threads).
             var avail = (q.writePos - q.readPos + q.ring.length) % q.ring.length;
             if (avail < FRAME) {
-                output.fill(0);
-                silentCount++;
-                // Auto-cleanup: if outputting silence for >3s, this user
-                // stopped sending — disconnect the processor to free resources.
-                if (silentCount > 70) { // ~3s at 42.7ms per 2048-sample callback
-                    cleanupMemberGain(uid);
+                if (!wasSilent) {
+                    for (var j = 0; j < FRAME; j++) {
+                        var t = 1 - j / FRAME;
+                        output[j] = prevTail * t * t * (3 - 2 * t);
+                    }
+                } else {
+                    output.fill(0);
                 }
+                wasSilent = true;
+                prevTail = 0;
+                silentCount++;
+                if (silentCount > 70) { cleanupMemberGain(uid); }
                 return;
             }
             silentCount = 0;
-            // Prime: skip ahead to reduce initial latency jitter
-            if (!primed) {
-                if (avail > FRAME * 4) {
-                    var skip = avail - FRAME * 2;
-                    q.readPos = (q.readPos + skip) % q.ring.length;
-                }
-                primed = true;
-            }
-            // Read from ring buffer into output — seamless, no frame boundaries
             for (var i = 0; i < FRAME; i++) {
                 output[i] = q.ring[q.readPos];
                 q.readPos = (q.readPos + 1) % q.ring.length;
             }
+            if (wasSilent) {
+                wasSilent = false;
+                for (var j = 0; j < FRAME; j++) {
+                    var t = j / FRAME;
+                    output[j] *= t * t * (3 - 2 * t);
+                }
+            }
+            prevTail = output[FRAME - 1];
         };
 
         var gain = getOrCreateMemberGain(uid);
-        // Connect: processor → gain → destination (silent playback through gain node)
         processor.connect(gain);
-        // ScriptProcessorNode needs to be connected to destination to fire
         var silent = ctx.createGain();
         silent.gain.value = 0;
         processor.connect(silent);

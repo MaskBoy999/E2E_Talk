@@ -43,6 +43,10 @@ impl WsRateLimiter {
     fn check_and_increment(&self, key: &str, max_attempts: u32, window: Duration) -> bool {
         let mut map = self.attempts.lock().unwrap();
         let now = Instant::now();
+        // Evict expired entries when map grows large to prevent unbounded memory growth
+        if map.len() > 1000 {
+            map.retain(|_, (_, first)| now.duration_since(*first) <= window);
+        }
         if let Some(&(count, first_attempt)) = map.get(key) {
             if now.duration_since(first_attempt) > window {
                 map.insert(key.to_string(), (1, now));
