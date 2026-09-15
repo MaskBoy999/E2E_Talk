@@ -130,6 +130,10 @@ pub struct VoiceMember {
     // Mesh senders use recv_audio_quality to set per-receiver Opus bitrate.
     pub recv_audio_quality: String,
     pub send_audio_quality: String,
+    pub recv_screen_audio_quality: String,
+    pub send_screen_audio_quality: String,
+    pub camera_mode: String,
+    pub screen_mode: String,
 }
 
 pub struct VoiceRoom {
@@ -182,6 +186,10 @@ fn voice_member_json(m: &VoiceMember) -> serde_json::Value {
         "video_mode": m.video_mode,
         "recv_audio_quality": m.recv_audio_quality,
         "send_audio_quality": m.send_audio_quality,
+        "recv_screen_audio_quality": m.recv_screen_audio_quality,
+        "send_screen_audio_quality": m.send_screen_audio_quality,
+        "camera_mode": m.camera_mode,
+        "screen_mode": m.screen_mode,
     })
 }
 
@@ -935,7 +943,9 @@ async fn handle_ws_binary(
 
     // Collect member IDs (excluding sender). For camera/screen relay,
     // skip receivers who have this feed unloaded (manual video load).
+    // For audio (including screen_audio), skip deafened receivers to save bandwidth.
     let feed_key = format!("{}:{}", user_id, kind_str);
+    let is_audio = kind_str.starts_with("audio") || kind_str.starts_with("screen_audio");
     let ids: Vec<String> = {
         let rooms = match state.voice_rooms.read() {
             Ok(r) => r,
@@ -945,7 +955,11 @@ async fn handle_ws_binary(
             Some(room) => room.members.iter()
                 .filter(|(id, m)| {
                     if id.as_str() == user_id { return false; }
-                    // For camera/screen, skip if receiver unloaded this feed
+                    // Deafened members can't hear audio — skip to save bandwidth
+                    if is_audio && (m.deafened || m.force_deafened) {
+                        return false;
+                    }
+                    // For camera/screen video, skip if receiver unloaded this feed
                     if (kind_str == "camera" || kind_str == "screen") && m.unloaded_feeds.contains(&feed_key) {
                         return false;
                     }
@@ -2361,6 +2375,10 @@ async fn handle_voice_join(
         video_mode: "auto".to_string(),
         recv_audio_quality: "medium".to_string(),
         send_audio_quality: "medium".to_string(),
+        recv_screen_audio_quality: "medium".to_string(),
+        send_screen_audio_quality: "medium".to_string(),
+        camera_mode: "auto".to_string(),
+        screen_mode: "auto".to_string(),
     };
 
     // All room mutation happens inside a scope so the write guard (and its &mut
@@ -2901,6 +2919,26 @@ async fn handle_voice_state(
         .and_then(|v| v.as_str())
         .unwrap_or("medium")
         .to_string();
+    let recv_screen_audio_quality = parsed
+        .get("recv_screen_audio_quality")
+        .and_then(|v| v.as_str())
+        .unwrap_or("medium")
+        .to_string();
+    let send_screen_audio_quality = parsed
+        .get("send_screen_audio_quality")
+        .and_then(|v| v.as_str())
+        .unwrap_or("medium")
+        .to_string();
+    let camera_mode = parsed
+        .get("camera_mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("auto")
+        .to_string();
+    let screen_mode = parsed
+        .get("screen_mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("auto")
+        .to_string();
 
     let (member, server_id) = {
         let mut rooms = match state.voice_rooms.write() {
@@ -2932,6 +2970,10 @@ async fn handle_voice_state(
         m.video_mode = video_mode;
         m.recv_audio_quality = recv_audio_quality;
         m.send_audio_quality = send_audio_quality;
+        m.recv_screen_audio_quality = recv_screen_audio_quality;
+        m.send_screen_audio_quality = send_screen_audio_quality;
+        m.camera_mode = camera_mode;
+        m.screen_mode = screen_mode;
         let server_id = room.server_id.clone().unwrap_or_default();
         (m.clone(), server_id)
     };

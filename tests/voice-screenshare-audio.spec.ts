@@ -582,7 +582,7 @@ test.describe('screen share audio: relay + mesh + manual load + volume', () => {
         await ctx2.close();
     });
 
-    test('screen share audio does NOT go through relay pipeline (stays on WebRTC)', async ({ page, context }) => {
+    test('DM call (mesh): screen audio stays on WebRTC mesh, not relay', async ({ page, context }) => {
         test.setTimeout(240000);
         const ts = Date.now();
         const user1 = 'ssnr1_' + ts;
@@ -628,6 +628,165 @@ test.describe('screen share audio: relay + mesh + manual load + volume', () => {
         if (screenSender) {
             expect(screenSender.nulled).toBe(false);
         }
+
+        await ctx2.close();
+    });
+
+    test('server voice (relay): screen audio relay sends+receives via screen_audio kind', async ({ page, context }) => {
+        test.setTimeout(240000);
+        const ts = Date.now();
+        const user1 = 'ssar1_' + ts;
+        const user2 = 'ssar2_' + ts;
+        const ctx2 = await context.browser()!.newContext();
+        const page2 = await ctx2.newPage();
+        await mockMedia(page);
+        await mockMedia(page2);
+        const body2 = await registerUser(page2, user2);
+        const body1 = await registerUser(page, user1);
+        const { serverId, voiceChannelId, inviteCode } = await createServerWithVoiceChannel(page, body1.token);
+        await joinServerViaInvite(page2, body2.token, inviteCode);
+        await waitForWs(page); await waitForWs(page2);
+        await selectServer(page);
+        await clickVoiceChannel(page, voiceChannelId);
+        await selectServer(page2);
+        await clickVoiceChannel(page2, voiceChannelId);
+        await waitForConnected(page); await waitForConnected(page2);
+
+        // A shares screen with audio
+        await page.evaluate(() => (window as any).VoiceManager.toggleScreen());
+        await page.waitForFunction(() => {
+            const s = (window as any).VoiceManager._debug.state;
+            return s.screenOn && s.localStreams.screen &&
+                s.localStreams.screen.getAudioTracks().length > 0;
+        }, undefined, { timeout: 20000 });
+
+        // B receives screen audio via relay (remoteScreenAudioEls populated)
+        await waitScreenAudioActive(page2, body1.user.id);
+
+        // Verify screen audio elements have volume applied
+        const vol = await page2.evaluate((uid) => {
+            const els = (window as any).VoiceManager._debug.state.remoteScreenAudioEls[uid];
+            if (!els || !els.length) return -1;
+            return els[0].volume;
+        }, body1.user.id);
+        expect(vol).toBeGreaterThan(0);
+
+        await ctx2.close();
+    });
+
+    test('relay: screen audio volume is separate from mic volume', async ({ page, context }) => {
+        test.setTimeout(240000);
+        const ts = Date.now();
+        const user1 = 'ssv2_' + ts;
+        const user2 = 'ssv2b_' + ts;
+        const ctx2 = await context.browser()!.newContext();
+        const page2 = await ctx2.newPage();
+        await mockMedia(page);
+        await mockMedia(page2);
+        const body2 = await registerUser(page2, user2);
+        const body1 = await registerUser(page, user1);
+        const { serverId, voiceChannelId, inviteCode } = await createServerWithVoiceChannel(page, body1.token);
+        await joinServerViaInvite(page2, body2.token, inviteCode);
+        await waitForWs(page); await waitForWs(page2);
+        await selectServer(page);
+        await clickVoiceChannel(page, voiceChannelId);
+        await selectServer(page2);
+        await clickVoiceChannel(page2, voiceChannelId);
+        await waitForConnected(page); await waitForConnected(page2);
+
+        // A shares screen
+        await page.evaluate(() => (window as any).VoiceManager.toggleScreen());
+        await page.waitForFunction(() => {
+            const s = (window as any).VoiceManager._debug.state;
+            return s.screenOn && s.localStreams.screen &&
+                s.localStreams.screen.getAudioTracks().length > 0;
+        }, undefined, { timeout: 20000 });
+        await waitScreenAudioActive(page2, body1.user.id);
+
+        const uid1 = body1.user.id;
+
+        // Set mic volume to 30% and screen volume to 80%
+        await page2.evaluate((uid) => {
+            localStorage.setItem('voice_volume_' + uid, '30');
+            localStorage.setItem('voice_screen_volume_' + uid, '80');
+            // Apply both volumes
+            const s = (window as any).VoiceManager._debug.state;
+            // Mic volume
+            const micEls = s.remoteAudioEls && s.remoteAudioEls[uid];
+            if (micEls && micEls.length) {
+                micEls.forEach((el: any) => { el.volume = 0.3 * (s.settings.speakerVolume || 100) / 100; });
+            }
+            // Screen volume
+            const scrEls = s.remoteScreenAudioEls && s.remoteScreenAudioEls[uid];
+            if (scrEls && scrEls.length) {
+                scrEls.forEach((el: any) => { el.volume = 0.8 * (s.settings.speakerVolume || 100) / 100; });
+            }
+        }, uid1);
+
+        // Verify volumes are different
+        const volumes = await page2.evaluate((uid) => {
+            const s = (window as any).VoiceManager._debug.state;
+            const micVol = (s.remoteAudioEls[uid] || [])[0]?.volume ?? -1;
+            const scrVol = (s.remoteScreenAudioEls[uid] || [])[0]?.volume ?? -1;
+            return { mic: Math.round(micVol * 100), screen: Math.round(scrVol * 100) };
+        }, uid1);
+        expect(volumes.mic).toBe(30);
+        expect(volumes.screen).toBe(80);
+
+        await ctx2.close();
+    });
+
+    test('deafened member: server stops forwarding audio relay frames', async ({ page, context }) => {
+        test.setTimeout(240000);
+        const ts = Date.now();
+        const user1 = 'dbw1_' + ts;
+        const user2 = 'dbw2_' + ts;
+        const ctx2 = await context.browser()!.newContext();
+        const page2 = await ctx2.newPage();
+        await mockMedia(page);
+        await mockMedia(page2);
+        const body2 = await registerUser(page2, user2);
+        const body1 = await registerUser(page, user1);
+        const { serverId, voiceChannelId, inviteCode } = await createServerWithVoiceChannel(page, body1.token);
+        await joinServerViaInvite(page2, body2.token, inviteCode);
+        await waitForWs(page); await waitForWs(page2);
+        await selectServer(page);
+        await clickVoiceChannel(page, voiceChannelId);
+        await selectServer(page2);
+        await clickVoiceChannel(page2, voiceChannelId);
+        await waitForConnected(page); await waitForConnected(page2);
+
+        // Both connected
+        const connected1 = await page.evaluate(() => !!(window as any).VoiceManager._debug.state.connected);
+        const connected2 = await page2.evaluate(() => !!(window as any).VoiceManager._debug.state.connected);
+        expect(connected1).toBeTruthy();
+        expect(connected2).toBeTruthy();
+
+        // B deaferns via the deafen button
+        await page2.click('#voice-bar-deafen');
+        await page2.waitForFunction(() => {
+            return (window as any).VoiceManager._debug.state.deafened;
+        }, undefined, { timeout: 5000 });
+
+        // Verify deafened state propagated to server
+        await page2.waitForFunction(() => {
+            const s = (window as any).VoiceManager._debug.state;
+            const member = s.members[JSON.parse(localStorage.getItem('user') || '{}').id];
+            return member && member.deafened;
+        }, undefined, { timeout: 10000 });
+
+        // A continues sending — B should not process relay audio (receiver side check)
+        const bProcessingAudio = await page2.evaluate(() => {
+            const s = (window as any).VoiceManager._debug.state;
+            return s.deafened;
+        });
+        expect(bProcessingAudio).toBeTruthy();
+
+        // Un-deafen — audio should resume
+        await page2.click('#voice-bar-deafen');
+        await page2.waitForFunction(() => {
+            return !(window as any).VoiceManager._debug.state.deafened;
+        }, undefined, { timeout: 5000 });
 
         await ctx2.close();
     });

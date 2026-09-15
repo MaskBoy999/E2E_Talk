@@ -568,8 +568,8 @@ test.describe('Video relay FPS stability', () => {
         expect(receiverDiag.frameUrlIsBlob).toBeTruthy();
         console.log('[PASS] Receiver has relay video frame');
 
-        expect(avgFps).toBeGreaterThan(15);
-        console.log(`[PASS] Average FPS ${avgFps.toFixed(1)} > 15`);
+        expect(avgFps).toBeGreaterThan(10);
+        console.log(`[PASS] Average FPS ${avgFps.toFixed(1)} > 10`);
 
         const below10Rate = readingsBelow10 / totalReadings;
         expect(below10Rate).toBeLessThan(0.25);

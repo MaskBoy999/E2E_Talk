@@ -1106,6 +1106,22 @@
                         <option value="ultra">Ultra (48 kHz)</option>
                     </select>
                     <p class="settings-hint" style="margin-top:4px;color:var(--warning,#f0b232);">⚠ Receive quality only affects mesh P2P calls (DM calls and channels ≤5 people with mesh mode on). In server-relay mode, you get whatever the sender sends.</p>
+                    <label class="settings-checkbox-label" style="margin-top:8px;"><span style="font-size:12px;color:var(--text-muted)">Screen share audio quality (relay):</span></label>
+                    <select id="voice-send-screen-audio-quality" class="modal-input" style="margin-top:4px;max-width:200px;">
+                        <option value="low">Low (8 kHz, ~16 kbps)</option>
+                        <option value="medium" selected>Medium (16 kHz, ~32 kbps)</option>
+                        <option value="high">High (24 kHz, ~64 kbps)</option>
+                        <option value="ultra">Ultra (48 kHz, ~128 kbps)</option>
+                    </select>
+                    <p class="settings-hint" style="margin-top:4px;">Sample rate for screen share audio sent via server relay. Only affects the sender's capture quality; screen audio volume is controlled separately per-member via right-click on the screen tile.</p>
+                    <label class="settings-checkbox-label" style="margin-top:8px;"><span style="font-size:12px;color:var(--text-muted)">Receive screen audio quality (mesh):</span></label>
+                    <select id="voice-recv-screen-audio-quality" class="modal-input" style="margin-top:4px;max-width:200px;">
+                        <option value="low">Low (8 kHz)</option>
+                        <option value="medium" selected>Medium (16 kHz)</option>
+                        <option value="high">High (24 kHz)</option>
+                        <option value="ultra">Ultra (48 kHz)</option>
+                    </select>
+                    <p class="settings-hint" style="margin-top:4px;color:var(--warning,#f0b232);">⚠ Receive screen audio quality only affects mesh P2P calls (DM calls and channels ≤5 people with mesh mode on). In server-relay mode, you get whatever the sender sends.</p>
                 </div>
 <div class="settings-group">
                     <h4>Haptics</h4>
@@ -2105,8 +2121,10 @@
     <div class="voice-cam-opt-menu" id="voice-cam-opt-menu" style="display:none">
         <button type="button" id="cam-opt-flip" title="Flip camera"><svg class="ui-icon" width="14" height="14"><use href="#icon-flip"/></svg> Flip camera</button>
         <button type="button" id="cam-opt-flash" title="Flash"><svg class="ui-icon" width="14" height="14"><use href="#icon-flash"/></svg> Flash</button>
-        <button type="button" id="cam-opt-video-mode" title="Toggle video between server relay and P2P mesh"><svg class="ui-icon" width="14" height="14"><use href="#icon-monitor"/></svg> <span id="cam-opt-video-mode-label">Video: Server relay</span></button>
+        <div class="voice-cam-opt-divider"></div>
         <button type="button" id="cam-opt-audio-mode" title="Toggle audio between server relay and P2P mesh"><svg class="ui-icon" width="14" height="14"><use href="#icon-volume-on"/></svg> <span id="cam-opt-audio-mode-label">Audio: Auto</span></button>
+        <button type="button" id="cam-opt-camera-mode" title="Toggle camera video between server relay and P2P mesh"><svg class="ui-icon" width="14" height="14"><use href="#icon-camera"/></svg> <span id="cam-opt-camera-mode-label">Camera: Auto</span></button>
+        <button type="button" id="cam-opt-screen-mode" title="Toggle screen share between server relay and P2P mesh"><svg class="ui-icon" width="14" height="14"><use href="#icon-monitor"/></svg> <span id="cam-opt-screen-mode-label">Screen: Auto</span></button>
     </div>
 
     <!-- White-screen flash (for cameras without torch, e.g. the selfie

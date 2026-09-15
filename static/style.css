@@ -8888,6 +8888,7 @@ body.streamer-mode .dm-avatar:hover {
 }
 .voice-cam-opt-menu button:hover { background: #2c2c46; }
 .voice-cam-opt-menu button.active { background: #3a3340; color: #b39ddb; }
+.voice-cam-opt-divider { height: 1px; background: var(--bg-border, #2a2a4a); margin: 4px 0; }
 
 /* White-screen flash (selfie cameras without torch): covers the WHOLE app
    with white and a button to turn the flash back off. */

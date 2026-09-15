@@ -79,6 +79,8 @@
             // ring buffer sample rate. Values: 'low' | 'medium' | 'high' | 'ultra'.
             sendAudioQuality: 'medium',       // default 16 kHz ~32 kbps
             recvAudioQuality: 'medium',       // default 16 kHz playback
+            sendScreenAudioQuality: 'medium', // screen share audio quality (relay)
+            recvScreenAudioQuality: 'medium', // screen share audio quality (mesh P2P only)
             // Haptic cues (mobile). hapticIncoming: vibrate when a NEW
             // incoming ring starts (notice a call on silent mode).
             // hapticWaiting: vibrate when the ring flips to the waiting state
@@ -162,6 +164,8 @@
         // system decides based on active participant count.
         _audioModeOverrides: {},
         _videoModeOverrides: {},
+        _cameraModeOverrides: {},
+        _screenModeOverrides: {},
         // Relay video frame blob URLs: { 'uid_kind': blobUrl }
         // Stored so renderPopup() can re-inject <img> tiles after rebuilding.
         _relayVideoFrames: {},
@@ -208,8 +212,12 @@
         stopCamera: stopCamera,
         setSelfAudioMode: setSelfAudioMode,
         setSelfVideoMode: setSelfVideoMode,
+        setSelfCameraMode: setSelfCameraMode,
+        setSelfScreenMode: setSelfScreenMode,
         resolveAudioMode: resolveAudioMode,
         resolveVideoMode: resolveVideoMode,
+        resolveCameraMode: resolveCameraMode,
+        resolveScreenMode: resolveScreenMode,
         setVideoWatchdogSecs: setVideoWatchdogSecs,
         getPeerDiag: function () { return collectPeerDiag(); },
         getVoiceState: function () { return { inVoice: S.connected, channelId: S.channelId, dmChannelId: S.dmChannelId, serverId: S.serverId, roomType: S.roomType }; },
@@ -470,6 +478,8 @@
             // Per-user mode overrides (for tests)
             audioOverrides: function () { return JSON.parse(JSON.stringify(S._audioModeOverrides)); },
             videoOverrides: function () { return JSON.parse(JSON.stringify(S._videoModeOverrides)); },
+            cameraOverrides: function () { return JSON.parse(JSON.stringify(S._cameraModeOverrides)); },
+            screenOverrides: function () { return JSON.parse(JSON.stringify(S._screenModeOverrides)); },
             lastAudioMode: function () { return S._lastAudioMode; },
         },
     };
@@ -612,6 +622,10 @@
         if (saq) saq.value = S.settings.sendAudioQuality || 'medium';
         var raq = document.getElementById('voice-recv-audio-quality');
         if (raq) raq.value = S.settings.recvAudioQuality || 'medium';
+        var ssaq = document.getElementById('voice-send-screen-audio-quality');
+        if (ssaq) ssaq.value = S.settings.sendScreenAudioQuality || 'medium';
+        var rsaq = document.getElementById('voice-recv-screen-audio-quality');
+        if (rsaq) rsaq.value = S.settings.recvScreenAudioQuality || 'medium';
         // hear-self is now a button, not a checkbox — no sync needed
         var hi = document.getElementById('voice-haptic-incoming');
         if (hi) hi.checked = S.settings.hapticIncoming !== false;
@@ -963,7 +977,7 @@
     // Server → Client:  [0x01 marker][uid_len:u8][uid][kind:u8][nonce:24][ciphertext]
 
     function encodeRelayBinary(kindStr, nonce, ciphertext) {
-        var kindByte = kindStr === 'screen' ? 1 : kindStr === 'audio' ? 2 : kindStr === 'audio_low' ? 3 : kindStr === 'audio_med' ? 4 : kindStr === 'audio_high' ? 5 : kindStr === 'audio_ultra' ? 6 : 0;
+        var kindByte = kindStr === 'screen' ? 1 : kindStr === 'audio' ? 2 : kindStr === 'audio_low' ? 3 : kindStr === 'audio_med' ? 4 : kindStr === 'audio_high' ? 5 : kindStr === 'audio_ultra' ? 6 : kindStr === 'screen_audio' ? 7 : kindStr === 'screen_audio_low' ? 8 : kindStr === 'screen_audio_med' ? 9 : kindStr === 'screen_audio_high' ? 10 : kindStr === 'screen_audio_ultra' ? 11 : 0;
         var rt = (S.roomType || 'server');
         var ci = (S.channelId || '');
         var di = (S.dmChannelId || '');
@@ -996,7 +1010,7 @@
         var uidLen = u8[pos++];
         var uid = new TextDecoder().decode(u8.slice(pos, pos + uidLen)); pos += uidLen;
         var kindByte = u8[pos++];
-        var kindStr = kindByte === 1 ? 'screen' : kindByte === 2 ? 'audio' : kindByte === 3 ? 'audio_low' : kindByte === 4 ? 'audio_med' : kindByte === 5 ? 'audio_high' : kindByte === 6 ? 'audio_ultra' : 'camera';
+        var kindStr = kindByte === 1 ? 'screen' : kindByte === 2 ? 'audio' : kindByte === 3 ? 'audio_low' : kindByte === 4 ? 'audio_med' : kindByte === 5 ? 'audio_high' : kindByte === 6 ? 'audio_ultra' : kindByte === 7 ? 'screen_audio' : kindByte === 8 ? 'screen_audio_low' : kindByte === 9 ? 'screen_audio_med' : kindByte === 10 ? 'screen_audio_high' : kindByte === 11 ? 'screen_audio_ultra' : 'camera';
         var nonce = u8.slice(pos, pos + 24); pos += 24;
         var ciphertext = u8.slice(pos);
         return { fromUid: uid, kind: kindStr, nonce: nonce, ciphertext: ciphertext };
@@ -1112,6 +1126,8 @@
         if (_recalcAudioTimer) { clearTimeout(_recalcAudioTimer); _recalcAudioTimer = null; }
         S._audioModeOverrides = {};
         S._videoModeOverrides = {};
+        S._cameraModeOverrides = {};
+        S._screenModeOverrides = {};
         closeAllPeers();
         // Bulk-kill any relay audio nodes that survived closeAllPeers (relay
         // users may not have S.remoteAudioEls entries, so per-uid cleanup
@@ -1549,15 +1565,20 @@
                 }
                 if (useVideoRelay()) {
                     // Server voice channel: relay screen video via WebSocket.
-                    // Screen AUDIO still goes through WebRTC (via addLocalTracksToAllPeers).
+                    // Screen audio is relayed too if audio relay is active,
+                    // otherwise it stays on WebRTC mesh.
                     startVideoRelay(stream, 'screen');
-                    // Add only audio tracks to peers (video is relayed)
-                    var audioTracks = stream.getAudioTracks();
-                    for (var uid in S.peers) {
-                        var pc = S.peers[uid];
-                        audioTracks.forEach(function (track) {
-                            try { pc.addTrack(track, stream); } catch (_) {}
-                        });
+                    if (_audioRelayTimer) {
+                        startScreenAudioRelay();
+                    } else {
+                        // Add audio tracks to peers (audio is still on mesh)
+                        var audioTracks = stream.getAudioTracks();
+                        for (var uid in S.peers) {
+                            var pc = S.peers[uid];
+                            audioTracks.forEach(function (track) {
+                                try { pc.addTrack(track, stream); } catch (_) {}
+                            });
+                        }
                     }
                 } else {
                     addLocalTracksToAllPeers();
@@ -1581,6 +1602,7 @@
             S.localStreams.screen = null;
         }
         stopVideoRelay('screen');
+        stopScreenAudioRelay();
         S.screenOn = false;
         sendVoiceState();
         renderSelfPreview();
@@ -2046,7 +2068,7 @@
             }
         }
         if (S.localStreams.camera && S.cameraOn) {
-            if (!useVideoRelay()) {
+            if (!useVideoRelay('camera')) {
                 var vt = S.localStreams.camera.getVideoTracks()[0];
                 if (vt && !pc.getSenders().find(function (s) { return senderOccupied(s, vt); })) {
                     pc.addTrack(vt, new MediaStream([vt]));
@@ -2055,7 +2077,7 @@
             }
         }
         if (S.localStreams.screen && S.screenOn) {
-            if (!useVideoRelay()) {
+            if (!useVideoRelay('screen')) {
                 var st = S.localStreams.screen.getVideoTracks()[0];
                 if (st && !pc.getSenders().find(function (s) { return senderOccupied(s, st); })) {
                     pc.addTrack(st, new MediaStream([st]));
@@ -3367,16 +3389,19 @@
             var st = row.querySelector('.voice-member-status');
             if (st) {
                 var html = memberBadges(local, 'vm');
-                // Re-include mode badges (status badges alone would wipe them)
                 if (S.roomType === 'server' && S.connected) {
                     var audioMode = resolveAudioMode(uid);
-                    var videoMode = resolveVideoMode(uid);
+                    var cameraMode = resolveCameraMode(uid);
+                    var screenMode = resolveScreenMode(uid);
                     var audioOv = S._audioModeOverrides[uid];
-                    var videoOv = S._videoModeOverrides[uid];
+                    var cameraOv = S._cameraModeOverrides[uid];
+                    var screenOv = S._screenModeOverrides[uid];
                     var audioIsManual = audioOv === 'mesh' || audioOv === 'relay';
-                    var videoIsManual = videoOv === 'mesh' || videoOv === 'relay';
-                    html += ' <span class="voice-mode-badge mode-' + audioMode + (isSelf ? ' is-self' : '') + '" data-mode-kind="audio" data-uid="' + esc(uid) + '" title="Audio: ' + audioMode + (audioIsManual ? ' (manual)' : ' (auto)') + '">' + (audioMode === 'mesh' ? 'M' : 'R') + '</span>';
-                    html += ' <span class="voice-mode-badge mode-' + videoMode + (isSelf ? ' is-self' : '') + '" data-mode-kind="video" data-uid="' + esc(uid) + '" title="Video: ' + videoMode + (videoIsManual ? ' (manual)' : ' (auto)') + '">' + (videoMode === 'mesh' ? 'M' : 'R') + '</span>';
+                    var cameraIsManual = cameraOv === 'mesh' || cameraOv === 'relay';
+                    var screenIsManual = screenOv === 'mesh' || screenOv === 'relay';
+                    html += ' <span class="voice-mode-badge mode-' + audioMode + (isSelf ? ' is-self' : '') + '" data-mode-kind="audio" data-uid="' + esc(uid) + '" title="Audio: ' + audioMode + (audioIsManual ? ' (manual)' : ' (auto)') + '">' + icon('volume-on', 10) + (audioMode === 'mesh' ? 'M' : 'R') + '</span>';
+                    html += ' <span class="voice-mode-badge mode-' + cameraMode + (isSelf ? ' is-self' : '') + '" data-mode-kind="camera" data-uid="' + esc(uid) + '" title="Camera: ' + cameraMode + (cameraIsManual ? ' (manual)' : ' (auto)') + '">' + icon('camera', 10) + (cameraMode === 'mesh' ? 'M' : 'R') + '</span>';
+                    html += ' <span class="voice-mode-badge mode-' + screenMode + (isSelf ? ' is-self' : '') + '" data-mode-kind="screen" data-uid="' + esc(uid) + '" title="Screen: ' + screenMode + (screenIsManual ? ' (manual)' : ' (auto)') + '">' + icon('monitor', 10) + (screenMode === 'mesh' ? 'M' : 'R') + '</span>';
                 }
                 st.innerHTML = html;
             }
@@ -4427,25 +4452,35 @@
         if (flash) flash.classList.toggle('active', !!S.cameraFlash);
         var isDm = S.roomType === 'dm';
         // Hide mesh/relay options in DM calls (always mesh)
-        var videoMode = el('cam-opt-video-mode');
         var audioMode = el('cam-opt-audio-mode');
-        if (videoMode) videoMode.style.display = isDm ? 'none' : '';
+        var cameraMode = el('cam-opt-camera-mode');
+        var screenMode = el('cam-opt-screen-mode');
         if (audioMode) audioMode.style.display = isDm ? 'none' : '';
-        // Video mode label
-        var vlabel = el('cam-opt-video-mode-label');
-        if (vlabel) {
-            var selfId = getSelfId();
-            var vMode = selfId ? resolveVideoMode(selfId) : autoVideoMode();
-            var vManual = selfId && (S._videoModeOverrides[selfId] === 'mesh' || S._videoModeOverrides[selfId] === 'relay');
-            vlabel.textContent = 'Video: ' + (vMode === 'mesh' ? 'P2P mesh' : 'Server relay') + (vManual ? ' (manual)' : '');
-        }
+        if (cameraMode) cameraMode.style.display = isDm ? 'none' : '';
+        if (screenMode) screenMode.style.display = isDm ? 'none' : '';
         // Audio mode label
         var alabel = el('cam-opt-audio-mode-label');
         if (alabel) {
-            var selfId2 = getSelfId();
-            var aMode = selfId2 ? resolveAudioMode(selfId2) : autoAudioMode();
-            var aManual = selfId2 && (S._audioModeOverrides[selfId2] === 'mesh' || S._audioModeOverrides[selfId2] === 'relay');
+            var selfId = getSelfId();
+            var aMode = selfId ? resolveAudioMode(selfId) : autoAudioMode();
+            var aManual = selfId && (S._audioModeOverrides[selfId] === 'mesh' || S._audioModeOverrides[selfId] === 'relay');
             alabel.textContent = 'Audio: ' + (aMode === 'mesh' ? 'P2P mesh' : 'Server relay') + (aManual ? ' (manual)' : '');
+        }
+        // Camera mode label
+        var clabel = el('cam-opt-camera-mode-label');
+        if (clabel) {
+            var selfId2 = getSelfId();
+            var cMode = selfId2 ? resolveCameraMode(selfId2) : autoVideoMode();
+            var cManual = selfId2 && (S._cameraModeOverrides[selfId2] === 'mesh' || S._cameraModeOverrides[selfId2] === 'relay');
+            clabel.textContent = 'Camera: ' + (cMode === 'mesh' ? 'P2P mesh' : 'Server relay') + (cManual ? ' (manual)' : '');
+        }
+        // Screen mode label
+        var slabel = el('cam-opt-screen-mode-label');
+        if (slabel) {
+            var selfId3 = getSelfId();
+            var sMode = selfId3 ? resolveScreenMode(selfId3) : autoVideoMode();
+            var sManual = selfId3 && (S._screenModeOverrides[selfId3] === 'mesh' || S._screenModeOverrides[selfId3] === 'relay');
+            slabel.textContent = 'Screen: ' + (sMode === 'mesh' ? 'P2P mesh' : 'Server relay') + (sManual ? ' (manual)' : '');
         }
     }
 
@@ -4454,24 +4489,33 @@
         if (!menu) return;
         var flip = el('cam-opt-flip');
         var flash = el('cam-opt-flash');
-        var videoMode = el('cam-opt-video-mode');
         var audioMode = el('cam-opt-audio-mode');
+        var cameraMode = el('cam-opt-camera-mode');
+        var screenMode = el('cam-opt-screen-mode');
         if (flip) flip.addEventListener('click', function (e) { e.stopPropagation(); flipCamera(); closeCamOptMenu(); });
         if (flash) flash.addEventListener('click', function (e) { e.stopPropagation(); toggleCameraFlash(); });
-        if (videoMode) videoMode.addEventListener('click', function (e) {
-            e.stopPropagation();
-            var selfId = getSelfId();
-            var cur = selfId ? (S._videoModeOverrides[selfId] || 'auto') : 'auto';
-            var next = cur === 'auto' ? 'mesh' : cur === 'mesh' ? 'relay' : 'auto';
-            setSelfVideoMode(next);
-            updateCamOptMenuState();
-        });
         if (audioMode) audioMode.addEventListener('click', function (e) {
             e.stopPropagation();
             var selfId = getSelfId();
             var cur = selfId ? (S._audioModeOverrides[selfId] || 'auto') : 'auto';
             var next = cur === 'auto' ? 'mesh' : cur === 'mesh' ? 'relay' : 'auto';
             setSelfAudioMode(next);
+            updateCamOptMenuState();
+        });
+        if (cameraMode) cameraMode.addEventListener('click', function (e) {
+            e.stopPropagation();
+            var selfId = getSelfId();
+            var cur = selfId ? (S._cameraModeOverrides[selfId] || 'auto') : 'auto';
+            var next = cur === 'auto' ? 'mesh' : cur === 'mesh' ? 'relay' : 'auto';
+            setSelfCameraMode(next);
+            updateCamOptMenuState();
+        });
+        if (screenMode) screenMode.addEventListener('click', function (e) {
+            e.stopPropagation();
+            var selfId = getSelfId();
+            var cur = selfId ? (S._screenModeOverrides[selfId] || 'auto') : 'auto';
+            var next = cur === 'auto' ? 'mesh' : cur === 'mesh' ? 'relay' : 'auto';
+            setSelfScreenMode(next);
             updateCamOptMenuState();
         });
         var off = el('camera-flash-off');
@@ -4502,6 +4546,8 @@
             // Broadcast self audio/video mode so peers can show M/R badges
             audio_mode: selfId ? (S._audioModeOverrides[selfId] || 'auto') : 'auto',
             video_mode: selfId ? (S._videoModeOverrides[selfId] || 'auto') : 'auto',
+            camera_mode: selfId ? (S._cameraModeOverrides[selfId] || 'auto') : 'auto',
+            screen_mode: selfId ? (S._screenModeOverrides[selfId] || 'auto') : 'auto',
             // Receive-resolution preference: every peer scales its sender for
             // THIS member down to these heights (per-receiver quality).
             recv_camera_res: S.settings.recvCameraRes || 360,
@@ -4510,6 +4556,8 @@
             // Opus encoding / relay capture to match what this member wants.
             send_audio_quality: S.settings.sendAudioQuality || 'medium',
             recv_audio_quality: S.settings.recvAudioQuality || 'medium',
+            send_screen_audio_quality: S.settings.sendScreenAudioQuality || 'medium',
+            recv_screen_audio_quality: S.settings.recvScreenAudioQuality || 'medium',
             // Manual video-load state: which feeds ("uid:kind") this viewer has
             // explicitly loaded/unloaded, so every sender can stop sending a
             // feed nobody is watching (bitrate) — see feedWanted().
@@ -5281,6 +5329,18 @@
             updateSettingsLabels();
             if (S.connected) sendVoiceState();
         });
+        var ssaq = document.getElementById('voice-send-screen-audio-quality');
+        if (ssaq) ssaq.addEventListener('change', function (e) {
+            S.settings.sendScreenAudioQuality = e.target.value;
+            saveSettings();
+        });
+        var rsaq = document.getElementById('voice-recv-screen-audio-quality');
+        if (rsaq) rsaq.addEventListener('change', function (e) {
+            S.settings.recvScreenAudioQuality = e.target.value;
+            saveSettings();
+            updateSettingsLabels();
+            if (S.connected) sendVoiceState();
+        });
         // --- Test Mic button (hear-self) ---
         var _hearSelfBtn = document.getElementById('voice-hear-self-btn');
         var _hearSelfMeterWrap = document.getElementById('voice-hear-self-meter-wrap');
@@ -5701,14 +5761,18 @@
         // Self gets clickable badges to toggle; others see indicators.
         if (S.roomType === 'server' && S.connected) {
             var audioMode = resolveAudioMode(uid);
-            var videoMode = resolveVideoMode(uid);
+            var cameraMode = resolveCameraMode(uid);
+            var screenMode = resolveScreenMode(uid);
             var audioOv = S._audioModeOverrides[uid];
-            var videoOv = S._videoModeOverrides[uid];
+            var cameraOv = S._cameraModeOverrides[uid];
+            var screenOv = S._screenModeOverrides[uid];
             var audioIsManual = audioOv === 'mesh' || audioOv === 'relay';
-            var videoIsManual = videoOv === 'mesh' || videoOv === 'relay';
+            var cameraIsManual = cameraOv === 'mesh' || cameraOv === 'relay';
+            var screenIsManual = screenOv === 'mesh' || screenOv === 'relay';
             html += '<span class="voice-member-status">' + memberBadges(local, 'vm');
-            html += ' <span class="voice-mode-badge mode-' + audioMode + (isSelf ? ' is-self' : '') + '" data-mode-kind="audio" data-uid="' + esc(uid) + '" title="Audio: ' + audioMode + (audioIsManual ? ' (manual)' : ' (auto)') + '">' + (audioMode === 'mesh' ? 'M' : 'R') + '</span>';
-            html += ' <span class="voice-mode-badge mode-' + videoMode + (isSelf ? ' is-self' : '') + '" data-mode-kind="video" data-uid="' + esc(uid) + '" title="Video: ' + videoMode + (videoIsManual ? ' (manual)' : ' (auto)') + '">' + (videoMode === 'mesh' ? 'M' : 'R') + '</span>';
+            html += ' <span class="voice-mode-badge mode-' + audioMode + (isSelf ? ' is-self' : '') + '" data-mode-kind="audio" data-uid="' + esc(uid) + '" title="Audio: ' + audioMode + (audioIsManual ? ' (manual)' : ' (auto)') + '">' + icon('volume-on', 10) + (audioMode === 'mesh' ? 'M' : 'R') + '</span>';
+            html += ' <span class="voice-mode-badge mode-' + cameraMode + (isSelf ? ' is-self' : '') + '" data-mode-kind="camera" data-uid="' + esc(uid) + '" title="Camera: ' + cameraMode + (cameraIsManual ? ' (manual)' : ' (auto)') + '">' + icon('camera', 10) + (cameraMode === 'mesh' ? 'M' : 'R') + '</span>';
+            html += ' <span class="voice-mode-badge mode-' + screenMode + (isSelf ? ' is-self' : '') + '" data-mode-kind="screen" data-uid="' + esc(uid) + '" title="Screen: ' + screenMode + (screenIsManual ? ' (manual)' : ' (auto)') + '">' + icon('monitor', 10) + (screenMode === 'mesh' ? 'M' : 'R') + '</span>';
             html += '</span>';
         } else {
             html += '<span class="voice-member-status">' + memberBadges(local, 'vm') + '</span>';
@@ -5894,10 +5958,14 @@
                     var cur = S._audioModeOverrides[uid] || 'auto';
                     var next = cur === 'auto' ? 'mesh' : cur === 'mesh' ? 'relay' : 'auto';
                     setSelfAudioMode(next);
-                } else if (kind === 'video') {
-                    var cur = S._videoModeOverrides[uid] || 'auto';
+                } else if (kind === 'camera') {
+                    var cur = S._cameraModeOverrides[uid] || 'auto';
                     var next = cur === 'auto' ? 'mesh' : cur === 'mesh' ? 'relay' : 'auto';
-                    setSelfVideoMode(next);
+                    setSelfCameraMode(next);
+                } else if (kind === 'screen') {
+                    var cur = S._screenModeOverrides[uid] || 'auto';
+                    var next = cur === 'auto' ? 'mesh' : cur === 'mesh' ? 'relay' : 'auto';
+                    setSelfScreenMode(next);
                 }
             });
         }
@@ -7624,17 +7692,18 @@
 
     // Determine whether to use relay mode for video in the current room.
     // Server voice channels use relay; DM calls use WebRTC mesh.
-    function useVideoRelay() {
+    function useVideoRelay(kind) {
         if (S.roomType !== 'server' || !S.connected) return false;
         var selfId = getSelfId();
-        var mode = resolveVideoMode(selfId);
-        return mode === 'relay';
+        // Check kind-specific override first (camera/screen have independent modes)
+        if (kind === 'camera') return resolveCameraMode(selfId) === 'relay';
+        if (kind === 'screen') return resolveScreenMode(selfId) === 'relay';
+        return resolveVideoMode(selfId) === 'relay';
     }
 
     // Start capturing frames from a MediaStream and relaying them via WebSocket.
     // kind = 'camera' | 'screen'
     function startVideoRelay(stream, kind) {
-        if (!useVideoRelay()) return;
         if (S._relayTimers[kind]) return; // already running
 
         var fps = S.settings.relayVideoFps || 15;
@@ -7827,7 +7896,7 @@
                 );
             } catch (e) { console.log('[BIN-RELAY] decrypt failed:', e); return; }
 
-            if (decoded.kind.startsWith('audio')) {
+            if (decoded.kind.startsWith('audio') || decoded.kind.startsWith('screen_audio')) {
                 handleRelayedAudioFrame(decoded.fromUid, plaintext, decoded.kind);
                 return;
             }
@@ -8014,6 +8083,32 @@
         return autoVideoMode();
     }
 
+    // Resolve camera-specific video mode (camera = video only, no audio).
+    function resolveCameraMode(uid) {
+        var selfId = getSelfId();
+        if (uid === selfId) {
+            var ov = S._cameraModeOverrides[uid];
+            if (ov === 'mesh' || ov === 'relay') return ov;
+        } else {
+            var m = S.members[uid];
+            if (m && (m.camera_mode === 'mesh' || m.camera_mode === 'relay')) return m.camera_mode;
+        }
+        return autoVideoMode();
+    }
+
+    // Resolve screen-specific mode (screen = video + screen audio).
+    function resolveScreenMode(uid) {
+        var selfId = getSelfId();
+        if (uid === selfId) {
+            var ov = S._screenModeOverrides[uid];
+            if (ov === 'mesh' || ov === 'relay') return ov;
+        } else {
+            var m = S.members[uid];
+            if (m && (m.screen_mode === 'mesh' || m.screen_mode === 'relay')) return m.screen_mode;
+        }
+        return autoVideoMode();
+    }
+
     // Current mode state
     S._lastAudioMode = null; // 'mesh' | 'relay' | null (initial)
     var _recalcAudioTimer = null; // debounce timer for rapid mode switches
@@ -8082,7 +8177,7 @@
                 pc.getSenders().forEach(function (sender) {
                     if (sender.track && sender.track.kind === 'video') {
                         sender.replaceTrack(null).catch(function () {});
-                        sender._videoNulled = sender.track;
+                        sender._voiceNulled = sender.track;
                     }
                 });
             }
@@ -8113,38 +8208,132 @@
         showToast('Video mode: ' + mode + (mode === 'auto' ? ' (auto)' : ' (manual)'));
     }
 
+    // Set camera-specific video mode (camera = video only, no audio).
+    function setSelfCameraMode(mode) {
+        var selfId = getSelfId();
+        if (!selfId) return;
+        if (mode === 'auto') {
+            delete S._cameraModeOverrides[selfId];
+        } else {
+            S._cameraModeOverrides[selfId] = mode;
+        }
+        sendVoiceState();
+        // Apply camera mode: relay or mesh for camera feed only
+        var effective = resolveCameraMode(selfId);
+        var peers = S.peers;
+        if (effective === 'relay') {
+            // Null camera video senders on WebRTC, start camera relay
+            for (var uid in peers) {
+                var pc = peers[uid];
+                if (!pc || !pc.getSenders) continue;
+                pc.getSenders().forEach(function (sender) {
+                    if (sender.track && sender.track.kind === 'video' && isTrackKind(sender.track, 'camera')) {
+                        sender.replaceTrack(null).catch(function () {});
+                        sender._voiceNulled = sender.track;
+                    }
+                });
+            }
+            if (S.localStreams.camera && S.cameraOn) startVideoRelay(S.localStreams.camera, 'camera');
+        } else {
+            // Mesh: stop camera relay, restore WebRTC camera
+            stopVideoRelay('camera');
+            for (var uid2 in peers) {
+                var pc2 = peers[uid2];
+                if (pc2 && pc2.getSenders) {
+                    pc2.getSenders().forEach(function (sender) {
+                        if (sender.track && sender.track.kind === 'video' && isTrackKind(sender.track, 'camera')) {
+                            try { pc2.removeTrack(sender); } catch (_) {}
+                        } else if (sender._voiceNulled && sender._voiceNulled.kind === 'video' && isTrackKind(sender._voiceNulled, 'camera')) {
+                            try { pc2.removeTrack(sender); } catch (_) {}
+                            sender._voiceNulled = null;
+                        }
+                    });
+                }
+                addLocalTracks(peers[uid2]);
+            }
+        }
+        updateCamOptMenuState();
+        renderPopup();
+        showToast('Camera mode: ' + mode + (mode === 'auto' ? ' (auto)' : ' (manual)'));
+    }
+
+    // Set screen-specific mode (screen = video + screen audio).
+    function setSelfScreenMode(mode) {
+        var selfId = getSelfId();
+        if (!selfId) return;
+        if (mode === 'auto') {
+            delete S._screenModeOverrides[selfId];
+        } else {
+            S._screenModeOverrides[selfId] = mode;
+        }
+        sendVoiceState();
+        // Apply screen mode: relay or mesh for screen feed only
+        var effective = resolveScreenMode(selfId);
+        var peers = S.peers;
+        if (effective === 'relay') {
+            // Null screen video senders on WebRTC, start screen relay
+            for (var uid in peers) {
+                var pc = peers[uid];
+                if (!pc || !pc.getSenders) continue;
+                pc.getSenders().forEach(function (sender) {
+                    if (sender.track && sender.track.kind === 'video' && isTrackKind(sender.track, 'screen')) {
+                        sender.replaceTrack(null).catch(function () {});
+                        sender._voiceNulled = sender.track;
+                    }
+                });
+            }
+            if (S.localStreams.screen && S.screenOn) startVideoRelay(S.localStreams.screen, 'screen');
+        } else {
+            // Mesh: stop screen relay, restore WebRTC screen
+            stopVideoRelay('screen');
+            for (var uid2 in peers) {
+                var pc2 = peers[uid2];
+                if (pc2 && pc2.getSenders) {
+                    pc2.getSenders().forEach(function (sender) {
+                        if (sender.track && sender.track.kind === 'video' && isTrackKind(sender.track, 'screen')) {
+                            try { pc2.removeTrack(sender); } catch (_) {}
+                        } else if (sender._voiceNulled && sender._voiceNulled.kind === 'video' && isTrackKind(sender._voiceNulled, 'screen')) {
+                            try { pc2.removeTrack(sender); } catch (_) {}
+                            sender._voiceNulled = null;
+                        }
+                    });
+                }
+                addLocalTracks(peers[uid2]);
+            }
+        }
+        updateCamOptMenuState();
+        renderPopup();
+        showToast('Screen mode: ' + mode + (mode === 'auto' ? ' (auto)' : ' (manual)'));
+    }
+
     // Switch audio from WebRTC mesh to WebSocket relay.
     function switchAudioToRelay() {
         console.log('[Relay] Switching audio to server relay (> ' + MESH_THRESHOLD + ' active)');
-        // Mute the mic sender on all WebRTC peers (keep the m-line but
-        // send silence). Screen audio stays on WebRTC — it's low-bandwidth
-        // and the receiver needs per-member volume control via <audio> elements.
-        var screenAudioTrack = (S.localStreams.screen && S.localStreams.screen.getAudioTracks()[0]) || null;
+        // Mute ALL audio senders on WebRTC peers (mic + screen audio).
+        // Both are relayed via WebSocket now.
         for (var uid in S.peers) {
             var pc = S.peers[uid];
             if (!pc || !pc.getSenders) continue;
             pc.getSenders().forEach(function (sender) {
                 if (sender.track && sender.track.kind === 'audio') {
-                    // Skip screen audio — keep it on WebRTC mesh
-                    if (screenAudioTrack && sender.track.id === screenAudioTrack.id) return;
                     sender.replaceTrack(null).catch(function () {});
                     sender._voiceNulled = sender.track;
                 }
             });
         }
-        // Start the audio relay capture loop
+        // Start both mic and screen audio relay capture loops
         startAudioRelay();
+        startScreenAudioRelay();
         showToast('Audio switched to server relay (' + countActiveParticipants() + ' active)');
     }
 
     // Switch audio from WebSocket relay back to WebRTC mesh.
     function switchAudioToMesh() {
         console.log('[Relay] Switching audio to WebRTC mesh (≤ ' + MESH_THRESHOLD + ' active)');
-        // Stop the audio relay capture loop
+        // Stop both mic and screen audio relay capture loops
         stopAudioRelay();
-        // Kill all relay PLAYBACK receivers — their ScriptProcessors are
-        // still outputting stale audio to ctx.destination. Without this,
-        // both relay and mesh audio play simultaneously → "random sounds".
+        stopScreenAudioRelay();
+        // Kill all relay PLAYBACK receivers (mic + screen audio)
         Object.keys(_relayPlaybackTimers).forEach(function (uid) {
             var t = _relayPlaybackTimers[uid];
             if (t.processor) { try { t.processor.disconnect(); } catch (_) {} }
@@ -8156,22 +8345,37 @@
             delete _relayGainNodes[uid];
         });
         S._relayAudioQueues = {};
-        // Restore the mic track on all WebRTC peers
-        if (S.localStreams.mic) {
-            var at = (S.localStreams.processedMic && S.localStreams.processedMic.getAudioTracks()[0])
-                || S.localStreams.mic.getAudioTracks()[0];
-            if (at) {
-                for (var uid in S.peers) {
-                    var pc = S.peers[uid];
-                    if (!pc || !pc.getSenders) continue;
-                    pc.getSenders().forEach(function (sender) {
-                        if (sender.track === null || sender._voiceNulled) {
-                            sender.replaceTrack(at).catch(function () {});
-                            delete sender._voiceNulled;
-                        }
-                    });
+        Object.keys(_relayScreenPlaybackTimers).forEach(function (uid) {
+            var t = _relayScreenPlaybackTimers[uid];
+            if (t.processor) { try { t.processor.disconnect(); } catch (_) {} }
+            if (t.silent) { try { t.silent.disconnect(); } catch (_) {} }
+            delete _relayScreenPlaybackTimers[uid];
+        });
+        Object.keys(_relayScreenGainNodes).forEach(function (uid) {
+            try { _relayScreenGainNodes[uid].disconnect(); } catch (_) {}
+            delete _relayScreenGainNodes[uid];
+        });
+        S._relayScreenAudioQueues = {};
+        // Restore ALL audio tracks (mic + screen) on all WebRTC peers
+        var micTrack = (S.localStreams.mic &&
+            ((S.localStreams.processedMic && S.localStreams.processedMic.getAudioTracks()[0]) ||
+             S.localStreams.mic.getAudioTracks()[0])) || null;
+        var screenAudioTrack = (S.localStreams.screen && S.localStreams.screen.getAudioTracks()[0]) || null;
+        for (var uid in S.peers) {
+            var pc = S.peers[uid];
+            if (!pc || !pc.getSenders) continue;
+            pc.getSenders().forEach(function (sender) {
+                if (sender.track === null || sender._voiceNulled) {
+                    var held = sender._voiceNulled;
+                    // Restore the correct track based on what was nulled
+                    var trackToRestore = micTrack;
+                    if (held && screenAudioTrack && held.id === screenAudioTrack.id) {
+                        trackToRestore = screenAudioTrack;
+                    }
+                    if (trackToRestore) sender.replaceTrack(trackToRestore).catch(function () {});
+                    delete sender._voiceNulled;
                 }
-            }
+            });
         }
         showToast('Audio switched to WebRTC mesh (' + countActiveParticipants() + ' active)');
     }
@@ -8184,6 +8388,13 @@
     var _relayCaptureFloat = null; // Float32 view starting at byte 8
     var _relayCapturePoll = null; // interval for polling capture SAB
     var _relayCaptureMc = null; // MessageChannel for background-tab polling
+    // Screen audio relay capture (separate from mic)
+    var _screenAudioRelayTimer = null;
+    var _screenAudioRelaySab = null;
+    var _screenAudioRelayInt = null;
+    var _screenAudioRelayFloat = null;
+    var _screenAudioRelayPoll = null;
+    var _screenAudioRelayMc = null;
 
     // MessageChannel-based poll for audio relay SAB — not throttled in background tabs.
     function startAudioRelayMcPoll() {
@@ -8365,10 +8576,155 @@
     }
 
     // ------------------------------------------------------------------
+    // Screen audio relay capture — same pipeline as mic but captures
+    // from S.localStreams.screen audio track.  Runs alongside mic relay.
+    // ------------------------------------------------------------------
+    function startScreenAudioRelay() {
+        if (_screenAudioRelayTimer) return;
+        if (!S.localStreams.screen) return;
+        var audioTracks = S.localStreams.screen.getAudioTracks();
+        if (!audioTracks.length) return;
+        var stream = new MediaStream([audioTracks[0]]);
+        var audioCtx = ensureAudioCtx();
+        if (!audioCtx) return;
+        var source = audioCtx.createMediaStreamSource(stream);
+        var SAB_SIZE = 8 + RELAY_SAMPLE_RATE * 4;
+        if (typeof SharedArrayBuffer !== 'undefined' && audioCtx.audioWorklet) {
+            _screenAudioRelaySab = new SharedArrayBuffer(SAB_SIZE);
+            _screenAudioRelayInt = new Int32Array(_screenAudioRelaySab);
+            _screenAudioRelayFloat = new Float32Array(_screenAudioRelaySab, 8);
+            Atomics.store(_screenAudioRelayInt, 0, 0);
+            Atomics.store(_screenAudioRelayInt, 1, 0);
+
+            var startCaptureWorklet = function () {
+                var node = new AudioWorkletNode(audioCtx, 'relay-capture-processor', {
+                    processorOptions: { sharedBuffer: _screenAudioRelaySab }
+                });
+                source.connect(node);
+                var silent = audioCtx.createGain();
+                silent.gain.value = 0;
+                node.connect(silent);
+                silent.connect(audioCtx.destination);
+                _screenAudioRelayTimer = { source: source, node: node, silent: silent };
+                _screenAudioRelayPoll = setInterval(function () {
+                    pollScreenAudioRelaySAB();
+                    if (document.visibilityState === 'hidden') startScreenAudioRelayMcPoll();
+                }, 10);
+                if (document.visibilityState === 'hidden') startScreenAudioRelayMcPoll();
+            };
+            audioCtx.audioWorklet.addModule('relay-capture-processor.js').then(startCaptureWorklet).catch(function () {
+                startScreenAudioRelayFallback(source, audioCtx);
+            });
+        } else {
+            startScreenAudioRelayFallback(source, audioCtx);
+        }
+    }
+
+    function startScreenAudioRelayFallback(source, audioCtx) {
+        var processor = audioCtx.createScriptProcessor(2048, 1, 1);
+        processor.onaudioprocess = function (e) {
+            try {
+                if (!S.connected || !S.roomKeyB64 || S.muted || S.deafened) return;
+                var w = getWs();
+                if (!w || w.readyState !== WebSocket.OPEN) return;
+                if (w.bufferedAmount > 256 * 1024) return;
+                var pcm = e.inputBuffer.getChannelData(0);
+                var targetRate = getRelayScreenAudioQuality();
+                var downsampled = downsampleRelayAudio(pcm, RELAY_SAMPLE_RATE, targetRate);
+                var int16 = new Int16Array(downsampled.length);
+                for (var i = 0; i < downsampled.length; i++) {
+                    var s = Math.max(-1, Math.min(1, downsampled[i]));
+                    int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                }
+                var raw = new Uint8Array(int16.buffer);
+                var keyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(S.roomKeyB64));
+                var enc = E2ECrypto.aeadEncrypt(raw, keyBytes);
+                var kindStr = getRelayScreenAudioKind(targetRate);
+                sendRelayBinary(kindStr, enc.nonce, new Uint8Array(E2ECrypto.base64ToArrayBuffer(enc.ciphertext)));
+            } catch (_) {}
+        };
+        source.connect(processor);
+        var silent = audioCtx.createGain();
+        silent.gain.value = 0;
+        processor.connect(silent);
+        silent.connect(audioCtx.destination);
+        _screenAudioRelayTimer = { source: source, processor: processor, silent: silent };
+    }
+
+    function startScreenAudioRelayMcPoll() {
+        if (_screenAudioRelayMc) return;
+        var ch = new MessageChannel();
+        _screenAudioRelayMc = ch;
+        var lastPoll = performance.now();
+        ch.port1.onmessage = function () {
+            if (!_screenAudioRelayTimer) { ch.port1.close(); ch.port2.close(); return; }
+            var now = performance.now();
+            if (now - lastPoll >= 10) {
+                pollScreenAudioRelaySAB();
+                lastPoll = now;
+            }
+            ch.port2.postMessage(null);
+        };
+        ch.port2.postMessage(null);
+    }
+
+    function pollScreenAudioRelaySAB() {
+        try {
+            if (!S.connected || !S.roomKeyB64 || S.muted || S.deafened) return;
+            if (!S.localStreams.screen || !S.localStreams.screen.getAudioTracks().length) return;
+            var w = getWs();
+            if (!w || w.readyState !== WebSocket.OPEN) return;
+            if (w.bufferedAmount > 256 * 1024) return;
+            var readPos = Atomics.load(_screenAudioRelayInt, 1);
+            var writePos = Atomics.load(_screenAudioRelayInt, 0);
+            var ringLen = _screenAudioRelayFloat.length;
+            var avail = (writePos - readPos + ringLen) % ringLen;
+            if (avail < RELAY_FRAME_SAMPLES) return;
+            var pcm = new Float32Array(RELAY_FRAME_SAMPLES);
+            for (var i = 0; i < RELAY_FRAME_SAMPLES; i++) {
+                pcm[i] = _screenAudioRelayFloat[(readPos + i) % ringLen];
+            }
+            Atomics.store(_screenAudioRelayInt, 1, (readPos + RELAY_FRAME_SAMPLES) % ringLen);
+            var targetRate = getRelayScreenAudioQuality();
+            var downsampled = downsampleRelayAudio(pcm, RELAY_SAMPLE_RATE, targetRate);
+            var int16 = new Int16Array(downsampled.length);
+            for (var i = 0; i < downsampled.length; i++) {
+                var s = Math.max(-1, Math.min(1, downsampled[i]));
+                int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+            }
+            var raw = new Uint8Array(int16.buffer);
+            var keyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(S.roomKeyB64));
+            var enc = E2ECrypto.aeadEncrypt(raw, keyBytes);
+            var kindStr = getRelayScreenAudioKind(targetRate);
+            sendRelayBinary(kindStr, enc.nonce, new Uint8Array(E2ECrypto.base64ToArrayBuffer(enc.ciphertext)));
+        } catch (_) {}
+    }
+
+    function stopScreenAudioRelay() {
+        if (_screenAudioRelayPoll) { clearInterval(_screenAudioRelayPoll); _screenAudioRelayPoll = null; }
+        if (_screenAudioRelayMc) { try { _screenAudioRelayMc.port1.close(); _screenAudioRelayMc.port2.close(); } catch (_) {} _screenAudioRelayMc = null; }
+        _screenAudioRelaySab = null; _screenAudioRelayInt = null; _screenAudioRelayFloat = null;
+        if (_screenAudioRelayTimer) {
+            try {
+                if (_screenAudioRelayTimer.processor) _screenAudioRelayTimer.processor.disconnect();
+                if (_screenAudioRelayTimer.node) {
+                    try { _screenAudioRelayTimer.node.port.postMessage({ type: 'stop' }); } catch (_) {}
+                    _screenAudioRelayTimer.node.disconnect();
+                }
+                _screenAudioRelayTimer.source.disconnect();
+                if (_screenAudioRelayTimer.silent) _screenAudioRelayTimer.silent.disconnect();
+            } catch (_) {}
+            _screenAudioRelayTimer = null;
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Relayed audio playback — jitter buffer
     // ------------------------------------------------------------------
-    var _relayGainNodes = {}; // uid → GainNode
-    var _relayPlaybackTimers = {}; // uid → intervalId
+    var _relayGainNodes = {}; // uid → GainNode (mic audio)
+    var _relayPlaybackTimers = {}; // uid → { node, silent } (mic audio)
+    var _relayScreenGainNodes = {}; // uid → GainNode (screen audio)
+    var _relayScreenPlaybackTimers = {}; // uid → { node, silent } (screen audio)
     var RELAY_SAMPLE_RATE = 48000;
     var RELAY_FRAME_SAMPLES = 2048; // must match sender buffer size (2048 = ~43ms at 48kHz)
     var RELAY_JITTER_MS = 60; // buffer 60ms before playing (≈1.5 frames)
@@ -8378,7 +8734,8 @@
     // effective rate (min of send/receive) and the receiver upsamples back
     // to RELAY_SAMPLE_RATE for the worklet ring buffer.
     var AUDIO_QUALITY_RATES = { low: 8000, medium: 16000, high: 24000, ultra: 48000 };
-    var AUDIO_KIND_SAMPLE_RATES = { audio: 48000, audio_low: 8000, audio_med: 16000, audio_high: 24000, audio_ultra: 48000 };
+    var AUDIO_KIND_SAMPLE_RATES = { audio: 48000, audio_low: 8000, audio_med: 16000, audio_high: 24000, audio_ultra: 48000,
+        screen_audio: 48000, screen_audio_low: 8000, screen_audio_med: 16000, screen_audio_high: 24000, screen_audio_ultra: 48000 };
 
     // Relay audio: sender sends at their own sendAudioQuality rate.
     // Each receiver plays at min(sender_rate, recvAudioQuality).
@@ -8392,6 +8749,18 @@
         if (targetRate <= 16000) return 'audio_med';
         if (targetRate <= 24000) return 'audio_high';
         return 'audio_ultra';
+    }
+
+    function getRelayScreenAudioQuality() {
+        var sendQ = (S.settings && S.settings.sendScreenAudioQuality) || (S.settings && S.settings.sendAudioQuality) || 'medium';
+        return AUDIO_QUALITY_RATES[sendQ] || 16000;
+    }
+
+    function getRelayScreenAudioKind(targetRate) {
+        if (targetRate <= 8000) return 'screen_audio_low';
+        if (targetRate <= 16000) return 'screen_audio_med';
+        if (targetRate <= 24000) return 'screen_audio_high';
+        return 'screen_audio_ultra';
     }
 
     // Downsample Float32 PCM from srcRate to dstRate using linear interpolation.
@@ -8453,6 +8822,17 @@
     }
 
     function cleanupMemberGain(uid) {
+        // Clear the ring buffer so the worklet outputs silence immediately
+        // instead of stale samples during the disconnect race.
+        if (S._relayAudioQueues[uid]) {
+            var q = S._relayAudioQueues[uid];
+            if (q._sharedInt) {
+                // Set writePos = readPos so worklet sees 0 available samples
+                Atomics.store(q._sharedInt, 0, Atomics.load(q._sharedInt, 1));
+            } else {
+                q.writePos = q.readPos;
+            }
+        }
         if (_relayGainNodes[uid]) {
             try { _relayGainNodes[uid].disconnect(); } catch (_) {}
             delete _relayGainNodes[uid];
@@ -8474,6 +8854,115 @@
         delete S._relayAudioQueues[uid];
     }
 
+    function getOrCreateScreenMemberGain(uid) {
+        if (_relayScreenGainNodes[uid]) return _relayScreenGainNodes[uid];
+        var ctx = ensureAudioCtx();
+        var gain = ctx.createGain();
+        var vol = remoteScreenVolumeFor(uid);
+        gain.gain.value = Math.max(0, Math.min(2, vol));
+        gain.connect(ctx.destination);
+        _relayScreenGainNodes[uid] = gain;
+        return gain;
+    }
+
+    function cleanupScreenMemberGain(uid) {
+        if ((S._relayScreenAudioQueues || {})[uid]) {
+            var q = S._relayScreenAudioQueues[uid];
+            if (q._sharedInt) {
+                Atomics.store(q._sharedInt, 0, Atomics.load(q._sharedInt, 1));
+            } else {
+                q.writePos = q.readPos;
+            }
+        }
+        if (_relayScreenGainNodes[uid]) {
+            try { _relayScreenGainNodes[uid].disconnect(); } catch (_) {}
+            delete _relayScreenGainNodes[uid];
+        }
+        if (_relayScreenPlaybackTimers[uid]) {
+            var t = _relayScreenPlaybackTimers[uid];
+            if (t.node) {
+                try { t.node.port.postMessage({ type: 'stop' }); } catch (_) {}
+                try { t.node.disconnect(); } catch (_) {}
+            }
+            if (t.processor) { try { t.processor.disconnect(); } catch (_) {} }
+            if (t.silent) { try { t.silent.disconnect(); } catch (_) {} }
+            delete _relayScreenPlaybackTimers[uid];
+        }
+        delete (S._relayScreenAudioQueues || {})[uid];
+    }
+
+    function startRelayScreenAudioPlayback(uid) {
+        if (_relayScreenPlaybackTimers[uid]) return;
+        var ctx = ensureAudioCtx();
+        if (!ctx) return;
+        var q = (S._relayScreenAudioQueues || {})[uid];
+        if (!q) return;
+
+        var startNode = function () {
+            if (_relayScreenPlaybackTimers[uid]) return;
+            var nodeOpts = { processorOptions: {} };
+            if (q._sharedSab) nodeOpts.processorOptions.sharedBuffer = q._sharedSab;
+            var node = new AudioWorkletNode(ctx, 'relay-audio-processor', nodeOpts);
+            var silent = ctx.createGain();
+            silent.gain.value = 0;
+            var gain = getOrCreateScreenMemberGain(uid);
+            node.connect(gain);
+            node.connect(silent);
+            silent.connect(ctx.destination);
+            q._workletNode = node;
+            _relayScreenPlaybackTimers[uid] = { node: node, silent: silent };
+            if (!q._sharedSab) {
+                var len = (q.writePos - q.readPos + q.ring.length) % q.ring.length;
+                if (len > 0) {
+                    var chunk = new Float32Array(len);
+                    for (var i = 0; i < len; i++) {
+                        chunk[i] = q.ring[q.readPos];
+                        q.readPos = (q.readPos + 1) % q.ring.length;
+                    }
+                    node.port.postMessage({ samples: chunk });
+                }
+            }
+        };
+        if (ctx.audioWorklet) {
+            ctx.audioWorklet.addModule('relay-audio-processor.js').then(startNode).catch(function () {
+                startRelayScreenAudioPlaybackFallback(uid);
+            });
+        } else {
+            startRelayScreenAudioPlaybackFallback(uid);
+        }
+    }
+
+    function startRelayScreenAudioPlaybackFallback(uid) {
+        var ctx = ensureAudioCtx();
+        if (!ctx) return;
+        var q = (S._relayScreenAudioQueues || {})[uid];
+        if (!q) return;
+        var processor = ctx.createScriptProcessor(2048, 1, 1);
+        var gain = getOrCreateScreenMemberGain(uid);
+        processor.onaudioprocess = function (e) {
+            var out = e.outputBuffer.getChannelData(0);
+            var ringLen = q.ring.length;
+            var readPos = q.readPos;
+            var avail = (q.writePos - readPos + ringLen) % ringLen;
+            var need = out.length;
+            if (avail < need) {
+                // Underrun: output silence
+                for (var i = 0; i < need; i++) out[i] = 0;
+                return;
+            }
+            for (var i = 0; i < need; i++) {
+                out[i] = q.ring[(readPos + i) % ringLen];
+            }
+            q.readPos = (readPos + need) % ringLen;
+        };
+        processor.connect(gain);
+        var silent = ctx.createGain();
+        silent.gain.value = 0;
+        processor.connect(silent);
+        silent.connect(ctx.destination);
+        _relayScreenPlaybackTimers[uid] = { processor: processor, silent: silent };
+    }
+
     function handleRelayedAudioFrame(fromUid, rawPcmBytes, kindStr) {
         try {
             var audioCtx = ensureAudioCtx();
@@ -8481,6 +8970,10 @@
             if (!S.members[fromUid]) return;
 
             var srcRate = AUDIO_KIND_SAMPLE_RATES[kindStr] || RELAY_SAMPLE_RATE;
+            var isScreenAudio = kindStr.indexOf('screen_audio') === 0;
+
+            // Deafened: drop incoming audio to save bandwidth
+            if (S.deafened) return;
 
             var int16 = new Int16Array(rawPcmBytes.buffer, rawPcmBytes.byteOffset, rawPcmBytes.byteLength / 2);
             var float32 = new Float32Array(int16.length);
@@ -8489,15 +8982,17 @@
             }
 
             // Upsample from the sender's rate to RELAY_SAMPLE_RATE (48kHz)
-            // for the worklet ring buffer. In relay mode the sender decides
-            // the quality — the receiver just plays it at the correct rate.
             if (srcRate < RELAY_SAMPLE_RATE) {
                 float32 = upsampleRelayAudio(float32, srcRate, RELAY_SAMPLE_RATE);
             }
 
-            if (!S._relayAudioQueues[fromUid]) {
+            // Route to the correct queue: mic audio vs screen audio
+            var queues = isScreenAudio ? (S._relayScreenAudioQueues || (S._relayScreenAudioQueues = {})) : S._relayAudioQueues;
+            var playbackFn = isScreenAudio ? startRelayScreenAudioPlayback : startRelayPlayback;
+
+            if (!queues[fromUid]) {
                 var sharedSab = createRelaySharedBuffer();
-                S._relayAudioQueues[fromUid] = {
+                queues[fromUid] = {
                     ring: new Float32Array(RELAY_RING_LEN),
                     writePos: 0,
                     readPos: 0,
@@ -8506,29 +9001,26 @@
                     _sharedInt: sharedSab ? new Int32Array(sharedSab) : null,
                     _sharedFloat: sharedSab ? new Float32Array(sharedSab, RELAY_SHARED_HEADER_BYTES) : null,
                 };
-                startRelayPlayback(fromUid);
+                playbackFn(fromUid);
             }
 
-            var q = S._relayAudioQueues[fromUid];
+            var q = queues[fromUid];
 
-            // Lock-free path: write directly to SharedArrayBuffer + Atomics.store.
-            // No postMessage — data is in shared memory the instant writePos advances.
             if (q._sharedSab && q._sharedFloat && q._sharedInt) {
                 var ringLen = RELAY_RING_LEN;
                 var writePos = Atomics.load(q._sharedInt, 0);
                 var readPos = Atomics.load(q._sharedInt, 1);
                 var avail = (writePos - readPos + ringLen) % ringLen;
                 var free = ringLen - avail;
-                if (float32.length > free) return; // drop frame if full
+                if (float32.length > free) return;
                 for (var i = 0; i < float32.length; i++) {
                     q._sharedFloat[writePos] = float32[i];
                     writePos = (writePos + 1) % ringLen;
                 }
-                Atomics.store(q._sharedInt, 0, writePos); // publish samples atomically
+                Atomics.store(q._sharedInt, 0, writePos);
                 return;
             }
 
-            // Fallback: postMessage path (SharedArrayBuffer unavailable)
             if (q._workletNode) {
                 q._workletNode.port.postMessage({ samples: float32 });
                 return;
