@@ -10239,7 +10239,7 @@ function showMissedActivityNotification(newDms, newServerMsgs) {
     // Show the toast
     var toast = document.getElementById('mention-toast');
     if (toast) {
-        toast.textContent = icon('send') + ' ' + msg;
+        toast.innerHTML = icon('send') + ' ' + msg;
         toast.style.display = 'block';
         toast.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
         toast.onclick = function () {

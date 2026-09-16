@@ -773,7 +773,9 @@ pub(crate) async fn deliver_encrypted_notification(
 // Relay frames use a compact binary format to avoid JSON serialization overhead.
 //
 // Client → Server binary relay frame:
-//   [kind: u8]                 0=camera, 1=screen, 2=audio
+//   [kind: u8]                 0=camera, 1=screen, 2=audio,
+//                              3..=6=audio_low/med/high/ultra,
+//                              7..=11=screen_audio[_low/med/high/ultra]
 //   [room_type_len: u8]
 //   [room_type: utf8]
 //   [channel_id_len: u16 LE]
@@ -812,20 +814,45 @@ fn read_bytes<'a>(data: &'a [u8], pos: &mut usize, len: usize) -> Option<&'a [u8
     Some(slice)
 }
 
+// Audio kinds 3..=6 are mic audio at a specific sample rate (the sender picks
+// the kind from its sendAudioQuality and downsamples to match); 7..=11 are the
+// same for screen-share audio. These MUST round-trip here, otherwise the client
+// encodes a rate-tagged kind and the server silently drops the frame.
 fn kind_to_str(kind: u8) -> &'static str {
     match kind {
         0 => "camera",
         1 => "screen",
         2 => "audio",
+        3 => "audio_low",
+        4 => "audio_med",
+        5 => "audio_high",
+        6 => "audio_ultra",
+        7 => "screen_audio",
+        8 => "screen_audio_low",
+        9 => "screen_audio_med",
+        10 => "screen_audio_high",
+        11 => "screen_audio_ultra",
         _ => "camera",
     }
 }
+
+/// Highest valid client→server kind byte (see the binary protocol above).
+const RELAY_KIND_MAX: u8 = 11;
 
 fn str_to_kind(s: &str) -> u8 {
     match s {
         "camera" => 0,
         "screen" => 1,
         "audio" => 2,
+        "audio_low" => 3,
+        "audio_med" => 4,
+        "audio_high" => 5,
+        "audio_ultra" => 6,
+        "screen_audio" => 7,
+        "screen_audio_low" => 8,
+        "screen_audio_med" => 9,
+        "screen_audio_high" => 10,
+        "screen_audio_ultra" => 11,
         _ => 0,
     }
 }
@@ -854,11 +881,14 @@ async fn handle_ws_binary(
 ) {
     if data.is_empty() { return; }
 
-    // Binary relay frames from client: first byte is kind (0/1/2).
-    // We verify it's a valid kind before proceeding.
+    // Binary relay frames from client: first byte is the kind byte
+    // (0=camera, 1=screen, 2=audio, 3..=6 rate-tagged mic audio,
+    // 7..=11 rate-tagged screen audio). We verify it's a valid kind before
+    // proceeding — audio kinds above 2 used to be rejected here, which made
+    // every relayed microphone frame disappear.
     let mut pos = 0;
     let kind_byte = match read_u8(data, &mut pos) {
-        Some(k) if k <= 2 => k,
+        Some(k) if k <= RELAY_KIND_MAX => k,
         _ => return,
     };
     let kind_str = kind_to_str(kind_byte);
@@ -926,8 +956,13 @@ async fn handle_ws_binary(
     };
     if !is_member { return; }
 
-    // Drop audio from muted users
-    if kind_str == "audio" {
+    // Drop MIC audio from muted users. Must cover every rate-tagged mic kind
+    // (audio, audio_low, audio_med, audio_high, audio_ultra) — an exact
+    // "audio" match would let a muted user be heard via the quality kinds.
+    // Screen-share audio is deliberately not covered here (it is its own feed,
+    // gated by the sharer stopping the share).
+    let is_mic_audio = kind_str == "audio" || kind_str.starts_with("audio_");
+    if is_mic_audio {
         let muted = {
             let rooms = match state.voice_rooms.read() {
                 Ok(r) => r,

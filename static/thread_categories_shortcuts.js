@@ -1788,7 +1788,7 @@
             if (old) old.remove();
             var t = document.createElement('div');
             t.className = 'streamer-toast';
-            t.textContent = msg;
+            t.innerHTML = msg;
             t.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:99999;background:rgba(0,0,0,0.85);color:#fff;padding:8px 18px;border-radius:8px;font-size:13px;font-weight:600;pointer-events:none;transition:opacity 0.3s;';
             document.body.appendChild(t);
             setTimeout(function () { t.style.opacity = '0'; setTimeout(function () { t.remove(); }, 350); }, 1500);

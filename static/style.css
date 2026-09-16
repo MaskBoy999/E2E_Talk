@@ -9214,6 +9214,20 @@ video.remote-video-tile.mirrored {
     border: 1px solid var(--bg-border, #2a2a4a);
 }
 
+/* Hard cap for tiles inside a media row. A stale inline width/height left over
+   from a fullscreen exit or a rotation swap used to make the camera tile paint
+   far outside the 96px member row (and outside the DM tile body). max-height /
+   max-width are separate properties, so this caps inline sizes too. */
+.voice-member-media > .remote-video-tile,
+.voice-member-media > .voice-tile-slot,
+.voice-member-media > img.relay-video,
+.dm-call-tile-media > .remote-video-tile,
+.dm-call-tile-media > img.relay-video,
+.voice-self-preview-wrap > .voice-self-video,
+.voice-self-preview-wrap > img.relay-video {
+    max-height: 100%;
+}
+
 /* "Reset view" hint chip — floats at the bottom-center of any tile whose
    feed is mirrored/rotated for you (remote or your own, tile or fullscreen).
    One click clears the per-viewer transform. Sits above the feed buttons but
@@ -9223,29 +9237,43 @@ video.remote-video-tile.mirrored {
     z-index: 7;
     display: flex;
     align-items: center;
-    gap: 5px;
-    padding: 3px 10px;
-    border-radius: 10px;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: 8px;
     border: 1px solid var(--bg-border, #2a2a4a);
-    background: rgba(0, 0, 0, 0.72);
+    background: rgba(0, 0, 0, 0.78);
     color: var(--text-primary, #eee);
-    font-size: 11px;
+    font-size: 10px;
     font-weight: 600;
     cursor: pointer;
-    max-width: 80%;
+    max-width: 90%;
     box-sizing: border-box;
+    white-space: nowrap;
+    pointer-events: auto;
 }
 .voice-tile-reset-view:hover {
     background: rgba(88, 101, 242, 0.85);
 }
 .voice-tile-reset-ico {
-    font-size: 11px;
+    font-size: 10px;
     line-height: 1;
+    flex-shrink: 0;
 }
 .voice-tile-reset-lbl {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+}
+/* Mobile: shrink the reset chip further so it fits inside small rotated tiles */
+@media (max-width: 600px) {
+    .voice-tile-reset-view {
+        padding: 1px 4px;
+        font-size: 9px;
+        gap: 2px;
+        max-width: 90%;
+    }
+    .voice-tile-reset-ico { font-size: 9px; }
+    .voice-tile-reset-lbl { font-size: 9px; }
 }
 
 /* Rotation slot (right-click → View → 90°): when a tile is rotated sideways

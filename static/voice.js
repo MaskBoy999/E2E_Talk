@@ -3304,24 +3304,19 @@
             (prev.loaded_feeds || []).join(',') !== (member.loaded_feeds || []).join(',') ||
             (prev.unloaded_feeds || []).join(',') !== (member.unloaded_feeds || []).join(',');
         S.members[member.user_id] = member;
-        // Clean up stale relay video frames when sender turns off camera/screen
+        // Drop stale relay frames when the sender turns a feed off OR moves it
+        // back to the mesh path (the relay <img> must never keep hiding the
+        // fresh mesh <video>). Only an EXPLICIT 'mesh' broadcast counts — the
+        // local auto-mode fallback must not decide this for another user.
         if (!isSelf && prev) {
             ['camera', 'screen'].forEach(function (k) {
-                if (prev[k] && !member[k]) {
-                    var fk = member.user_id + '_' + k;
-                    if (S._relayVideoFrames[fk]) {
-                        URL.revokeObjectURL(S._relayVideoFrames[fk]);
-                        delete S._relayVideoFrames[fk];
-                    }
-                    // Remove the stale relay <img> if present
-                    var staleImg = document.querySelector('img.relay-video[data-uid="' + member.user_id + '"][data-kind="' + k + '"]');
-                    if (staleImg) {
-                        var vid = document.querySelector('video.remote-video-tile[data-uid="' + member.user_id + '"][data-kind="' + k + '"]');
-                        if (vid) vid.style.display = '';
-                        if (staleImg.src && staleImg.src.startsWith('blob:')) URL.revokeObjectURL(staleImg.src);
-                        staleImg.remove();
-                    }
-                }
+                var announced = k === 'camera'
+                    ? (member.camera_mode || member.video_mode)
+                    : (member.screen_mode || member.video_mode);
+                var turnedOff = prev[k] && !member[k];
+                var leftRelay = !!member[k] && announced === 'mesh';
+                if (!turnedOff && !leftRelay) return;
+                dropRelayFeed(member.user_id, k, !!member[k]);
             });
         }
         // Check if deafen state changed for any member — recalc audio mode
@@ -4302,26 +4297,195 @@
 
     // --- Picture-in-Picture ---
     var _pipActive = false;
+    var _pipTempVideo = null;
+    var _pipCanvas = null;
+    var _pipAnimFrame = 0;
     function togglePiP() {
         if (_pipActive) {
-            document.exitPictureInPicture().catch(function() {});
             _pipActive = false;
+            document.exitPictureInPicture().catch(function() {});
+            // Always release the canvas, the hidden <video> and its stream —
+            // the old exit path only flipped the flag, so every toggle leaked
+            // a canvas + MediaStream + draw loop.
+            _cleanupCanvasPiP();
             return;
         }
-        // Find the active screen share or camera video
-        var video = document.querySelector('.voice-popup-wrap .remote-video-tile[data-kind="screen"]:not([style*="display:none"])')
-                 || document.querySelector('.voice-popup-wrap .remote-video-tile[data-kind="camera"]:not([style*="display:none"])')
-                 || document.querySelector('.voice-fs-wrap .remote-video-tile[data-kind="screen"]:not([style*="display:none"])')
-                 || document.querySelector('.voice-fs-wrap .remote-video-tile[data-kind="camera"]:not([style*="display:none"])');
-        if (!video || !video.srcObject) { showToast('No active video to PiP'); return; }
         if (!document.pictureInPictureEnabled) { showToast('PiP not supported in this browser'); return; }
-        video.requestPictureInPicture().then(function() {
+        var target = pickVisibleVideoTile();
+        if (!target) { showToast('No active video to PiP'); return; }
+        var uid = target.getAttribute('data-uid');
+        var kind = target.getAttribute('data-kind');
+        var st = uid && kind ? S.tileTransforms[uid + ':' + kind] : null;
+        var hasTransform = st && (st.mirror || st.rot);
+        var isImg = target.tagName === 'IMG';
+        // If the target has rotation/mirror transforms, or is a relay <img>,
+        // use a canvas compositing pipeline so the PiP window shows the
+        // transformed view (browser PiP ignores CSS transforms).
+        if (hasTransform || isImg) {
+            _startCanvasPiP(target, uid, kind, isImg);
+            return;
+        }
+        // No transforms, <video> element — PiP directly
+        if (!target.srcObject) { showToast('No active video to PiP'); return; }
+        target.requestPictureInPicture().then(function() {
             _pipActive = true;
-            video.addEventListener('leavepictureinpicture', function handler() {
+            target.addEventListener('leavepictureinpicture', function handler() {
                 _pipActive = false;
-                video.removeEventListener('leavepictureinpicture', handler);
+                target.removeEventListener('leavepictureinpicture', handler);
             });
-        }).catch(function(err) { console.warn('[PiP]', err); });
+        }).catch(function(err) { console.warn('[PiP]', err); showToast('PiP failed: ' + (err.message || err)); });
+    }
+
+    // The visible camera/screen tile the user means. Prefers an active relay
+    // <img>, then a mesh <video>, and filters on REAL layout visibility — the
+    // old `:not([style*="display:none"])` list never excluded anything (Chrome
+    // serialises inline styles as `display: none;` with a space), so PiP
+    // targeted the invisible mesh <video> that sits behind every relay frame.
+    function pickVisibleVideoTile() {
+        var areas = ['#voice-popup', '#dm-call-body', '.voice-fs-wrap', 'body'];
+        var kinds = ['screen', 'camera'];
+        var tags = ['img.relay-video', 'video.remote-video-tile', 'video.voice-self-video'];
+        for (var a = 0; a < areas.length; a++) {
+            for (var k = 0; k < kinds.length; k++) {
+                for (var t = 0; t < tags.length; t++) {
+                    var list = document.querySelectorAll(areas[a] + ' ' + tags[t] + '[data-kind="' + kinds[k] + '"]');
+                    for (var i = 0; i < list.length; i++) {
+                        if (isTileVisible(list[i])) return list[i];
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    function _startCanvasPiP(target, uid, kind, isImg) {
+        // Never stack sessions — a rapid toggle-off/on used to leave the older
+        // canvas + hidden video alive.
+        _cleanupCanvasPiP();
+        var st = uid && kind ? S.tileTransforms[uid + ':' + kind] : null;
+        var rot = st && st.rot ? ((st.rot % 360) + 360) % 360 : 0;
+        var mirror = st && st.mirror;
+        var srcW = 0, srcH = 0;
+        // A relay <img> already has a decoded frame (naturalWidth) but a
+        // freshly injected one may not, and a mesh <video> needs metadata.
+        // drawImage() on a not-yet-decoded source is a silent no-op, so the
+        // old code started the capture stream immediately and the PiP window
+        // stayed BLANK. Wait for a real frame before creating the canvas.
+        var readSrcSize = function () {
+            srcW = isImg ? (target.naturalWidth || 0) : (target.videoWidth || 0);
+            srcH = isImg ? (target.naturalHeight || 0) : (target.videoHeight || 0);
+            if (!(srcW > 0 && srcH > 0)) {
+                srcW = target.clientWidth || 0;
+                srcH = target.clientHeight || 0;
+            }
+            return srcW > 0 && srcH > 0;
+        };
+        if (!readSrcSize()) {
+            var waited = 0;
+            var waitId = setInterval(function () {
+                waited += 100;
+                if (readSrcSize() || waited >= 4000) {
+                    clearInterval(waitId);
+                    if (srcW > 0 && srcH > 0) start();
+                    else showToast('PiP: video not ready');
+                }
+            }, 100);
+            return;
+        }
+        start();
+
+        function start() {
+            var sideways = rot === 90 || rot === 270;
+            var canvasW = sideways ? srcH : srcW;
+            var canvasH = sideways ? srcW : srcH;
+            var canvas = document.createElement('canvas');
+            canvas.width = canvasW;
+            canvas.height = canvasH;
+            _pipCanvas = canvas;
+            // Expose for test verification
+            try { window._pipCanvas = canvas; window._pipFramesDrawn = 0; window._pipLastError = null; } catch (_) {}
+            var ctx = canvas.getContext('2d');
+            // Mark active BEFORE starting the draw loop so drawFrame() runs.
+            _pipActive = true;
+            // Draw loop: composite the source with rotation + mirror. Uses a
+            // TIMER, not requestAnimationFrame — rAF drops to ~1fps for a
+            // background/occluded tab, which is exactly when PiP is being used
+            // (the page is behind the PiP window or another window).
+            var drawFrame = function () {
+                if (!_pipActive) return;
+                try {
+                    ctx.save();
+                    ctx.translate(canvasW / 2, canvasH / 2);
+                    if (mirror) ctx.scale(-1, 1);
+                    if (rot) ctx.rotate(rot * Math.PI / 180);
+                    ctx.drawImage(target, -srcW / 2, -srcH / 2, srcW, srcH);
+                    ctx.restore();
+                    try { window._pipFramesDrawn = (window._pipFramesDrawn || 0) + 1; } catch (_) {}
+                } catch (e) {
+                    try { window._pipLastError = String((e && e.message) || e); } catch (_) {}
+                }
+                _pipAnimFrame = setTimeout(drawFrame, 33);
+            };
+            drawFrame();
+            // Capture canvas stream and pipe to hidden video
+            var stream = canvas.captureStream(30);
+            var pipVideo = document.createElement('video');
+            pipVideo.srcObject = stream;
+            pipVideo.muted = true;
+            pipVideo.playsInline = true;
+            pipVideo.style.cssText = 'position:fixed;top:-9999px;left:-9999px;width:1px;height:1px;opacity:0;pointer-events:none;z-index:-1;';
+            document.body.appendChild(pipVideo);
+            _pipTempVideo = pipVideo;
+            pipVideo.play().catch(function() {});
+            // requestPictureInPicture() throws InvalidStateError until the
+            // element has metadata (HAVE_METADATA). A canvas captureStream is
+            // empty for a moment after captureStream() — calling PiP right away
+            // ALWAYS failed with "Metadata for the video element are not loaded
+            // yet", which is why PiP silently did nothing. Wait for the first
+            // real frame (and retry briefly) before requesting.
+            var pipTries = 0;
+            var tryPip = function () {
+                if (!_pipActive) return;
+                if (!pipVideo.isConnected) return;
+                if (pipVideo.readyState < 1 /* HAVE_METADATA */) {
+                    if (++pipTries > 60) { // ~3s
+                        showToast('PiP failed: video not ready');
+                        _cleanupCanvasPiP();
+                        return;
+                    }
+                    setTimeout(tryPip, 50);
+                    return;
+                }
+                pipVideo.requestPictureInPicture().then(function() {
+                    _pipActive = true;
+                    pipVideo.addEventListener('leavepictureinpicture', function handler() {
+                        pipVideo.removeEventListener('leavepictureinpicture', handler);
+                        _cleanupCanvasPiP();
+                    });
+                }).catch(function(err) {
+                    console.warn('[PiP canvas]', err);
+                    showToast('PiP failed: ' + ((err && err.message) || err));
+                    _cleanupCanvasPiP();
+                });
+            };
+            tryPip();
+        }
+    }
+
+    function _cleanupCanvasPiP() {
+        _pipActive = false;
+        if (_pipAnimFrame) { clearTimeout(_pipAnimFrame); _pipAnimFrame = 0; }
+        _pipCanvas = null;
+        try { window._pipCanvas = null; } catch (_) {}
+        if (_pipTempVideo) {
+            if (_pipTempVideo.srcObject) {
+                try { _pipTempVideo.srcObject.getTracks().forEach(function(t) { t.stop(); }); } catch (_) {}
+            }
+            _pipTempVideo.srcObject = null;
+            _pipTempVideo.src = '';
+            if (_pipTempVideo.parentNode) _pipTempVideo.parentNode.removeChild(_pipTempVideo);
+            _pipTempVideo = null;
+        }
     }
 
     function toggleDeafen() {
@@ -5790,16 +5954,150 @@
         return html;
     }
 
+    // ------------------------------------------------------------------
+    // Tile helpers — visibility, single interaction binder, relay <img>.
+    // ------------------------------------------------------------------
+
+    // Is this tile actually rendered on screen? A relay feed keeps TWO nodes
+    // in the DOM with the same [data-uid][data-kind]: the visible relay <img>
+    // and the hidden mesh <video>. The old visibility filters matched on a
+    // `[style*="display:none"]` attribute substring, which NEVER matched —
+    // Chrome serialises inline styles as `display: none;` WITH a space — so
+    // fullscreen/PiP/transform paths happily targeted the hidden node.
+    function isTileVisible(node) {
+        if (!node || !node.isConnected) return false;
+        if (document.fullscreenElement === node) return true;
+        if (node.closest && node.closest('.voice-fs-wrap')) return true;
+        return !!node.offsetParent;
+    }
+
+    // The tile the user actually sees for uid+kind: the relay <img> when relay
+    // frames are live, otherwise the visible mesh <video>.
+    function pickVisibleTile(uid, kind) {
+        var sel = '[data-uid="' + uid + '"][data-kind="' + kind + '"]';
+        var found = null;
+        document.querySelectorAll('img.relay-video' + sel).forEach(function (n) {
+            if (!found && isTileVisible(n)) found = n;
+        });
+        if (found) return found;
+        document.querySelectorAll('video.remote-video-tile' + sel + ', video.voice-self-video' + sel).forEach(function (n) {
+            if (!found && isTileVisible(n)) found = n;
+        });
+        return found;
+    }
+
+    // The only place tile click/contextmenu handlers are bound. Guarded, since
+    // the relay path used to add its OWN click handler on top of this one: a
+    // single click ran toggleFullscreen twice, and the second call exited then
+    // immediately re-entered fullscreen (tile 1 worked, tile 2 seemed dead,
+    // and clicking inside fullscreen bounced straight back in).
+    function bindTileInteractions(node) {
+        if (!node || node._tileBound) return;
+        node._tileBound = true;
+        var uid = node.dataset ? node.dataset.uid : null;
+        var kind = node.dataset ? node.dataset.kind : null;
+        node.addEventListener('click', function () { toggleFullscreen(node); });
+        // Right-click opens the View menu (mirror / rotate / reset). Screen
+        // tiles also target the SCREEN audio volume; camera tiles have no
+        // audio at all. Stops propagation so the member row's own handler
+        // doesn't double-open the menu.
+        if (!uid) return;
+        node.addEventListener('contextmenu', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            openVolumeMenu(e, uid, kind === 'screen' ? 'screen' : 'video');
+        });
+    }
+
+    // Drop the relay <img> for uid+kind and hand every tile back to the mesh
+    // <video>: used when the sender turns the feed OFF or switches that feed
+    // from relay back to mesh. Without this the stale relay image kept hiding
+    // the fresh mesh <video> behind it. Never touches the media/encryption
+    // path itself — it only removes the client-side render surface.
+    function dropRelayFeed(uid, kind, feedOn) {
+        var fk = uid + '_' + kind;
+        var imgs = document.querySelectorAll('img.relay-video[data-uid="' + uid + '"][data-kind="' + kind + '"]');
+        if (!S._relayVideoFrames[fk] && !imgs.length) return;
+        if (S._relayVideoFrames[fk]) {
+            URL.revokeObjectURL(S._relayVideoFrames[fk]);
+            delete S._relayVideoFrames[fk];
+        }
+        document.querySelectorAll('video.remote-video-tile[data-uid="' + uid + '"][data-kind="' + kind + '"]').forEach(function (vid) {
+            vid.removeAttribute('data-relay-hidden');
+            // 'block'/'none' — an empty string would fall back to the initial
+            // `inline` display for a <video> and break the media row layout.
+            vid.style.display = feedOn ? 'block' : 'none';
+            if (feedOn) reattachTileStream(vid);
+            if (vid.dataset) applyTileTransform(vid, uid, kind);
+        });
+        imgs.forEach(function (img) {
+            if (img.src && img.src.indexOf('blob:') === 0) URL.revokeObjectURL(img.src);
+            img.remove();
+        });
+        syncResetViewChips(uid, kind);
+    }
+
+    // Inject (or refresh) the relay <img> tile for uid+kind in EVERY container
+    // that renders that feed (the server-popup member row AND the DM call tile
+    // can both exist for the same uid+kind). A single unscoped
+    // document.querySelector() used to hit whichever came FIRST in the DOM —
+    // in a DM call that was the hidden server-popup row, so the DM tile stayed
+    // a hidden mesh <video> with no image at all (black tile / "PiP does
+    // nothing"). The mesh <video> stays in the DOM as the WebRTC sink but is
+    // flagged data-relay-hidden + display:none so it can never be mistaken for
+    // the visible tile. Sizing comes from the .relay-video stylesheet — the old
+    // inline cssText carried !important width/height that survived into rotated
+    // and fullscreen tiles and cropped them.
+    function injectRelayTile(uid, kind, url, onlyParent) {
+        var videos = document.querySelectorAll('video.remote-video-tile[data-uid="' + uid + '"][data-kind="' + kind + '"]');
+        var made = null;
+        videos.forEach(function (videoTile) {
+            var parent = videoTile.parentElement;
+            if (!parent) return;
+            if (onlyParent && parent !== onlyParent) return;
+            var img = parent.querySelector('img.relay-video[data-uid="' + uid + '"][data-kind="' + kind + '"]');
+            if (img) {
+                if (img.src !== url) {
+                    if (img.src && img.src.indexOf('blob:') === 0) URL.revokeObjectURL(img.src);
+                    img.src = url;
+                }
+            } else {
+                img = document.createElement('img');
+                img.src = url;
+                img.className = 'remote-video-tile relay-video';
+                img.setAttribute('data-uid', uid);
+                img.setAttribute('data-kind', kind);
+                parent.insertBefore(img, videoTile);
+                bindTileInteractions(img);
+                // Keep the per-viewer mirror/rotation across a tile rebuild
+                // (renderPopup/renderDmPanel destroy and re-create every tile).
+                applyTileTransform(img, uid, kind);
+            }
+            videoTile.setAttribute('data-relay-hidden', '1');
+            videoTile.style.display = 'none';
+            if (!made) made = img;
+        });
+        if (made) syncResetViewChips(uid, kind);
+        return made;
+    }
+
     // Attach srcObject to every media tile inside a container. Self tiles use
     // the local camera/screen streams; other tiles use the remote streams.
     function wireVoiceMedia(root) {
         if (!root) return;
-        var selfId = getSelfId();
         root.querySelectorAll('.remote-video-tile').forEach(function (video) {
             var uid = video.dataset.uid;
             var kind = video.dataset.kind;
             var isSelf = video.dataset.self === '1';
+            var isImg = video.tagName === 'IMG';
             var stream = null;
+            if (isImg) {
+                // Relay <img> tile — the relay pipeline owns src/streams. Only
+                // restore the per-viewer view transform after a rebuild.
+                applyTileTransform(video, uid, kind);
+                bindTileInteractions(video);
+                return;
+            }
             if (isSelf) {
                 stream = kind === 'camera' ? S.localStreams.camera : S.localStreams.screen;
                 if (stream) {
@@ -5815,17 +6113,7 @@
             // how YOU see this feed — remote and SELF tiles alike. Pure
             // renderer-side CSS — nothing is sent.
             applyTileTransform(video, uid, kind);
-            video.addEventListener('click', function () { toggleFullscreen(video); });
-            // Right-click on a camera/screen tile opens the View menu (mirror /
-            // rotate / reset) — on SELF tiles too. Screen tiles also target the
-            // SCREEN audio volume; camera tiles have no audio at all (the
-            // member's mic volume lives on the member row / tile chrome). Stops
-            // propagation so the member row's own handler doesn't double-open.
-            video.addEventListener('contextmenu', function (e) {
-                e.preventDefault();
-                e.stopPropagation();
-                openVolumeMenu(e, uid, kind === 'screen' ? 'screen' : 'video');
-            });
+            bindTileInteractions(video);
         });
         // Tiles may have been rebuilt — re-sync any "Reset view" hint chips.
         syncAllResetViewChips();
@@ -5843,45 +6131,27 @@
             var kind = parts[1];
             var url = frames[key];
             if (!url || !uid || !kind) continue;
-            // Skip if relay img already exists and is visible (including in fullscreen wrap)
+            // If the relay img is currently fullscreened its element lives in
+            // the wrap, not in the rebuilt tile list — re-home it to the new
+            // tile so exiting fullscreen lands it in the right container.
             var existing = document.querySelector('img.relay-video[data-uid="' + uid + '"][data-kind="' + kind + '"]');
-            if (existing && (existing.offsetWidth > 0 || existing.closest('.voice-fs-wrap'))) {
-                // If the relay img is in a fullscreen wrap, its _fsOrigParent may
-                // be stale (destroyed by renderPopup). Re-home it to the new tile.
-                if (existing.closest('.voice-fs-wrap')) {
-                    var newTile = document.querySelector('video.remote-video-tile[data-uid="' + uid + '"][data-kind="' + kind + '"]');
-                    if (newTile && newTile.parentElement) {
-                        existing._fsOrigParent = newTile.parentElement;
-                        existing._fsOrigNext = null;
-                        // Hide the mesh <video> so the relay <img> takes over
-                        // when restored from fullscreen
-                        newTile.style.display = 'none';
-                    }
+            if (existing && existing.closest && existing.closest('.voice-fs-wrap')) {
+                var newTile = document.querySelector('video.remote-video-tile[data-uid="' + uid + '"][data-kind="' + kind + '"]');
+                if (newTile && newTile.parentElement) {
+                    existing._fsOrigParent = newTile.parentElement;
+                    existing._fsOrigNext = null;
+                    newTile.setAttribute('data-relay-hidden', '1');
+                    newTile.style.display = 'none';
                 }
                 continue;
             }
-            // Find the <video> tile to replace
-            var videoTile = document.querySelector('video.remote-video-tile[data-uid="' + uid + '"][data-kind="' + kind + '"]');
-            if (!videoTile) continue;
-            var parent = videoTile.parentElement;
-            if (!parent) continue;
-            // Remove any old relay img for this uid+kind
-            var oldImg = parent.querySelector('img.relay-video[data-uid="' + uid + '"][data-kind="' + kind + '"]');
-            if (oldImg) {
-                if (oldImg.src && oldImg.src.startsWith('blob:')) URL.revokeObjectURL(oldImg.src);
-                oldImg.remove();
-            }
-            // Create the relay img and insert it BEFORE the hidden <video>
-            var img = document.createElement('img');
-            img.src = url;
-            img.className = 'remote-video-tile relay-video';
-            img.setAttribute('data-uid', uid);
-            img.setAttribute('data-kind', kind);
-            img.style.cssText = 'display:block !important;width:100% !important;height:100% !important;max-height:96px;object-fit:contain;border-radius:4px;cursor:pointer;background:#000;';
-            (function (el) { el.addEventListener('click', function () { toggleFullscreen(el); }); })(img);
-            parent.insertBefore(img, videoTile);
-            videoTile.style.display = 'none';
-            count++;
+            // injectRelayTile(): creates/refreshes the relay <img> in EVERY
+            // container that renders this feed (server popup row, DM call tile,
+            // rotated slot), binds interactions ONCE (guarded — the old code let
+            // wireVoiceMedia add a second click handler, double-toggling
+            // fullscreen) and re-applies the per-viewer mirror/rotation so a
+            // rebuilt tile does not come back untransformed.
+            if (injectRelayTile(uid, kind, url, null)) count++;
         }
         if (count > 0) console.log('[Relay] re-injected ' + count + ' relay frame(s)');
     }
@@ -6019,7 +6289,10 @@
     // manual-load feature) resumes both directions.
     function unloadFeed(uid, kind) {
         markFeedUnloaded(uid, kind);
-        var v = document.querySelector('.remote-video-tile[data-uid="' + uid + '"][data-kind="' + kind + '"]');
+        // Target the mesh <video> explicitly — a relay <img> shares the same
+        // [data-uid][data-kind] and must not be picked (srcObject on an <img>
+        // is meaningless and hid the real element).
+        var v = document.querySelector('video.remote-video-tile[data-uid="' + uid + '"][data-kind="' + kind + '"]');
         if (v) { try { v.srcObject = null; } catch (_) {} }
         applyFeedPlaceholders();
         // Unloading the screen also silences its tab/system audio (receiver side).
@@ -6123,7 +6396,7 @@
                     (kind === 'screen' ? 'Load screen' : 'Load camera') + '</span>';
                 holder.addEventListener('click', function () {
                     markFeedLoaded(uid, kind);
-                    var v = document.querySelector('.remote-video-tile[data-uid="' + uid + '"][data-kind="' + kind + '"]');
+                    var v = document.querySelector('video.remote-video-tile[data-uid="' + uid + '"][data-kind="' + kind + '"]');
                     if (v && S.remoteStreams[uid] && S.remoteStreams[uid][kind]) {
                         v.srcObject = S.remoteStreams[uid][kind];
                         v.play().catch(function () {});
@@ -6212,7 +6485,7 @@
         // The tile element IS the <video> (class remote-video-tile sits on the
         // video itself) — attach srcObject directly (or hold behind Load when
         // manual video load is on).
-        var video = document.querySelector('.remote-video-tile[data-uid="' + uid + '"][data-kind="' + kind + '"]');
+        var video = document.querySelector('video.remote-video-tile[data-uid="' + uid + '"][data-kind="' + kind + '"]');
         if (!video) return;
         attachRemoteVideo(video, uid, kind, S.remoteStreams[uid] ? S.remoteStreams[uid][kind] : null);
     }
@@ -6232,14 +6505,9 @@
             v.setAttribute('data-kind', 'camera');
             v.setAttribute('data-self', '1');
             v.setAttribute('data-uid', getSelfId());
-            v.addEventListener('click', function () { toggleFullscreen(v); });
-            // Right-click our own camera in the DM self strip -> View menu
-            // (mirror / rotate / reset), same as everyone else's tiles.
-            v.addEventListener('contextmenu', function (e) {
-                e.preventDefault();
-                e.stopPropagation();
-                openVolumeMenu(e, getSelfId(), 'video');
-            });
+            // Single guarded binder: click = fullscreen, right-click = the View
+            // menu (mirror / rotate / reset) on our OWN feed.
+            bindTileInteractions(v);
             wrap.appendChild(v);
         }
         if (S.screenOn && S.localStreams.screen) {
@@ -6252,14 +6520,7 @@
             s.setAttribute('data-kind', 'screen');
             s.setAttribute('data-self', '1');
             s.setAttribute('data-uid', getSelfId());
-            s.addEventListener('click', function () { toggleFullscreen(s); });
-            // Right-click our own screen share in the DM self strip -> View
-            // menu (mirror / rotate / reset), same as everyone else's tiles.
-            s.addEventListener('contextmenu', function (e) {
-                e.preventDefault();
-                e.stopPropagation();
-                openVolumeMenu(e, getSelfId(), 'screen');
-            });
+            bindTileInteractions(s);
             wrap.appendChild(s);
         }
         if (!S.cameraOn && !S.screenOn) {
@@ -6461,20 +6722,16 @@
         body.querySelectorAll('.remote-video-tile').forEach(function (video) {
             var uid = video.dataset.uid;
             var kind = video.dataset.kind;
-            var _stream = S.remoteStreams[uid] ? S.remoteStreams[uid][kind] : null;
-            // Manual-load aware: holds behind a Load button when enabled.
-            attachRemoteVideo(video, uid, kind, _stream);
+            var isImg = video.tagName === 'IMG';
+            if (!isImg) {
+                var _stream = S.remoteStreams[uid] ? S.remoteStreams[uid][kind] : null;
+                // Manual-load aware: holds behind a Load button when enabled.
+                attachRemoteVideo(video, uid, kind, _stream);
+            }
             // Per-viewer mirror/rotate transform (right-click menu) — how YOU
             // see this feed. Remote tiles never mirror by default.
             applyTileTransform(video, uid, kind);
-            video.addEventListener('click', function () { toggleFullscreen(video); });
-            video.addEventListener('contextmenu', function (e) {
-                e.preventDefault();
-                e.stopPropagation();
-                // Screen tiles open the SCREEN-audio volume; camera tiles the
-                // member's mic volume.
-                openVolumeMenu(e, uid, video.dataset.kind === 'screen' ? 'screen' : 'video');
-            });
+            bindTileInteractions(video);
         });
         // Right-click ANYWHERE on a DM call tile (avatar, name, placeholder —
         // not just the video) opens the per-member volume slider, matching the
@@ -6634,26 +6891,47 @@
         var css = tileTransformCss(uid, kind);
         var sideways = rot === 90 || rot === 270;
         var fsWrap = video.closest ? video.closest('.voice-fs-wrap') : null;
+        var isNativeFs = document.fullscreenElement === video;
+        var inFullscreen = fsWrap || isNativeFs;
         var slot = video.parentElement && video.parentElement.classList.contains('voice-tile-slot')
             ? video.parentElement : null;
-        if (fsWrap) {
-            // Fullscreen: the wrap fills the screen (W×H) and its CSS forces the
-            // video to 100%×100% with !important, so a rotated element keeps the
-            // screen's aspect and gets cut off at the top/bottom. Swap the
-            // element to H×W (with !important so it beats the wrap rules) —
-            // after the 90° rotation the content then fills the screen exactly.
+        if (inFullscreen) {
+            // Fullscreen (CSS wrapper OR native): scale the video proportionally
+            // so the largest dimension fits the screen — never upscale, maintain
+            // aspect ratio. Apply rotation/mirror transform.
             clearInlineDims(video);
-            if (!sideways) {
-                video.style.transform = css || '';
-                return;
+            // Get natural (unrotated) video dimensions.
+            var bw = video.videoWidth || video.naturalWidth || 0;
+            var bh = video.videoHeight || video.naturalHeight || 0;
+            if (!(bw > 0 && bh > 0)) {
+                bw = video.offsetWidth || 1;
+                bh = video.offsetHeight || 1;
             }
-            var fw = fsWrap.clientWidth || window.innerWidth;
-            var fh = fsWrap.clientHeight || window.innerHeight;
-            if (fw > 0 && fh > 0) {
-                setDimImportant(video, 'width', Math.round(fh) + 'px');
-                setDimImportant(video, 'height', Math.round(fw) + 'px');
+            // Effective visual dimensions after rotation.
+            var evw = sideways ? bh : bw;
+            var evh = sideways ? bw : bh;
+            var fw, fh;
+            if (fsWrap) {
+                fw = fsWrap.clientWidth || window.innerWidth;
+                fh = fsWrap.clientHeight || window.innerHeight;
+            } else {
+                fw = window.innerWidth;
+                fh = window.innerHeight;
             }
-            video.style.transform = css || '';
+            // Scale so the largest visual dimension fits the screen's largest.
+            var maxDim = Math.max(evw, evh);
+            var containerMax = Math.max(fw, fh);
+            var s = maxDim > 0 ? Math.min(1, containerMax / maxDim) : 1;
+            if (evw > 0 && evh > 0) {
+                setDimImportant(video, 'width', Math.round(evw * s) + 'px');
+                setDimImportant(video, 'height', Math.round(evh * s) + 'px');
+                setDimImportant(video, 'maxWidth', 'none');
+                setDimImportant(video, 'maxHeight', 'none');
+            }
+            // Inline !important transform: the stylesheet's `.voice-fs-wrap img
+            // .relay-video { width/height: 100% !important }` used to win, so a
+            // fullscreened tile showed the RAW feed with no mirror/rotation.
+            setTransform(video, css);
             return;
         }
         var inMedia = video.parentElement && (
@@ -6672,7 +6950,10 @@
                 slot.remove();
             }
             clearInlineDims(video);
-            video.style.transform = css || '';
+            // Non-rotated tiles in media context: let CSS handle sizing
+            // (height:100%, width:auto, max-width:46%). Only set inline dims
+            // when there IS a rotation (sideways) that swaps width/height.
+            setTransform(video, css);
             return;
         }
         // 90°/270° rotation. A rotated element's VISUAL box is the transpose of
@@ -6686,18 +6967,18 @@
             var sVw = parseFloat(slot.style.width);
             var sVh = parseFloat(slot.style.height);
             if (sVw > 0 && sVh > 0) {
-                video.style.width = Math.round(sVh) + 'px';
-                video.style.height = Math.round(sVw) + 'px';
-                video.style.maxWidth = 'none';
-                video.style.maxHeight = 'none';
-                video.style.transform = css || '';
+                setDimImportant(video, 'width', Math.round(sVh) + 'px');
+                setDimImportant(video, 'height', Math.round(sVw) + 'px');
+                setDimImportant(video, 'maxWidth', 'none');
+                setDimImportant(video, 'maxHeight', 'none');
+                setTransform(video, css);
                 return;
             }
         }
         if (!inMedia) {
             // Not in a tile row (e.g. the DM self preview) — plain transform.
             clearInlineDims(video);
-            video.style.transform = css || '';
+            setTransform(video, css);
             return;
         }
         // Measure the NATURAL (unrotated) size while the video is still a
@@ -6730,27 +7011,51 @@
         slot.style.height = Vh + 'px';
         slot.style.maxWidth = 'none';
         slot.style.maxHeight = 'none';
-        video.style.width = Vh + 'px';
-        video.style.height = Vw + 'px';
-        // Inline dims must beat the tile max-width/max-height caps.
-        video.style.maxWidth = 'none';
-        video.style.maxHeight = 'none';
-        video.style.transform = css || '';
+        // !important inline dims: the `.relay-video` stylesheet sets
+        // `height:100%` / `width:auto` with !important and
+        // `.voice-member-media .remote-video-tile` caps max-width — plain
+        // inline sizes LOST to those and the rotated relay tile came back
+        // cropped / oversized after a rebuild.
+        setDimImportant(video, 'width', Vh + 'px');
+        setDimImportant(video, 'height', Vw + 'px');
+        setDimImportant(video, 'maxWidth', 'none');
+        setDimImportant(video, 'maxHeight', 'none');
+        setTransform(video, css);
     }
 
     // Reset any inline layout dims set by a previous rotation swap (including
     // the !important ones used inside fullscreen).
     function clearInlineDims(video) {
         if (!video) return;
-        ['width', 'height', 'maxWidth', 'maxHeight'].forEach(function (p) {
-            try { video.style.removeProperty(p); } catch (_) {}
-            video.style[p] = '';
+        var props = { width: 'width', height: 'height', maxWidth: 'max-width', maxHeight: 'max-height' };
+        Object.keys(props).forEach(function (p) {
+            // removeProperty needs KEBAB-CASE — 'maxWidth' is invalid and
+            // silently did nothing, so the !important caps survived a
+            // fullscreen exit and kept the tile oversized (cropped).
+            try { video.style.removeProperty(props[p]); } catch (_) {}
+            try { video.style[p] = ''; } catch (_) {}
         });
+    }
+
+    // Inline !important transform. Inline beats the stylesheet, so this is how
+    // the mirror/rotation is guaranteed to render — inside the CSS fullscreen
+    // wrapper the sheet's !important sizing rules previously made the
+    // transform invisible.
+    function setTransform(node, css) {
+        if (!node) return;
+        try {
+            if (css) node.style.setProperty('transform', css, 'important');
+            else node.style.removeProperty('transform');
+        } catch (_) {
+            node.style.transform = css || '';
+        }
     }
 
     // Inline !important beats the fullscreen stylesheet's !important rules.
     function setDimImportant(video, prop, val) {
-        try { video.style.setProperty(prop, val, 'important'); } catch (_) { video.style[prop] = val; }
+        // setProperty expects kebab-case CSS property names
+        var cssProp = prop.replace(/([A-Z])/g, '-$1').toLowerCase();
+        try { video.style.setProperty(cssProp, val, 'important'); } catch (_) { video.style[prop] = val; }
     }
 
     function applyTileTransformAll(uid, kind) {
@@ -6783,8 +7088,19 @@
             var or = op.getBoundingClientRect();
             var cw = chip.offsetWidth || 90;
             var ch = chip.offsetHeight || 24;
-            chip.style.left = Math.round(vr.left - or.left + (vr.width - cw) / 2) + 'px';
-            chip.style.top = Math.round(vr.top - or.top + vr.height - ch - 6) + 'px';
+            // Clamp the chip INSIDE the tile's own bounds. Both sides must be
+            // in offsetParent coordinates — the old clamp compared the chip's
+            // parent-relative left against the tile's WIDTH, so on a narrow
+            // mobile tile it pushed the chip outside the tile and off-screen.
+            var tileLeft = vr.left - or.left;
+            var tileTop = vr.top - or.top;
+            var maxLeft = tileLeft + Math.max(0, vr.width - cw);
+            var chipLeft = tileLeft + (vr.width - cw) / 2;
+            chipLeft = Math.max(tileLeft, Math.min(chipLeft, maxLeft));
+            chip.style.left = Math.round(chipLeft) + 'px';
+            var maxTop = tileTop + Math.max(0, vr.height - ch);
+            var chipTop = tileTop + vr.height - ch - 4;
+            chip.style.top = Math.round(Math.max(tileTop, Math.min(chipTop, maxTop))) + 'px';
         };
         place();
         var tries = 0;
@@ -7711,11 +8027,16 @@
         var w = resW(maxH);
         var h = maxH;
 
-        var canvas = document.createElement('canvas');
-        canvas.width = w;
-        canvas.height = h;
-        var ctx = canvas.getContext('2d');
-        _relayCanvases[kind] = canvas;
+        // Double-buffer: two canvases so capture can run while the previous
+        // frame is still being encoded — prevents the busy guard from dropping
+        // every other frame when toBlob() is slow.
+        var canvasA = document.createElement('canvas');
+        canvasA.width = w; canvasA.height = h;
+        var canvasB = document.createElement('canvas');
+        canvasB.width = w; canvasB.height = h;
+        var ctxA = canvasA.getContext('2d');
+        var ctxB = canvasB.getContext('2d');
+        _relayCanvases[kind] = canvasA;
 
         var video = document.createElement('video');
         video.srcObject = stream;
@@ -7728,54 +8049,89 @@
         // Wait for the video to have dimensions before starting the loop
         var startLoop = function () {
             if (S._relayTimers[kind]) return;
-            // Store running flag on _relayCanvases so stopVideoRelay() can
-            // stop the loop even if an async toBlob() callback is in flight.
-            var state = { running: true, video: video };
+            var state = { running: true, video: video, _visHandler: null };
             _relayCanvases[kind] = state;
             S._relayTimers[kind] = true; // mark as active
-            var busy = false; // guard: skip frame if previous still processing
+            var encodingA = false; // per-canvas: true while toBlob()+encrypt is in flight
+            var encodingB = false;
             var reusableKeyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(S.roomKeyB64));
             var targetMs = Math.max(16, 1000 / fps);
-            // Capture-and-send pipeline (shared by both timer modes)
+            var sendIndex = 0; // alternates 0/1 for double-buffer
+
+            // Chrome clamps setTimeout to ~1s (and to 1 wake-up/minute after a
+            // while) for a page that is HIDDEN or whose window is NOT FOCUSED —
+            // that is the "relay video drops to 1fps" report. MessageChannel
+            // postMessage is not clamped, so use it whenever timers can't be
+            // trusted. Exposed counters let tests measure real throughput
+            // instead of guessing.
+            function needsUnthrottledLoop() {
+                return document.visibilityState === 'hidden' || !document.hasFocus();
+            }
+            S._relayStats = S._relayStats || {};
+            S._relayStats[kind] = { sent: 0, startedAt: Date.now() };
+
+            // Capture-and-send pipeline — draws onto the idle canvas, then
+            // kicks off async encode on that canvas. Returns immediately so
+            // the caller can schedule the next capture without waiting.
             function captureFrame() {
                 if (!state.running || !S.connected || !S.roomKeyB64) { S._relayTimers[kind] = null; state.running = false; return; }
-                if (busy) return;
-                busy = true;
+                // Pick the idle canvas (alternate each frame)
+                var drawCanvas = sendIndex === 0 ? canvasA : canvasB;
+                var drawCtx = sendIndex === 0 ? ctxA : ctxB;
+                var isA = sendIndex === 0;
+                sendIndex = 1 - sendIndex;
+                // Skip this canvas if its previous encode is still in flight
+                if (isA ? encodingA : encodingB) return;
+                if (isA) encodingA = true; else encodingB = true;
                 try {
-                    ctx.drawImage(video, 0, 0, w, h);
-                    canvas.toBlob(function (blob) {
-                        if (!blob || blob.size < 100) { busy = false; return; }
+                    drawCtx.drawImage(video, 0, 0, w, h);
+                    drawCanvas.toBlob(function (blob) {
+                        if (!blob || blob.size < 100) { if (isA) encodingA = false; else encodingB = false; return; }
                         blob.arrayBuffer().then(function (buf) {
                             var ws = getWs();
                             if (ws && ws.bufferedAmount > 512 * 1024) {
-                                busy = false;
+                                if (isA) encodingA = false; else encodingB = false;
                                 return;
                             }
                             var raw = new Uint8Array(buf);
                             var enc = E2ECrypto.aeadEncrypt(raw, reusableKeyBytes);
                             sendRelayBinary(kind, enc.nonce, new Uint8Array(E2ECrypto.base64ToArrayBuffer(enc.ciphertext)));
-                            busy = false;
-                        }).catch(function () { busy = false; });
+                            try { S._relayStats[kind].sent++; } catch (_) {}
+                            if (isA) encodingA = false; else encodingB = false;
+                        }).catch(function () { if (isA) encodingA = false; else encodingB = false; });
                     }, 'image/jpeg', S.settings.relayVideoQuality || 0.6);
-                } catch (_) { busy = false; }
+                } catch (_) { if (isA) encodingA = false; else encodingB = false; }
             }
-            // ---- Dual-mode timer: MessageChannel when hidden, setTimeout when visible ----
-            // Chrome throttles setTimeout/setInterval to 1Hz in background tabs,
-            // which kills relay FPS. MessageChannel postMessage is NOT throttled.
-            var _mcPort = null;
+
+            // ---- Timer modes ----
+            // Focused foreground: setTimeout (full rate).
+            // Hidden OR unfocused window: MessageChannel — Chrome clamps
+            // setTimeout to ~1s (and to 1/min later) for those, which was the
+            // "relay video drops to 1fps" report. rAF is worse (always ~1fps
+            // off-screen), so it is not used at all.
+            var _mcPort = null, _mcPort2 = null;
             var _mcLast = 0;
+            var _timerId = 0;
+
+            function stopMcLoop() {
+                if (!_mcPort) return;
+                var p1 = _mcPort, p2 = _mcPort2;
+                _mcPort = null; _mcPort2 = null;
+                try { p1.onmessage = null; } catch (_) {}
+                try { p1.close(); } catch (_) {}
+                try { p2.close(); } catch (_) {}
+            }
+
             function startMcLoop() {
                 if (_mcPort) return;
                 var ch = new MessageChannel();
                 _mcPort = ch.port1;
+                _mcPort2 = ch.port2;
                 _mcLast = performance.now();
                 _mcPort.onmessage = function () {
-                    if (!state.running || document.visibilityState === 'visible') {
-                        // Tab became visible — stop MC loop, setTimeout takes over
-                        _mcPort = null;
-                        ch.port1.close();
-                        ch.port2.close();
-                        if (state.running) scheduleNextTimeout();
+                    if (!state.running || !needsUnthrottledLoop()) {
+                        stopMcLoop();
+                        if (state.running) scheduleNext();
                         return;
                     }
                     var now = performance.now();
@@ -7783,51 +8139,63 @@
                         captureFrame();
                         _mcLast = now;
                     }
-                    ch.port2.postMessage(null);
+                    try { ch.port2.postMessage(null); } catch (_) {}
                 };
                 ch.port2.postMessage(null);
             }
-            function stopMcLoop() {
-                if (_mcPort) {
-                    _mcPort = null;
+
+            function scheduleNext() {
+                if (!state.running || !S.connected || !S.roomKeyB64) {
+                    S._relayTimers[kind] = null;
+                    state.running = false;
+                    stopMcLoop();
+                    return;
                 }
-            }
-            function scheduleNextTimeout() {
-                if (!state.running || !S.connected || !S.roomKeyB64) { S._relayTimers[kind] = null; state.running = false; return; }
-                S._relayTimers[kind] = setTimeout(function () {
+                if (needsUnthrottledLoop()) {
+                    // Hidden / unfocused — MessageChannel (not clamped)
+                    S._relayTimers[kind] = true;
+                    startMcLoop();
+                    return;
+                }
+                // Focused + visible — the single setTimeout chain
+                if (_mcPort) stopMcLoop();
+                _timerId = setTimeout(function () {
                     if (!state.running) return;
-                    if (document.visibilityState === 'hidden') {
-                        // Tab hidden — switch to MessageChannel
+                    if (needsUnthrottledLoop()) {
                         S._relayTimers[kind] = true;
                         startMcLoop();
                         return;
                     }
-                    scheduleNextTimeout();
                     captureFrame();
+                    if (state.running) scheduleNext();
                 }, targetMs);
+                S._relayTimers[kind] = _timerId;
             }
-            // Visibility change listener: switch between timer modes
+
             function onVisChange() {
                 if (!state.running) {
-                    document.removeEventListener('visibilitychange', onVisChange);
+                    document.removeEventListener('visibilitychange', onVisHandler);
+                    window.removeEventListener('focus', onVisHandler);
+                    window.removeEventListener('blur', onVisHandler);
                     return;
                 }
-                if (document.visibilityState === 'hidden' && !_mcPort) {
-                    // Tab just hidden — clear setTimeout, start MC loop
-                    if (S._relayTimers[kind] && S._relayTimers[kind] !== true) {
-                        clearTimeout(S._relayTimers[kind]);
-                    }
+                if (needsUnthrottledLoop()) {
+                    // Hidden or the window lost focus — swap to MessageChannel.
+                    if (_timerId) { clearTimeout(_timerId); _timerId = 0; }
                     S._relayTimers[kind] = true;
                     startMcLoop();
-                } else if (document.visibilityState === 'visible' && _mcPort) {
-                    // Tab just visible — MC loop will self-stop, start setTimeout
-                    stopMcLoop();
-                    scheduleNextTimeout();
                 }
+                // Refocused: the MC loop stands down on its next tick and
+                // resumes the setTimeout chain itself (no second chain here —
+                // doing both doubled the capture rate).
             }
-            document.addEventListener('visibilitychange', onVisChange);
-            // Start with setTimeout (foreground)
-            scheduleNextTimeout();
+            var _visHandler = onVisChange;
+            state._visHandler = _visHandler;
+            document.addEventListener('visibilitychange', _visHandler);
+            window.addEventListener('focus', _visHandler);
+            window.addEventListener('blur', _visHandler);
+            // Start foreground loop
+            scheduleNext();
         };
 
         // Start when video has enough metadata
@@ -7835,9 +8203,6 @@
             startLoop();
         } else {
             video.addEventListener('loadeddata', startLoop, { once: true });
-            // Fallback: start after 1s even if metadata hasn't loaded.
-            // Store handle so stopVideoRelay can cancel it (prevents ghost
-            // relay restarting on a dead video element after rapid toggle).
             var fallbackTimer = setTimeout(startLoop, 1000);
             var existing = _relayCanvases[kind];
             if (existing && existing.running !== undefined) {
@@ -7856,7 +8221,7 @@
             clearTimeout(existing._fallbackTimer);
         }
         if (S._relayTimers[kind]) {
-            clearTimeout(S._relayTimers[kind]);
+            if (S._relayTimers[kind] !== true) clearTimeout(S._relayTimers[kind]);
             delete S._relayTimers[kind];
         }
         // Stop the running loop — this invalidates any in-flight toBlob()
@@ -7864,6 +8229,12 @@
         var state = _relayCanvases[kind];
         if (state && state.running !== undefined) {
             state.running = false;
+        }
+        // Remove visibility / focus listeners
+        if (state && state._visHandler) {
+            document.removeEventListener('visibilitychange', state._visHandler);
+            window.removeEventListener('focus', state._visHandler);
+            window.removeEventListener('blur', state._visHandler);
         }
         // Release the hidden video element's stream reference
         if (state && state.video) {
@@ -7911,28 +8282,8 @@
             }
             S._relayVideoFrames[frameKey] = url;
 
-            var existingImg = document.querySelector('img.remote-video-tile[data-uid="' + decoded.fromUid + '"][data-kind="' + decoded.kind + '"]');
-            if (existingImg) {
-                var oldUrl = existingImg.src;
-                existingImg.src = url;
-                if (oldUrl && oldUrl.startsWith('blob:')) URL.revokeObjectURL(oldUrl);
-            } else {
-                var videoTile = document.querySelector('video.remote-video-tile[data-uid="' + decoded.fromUid + '"][data-kind="' + decoded.kind + '"]');
-                var parent = videoTile ? videoTile.parentElement : null;
-                if (videoTile) {
-                    videoTile.style.display = 'none';
-                }
-                if (parent) {
-                    var img = document.createElement('img');
-                    img.src = url;
-                    img.className = 'remote-video-tile relay-video';
-                    img.setAttribute('data-uid', decoded.fromUid);
-                    img.setAttribute('data-kind', decoded.kind);
-                    img.style.cssText = 'display:block !important;height:100% !important;width:auto !important;max-width:46%;object-fit:contain;border-radius:8px;cursor:pointer;background:#000;border:1px solid var(--bg-border, #2a2a4a);';
-                    (function (el) { el.addEventListener('click', function () { toggleFullscreen(el); }); })(img);
-                    parent.insertBefore(img, videoTile);
-                }
-            }
+            // Render as a relay <img> tile (the mesh <video> is hidden behind it).
+            injectRelayTile(decoded.fromUid, decoded.kind, url);
 
             if (!S.members[decoded.fromUid]) S.members[decoded.fromUid] = {};
             S.members[decoded.fromUid][decoded.kind === 'camera' ? 'camera' : 'screen'] = true;
@@ -7973,30 +8324,8 @@
         }
         S._relayVideoFrames[frameKey] = url;
 
-        // Find existing relay <img> tile to update
-        var existingImg = document.querySelector('img.remote-video-tile[data-uid="' + fromUid + '"][data-kind="' + kind + '"]');
-        if (existingImg) {
-            var oldUrl = existingImg.src;
-            existingImg.src = url;
-            if (oldUrl && oldUrl.startsWith('blob:')) URL.revokeObjectURL(oldUrl);
-        } else {
-            // First relay frame — hide the <video> tile (mesh placeholder) and inject <img>
-            var videoTile = document.querySelector('video.remote-video-tile[data-uid="' + fromUid + '"][data-kind="' + kind + '"]');
-            var parent = videoTile ? videoTile.parentElement : null;
-            if (videoTile) {
-                videoTile.style.display = 'none';
-            }
-            if (parent) {
-                var img = document.createElement('img');
-                img.src = url;
-                img.className = 'remote-video-tile relay-video';
-                img.setAttribute('data-uid', fromUid);
-                img.setAttribute('data-kind', kind);
-                img.style.cssText = 'display:block !important;height:100% !important;width:auto !important;max-width:46%;object-fit:contain;border-radius:8px;cursor:pointer;background:#000;border:1px solid var(--bg-border, #2a2a4a);';
-                (function (el) { el.addEventListener('click', function () { toggleFullscreen(el); }); })(img);
-                parent.insertBefore(img, videoTile);
-            }
-        }
+        // Render as a relay <img> tile (the mesh <video> is hidden behind it).
+        injectRelayTile(fromUid, kind, url);
 
         if (!S.members[fromUid]) S.members[fromUid] = {};
         S.members[fromUid][kind === 'camera' ? 'camera' : 'screen'] = true;
@@ -9695,78 +10024,106 @@
     // continues decoding seamlessly.
     function toggleFullscreen(el) {
         if (!el) return;
-        // If the element is already inside a voice-fs-wrap, restore it
-        var activeWrap = el.closest ? el.closest('.voice-fs-wrap') : null;
-        if (activeWrap) {
-            restoreFromFsWrap(activeWrap, el);
-            if (document.fullscreenElement) {
-                document.exitFullscreen().catch(function () {});
+        var fsEl = document.fullscreenElement;
+        // 1) This element (or its fullscreen wrapper) IS the native fullscreen
+        //    element — a click exits, and STOPS there. The old code fell through
+        //    to the "exit then re-enter" branch, which is the reported bug: a
+        //    click in fullscreen exited and immediately re-entered, so only
+        //    Escape worked, phone users were stuck fullscreen, and the second
+        //    tile appeared dead.
+        if (fsEl && (fsEl === el || (fsEl.contains && fsEl.contains(el)))) {
+            document.exitFullscreen().catch(function () {});
+            // enterTileFullscreen() installed a fullscreenchange handler that
+            // restores the tile + removes the wrapper. Only the legacy case
+            // (the tile itself is the fullscreen element) needs a manual restore.
+            if (fsEl === el) {
+                var w0 = el.closest ? el.closest('.voice-fs-wrap') : null;
+                if (w0) restoreFromFsWrap(w0, el);
             }
             return;
         }
-        if (document.fullscreenElement && !document.querySelector('.voice-fs-wrap')) {
+        // 2) Inside the CSS overlay wrapper — restore the tile and leave.
+        var activeWrap = el.closest ? el.closest('.voice-fs-wrap') : null;
+        if (activeWrap) {
+            restoreFromFsWrap(activeWrap, el);
+            if (fsEl) document.exitFullscreen().catch(function () {});
             return;
         }
-        // If another element is already fullscreened via voice-fs-wrap, restore it first
+        // 3) Native fullscreen is active on ANOTHER element — exit, then enter
+        //    with the requested one (guarded: the exit promise can resolve
+        //    after a re-render swapped the element out).
+        if (fsEl) {
+            var target = el;
+            document.exitFullscreen().then(function () {
+                if (document.fullscreenElement) return;
+                if (!target.isConnected) return;
+                enterTileFullscreen(target);
+            }).catch(function () {});
+            return;
+        }
+        // 4) Another element is fullscreened via the CSS wrapper — restore it.
         var existingFs = document.querySelector('.voice-fs-wrap');
         if (existingFs) {
             var existingEl = existingFs.firstElementChild;
             if (existingEl) restoreFromFsWrap(existingFs, existingEl);
         }
+        enterTileFullscreen(el);
+    }
+
+    // Enter fullscreen for a tile. The tile is moved into a `.voice-fs-wrap`
+    // DIV and THAT DIV becomes the native fullscreen element (falling back to
+    // the plain CSS overlay if the request is refused).
+    //
+    // Fullscreening the tile itself is what broke mirror/rotation + sizing in
+    // fullscreen: Chrome's fullscreen UA stylesheet uses !important rules that
+    // force `transform: none` and `width/height: 100%` on the fullscreen
+    // element, and UA !important beats author !important — verified live:
+    // inline `transform: scaleX(-1) !important` still present while
+    // getComputedStyle() reported "none", so the feed rendered untransformed.
+    // A div wrapper keeps the tile's transforms/sizing AND avoids Chrome's
+    // native playback controls on a fullscreened <video>.
+    function enterTileFullscreen(el) {
+        if (!el || !el.isConnected) return;
+        if (el.closest && el.closest('.voice-fs-wrap')) return;
         el._fsOrigParent = el.parentNode;
         el._fsOrigNext = el.nextSibling;
-        // Try element-level fullscreen on the element directly
-        el.requestFullscreen().then(function () {
-            // True element-level fullscreen succeeded — no wrapper needed
-            el._fsNoWrap = true;
-            var handler = function () {
-                if (!document.fullscreenElement) {
-                    document.removeEventListener('fullscreenchange', handler);
-                    el.removeEventListener('click', clickExit);
-                    if (el._fsNoWrap) {
-                        el._fsNoWrap = false;
-                        reattachTileStream(el);
-                        if (el.dataset) applyTileTransform(el, el.dataset.uid, el.dataset.kind);
-                        if (el.dataset) syncResetViewChips(el.dataset.uid, el.dataset.kind);
-                    }
-                }
-            };
-            // Click anywhere on the element to exit fullscreen (mobile-friendly)
-            var clickExit = function () {
-                document.exitFullscreen().catch(function () {});
-            };
-            el.addEventListener('click', clickExit);
-            document.addEventListener('fullscreenchange', handler);
-        }).catch(function () {
-            // Element-level fullscreen blocked — fall back to CSS overlay wrapper
-            var wrap = document.createElement('div');
-            wrap.className = 'voice-fs-wrap';
-            wrap.appendChild(el);
-            document.body.appendChild(wrap);
-            if (el.dataset) applyTileTransform(el, el.dataset.uid, el.dataset.kind);
-            if (el.dataset) syncResetViewChips(el.dataset.uid, el.dataset.kind);
-            var restored = false;
-            var restore = function () {
-                if (restored) return;
-                restored = true;
-                document.removeEventListener('fullscreenchange', handler);
-                if (el.parentNode === wrap) {
-                    moveTileBack(el);
-                }
-                if (wrap.parentNode) wrap.remove();
-                reattachTileStream(el);
-                if (el.dataset) applyTileTransform(el, el.dataset.uid, el.dataset.kind);
-                if (el.dataset) syncResetViewChips(el.dataset.uid, el.dataset.kind);
-            };
-            var handler = function () {
-                if (!document.fullscreenElement) restore();
-            };
-            document.addEventListener('fullscreenchange', handler);
-            // Also allow clicking the wrap background to exit
-            wrap.addEventListener('click', function (e) {
-                if (e.target === wrap) restore();
-            });
+        var wrap = document.createElement('div');
+        wrap.className = 'voice-fs-wrap';
+        if (el.parentNode) el.parentNode.insertBefore(wrap, el);
+        wrap.appendChild(el);
+        el._fsWrap = wrap;
+        var paint = function () {
+            if (!el.dataset) return;
+            applyTileTransform(el, el.dataset.uid, el.dataset.kind);
+            syncResetViewChips(el.dataset.uid, el.dataset.kind);
+        };
+        var restored = false;
+        var restore = function () {
+            if (restored) return;
+            restored = true;
+            document.removeEventListener('fullscreenchange', handler);
+            if (el.parentNode === wrap) moveTileBack(el);
+            if (wrap.parentNode) wrap.remove();
+            reattachTileStream(el);
+            paint();
+        };
+        var handler = function () {
+            if (!document.fullscreenElement) restore();
+            else paint(); // re-apply after an orientation/resize relayout
+        };
+        document.addEventListener('fullscreenchange', handler);
+        // Clicking the black area around the tile exits too.
+        wrap.addEventListener('click', function (e) {
+            if (e.target === wrap) document.exitFullscreen().catch(function () {});
         });
+        var req = wrap.requestFullscreen ? wrap.requestFullscreen() : null;
+        if (req && req.then) {
+            // Rejected (no user activation / blocked) — the fixed inset:0
+            // wrapper already covers the screen, so the overlay still works.
+            req.then(paint).catch(function () { paint(); });
+        } else {
+            paint();
+        }
     }
 
     // Restore a <video> that lives inside a .voice-fs-wrap back into the
@@ -9807,7 +10164,18 @@
             // A duplicate already exists in the current render (or the tile was
             // removed entirely) — make sure the live duplicate has its stream.
             var dup = findTileDuplicate(el);
-            if (dup) reattachTileStream(dup);
+            if (dup) {
+                if (isTileVisible(dup)) {
+                    reattachTileStream(dup);
+                } else if (dup.parentElement) {
+                    // The "live" duplicate is a tile we can't show (e.g. the
+                    // hidden mesh <video> behind a relay <img>). Put the
+                    // restored element back beside it instead of orphaning it —
+                    // this is what froze the tile after a second fullscreen.
+                    dup.parentElement.insertBefore(el, dup);
+                    reattachTileStream(el);
+                }
+            }
         }
     }
 
@@ -9843,7 +10211,18 @@
             return dmPrev && kind ? dmPrev.querySelector('.voice-self-video[data-kind="' + kind + '"]') : null;
         }
         if (!uid) return null;
-        return document.querySelector('.remote-video-tile[data-uid="' + uid + '"][data-kind="' + kind + '"]');
+        // Never return the element being restored as its own duplicate, and
+        // skip anything still sitting in a fullscreen wrapper. The old query
+        // returned the lifted element, so the live tile never got the stream
+        // back (black/frozen tile after exiting a second fullscreen).
+        var list = document.querySelectorAll('.remote-video-tile[data-uid="' + uid + '"][data-kind="' + kind + '"]');
+        for (var i = 0; i < list.length; i++) {
+            var n = list[i];
+            if (n === el) continue;
+            if (n.closest && n.closest('.voice-fs-wrap')) continue;
+            return n;
+        }
+        return null;
     }
 
     // Re-attach the stream to a tile if it changed while fullscreened (a

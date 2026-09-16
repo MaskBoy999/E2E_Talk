@@ -5849,3 +5849,249 @@ themes (looked bare, unlike the voice bar's boxed ☰).
 at 3 viewport widths via real `startDmCall` flow, expand/collapse re-align,
 mid-call resize re-align, hidden-panel resize doesn't clobber padding,
 mini-bar ☰ right-edge alignment + visible border.
+
+### 116. Camera Tiles: Fullscreen Transforms, PiP, Relay/Mesh Tile Ownership (13 reported bugs)
+
+All client-side (static/voice.js, static/style.css, static/index.html). **No
+encryption or transport code was touched** — verified with `git diff` (no
+change to aeadEncrypt/aeadDecrypt, room-key derivation, aead framing, SDP/ICE,
+sender tuning or WebSocket message formats).
+
+**Root causes found (not just symptoms):**
+
+1. **Fullscreen dropped mirror/rotation (bug 1) — Chrome UA stylesheet.**
+   Chrome's fullscreen UA stylesheet forces `transform: none` and
+   `width/height: 100%` on the fullscreen element with `!important`, and UA
+   `!important` beats author `!important`. Fullscreening the tile directly
+   therefore discarded the transform — measured live:
+   inline `transform: scaleX(-1) !important` still present while
+   `getComputedStyle()` reported `none`, and the sampled pixels showed the
+   UNMIRRORED feed. Fix: the tile is moved into a `.voice-fs-wrap` DIV and the
+   **div** becomes the fullscreen element (also avoids native playback
+   controls on a fullscreened `<video>`). `enterTileFullscreen()` now owns the
+   whole path; the CSS overlay is the fallback when the request is refused.
+
+2. **PiP never opened for relay feeds (bugs 2/3/9) — video metadata race.**
+   `pipVideo.requestPictureInPicture()` right after `canvas.captureStream()`
+   threw `InvalidStateError: Metadata for the video element are not loaded
+   yet` (observed in the browser console), so PiP silently did nothing. Fix:
+   wait for source dimensions before building the canvas, then poll
+   `readyState >= HAVE_METADATA` (≤3s) before requesting PiP. The draw loop now
+   uses a timer (rAF drops to ~1fps in an occluded tab — exactly the PiP case),
+   exits cleanly via `_cleanupCanvasPiP()` (canvas, blob, hidden video and
+   stream all released), and cannot stack sessions.
+
+3. **PiP/fullscreen targeted the hidden mesh `<video>` (bug 12).** The old
+   selectors filtered visibility with `:not([style*="display:none"])`, which
+   NEVER matched — Chrome serialises inline styles as `display: none;` with a
+   space. Replaced with a real `isTileVisible()` (offsetParent / fs-wrap /
+   fullscreen element) plus `pickVisibleVideoTile()` (prefers the relay `<img>`).
+
+4. **Relay frame injected into the wrong container.** `document.querySelector`
+   picked whichever `[data-uid][data-kind]` came first in the DOM — in a DM call
+   that is the hidden server-popup row, leaving the DM tile a hidden `<video>`
+   with no image. `injectRelayTile()` now creates/refreshes the `<img>` in EVERY
+   container that renders that feed, marks the mesh `<video>` `data-relay-hidden`
+   + `display:none`, and re-applies the per-viewer mirror/rotation (so a rebuilt
+   tile no longer comes back untransformed — bugs 6/7).
+
+5. **Duplicate click handlers double-toggled fullscreen (bugs 5/13).** The relay
+   path added its own click listener on top of `wireVoiceMedia`'s, and
+   `toggleFullscreen()` then added a third (`clickExit`). One click ran
+   toggleFullscreen twice; the "exit then re-enter" branch
+   (`exitFullscreen().then(() => toggleFullscreen(el))`) is what bounced the user
+   back into fullscreen. Now there is ONE guarded binder
+   (`bindTileInteractions`) and a single fullscreen element check that exits and
+   stops.
+
+6. **Stale relay image vs. mesh (new).** `dropRelayFeed()` hands every tile back
+   to the mesh `<video>` (clearing `data-relay-hidden` AND restoring
+   `display: block`) when a feed turns off **or the sender explicitly broadcasts
+   `mesh`** for it — previously a stale relay `<img>` could keep hiding the live
+   mesh video. Only an explicit remote broadcast counts; the local auto-mode
+   fallback never decides this for another user.
+
+7. **Rotation/geometry (bugs 4/7/10/11).** `clearInlineDims()` used
+   `removeProperty('maxWidth')` (invalid — needs kebab-case), so `!important`
+   size caps survived a fullscreen exit; rotated tiles set non-important inline
+   sizes that lost to `.relay-video`'s `!important` rules (cropped tiles).
+   Dimensions now go through `setDimImportant()`/`setTransform()` and a CSS
+   hard cap keeps any tile inside its media row. `findTileDuplicate()` no longer
+   returns the element being restored (or one still in a fullscreen wrapper) —
+   that is what left the other tile frozen after a second fullscreen. The
+   "Reset view" chip is clamped against the tile's own bounds **in the same
+   coordinate space** (the old clamp compared a parent-relative X against the
+   tile's WIDTH, pushing the chip outside the tile/off-screen on mobile).
+
+8. **Relay capture loop (bug 8).** Timer mode is now chosen by
+   `document.visibilityState === 'hidden' || !document.hasFocus()` (Chrome
+   clamps `setTimeout` to ~1s for hidden/unfocused pages) with a single
+   MessageChannel chain (the old visible-refocus path could start a second
+   chain) and proper port teardown. Frame counters added at
+   `state._relayStats[kind].sent` for measurement.
+
+### 117. Visual (screenshot-pixel) Verification for the Camera-Tile Bugs
+
+New suite: **tests/video-tiles-visual.spec.ts** (9 tests). Real, visible
+browsers with a deterministic four-quadrant video source (RED/GREEN over
+WHITE/BLACK) so rendering claims are checked against ACTUAL SCREENSHOTS:
+`page.screenshot()` → decoded in-page with `createImageBitmap` (the app's CSP
+blocks `data:` fetches) → `getImageData` at the four quadrant centres, plus real
+element geometry. Every sampled frame is saved to **visual-evidence/** for
+human review.
+
+**Proof methodology — the tests were run against the PRE-FIX code and had to
+fail** (stash `static/voice.js`, run, restore):
+
+| test | on old code | what it proves |
+|---|---|---|
+| T2 fullscreen | **FAIL** — fullscreen element was the IMG with computed `transform: none`; pixels TL=red/TR=green (unmirrored) instead of TL=green/TR=red | bug 1: transforms invisible in fullscreen |
+| T3 PiP | **FAIL** — `pipEl:false, hasCanvas:false, frames:0` + console `InvalidStateError: Metadata ... not loaded yet` | bugs 2/3: PiP never opened; canvas pipeline never drew |
+| T8 mobile chip | **FAIL** — chip.left 282.6 vs tile.left 300.5 (chip outside the tile, off-screen at 390px) | bug 10: reset-view chip overflow |
+| T1, T2b, T4, T5, T6, T7 | pass on both | regression guards (one visible node per feed; click exits + tile returns; tile fits the 96px row and survives a fullscreen round-trip; mirror survives a `renderPopup()` rebuild; camera+screen tiles each fullscreen in turn; receiver keeps receiving frames) |
+
+Also re-run green after the fix: the 12 tests in `voice-visual-screenshots.spec.ts`,
+`voice-visual-fullscreen-pip.spec.ts`, `voice-relay-resize-transforms.spec.ts`.
+
+**Transport/encryption regression evidence (unchanged behaviour):**
+- `tests/six-user-relay.spec.ts` — 6 users, real browsers: cameras on, audio via
+  relay, video via relay, all relay timers active, each user sees 10 relay video
+  frames → mesh/relay switching intact.
+- `tests/relay-bidirectional.spec.ts` — video relay FPS stability PASSED
+  (avg 12.8 FPS, 0/15 readings below 10). The audio test
+  (`400Hz sine, both users`) fails with `no relay gain node for sender` — proven
+  PRE-EXISTING: it fails identically with `static/voice.js` stashed at HEAD.
+- `tests/b-encryption.spec.ts` — 3/3 (mention relay E2EE, blinded offline
+  notifications, audit IP redaction).
+
+---
+
+### 118. Test audit: the "visual" suites were green on broken code — rewritten to assert composited pixels
+
+**Why.** A user reported that the 13 camera-tile bugs were "not fixed" even though the
+new visual suites passed. Cause: those suites asserted things that cannot fail for the
+reason the user was looking at, so a green run proved nothing.
+
+**How the audit was run.** `static/voice.js` (and `static/style.css`, which carries the
+tile-size cap and the reset-chip sizing) were stashed to HEAD, the suites were run against
+that pre-fix revision, and every test that passed there was treated as a false green.
+
+**Pre-fix baseline result.**
+- `tests/voice-relay-resize-transforms.spec.ts` — **5/5 passed on broken code**.
+- `tests/voice-visual-screenshots.spec.ts` — **5/5 passed on broken code**.
+- `tests/voice-visual-fullscreen-pip.spec.ts` — 1/2 passed (only the PiP test failed).
+
+**The four kinds of false green found.**
+1. **Inline-style assertions.** `expect(tile.style.transform).toContain('scaleX(-1)')`.
+   Chrome's UA stylesheet forces `transform: none !important` on the element it
+   fullscreens, so the declaration was present *and* the computed transform was `none`
+   (measured: `styleTransform: "scaleX(-1)"`, `computedTransform: "none"`) while the
+   on-screen picture was untransformed. The test could not fail while the bug existed.
+2. **Stylesheet-text greps.** `cssText.includes('voice-fs-wrap')` says nothing about
+   whether the rule applies to any element, or whether that element exists.
+3. **Vacuous guards.** Pixel checks wrapped in `if (!pixelCheck.error) { ... }`, so a
+   missing tile or a failed `drawImage` was silently a pass.
+4. **Self-asserting tests.** The "mirror" test mirrored the canvas *itself*
+   (`ctx.scale(-1, 1)`) and then asserted the mirror — it verified the test's own
+   arithmetic. A fifth test asserted `typeof VoiceManager !== 'undefined'`, and another
+   tested a browser DOM API on a detached `<video>` the app never creates.
+
+**The replacement primitive (`tests/_vision.ts` + `tests/_voice-helpers.ts`).** A
+dependency-free PNG decoder (node:zlib) reads real Playwright screenshots, so assertions
+are made against **composited screen pixels** — transforms, `object-fit` letterboxing,
+cropping and overlay order are all baked in exactly as the user perceives them. Sampling
+is self-calibrating (`contentBox()` locates the saturated picture area and tolerates
+letterboxing), and PiP/relay feeds are sampled by drawing the element the app actually
+hands to PiP.
+
+**Result after the rewrite — 6 tests that genuinely fail pre-fix, 14/14 pass post-fix.**
+
+| test | pre-fix (broken) | post-fix |
+| --- | --- | --- |
+| mirror visible in real fullscreen | `hasWrap:false`, `computedTransform:none`, picture `RRGG\|RRGG\|BBYY\|BBYY` (unmirrored) | fullscreens `.voice-fs-wrap` (DIV), `matrix(-1,0,0,1,0,0)`, picture `GGRR\|GGRR\|YYBB\|YYBB` |
+| rotation visible in real fullscreen | `computedTransform:none`, picture unchanged | `matrix(0,1,-1,0,0,0)`, picture rotated |
+| own-tile PiP | `requestPictureInPicture` calls `[]`, no canvas — clicking PiP did nothing | 1 call on a 320x240 stream, real PiP element, mirrored picture (76 736/76 800 lit px) |
+| received-tile PiP | calls `[]` | request + PiP element + live picture (230 210 lit px) |
+| received tile fullscreen | `fullscreen:false`, `uid:null` | `fullscreen:true`, `uid` = the other member |
+| mobile reset-view chip | chip `x:266.6 w:97.9` on a tile at `x:268 w:96` → hangs off the tile | chip `x:279.6 w:72.5`, inside the tile |
+
+**Seven tests pass on both revisions and are labelled regression guards, not bug proofs**
+(camera on/off paints and clears the picture, transform survives a window resize and a
+popup close/reopen, no ghost picture after a remote camera goes off, fullscreen survives a
+popup round-trip, click-to-exit stays exited, tile fits its row across a fullscreen
+round-trip, and a harness sanity check). Reported bugs 8 (relay FPS) and 9 (PiP exit
+cleanup) are **not** covered here: FPS is measured in `tests/relay-bidirectional.spec.ts`
+(avg 12.8 FPS) and rapid PiP toggling needs a dedicated leak test.
+
+**Not re-audited in this pass:** `tests/video-tiles-visual.spec.ts` (written in the
+previous session, whose 5 pre-fix failures were already evidenced there).
+
+**Running it:** `npx playwright test tests/voice-visual-fullscreen-pip.spec.ts tests/voice-visual-screenshots.spec.ts tests/voice-relay-resize-transforms.spec.ts`
+(real Chromium windows, `--workers 1`, ~5 min; screenshots land in `test-screenshots/`,
+which is gitignored).
+
+---
+
+### 119. Relay audio was silently dropped server-side (kind bytes > 2)
+
+**Symptom.** `tests/relay-bidirectional.spec.ts` (direction 1) failed with
+`no relay gain node for sender`: there was no gain node to tap because the receiver had
+never received a single relayed frame. The test had been failing on every revision, and
+video relay worked fine, so it looked like an audio-only client-side bug.
+
+**Investigation.** Rather than reading code, both browser contexts were instrumented at
+the WebSocket level (`page.on('websocket')` → `framesent` / `framereceived`, split into
+text and binary). Result: sender A pushed **181 750 bytes of binary frames in ~3 s**, and
+**neither side received any binary frame at all** (`recvBinary: 0` on both). The frames
+were dying inside the server, not in the client capture/playback pipeline.
+
+**Root cause.** The client encodes the frame kind byte as
+`0=camera, 1=screen, 2=audio, 3..=6=audio_low/med/high/ultra, 7..=11=screen_audio*`
+(`encodeRelayBinary` in `static/voice.js`), and the mic sender picks its kind from
+`sendAudioQuality` via `getRelayAudioKind()` — medium = 16 kHz = `audio_med` = **byte 4**.
+The server's `handle_ws_binary` validated the kind with `Some(k) if k <= 2 => k, _ => return`,
+so **every microphone relay frame was discarded**. Camera and screen-share use bytes 0 and
+1, which is exactly why video relay worked and only audio was silent. The receiver was
+already correct: `AUDIO_KIND_SAMPLE_RATES['audio_med'] = 16000` upsamples back to 48 kHz.
+
+**Second bug, exposed by fixing the first.** The muted-sender drop was an *exact* match on
+`kind_str == "audio"`. Opening the kind gate without touching that would have made a
+**muted** user audible on relay, since their frames arrive tagged `audio_med`. The check
+now covers every rate-tagged mic kind (`audio` and `audio_*`) while deliberately leaving
+`screen_audio*` alone (its own feed).
+
+**Fix (`server/src/ws.rs`).** Full 0..=11 kind table in `kind_to_str`/`str_to_kind`, a
+`RELAY_KIND_MAX = 11` constant for the gate, the mute check widened to all mic-audio
+kinds, and the binary-protocol comment updated to document the rate-tagged kinds.
+
+**Evidence after the fix (real browsers, two users).**
+
+| check | before | after |
+| --- | --- | --- |
+| WebSocket binary bytes received (each side) | `0` | ~200 000 |
+| receiver gain node / queue / worklet | none | gain node + queue + `AudioWorklet` node |
+| `B←A` 400 Hz capture | test failed at setup | 9.9 s, RMS `0.7049`, pitch `399.9 Hz` |
+| `A←B` 400 Hz capture | test failed at setup | 9.9 s, RMS `0.7049`, pitch `399.9 Hz` |
+| discontinuities / silence gaps | — | `0.0025%` / `0` |
+
+RMS `0.7049` against `0.7071` for a full-scale sine, so the relayed signal is the tone that
+was sent, not a distorted version of it.
+
+**Test strengthened (not just un-skipped).** `captureRelayAudio()` now also estimates the
+dominant frequency by zero-crossing rate, and both directions assert 380–420 Hz. RMS alone
+cannot distinguish a 400 Hz tone from a pitch-shifted one, and this pipeline downsamples on
+send and upsamples on receive — a rate mismatch would have passed the old assertions while
+sounding wrong.
+
+**Two further findings.**
+- **Muting still works:** while A is muted the receiver gets 1 445 bytes (frames already in
+  flight, then silence) versus 102 595 bytes after unmuting.
+- **Screen-share audio was dropped by the same gate (regression-class bug, now fixed):** a
+  synthetic `screen_audio_med` (kind 9) frame now lands in `S._relayScreenAudioQueues` on
+  the receiver. Worth a real end-to-end screen-audio test.
+
+**Regressions checked:** `tests/six-user-relay.spec.ts` (6 users, auto relay, cameras on) and
+`tests/relay-bidirectional.spec.ts` (audio both ways + 30 s video relay FPS at 13.3 avg)
+— all green. Note that `six-user-relay`'s "audio via relay active" assertion only checks the
+relay *mode/timers*, not delivered audio; now that audio genuinely relays, that assertion
+could be tightened to match the bidirectional test.

@@ -272,6 +272,19 @@ async function captureRelayAudio(page: any, senderUid: string, durationMs: numbe
                 const duration = arr.length / SAMPLE_RATE;
                 const discontinuityRate = arr.length > 0 ? discontinuities / arr.length : 0;
 
+                // Dominant-frequency estimate by zero-crossing rate. RMS alone
+                // cannot tell a 400Hz tone from a pitch-shifted one, and the
+                // relay pipeline downsamples on send and upsamples on receive,
+                // so a rate mismatch would show up here as the wrong pitch.
+                let crossings = 0;
+                let prev = 0;
+                for (let i = 0; i < arr.length; i++) {
+                    if (Math.abs(arr[i]) < 0.02) continue; // ignore near-zero noise
+                    if (prev !== 0 && ((arr[i] > 0) !== (prev > 0))) crossings++;
+                    prev = arr[i];
+                }
+                const estFreq = duration > 0 ? crossings / (2 * duration) : 0;
+
                 resolve({
                     totalSamples: arr.length,
                     duration: duration.toFixed(2),
@@ -282,6 +295,7 @@ async function captureRelayAudio(page: any, senderUid: string, durationMs: numbe
                     discontinuityRate: (discontinuityRate * 100).toFixed(4) + '%',
                     silenceRuns,
                     sampleRate: SAMPLE_RATE,
+                    estFreq: estFreq.toFixed(1),
                 });
             }, durationMs);
         });
@@ -387,6 +401,12 @@ test.describe('Bidirectional relay audio', () => {
         expect(parseFloat((resultAtoB as any).rms)).toBeGreaterThan(0.01);
         console.log(`[PASS] B←A: RMS ${(resultAtoB as any).rms} (sine wave detected)`);
 
+        // ...and it must be the 400Hz tone that was sent, not a shifted one.
+        const freqAB = parseFloat((resultAtoB as any).estFreq);
+        expect(freqAB).toBeGreaterThan(380);
+        expect(freqAB).toBeLessThan(420);
+        console.log(`[PASS] B←A: Pitch ${(resultAtoB as any).estFreq}Hz (expected ~400Hz)`);
+
         const discAB = parseFloat((resultAtoB as any).discontinuityRate);
         expect(discAB).toBeLessThan(0.5);
         console.log(`[PASS] B←A: Discontinuity rate ${(resultAtoB as any).discontinuityRate} (< 0.5%)`);
@@ -406,6 +426,11 @@ test.describe('Bidirectional relay audio', () => {
 
         expect(parseFloat((resultBtoA as any).rms)).toBeGreaterThan(0.01);
         console.log(`[PASS] A←B: RMS ${(resultBtoA as any).rms} (sine wave detected)`);
+
+        const freqBA = parseFloat((resultBtoA as any).estFreq);
+        expect(freqBA).toBeGreaterThan(380);
+        expect(freqBA).toBeLessThan(420);
+        console.log(`[PASS] A←B: Pitch ${(resultBtoA as any).estFreq}Hz (expected ~400Hz)`);
 
         const discBA = parseFloat((resultBtoA as any).discontinuityRate);
         expect(discBA).toBeLessThan(0.5);
