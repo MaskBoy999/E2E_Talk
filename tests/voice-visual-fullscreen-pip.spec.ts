@@ -176,7 +176,11 @@ test.describe('User-visible: fullscreen + PiP + transforms', () => {
             };
         });
 
+        // The PiP button opens a picker of every live feed — choose the feed
+        // to pop out (this test only has the self camera).
         await page.click('#voice-popup-pip');
+        await page.waitForSelector('#voice-pip-menu button', { timeout: 5000 });
+        await page.click('#voice-pip-menu button');
         await page.waitForTimeout(3000);
 
         const result = await page.evaluate(() => {

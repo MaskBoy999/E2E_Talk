@@ -6095,3 +6095,182 @@ sounding wrong.
 — all green. Note that `six-user-relay`'s "audio via relay active" assertion only checks the
 relay *mode/timers*, not delivered audio; now that audio genuinely relays, that assertion
 could be tightened to match the bidirectional test.
+
+## Mesh-by-default + relay performance + PiP picker (this session)
+
+### 1. Mesh is now the default for everything; relay is strictly opt-in
+
+- Removed the automatic relay switch. `autoAudioMode()`/`autoVideoMode()` and the
+  `MESH_THRESHOLD = 5` active-participant threshold are gone: **nothing turns relay
+  on for you, no matter how many people are in the channel.** `resolve{Audio,Video,
+  Camera,Screen}Mode()` fall back to `'mesh'` when there is no explicit override.
+- The mode control is now a **2-state mesh ⇄ relay toggle** per kind (audio / camera /
+  screen) in the camera-options (⋯) menu and the clickable mode badges. The old
+  `auto` state — and its `recalcAudioMode()` debounced auto-switcher — were deleted
+  (`recalcAudioMode` no longer exists; every call site was removed).
+- `setSelfVideoMode()` now sets the camera **and** screen overrides together (the
+  global video mode), so the legacy `setVideoMeshMode(on)` helper still works: it
+  mirrors `settings.videoMeshMode` and delegates to `setSelfVideoMode(on ? 'mesh' :
+  'relay')`. The redundant "Video Transmission" checkbox was removed from Settings;
+  the group now explains the mesh default and points at the ⋯ menu.
+- `sendVoiceState()` broadcasts `mesh` (not `auto`) as the default mode, and
+  `addLocalTracks()` no longer adds the mic or screen-audio tracks to peers while the
+  audio relay is active (a peer created *after* the switch used to receive the relay
+  copy **and** a live mesh track).
+
+### 2. Relay video no longer collapses to 1 fps when camera + screen are both on
+
+Root causes found and fixed:
+
+- **CPU busy-spin.** `needsUnthrottledLoop()` returned true when the window merely
+  lost *focus* (`!document.hasFocus()`), not just when the tab was hidden. Opening the
+  screen-share picker steals focus, so **both** relay loops jumped into a MessageChannel
+  ping-pong that re-posted itself with no delay — a busy loop that pegged a core per
+  stream, starving the second stream and the audio-relay poll ("camera + screen both drop
+  to 1 fps and no audio is sent"). Now only a genuinely **hidden** tab takes the
+  background path, and that path uses a dedicated worker clock
+  (`static/relay-tick-worker.js`) instead of spinning the main thread.
+- **Audio-relay poll spin (same class of bug).** The mic/screen audio relay also used a
+  MessageChannel ping-pong for its background-tab 10 ms poll — a CPU-burning loop that also
+  never stood down for screen audio when the tab became visible again. Both now use the
+  worker clock.
+- **Main-thread JPEG encode.** Each stream now encodes **off the main thread**
+  (`static/relay-encode-worker.js`): the loop draws onto its double-buffered canvas,
+  hands an `ImageBitmap` to the stream's own worker, and the worker draws it on an
+  `OffscreenCanvas` + `convertToBlob({ type: 'image/jpeg' })`. The worker result is then
+  encrypted and relayed on the main thread. Falls back to the old `canvas.toBlob()` path
+  when `Worker`/`OffscreenCanvas`/`createImageBitmap` are unavailable.
+- The relay source `<video>` is now kept **in the document** (hidden, like the PiP temp
+  video) instead of detached — Chrome is inconsistent about decoding frames for a
+  detached media element, which made `drawImage()` redraw a stale frame.
+
+### 3. Relay audio is never starved by video backpressure
+
+- The video relay now drops frames at `RELAY_VIDEO_MAX_BUFFERED = 256 KB` of WebSocket
+  backlog, while the mic/screen **audio** relay only stops at
+  `RELAY_AUDIO_MAX_BUFFERED = 4 MB`. Previously all four audio paths bailed at 256 KB, so
+  two video streams alone could silence the mic relay (the "I don't send any more audio"
+  report).
+
+### 4. Picture-in-Picture picker (switch between members)
+
+- The PiP button no longer guesses a tile (`pickVisibleVideoTile()` is gone). It opens
+  `#voice-pip-menu`, a list of **every live camera/screen feed** (member name + feed
+  kind, de-duplicated per `uid:kind` and preferring the visible tile). Choosing an entry
+  pops that feed out; pressing the button again while PiP is open closes it. Selecting a
+  different entry switches the popped-out feed. Closes on outside click and on leaving
+  the call.
+
+### 5. Tests updated for the new contract
+
+- `voice-mode-toggles`: the cam-opt cycle now asserts mesh ↔ relay (mesh first), and the
+  "independent control" tests force relay per kind (relay is opt-in) before asserting
+  that switching one kind leaves the others alone.
+- `voice-mesh-relay`: the 4 threshold tests were rewritten — 6 members (and 6th-join /
+  deafen / mute churn) must now **stay on mesh**, and manual relay still switches.
+- `six-user-relay`: asserts no auto-relay at 6 members and forces video relay before the
+  cameras come on.
+- The three PiP tests (`voice-visual-fullscreen-pip`, `voice-relay-resize-transforms`,
+  `video-tiles-visual`) now click the picker entry instead of expecting PiP immediately.
+- `sw.js` cache name bumped `e2e-chat-v2` → `e2e-chat-v3` (assets are cache-first, so an
+  unchanged name would keep serving the old `voice.js`) and the two new workers are
+  precached.
+
+### Verified
+
+- `node --check` clean on `voice.js` and both new workers; CSS braces balanced;
+  `index.html` div tags balanced.
+- Test runs against a server started with the playwright `webServer` env (the default
+  register limit of 5 accounts / 10 min / IP blocks the suite otherwise):
+  - `voice-mode-toggles.spec.ts` — **9/9 passing** (mesh default, 2-state cycle, the
+    per-kind independent-control tests).
+  - `voice-visual-fullscreen-pip.spec.ts` — **4/4** (the PiP picker opens the menu and
+    the chosen feed is what gets popped out, mirror included).
+  - `relay-bidirectional.spec.ts` — **2/2**: 400 Hz relay audio detected both ways
+    (RMS 0.70, pitch 399.8–399.9 Hz, 0 silence gaps) and relay video held a steady
+    **14 fps over 30 s** (0/15 readings below 10) through the new worker encoder.
+  - `voice-camera-screen.spec.ts` + `voice-screenshare-audio.spec.ts` — **11/11**
+    (camera + screen side by side, screen-off keeps camera, screen `screen_audio`
+    kind sends/receives, deafened member stops receiving frames).
+  - `voice-relay-resize-transforms.spec.ts` — **5/5**.
+  - `resolution-fps.spec.ts --grep "relay FPS setting is applied"` — passing
+    (10 fps target measured at 9).
+  - `voice-mesh-relay.spec.ts` — **5/5** after rewriting the threshold tests.
+  - `six-user-relay.spec.ts` — passing (6 users, mesh audio, camera relay forced,
+    10 relay tiles each).
+  - `voice.spec.ts` + `voice-turn.spec.ts` — **6/6**.
+- One pre-existing failure found while regression-checking:
+  `voice-camera-options.spec.ts › camera flip/mirror/flash in a DM call` fails at the
+  self-screen `rotate(90deg)` assertion (line 314) — verified to fail **identically on
+  the pre-change baseline** via `git stash`, so it is not a regression from this work.
+
+## Session: audio-on-join race + mobile camera stretch (two user-reported bugs)
+
+### Bug 1 — "entering a voice channel sometimes lets no one hear the other (mesh and
+relay); all members must rejoin to fix it"
+
+Root cause: **peers could be opened without the room key.** With no `S.roomKeyB64`
+there is no E2EE transform on senders OR receivers, so media is undecryptable in
+both directions — the call is dead until a manual rejoin (by which time the key is
+cached, which is why rejoining "fixed" it). The key is missing when the server key
+hasn't been fetched/decrypted yet (fresh join, cold boot) or, for DMs, when the
+partner's identity key hasn't landed.
+
+Fixes (fail-closed: never open an unencrypted edge):
+- `schedulePeerCreation(uid, delay)` — peers whose key isn't ready are parked in
+  `S._pendingPeerUids` instead of being created keyless; `ensureRoomKey()` fetches
+  the server key (`fetchAndDecryptServerKey`) and re-derives.
+- `handleSignal` HOLDS incoming SDP/ICE (per-uid FIFO in `S._pendingSignals`, capped
+  at 64) until the key exists, instead of answering an offer with a keyless peer;
+  `flushPendingSignals()` replays in arrival order. A 250 ms watch retries
+  derivation (DM keys can land via the conversation prefetch) and, after ~6 s
+  without a key, gives up and opens the edge anyway — `deriveRoomKey()`'s heal
+  then repairs transforms the moment the key arrives.
+- `deriveRoomKey()` now also runs `healE2eeInPlace()` + `flushPendingRecvTransforms()`
+  on success, so ANY peer that somehow opened before the key (or lost its transform)
+  heals immediately instead of staying silent forever; the 4 s video watchdog also
+  calls `healE2eeInPlace()` as a safety net.
+- `recreateAllPeers()` refuses to rebuild while the key is missing (rebuilds via the
+  pending queue when it lands); teardown clears both pending queues + the watch.
+- Cache bust: `voice.js?v=13`, SW cache `e2e-chat-v4`.
+
+### Bug 2 — "mobile camera feed is stretched; width is kept the same while height is
+the only one being resized; same in fullscreen and PiP; rotating 90° makes it look
+right but it's still stretched"
+
+Two independent stretch sources, both fixed:
+- **Relay encoder forced 16:9.** `startVideoRelay` built its capture canvas at
+  `resW(maxH)×maxH` before the video had metadata and drew `drawImage(video,0,0,w,h)`
+  — a portrait phone camera (e.g. 720×1280) was painted sideways-stretched into a
+  landscape canvas, and every consumer (tile `<img>`, fullscreen, PiP) showed the
+  pre-stretched frame. Now the canvas is created inside `startLoop` (after metadata)
+  sized from the SOURCE ratio, capped at `maxH` on the height (16:9 sources keep
+  their exact old dimensions). `relay-encode-worker.js` needed no change (it uses
+  the bitmap's own size).
+- **Fullscreen transform math was not a contain-fit.** It scaled the largest visual
+  dimension to the largest screen dimension (only one axis pair compared — a
+  portrait feed kept its width while the height overflowed) and wrote the layout box
+  UN-transposed, so after `rotate(90deg)` a 4:3 feed painted as 16:9. Now: true
+  contain-fit `s = min(fw/evw, fh/evh)` and the layout box = the visual box
+  TRANSPOSED when sideways, so the feed's own aspect is preserved and the rotated
+  visual always fits both screen axes.
+- Defensive: `.voice-self-video` (self preview strip) had no `object-fit` (default
+  `fill` = stretch whenever the box is forced off-ratio); now `contain`. All other
+  tile rules already had it. Cache bust: `style.css?v=14`.
+
+Tests: `voice-send-gating.spec.ts › rotating the camera swaps the tile dimensions`
+was asserting the OLD transposed-to-screen math (720×1280 layout for a 4:3 feed =
+the reported stretch); rewritten to assert contain-fit with the source ratio
+preserved (`width/height` derived from `videoWidth/videoHeight` + screen, ratio
+within 2%, rotated visual fits the screen and touches its limiting axis), and the
+pre-wait now requires decoded metadata (`videoWidth > 0`) so the math is exercised
+against real dimensions.
+
+### Verified (this session)
+
+- `node --check` clean on voice.js/sw.js; CSS brace balance unchanged.
+- `voice-send-gating.spec.ts` **4/4**, `voice-mode-toggles.spec.ts` **9/9**,
+  `voice-mesh-relay.spec.ts` **5/5**, `voice-relay-resize-transforms.spec.ts` +
+  `voice-visual-fullscreen-pip.spec.ts` + `video-tiles-visual.spec.ts` — 11 passed
+  (the fullscreen/rotation/PiP suites are pixel-based and confirm mirror/rotation
+  still render correctly with the new math).

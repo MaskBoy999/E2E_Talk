@@ -351,7 +351,7 @@ test.describe('Mode toggles: audio/camera/screen in 3-dots menu', () => {
         await ctx2.close();
     });
 
-    test('cam-opt screen mode button cycles auto/mesh/relay', async ({ page, context }) => {
+    test('cam-opt screen mode button cycles mesh/relay', async ({ page, context }) => {
         test.setTimeout(120000);
         const ts = Date.now();
         const user1 = 'mt5_' + ts;
@@ -373,17 +373,21 @@ test.describe('Mode toggles: audio/camera/screen in 3-dots menu', () => {
         await page.click('#voice-bar-cam-opt');
         await page.waitForSelector('#voice-cam-opt-menu', { state: 'visible', timeout: 3000 });
 
+        // Mesh is the default, so the first click switches to relay...
+        const initial = await page.textContent('#cam-opt-screen-mode-label');
+        expect(initial).toContain('P2P mesh');
         await page.click('#cam-opt-screen-mode');
         await page.waitForTimeout(300);
         const afterClick = await page.textContent('#cam-opt-screen-mode-label');
-        expect(afterClick).toContain('P2P mesh');
+        expect(afterClick).toContain('Server relay');
 
+        // ...and the second click switches back to mesh (no auto state).
         await page.click('#voice-bar-cam-opt');
         await page.waitForSelector('#voice-cam-opt-menu', { state: 'visible', timeout: 3000 });
         await page.click('#cam-opt-screen-mode');
         await page.waitForTimeout(300);
         const afterClick2 = await page.textContent('#cam-opt-screen-mode-label');
-        expect(afterClick2).toContain('Server relay');
+        expect(afterClick2).toContain('P2P mesh');
 
         await ctx2.close();
     });
@@ -459,11 +463,14 @@ test.describe('Mode toggles: independent control per media type', () => {
         const { ctx2, page2 } = await setupTwoUserVoice(page, context);
 
         await page.evaluate(() => (window as any).VoiceManager.startCamera());
+        // Camera relay is opt-in now (mesh is the default) — turn it on so we
+        // can prove an AUDIO-only switch leaves it alone.
+        await page.evaluate(() => (window as any).VoiceManager.setSelfCameraMode('relay'));
         await page.waitForTimeout(2000);
 
         const before = await getModes(page);
         expect(before.audioMode).toBe('auto');
-        expect(before.cameraMode).toBe('auto');
+        expect(before.cameraMode).toBe('relay');
         expect(before.cameraRelayActive).toBeTruthy();
 
         await page.evaluate(() => (window as any).VoiceManager.setSelfAudioMode('relay'));
@@ -471,15 +478,15 @@ test.describe('Mode toggles: independent control per media type', () => {
 
         const after = await getModes(page);
         expect(after.audioMode).toBe('relay');
-        expect(after.cameraMode).toBe('auto');
+        expect(after.cameraMode).toBe('relay');
         expect(after.cameraRelayActive).toBeTruthy();
 
-        await page.evaluate(() => (window as any).VoiceManager.setSelfAudioMode('auto'));
+        await page.evaluate(() => (window as any).VoiceManager.setSelfAudioMode('mesh'));
         await page.waitForTimeout(500);
 
         const restored = await getModes(page);
-        expect(restored.audioMode).toBe('auto');
-        expect(restored.cameraMode).toBe('auto');
+        expect(restored.audioMode).toBe('mesh');
+        expect(restored.cameraMode).toBe('relay');
         expect(restored.cameraRelayActive).toBeTruthy();
 
         await ctx2.close();
@@ -490,6 +497,7 @@ test.describe('Mode toggles: independent control per media type', () => {
         const { ctx2, page2 } = await setupTwoUserVoice(page, context);
 
         await page.evaluate(() => (window as any).VoiceManager.startCamera());
+        await page.evaluate(() => (window as any).VoiceManager.setSelfCameraMode('relay'));
         await page.waitForTimeout(2000);
 
         const before = await getModes(page);
@@ -514,6 +522,8 @@ test.describe('Mode toggles: independent control per media type', () => {
 
         await page.evaluate(() => (window as any).VoiceManager.startCamera());
         await page.evaluate(() => (window as any).VoiceManager.toggleScreen());
+        await page.evaluate(() => (window as any).VoiceManager.setSelfCameraMode('relay'));
+        await page.evaluate(() => (window as any).VoiceManager.setSelfScreenMode('relay'));
         await page.waitForTimeout(2000);
 
         const before = await getModes(page);
@@ -539,6 +549,7 @@ test.describe('Mode toggles: independent control per media type', () => {
 
         await page.evaluate(() => (window as any).VoiceManager.startCamera());
         await page.evaluate(() => (window as any).VoiceManager.toggleScreen());
+        await page.evaluate(() => (window as any).VoiceManager.setSelfCameraMode('relay'));
         await page.waitForTimeout(2000);
 
         await page.evaluate(() => (window as any).VoiceManager.setSelfScreenMode('mesh'));

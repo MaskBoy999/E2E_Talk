@@ -327,11 +327,12 @@ test.describe('per-receiver send gating + rotated-tile sizing', () => {
         await startDmCall(page, page2, dm, userData.id, user2);
         const aUid = body1.user.id;
 
-        // A's camera renders in B's DM tile with real layout.
+        // A's camera renders in B's DM tile with real layout (and decoded
+        // metadata, so the fullscreen math below reads the true source ratio).
         await page.evaluate(() => (window as any).VoiceManager.toggleCamera());
         await page2.waitForFunction((uid) => {
-            const v = document.querySelector('.dm-call-tile video[data-kind="camera"][data-uid="' + uid + '"]');
-            return v && v.offsetWidth > 0;
+            const v = document.querySelector('.dm-call-tile video[data-kind="camera"][data-uid="' + uid + '"]') as HTMLVideoElement | null;
+            return !!v && v.offsetWidth > 0 && v.videoWidth > 0 && v.videoHeight > 0;
         }, aUid, { timeout: 20000 });
 
         // Rotate 90° → the tile must swap its layout dims (inline px) so the
@@ -386,6 +387,8 @@ test.describe('per-receiver send gating + rotated-tile sizing', () => {
                 transform: st.transform,
                 fw: wrap.clientWidth,
                 fh: wrap.clientHeight,
+                vw: v.videoWidth,
+                vh: v.videoHeight,
             };
             // Put it back into the DM tile and restore tile-mode dims.
             const media = document.querySelector('.dm-call-tile-media') as HTMLElement;
@@ -396,10 +399,32 @@ test.describe('per-receiver send gating + rotated-tile sizing', () => {
         }, aUid);
         expect(fsInfo).toBeTruthy();
         expect(fsInfo!.fw).toBeGreaterThan(0);
-        // Swapped to the wrap's transposed dims, applied with !important so the
-        // fs-wrap stylesheet rules can't override them.
-        expect(fsInfo!.width).toBe(Math.round(fsInfo!.fh) + 'px');
-        expect(fsInfo!.height).toBe(Math.round(fsInfo!.fw) + 'px');
+        expect(fsInfo!.vw).toBeGreaterThan(0);
+        // Contain-fit with the SOURCE ratio preserved. A 90°-rotated element
+        // paints its layout box transposed, so the LAYOUT keeps the feed's own
+        // aspect (here 4:3) while the rotated VISUAL box fits both screen
+        // axes. The previous expectation (layout = the screen's transposed
+        // dims, e.g. 720×1280 for a 4:3 feed) asserted the stretched
+        // rendering this fix removes — width was forced to one screen axis
+        // while height followed the other, ignoring the camera's proportions.
+        const evw = fsInfo!.vh;   // visual width after 90° rotation
+        const evh = fsInfo!.vw;   // visual height after 90° rotation
+        const s = Math.min(fsInfo!.fw / evw, fsInfo!.fh / evh);
+        const expLayW = Math.round(evh * s);   // layout = visual transposed
+        const expLayH = Math.round(evw * s);
+        expect(fsInfo!.width).toBe(expLayW + 'px');
+        expect(fsInfo!.height).toBe(expLayH + 'px');
+        // Ratio preserved (the actual bug: it wasn't).
+        const layRatio = expLayW / expLayH;
+        const srcRatio = fsInfo!.vw / fsInfo!.vh;
+        expect(Math.abs(layRatio - srcRatio)).toBeLessThan(0.02);
+        // Rotated visual (the layout transposed) fits inside the screen…
+        expect(expLayH).toBeLessThanOrEqual(fsInfo!.fw + 1);
+        expect(expLayW).toBeLessThanOrEqual(fsInfo!.fh + 1);
+        // …and contain touches the limiting axis: the VISUAL box (the layout
+        // transposed) reaches the shorter screen dimension.
+        const visW = expLayH, visH = expLayW;
+        expect(Math.max(visW, visH) + 2).toBeGreaterThanOrEqual(Math.min(fsInfo!.fw, fsInfo!.fh));
         expect(fsInfo!.wImportant).toBe('important');
         expect(fsInfo!.hImportant).toBe('important');
         expect(fsInfo!.transform).toContain('rotate(90deg)');

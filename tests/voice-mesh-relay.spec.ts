@@ -315,7 +315,7 @@ async function setupMemberPage(browser: any, inviteCode: string, username: strin
 
 test.describe('Voice mesh/relay dynamic switching', () => {
 
-    test('video defaults to server relay in server voice channels', async ({ page, context }) => {
+    test('video defaults to P2P mesh in server voice channels', async ({ page, context }) => {
         test.setTimeout(120000);
         const ts = Date.now();
         const owner = await registerUser(page, 'vrelay_own_' + ts);
@@ -328,35 +328,38 @@ test.describe('Voice mesh/relay dynamic switching', () => {
         await page.waitForTimeout(2000);
         expect(await isInVoiceChannel(page)).toBeTruthy();
 
-        // Video relay should be active (server room, default meshMode=false)
+        // Mesh is the default for every kind — nothing auto-enables relay.
         let st = await getVoiceState(page);
         expect(st).toBeTruthy();
         expect(st!.roomType).toBe('server');
-        expect(st!.videoMeshMode).toBeFalsy();
 
-        // Start camera — should use relay mode
+        // Start camera — must stay on the P2P mesh (no relay loop).
         await startCamera(page);
         await page.waitForTimeout(2000);
 
         st = await getVoiceState(page);
         expect(st!.cameraOn).toBeTruthy();
 
-        // Verify relay timers are running
-        const relayTimers = await page.evaluate(() => {
-            const V = (window as any).VoiceManager;
-            const S = V._debug.state;
-            return {
-                camera: !!(S._relayTimers && S._relayTimers.camera),
-            };
+        let relayTimers = await page.evaluate(() => {
+            const S = (window as any).VoiceManager._debug.state;
+            return { camera: !!(S._relayTimers && S._relayTimers.camera) };
         });
-        // In relay mode, camera relay timer should be active
-        expect(st!.roomType).toBe('server');
+        expect(relayTimers.camera).toBeFalsy();
+
+        // Opting in per-kind starts the relay loop.
+        await page.evaluate(() => (window as any).VoiceManager.setSelfCameraMode('relay'));
+        await page.waitForTimeout(1500);
+        relayTimers = await page.evaluate(() => {
+            const S = (window as any).VoiceManager._debug.state;
+            return { camera: !!(S._relayTimers && S._relayTimers.camera) };
+        });
+        expect(relayTimers.camera).toBeTruthy();
 
         await stopCamera(page);
         await leaveVoice(page);
     });
 
-    test('6 members: audio switches from mesh to relay', async ({ page, context }) => {
+    test('6 members: audio stays on mesh (no auto relay)', async ({ page, context }) => {
         test.setTimeout(300000);
         const ts = Date.now();
         const browser = context.browser()!;
@@ -399,37 +402,36 @@ test.describe('Voice mesh/relay dynamic switching', () => {
         const activeCount = await waitForActiveCount(page, 6, 15000);
         expect(activeCount).toBeGreaterThanOrEqual(6);
 
-        const mode = await waitForMode(page, 'relay', 15000);
-        expect(mode).toBe('relay');
-
         const st = await getVoiceState(page);
         expect(st).toBeTruthy();
         expect(st!.memberCount).toBeGreaterThanOrEqual(6);
 
-        // User 5 deafens → 5 active → mesh
+        // No auto-relay: the mode stays on mesh at 6 members...
+        await page.waitForTimeout(4000);
+        let mode = await getRelayMode(page);
+        expect(mode).toBe('mesh');
+
+        // ...and deafening / leaving never switches it either.
         await toggleDeafen(pages[5]);
-        const mode2 = await waitForMode(page, 'mesh', 10000);
-        expect(mode2).toBe('mesh');
-
-        // User 5 undeafens → 6 active → relay
+        await page.waitForTimeout(1500);
+        mode = await getRelayMode(page);
+        expect(mode).toBe('mesh');
         await toggleDeafen(pages[5]);
-        const mode3 = await waitForMode(page, 'relay', 10000);
-        expect(mode3).toBe('relay');
-
-        // User 3 deafens → 5 active → mesh
-        await toggleDeafen(pages[3]);
-        const mode4 = await waitForMode(page, 'mesh', 10000);
-        expect(mode4).toBe('mesh');
-
-        // User 3 undeafens → 6 active → relay
-        await toggleDeafen(pages[3]);
-        const mode5 = await waitForMode(page, 'relay', 10000);
-        expect(mode5).toBe('relay');
-
-        // User 2 leaves → 5 active → mesh
+        await page.waitForTimeout(1500);
+        mode = await getRelayMode(page);
+        expect(mode).toBe('mesh');
         await leaveVoice(pages[2]);
-        const mode6 = await waitForMode(page, 'mesh', 15000);
-        expect(mode6).toBe('mesh');
+        await page.waitForTimeout(1500);
+        mode = await getRelayMode(page);
+        expect(mode).toBe('mesh');
+
+        // Manual relay opt-in still works, and can be switched back.
+        await page.evaluate(() => (window as any).VoiceManager.setSelfAudioMode('relay'));
+        mode = await waitForMode(page, 'relay', 10000);
+        expect(mode).toBe('relay');
+        await page.evaluate(() => (window as any).VoiceManager.setSelfAudioMode('mesh'));
+        mode = await waitForMode(page, 'mesh', 10000);
+        expect(mode).toBe('mesh');
 
         // Clean up: all leave
         for (let i = pages.length - 1; i >= 0; i--) {
@@ -481,7 +483,7 @@ test.describe('Voice mesh/relay dynamic switching', () => {
         await leaveVoice(page);
     });
 
-    test('muted users still count as active for mode calculation', async ({ page, context }) => {
+    test('muting or deafening never auto-switches the audio mode', async ({ page, context }) => {
         test.setTimeout(300000);
         const ts = Date.now();
         const browser = context.browser()!;
@@ -510,30 +512,27 @@ test.describe('Voice mesh/relay dynamic switching', () => {
         }
         await page.waitForTimeout(3000);
 
-        // 6 active → relay (poll until stable)
+        // 6 participants, but relay is opt-in only — the mode stays on mesh.
         await waitForActiveCount(page, 6, 15000);
-        let mode = await waitForMode(page, 'relay', 15000);
-        expect(mode).toBe('relay');
-
-        // Mute user 1 (still counts as active — can hear)
-        await toggleMute(pages[1]);
-        await page.waitForTimeout(1500);
-
-        // Still 6 active (muted users count), should stay relay
-        const activeCount = await getActiveParticipantCount(page);
-        expect(activeCount).toBeGreaterThanOrEqual(6);
-        mode = await getRelayMode(page);
-        expect(mode).toBe('relay');
-
-        // Now deafen user 1 → drops to 5 → mesh
-        await toggleDeafen(pages[1]);
-        mode = await waitForMode(page, 'mesh', 10000);
+        await page.waitForTimeout(4000);
+        let mode = await getRelayMode(page);
         expect(mode).toBe('mesh');
 
-        // Undeafen user 1 → back to 6 → relay
+        // Muting and deafening other members must not switch the mode either.
+        await toggleMute(pages[1]);
+        await page.waitForTimeout(1500);
+        mode = await getRelayMode(page);
+        expect(mode).toBe('mesh');
+
         await toggleDeafen(pages[1]);
-        mode = await waitForMode(page, 'relay', 10000);
-        expect(mode).toBe('relay');
+        await page.waitForTimeout(1500);
+        mode = await getRelayMode(page);
+        expect(mode).toBe('mesh');
+
+        await toggleDeafen(pages[1]);
+        await page.waitForTimeout(1500);
+        mode = await getRelayMode(page);
+        expect(mode).toBe('mesh');
 
         // Clean up
         for (let i = pages.length - 1; i >= 0; i--) {
@@ -541,7 +540,7 @@ test.describe('Voice mesh/relay dynamic switching', () => {
         }
     });
 
-    test('threshold boundary: exactly 5 = mesh, 6th join = relay', async ({ page, context }) => {
+    test('joining a 6th member does not auto-enable relay', async ({ page, context }) => {
         test.setTimeout(300000);
         const ts = Date.now();
         const browser = context.browser()!;
@@ -569,29 +568,23 @@ test.describe('Voice mesh/relay dynamic switching', () => {
         }
         await page.waitForTimeout(3000);
 
-        // 5 active → mesh (poll until stable)
+        // 5 participants → mesh, as always.
         await waitForActiveCount(page, 5, 15000);
-        let activeCount = await getActiveParticipantCount(page);
+        const activeCount = await getActiveParticipantCount(page);
         expect(activeCount).toBe(5);
         let mode = await waitForMode(page, 'mesh', 15000);
         expect(mode).toBe('mesh');
 
-        // 6th user joins → relay
+        // A 6th user joining must NOT flip the room onto the relay.
         const m6 = await setupMemberPage(browser, inviteCode, `bound_m5_${ts}`, ts);
         await selectServer(m6.page);
         await clickVoiceChannel(m6.page, voiceChannelId);
         await m6.page.waitForTimeout(2000);
         pages.push(m6.page);
 
-        // Poll until relay mode
-        activeCount = await waitForActiveCount(page, 6, 15000);
-        expect(activeCount).toBeGreaterThanOrEqual(6);
-        mode = await waitForMode(page, 'relay', 15000);
-        expect(mode).toBe('relay');
-
-        // 6th user leaves → back to mesh
-        await leaveVoice(m6.page);
-        mode = await waitForMode(page, 'mesh', 15000);
+        await waitForActiveCount(page, 6, 15000);
+        await page.waitForTimeout(4000);
+        mode = await getRelayMode(page);
         expect(mode).toBe('mesh');
 
         // Clean up

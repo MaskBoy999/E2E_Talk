@@ -36,6 +36,8 @@
         roomKeyB64: null,
         sigKeyB64: null,        // signaling subkey (SDP/ICE E2EE) derived from the room key
         _pendingRecvTransforms: [],  // receivers awaiting a decrypt transform until the room key arrives
+        _pendingPeerUids: {},        // members whose peer could not open yet (room key missing)
+        _pendingSignals: {},         // uid -> signaling held until the room key is derivable
         iceServers: [
             { urls: 'stun:stun.l.google.com:19302' },
             { urls: 'stun:stun1.l.google.com:19302' },
@@ -126,9 +128,9 @@
             // feed shows a "Load" button (per user AND per kind) and is
             // attached only when clicked. Right-click menus are unaffected.
             manualVideoLoad: false,
-            // When ON, camera/screen use WebRTC P2P mesh instead of server
-            // relay in server voice channels. Lower latency (~50ms) but each
-            // peer needs a separate copy. DM calls always use mesh.
+            // Legacy mirror of the per-kind video mesh/relay choice (kept for
+            // API compatibility). Mesh is the default now, so this is only
+            // meaningful when the legacy setVideoMeshMode() toggle is used.
             videoMeshMode: false,
             // Black-feed auto-recovery: seconds of zero encoded frames before
             // the per-sender watchdog forces a renegotiation (a dropped
@@ -158,10 +160,8 @@
         sigRecvEncrypted: 0,
         sigRecvPlain: 0,
         _lastSigWarnKey: null,
-        // Per-user manual mesh/relay overrides. uid → 'auto' | 'mesh' | 'relay'.
-        // When set to 'mesh' or 'relay', that choice persists regardless of the
-        // automatic threshold-based switching. 'auto' (or absent) means the
-        // system decides based on active participant count.
+        // Per-user mesh/relay overrides. uid → 'mesh' | 'relay' (absent = 'mesh',
+        // the default). Relay is opt-in and never auto-selected.
         _audioModeOverrides: {},
         _videoModeOverrides: {},
         _cameraModeOverrides: {},
@@ -681,12 +681,6 @@
         if (jq) jq.value = S.settings.relayVideoQuality || 0.6;
         var ml = document.getElementById('voice-manual-video-load');
         if (ml) ml.checked = !!S.settings.manualVideoLoad;
-        var vm = document.getElementById('voice-video-mesh-mode');
-        if (vm) {
-            var _selfId = getSelfId();
-            var _effectiveMode = _selfId ? resolveVideoMode(_selfId) : autoVideoMode();
-            vm.checked = _effectiveMode === 'mesh';
-        }
         var wd = document.getElementById('voice-video-watchdog-secs');
         if (wd) wd.value = String(S.settings.videoWatchdogSecs || 0);
         updateSettingsLabels();
@@ -772,6 +766,16 @@
             // Any remote tracks that arrived before the key was derivable now
             // get their decrypt transform (otherwise one-sided E2EE = silence).
             flushPendingRecvTransforms();
+            // Peers held back because the key wasn't ready can now open.
+            flushPendingPeerUids();
+            // Any peer that DID open before the key existed (or lost its
+            // transform mid-call) is healable right now: give every sender and
+            // receiver its transform. Without this a keyless peer stays silent
+            // forever even after the key lands — the "everyone must rejoin"
+            // one-sided-silence bug.
+            try { healE2eeInPlace(); } catch (_) {}
+            // Signaling that arrived before the key can now be answered.
+            flushPendingSignals(false);
             return b64;
         } catch (_) {
             return null;
@@ -1043,7 +1047,15 @@
         S.channelName = channelName || '';
         S.popupOpen = false;
         resetFullscreenState();
-        deriveRoomKey();
+        S._pendingPeerUids = {};
+        if (!deriveRoomKey()) {
+            // The room key derives from the SERVER key. If that hasn't been
+            // fetched/decrypted yet (fresh join, key rotation, cold boot) every
+            // peer would open WITHOUT E2EE — undecryptable media, i.e. nobody
+            // hears anybody until a manual rejoin. Kick the key fetch and hold
+            // peer creation until it lands (see schedulePeerCreation).
+            ensureRoomKey();
+        }
         deriveSignalKey();
         send({ type: 'voice_join', room_type: 'server', server_id: serverId, channel_id: channelId });
         playSound('join');
@@ -1069,6 +1081,8 @@
         hideDmPanel();
         hideMiniBar();
         hideIncomingCall();
+        closePipMenu();
+        closeCamOptMenu();
     }
 
     function teardownRoom() {
@@ -1122,8 +1136,11 @@
         if (prevDmChannelId) {
             clearWaitingMarkerForChannel(prevDmChannelId);
         }
-        S._lastAudioMode = null;
-        if (_recalcAudioTimer) { clearTimeout(_recalcAudioTimer); _recalcAudioTimer = null; }
+        // Back to the mesh default for the next room.
+        S._lastAudioMode = 'mesh';
+        S._pendingPeerUids = {};
+        S._pendingSignals = {};
+        stopPendingSignalWatch();
         S._audioModeOverrides = {};
         S._videoModeOverrides = {};
         S._cameraModeOverrides = {};
@@ -1170,11 +1187,17 @@
     function recreateAllPeers() {
         var uids = Object.keys(S.peers);
         if (!uids.length) return;
+        // No room key means no E2EE — recreating now would leave every edge
+        // silent. The pending-peer queue reopens them once the key lands.
+        if (!S.roomKeyB64) {
+            ensureRoomKey();
+            return;
+        }
         closeAllPeers();
         var selfId = getSelfId();
         Object.keys(S.members).forEach(function (uid) {
             if (uid !== selfId && !S.peers[uid]) {
-                createPeer(uid);
+                schedulePeerCreation(uid, 0);
             }
         });
     }
@@ -1496,7 +1519,7 @@
                 S.cameraOn = true;
                 var cvt = stream.getVideoTracks()[0];
                 if (cvt) { try { cvt.contentHint = 'motion'; } catch (_) {} }
-                if (useVideoRelay()) {
+                if (useVideoRelay('camera')) {
                     // Server voice channel: relay video via WebSocket
                     startVideoRelay(stream, 'camera');
                 } else {
@@ -1563,7 +1586,7 @@
                         stopScreen();
                     });
                 }
-                if (useVideoRelay()) {
+                if (useVideoRelay('screen')) {
                     // Server voice channel: relay screen video via WebSocket.
                     // Screen audio is relayed too if audio relay is active,
                     // otherwise it stays on WebRTC mesh.
@@ -1629,6 +1652,49 @@
             }
             return match;
         });
+    }
+
+    // Open a peer for a member — but NEVER without a room key. With no key the
+    // E2EE transform is never attached, the media is undecryptable and the call
+    // is silent (both directions) until a manual rejoin. Uids that have to wait
+    // are remembered and retried the moment the key becomes derivable.
+    function schedulePeerCreation(uid, delayMs) {
+        setTimeout(function () {
+            if (!S.connected || !S.members[uid] || S.peers[uid]) return;
+            if (!S.roomKeyB64) {
+                S._pendingPeerUids[uid] = true;
+                ensureRoomKey();
+                return;
+            }
+            createPeer(uid);
+        }, delayMs || 0);
+    }
+
+    function flushPendingPeerUids() {
+        if (!S.roomKeyB64) return;
+        var uids = Object.keys(S._pendingPeerUids || {});
+        if (!uids.length) return;
+        S._pendingPeerUids = {};
+        uids.forEach(function (uid, idx) { schedulePeerCreation(uid, idx * 100); });
+    }
+
+    // The room key needs the server key (server rooms). When it is missing,
+    // fetch + decrypt it, then re-derive and release any waiting peers.
+    // chat.js exposes fetchAndDecryptServerKey; without it we simply keep
+    // retrying the derivation (the key may arrive via another path).
+    function ensureRoomKey() {
+        if (S.roomType !== 'server' || !S.serverId) return;
+        if (S.roomKeyB64) { flushPendingPeerUids(); return; }
+        var fetchKey = window.fetchAndDecryptServerKey;
+        if (typeof fetchKey !== 'function') return;
+        if (S._roomKeyFetching === S.serverId) return; // one in flight
+        S._roomKeyFetching = S.serverId;
+        try {
+            Promise.resolve(fetchKey(S.serverId)).then(function () {
+                S._roomKeyFetching = null;
+                if (deriveRoomKey()) deriveSignalKey();
+            }).catch(function () { S._roomKeyFetching = null; });
+        } catch (_) { S._roomKeyFetching = null; }
     }
 
     function createPeer(uid) {
@@ -2058,7 +2124,10 @@
                 }
             } catch (_) {}
         }
-        if (S.localStreams.mic && !S.muted && !S.deafened) {
+        // When mic audio is being server-relayed it must NOT also be added to
+        // the WebRTC peers — a peer created after the switch (new joiner)
+        // would otherwise receive BOTH the relay copy and a live mesh track.
+        if (S.localStreams.mic && !S.muted && !S.deafened && !_audioRelayTimer) {
             // Prefer the RNNoise-processed track when active; otherwise the
             // raw mic track.
             var at = (S.localStreams.processedMic && S.localStreams.processedMic.getAudioTracks()[0]) || S.localStreams.mic.getAudioTracks()[0];
@@ -2089,7 +2158,7 @@
             // volume). The mic audio track is added FIRST, so the receiver
             // classifies audio tracks by fill order — mic, then screen.
             var sat = S.localStreams.screen.getAudioTracks()[0];
-            if (sat && !pc.getSenders().find(function (s) { return senderOccupied(s, sat); })) {
+            if (sat && !_audioRelayTimer && !pc.getSenders().find(function (s) { return senderOccupied(s, sat); })) {
                 pc.addTrack(sat, new MediaStream([sat]));
                 setSenderPriority(sat);
             }
@@ -2871,8 +2940,16 @@
     function handleSignal(fromUid, signal) {
         var pc = S.peers[fromUid];
         if (!pc) {
-            // A peer we haven't created yet — create it (covers late-joining members
-            // and DM callees who receive an offer before their own voice_joined lands)
+            // A peer we haven't created yet — create it (covers late-joining
+            // members and DM callees who receive an offer before their own
+            // voice_joined lands). BUT only once the room key exists: a peer
+            // opened without it has no E2EE transform on either side, so the
+            // media is undecryptable in both directions and the call is silent
+            // until a manual rejoin. Until then the signaling is held.
+            if (!S.roomKeyB64) {
+                queuePendingSignal(fromUid, signal);
+                return;
+            }
             pc = createPeer(fromUid);
         }
         var sdp = signal.sdp;
@@ -2984,6 +3061,80 @@
         }
     }
 
+    // Signals that arrived before the room key was derivable. Replayed in
+    // arrival order once it lands, so the handshake completes exactly once and
+    // with E2EE attached. (Opening the peer early instead is what produced
+    // silent calls, because a transform can never be attached retroactively in
+    // a way the remote can decrypt without a renegotiation.)
+    function queuePendingSignal(uid, signal) {
+        S._pendingPeerUids[uid] = true;
+        var q = S._pendingSignals[uid];
+        if (!q) { q = S._pendingSignals[uid] = []; }
+        // One handshake's worth is all that can ever be useful; the cap stops a
+        // hostile/broken peer from growing the queue without bound.
+        if (q.length < 64) q.push(signal);
+        ensureRoomKey();
+        startPendingSignalWatch();
+    }
+
+    function stopPendingSignalWatch() {
+        if (S._pendingSignalTimer) {
+            clearInterval(S._pendingSignalTimer);
+            S._pendingSignalTimer = null;
+        }
+        S._pendingSignalTries = 0;
+    }
+
+    function startPendingSignalWatch() {
+        if (S._pendingSignalTimer) return;
+        S._pendingSignalTries = 0;
+        S._pendingSignalTimer = setInterval(function () {
+            if (!S.connected || !S.roomType) {
+                stopPendingSignalWatch();
+                S._pendingSignals = {};
+                return;
+            }
+            if (S.roomKeyB64) {
+                stopPendingSignalWatch();
+                flushPendingSignals(false);
+                return;
+            }
+            // DM keys come from the partner's identity key, which may land
+            // through the conversation prefetch — retry the derivation too.
+            if (S.roomType === 'dm') deriveRoomKey();
+            ensureRoomKey();
+            S._pendingSignalTries++;
+            // ~6s without a key: give up holding and open the peers anyway.
+            // The edge then exists, and deriveRoomKey()'s heal (or the 4s
+            // stuck-peer watchdog) repairs the transforms the moment the key
+            // arrives. Better a recoverable edge than a handshake that never
+            // completes.
+            if (S._pendingSignalTries >= 24) {
+                stopPendingSignalWatch();
+                flushPendingSignals(true);
+            }
+        }, 250);
+    }
+
+    function flushPendingSignals(force) {
+        if (!S.roomKeyB64 && !force) return;
+        var uids = Object.keys(S._pendingSignals || {});
+        if (!uids.length) return;
+        uids.forEach(function (uid) {
+            var list = S._pendingSignals[uid];
+            delete S._pendingSignals[uid];
+            if (!list || !list.length) return;
+            // Force path: create the peer FIRST so replaying the held signals
+            // does not re-queue them (which would restart the watch forever).
+            if (!S.peers[uid] && uid !== getSelfId()) {
+                try { createPeer(uid); } catch (_) {}
+            }
+            list.forEach(function (sig) {
+                try { handleSignal(uid, sig); } catch (_) {}
+            });
+        });
+    }
+
     // ------------------------------------------------------------------
     // WS message routing (called from chat.js onmessage)
     // ------------------------------------------------------------------
@@ -3083,13 +3234,8 @@
         // manageable without meaningfully delaying the call.
         var selfId = getSelfId();
         var peerUids = Object.keys(S.members).filter(function (uid) { return uid !== selfId && !S.peers[uid]; });
-        peerUids.forEach(function (uid, idx) {
-            setTimeout(function () {
-                if (!S.connected || S.roomKeyB64 === undefined) return;
-                if (S.peers[uid]) return;
-                createPeer(uid);
-            }, idx * 100);
-        });
+        peerUids.forEach(function (uid, idx) { schedulePeerCreation(uid, idx * 100); });
+        if (!S.roomKeyB64) ensureRoomKey();
 
         if (S.roomType === 'server') {
             showBar();
@@ -3100,7 +3246,6 @@
         }
         updateSelfUI();
         updateChannelChips();
-        recalcAudioMode();
 
         // Late-join soundboard sync: if a soundboard clip was already playing
         // when we joined, pick it up from the current position. The offset is
@@ -3231,13 +3376,8 @@
         // Open peers for newcomers (staggered like the join path — see
         // handleVoiceJoined for why the burst must be spread out).
         var newUids = list.filter(function (m) { return m.user_id !== selfId && !S.peers[m.user_id]; });
-        newUids.forEach(function (m, idx) {
-            setTimeout(function () {
-                if (!S.connected || !S.members[m.user_id]) return;
-                if (S.peers[m.user_id]) return;
-                createPeer(m.user_id);
-            }, idx * 100);
-        });
+        newUids.forEach(function (m, idx) { schedulePeerCreation(m.user_id, idx * 100); });
+        if (!S.roomKeyB64) ensureRoomKey();
         // Close peers for people who left
         Object.keys(S.peers).forEach(function (uid) {
             if (!newMembers[uid]) {
@@ -3268,7 +3408,6 @@
         renderPopup();
         renderDmPanel();
         updateChannelChips();
-        recalcAudioMode();
     }
 
     function handleMemberUpdate(member) {
@@ -3321,8 +3460,7 @@
         }
         // Check if deafen state changed for any member — recalc audio mode
         if (prev && prev.deafened !== member.deafened) {
-            recalcAudioMode();
-        }
+            }
         // The member changed their RECEIVE resolution — re-tune our sender for
         // them so we send exactly what they asked for (per-receiver scaling).
         if (!isSelf && prev &&
@@ -3348,8 +3486,7 @@
             S.muted = !!member.muted;
             S.deafened = !!member.deafened;
             updateSelfUI();
-            recalcAudioMode();
-        }
+            }
         if (mediaChanged) {
             // The state broadcast may have arrived AFTER the video tracks
             // (their classification raced) — put every stream in the correct
@@ -3463,7 +3600,6 @@
         renderPopup();
         renderDmPanel();
         updateChannelChips();
-        recalcAudioMode();
     }
 
     // A server-wide voice presence snapshot (who is in each voice channel and
@@ -4300,62 +4436,146 @@
     var _pipTempVideo = null;
     var _pipCanvas = null;
     var _pipAnimFrame = 0;
-    function togglePiP() {
-        if (_pipActive) {
-            _pipActive = false;
-            document.exitPictureInPicture().catch(function() {});
-            // Always release the canvas, the hidden <video> and its stream —
-            // the old exit path only flipped the flag, so every toggle leaked
-            // a canvas + MediaStream + draw loop.
-            _cleanupCanvasPiP();
-            return;
-        }
-        if (!document.pictureInPictureEnabled) { showToast('PiP not supported in this browser'); return; }
-        var target = pickVisibleVideoTile();
+    var _pipUid = null;   // member whose feed is in the PiP window
+    var _pipKind = null;  // 'camera' | 'screen'
+    // Clicking the PiP button opens a picker of every live camera/screen feed
+    // so you can choose which member/stream to pop out (and switch between
+    // them). Clicking it again while a PiP window is open closes it.
+    function togglePiP(anchor) {
+        if (_pipActive) { stopPiP(); return; }
+        openPipMenu(anchor);
+    }
+
+    function stopPiP() {
+        _pipActive = false;
+        _pipUid = null;
+        _pipKind = null;
+        try { document.exitPictureInPicture().catch(function () {}); } catch (_) {}
+        _cleanupCanvasPiP();
+    }
+
+    // Start PiP for one specific feed (invoked from the picker).
+    function startPiPForTile(target, uid, kind) {
         if (!target) { showToast('No active video to PiP'); return; }
-        var uid = target.getAttribute('data-uid');
-        var kind = target.getAttribute('data-kind');
-        var st = uid && kind ? S.tileTransforms[uid + ':' + kind] : null;
+        if (!document.pictureInPictureEnabled) { showToast('PiP not supported in this browser'); return; }
+        _pipUid = uid || target.getAttribute('data-uid') || getSelfId();
+        _pipKind = kind || target.getAttribute('data-kind') || 'camera';
+        var st = S.tileTransforms[_pipUid + ':' + _pipKind] || null;
         var hasTransform = st && (st.mirror || st.rot);
         var isImg = target.tagName === 'IMG';
         // If the target has rotation/mirror transforms, or is a relay <img>,
         // use a canvas compositing pipeline so the PiP window shows the
         // transformed view (browser PiP ignores CSS transforms).
-        if (hasTransform || isImg) {
-            _startCanvasPiP(target, uid, kind, isImg);
-            return;
-        }
-        // No transforms, <video> element — PiP directly
+        if (hasTransform || isImg) { _startCanvasPiP(target, _pipUid, _pipKind, isImg); return; }
+        // No transforms, <video> element — PiP directly.
         if (!target.srcObject) { showToast('No active video to PiP'); return; }
-        target.requestPictureInPicture().then(function() {
+        target.requestPictureInPicture().then(function () {
             _pipActive = true;
             target.addEventListener('leavepictureinpicture', function handler() {
                 _pipActive = false;
+                _pipUid = null;
+                _pipKind = null;
                 target.removeEventListener('leavepictureinpicture', handler);
             });
-        }).catch(function(err) { console.warn('[PiP]', err); showToast('PiP failed: ' + (err.message || err)); });
+        }).catch(function (err) { console.warn('[PiP]', err); showToast('PiP failed: ' + (err.message || err)); });
     }
 
-    // The visible camera/screen tile the user means. Prefers an active relay
-    // <img>, then a mesh <video>, and filters on REAL layout visibility — the
-    // old `:not([style*="display:none"])` list never excluded anything (Chrome
-    // serialises inline styles as `display: none;` with a space), so PiP
-    // targeted the invisible mesh <video> that sits behind every relay frame.
-    function pickVisibleVideoTile() {
-        var areas = ['#voice-popup', '#dm-call-body', '.voice-fs-wrap', 'body'];
-        var kinds = ['screen', 'camera'];
-        var tags = ['img.relay-video', 'video.remote-video-tile', 'video.voice-self-video'];
-        for (var a = 0; a < areas.length; a++) {
-            for (var k = 0; k < kinds.length; k++) {
-                for (var t = 0; t < tags.length; t++) {
-                    var list = document.querySelectorAll(areas[a] + ' ' + tags[t] + '[data-kind="' + kinds[k] + '"]');
-                    for (var i = 0; i < list.length; i++) {
-                        if (isTileVisible(list[i])) return list[i];
-                    }
-                }
+    // Every camera/screen feed currently on screen, de-duplicated per
+    // (member, kind), preferring the visible tile when a feed is rendered in
+    // more than one place (popup row + DM body + fullscreen wrapper).
+    function collectPipSources() {
+        var selfId = getSelfId();
+        var byKey = {};
+        var order = [];
+        var nodes = document.querySelectorAll('img[data-kind], video[data-kind]');
+        for (var i = 0; i < nodes.length; i++) {
+            var node = nodes[i];
+            var cls = node.className || '';
+            var isTile = cls.indexOf('relay-video') !== -1 || cls.indexOf('remote-video-tile') !== -1 || cls.indexOf('voice-self-video') !== -1;
+            if (!isTile) continue;
+            var kind = node.getAttribute('data-kind');
+            if (kind !== 'camera' && kind !== 'screen') continue;
+            var uid = node.getAttribute('data-uid') || selfId;
+            if (!uid) continue;
+            var key = uid + ':' + kind;
+            var vis = isTileVisible(node);
+            if (!byKey[key]) {
+                byKey[key] = { uid: uid, kind: kind, tile: node, visible: vis };
+                order.push(key);
+            } else if (vis && !byKey[key].visible) {
+                byKey[key] = { uid: uid, kind: kind, tile: node, visible: true };
             }
         }
-        return null;
+        return order.map(function (k) { return byKey[k]; });
+    }
+
+    function closePipMenu() {
+        var menu = el('voice-pip-menu');
+        if (!menu) return;
+        menu.style.display = 'none';
+        if (menu._pipDocClick) {
+            document.removeEventListener('click', menu._pipDocClick);
+            menu._pipDocClick = null;
+        }
+    }
+
+    function openPipMenu(anchor) {
+        var menu = el('voice-pip-menu');
+        if (!menu) return;
+        if (!document.pictureInPictureEnabled) { showToast('PiP not supported in this browser'); return; }
+        var selfId = getSelfId();
+        var sources = collectPipSources();
+        menu.innerHTML = '';
+        if (sources.length === 0) {
+            var empty = document.createElement('div');
+            empty.className = 'voice-pip-empty';
+            empty.textContent = 'No active camera or screen share';
+            menu.appendChild(empty);
+        } else {
+            sources.forEach(function (src) {
+                var btn = document.createElement('button');
+                btn.type = 'button';
+                btn.setAttribute('data-uid', src.uid);
+                btn.setAttribute('data-kind', src.kind);
+                if (_pipActive && src.uid === _pipUid && src.kind === _pipKind) btn.classList.add('active');
+                var label = document.createElement('span');
+                var m = S.members[src.uid];
+                label.textContent = (src.uid === selfId) ? 'You' : memberDisplayName(src.uid, m);
+                btn.appendChild(label);
+                var kindEl = document.createElement('span');
+                kindEl.className = 'voice-pip-kind';
+                kindEl.textContent = src.kind === 'camera' ? 'Camera' : 'Screen';
+                btn.appendChild(kindEl);
+                btn.addEventListener('click', function (e) {
+                    e.stopPropagation();
+                    closePipMenu();
+                    startPiPForTile(src.tile, src.uid, src.kind);
+                });
+                menu.appendChild(btn);
+            });
+        }
+        // Show, then position near the button that opened it (clamped to the
+        // viewport) — same placement logic as the camera options menu.
+        menu.style.display = 'flex';
+        menu.style.left = '0px';
+        menu.style.top = '0px';
+        var rect = anchor && anchor.getBoundingClientRect ? anchor.getBoundingClientRect() : null;
+        var mw = menu.offsetWidth || 200;
+        var mh = menu.offsetHeight || 100;
+        var left = rect ? (rect.left + rect.width / 2 - mw / 2) : (window.innerWidth / 2 - mw / 2);
+        var top = rect ? (rect.top - mh - 8) : 80;
+        left = Math.max(8, Math.min(window.innerWidth - mw - 8, left));
+        if (top < 8) top = rect ? Math.min(window.innerHeight - mh - 8, rect.bottom + 8) : 8;
+        menu.style.left = left + 'px';
+        menu.style.top = Math.max(8, top) + 'px';
+        setTimeout(function () {
+            var onDocClick = function (e) {
+                if (menu.style.display === 'none' || menu.contains(e.target)) return;
+                closePipMenu();
+            };
+            menu._pipDocClick = onDocClick;
+            document.addEventListener('click', onDocClick);
+        }, 10);
     }
 
     function _startCanvasPiP(target, uid, kind, isImg) {
@@ -4510,7 +4730,6 @@
             applyRemoteScreenVolume(uid);
         });
         sendVoiceState();
-        recalcAudioMode();
         updateSelfUI();
         playSound(S.deafened ? 'deafen' : 'undeafen');
     }
@@ -4626,25 +4845,22 @@
         var alabel = el('cam-opt-audio-mode-label');
         if (alabel) {
             var selfId = getSelfId();
-            var aMode = selfId ? resolveAudioMode(selfId) : autoAudioMode();
-            var aManual = selfId && (S._audioModeOverrides[selfId] === 'mesh' || S._audioModeOverrides[selfId] === 'relay');
-            alabel.textContent = 'Audio: ' + (aMode === 'mesh' ? 'P2P mesh' : 'Server relay') + (aManual ? ' (manual)' : '');
+            var aMode = selfId ? resolveAudioMode(selfId) : 'mesh';
+            alabel.textContent = 'Audio: ' + (aMode === 'mesh' ? 'P2P mesh' : 'Server relay');
         }
         // Camera mode label
         var clabel = el('cam-opt-camera-mode-label');
         if (clabel) {
             var selfId2 = getSelfId();
-            var cMode = selfId2 ? resolveCameraMode(selfId2) : autoVideoMode();
-            var cManual = selfId2 && (S._cameraModeOverrides[selfId2] === 'mesh' || S._cameraModeOverrides[selfId2] === 'relay');
-            clabel.textContent = 'Camera: ' + (cMode === 'mesh' ? 'P2P mesh' : 'Server relay') + (cManual ? ' (manual)' : '');
+            var cMode = selfId2 ? resolveCameraMode(selfId2) : 'mesh';
+            clabel.textContent = 'Camera: ' + (cMode === 'mesh' ? 'P2P mesh' : 'Server relay');
         }
         // Screen mode label
         var slabel = el('cam-opt-screen-mode-label');
         if (slabel) {
             var selfId3 = getSelfId();
-            var sMode = selfId3 ? resolveScreenMode(selfId3) : autoVideoMode();
-            var sManual = selfId3 && (S._screenModeOverrides[selfId3] === 'mesh' || S._screenModeOverrides[selfId3] === 'relay');
-            slabel.textContent = 'Screen: ' + (sMode === 'mesh' ? 'P2P mesh' : 'Server relay') + (sManual ? ' (manual)' : '');
+            var sMode = selfId3 ? resolveScreenMode(selfId3) : 'mesh';
+            slabel.textContent = 'Screen: ' + (sMode === 'mesh' ? 'P2P mesh' : 'Server relay');
         }
     }
 
@@ -4661,24 +4877,24 @@
         if (audioMode) audioMode.addEventListener('click', function (e) {
             e.stopPropagation();
             var selfId = getSelfId();
-            var cur = selfId ? (S._audioModeOverrides[selfId] || 'auto') : 'auto';
-            var next = cur === 'auto' ? 'mesh' : cur === 'mesh' ? 'relay' : 'auto';
+            var cur = selfId ? (S._audioModeOverrides[selfId] || 'mesh') : 'mesh';
+            var next = cur === 'relay' ? 'mesh' : 'relay';
             setSelfAudioMode(next);
             updateCamOptMenuState();
         });
         if (cameraMode) cameraMode.addEventListener('click', function (e) {
             e.stopPropagation();
             var selfId = getSelfId();
-            var cur = selfId ? (S._cameraModeOverrides[selfId] || 'auto') : 'auto';
-            var next = cur === 'auto' ? 'mesh' : cur === 'mesh' ? 'relay' : 'auto';
+            var cur = selfId ? (S._cameraModeOverrides[selfId] || 'mesh') : 'mesh';
+            var next = cur === 'relay' ? 'mesh' : 'relay';
             setSelfCameraMode(next);
             updateCamOptMenuState();
         });
         if (screenMode) screenMode.addEventListener('click', function (e) {
             e.stopPropagation();
             var selfId = getSelfId();
-            var cur = selfId ? (S._screenModeOverrides[selfId] || 'auto') : 'auto';
-            var next = cur === 'auto' ? 'mesh' : cur === 'mesh' ? 'relay' : 'auto';
+            var cur = selfId ? (S._screenModeOverrides[selfId] || 'mesh') : 'mesh';
+            var next = cur === 'relay' ? 'mesh' : 'relay';
             setSelfScreenMode(next);
             updateCamOptMenuState();
         });
@@ -4707,11 +4923,12 @@
             speaking: S.speaking,
             camera_track_id: camTrack ? camTrack.id : null,
             screen_track_id: scrTrack ? scrTrack.id : null,
-            // Broadcast self audio/video mode so peers can show M/R badges
-            audio_mode: selfId ? (S._audioModeOverrides[selfId] || 'auto') : 'auto',
-            video_mode: selfId ? (S._videoModeOverrides[selfId] || 'auto') : 'auto',
-            camera_mode: selfId ? (S._cameraModeOverrides[selfId] || 'auto') : 'auto',
-            screen_mode: selfId ? (S._screenModeOverrides[selfId] || 'auto') : 'auto',
+            // Broadcast self audio/video mode so peers can show M/R badges.
+            // Mesh is the default — relay only when the user opted in.
+            audio_mode: selfId ? (S._audioModeOverrides[selfId] || 'mesh') : 'mesh',
+            video_mode: selfId ? (S._videoModeOverrides[selfId] || 'mesh') : 'mesh',
+            camera_mode: selfId ? (S._cameraModeOverrides[selfId] || 'mesh') : 'mesh',
+            screen_mode: selfId ? (S._screenModeOverrides[selfId] || 'mesh') : 'mesh',
             // Receive-resolution preference: every peer scales its sender for
             // THIS member down to these heights (per-receiver quality).
             recv_camera_res: S.settings.recvCameraRes || 360,
@@ -5439,7 +5656,7 @@
         bindClick(pop, 'voice-popup-camera', function () { toggleCamera(); });
         bindClick(pop, 'voice-popup-cam-opt', function (e) { openCamOptMenu(this); });
         bindClick(pop, 'voice-popup-screen', function () { toggleScreen(); });
-        bindClick(pop, 'voice-popup-pip', function () { togglePiP(); });
+        bindClick(pop, 'voice-popup-pip', function () { togglePiP(this); });
         bindClick(pop, 'voice-popup-leave', function () { leaveVoice(); });
         var pmv = pop.querySelector('#voice-popup-mic-volume');
         if (pmv) pmv.addEventListener('input', function (e) { setMicVolume(parseInt(e.target.value, 10)); updateSettingsLabels(); });
@@ -5761,8 +5978,6 @@
         if (jq) jq.addEventListener('change', function (e) { S.settings.relayVideoQuality = Math.max(0.1, Math.min(1.0, parseFloat(e.target.value) || 0.6)); saveSettings(); });
         var ml = document.getElementById('voice-manual-video-load');
         if (ml) ml.addEventListener('change', function (e) { setManualVideoLoad(e.target.checked); });
-        var vm = document.getElementById('voice-video-mesh-mode');
-        if (vm) vm.addEventListener('change', function (e) { setVideoMeshMode(e.target.checked); });
         var wd = document.getElementById('voice-video-watchdog-secs');
         if (wd) wd.addEventListener('change', function (e) { setVideoWatchdogSecs(e.target.value); });
         // Call diagnostics (Settings → Voice → Advanced)
@@ -5790,12 +6005,6 @@
         if (pmvV) pmvV.textContent = S.settings.micVolume + '%';
         var psvV = document.getElementById('voice-popup-speaker-volume-val');
         if (psvV) psvV.textContent = S.settings.speakerVolume + '%';
-        var vm = document.getElementById('voice-video-mesh-mode');
-        if (vm) {
-            var _selfId2 = getSelfId();
-            var _effectiveMode2 = _selfId2 ? resolveVideoMode(_selfId2) : autoVideoMode();
-            vm.checked = _effectiveMode2 === 'mesh';
-        }
         var pns = document.getElementById('voice-popup-noise-suppression');
         if (pns) pns.value = S.settings.noiseSuppressionMode || 'rnnoise';
         // Haptic pattern tuning sliders (Settings → Voice → Haptics).
@@ -6209,7 +6418,7 @@
                 callMemberFromVoice(uid, m ? (m.username || '') : '');
             });
         });
-        // Mode badge click → cycle through auto/mesh/relay (self only).
+        // Mode badge click → toggle mesh/relay (self only).
         // Others just see the indicator; clicking does nothing.
         // Uses event delegation on the list container so clicks survive
         // innerHTML replacement from updateMemberBadgesInPlace.
@@ -6225,17 +6434,14 @@
                 var uid = badge.getAttribute('data-uid');
                 if (uid !== getSelfId()) return;
                 if (kind === 'audio') {
-                    var cur = S._audioModeOverrides[uid] || 'auto';
-                    var next = cur === 'auto' ? 'mesh' : cur === 'mesh' ? 'relay' : 'auto';
-                    setSelfAudioMode(next);
+                    var cur = S._audioModeOverrides[uid] || 'mesh';
+                    setSelfAudioMode(cur === 'relay' ? 'mesh' : 'relay');
                 } else if (kind === 'camera') {
-                    var cur = S._cameraModeOverrides[uid] || 'auto';
-                    var next = cur === 'auto' ? 'mesh' : cur === 'mesh' ? 'relay' : 'auto';
-                    setSelfCameraMode(next);
+                    var cur = S._cameraModeOverrides[uid] || 'mesh';
+                    setSelfCameraMode(cur === 'relay' ? 'mesh' : 'relay');
                 } else if (kind === 'screen') {
-                    var cur = S._screenModeOverrides[uid] || 'auto';
-                    var next = cur === 'auto' ? 'mesh' : cur === 'mesh' ? 'relay' : 'auto';
-                    setSelfScreenMode(next);
+                    var cur = S._screenModeOverrides[uid] || 'mesh';
+                    setSelfScreenMode(cur === 'relay' ? 'mesh' : 'relay');
                 }
             });
         }
@@ -6635,7 +6841,7 @@
         bindClick(p, 'dm-call-camera', function () { toggleCamera(); });
         bindClick(p, 'dm-call-cam-opt', function (e) { openCamOptMenu(this); });
         bindClick(p, 'dm-call-screen', function () { toggleScreen(); });
-        bindClick(p, 'dm-call-pip', function () { togglePiP(); });
+        bindClick(p, 'dm-call-pip', function () { togglePiP(this); });
         bindClick(p, 'dm-call-soundboard', function () {
             var sbOverlay = document.getElementById('soundboard-overlay');
             if (sbOverlay) sbOverlay.style.display = 'flex';
@@ -6896,9 +7102,9 @@
         var slot = video.parentElement && video.parentElement.classList.contains('voice-tile-slot')
             ? video.parentElement : null;
         if (inFullscreen) {
-            // Fullscreen (CSS wrapper OR native): scale the video proportionally
-            // so the largest dimension fits the screen — never upscale, maintain
-            // aspect ratio. Apply rotation/mirror transform.
+            // Fullscreen (CSS wrapper OR native): contain-fit the picture to
+            // the screen — both axes scaled by the SAME factor, ratio kept.
+            // Apply rotation/mirror transform.
             clearInlineDims(video);
             // Get natural (unrotated) video dimensions.
             var bw = video.videoWidth || video.naturalWidth || 0;
@@ -6918,13 +7124,25 @@
                 fw = window.innerWidth;
                 fh = window.innerHeight;
             }
-            // Scale so the largest visual dimension fits the screen's largest.
-            var maxDim = Math.max(evw, evh);
-            var containerMax = Math.max(fw, fh);
-            var s = maxDim > 0 ? Math.min(1, containerMax / maxDim) : 1;
+            // Contain-fit: scale so the VISUAL box fits BOTH screen axes.
+            // The old rule (largest visual dim vs largest screen dim) only
+            // ever compared one axis pair — a portrait phone camera kept its
+            // width while the height overflowed the shorter screen edge, i.e.
+            // "width is kept the same while height is the only one being
+            // resized": the picture was cropped instead of shrunk uniformly.
+            var s = (evw > 0 && evh > 0) ? Math.min(fw / evw, fh / evh) : 1;
+            if (!isFinite(s) || s <= 0) s = 1;
             if (evw > 0 && evh > 0) {
-                setDimImportant(video, 'width', Math.round(evw * s) + 'px');
-                setDimImportant(video, 'height', Math.round(evh * s) + 'px');
+                // The element's LAYOUT box is the visual box TRANSPOSED when
+                // rotated 90°/270°: after rotate(90deg) a layW×layH element
+                // paints a layH×layW visual. Writing the visual dims straight
+                // into the layout (the old code) gave the box the wrong
+                // aspect, which the rotation then skewed — the stretched look
+                // reported on mobile in fullscreen and PiP.
+                var layW = sideways ? evh * s : evw * s;
+                var layH = sideways ? evw * s : evh * s;
+                setDimImportant(video, 'width', Math.round(layW) + 'px');
+                setDimImportant(video, 'height', Math.round(layH) + 'px');
                 setDimImportant(video, 'maxWidth', 'none');
                 setDimImportant(video, 'maxHeight', 'none');
             }
@@ -8005,6 +8223,10 @@
 
     S._relayTimers = {};   // { camera: intervalId, screen: intervalId }
     var _relayCanvases = {}; // { camera: canvas, screen: canvas }
+    // Drop relayed video frames once the WebSocket backlog passes this. Video
+    // is the sacrificial stream: the audio relay keeps flowing regardless (it
+    // is tiny and must never be starved by a busy video pipe).
+    var RELAY_VIDEO_MAX_BUFFERED = 256 * 1024;
 
     // Determine whether to use relay mode for video in the current room.
     // Server voice channels use relay; DM calls use WebRTC mesh.
@@ -8024,51 +8246,115 @@
 
         var fps = S.settings.relayVideoFps || 15;
         var maxH = S.settings[kind === 'screen' ? 'sendScreenRes' : 'sendCameraRes'] || (kind === 'screen' ? 480 : 360);
-        var w = resW(maxH);
-        var h = maxH;
 
-        // Double-buffer: two canvases so capture can run while the previous
-        // frame is still being encoded — prevents the busy guard from dropping
-        // every other frame when toBlob() is slow.
-        var canvasA = document.createElement('canvas');
-        canvasA.width = w; canvasA.height = h;
-        var canvasB = document.createElement('canvas');
-        canvasB.width = w; canvasB.height = h;
-        var ctxA = canvasA.getContext('2d');
-        var ctxB = canvasB.getContext('2d');
-        _relayCanvases[kind] = canvasA;
+        // Multithreading support: the JPEG encode runs in a worker (needs
+        // OffscreenCanvas + createImageBitmap), and a backgrounded tab uses a
+        // worker clock instead of being clamped to 1 fps.
+        var _workerClockAvailable = (typeof Worker !== 'undefined');
+        var _canWorkerEncode = _workerClockAvailable && typeof createImageBitmap === 'function' && typeof OffscreenCanvas !== 'undefined';
 
         var video = document.createElement('video');
         video.srcObject = stream;
         video.muted = true;
         video.playsInline = true;
-        video.width = w;
-        video.height = h;
+        // Keep the element in the document (hidden) — Chrome is inconsistent
+        // about decoding frames for a fully detached media element, and a
+        // stalled decode is what makes drawImage() re-draw a stale frame.
+        video.style.cssText = 'position:fixed;top:-9999px;left:-9999px;width:1px;height:1px;opacity:0;pointer-events:none;z-index:-1;';
+        document.body.appendChild(video);
         video.play().catch(function () {});
 
         // Wait for the video to have dimensions before starting the loop
         var startLoop = function () {
             if (S._relayTimers[kind]) return;
-            var state = { running: true, video: video, _visHandler: null };
+            // Size the capture canvas from the SOURCE's real aspect ratio —
+            // NOT a forced 16:9. The old code always built a resW(maxH)×maxH
+            // canvas, so a portrait phone camera (e.g. 720×1280) was drawn
+            // stretched sideways into a landscape canvas and every consumer
+            // (tile, fullscreen, PiP) showed the pre-stretched frame — the
+            // reported "width is kept the same while height is the only one
+            // being resized". Cap the HEIGHT at the configured resolution;
+            // width follows the ratio (a 16:9 source at maxH keeps its exact
+            // old dimensions, so only non-16:9 sources change).
+            var srcW = video.videoWidth || 0;
+            var srcH = video.videoHeight || 0;
+            var w = resW(maxH);
+            var h = maxH;
+            if (srcW > 0 && srcH > 0) {
+                var sc = maxH / srcH;
+                w = Math.max(2, Math.round(srcW * sc));
+                h = Math.max(2, Math.round(srcH * sc));
+            }
+            // Double-buffer: two canvases so capture can run while the previous
+            // frame is still being encoded — prevents the busy guard from dropping
+            // every other frame when toBlob() is slow.
+            var canvasA = document.createElement('canvas');
+            canvasA.width = w; canvasA.height = h;
+            var canvasB = document.createElement('canvas');
+            canvasB.width = w; canvasB.height = h;
+            var ctxA = canvasA.getContext('2d');
+            var ctxB = canvasB.getContext('2d');
+            var state = { running: true, video: video, _visHandler: null, encWorker: null };
             _relayCanvases[kind] = state;
             S._relayTimers[kind] = true; // mark as active
-            var encodingA = false; // per-canvas: true while toBlob()+encrypt is in flight
+            var encodingA = false; // per-canvas: true while encode+encrypt is in flight
             var encodingB = false;
             var reusableKeyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(S.roomKeyB64));
             var targetMs = Math.max(16, 1000 / fps);
             var sendIndex = 0; // alternates 0/1 for double-buffer
 
-            // Chrome clamps setTimeout to ~1s (and to 1 wake-up/minute after a
-            // while) for a page that is HIDDEN or whose window is NOT FOCUSED —
-            // that is the "relay video drops to 1fps" report. MessageChannel
-            // postMessage is not clamped, so use it whenever timers can't be
-            // trusted. Exposed counters let tests measure real throughput
-            // instead of guessing.
+            // Chrome clamps setTimeout on a HIDDEN page to ~1/s (and to
+            // 1/minute after a while). A blurred-but-visible window is NOT
+            // throttled, so only a truly backgrounded tab takes the worker
+            // clock path. The old `|| !document.hasFocus()` condition made
+            // every relay loop busy-spin the moment the screen-share picker
+            // stole focus — with two streams (camera + screen) that spin
+            // saturated the main thread, which collapsed BOTH feeds to ~1 fps
+            // and starved the audio-relay poll at the same time.
             function needsUnthrottledLoop() {
-                return document.visibilityState === 'hidden' || !document.hasFocus();
+                return _workerClockAvailable && document.visibilityState === 'hidden';
             }
             S._relayStats = S._relayStats || {};
             S._relayStats[kind] = { sent: 0, startedAt: Date.now() };
+
+            // ---- Off-main-thread JPEG encoder ----
+            // The JPEG encode is the expensive part of a relay frame. Doing it
+            // on the main thread for TWO simultaneous streams starves timers
+            // and the audio relay, so each stream gets its own worker that
+            // draws the frame on an OffscreenCanvas and encodes it there.
+            var encWorker = null;
+            var frameSeq = 0;
+            if (_canWorkerEncode) {
+                try { encWorker = new Worker('relay-encode-worker.js'); } catch (_) { encWorker = null; }
+            }
+            state.encWorker = encWorker;
+
+            function finishEncode(isA) { if (isA) encodingA = false; else encodingB = false; }
+
+            // Backpressure check → encrypt → relay. Video is dropped
+            // aggressively when the socket is congested; the audio relay has
+            // its own (much higher) threshold so audio is never starved by a
+            // busy video pipe.
+            function sendEncoded(buf, isA) {
+                var ws = getWs();
+                if (ws && ws.bufferedAmount > RELAY_VIDEO_MAX_BUFFERED) { finishEncode(isA); return; }
+                try {
+                    var raw = new Uint8Array(buf);
+                    var enc = E2ECrypto.aeadEncrypt(raw, reusableKeyBytes);
+                    sendRelayBinary(kind, enc.nonce, new Uint8Array(E2ECrypto.base64ToArrayBuffer(enc.ciphertext)));
+                    try { S._relayStats[kind].sent++; } catch (_) {}
+                } catch (_) {}
+                finishEncode(isA);
+            }
+
+            if (encWorker) {
+                encWorker.onmessage = function (e) {
+                    var d = e.data || {};
+                    if (d.error || !d.buffer || d.size < 100) { finishEncode(!!d.isA); return; }
+                    sendEncoded(d.buffer, !!d.isA);
+                };
+                encWorker.onerror = function () { finishEncode(true); finishEncode(false); };
+            }
 
             // Capture-and-send pipeline — draws onto the idle canvas, then
             // kicks off async encode on that canvas. Returns immediately so
@@ -8085,63 +8371,57 @@
                 if (isA) encodingA = true; else encodingB = true;
                 try {
                     drawCtx.drawImage(video, 0, 0, w, h);
+                    if (encWorker) {
+                        // Hand the frame to the worker as an ImageBitmap so the
+                        // JPEG encode happens off the main thread.
+                        createImageBitmap(drawCanvas).then(function (bmp) {
+                            try {
+                                encWorker.postMessage({ id: ++frameSeq, bitmap: bmp, isA: isA, quality: S.settings.relayVideoQuality || 0.6 }, [bmp]);
+                            } catch (_) { try { bmp.close(); } catch (_e) {} finishEncode(isA); }
+                        }).catch(function () { finishEncode(isA); });
+                        return;
+                    }
                     drawCanvas.toBlob(function (blob) {
-                        if (!blob || blob.size < 100) { if (isA) encodingA = false; else encodingB = false; return; }
-                        blob.arrayBuffer().then(function (buf) {
-                            var ws = getWs();
-                            if (ws && ws.bufferedAmount > 512 * 1024) {
-                                if (isA) encodingA = false; else encodingB = false;
-                                return;
-                            }
-                            var raw = new Uint8Array(buf);
-                            var enc = E2ECrypto.aeadEncrypt(raw, reusableKeyBytes);
-                            sendRelayBinary(kind, enc.nonce, new Uint8Array(E2ECrypto.base64ToArrayBuffer(enc.ciphertext)));
-                            try { S._relayStats[kind].sent++; } catch (_) {}
-                            if (isA) encodingA = false; else encodingB = false;
-                        }).catch(function () { if (isA) encodingA = false; else encodingB = false; });
+                        if (!blob || blob.size < 100) { finishEncode(isA); return; }
+                        blob.arrayBuffer().then(function (buf) { sendEncoded(buf, isA); }).catch(function () { finishEncode(isA); });
                     }, 'image/jpeg', S.settings.relayVideoQuality || 0.6);
-                } catch (_) { if (isA) encodingA = false; else encodingB = false; }
+                } catch (_) { finishEncode(isA); }
             }
 
             // ---- Timer modes ----
-            // Focused foreground: setTimeout (full rate).
-            // Hidden OR unfocused window: MessageChannel — Chrome clamps
-            // setTimeout to ~1s (and to 1/min later) for those, which was the
-            // "relay video drops to 1fps" report. rAF is worse (always ~1fps
-            // off-screen), so it is not used at all.
-            var _mcPort = null, _mcPort2 = null;
-            var _mcLast = 0;
+            // Visible: a plain setTimeout chain at the target rate.
+            // Backgrounded: a dedicated worker clock. A worker's timers are not
+            // subject to the page-level background clamp, and — unlike the old
+            // MessageChannel ping-pong — the worker does not busy-spin the main
+            // thread, so it cannot starve audio or the other relay stream.
+            var _tickWorker = null;
+            var _tickLast = 0;
             var _timerId = 0;
 
             function stopMcLoop() {
-                if (!_mcPort) return;
-                var p1 = _mcPort, p2 = _mcPort2;
-                _mcPort = null; _mcPort2 = null;
-                try { p1.onmessage = null; } catch (_) {}
-                try { p1.close(); } catch (_) {}
-                try { p2.close(); } catch (_) {}
+                if (!_tickWorker) return;
+                try { _tickWorker.postMessage({ cmd: 'stop' }); } catch (_) {}
+                try { _tickWorker.terminate(); } catch (_) {}
+                _tickWorker = null;
             }
 
             function startMcLoop() {
-                if (_mcPort) return;
-                var ch = new MessageChannel();
-                _mcPort = ch.port1;
-                _mcPort2 = ch.port2;
-                _mcLast = performance.now();
-                _mcPort.onmessage = function () {
+                if (_tickWorker) return;
+                try { _tickWorker = new Worker('relay-tick-worker.js'); } catch (_) { _tickWorker = null; return; }
+                _tickLast = performance.now();
+                _tickWorker.onmessage = function () {
                     if (!state.running || !needsUnthrottledLoop()) {
                         stopMcLoop();
                         if (state.running) scheduleNext();
                         return;
                     }
                     var now = performance.now();
-                    if (now - _mcLast >= targetMs) {
+                    if (now - _tickLast >= targetMs) {
                         captureFrame();
-                        _mcLast = now;
+                        _tickLast = now;
                     }
-                    try { ch.port2.postMessage(null); } catch (_) {}
                 };
-                ch.port2.postMessage(null);
+                _tickWorker.postMessage({ cmd: 'start', ms: Math.max(10, Math.min(60, targetMs)) });
             }
 
             function scheduleNext() {
@@ -8152,13 +8432,13 @@
                     return;
                 }
                 if (needsUnthrottledLoop()) {
-                    // Hidden / unfocused — MessageChannel (not clamped)
+                    // Backgrounded — worker clock (not clamped)
                     S._relayTimers[kind] = true;
                     startMcLoop();
                     return;
                 }
-                // Focused + visible — the single setTimeout chain
-                if (_mcPort) stopMcLoop();
+                // Visible — the single setTimeout chain
+                if (_tickWorker) stopMcLoop();
                 _timerId = setTimeout(function () {
                     if (!state.running) return;
                     if (needsUnthrottledLoop()) {
@@ -8174,27 +8454,22 @@
 
             function onVisChange() {
                 if (!state.running) {
-                    document.removeEventListener('visibilitychange', onVisHandler);
-                    window.removeEventListener('focus', onVisHandler);
-                    window.removeEventListener('blur', onVisHandler);
+                    document.removeEventListener('visibilitychange', _visHandler);
                     return;
                 }
                 if (needsUnthrottledLoop()) {
-                    // Hidden or the window lost focus — swap to MessageChannel.
+                    // Backgrounded — swap to the worker clock.
                     if (_timerId) { clearTimeout(_timerId); _timerId = 0; }
                     S._relayTimers[kind] = true;
                     startMcLoop();
                 }
-                // Refocused: the MC loop stands down on its next tick and
-                // resumes the setTimeout chain itself (no second chain here —
-                // doing both doubled the capture rate).
+                // Foregrounded: the worker clock stands down on its next tick
+                // and resumes the setTimeout chain itself (no second chain).
             }
             var _visHandler = onVisChange;
             state._visHandler = _visHandler;
             document.addEventListener('visibilitychange', _visHandler);
-            window.addEventListener('focus', _visHandler);
-            window.addEventListener('blur', _visHandler);
-            // Start foreground loop
+            // Start the loop
             scheduleNext();
         };
 
@@ -8236,9 +8511,15 @@
             window.removeEventListener('focus', state._visHandler);
             window.removeEventListener('blur', state._visHandler);
         }
-        // Release the hidden video element's stream reference
+        // Tear the off-main-thread encoder down
+        if (state && state.encWorker) {
+            try { state.encWorker.terminate(); } catch (_) {}
+            state.encWorker = null;
+        }
+        // Release the hidden video element's stream reference and detach it
         if (state && state.video) {
             try { state.video.srcObject = null; } catch (_) {}
+            try { if (state.video.parentNode) state.video.parentNode.removeChild(state.video); } catch (_) {}
         }
         delete _relayCanvases[kind];
     }
@@ -8343,41 +8624,17 @@
     }
 
     // ------------------------------------------------------------------
-    // Dynamic mesh/relay mode switching
+    // Mesh/relay mode selection
     // ------------------------------------------------------------------
-    // Server voice channels switch between mesh and relay based on the
-    // number of ACTIVE (hearing) participants:
-    //   - Video: ALWAYS server relay (quality over latency)
-    //   - Audio ≤5 active: WebRTC mesh (lowest latency)
-    //   - Audio >5 active: Server relay via WebSocket
-    // Deafened users don't count toward the threshold (they can't hear
-    // or talk), so server-muted users DO count (they can hear but not talk).
-    // Switching happens live without dropping the call.
-
-    var MESH_THRESHOLD = 5; // max active participants for mesh audio
-
-    // Count active (hearing) participants in the current room.
-    // Active = not deafened (can hear AND talk). Deafened users are excluded
-    // because they can't send or receive audio, so they don't need mesh peers.
-    function countActiveParticipants() {
-        var count = 0;
-        for (var uid in S.members) {
-            var m = S.members[uid];
-            if (!m.deafened && !m.force_deafened) count++;
-        }
-        // Always include self
-        if (!S.deafened) count = Math.max(count, 1);
-        return count;
-    }
-
-    // Determine the auto-selected audio mode based on participant count.
-    function autoAudioMode() {
-        if (S.roomType !== 'server' || !S.connected) return 'mesh';
-        return countActiveParticipants() > MESH_THRESHOLD ? 'relay' : 'mesh';
-    }
+    // MESH (P2P) is the default for EVERY media kind and is NEVER switched
+    // automatically: a server voice channel stays on the mesh no matter how
+    // many members are present. Server relay is strictly opt-in per kind
+    // (audio / camera / screen) from the camera options menu. The old
+    // threshold-based auto-switch that forced relay at > 5 active members is
+    // gone — nothing turns relay on for you.
 
     // Resolve the effective audio mode for a given user.
-    // Checks per-user override first, falls back to auto mode.
+    // Checks the per-user override first, then falls back to mesh (default).
     // Only self uid is affected by overrides (others' modes are their own).
     function resolveAudioMode(uid) {
         var selfId = getSelfId();
@@ -8389,13 +8646,7 @@
             var m = S.members[uid];
             if (m && (m.audio_mode === 'mesh' || m.audio_mode === 'relay')) return m.audio_mode;
         }
-        return autoAudioMode();
-    }
-
-    // Determine the auto-selected video mode.
-    function autoVideoMode() {
-        if (S.roomType !== 'server' || !S.connected) return 'mesh';
-        return S.settings.videoMeshMode ? 'mesh' : 'relay';
+        return 'mesh';
     }
 
     // Resolve the effective video mode for a given user.
@@ -8409,7 +8660,7 @@
             var m = S.members[uid];
             if (m && (m.video_mode === 'mesh' || m.video_mode === 'relay')) return m.video_mode;
         }
-        return autoVideoMode();
+        return 'mesh';
     }
 
     // Resolve camera-specific video mode (camera = video only, no audio).
@@ -8422,7 +8673,7 @@
             var m = S.members[uid];
             if (m && (m.camera_mode === 'mesh' || m.camera_mode === 'relay')) return m.camera_mode;
         }
-        return autoVideoMode();
+        return 'mesh';
     }
 
     // Resolve screen-specific mode (screen = video + screen audio).
@@ -8435,209 +8686,114 @@
             var m = S.members[uid];
             if (m && (m.screen_mode === 'mesh' || m.screen_mode === 'relay')) return m.screen_mode;
         }
-        return autoVideoMode();
+        return 'mesh';
     }
 
-    // Current mode state
-    S._lastAudioMode = null; // 'mesh' | 'relay' | null (initial)
-    var _recalcAudioTimer = null; // debounce timer for rapid mode switches
+    // Last applied audio mode — diagnostics/tests only. Modes never
+    // auto-switch anymore: mesh is the default, relay is opt-in.
+    S._lastAudioMode = 'mesh';
 
-    // Check if the mode needs to switch and apply it.
-    // Debounced: rapid member changes within 200ms collapse into one switch,
-    // preventing destructive relay↔mesh flip-flopping that leaks audio nodes.
-    function recalcAudioMode() {
-        if (S.roomType !== 'server' || !S.connected) return;
-        if (_recalcAudioTimer) clearTimeout(_recalcAudioTimer);
-        _recalcAudioTimer = setTimeout(function () {
-            _recalcAudioTimer = null;
-            if (S.roomType !== 'server' || !S.connected) return;
-            var selfId = getSelfId();
-            var newMode = resolveAudioMode(selfId);
-            var oldMode = S._lastAudioMode;
-
-            if (newMode === oldMode) return; // no change
-
-            S._lastAudioMode = newMode;
-            console.log('[Relay] Audio mode: ' + newMode + ' (active: ' + countActiveParticipants() + '/' + Object.keys(S.members).length + ')');
-
-            if (newMode === 'relay') {
-                switchAudioToRelay();
-            } else {
-                switchAudioToMesh();
-            }
-            // Update mode badges in the member list
-            renderPopup();
-        }, 100);
-    }
-
-    // Set a per-user audio mode override for self. 'auto' clears the override.
+    // Set the audio mode for self ('mesh' default, or 'relay').
     function setSelfAudioMode(mode) {
         var selfId = getSelfId();
         if (!selfId) return;
-        if (mode === 'auto') {
-            delete S._audioModeOverrides[selfId];
-        } else {
-            S._audioModeOverrides[selfId] = mode;
-        }
+        var next = (mode === 'relay') ? 'relay' : 'mesh';
+        S._audioModeOverrides[selfId] = next;
+        S._lastAudioMode = next;
         sendVoiceState();
-        recalcAudioMode();
+        if (next === 'relay') switchAudioToRelay(); else switchAudioToMesh();
+        updateCamOptMenuState();
         renderPopup();
-        showToast('Audio mode: ' + mode + (mode === 'auto' ? ' (auto)' : ' (manual)'));
+        showToast('Audio mode: ' + (next === 'relay' ? 'Server relay' : 'P2P mesh'));
     }
 
-    // Set a per-user video mode override for self. 'auto' clears the override.
-    function setSelfVideoMode(mode) {
+    // Apply the effective mesh/relay mode for ONE video kind to the live
+    // peers: in relay mode the WebRTC video sender is nulled and the relay
+    // loop started; in mesh mode the relay is stopped and the WebRTC track is
+    // re-added. Shared by the camera / screen / global video toggles.
+    function applyVideoRelayForKind(kind) {
         var selfId = getSelfId();
         if (!selfId) return;
-        if (mode === 'auto') {
-            delete S._videoModeOverrides[selfId];
-        } else {
-            S._videoModeOverrides[selfId] = mode;
-        }
-        sendVoiceState();
-        // Apply video mode change immediately
-        var effective = resolveVideoMode(selfId);
-        var currentlyRelaying = useVideoRelay();
-        if (effective === 'relay' && !currentlyRelaying) {
-            // Switch to relay: stop WebRTC video, start relay
-            for (var uid in S.peers) {
+        var effective = kind === 'camera' ? resolveCameraMode(selfId) : resolveScreenMode(selfId);
+        var uid;
+        if (effective === 'relay') {
+            for (uid in S.peers) {
                 var pc = S.peers[uid];
                 if (!pc || !pc.getSenders) continue;
                 pc.getSenders().forEach(function (sender) {
-                    if (sender.track && sender.track.kind === 'video') {
+                    if (sender.track && sender.track.kind === 'video' && isTrackKind(sender.track, kind)) {
                         sender.replaceTrack(null).catch(function () {});
                         sender._voiceNulled = sender.track;
                     }
                 });
             }
-            if (S.localStreams.camera && S.cameraOn) startVideoRelay(S.localStreams.camera, 'camera');
-            if (S.localStreams.screen && S.screenOn) startVideoRelay(S.localStreams.screen, 'screen');
-        } else if (effective === 'mesh' && currentlyRelaying) {
-            // Switch to mesh: stop relay, restore WebRTC video
-            stopAllVideoRelays();
-            for (var uid in S.peers) {
+            var stream = kind === 'camera' ? S.localStreams.camera : S.localStreams.screen;
+            var on = kind === 'camera' ? S.cameraOn : S.screenOn;
+            if (stream && on) startVideoRelay(stream, kind);
+        } else {
+            stopVideoRelay(kind);
+            for (uid in S.peers) {
                 var pc2 = S.peers[uid];
                 if (pc2 && pc2.getSenders) {
                     pc2.getSenders().forEach(function (sender) {
-                        if (sender.track && sender.track.kind === 'video') {
-                            // Remove existing video sender so addLocalTracks can re-add cleanly
+                        if (sender.track && sender.track.kind === 'video' && isTrackKind(sender.track, kind)) {
                             try { pc2.removeTrack(sender); } catch (_) {}
-                        } else if (sender._voiceNulled && sender._voiceNulled.kind === 'video') {
-                            // Nulled video sender from relay — remove its m-line
+                        } else if (sender._voiceNulled && sender._voiceNulled.kind === 'video' && isTrackKind(sender._voiceNulled, kind)) {
                             try { pc2.removeTrack(sender); } catch (_) {}
                             sender._voiceNulled = null;
                         }
                     });
                 }
-                addLocalTracks(S.peers[uid]);
+                addLocalTracks(pc2);
             }
         }
+    }
+
+    // Global video mode for self: applies to camera AND screen at once.
+    function setSelfVideoMode(mode) {
+        var selfId = getSelfId();
+        if (!selfId) return;
+        var next = (mode === 'relay') ? 'relay' : 'mesh';
+        S._videoModeOverrides[selfId] = next;
+        S._cameraModeOverrides[selfId] = next;
+        S._screenModeOverrides[selfId] = next;
+        sendVoiceState();
+        applyVideoRelayForKind('camera');
+        applyVideoRelayForKind('screen');
         updateCamOptMenuState();
         renderPopup();
-        showToast('Video mode: ' + mode + (mode === 'auto' ? ' (auto)' : ' (manual)'));
+        showToast('Video mode: ' + (next === 'relay' ? 'Server relay' : 'P2P mesh'));
     }
 
     // Set camera-specific video mode (camera = video only, no audio).
     function setSelfCameraMode(mode) {
         var selfId = getSelfId();
         if (!selfId) return;
-        if (mode === 'auto') {
-            delete S._cameraModeOverrides[selfId];
-        } else {
-            S._cameraModeOverrides[selfId] = mode;
-        }
+        var next = (mode === 'relay') ? 'relay' : 'mesh';
+        S._cameraModeOverrides[selfId] = next;
         sendVoiceState();
-        // Apply camera mode: relay or mesh for camera feed only
-        var effective = resolveCameraMode(selfId);
-        var peers = S.peers;
-        if (effective === 'relay') {
-            // Null camera video senders on WebRTC, start camera relay
-            for (var uid in peers) {
-                var pc = peers[uid];
-                if (!pc || !pc.getSenders) continue;
-                pc.getSenders().forEach(function (sender) {
-                    if (sender.track && sender.track.kind === 'video' && isTrackKind(sender.track, 'camera')) {
-                        sender.replaceTrack(null).catch(function () {});
-                        sender._voiceNulled = sender.track;
-                    }
-                });
-            }
-            if (S.localStreams.camera && S.cameraOn) startVideoRelay(S.localStreams.camera, 'camera');
-        } else {
-            // Mesh: stop camera relay, restore WebRTC camera
-            stopVideoRelay('camera');
-            for (var uid2 in peers) {
-                var pc2 = peers[uid2];
-                if (pc2 && pc2.getSenders) {
-                    pc2.getSenders().forEach(function (sender) {
-                        if (sender.track && sender.track.kind === 'video' && isTrackKind(sender.track, 'camera')) {
-                            try { pc2.removeTrack(sender); } catch (_) {}
-                        } else if (sender._voiceNulled && sender._voiceNulled.kind === 'video' && isTrackKind(sender._voiceNulled, 'camera')) {
-                            try { pc2.removeTrack(sender); } catch (_) {}
-                            sender._voiceNulled = null;
-                        }
-                    });
-                }
-                addLocalTracks(peers[uid2]);
-            }
-        }
+        applyVideoRelayForKind('camera');
         updateCamOptMenuState();
         renderPopup();
-        showToast('Camera mode: ' + mode + (mode === 'auto' ? ' (auto)' : ' (manual)'));
+        showToast('Camera mode: ' + (next === 'relay' ? 'Server relay' : 'P2P mesh'));
     }
 
     // Set screen-specific mode (screen = video + screen audio).
     function setSelfScreenMode(mode) {
         var selfId = getSelfId();
         if (!selfId) return;
-        if (mode === 'auto') {
-            delete S._screenModeOverrides[selfId];
-        } else {
-            S._screenModeOverrides[selfId] = mode;
-        }
+        var next = (mode === 'relay') ? 'relay' : 'mesh';
+        S._screenModeOverrides[selfId] = next;
         sendVoiceState();
-        // Apply screen mode: relay or mesh for screen feed only
-        var effective = resolveScreenMode(selfId);
-        var peers = S.peers;
-        if (effective === 'relay') {
-            // Null screen video senders on WebRTC, start screen relay
-            for (var uid in peers) {
-                var pc = peers[uid];
-                if (!pc || !pc.getSenders) continue;
-                pc.getSenders().forEach(function (sender) {
-                    if (sender.track && sender.track.kind === 'video' && isTrackKind(sender.track, 'screen')) {
-                        sender.replaceTrack(null).catch(function () {});
-                        sender._voiceNulled = sender.track;
-                    }
-                });
-            }
-            if (S.localStreams.screen && S.screenOn) startVideoRelay(S.localStreams.screen, 'screen');
-        } else {
-            // Mesh: stop screen relay, restore WebRTC screen
-            stopVideoRelay('screen');
-            for (var uid2 in peers) {
-                var pc2 = peers[uid2];
-                if (pc2 && pc2.getSenders) {
-                    pc2.getSenders().forEach(function (sender) {
-                        if (sender.track && sender.track.kind === 'video' && isTrackKind(sender.track, 'screen')) {
-                            try { pc2.removeTrack(sender); } catch (_) {}
-                        } else if (sender._voiceNulled && sender._voiceNulled.kind === 'video' && isTrackKind(sender._voiceNulled, 'screen')) {
-                            try { pc2.removeTrack(sender); } catch (_) {}
-                            sender._voiceNulled = null;
-                        }
-                    });
-                }
-                addLocalTracks(peers[uid2]);
-            }
-        }
+        applyVideoRelayForKind('screen');
         updateCamOptMenuState();
         renderPopup();
-        showToast('Screen mode: ' + mode + (mode === 'auto' ? ' (auto)' : ' (manual)'));
+        showToast('Screen mode: ' + (next === 'relay' ? 'Server relay' : 'P2P mesh'));
     }
 
     // Switch audio from WebRTC mesh to WebSocket relay.
     function switchAudioToRelay() {
-        console.log('[Relay] Switching audio to server relay (> ' + MESH_THRESHOLD + ' active)');
+        S._lastAudioMode = 'relay';
         // Mute ALL audio senders on WebRTC peers (mic + screen audio).
         // Both are relayed via WebSocket now.
         for (var uid in S.peers) {
@@ -8653,12 +8809,11 @@
         // Start both mic and screen audio relay capture loops
         startAudioRelay();
         startScreenAudioRelay();
-        showToast('Audio switched to server relay (' + countActiveParticipants() + ' active)');
     }
 
     // Switch audio from WebSocket relay back to WebRTC mesh.
     function switchAudioToMesh() {
-        console.log('[Relay] Switching audio to WebRTC mesh (≤ ' + MESH_THRESHOLD + ' active)');
+        S._lastAudioMode = 'mesh';
         // Stop both mic and screen audio relay capture loops
         stopAudioRelay();
         stopScreenAudioRelay();
@@ -8706,17 +8861,22 @@
                 }
             });
         }
-        showToast('Audio switched to WebRTC mesh (' + countActiveParticipants() + ' active)');
     }
 
     // Audio relay capture loop: captures mic PCM, encrypts, sends via WebSocket.
     var _audioRelayTimer = null;
 
+    // Audio must never be starved by a congested video pipe: the video relay
+    // drops frames at RELAY_VIDEO_MAX_BUFFERED (256 KB), while audio keeps
+    // flowing until the socket is genuinely unusable. The old 256 KB audio
+    // threshold meant two video streams alone could silence the mic relay.
+    var RELAY_AUDIO_MAX_BUFFERED = 4 * 1024 * 1024;
+
     var _relayCaptureSab = null; // SharedArrayBuffer for capture worklet → main thread
     var _relayCaptureInt = null; // Int32 view (writePos at [0], readPos at [1])
     var _relayCaptureFloat = null; // Float32 view starting at byte 8
     var _relayCapturePoll = null; // interval for polling capture SAB
-    var _relayCaptureMc = null; // MessageChannel for background-tab polling
+    var _relayCaptureMc = null; // worker clock for background-tab polling
     // Screen audio relay capture (separate from mic)
     var _screenAudioRelayTimer = null;
     var _screenAudioRelaySab = null;
@@ -8725,22 +8885,29 @@
     var _screenAudioRelayPoll = null;
     var _screenAudioRelayMc = null;
 
-    // MessageChannel-based poll for audio relay SAB — not throttled in background tabs.
+    // Background-tab clock for the audio relay poll. A worker's timers are not
+    // clamped the way a hidden page's setTimeout is, and — unlike the
+    // MessageChannel ping-pong this replaces — the worker does not busy-spin
+    // the main thread (that spin burned a CPU core whenever the audio relay was
+    // active in a background tab).
     function startAudioRelayMcPoll() {
         if (_relayCaptureMc) return;
-        var ch = new MessageChannel();
-        _relayCaptureMc = ch;
+        if (typeof Worker === 'undefined') return; // visible setInterval still polls
+        var worker;
+        try { worker = new Worker('relay-tick-worker.js'); } catch (_) { return; }
+        _relayCaptureMc = worker;
         var lastPoll = performance.now();
-        ch.port1.onmessage = function () {
+        worker.onmessage = function () {
+            if (_relayCaptureMc !== worker) return;
             if (!S.connected || !_relayCaptureSab) {
                 _relayCaptureMc = null;
-                ch.port1.close(); ch.port2.close();
+                try { worker.terminate(); } catch (_) {}
                 return;
             }
-            // When tab is visible, the setInterval handles polling; stop MC.
+            // Visible again: the setInterval handles polling; stand down.
             if (document.visibilityState === 'visible') {
                 _relayCaptureMc = null;
-                ch.port1.close(); ch.port2.close();
+                try { worker.terminate(); } catch (_) {}
                 return;
             }
             var now = performance.now();
@@ -8748,18 +8915,17 @@
                 pollAudioRelaySAB();
                 lastPoll = now;
             }
-            ch.port2.postMessage(null);
         };
-        ch.port2.postMessage(null);
+        worker.postMessage({ cmd: 'start', ms: 10 });
     }
 
-    // Shared poll logic used by both setInterval and MessageChannel paths
+    // Shared poll logic used by both the setInterval and worker-clock paths
     function pollAudioRelaySAB() {
         try {
             if (!S.connected || !S.roomKeyB64 || S.muted || S.deafened) return;
             var w = getWs();
             if (!w || w.readyState !== WebSocket.OPEN) return;
-            if (w.bufferedAmount > 256 * 1024) return;
+            if (w.bufferedAmount > RELAY_AUDIO_MAX_BUFFERED) return;
             var readPos = Atomics.load(_relayCaptureInt, 1);
             var writePos = Atomics.load(_relayCaptureInt, 0);
             var ringLen = _relayCaptureFloat.length;
@@ -8817,7 +8983,7 @@
                 _audioRelayTimer = { source: source, node: node, silent: silent };
 
                 // Poll the SAB every 10ms and send captured audio.
-                // Uses setInterval when visible, MessageChannel when hidden.
+                // Uses setInterval when visible, the worker clock when hidden.
                 _relayCapturePoll = setInterval(function () {
                     pollAudioRelaySAB();
                     // Also start MC poll if tab is hidden (setInterval is throttled)
@@ -8857,7 +9023,7 @@
                 if (!S.connected || !S.roomKeyB64 || S.muted || S.deafened) return;
                 var w = getWs();
                 if (!w || w.readyState !== WebSocket.OPEN) return;
-                if (w.bufferedAmount > 256 * 1024) return;
+                if (w.bufferedAmount > RELAY_AUDIO_MAX_BUFFERED) return;
                 var pcm = e.inputBuffer.getChannelData(0);
                 var int16 = new Int16Array(pcm.length);
                 for (var i = 0; i < pcm.length; i++) {
@@ -8884,7 +9050,8 @@
             _relayCapturePoll = null;
         }
         if (_relayCaptureMc) {
-            try { _relayCaptureMc.port1.close(); _relayCaptureMc.port2.close(); } catch (_) {}
+            try { _relayCaptureMc.postMessage({ cmd: 'stop' }); } catch (_) {}
+            try { _relayCaptureMc.terminate(); } catch (_) {}
             _relayCaptureMc = null;
         }
         _relayCaptureSab = null;
@@ -8956,7 +9123,7 @@
                 if (!S.connected || !S.roomKeyB64 || S.muted || S.deafened) return;
                 var w = getWs();
                 if (!w || w.readyState !== WebSocket.OPEN) return;
-                if (w.bufferedAmount > 256 * 1024) return;
+                if (w.bufferedAmount > RELAY_AUDIO_MAX_BUFFERED) return;
                 var pcm = e.inputBuffer.getChannelData(0);
                 var targetRate = getRelayScreenAudioQuality();
                 var downsampled = downsampleRelayAudio(pcm, RELAY_SAMPLE_RATE, targetRate);
@@ -8980,21 +9147,34 @@
         _screenAudioRelayTimer = { source: source, processor: processor, silent: silent };
     }
 
+    // Same worker clock as the mic poll. The old version never stood down when
+    // the tab became visible again and spun the main thread forever.
     function startScreenAudioRelayMcPoll() {
         if (_screenAudioRelayMc) return;
-        var ch = new MessageChannel();
-        _screenAudioRelayMc = ch;
+        if (typeof Worker === 'undefined') return;
+        var worker;
+        try { worker = new Worker('relay-tick-worker.js'); } catch (_) { return; }
+        _screenAudioRelayMc = worker;
         var lastPoll = performance.now();
-        ch.port1.onmessage = function () {
-            if (!_screenAudioRelayTimer) { ch.port1.close(); ch.port2.close(); return; }
+        worker.onmessage = function () {
+            if (_screenAudioRelayMc !== worker) return;
+            if (!_screenAudioRelayTimer) {
+                _screenAudioRelayMc = null;
+                try { worker.terminate(); } catch (_) {}
+                return;
+            }
+            if (document.visibilityState === 'visible') {
+                _screenAudioRelayMc = null;
+                try { worker.terminate(); } catch (_) {}
+                return;
+            }
             var now = performance.now();
             if (now - lastPoll >= 10) {
                 pollScreenAudioRelaySAB();
                 lastPoll = now;
             }
-            ch.port2.postMessage(null);
         };
-        ch.port2.postMessage(null);
+        worker.postMessage({ cmd: 'start', ms: 10 });
     }
 
     function pollScreenAudioRelaySAB() {
@@ -9003,7 +9183,7 @@
             if (!S.localStreams.screen || !S.localStreams.screen.getAudioTracks().length) return;
             var w = getWs();
             if (!w || w.readyState !== WebSocket.OPEN) return;
-            if (w.bufferedAmount > 256 * 1024) return;
+            if (w.bufferedAmount > RELAY_AUDIO_MAX_BUFFERED) return;
             var readPos = Atomics.load(_screenAudioRelayInt, 1);
             var writePos = Atomics.load(_screenAudioRelayInt, 0);
             var ringLen = _screenAudioRelayFloat.length;
@@ -9031,7 +9211,11 @@
 
     function stopScreenAudioRelay() {
         if (_screenAudioRelayPoll) { clearInterval(_screenAudioRelayPoll); _screenAudioRelayPoll = null; }
-        if (_screenAudioRelayMc) { try { _screenAudioRelayMc.port1.close(); _screenAudioRelayMc.port2.close(); } catch (_) {} _screenAudioRelayMc = null; }
+        if (_screenAudioRelayMc) {
+            try { _screenAudioRelayMc.postMessage({ cmd: 'stop' }); } catch (_) {}
+            try { _screenAudioRelayMc.terminate(); } catch (_) {}
+            _screenAudioRelayMc = null;
+        }
         _screenAudioRelaySab = null; _screenAudioRelayInt = null; _screenAudioRelayFloat = null;
         if (_screenAudioRelayTimer) {
             try {
@@ -9531,38 +9715,13 @@
         if (S.connected) sendVoiceState();
     }
 
+    // Legacy global video toggle (kept for API/tests only — the UI now uses
+    // the per-kind mesh/relay control). Mesh is the default for every kind.
     function setVideoMeshMode(on) {
         S.settings.videoMeshMode = !!on;
         saveSettings();
-        updateSettingsLabels();
-        updateCamOptMenuState();
-        if (!S.connected) return;
-        // Update the per-user video override to match the global setting
-        var selfId = getSelfId();
-        if (selfId) {
-            S._videoModeOverrides[selfId] = on ? 'mesh' : 'relay';
-        }
-        if (on) {
-            stopAllVideoRelays();
-            for (var uid in S.peers) {
-                addLocalTracks(S.peers[uid]);
-            }
-            showToast('Video mode: P2P mesh (lower latency)');
-        } else {
-            for (var uid in S.peers) {
-                var pc = S.peers[uid];
-                if (!pc || !pc.getSenders) continue;
-                pc.getSenders().forEach(function (sender) {
-                    if (sender.track && sender.track.kind === 'video') {
-                        sender.replaceTrack(null).catch(function () {});
-                    }
-                });
-            }
-            if (S.localStreams.camera && S.cameraOn) startVideoRelay(S.localStreams.camera, 'camera');
-            if (S.localStreams.screen && S.screenOn) startVideoRelay(S.localStreams.screen, 'screen');
-            showToast('Video mode: server relay (better quality)');
-        }
-        renderPopup();
+        if (!S.connected) { updateCamOptMenuState(); return; }
+        setSelfVideoMode(on ? 'mesh' : 'relay');
     }
 
     function retuneAllVideoSenders() {

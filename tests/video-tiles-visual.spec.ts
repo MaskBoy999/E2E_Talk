@@ -578,6 +578,9 @@ test.describe('camera tile visuals (real pixels)', () => {
             const btnVisible = await pipBtn.isVisible();
             console.log('[T3] pip button visible =', btnVisible);
             await pipBtn.click();
+            // The PiP button now opens a picker — pick A's relayed camera feed.
+            await pair.pageB.waitForSelector('#voice-pip-menu button', { timeout: 5000 });
+            await pair.pageB.click(`#voice-pip-menu button[data-uid="${aUid}"][data-kind="camera"]`);
             let pipOk = true;
             try {
                 await pair.pageB.waitForFunction(() => !!document.pictureInPictureElement, undefined, { timeout: 15000 });

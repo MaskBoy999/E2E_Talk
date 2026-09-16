@@ -156,7 +156,10 @@ test.describe('relay, resize and transforms (on-screen behaviour)', () => {
                 return typeof orig === 'function' ? orig.apply(this) : Promise.reject(new Error('unsupported'));
             };
         });
+        // The PiP button opens a picker — choose the remote user's camera feed.
         await page.click('#voice-popup-pip');
+        await page.waitForSelector('#voice-pip-menu button', { timeout: 5000 });
+        await page.click(`#voice-pip-menu button[data-uid="${u2.user.id}"][data-kind="camera"]`);
         await page.waitForTimeout(3000);
 
         const pip = await page.evaluate(() => {

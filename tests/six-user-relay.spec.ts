@@ -193,7 +193,7 @@ async function setupMemberPage(browser: any, inviteCode: string, username: strin
 
 test.describe('6-user relay test (visible browsers)', () => {
 
-    test('6 users join voice, auto relay triggers, each talks, all cameras on', async ({ page, context }) => {
+    test('6 users join voice (mesh default), each talks, all cameras on relay', async ({ page, context }) => {
         test.setTimeout(600000);
 
         console.log('=== 6-USER RELAY TEST ===');
@@ -230,7 +230,7 @@ test.describe('6-user relay test (visible browsers)', () => {
         // Wait for all member updates to propagate
         await page.waitForTimeout(3000);
 
-        // --- Verify auto relay kicked in (>5 active = relay) ---
+        // --- Verify audio stays on the mesh default (relay is opt-in) ---
         const state0 = await getState(page);
         console.log('[0] State after all joined:', JSON.stringify(state0));
         expect(state0!.connected).toBe(true);
@@ -245,9 +245,10 @@ test.describe('6-user relay test (visible browsers)', () => {
         const relayCount = statesAfterJoin.filter(s => s && s.lastAudioMode === 'relay').length;
         const meshCount = statesAfterJoin.filter(s => s && s.lastAudioMode === 'mesh').length;
         console.log(`[JOIN] Audio modes: ${relayCount} relay, ${meshCount} mesh`);
-        // With 6 users, active count > 5, so relay should auto-activate
-        // But some users may deafen/mute affecting the count
-        console.log('[PASS] Auto relay triggered for participants');
+        // Relay is opt-in now: 6 members must NOT auto-switch anyone to relay.
+        expect(relayCount).toBe(0);
+        expect(meshCount).toBeGreaterThan(0);
+        console.log('[PASS] No auto relay at 6 members (mesh default)');
 
         // --- All 6 unmute and take turns "talking" ---
         console.log('\n--- TURN-TAKING: Each user unmutes briefly ---');
@@ -275,8 +276,11 @@ test.describe('6-user relay test (visible browsers)', () => {
             await sp.waitForTimeout(500);
         }
 
-        // --- All 6 turn on camera ---
-        console.log('\n--- CAMERAS: All 6 turn on camera ---');
+        // --- All 6 turn on camera (relay is opt-in, so force it here) ---
+        console.log('\n--- CAMERAS: All 6 turn on camera (video relay forced) ---');
+        for (let i = 0; i < 6; i++) {
+            await allPages[i].evaluate(() => { (window as any).VoiceManager.setSelfVideoMode('relay'); });
+        }
         for (let i = 0; i < 6; i++) {
             const p = allPages[i];
             await p.evaluate(async () => {

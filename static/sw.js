@@ -7,7 +7,10 @@
 // 3. Push notification handling
 // =====================================================================
 
-const CACHE_NAME = 'e2e-chat-v2';
+// Bump this whenever static JS changes: assets are served cache-first, so an
+// unchanged cache name keeps an OLD voice.js/chat.js alive and code fixes look
+// like they "didn't apply".
+const CACHE_NAME = 'e2e-chat-v4';
 const STATIC_ASSETS = [
     '/',
     '/index.html',
@@ -15,6 +18,8 @@ const STATIC_ASSETS = [
     '/style.css',
     '/chat.js',
     '/voice.js',
+    '/relay-encode-worker.js',
+    '/relay-tick-worker.js',
     '/crypto.js',
     '/secure-storage.js',
     '/doc-preview.js',
