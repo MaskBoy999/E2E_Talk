@@ -522,6 +522,11 @@
         // can grow past 300px on wide screens, so a calc() alone drifts).
         syncOverlayBounds();
         window.addEventListener('resize', syncOverlayBounds);
+        // Delegated feed-menu opener + tile refit on relayout (see
+        // onTileContextMenu / refitAllTiles).
+        document.addEventListener('contextmenu', onTileContextMenu, true);
+        window.addEventListener('resize', refitAllTiles);
+        window.addEventListener('orientationchange', refitAllTiles);
         // The floating voice bar / DM mini bar can be dragged anywhere on
         // screen (position is persisted in localStorage).
         makeDraggable('voice-bar', 'voice_bar_pos');
@@ -3371,11 +3376,26 @@
     function handleVoiceMembers(data) {
         if (!S.connected) return;
         var list = data.members || [];
+        var prevMembers = S.members || {};
         var newMembers = {};
         list.forEach(function (m) { newMembers[m.user_id] = m; });
         S.members = newMembers;
 
         var selfId = getSelfId();
+
+        // A full member-list snapshot is the ONLY update for some paths (a
+        // joiner/leaver broadcast carries everyone), so diff it: any feed that
+        // went OFF since the last snapshot must have its surface cleared too,
+        // otherwise the receiver keeps a stuck/frozen frame until something
+        // else rebuilds the row (the "camera closed but frame stays" report).
+        Object.keys(newMembers).forEach(function (uid) {
+            if (uid === selfId) return;
+            var p = prevMembers[uid];
+            if (!p) return;
+            ['camera', 'screen'].forEach(function (k) {
+                if (p[k] && !newMembers[uid][k]) clearFeedSurface(uid, k);
+            });
+        });
         if (S.roomType === 'dm' && list.some(function (m) { return m.user_id !== selfId; })) {
             markDmCallAnswered();
         }
@@ -3460,8 +3480,10 @@
                     : (member.screen_mode || member.video_mode);
                 var turnedOff = prev[k] && !member[k];
                 var leftRelay = !!member[k] && announced === 'mesh';
-                if (!turnedOff && !leftRelay) return;
-                dropRelayFeed(member.user_id, k, !!member[k]);
+                // Feed OFF → clear the whole surface (relay frame + mesh
+                // decoder + fullscreen), not just the relay <img>.
+                if (turnedOff) { clearFeedSurface(member.user_id, k); return; }
+                if (leftRelay) dropRelayFeed(member.user_id, k, true);
             });
         }
         // Check if deafen state changed for any member — recalc audio mode
@@ -4516,9 +4538,10 @@
     }
 
     function closePipMenu() {
-        var menu = el('voice-pip-menu');
+        var menu = overlayNode('voice-pip-menu');
         if (!menu) return;
         menu.style.display = 'none';
+        rehomeOverlays();
         if (menu._pipDocClick) {
             document.removeEventListener('click', menu._pipDocClick);
             menu._pipDocClick = null;
@@ -4526,9 +4549,10 @@
     }
 
     function openPipMenu(anchor) {
-        var menu = el('voice-pip-menu');
+        var menu = overlayNode('voice-pip-menu');
         if (!menu) return;
         if (!document.pictureInPictureEnabled) { showToast('PiP not supported in this browser'); return; }
+        mountOverlay(menu);
         var selfId = getSelfId();
         var sources = collectPipSources();
         menu.innerHTML = '';
@@ -4577,7 +4601,9 @@
                 }
                 var m = S.members[sec.uid] || {};
                 var disp = (sec.uid === selfId) ? 'You' : memberDisplayName(sec.uid, m);
-                var uname = m.username || (sec.uid === selfId ? (S.selfUsername || '') : '') || '';
+                // Display name + @username: both are shown (and both are
+                // searchable), so the picker matches the member list treatment.
+                var uname = m.username || (sec.uid === selfId ? getSelfUsername() : '') || '';
                 var row = document.createElement('div');
                 row.className = 'voice-pip-user';
                 // Search haystack: display name + username, so either matches.
@@ -4636,8 +4662,14 @@
                     ic.setAttribute('class', 'ui-icon');
                     ic.setAttribute('width', '14');
                     ic.setAttribute('height', '14');
+                    ic.setAttribute('aria-hidden', 'true');
+                    var iconRef = src.kind === 'screen' ? '#icon-monitor' : '#icon-camera';
                     var use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
-                    use.setAttribute('href', src.kind === 'screen' ? '#icon-monitor' : '#icon-camera');
+                    // Both forms: SVG2 `href` plus the legacy xlink:href — some
+                    // engines only resolve the namespaced one, and a missing
+                    // reference renders as an empty box (broken icon).
+                    use.setAttribute('href', iconRef);
+                    try { use.setAttributeNS('http://www.w3.org/1999/xlink', 'xlink:href', iconRef); } catch (_) {}
                     ic.appendChild(use);
                     btn.appendChild(ic);
                     var lbl = document.createElement('span');
@@ -4898,8 +4930,9 @@
     // mirror close it immediately; flash closes it too (the white overlay
     // itself becomes the "flash is on" indicator).
     function openCamOptMenu(anchor) {
-        var menu = el('voice-cam-opt-menu');
+        var menu = overlayNode('voice-cam-opt-menu');
         if (!menu) return;
+        mountOverlay(menu);
         // Disable camera-only options when camera is off
         var flip = el('cam-opt-flip');
         var flash = el('cam-opt-flash');
@@ -4926,8 +4959,9 @@
     }
 
     function closeCamOptMenu() {
-        var menu = el('voice-cam-opt-menu');
+        var menu = overlayNode('voice-cam-opt-menu');
         if (menu) menu.style.display = 'none';
+        rehomeOverlays();
     }
 
     function updateCamOptMenuState() {
@@ -5117,6 +5151,17 @@
         } catch (_) { return null; }
     }
 
+    // Our own @username for the places that render it (e.g. the PiP picker),
+    // from the same sources getSelfId() uses.
+    function getSelfUsername() {
+        if (window.currentUser && currentUser.username) return currentUser.username;
+        if (typeof user !== 'undefined' && user && user.username) return user.username;
+        try {
+            var u = JSON.parse(localStorage.getItem('user') || 'null');
+            return (u && u.username) || '';
+        } catch (_) { return ''; }
+    }
+
     function el(id) { return document.getElementById(id); }
 
     // Tell the DM chat layer that the persisted waiting state changed so it can
@@ -5282,6 +5327,12 @@
     }
     if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
         document.addEventListener('visibilitychange', _updateBackgroundStart);
+        // Native fullscreen ended (or a fullscreened wrapper was destroyed by a
+        // re-render) — bring any open menu back out of the top layer so it can
+        // never be stranded inside a detached element.
+        document.addEventListener('fullscreenchange', function () {
+            if (!document.fullscreenElement) rehomeOverlays();
+        });
         // Mobile sleep/wake recovery. 'visibilitychange' alone misses two real
         // wake paths (PWA resume; lock-screen without a visibility flip on
         // some Android browsers), so also listen on 'pageshow' (bfcache
@@ -6307,7 +6358,62 @@
         return found;
     }
 
-    // The only place tile click/contextmenu handlers are bound. Guarded, since
+    // ------------------------------------------------------------------
+    // Right-click on a feed tile — DELEGATED (capture phase, document level)
+    // ------------------------------------------------------------------
+    // Every surface (voice-channel member row, DM call tile, DM self strip,
+    // fullscreen wrapper) builds its own tile elements, and the menu used to
+    // depend on a handler being bound to THAT exact element. Any tile that was
+    // re-created, moved into the fullscreen wrapper, wrapped in a rotation slot
+    // or rendered by the relay path could silently lose it — reported as
+    // "can't access the rotate / mirror / volume options for a camera or screen
+    // share while fullscreened".
+    //
+    // The resolver below finds the tile from the event target, so ONE capture
+    // listener opens the feed menu for every feed, everywhere — including the
+    // black area AROUND a letterboxed picture, which is most of a fullscreen
+    // screen and the part users actually right-click.
+    function tileNodeFrom(target) {
+        if (!target || !target.closest) return null;
+        var node = target.closest('video.remote-video-tile, video.voice-self-video, img.relay-video, .voice-tile-slot');
+        if (!node) return null;
+        if (node.classList && node.classList.contains('voice-tile-slot')) {
+            node = node.querySelector('video[data-kind], img[data-kind]') || null;
+        }
+        return node;
+    }
+
+    // The feed the user is looking at inside a container (its visible tile).
+    function visibleFeedIn(container) {
+        var found = null;
+        container.querySelectorAll('img.relay-video[data-kind], video.remote-video-tile[data-kind], video.voice-self-video[data-kind]').forEach(function (n) {
+            if (found || n.style.display === 'none') return;
+            found = n;
+        });
+        return found;
+    }
+
+    function onTileContextMenu(e) {
+        var tile = tileNodeFrom(e.target);
+        if (!tile) {
+            // Not on a tile: the black area of a fullscreen picture, the empty
+            // part of a media row, or the self strip still belongs to the feed
+            // shown there.
+            var host = e.target && e.target.closest ? e.target.closest(
+                '.voice-fs-wrap, .voice-member-media, .dm-call-tile-media, .voice-self-preview-wrap') : null;
+            if (!host) return;                       // e.g. the member row's name area
+            tile = visibleFeedIn(host);
+            if (!tile) return;
+        }
+        var uid = tile.dataset ? tile.dataset.uid : null;
+        var kind = tile.dataset ? tile.dataset.kind : null;
+        if (!uid) return;
+        e.preventDefault();
+        e.stopPropagation();
+        openVolumeMenu(e, uid, kind === 'screen' ? 'screen' : 'video');
+    }
+
+    // The only place tile click handlers are bound. Guarded, since
     // the relay path used to add its OWN click handler on top of this one: a
     // single click ran toggleFullscreen twice, and the second call exited then
     // immediately re-entered fullscreen (tile 1 worked, tile 2 seemed dead,
@@ -6358,11 +6464,54 @@
             vid.style.display = feedOn ? 'block' : 'none';
             if (feedOn) reattachTileStream(vid);
             if (vid.dataset) applyTileTransform(vid, uid, kind);
+            // A tile that spent its first frames hidden has no fit yet.
+            if (feedOn) { fitTileBox(vid); fitTileWhenReady(vid); }
         });
         imgs.forEach(function (img) {
             if (img.src && img.src.indexOf('blob:') === 0) URL.revokeObjectURL(img.src);
             img.remove();
         });
+        syncResetViewChips(uid, kind);
+    }
+
+    // Fully clear a member's feed surface when they turn a camera / screen OFF.
+    //
+    // dropRelayFeed() handles the relay <img> path, but the MESH path (the
+    // default) leaves a <video> element attached to a track that just ended —
+    // browsers do NOT blank the element, they keep painting the last decoded
+    // frame, so the tile stays "on" as a stuck/frozen image for everyone else.
+    // A fullscreened or restored tile can additionally be re-inserted later by
+    // the fullscreen-exit path with its stream re-attached. So: drop the relay
+    // frame, detach the decoder + hide every video surface for that feed, leave
+    // fullscreen if that feed is what is fullscreened, and refresh any reset-
+    // view chip. Callers: the per-state path (handleMemberUpdate) and the
+    // full-snapshot path (handleVoiceMembers) — a feed must never stay on
+    // screen once it is OFF.
+    function clearFeedSurface(uid, kind) {
+        if (!uid || !kind) return;
+        dropRelayFeed(uid, kind, false);
+        document.querySelectorAll('video.remote-video-tile[data-uid="' + uid + '"][data-kind="' + kind + '"]').forEach(function (v) {
+            try { if (v.srcObject) v.srcObject = null; } catch (_) {}
+            v.style.display = 'none';
+            v.removeAttribute('data-relay-hidden');
+        });
+        // A fullscreened tile for a feed that just went off must not keep its
+        // frozen frame on screen. Exit native fullscreen (if that is what is
+        // active) AND drop the tile out of the wrapper — if the fullscreen
+        // request was blocked (no user activation) no fullscreenchange handler
+        // ever runs, and the wrapper would otherwise keep showing the frozen
+        // frame. The exit handler skips a tile that is no longer inside the
+        // wrapper, so removing it here is safe either way.
+        var wraps = document.querySelectorAll('.voice-fs-wrap');
+        for (var wi = 0; wi < wraps.length; wi++) {
+            var wrapped = wraps[wi].querySelector('[data-uid="' + uid + '"][data-kind="' + kind + '"]');
+            if (!wrapped) continue;
+            try {
+                var p = document.exitFullscreen();
+                if (p && p.catch) p.catch(function () {});
+            } catch (_) {}
+            try { wrapped.remove(); } catch (_) {}
+        }
         syncResetViewChips(uid, kind);
     }
 
@@ -6401,6 +6550,8 @@
                 // Keep the per-viewer mirror/rotation across a tile rebuild
                 // (renderPopup/renderDmPanel destroy and re-create every tile).
                 applyTileTransform(img, uid, kind);
+                fitTileBox(img);
+                fitTileWhenReady(img);
             }
             videoTile.setAttribute('data-relay-hidden', '1');
             videoTile.style.display = 'none';
@@ -6425,6 +6576,8 @@
                 // restore the per-viewer view transform after a rebuild.
                 applyTileTransform(video, uid, kind);
                 bindTileInteractions(video);
+                fitTileBox(video);
+                fitTileWhenReady(video);
                 return;
             }
             if (isSelf) {
@@ -6443,9 +6596,16 @@
             // renderer-side CSS — nothing is sent.
             applyTileTransform(video, uid, kind);
             bindTileInteractions(video);
+            // Size the box to the picture inside the row's designated space.
+            fitTileBox(video);
+            fitTileWhenReady(video);
         });
         // Tiles may have been rebuilt — re-sync any "Reset view" hint chips.
         syncAllResetViewChips();
+        // Two feeds side by side (camera + screen) size against each other's
+        // footprint; the per-tile fit above sees the sibling's PRE-fit width, so
+        // converge once every tile exists.
+        refitAllTiles();
     }
 
     // Re-inject relay video <img> tiles after renderPopup() rebuilds all tiles
@@ -6460,6 +6620,10 @@
             var kind = parts[1];
             var url = frames[key];
             if (!url || !uid || !kind) continue;
+            // Never resurrect a cached relay frame for a feed the member has
+            // turned OFF (defence in depth behind clearFeedSurface).
+            var live = S.members[uid];
+            if (live && live[kind] === false) continue;
             // If the relay img is currently fullscreened its element lives in
             // the wrap, not in the rebuilt tile list — re-home it to the new
             // tile so exiting fullscreen lands it in the right container.
@@ -6805,6 +6969,9 @@
         Object.keys(S.remoteStreams).forEach(function (uid) {
             applyScreenAudioGate(uid);
         });
+        // A tile that was hidden behind a Load button had no frame to size
+        // against when it was created — fit the ones that just became visible.
+        refitAllTiles();
     }
 
     function renderRemoteTile(uid, kind) {
@@ -6834,6 +7001,8 @@
             // Single guarded binder: click = fullscreen, right-click = the View
             // menu (mirror / rotate / reset) on our OWN feed.
             bindTileInteractions(v);
+            fitTileBox(v);
+            fitTileWhenReady(v);
             wrap.appendChild(v);
         }
         if (S.screenOn && S.localStreams.screen) {
@@ -6847,6 +7016,8 @@
             s.setAttribute('data-self', '1');
             s.setAttribute('data-uid', getSelfId());
             bindTileInteractions(s);
+            fitTileBox(s);
+            fitTileWhenReady(s);
             wrap.appendChild(s);
         }
         if (!S.cameraOn && !S.screenOn) {
@@ -6872,9 +7043,14 @@
             // reset how YOU had your own feeds arranged.
             document.querySelectorAll('#dm-call-self video.voice-self-video').forEach(function (v) {
                 applyTileTransform(v, v.dataset.uid, v.dataset.kind);
+                // The strip is in the DOM now — size each feed to its picture
+                // inside the strip's own space.
+                fitTileBox(v);
+                fitTileWhenReady(v);
             });
             // The self strip was rebuilt — restore any "Reset view" hint chip.
             syncAllResetViewChips();
+            refitAllTiles();
         }
     }
 
@@ -7058,6 +7234,8 @@
             // see this feed. Remote tiles never mirror by default.
             applyTileTransform(video, uid, kind);
             bindTileInteractions(video);
+            fitTileBox(video);
+            fitTileWhenReady(video);
         });
         // Right-click ANYWHERE on a DM call tile (avatar, name, placeholder —
         // not just the video) opens the per-member volume slider, matching the
@@ -7195,6 +7373,60 @@
     }
 
     // ------------------------------------------------------------------
+    // Fullscreen-safe menus
+    // ------------------------------------------------------------------
+    // A NATIVE fullscreen element renders in the browser's TOP LAYER: every
+    // element outside it — including our body-level menus, whatever their
+    // z-index — is invisible AND unclickable. So while a tile is natively
+    // fullscreened, the volume / camera-options / PiP menus are parked INSIDE
+    // that fullscreen element (its descendants render normally there) and
+    // handed back to <body> when the menu closes or fullscreen ends.
+    //
+    // The other fullscreen-ish surfaces (the voice popup's own "full screen"
+    // button, an expanded DM call panel) are plain CSS overlays, so they only
+    // need the menu's z-index to sit above them (see .volume-menu in the
+    // stylesheet).
+    var OVERLAY_IDS = ['volume-menu', 'voice-cam-opt-menu', 'voice-pip-menu'];
+    var _overlayNodes = {};
+
+    // Cached node refs: a fullscreen wrapper can be removed from the DOM while
+    // an overlay still lives inside it — getElementById() would then return
+    // null and the menu would be lost forever.
+    function overlayNode(id) {
+        if (!_overlayNodes[id] || !_overlayNodes[id].isConnected) {
+            var found = document.getElementById(id);
+            if (found) _overlayNodes[id] = found;
+        }
+        return _overlayNodes[id] || null;
+    }
+
+    function mountOverlay(node) {
+        if (!node) return;
+        if (!node._overlayHome) node._overlayHome = node.parentNode || document.body;
+        var fsEl = document.fullscreenElement;
+        if (fsEl && fsEl !== node && !fsEl.contains(node)) {
+            try { fsEl.appendChild(node); } catch (_) {}
+        } else if (!fsEl && node.parentNode !== node._overlayHome) {
+            try { node._overlayHome.appendChild(node); } catch (_) {}
+        }
+    }
+
+    // Send every overlay back to its normal <body> home (called when native
+    // fullscreen ends — including when the wrapper was destroyed by a re-render
+    // while a menu was open).
+    function rehomeOverlays() {
+        if (document.fullscreenElement) return;
+        OVERLAY_IDS.forEach(function (id) {
+            var node = overlayNode(id);
+            if (!node) return;
+            var home = node._overlayHome || document.body;
+            if (node.parentNode === home) return;
+            try { home.appendChild(node); } catch (_) {}
+        });
+    }
+    VoiceManager._rehomeOverlays = rehomeOverlays;
+
+    // ------------------------------------------------------------------
     // UI: per-viewer tile transforms (right-click menu) — mirror/rotate only
     // change how YOU see a member's camera/screen feed. Nothing is signaled
     // or sent; the E2EE media path is untouched. The mirror is ALWAYS a
@@ -7288,10 +7520,12 @@
                 slot.remove();
             }
             clearInlineDims(video);
-            // Non-rotated tiles in media context: let CSS handle sizing
-            // (height:100%, width:auto, max-width:46%). Only set inline dims
-            // when there IS a rotation (sideways) that swaps width/height.
+            // Non-rotated tile: clear any rotation-swapped dims, then re-fit the
+            // box to the picture inside the row's space (the stylesheet's
+            // height:100%/max-width:46% box letterboxed odd ratios — see
+            // fitTileBox()).
             setTransform(video, css);
+            fitTileBox(video);
             return;
         }
         // 90°/270° rotation. A rotated element's VISUAL box is the transpose of
@@ -7317,11 +7551,17 @@
             // Not in a tile row (e.g. the DM self preview) — plain transform.
             clearInlineDims(video);
             setTransform(video, css);
+            fitTileBox(video);
             return;
         }
         // Measure the NATURAL (unrotated) size while the video is still a
         // direct child of the row (height:100% resolves against the row).
         clearInlineDims(video);
+        // Fit the box to the picture FIRST: a letterboxed stylesheet box (the
+        // DM self strip's 240×150 caps on a portrait phone camera) would
+        // otherwise be measured as the "natural" size and the rotated slot
+        // would come out with the wrong aspect.
+        fitTileBox(video);
         var bw = video.offsetWidth;
         var bh = video.offsetHeight;
         if (!(bw > 0 && bh > 0)) return;
@@ -7396,6 +7636,126 @@
         try { video.style.setProperty(cssProp, val, 'important'); } catch (_) { video.style[prop] = val; }
     }
 
+    // ------------------------------------------------------------------
+    // Tile sizing: fit the preview to the picture, inside the row's space
+    // ------------------------------------------------------------------
+    // A feed tile used to be sized ONLY by the stylesheet (height:100%, the
+    // 46% width cap, the 240×150 caps on the DM self strip). Whenever the
+    // stylesheet box did not match the source ratio — a PORTRAIT phone camera
+    // in the DM self strip, an ultra-wide screen share clamped by max-width, a
+    // stale inline size — the element kept the wrong-shaped box and
+    // `object-fit: contain` letterboxed the picture inside it. The resulting
+    // black area looked like part of the tile and the "Reset view" chip floated
+    // over the feed (user report: "the reset view button is in the wrong place,
+    // it overlaps our camera or screen share").
+    //
+    // fitTileBox() sizes the element box to the PICTURE, contain-fit into the
+    // space actually designated for it (a member row's 96px height and the
+    // width left over after its visible siblings, or the self strip's own
+    // caps), so the box hugs the feed, keeps the source's perspective and never
+    // grows into the row's buttons or the neighbouring tile.
+    function isTileNode(node) {
+        return !!(node && node.classList && (
+            node.classList.contains('remote-video-tile') ||
+            node.classList.contains('voice-self-video') ||
+            node.classList.contains('relay-video') ||
+            node.classList.contains('voice-tile-slot')));
+    }
+
+    // The space a tile may occupy, in the container that lays it out.
+    function tileFitSpace(video) {
+        var parent = video && video.parentElement;
+        if (!parent || !parent.classList) return null;
+        // A rotation slot already owns its size (its box IS the rotated visual
+        // box) — never resize the tile out of it.
+        if (parent.classList.contains('voice-tile-slot')) return null;
+        if (parent.classList.contains('voice-self-preview-wrap')) {
+            // The self strip's height is driven by its own children (auto), so
+            // its clientHeight just echoes back whatever we set — use the
+            // stylesheet's cap for a self feed instead of a self-referential
+            // measurement. Only a PIXEL cap is usable: `max-height: 100%`
+            // resolves against an auto-height wrap and is either indefinite
+            // (letterboxing the feed in a 400px box) or self-referential.
+            var mh = 0;
+            try {
+                var raw = getComputedStyle(video).maxHeight || '';
+                if (raw.indexOf('px') !== -1) mh = parseFloat(raw) || 0;
+            } catch (_) {}
+            return { w: parent.clientWidth || 0, h: mh > 0 ? mh : 150, gap: 10 };
+        }
+        if (parent.classList.contains('voice-member-media') ||
+            parent.classList.contains('dm-call-tile-media')) {
+            return { w: parent.clientWidth || 0, h: parent.clientHeight || 0, gap: 8 };
+        }
+        return null;
+    }
+
+    function fitTileBox(video) {
+        if (!video || !video.style) return;
+        var space = tileFitSpace(video);
+        if (!space) return;
+        // Fullscreen owns its own sizing (contain-fit to the screen).
+        if (video.closest && video.closest('.voice-fs-wrap')) return;
+        if (!video.offsetParent) return;                                   // feed is hidden
+        var srcW = video.videoWidth || video.naturalWidth || 0;
+        var srcH = video.videoHeight || video.naturalHeight || 0;
+        if (!(srcW > 0 && srcH > 0)) return;                               // no frame yet
+        var maxH = space.h - 2;                                            // 1px borders
+        var maxW = space.w - 2;
+        // Visible sibling tiles share the row — take their footprint off the
+        // top, so two feeds always fit side by side instead of overlapping.
+        Array.prototype.forEach.call(video.parentElement.children, function (child) {
+            if (child === video || !isTileNode(child)) return;
+            var r = child.getBoundingClientRect();
+            maxW -= (r.width + space.gap);
+        });
+        if (!(maxW > 8)) maxW = space.w - 2;
+        if (!(maxW > 8) || !(maxH > 8)) return;
+        var s = Math.min(maxW / srcW, maxH / srcH);
+        if (!isFinite(s) || s <= 0) return;
+        var w = Math.max(1, Math.round(srcW * s));
+        var h = Math.max(1, Math.round(srcH * s));
+        if (video._fitBox === w + 'x' + h) return;                          // already fitted
+        video._fitBox = w + 'x' + h;
+        setDimImportant(video, 'width', w + 'px');
+        setDimImportant(video, 'height', h + 'px');
+        setDimImportant(video, 'maxWidth', 'none');
+        setDimImportant(video, 'maxHeight', 'none');
+    }
+
+    // A tile has no frame until its first metadata/load — re-fit as soon as the
+    // source dimensions are known (and whenever the browser reports a new video
+    // size, e.g. after a camera resolution change).
+    function fitTileWhenReady(node) {
+        if (!node || node._fitBound) return;
+        node._fitBound = true;
+        var refit = function () { try { fitTileBox(node); } catch (_) {} };
+        node.addEventListener('loadedmetadata', refit);
+        node.addEventListener('loadeddata', refit);
+        node.addEventListener('load', refit);
+        try { node.addEventListener('resize', refit); } catch (_) {}
+    }
+
+    // Refit every visible tile after a relayout (window resize, orientation
+    // change, sidebar toggle). Two passes: sibling widths feed the fit and the
+    // first pass can change them.
+    var _fitRaf = 0;
+    function refitAllTiles() {
+        if (_fitRaf) return;
+        var raf = window.requestAnimationFrame || function (fn) { return setTimeout(fn, 16); };
+        _fitRaf = raf(function () {
+            _fitRaf = 0;
+            for (var pass = 0; pass < 2; pass++) {
+                document.querySelectorAll('.remote-video-tile, .voice-self-video, img.relay-video').forEach(function (n) {
+                    try { fitTileBox(n); } catch (_) {}
+                });
+            }
+            // The tiles just moved — the reset-view chips sit beside them.
+            if (typeof positionResetViewChip._onRelayout === 'function') positionResetViewChip._onRelayout();
+        });
+    }
+    VoiceManager._refitTiles = refitAllTiles;
+
     function applyTileTransformAll(uid, kind) {
         // Both tile classes: remote/popup tiles (.remote-video-tile) and the
         // DM panel's own self strip (.voice-self-video).
@@ -7409,10 +7769,15 @@
     // ------------------------------------------------------------------
     // "Reset view" hint chip
     // ------------------------------------------------------------------
-    // Floats at the bottom-center of ANY tile (camera or screen, remote or
-    // your own, tile or fullscreen) whose feed is mirrored/rotated for you, so
-    // the transform is noticeable and restorable in one click. Clicking clears
-    // the per-viewer transform; right-click opens the same view/volume menu.
+    // A COMPACT icon-only button in the tile's bottom-right corner for ANY
+    // feed (camera or screen, remote or your own) that is mirrored/rotated for
+    // you, so the transform is restorable in one click. It used to be a wide
+    // "Reset view" pill pinned across the tile's bottom edge — on a small
+    // portrait phone tile that pill was wider than the tile itself and covered
+    // most of the picture (user report: "the reset view button looks to be in
+    // the wrong place because it overlaps our camera or screen share").
+    // Clicking clears the per-viewer transform; right-click opens the same
+    // view/volume menu.
     function resetViewChipFeedKey(uid, kind) { return 'rv:' + feedKey(uid, kind); }
 
     function positionResetViewChip(chip, video) {
@@ -7424,21 +7789,49 @@
             var op = chip.offsetParent;
             if (!op) return;
             var or = op.getBoundingClientRect();
-            var cw = chip.offsetWidth || 90;
-            var ch = chip.offsetHeight || 24;
-            // Clamp the chip INSIDE the tile's own bounds. Both sides must be
-            // in offsetParent coordinates — the old clamp compared the chip's
-            // parent-relative left against the tile's WIDTH, so on a narrow
-            // mobile tile it pushed the chip outside the tile and off-screen.
+            var cw = chip.offsetWidth || 22;
+            var ch = chip.offsetHeight || 22;
+            // Everything below is in offsetParent coordinates: comparing the
+            // chip's parent-relative left against the tile's WIDTH is what
+            // pushed the chip outside a narrow tile and off-screen before.
             var tileLeft = vr.left - or.left;
             var tileTop = vr.top - or.top;
-            var maxLeft = tileLeft + Math.max(0, vr.width - cw);
-            var chipLeft = tileLeft + (vr.width - cw) / 2;
-            chipLeft = Math.max(tileLeft, Math.min(chipLeft, maxLeft));
+            // The row/media box this feed lives in — the space the chip may use
+            // WITHOUT covering the picture. Feed tiles are right-aligned in a
+            // member row, so there is usually free room beside them.
+            var hostEl = video.parentElement;
+            if (hostEl && hostEl.classList && hostEl.classList.contains('voice-tile-slot')) hostEl = hostEl.parentElement;
+            var hr = hostEl ? hostEl.getBoundingClientRect() : vr;
+            var hostLeft = hr.left - or.left;
+            var hostRight = hr.right - or.left;
+            var hostTop = hr.top - or.top;
+            var hostBottom = hr.bottom - or.top;
+            var gap = 6;
+            var rightRoom = hostRight - (tileLeft + vr.width);
+            var leftRoom = tileLeft - hostLeft;
+            // Bottom-aligned with the tile: outside the picture whenever the
+            // row has room beside it ("looks like it's in the wrong place
+            // because it overlaps our camera or screen share"), otherwise the
+            // inset corner INSIDE the tile as a last resort.
+            var chipLeft, chipTop = tileTop + vr.height - ch;
+            if (rightRoom >= cw + gap) {
+                chipLeft = tileLeft + vr.width + gap;
+            } else if (leftRoom >= cw + gap) {
+                chipLeft = tileLeft - cw - gap;
+            } else {
+                chipLeft = tileLeft + Math.max(0, vr.width - cw - 4);
+                chipTop = tileTop + Math.max(0, vr.height - ch - 4);
+            }
+            chipLeft = Math.max(hostLeft, Math.min(chipLeft, hostRight - cw));
+            chipTop = Math.max(hostTop, Math.min(chipTop, hostBottom - ch));
             chip.style.left = Math.round(chipLeft) + 'px';
-            var maxTop = tileTop + Math.max(0, vr.height - ch);
-            var chipTop = tileTop + vr.height - ch - 4;
-            chip.style.top = Math.round(Math.max(tileTop, Math.min(chipTop, maxTop))) + 'px';
+            chip.style.top = Math.round(chipTop) + 'px';
+            // Overlapping the picture only in the last-resort case, so keep the
+            // button small there.
+            var overlaps = chipLeft < tileLeft + vr.width && chipLeft + cw > tileLeft &&
+                chipTop < tileTop + vr.height && chipTop + ch > tileTop;
+            chip.classList.toggle('compact', overlaps || vr.width < 70 || vr.height < 70);
+            chip.classList.toggle('outside', !overlaps);
         };
         place();
         var tries = 0;
@@ -7496,8 +7889,12 @@
         chip.type = 'button';
         chip.className = 'voice-tile-reset-view';
         chip.setAttribute('data-feed', key);
-        chip.title = 'This feed is mirrored/rotated for you — click to reset';
-        chip.innerHTML = '<svg class="ui-icon" width="14" height="14"><use href="#icon-refresh-alt"/></svg><span class="voice-tile-reset-lbl">Reset view</span>';
+        var kindLabel = kind === 'screen' ? 'screen share' : 'camera';
+        chip.title = 'Your ' + kindLabel + ' view is mirrored/rotated — click to reset';
+        chip.setAttribute('aria-label', 'Reset ' + kindLabel + ' view');
+        // Icon only (no text label): a pill wide enough for "Reset view" was
+        // wider than a small portrait tile and covered the picture.
+        chip.innerHTML = '<svg class="ui-icon" width="14" height="14" aria-hidden="true"><use href="#icon-refresh-alt"/></svg>';
         chip.addEventListener('click', function (e) {
             e.stopPropagation();
             setTileViewTransform(uid, kind, 'reset', 0);
@@ -7554,6 +7951,10 @@
             setTileViewTransform(uid, viewKind, 'mirror', !tState.mirror);
             tState = S.tileTransforms[tKey] || { mirror: false, rot: 0 };
             btnMirror.classList.toggle('active', !!tState.mirror);
+            // Close the menu: it opens ON the feed (at the cursor), so leaving
+            // it up hid the very change the user asked for — "I can't rotate or
+            // mirror my own camera/screen" was really "I can't SEE it happen".
+            closeVolumeMenu();
         });
         viewRow.appendChild(btnMirror);
         var btnRotL = document.createElement('button');
@@ -7565,6 +7966,7 @@
             ev.stopPropagation();
             setTileViewTransform(uid, viewKind, 'rot', (tState.rot || 0) - 90);
             tState = S.tileTransforms[tKey] || { mirror: false, rot: 0 };
+            closeVolumeMenu();
         });
         viewRow.appendChild(btnRotL);
         var btnRotR = document.createElement('button');
@@ -7576,6 +7978,7 @@
             ev.stopPropagation();
             setTileViewTransform(uid, viewKind, 'rot', (tState.rot || 0) + 90);
             tState = S.tileTransforms[tKey] || { mirror: false, rot: 0 };
+            closeVolumeMenu();
         });
         viewRow.appendChild(btnRotR);
         var btnViewReset = document.createElement('button');
@@ -7588,14 +7991,19 @@
             setTileViewTransform(uid, viewKind, 'reset', 0);
             tState = { mirror: false, rot: 0 };
             btnMirror.classList.remove('active');
+            closeVolumeMenu();
         });
         viewRow.appendChild(btnViewReset);
         menu.appendChild(viewRow);
     }
 
     function openVolumeMenu(e, uid, kind) {
-        var menu = el('volume-menu');
+        var menu = overlayNode('volume-menu');
         if (!menu) return;
+        // Native fullscreen paints in the top layer — park the menu inside it
+        // so its controls stay visible AND clickable while a tile is
+        // fullscreened ("can't access right-click options in fullscreen").
+        mountOverlay(menu);
         // kind: 'member' (mic volume, default) | 'screen' (screen-share audio
         // volume — right-click the member's SCREEN tile) | 'video' (camera
         // tile — video only: no volume meter, since a camera feed carries no
@@ -7870,12 +8278,13 @@
     }
 
     function closeVolumeMenu() {
-        var menu = el('volume-menu');
+        var menu = overlayNode('volume-menu');
         if (menu) menu.style.display = 'none';
+        rehomeOverlays();
     }
 
     function bindVolumeMenu() {
-        var menu = el('volume-menu');
+        var menu = overlayNode('volume-menu');
         if (menu) menu.style.display = 'none';
     }
 
@@ -8718,8 +9127,12 @@
             // Render as a relay <img> tile (the mesh <video> is hidden behind it).
             injectRelayTile(decoded.fromUid, decoded.kind, url);
 
+            var _flag = decoded.kind === 'camera' ? 'camera' : 'screen';
             if (!S.members[decoded.fromUid]) S.members[decoded.fromUid] = {};
-            S.members[decoded.fromUid][decoded.kind === 'camera' ? 'camera' : 'screen'] = true;
+            // Never flip a KNOWN-OFF feed back on from a late frame — doing so
+            // resurrected the cached frame and left it stuck on screen after
+            // the sender closed their camera/screen.
+            if (S.members[decoded.fromUid][_flag] === undefined) S.members[decoded.fromUid][_flag] = true;
             S.members[decoded.fromUid]['_relay_' + decoded.kind] = Date.now();
         } catch (_) {}
     }
@@ -8764,8 +9177,11 @@
         // Render as a relay <img> tile (the mesh <video> is hidden behind it).
         injectRelayTile(fromUid, kind, url);
 
+        var _flag2 = kind === 'camera' ? 'camera' : 'screen';
         if (!S.members[fromUid]) S.members[fromUid] = {};
-        S.members[fromUid][kind === 'camera' ? 'camera' : 'screen'] = true;
+        // Same guard as the binary path: a late frame must not mark a feed the
+        // sender already turned OFF as live again.
+        if (S.members[fromUid][_flag2] === undefined) S.members[fromUid][_flag2] = true;
         S.members[fromUid]['_relay_' + kind] = Date.now();
     }
 
@@ -10528,6 +10944,13 @@
     // dropped instead — the fresh render already has a correct tile, and we
     // make sure THAT tile has the stream attached.
     function moveTileBack(el) {
+        // The feed was turned OFF (or the member left) while this tile was
+        // fullscreened. The fresh render already has its own hidden tile for
+        // it, so re-inserting this element would show its frozen last frame.
+        if (el && el.dataset && el.dataset.self !== '1' && el.dataset.uid && el.dataset.kind) {
+            var mm = S.members[el.dataset.uid];
+            if (mm && mm[el.dataset.kind] === false) return;
+        }
         var origParent = el._fsOrigParent;
         var origNext = el._fsOrigNext;
         if (origParent && origParent.isConnected) {
@@ -10618,6 +11041,10 @@
         if (isSelf) {
             stream = kind === 'camera' ? S.localStreams.camera : S.localStreams.screen;
         } else if (uid && S.remoteStreams[uid]) {
+            // A feed the member has turned OFF must never be re-attached: the
+            // element would paint its frozen last frame (stuck frame).
+            var m = S.members[uid];
+            if (m && m[kind] === false) return;
             stream = S.remoteStreams[uid][kind];
         }
         if (stream && el.srcObject !== stream) {

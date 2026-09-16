@@ -8,7 +8,7 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <link rel="manifest" href="/manifest.json">
     <title>E2E Chat</title>
-    <link rel="stylesheet" href="style.css?v=14">
+    <link rel="stylesheet" href="style.css?v=16">
 </head>
 <body>
     <!-- Inlined SVG icon sprite (hidden, referenced via <use href="#icon-name">) -->
@@ -1852,8 +1852,8 @@
                         <div class="profile-username-row" id="profile-modal-username-row">
                             <span class="profile-username-tag" id="profile-modal-username-tag"></span>
                         </div>
-                        <!-- Edit button (own profile only) — bottom-right, small pencil -->
-                        <button class="profile-edit-btn" id="profile-edit-btn" style="display:none" title="Edit Profile">✏️</button>
+                        <!-- Edit button (own profile only) — bottom-right, small pencil icon -->
+                        <button class="profile-edit-btn" id="profile-edit-btn" style="display:none" title="Edit Profile" aria-label="Edit profile"><svg class="ui-icon" width="16" height="16" aria-hidden="true"><use href="#icon-edit"/></svg></button>
                     </div>
                 </div>
             </div>
@@ -1893,7 +1893,7 @@
                         <div class="profile-edit-upload-row">
                             <label>Profile Picture</label>
                             <div class="profile-upload-actions">
-                                <button class="btn btn-primary" id="profile-avatar-upload-btn">📷 Choose</button>
+                                <button class="btn btn-primary" id="profile-avatar-upload-btn"><svg class="ui-icon" width="14" height="14"><use href="#icon-user"/></svg> Choose</button>
                                 <button class="btn btn-danger" id="profile-avatar-remove-btn" style="display:none"><svg class="ui-icon" width="14" height="14"><use href="#icon-close"/></svg></button>
                             </div>
                             <input type="file" id="profile-avatar-file-input" accept="image/*" style="display:none">
@@ -1901,7 +1901,7 @@
                         <div class="profile-edit-upload-row">
                             <label>Banner</label>
                             <div class="profile-upload-actions">
-                                <button class="btn btn-primary" id="profile-banner-upload-btn">📷 Choose</button>
+                                <button class="btn btn-primary" id="profile-banner-upload-btn"><svg class="ui-icon" width="14" height="14"><use href="#icon-image"/></svg> Choose</button>
                                 <button class="btn btn-danger" id="profile-banner-remove-btn" style="display:none"><svg class="ui-icon" width="14" height="14"><use href="#icon-close"/></svg></button>
                             </div>
                             <input type="file" id="profile-banner-file-input" accept="image/*" style="display:none">
@@ -1979,7 +1979,7 @@
                     </div>
                     <div class="profile-edit-actions">
                         <button class="btn-cancel" id="profile-edit-cancel-btn">Cancel</button>
-                        <button class="btn-invite" id="profile-edit-save-btn">💾 Save Profile</button>
+                        <button class="btn-invite" id="profile-edit-save-btn"><svg class="ui-icon" width="14" height="14"><use href="#icon-save"/></svg> Save Profile</button>
                     </div>
                     <div id="profile-edit-status" class="profile-save-status" style="display:none"></div>
                 </div>
@@ -2295,11 +2295,11 @@
     </div>
 
     <script src="secure-storage.js?v=2"></script>
-    <script src="voice.js?v=13"></script>
+    <script src="voice.js?v=15"></script>
     <script src="soundboard-pairing.js?v=8"></script>
-    <script src="thread_categories_shortcuts.js?v=2"></script>
+    <script src="thread_categories_shortcuts.js?v=3"></script>
     <script src="doc-preview.js?v=2"></script>
-    <script src="chat.js?v=41"></script>
+    <script src="chat.js?v=42"></script>
     <script>
     // PWA: Register service worker
     if ('serviceWorker' in navigator) {

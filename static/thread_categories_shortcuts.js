@@ -1268,7 +1268,19 @@
             }
             var el = document.createElement('div');
             el.className = 'context-menu-item' + (item.danger ? ' context-menu-danger' : '');
-            el.textContent = item.label;
+            // An item may carry `icon` (a sprite name) — render the icon glyph
+            // next to the label. The icon markup comes from the trusted local
+            // icon() sprite helper; the LABEL is always inserted as text, never
+            // as HTML, so a channel/user name in a label can't inject markup.
+            if (item.icon && typeof icon === 'function') {
+                el.innerHTML = icon(item.icon, item.iconSize || 14);
+                var lbl = document.createElement('span');
+                lbl.className = 'context-menu-label';
+                lbl.textContent = item.label;
+                el.appendChild(lbl);
+            } else {
+                el.textContent = item.label;
+            }
             el.addEventListener('click', function (e) {
                 e.stopPropagation();
                 menu.remove();

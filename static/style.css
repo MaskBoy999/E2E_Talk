@@ -2830,12 +2830,26 @@ select.modal-input:focus {
     box-shadow: 0 4px 16px rgba(0,0,0,0.4);
 }
 .context-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     padding: 8px 16px;
     font-size: 13px;
     color: var(--text-primary);
     cursor: pointer;
     transition: background 0.12s ease, padding-left 0.12s ease;
     border-left: 3px solid transparent;
+}
+/* Optional leading glyph (item.icon) + label rendered as text. */
+.context-menu-item > .ui-icon {
+    flex-shrink: 0;
+    opacity: 0.85;
+}
+.context-menu-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 .context-menu-item:hover {
     background: var(--hover-bg);
@@ -5766,6 +5780,38 @@ select.modal-input:focus {
     flex-shrink: 0;
     min-width: 40px;
     text-align: center;
+}
+
+/* "Download all" — every file of a multi-file upload as one zip. Pushed to
+   the right end of the gallery nav row. */
+.msg-gallery-download-all {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 10px;
+    background: var(--bg-primary);
+    border: 1px solid var(--bg-border);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    flex-shrink: 0;
+    white-space: nowrap;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.msg-gallery-download-all:hover:not(:disabled) {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--bg-primary);
+}
+
+.msg-gallery-download-all.busy,
+.msg-gallery-download-all:disabled {
+    opacity: 0.6;
+    cursor: progress;
 }
 
 .msg-gallery-items {
@@ -9358,52 +9404,72 @@ video.remote-video-tile.mirrored {
     max-height: 100%;
 }
 
-/* "Reset view" hint chip — floats at the bottom-center of any tile whose
-   feed is mirrored/rotated for you (remote or your own, tile or fullscreen).
-   One click clears the per-viewer transform. Sits above the feed buttons but
-   below nothing that matters; small so it never blocks the feed. */
+/* "Reset view" chip — a COMPACT icon-only button in the BOTTOM-RIGHT corner of
+   any tile whose feed is mirrored/rotated for you (remote or your own). One
+   click clears the per-viewer transform; right-click opens the view/volume
+   menu. It used to be a wide "Reset view" pill pinned across the bottom edge,
+   which on a small portrait phone tile was wider than the tile and covered
+   most of the picture. Positioned/clamped inside the tile by
+   positionResetViewChip(). Sits above the feed buttons. */
 .voice-tile-reset-view {
     position: absolute;
-    z-index: 7;
+    z-index: 8;
     display: flex;
     align-items: center;
-    gap: 4px;
-    padding: 2px 8px;
-    border-radius: 8px;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    border-radius: 50%;
     border: 1px solid var(--bg-border, #2a2a4a);
     background: rgba(0, 0, 0, 0.78);
     color: var(--text-primary, #eee);
     font-size: 10px;
     font-weight: 600;
     cursor: pointer;
-    max-width: 90%;
     box-sizing: border-box;
     white-space: nowrap;
     pointer-events: auto;
+    line-height: 1;
 }
 .voice-tile-reset-view:hover {
-    background: rgba(88, 101, 242, 0.85);
+    background: rgba(88, 101, 242, 0.9);
 }
-.voice-tile-reset-ico {
-    font-size: 10px;
-    line-height: 1;
-    flex-shrink: 0;
+.voice-tile-reset-view:focus-visible {
+    outline: 2px solid var(--accent, #5865f2);
+    outline-offset: 1px;
 }
-.voice-tile-reset-lbl {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+/* Very small tile (positionResetViewChip adds .compact): shrink the button so
+   it covers as little of the picture as possible. */
+.voice-tile-reset-view.compact {
+    width: 20px;
+    height: 20px;
 }
-/* Mobile: shrink the reset chip further so it fits inside small rotated tiles */
+.voice-tile-reset-view.compact .ui-icon {
+    width: 11px;
+    height: 11px;
+}
+/* Placed BESIDE the feed (the row had free room, so the button never covers
+   the picture — positionResetViewChip only insets it over the tile when the
+   row is completely full). A solid surface + shadow keeps it readable against
+   the row background instead of the video. */
+.voice-tile-reset-view.outside {
+    width: 24px;
+    height: 24px;
+    background: rgba(0, 0, 0, 0.62);
+    border-color: rgba(255, 255, 255, 0.16);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+}
+/* Phones: keep the smallest footprint everywhere. */
 @media (max-width: 600px) {
     .voice-tile-reset-view {
-        padding: 1px 4px;
-        font-size: 9px;
-        gap: 2px;
-        max-width: 90%;
+        width: 22px;
+        height: 22px;
     }
-    .voice-tile-reset-ico { font-size: 9px; }
-    .voice-tile-reset-lbl { font-size: 9px; }
+    .voice-tile-reset-view .ui-icon {
+        width: 12px;
+        height: 12px;
+    }
 }
 
 /* Rotation slot (right-click → View → 90°): when a tile is rotated sideways
@@ -9924,7 +9990,14 @@ body.resizing-dm { cursor: ns-resize !important; user-select: none; }
 /* ---- Per-member volume menu ---- */
 .volume-menu {
     position: fixed;
-    z-index: 950;
+    /* Above the CSS-overlay fullscreen surfaces — the voice popup's full
+       screen mode and the expanded DM call panel sit at z-index 2000, so a
+       lower menu was painted BEHIND them and the right-click options (mirror /
+       rotate / reset / volume) were unreachable while fullscreened. Matches the
+       camera-options and PiP menus. (Native fullscreen ignores z-index — see
+       mountOverlay() in voice.js, which moves the menu inside the fullscreen
+       element.) */
+    z-index: 100002;
     min-width: 200px;
     background: var(--bg-secondary, #232338);
     border: 1px solid var(--bg-border, #2a2a4a);

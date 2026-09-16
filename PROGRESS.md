@@ -6274,3 +6274,344 @@ against real dimensions.
   `voice-visual-fullscreen-pip.spec.ts` + `video-tiles-visual.spec.ts` — 11 passed
   (the fullscreen/rotation/PiP suites are pixel-based and confirm mirror/rotation
   still render correctly with the new math).
+
+## Session: media download/copy menus, message context-menu icons, stuck frames
+
+User-reported batch: (1) a "Download all" button for multi-file uploads, (2)
+right-click "copy file" for images / any attachment, (3) remove the reset-view
+chip from fullscreen (it belongs to the voice-channel / DM-call views only),
+(4) the PiP picker should separate users, search by display name OR username,
+and show camera/screen icons + PFP + colored display name + username, (5) a
+closed camera/screen sometimes left a stuck frame for other viewers, (6) the
+message right-click menu showed broken icons.
+
+### 1. Message right-click menu icons (bug 6)
+
+Root cause: `_showContextMenu()` (thread_categories_shortcuts.js) rendered
+`item.label` with **`textContent`**, and the message menu built labels as
+`icon('reply') + ' Reply'` — so the raw `<svg …><use …/></svg>` markup was
+printed as literal text next to the label ("broken icons").
+- `_showContextMenu` now supports an optional `item.icon` (a sprite NAME):
+  it injects the trusted `icon(name)` markup for the glyph and appends the
+  LABEL via a `textContent` span, so user-supplied strings in labels (channel
+  names) still can't inject HTML.
+- chat.js message menu items switched from `label: icon('x') + ' Text'` to
+  `label: 'Text', icon: 'x'` (Reply / Reply in Thread / Forward ×2 / Edit /
+  Delete / Pin / Unpin / Copy Text / Copy Message Link / Block / Unblock).
+- CSS: `.context-menu-item` is now a flex row with a gap; `.context-menu-label`
+  truncates.
+
+### 2. Related real bug found while verifying: `icon` shadowing
+
+`buildFileCardHtml()` had `const icon = getFileIcon(...)`, shadowing the global
+sprite helper in the same scope — `icon('music')` (audio cards) and `icon('eye')`
+(document preview button) threw `TypeError: icon is not a function`, so audio
+and document attachments never rendered. Renamed the local to `fileIcon` (and
+the same shadow in `buildMultiFileCardHtml`'s strip loop, unused but a landmine).
+
+### 3. Multi-file "Download all" (bug 1)
+
+- `buildMultiFileCardHtml()` renders a `Download all` button in the gallery nav
+  (sprite `#icon-download`), hidden for single-file payloads (they stay a plain
+  card).
+- `downloadAllGalleryFiles(gallery, btn)` (chat.js) decrypts every card in the
+  gallery with the normal attachment path (`recoverAttachmentFileKey` fallback),
+  de-duplicates zip entry names, loads JSZip **on demand** (`/libs/jszip.min.js`,
+  the same copy doc-preview uses) and downloads `N-files.zip`. One file → a plain
+  download; JSZip unavailable → staggered per-file downloads. The button shows a
+  busy state and the gallery guards against double clicks.
+
+### 4. Right-click copy file / image (bug 2)
+
+- New `handleMediaContextMenu(e)` shared by the `#message-list` handler and the
+  document-level fallback. This was REQUIRED: the `#message-list` contextmenu
+  handler calls `stopPropagation()`, so the older document-level menu (emoji /
+  sticker / GIF download) never actually fired for anything inside a message.
+- Attachments (`.file-card`, `.audio-file-card`, gallery items) now open
+  **⬇ Download <name>** + **🖼 Copy image / 📋 Copy file** (`showAttachmentContextMenu`).
+- Emojis, stickers and GIFs gained **🖼 Copy image** next to their download item.
+- `copyBlobToClipboard()` writes a `ClipboardItem`; non-PNG images are
+  re-encoded through a canvas first (Chrome only accepts image/png), and an
+  unsupported type reports honestly via a toast instead of failing silently.
+- `showContextMenuAt(e, items)` generalizes the old one-item download menu
+  (viewport clamping + outside-click close); `showContextDownloadMenu()` is kept
+  as a thin wrapper.
+
+### 5. PiP picker + reset-view (bugs 3, 4)
+
+Both were already implemented on this branch — verified and completed:
+- Search bar matches display name **or** username (`data-search` haystack),
+  one section per user with a divider, PFP via the `data-profile-pic-load`
+  pipeline, colored/glowing display name (`memberNameStyle`), `@username`, and
+  camera / monitor icons per feed.
+- `S.selfUsername` never existed, so the "You" row showed no username: added
+  `getSelfUsername()` (window.currentUser → global `user` → localStorage) and
+  used it.
+- The feed-kind `<use>` now carries both `href` and `xlink:href` (some engines
+  only resolve the namespaced one — a missing reference renders as an empty box).
+- Reset-view chip: confirmed it is suppressed while the feed is inside a
+  `.voice-fs-wrap` (fullscreen) and reappears on exit, i.e. only present in the
+  voice-channel popup / DM call view.
+
+### 6. Stuck frame when a member closes camera/screen (bug 5)
+
+Root cause: the receiver kept a cached relay frame and/or a live `<video>`
+decoder for a feed the sender had turned OFF. Browsers do NOT blank a video
+element when its track ends — they keep painting the last decoded frame — and
+the cached relay `<img>` was re-injected by `reInjectRelayFrames()` on every
+render. The full-snapshot path (`voice_members`, sent on every join/leave
+broadcast) never diffed feed state at all, which is why it only happened
+"sometimes". Late relay frames could also flip `S.members[uid].camera` back to
+`true`, resurrecting the frozen frame.
+- New `clearFeedSurface(uid, kind)`: drops the relay frame + `<img>`
+  (`dropRelayFeed(uid, kind, false)`), detaches the decoder and hides every
+  `video[data-uid][data-kind]` surface, removes the tile from any
+  `.voice-fs-wrap` (and exits native fullscreen) so a fullscreened feed can't
+  keep a frozen frame, then re-syncs the reset-view chip.
+- Called from BOTH `handleMemberUpdate` (per-state) and the new diff in
+  `handleVoiceMembers` (full snapshot).
+- Guards: `reInjectRelayFrames()` skips feeds that are OFF; `reattachTileStream()`
+  refuses to attach a feed that is OFF; `moveTileBack()` refuses to re-insert a
+  fullscreen-restored tile for a feed that is OFF; the relay frame handlers only
+  mark a feed live when the flag is `undefined` (never re-flipping a known OFF).
+
+### Verified
+
+- `node --check` clean on chat.js/voice.js/thread_categories_shortcuts.js;
+  CSS braces balanced (1663/1663).
+- New `tests/media-rightclick-and-stuck-frame.spec.ts` — **3/3 passing**:
+  menu items carry `svg.ui-icon use[href="#icon-…"]` with the label as text;
+  attachments offer Download + Copy image/file; the gallery renders
+  `Download all` (and single-file payloads don't); a `voice_members` snapshot
+  with `camera:false` clears the cached relay frame and leaves **0** relay
+  images / 0 visible surfaces; closing a fullscreened feed leaves no frozen tile
+  and no leftover wrapper.
+- Regression proof: temporarily reverting the snapshot diff + re-inject guard
+  makes that test fail with `relayImgs: 2` (two stuck frames) — the exact
+  reported symptom.
+- Existing suites re-run green: `voice.spec.ts` 4/4,
+  `voice-camera-screen.spec.ts` 1/1 (real 2-user camera/screen toggles),
+  `voice-visual-fullscreen-pip.spec.ts` 4/4 (fullscreen + PiP picker pixels).
+- Cache busting: `style.css?v=15`, `voice.js?v=14`, `chat.js?v=42`,
+  `thread_categories_shortcuts.js?v=3`, SW `e2e-chat-v4` → `e2e-chat-v5`.
+
+## Session: preview fit + reset-view chip placement + fullscreen right-click + profile-modal icons
+
+Four user-reported items, all in the voice/video UI.
+
+### 1. "Can't rotate or mirror our own camera and screen share"
+
+Investigation (browser, real 2-user calls): right-click on your OWN camera/screen
+already worked in every surface — voice-channel member row, popup fullscreen and
+the DM call self strip — and the mirror/rotate transform applied. Two real
+problems were hiding behind the report:
+
+- The View menu is opened AT THE CURSOR, i.e. on top of the very feed it just
+  changed, so the effect was invisible: it looked like nothing happened.
+  `buildViewSection()` (static/voice.js) now closes the menu after
+  Mirror / 90 deg left / 90 deg right / Reset. (Volume controls still keep it
+  open — you dial those in while watching the meter.)
+- The rotation/right-click behaviour relied on a handler being bound to THAT
+  exact tile element. Any tile that was re-created, moved into the fullscreen
+  wrapper, wrapped in a rotation slot or rendered by the relay path could lose
+  it silently. Right-click is now DELEGATED: one capture-phase document listener
+  (`onTileContextMenu` + `tileNodeFrom` + `visibleFeedIn`) resolves the feed from
+  the event target, so every camera/screen tile answers everywhere.
+
+Also fixed: `tests/voice-camera-options.spec.ts` selected the rotate buttons by a
+glyph in `textContent` ('90 deg + the refresh arrow'), which can never match now
+that the buttons carry SVG icons — the test was silently rotating NOTHING and
+timing out. It now selects by `title="Rotate 90° right"` and passes.
+
+### 2. Reset-view chip overlapped the feed + preview had no max size
+
+Root cause: the tile's LAYOUT box was decided by the stylesheet
+(`height:100%` + `max-width:46%` in a member row, `240x150` caps on the DM self
+strip). Whenever that box did not match the source ratio — a PORTRAIT phone
+camera in the self strip measured **226x400** in a 417px strip — `object-fit:
+contain` letterboxed the picture inside it. The black area looked like part of
+the tile, so the chip "overlapped the camera".
+
+- New `fitTileBox(video)` + `tileFitSpace()` + `fitTileWhenReady()` +
+  `refitAllTiles()` (static/voice.js): the element box is contain-fitted to the
+  PICTURE (videoWidth/videoHeight) inside the space actually designated for it —
+  the row's height and the width left after its visible siblings, or the self
+  strip's own pixel cap — and never grows past it. Re-fitted on
+  loadedmetadata/loadeddata/<img> load/video resize, after every
+  transform/mirror/rotate, on tile creation (member row, relay <img>, DM tile,
+  DM self strip, popup self row) and on window resize/orientationchange.
+  Portrait phone camera in the DM self strip: 226x400 -> **83x148** at the true
+  ratio.
+- `positionResetViewChip()` now places the chip in the ROW's free space beside
+  the feed (right if there is room, else left, bottom-aligned) instead of always
+  insetting it over the picture; the inset corner is only the last resort when
+  the row is completely full, and the button shrinks (`.compact`) exactly then.
+  New `.voice-tile-reset-view.outside` style in static/style.css.
+- Verified in `tests/voice-tile-preview-fit.spec.ts`: box ratio == source ratio
+  (member row 53x94 and DM self strip 83x148 for a 240x426 portrait camera) and
+  `overlapsFeed: false` for the chip. Reverting `fitTileBox()` makes the strip
+  test fail with a 226x400 letterboxed box.
+
+### 3. Right-click options unreachable while fullscreened
+
+Beyond the delegation above, the delegated handler resolves the feed from the
+CONTAINER too: right-clicking the black area AROUND a letterboxed fullscreen
+picture (`.voice-fs-wrap`, a media row, the DM tile media, the self strip) opens
+that feed's menu. In fullscreen the picture is portrait, so most of the screen is
+exactly that black area — the place users actually right-click. The menu is
+mounted INSIDE the fullscreen element (`mountOverlay`), so it stays visible and
+clickable, and it was already verified as the topmost element in a real
+fullscreen hit-test. Covered by the new "fullscreen: right-clicking the black
+area still opens the feed menu" test.
+
+### 4. Profile edit modal emojis
+
+`static/index.html`: the three emoji buttons in the profile edit modal are real
+sprite icons with distinct glyphs — PFP `#icon-user`, banner `#icon-image`, save
+`#icon-save` (an e2e assertion checks the glyphs are NOT the same). The
+"Edit profile" pencil button in the profile VIEW modal was still the emoji ✏️
+and is now `#icon-edit`, so no emoji is left in that modal. The user was still
+seeing the pre-fix build: the service worker serves /index.html cache-first, so
+the cache name and the asset version params were bumped again (below) — one
+reload may still show the old bundle, a second one (or a hard reload) picks it up.
+
+### Files touched
+
+- `static/voice.js` — delegated feed context menu; tile fit helpers + hooks;
+  chip placement; View-menu auto-close; fit before the rotation-slot measurement.
+- `static/style.css` — `.voice-tile-reset-view.outside` (+ comments).
+- `static/index.html` — profile edit/view modal icons; `voice.js?v=15`,
+  `style.css?v=16`.
+- `static/sw.js` — SW cache `e2e-chat-v5` -> `e2e-chat-v6`.
+- `tests/voice-tile-preview-fit.spec.ts` — NEW (4 tests).
+- `tests/voice-camera-options.spec.ts` — rotate buttons selected by title.
+
+### Verified
+
+- `node --check voice.js` clean; CSS braces balanced (1664/1664).
+- NEW `tests/voice-tile-preview-fit.spec.ts` **4/4**: portrait box keeps the
+  source ratio inside the row space; DM self strip is not letterboxed;
+  chip sits beside the feed (`overlapsFeed: false`) and still resets on click;
+  fullscreen black-area right-click opens the View menu inside the fullscreen
+  element. With `fitTileBox()` stubbed out the strip test fails (226x400),
+  so the test has teeth.
+- Green re-runs: `media-rightclick-and-stuck-frame.spec.ts` 3/3,
+  `voice-visual-fullscreen-pip.spec.ts` 4/4, `voice-camera-options.spec.ts` 3/3
+  (incl. the fixed self-screen/self-camera rotate steps), `voice-rotate-overlap`
+  + `video-tiles-visual` + `voice-camera-screen` + `voice-feed-buttons-cleanup`
+  13/13, `voice-relay-resize-transforms.spec.ts` 6/6.
+- Pre-existing failures (confirmed by stashing voice.js back to HEAD and
+  re-running — identical failures): `voice-fullscreen.spec.ts`
+  "fullscreened tile survives a re-render (server room)" and "DM call: media
+  re-renders do not wipe the fullscreened tile" (`tileConnected: false` after a
+  popup re-render), and `dm-call-volume.spec.ts` "settings modal mic/speaker
+  reset buttons restore 100%".
+
+## Session: commit 681d45f — "progress with some features related to pip"
+
+The last PROGRESS.md update landed in commit 6375fc3; 681d45f (Sep 16, 22:32)
+came right after it and was never logged here. This section documents that
+commit's changes — all already present in the tree at 681d45f — so the ledger
+covers every commit. 365 insertions across voice.js, style.css and
+e2ee-worker.js, in five areas:
+
+### 1. Picture-in-Picture picker rebuilt (static/voice.js + static/style.css)
+
+- One section per USER, separated by a divider (`.voice-pip-sep`); a member's
+  camera and screen feeds share their section instead of appearing as two
+  unrelated rows.
+- Search bar (`.voice-pip-search`) matching display name OR username — a
+  `data-search` haystack of `displayName + username`, lower-cased substring
+  match, pure UI filter (typing only re-hides rows).
+- Each section head: PFP (cached `profilePicCache` blob URL now, or a
+  placeholder carrying `data-profile-pic-load` filled in async by the same
+  pipeline the member-row avatars use, with a pulsing
+  `.voice-pip-avatar-load` affordance), colored/glowing display name via
+  `memberDisplayName()`, `@username`, and a camera / monitor icon per feed
+  button so it is obvious which feed is which.
+- Menu sized 240-300px wide, max-height 380px with internal scrolling; the
+  search input swallows click propagation so the menu's outside-click closer
+  does not fire.
+
+### 2. Mobile sleep/wake recovery (NEW, static/voice.js)
+
+Problem: when a phone sleeps with camera / screen share / mic active, iOS and
+Android browsers tear down the media pipeline WITHOUT firing track 'ended'.
+On wake the encoders emit delta frames receivers cannot resync from (blocky
+artifact picture), the mic's AudioContext sits suspended, and the relay
+capture loops keep drawing from hidden `<video>` decoders stalled on
+pre-sleep frames.
+
+- `notifyWake()` — debounced (3s) and a no-op while not connected. In order:
+  (1) resume the AudioContext, (2) postMessage
+  `{ type: 'generate-keyframes' }` to the E2EE worker so every video sender
+  emits a keyframe NOW (the periodic 2.5s timer alone can take several frames
+  to converge — the visible artifacting), (3) `restartIce()` on peer
+  connections stuck in `connectionState: 'disconnected'` (a short ICE
+  disconnect that started during sleep sometimes never self-recovers),
+  (4) `restartVideoRelay(kind)` for every running relay loop, (5)
+  `sendVoiceState()` re-broadcast (a sleep can silently stop a track without
+  'ended', so peers re-learn our camera/screen/mute flags).
+- `restartVideoRelay(kind)` = `stopVideoRelay(kind)` + `startVideoRelay(...)`
+  — tears the off-main-thread capture pipeline down and rebuilds it fresh.
+- Wake triggers: `document visibilitychange` (unhide) alone misses two real
+  wake paths, so also `window pageshow` (bfcache restore) and `window focus`
+  after >= 1 backgrounded minute. `VoiceManager.notifyWake` is exposed for
+  the page/tests.
+
+### 3. E2EE worker: explicit keyframe generation (static/e2ee-worker.js)
+
+- New `liveTransformers` Set registering every live VIDEO transform; a
+  `message` handler for `generate-keyframes` calls `generateKeyFrame()` on
+  each (promise rejections swallowed); registry cleaned up in the transform
+  `cleanup()`.
+- On VIDEO decrypt failure the transform now ALSO forces a keyframe on the
+  sender (`transformer.generateKeyFrame()`, backpressure-safe: requests are
+  deduped by the browser) — after a sleep/wake the sender keeps emitting
+  deltas the receiver cannot resync from, so without this the tile stayed
+  artifacted until the next periodic keyframe happened to decode cleanly.
+  Dropping the failed frame remains correct (encrypt failures still never
+  forward plaintext).
+
+### 4. Stuck-frame groundwork for relay feeds (static/voice.js)
+
+- `dropRelayFeed(uid, kind, feedOn=false)` now revokes and deletes the cached
+  relay frame when the feed is OFF — otherwise every renderPopup /
+  reInjectRelayFrames pass resurrected the stale `<img>` ("camera off but a
+  frozen frame stays on screen").
+- Stale-frame guards in BOTH relay frame paths (binary and base64): a frame
+  for a member whose row already advertises the feed as OFF is dropped, so a
+  pre-stop frame racing the voice_state can never repaint a tile that should
+  be gone. (The full clearFeedSurface / snapshot-diff machinery documenting
+  the receiver side of this bug landed later, uncommitted — see the session
+  section below.)
+
+### 5. Reset-view chip fixes (static/voice.js)
+
+- Repositioned on `window resize` / `orientationchange` (`onRelayout`, wired
+  for the chip's lifetime): a portrait-to-landscape phone flip relayouts
+  every tile AFTER the chip was placed, and the stale position covered the
+  picture (user report: "after rotating on mobile the reset view button still
+  covers the whole camera").
+- Suppressed while the feed is inside a `.voice-fs-wrap`: there is no render
+  loop to reposition against a fullscreen relayout, so a stale chip covered
+  the fullscreen picture. The transform is per-viewer state and is NOT lost.
+- `restoreFromFsWrap()` re-syncs the chip on fullscreen exit, so it returns
+  as soon as the tile is back in the row.
+
+### Files touched in 681d45f
+
+- `static/voice.js` (+260/-25): PiP picker sections/search/PFP; wake
+  recovery (`notifyWake`, `restartVideoRelay`, listeners); relay stale-frame
+  guards + cache drop; chip reposition/suppress/restore.
+- `static/style.css` (+94): `.voice-pip-search`, `.voice-pip-user`,
+  `.voice-pip-sep`, `.voice-pip-user-head`, `.voice-pip-avatar` (+ pulse
+  keyframes), feed-button layout, picker sizing.
+- `static/e2ee-worker.js` (+36): `liveTransformers` registry +
+  `generate-keyframes` message; keyframe-on-decrypt-failure for video.
+
+The two session sections below this one (media download/copy menus and
+preview fit / chip placement / fullscreen right-click) are the uncommitted
+work that followed 681d45f and they verify parts of it: the PiP picker
+("search, per-user sections, icons — verified and completed") and the chip
+suppression in fullscreen.

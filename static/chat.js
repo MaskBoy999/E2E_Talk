@@ -9308,6 +9308,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Event delegation for multi-file gallery navigation
     document.getElementById('message-list').addEventListener('click', (e) => {
+        // "Download all" — decrypt every file in the gallery and hand them over
+        // as a single zip (or a plain download when there is only one).
+        const dlAllBtn = e.target.closest('.msg-gallery-download-all');
+        if (dlAllBtn) {
+            const gallery = dlAllBtn.closest('.msg-file-gallery');
+            if (gallery) downloadAllGalleryFiles(gallery, dlAllBtn);
+            return;
+        }
         const navBtn = e.target.closest('.msg-gallery-btn');
         if (navBtn) {
             const gallery = navBtn.closest('.msg-file-gallery');
@@ -15906,6 +15914,15 @@ document.getElementById('message-list').addEventListener('contextmenu', function
 
     if (!msgDiv) return;
 
+    // Attachments / emojis / stickers / GIFs have their own menu (download +
+    // copy to clipboard). This handler stops propagation, so the media menu
+    // MUST be dispatched from here — a document-level listener never sees it.
+    if (handleMediaContextMenu(e)) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+    }
+
     e.preventDefault();
 
     e.stopPropagation();
@@ -15924,51 +15941,54 @@ document.getElementById('message-list').addEventListener('contextmenu', function
 
     var items = [];
 
-    items.push({ label: icon('reply') + ' Reply', action: function() { handleReply(msgId, msgDiv); }});
+    // `icon` is a sprite NAME (not markup) — the context-menu renderer draws
+    // the glyph and inserts the label as text, so the icons actually appear
+    // instead of the raw <svg> markup being printed as text.
+    items.push({ label: 'Reply', icon: 'reply', action: function() { handleReply(msgId, msgDiv); }});
 
-    items.push({ label: icon('pin') + ' Reply in Thread', action: function() { openThreadPanel(msgId, currentChannelId); }});
+    items.push({ label: 'Reply in Thread', icon: 'pin', action: function() { openThreadPanel(msgId, currentChannelId); }});
 
     items.push('---');
 
     if (currentServerId) {
 
-        items.push({ label: icon('reply') + ' Forward to Channel', action: function() { handleForward(msgId, msgDiv); }});
+        items.push({ label: 'Forward to Channel', icon: 'reply', action: function() { handleForward(msgId, msgDiv); }});
 
-        items.push({ label: icon('send') + ' Forward to DM', action: function() { handleForwardToDm(msgId, msgDiv); }});
+        items.push({ label: 'Forward to DM', icon: 'send', action: function() { handleForwardToDm(msgId, msgDiv); }});
 
     }
 
     if (currentDmChannelId) {
 
-        items.push({ label: icon('reply') + ' Forward to Channel', action: function() { handleDmForwardToChannel(msgId, msgDiv); }});
+        items.push({ label: 'Forward to Channel', icon: 'reply', action: function() { handleDmForwardToChannel(msgId, msgDiv); }});
 
-        items.push({ label: icon('send') + ' Forward to DM', action: function() { handleDmForwardToDm(msgId, msgDiv); }});
+        items.push({ label: 'Forward to DM', icon: 'send', action: function() { handleDmForwardToDm(msgId, msgDiv); }});
 
     }
 
     items.push('---');
 
-    if (isOwn) items.push({ label: icon('edit') + ' Edit', action: function() { handleEdit(msgId, msgDiv); }});
+    if (isOwn) items.push({ label: 'Edit', icon: 'edit', action: function() { handleEdit(msgId, msgDiv); }});
 
-    if (isOwn) items.push({ label: icon('close') + ' Delete', danger: true, action: function() { handleDelete(msgId, msgDiv); }});
+    if (isOwn) items.push({ label: 'Delete', icon: 'close', danger: true, action: function() { handleDelete(msgId, msgDiv); }});
 
     var isPinned = msgDiv.querySelector('.pin-badge');
 
-    if (isPinned) items.push({ label: icon('pin') + ' Unpin', action: function() { togglePinMessage(msgId, false); }});
+    if (isPinned) items.push({ label: 'Unpin', icon: 'pin', action: function() { togglePinMessage(msgId, false); }});
 
-    else if (currentServerId && isOwner) items.push({ label: icon('pin') + ' Pin', action: function() { togglePinMessage(msgId, true); }});
+    else if (currentServerId && isOwner) items.push({ label: 'Pin', icon: 'pin', action: function() { togglePinMessage(msgId, true); }});
 
-    else if (currentDmChannelId) items.push({ label: icon('pin') + ' Pin', action: function() { togglePinMessage(msgId, true); }});
+    else if (currentDmChannelId) items.push({ label: 'Pin', icon: 'pin', action: function() { togglePinMessage(msgId, true); }});
 
     items.push('---');
 
-    items.push({ label: icon('copy') + ' Copy Text', action: function() {
+    items.push({ label: 'Copy Text', icon: 'copy', action: function() {
 
         if (msgText) navigator.clipboard.writeText(msgText).then(function() { showToast('Text copied'); });
 
     }});
 
-    items.push({ label: icon('link') + ' Copy Message Link', action: function() {
+    items.push({ label: 'Copy Message Link', icon: 'link', action: function() {
 
         var link = window.location.origin + '/#' + msgId;
 
@@ -15980,9 +16000,9 @@ document.getElementById('message-list').addEventListener('contextmenu', function
     if (senderId && senderId !== (typeof myUserId !== 'undefined' ? myUserId : '')) {
         items.push('---');
         if (isUserBlocked(senderId)) {
-            items.push({ label: 'Unblock User', action: function() { unblockUser(senderId); }});
+            items.push({ label: 'Unblock User', icon: 'unlock', action: function() { unblockUser(senderId); }});
         } else {
-            items.push({ label: 'Block User', danger: true, action: function() { blockUser(senderId); }});
+            items.push({ label: 'Block User', icon: 'ban', danger: true, action: function() { blockUser(senderId); }});
         }
     }
 
@@ -24449,7 +24469,10 @@ function buildFileCardHtml(fileData) {
     const isText = isTextFile(fileData.filename, fileData.mime_type);
     const isAudio = !isText && fileData.mime_type && fileData.mime_type.startsWith('audio/');
     const isDoc = window.DocPreview && DocPreview.isDocumentFile(fileData.filename, fileData.mime_type);
-    const icon = getFileIcon(fileData.mime_type, fileData.filename);
+    // NOTE: named `fileIcon` (not `icon`) — a local `icon` shadows the global
+    // sprite helper `icon(name)`, which threw "icon is not a function" for
+    // every audio/document card (their icon markup is built below).
+    const fileIcon = getFileIcon(fileData.mime_type, fileData.filename);
 
     // Audio: render as a full-width player (same as upload modal), not crammed inside a file-card
     if (isAudio) {
@@ -24496,7 +24519,7 @@ function buildFileCardHtml(fileData) {
         (isDoc ? '<button class="file-doc-preview-btn" title="Preview document">' + icon('eye') + '</button>' : '') +
 
         '<div class="file-details">' +
-            '<div class="file-name">' + icon + ' ' + escapeHtml(fileData.filename) + '</div>' +
+            '<div class="file-name">' + fileIcon + ' ' + escapeHtml(fileData.filename) + '</div>' +
             '<div class="file-meta">' + formatFileSize(fileData.file_size) + (fileData.mime_type ? ' • ' + escapeHtml(fileData.mime_type) : '') + '</div>' +
             previewContainer +
         '</div>' +
@@ -24564,11 +24587,13 @@ function buildMultiFileCardHtml(files) {
     const galleryId = 'gallery-' + Date.now() + '-' + Math.random().toString(36).substr(2, 5);
     let html = '<div class="msg-file-gallery" id="' + galleryId + '" data-index="0" data-total="' + files.length + '">';
 
-    // Navigation arrows
+    // Navigation arrows + "Download all" (every file in this upload as one
+    // zip, decrypted client-side — the server only ever hands back ciphertext).
     html += '<div class="msg-gallery-nav">';
     html += '<button class="msg-gallery-btn msg-gallery-prev" data-dir="-1" disabled><svg class="ui-icon" width="16" height="16"><use href="#icon-chevron-left"/></svg></button>';
     html += '<span class="msg-gallery-counter">1 / ' + files.length + '</span>';
     html += '<button class="msg-gallery-btn msg-gallery-next" data-dir="1"><svg class="ui-icon" width="16" height="16"><use href="#icon-chevron-right"/></svg></button>';
+    html += '<button class="msg-gallery-download-all" title="Download all ' + files.length + ' files"><svg class="ui-icon" width="14" height="14"><use href="#icon-download"/></svg><span>Download all</span></button>';
     html += '</div>';
 
     // File items container - only one visible at a time
@@ -24585,9 +24610,9 @@ function buildMultiFileCardHtml(files) {
     // File list strip
     html += '<div class="msg-gallery-strip">';
     files.forEach((f, idx) => {
-        const icon = getFileIcon(f.mime_type, f.filename);
+        const fileIcon = getFileIcon(f.mime_type, f.filename);
         html += '<div class="msg-gallery-strip-item' + (idx === 0 ? ' active' : '') + '" data-idx="' + idx + '" title="' + escapeHtml(f.filename) + '">';
-        html += '<span class="msg-strip-icon">' + icon + '</span>';
+        html += '<span class="msg-strip-icon">' + fileIcon + '</span>';
         html += '<span class="msg-strip-name">' + escapeHtml(f.filename) + '</span>';
         html += '</div>';
     });
@@ -24989,6 +25014,109 @@ function downloadBlobAs(url, filename, mimeType) {
     document.body.removeChild(a);
 }
 
+// Download an in-memory blob under an EXACT filename (no extension guessed /
+// appended) — used by the multi-file "Download all" zip.
+function triggerBlobDownload(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename || 'download';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => { try { URL.revokeObjectURL(url); } catch (_) {} }, 5000);
+}
+
+// === Multi-file "Download all" ===
+// Loads JSZip on demand (the same copy doc-preview.js uses) — nothing is
+// fetched until a user actually clicks Download all.
+function ensureJSZip() {
+    if (window.JSZip) return Promise.resolve(window.JSZip);
+    if (window.__jszipLoad) return window.__jszipLoad;
+    window.__jszipLoad = new Promise((resolve) => {
+        const s = document.createElement('script');
+        s.src = '/libs/jszip.min.js';
+        s.onload = () => resolve(window.JSZip || null);
+        s.onerror = () => resolve(null);
+        document.head.appendChild(s);
+    });
+    return window.__jszipLoad;
+}
+
+// Every attachment card inside a multi-file gallery, in display order.
+function galleryAttachmentCards(gallery) {
+    return Array.from(gallery.querySelectorAll('.msg-gallery-item .file-card, .msg-gallery-item .audio-file-card'));
+}
+
+// Zip entry names must stay unique (two `photo.jpg` in one upload).
+function uniqueZipEntryName(used, name) {
+    let n = name || 'file';
+    if (!used[n]) { used[n] = 1; return n; }
+    const dot = n.lastIndexOf('.');
+    const base = dot > 0 ? n.slice(0, dot) : n;
+    const ext = dot > 0 ? n.slice(dot) : '';
+    let i = 2;
+    while (used[base + ' (' + i + ')' + ext]) i++;
+    const out = base + ' (' + i + ')' + ext;
+    used[out] = 1;
+    return out;
+}
+
+async function downloadAllGalleryFiles(gallery, btn) {
+    if (!gallery || gallery.dataset.downloading === '1') return;
+    const cards = galleryAttachmentCards(gallery);
+    if (cards.length === 0) return;
+    gallery.dataset.downloading = '1';
+    if (btn) { btn.classList.add('busy'); btn.disabled = true; }
+    try {
+        const used = {};
+        const files = [];
+        for (const card of cards) {
+            const fid = card.getAttribute('data-file-id');
+            if (!fid) continue;
+            const fname = card.getAttribute('data-file-name') || 'file';
+            const fmime = card.getAttribute('data-file-mime') || 'application/octet-stream';
+            const fsize = parseInt(card.getAttribute('data-file-size'), 10) || 0;
+            let key = card.getAttribute('data-file-key') || '';
+            if (!key) { try { key = await recoverAttachmentFileKey(fid, card); } catch (_) {} }
+            if (!key) { console.warn('Download all: no key for', fname); continue; }
+            try {
+                const blob = await downloadAndDecryptFile(fid, key, fmime, fsize);
+                files.push({ name: uniqueZipEntryName(used, fname), blob: blob });
+            } catch (err) {
+                console.warn('Download all: skipped', fname, err);
+            }
+        }
+        if (files.length === 0) { showToast('Could not download those files'); return; }
+        if (files.length === 1) {
+            triggerBlobDownload(files[0].blob, files[0].name);
+            showToast('Downloaded ' + files[0].name);
+            return;
+        }
+        const JSZip = await ensureJSZip();
+        if (!JSZip) {
+            // No zip available (offline / blocked) — fall back to one download
+            // per file, staggered so the browser doesn't drop them.
+            files.forEach((f, idx) => {
+                setTimeout(() => triggerBlobDownload(f.blob, f.name), idx * 400);
+            });
+            showToast('Downloading ' + files.length + ' files…');
+            return;
+        }
+        const zip = new JSZip();
+        files.forEach(f => zip.file(f.name, f.blob));
+        const out = await zip.generateAsync({ type: 'blob' });
+        triggerBlobDownload(out, files.length + '-files.zip');
+        showToast('Downloaded ' + files.length + ' files');
+    } catch (err) {
+        console.error('Download all failed:', err);
+        showToast('Failed to download files: ' + (err && err.message ? err.message : err));
+    } finally {
+        gallery.dataset.downloading = '';
+        if (btn) { btn.classList.remove('busy'); btn.disabled = false; }
+    }
+}
+
 // === Emoji download confirm ===
 // Clicking an emoji in a message used to download it instantly. Now it opens a
 // small modal previewing the emoji with Cancel / Download — downloading only
@@ -25032,8 +25160,12 @@ function safeDownloadName(name, fallback) {
     return (name || fallback).replace(/[^\w.-]+/g, '_').replace(/^\.+$/, fallback);
 }
 
-function showContextDownloadMenu(e, src, label, filename, mimeType, onClick) {
-    if (!src) return;
+// Generic message-media context menu (one or more items, plain text labels so
+// nothing user-supplied is ever parsed as markup). Closes on outside click and
+// clamps itself into the viewport. Reused by the download menu and the
+// attachment menu (download / copy to clipboard).
+function showContextMenuAt(e, items) {
+    if (!items || !items.length) return;
     e.preventDefault();
     var existing = document.querySelector('.channel-context-menu');
     if (existing) existing.remove();
@@ -25041,16 +25173,22 @@ function showContextDownloadMenu(e, src, label, filename, mimeType, onClick) {
     menu.className = 'channel-context-menu';
     menu.style.left = e.clientX + 'px';
     menu.style.top = e.clientY + 'px';
-    var item = document.createElement('div');
-    item.className = 'context-menu-item';
-    item.textContent = label; // textContent — never inject
-    item.addEventListener('click', function () {
-        if (onClick) onClick();
-        else downloadBlobAs(src, filename, mimeType);
-        menu.remove();
+    items.forEach(function (it) {
+        var item = document.createElement('div');
+        item.className = 'context-menu-item' + (it.danger ? ' context-menu-danger' : '');
+        item.textContent = it.label; // textContent — never inject
+        item.addEventListener('click', function (ev) {
+            ev.stopPropagation();
+            menu.remove();
+            try { it.action(); } catch (err) { console.warn('Context action failed:', err); }
+        });
+        menu.appendChild(item);
     });
-    menu.appendChild(item);
     document.body.appendChild(menu);
+    // Keep the menu on screen (same edge handling as the channel menu).
+    var rect = menu.getBoundingClientRect();
+    if (rect.right > window.innerWidth) menu.style.left = Math.max(0, e.clientX - rect.width) + 'px';
+    if (rect.bottom > window.innerHeight) menu.style.top = Math.max(0, e.clientY - rect.height) + 'px';
     function closeMenu(e2) {
         if (!menu.contains(e2.target)) {
             menu.remove();
@@ -25058,6 +25196,132 @@ function showContextDownloadMenu(e, src, label, filename, mimeType, onClick) {
         }
     }
     setTimeout(function () { document.addEventListener('click', closeMenu); }, 0);
+}
+
+function showContextDownloadMenu(e, src, label, filename, mimeType, onClick) {
+    if (!src) return;
+    showContextMenuAt(e, [{
+        label: label,
+        action: function () {
+            if (onClick) onClick();
+            else downloadBlobAs(src, filename, mimeType);
+        },
+    }]);
+}
+
+// ---------------------------------------------------------------------------
+// Copy message media / attachments to the clipboard
+// ---------------------------------------------------------------------------
+// Chrome only accepts a small set of clipboard image types (image/png above
+// all), so non-PNG images are re-encoded through a canvas first. Everything
+// else is attempted with its real MIME type; if the browser refuses we say so
+// honestly instead of silently doing nothing.
+function clipboardImageSupported() {
+    return !!(navigator.clipboard && window.ClipboardItem);
+}
+
+function blobToPngBlob(blob) {
+    return new Promise(function (resolve) {
+        var url = URL.createObjectURL(blob);
+        var img = new Image();
+        img.onload = function () {
+            try {
+                var canvas = document.createElement('canvas');
+                canvas.width = img.naturalWidth || img.width;
+                canvas.height = img.naturalHeight || img.height;
+                canvas.getContext('2d').drawImage(img, 0, 0);
+                canvas.toBlob(function (out) { URL.revokeObjectURL(url); resolve(out || null); }, 'image/png');
+            } catch (_) { URL.revokeObjectURL(url); resolve(null); }
+        };
+        img.onerror = function () { URL.revokeObjectURL(url); resolve(null); };
+        img.src = url;
+    });
+}
+
+async function copyBlobToClipboard(blob, label) {
+    if (!clipboardImageSupported()) {
+        showToast('This browser cannot copy files to the clipboard');
+        return false;
+    }
+    var type = blob.type || 'application/octet-stream';
+    if (type.indexOf('image/') === 0 && type !== 'image/png') {
+        var png = await blobToPngBlob(blob);
+        if (png) { blob = png; type = 'image/png'; }
+    }
+    try {
+        var item = {};
+        item[type] = blob;
+        await navigator.clipboard.write([new ClipboardItem(item)]);
+        showToast((label || (type.indexOf('image/') === 0 ? 'Image' : 'File')) + ' copied to clipboard');
+        return true;
+    } catch (err) {
+        console.warn('Clipboard write failed:', err);
+        showToast('Could not copy that file type — this browser only allows images');
+        return false;
+    }
+}
+
+// Right-click a rendered image (sticker / GIF / file preview) → copy its bytes.
+async function copyImageElementToClipboard(imgEl, label) {
+    var src = imgEl && (imgEl.currentSrc || imgEl.src);
+    if (!src) return;
+    try {
+        var res = await fetch(src);
+        if (!res.ok) throw new Error('fetch ' + res.status);
+        await copyBlobToClipboard(await res.blob(), label);
+    } catch (err) {
+        console.warn('Copy image failed:', err);
+        showToast('Could not copy that image');
+    }
+}
+
+// Right-click an attachment card (single file, gallery item or audio card) →
+// the real decrypted file, ready to copy or download.
+async function copyAttachmentToClipboard(card) {
+    var fileId = card.getAttribute('data-file-id');
+    if (!fileId) return;
+    var filename = card.getAttribute('data-file-name') || 'file';
+    var mime = card.getAttribute('data-file-mime') || 'application/octet-stream';
+    var size = parseInt(card.getAttribute('data-file-size'), 10) || 0;
+    try {
+        var key = card.getAttribute('data-file-key') || '';
+        if (!key) { try { key = await recoverAttachmentFileKey(fileId, card); } catch (_) {} }
+        if (!key) throw new Error('file key unavailable');
+        var blob = await downloadAndDecryptFile(fileId, key, mime, size);
+        await copyBlobToClipboard(blob, (mime.indexOf('image/') === 0 ? 'Image "' + filename + '"' : 'File "' + filename + '"'));
+    } catch (err) {
+        console.warn('Copy attachment failed:', err);
+        showToast('Could not copy "' + filename + '"');
+    }
+}
+
+function downloadAttachmentFromCard(card) {
+    var fid = card.getAttribute('data-file-id');
+    if (!fid) return;
+    var fname = card.getAttribute('data-file-name') || 'file';
+    var fmime = card.getAttribute('data-file-mime') || 'application/octet-stream';
+    var fsize = parseInt(card.getAttribute('data-file-size'), 10) || 0;
+    var fkey = card.getAttribute('data-file-key') || '';
+    if (fkey) {
+        downloadFileById(fid, fkey, fname, fmime, fsize);
+    } else {
+        recoverAttachmentFileKey(fid, card).then(function (k) {
+            if (k) downloadFileById(fid, k, fname, fmime, fsize);
+            else showToast('File key unavailable');
+        }).catch(function () {});
+    }
+}
+
+// The attachment right-click menu: download the file, or copy the decrypted
+// file itself to the clipboard (images re-encoded to PNG when needed).
+function showAttachmentContextMenu(e, card) {
+    var mime = card.getAttribute('data-file-mime') || '';
+    var isImage = mime.indexOf('image/') === 0;
+    var name = card.getAttribute('data-file-name') || 'file';
+    showContextMenuAt(e, [
+        { label: '⬇ Download ' + name, action: function () { downloadAttachmentFromCard(card); } },
+        { label: (isImage ? '🖼 Copy image' : '📋 Copy file'), action: function () { copyAttachmentToClipboard(card); } },
+    ]);
 }
 
 // Fetch a remote URL (Giphy-style) and download as a blob — a plain <a
@@ -25073,10 +25337,22 @@ function downloadRemoteAs(url, filename, mimeType) {
         .catch(function () { window.open(url, '_blank'); });
 }
 
-document.addEventListener('contextmenu', function (e) {
-    if (!e.target || !e.target.closest) return;
-    var list = document.getElementById('message-list');
-    if (!list || !list.contains(e.target)) return;
+// Media / attachment right-click inside #message-list. Returns true when a
+// menu was opened (the caller then stops the event so the generic message menu
+// doesn't also appear). Shared by the #message-list handler (the common path —
+// it calls stopPropagation, so this must run there) and the document-level
+// fallback.
+function handleMediaContextMenu(e) {
+    if (!e.target || !e.target.closest) return false;
+
+    // File attachment — a single card, an audio card, a gallery item, or the
+    // image preview inside any of them. Offers download AND copy-to-clipboard
+    // of the actual decrypted file.
+    var fileCard = e.target.closest('.file-card, .audio-file-card');
+    if (fileCard && fileCard.getAttribute('data-file-id')) {
+        showAttachmentContextMenu(e, fileCard);
+        return true;
+    }
 
     // Custom emoji (message text OR reaction pill). Unicode emojis are spans
     // (no img) and are not matched.
@@ -25084,19 +25360,27 @@ document.addEventListener('contextmenu', function (e) {
     if (emojiImg) {
         var name = (emojiImg.getAttribute('alt') || '').replace(/^:|:$/g, '') || 'emoji';
         var src = emojiImg.currentSrc || emojiImg.src;
-        if (src) showContextDownloadMenu(e, src, '⬇ Download :' + name + ':', safeDownloadName(name, 'emoji') + '.png', 'image/png');
-        return;
+        if (!src) return false;
+        showContextMenuAt(e, [
+            { label: '⬇ Download :' + name + ':', action: function () { downloadBlobAs(src, safeDownloadName(name, 'emoji') + '.png', 'image/png'); } },
+            { label: '🖼 Copy image', action: function () { copyImageElementToClipboard(emojiImg, 'Emoji'); } },
+        ]);
+        return true;
     }
 
-    // Sticker in a message.
+    // Sticker in a message — download or copy the image itself.
     var stickerContainer = e.target.closest('.sticker-message');
     if (stickerContainer) {
         var sImg = stickerContainer.querySelector('img');
         var sUrl = sImg ? (sImg.currentSrc || sImg.src) : null;
+        if (!sUrl) return false;
         var sName = (stickerContainer._stickerData && stickerContainer._stickerData.sticker_name) || 'sticker';
         var sMime = stickerContainer.getAttribute('data-mime-type') || 'image/png';
-        if (sUrl) showContextDownloadMenu(e, sUrl, '⬇ Download ' + sName, safeDownloadName(sName, 'sticker'), sMime);
-        return;
+        showContextMenuAt(e, [
+            { label: '⬇ Download ' + sName, action: function () { downloadBlobAs(sUrl, safeDownloadName(sName, 'sticker'), sMime); } },
+            { label: '🖼 Copy image', action: function () { copyImageElementToClipboard(sImg, 'Sticker'); } },
+        ]);
+        return true;
     }
 
     // GIF in a message — mirror the hover ⬇ behavior (cross-origin → fetch to
@@ -25106,14 +25390,23 @@ document.addEventListener('contextmenu', function (e) {
         var gifWrap = gifImg.closest('.gif-message');
         var gifBtn = gifWrap ? gifWrap.querySelector('.media-download-btn') : null;
         var gifUrl = gifBtn ? gifBtn.getAttribute('data-url') : (gifImg.currentSrc || gifImg.src);
+        if (!gifUrl) return false;
         var gifName = (gifBtn && gifBtn.getAttribute('data-filename')) || 'sticker.gif';
-        if (gifUrl) {
-            showContextDownloadMenu(e, gifUrl, '⬇ Download GIF', gifName, 'image/gif', function () {
-                downloadRemoteAs(gifUrl, gifName, 'image/gif');
-            });
-        }
-        return;
+        showContextMenuAt(e, [
+            { label: '⬇ Download GIF', action: function () { downloadRemoteAs(gifUrl, gifName, 'image/gif'); } },
+            { label: '🖼 Copy image', action: function () { copyImageElementToClipboard(gifImg, 'GIF'); } },
+        ]);
+        return true;
     }
+
+    return false;
+}
+
+document.addEventListener('contextmenu', function (e) {
+    if (!e.target || !e.target.closest) return;
+    var list = document.getElementById('message-list');
+    if (!list || !list.contains(e.target)) return;
+    handleMediaContextMenu(e);
 });
 
 // ===== Fullscreen Media Viewer =====

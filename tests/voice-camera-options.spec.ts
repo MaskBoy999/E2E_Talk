@@ -302,15 +302,10 @@ test.describe('camera options + screen audio volume + resize minimum', () => {
         const selfScreenHasVol = await page.evaluate(() => !!document.querySelector('#volume-menu .volume-menu-slider'));
         expect(selfScreenHasVol).toBe(false);
         // View section still there (rotate right, then back) — and it works.
-        await page.evaluate(() => {
-            const btns = document.querySelectorAll('#volume-menu .volume-menu-view-btn');
-            for (const b of btns) {
-                if (b.textContent && b.textContent.indexOf('90°') !== -1 && b.textContent.indexOf('⟳') !== -1) {
-                    (b as HTMLButtonElement).click();
-                    break;
-                }
-            }
-        });
+        // Select by TITLE: the buttons carry SVG icons, so matching a glyph in
+        // textContent can never hit (the old '⟳' lookup matched nothing and
+        // this assertion silently never rotated anything).
+        await page.click('#volume-menu .volume-menu-view-btn[title="Rotate 90° right"]');
         await page.waitForFunction(() => {
             const v = document.querySelector('#dm-call-self video.voice-self-video[data-kind="screen"]') as HTMLElement | null;
             return !!v && (v.style.transform || '').indexOf('rotate(90deg)') !== -1;
@@ -327,15 +322,7 @@ test.describe('camera options + screen audio volume + resize minimum', () => {
         await selfCam2.waitFor({ state: 'visible', timeout: 15000 });
         await selfCam2.click({ button: 'right' });
         await page.waitForSelector('#volume-menu', { state: 'visible', timeout: 10000 });
-        await page.evaluate(() => {
-            const btns = document.querySelectorAll('#volume-menu .volume-menu-view-btn');
-            for (const b of btns) {
-                if (b.textContent && b.textContent.indexOf('90°') !== -1 && b.textContent.indexOf('⟳') !== -1) {
-                    (b as HTMLButtonElement).click();
-                    break;
-                }
-            }
-        });
+        await page.click('#volume-menu .volume-menu-view-btn[title="Rotate 90° right"]');
         await page.waitForFunction(() => {
             const v = document.querySelector('#dm-call-self video.voice-self-video[data-kind="camera"]') as HTMLElement | null;
             return !!v && (v.style.transform || '').indexOf('rotate(90deg)') !== -1;
