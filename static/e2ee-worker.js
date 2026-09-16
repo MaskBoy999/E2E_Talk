@@ -37,6 +37,25 @@ setInterval(() => {
     } catch (_) {}
 }, 1000);
 
+// Live transformer registry so the page can ask every VIDEO SENDER to emit a
+// keyframe right now — used on mobile wake, where every receiver's decoder
+// lost its reference frames while the phone slept and needs a clean keyframe
+// to resync (the periodic 2.5s timer also covers this, but an explicit kick
+// right after wake makes recovery immediate instead of up-to-2.5s-late).
+const liveTransformers = new Set();
+self.onmessage = (e) => {
+    if (e.data && e.data.type === 'generate-keyframes') {
+        liveTransformers.forEach((t) => {
+            try {
+                if (typeof t.generateKeyFrame === 'function') {
+                    const p = t.generateKeyFrame();
+                    if (p && typeof p.catch === 'function') p.catch(() => {});
+                }
+            } catch (_) {}
+        });
+    }
+};
+
 addEventListener('rtctransform', (event) => {
     const transformer = event.transformer;
     const options = transformer.options || {};
@@ -45,6 +64,7 @@ addEventListener('rtctransform', (event) => {
     __dbg.transforms++;
     if (operation === 'encrypt') __dbg.encTransforms++;
     else __dbg.decTransforms++;
+    liveTransformers.add(transformer);
 
     // Per-transform key: start() runs before any transform() for this stream,
     // so `myKey` is race-free even when many transforms share the worker.
@@ -160,14 +180,26 @@ addEventListener('rtctransform', (event) => {
                 //    keyframe (this was the 'lots of artifacts' bug).
                 //  - Encrypt failure: forwarding the PLAINTEXT bytes would leak
                 //    the frame in the clear to the server/peers.
-                // Dropping the frame is correct in both cases.
+                // Dropping the frame is correct in both cases — and on VIDEO
+                // decrypt failures we also force a keyframe on the sender:
+                // after a phone sleeps/wakes mid-call the sender keeps
+                // emitting deltas the receiver cannot resync from, so without
+                // this the tile stays artifacted until the next periodic
+                // keyframe happens to decode cleanly. generateKeyFrame() on
+                // the sender is backpressure-safe (requests are deduped).
                 if (operation === 'encrypt') __dbg.encDrop++;
-                else __dbg.decDrop++;
+                else {
+                    __dbg.decDrop++;
+                    if (isVideo && typeof event.transformer.generateKeyFrame === 'function') {
+                        try { event.transformer.generateKeyFrame(); } catch (_e) {}
+                    }
+                }
             }
         },
     });
 
     const cleanup = () => {
+        liveTransformers.delete(transformer);
         if (event.transformer._codebuffKfTimer) {
             clearInterval(event.transformer._codebuffKfTimer);
             event.transformer._codebuffKfTimer = null;

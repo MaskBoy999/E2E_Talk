@@ -277,6 +277,12 @@
         },
         updateDmCallUI: updateDmCallUI,
         updateChannelChips: updateChannelChips,
+        // Mobile sleep/wake recovery: fires after a phone unlocks with media
+        // active — audio context resume, keyframe push to every video sender,
+        // and a clean re-draw of the off-main-thread relay pipelines (their
+        // hidden <video> decoders are the "artifacts after the phone sleeps"
+        // source).
+        notifyWake: notifyWake,
         // Re-render self avatars/rows/tiles after the own profile loads (fresh
         // device: pfp arrives async after the voice UI may have rendered).
         refreshSelfProfile: function () {
@@ -4526,32 +4532,126 @@
         var selfId = getSelfId();
         var sources = collectPipSources();
         menu.innerHTML = '';
+
+        // Search bar — matches display name OR username (case-insensitive;
+        // "both should work"). Filter is pure UI: typing re-hides rows only.
+        var search = document.createElement('input');
+        search.type = 'text';
+        search.className = 'voice-pip-search';
+        search.placeholder = 'Search name or username';
+        search.setAttribute('autocomplete', 'off');
+        search.setAttribute('spellcheck', 'false');
+        search.addEventListener('click', function (e) { e.stopPropagation(); });
+        search.addEventListener('input', function () {
+            var q = (search.value || '').trim().toLowerCase();
+            var rows = menu.querySelectorAll('.voice-pip-user');
+            for (var i = 0; i < rows.length; i++) {
+                var hay = (rows[i].getAttribute('data-search') || '').toLowerCase();
+                rows[i].style.display = (!q || hay.indexOf(q) !== -1) ? '' : 'none';
+            }
+        });
+        menu.appendChild(search);
+
         if (sources.length === 0) {
             var empty = document.createElement('div');
             empty.className = 'voice-pip-empty';
             empty.textContent = 'No active camera or screen share';
             menu.appendChild(empty);
         } else {
+            // One section per USER, separated by a divider ("a separation from
+            // each user"); both of a member's feeds share their section.
+            var sections = [];
+            var byUid = {};
             sources.forEach(function (src) {
-                var btn = document.createElement('button');
-                btn.type = 'button';
-                btn.setAttribute('data-uid', src.uid);
-                btn.setAttribute('data-kind', src.kind);
-                if (_pipActive && src.uid === _pipUid && src.kind === _pipKind) btn.classList.add('active');
-                var label = document.createElement('span');
-                var m = S.members[src.uid];
-                label.textContent = (src.uid === selfId) ? 'You' : memberDisplayName(src.uid, m);
-                btn.appendChild(label);
-                var kindEl = document.createElement('span');
-                kindEl.className = 'voice-pip-kind';
-                kindEl.textContent = src.kind === 'camera' ? 'Camera' : 'Screen';
-                btn.appendChild(kindEl);
-                btn.addEventListener('click', function (e) {
-                    e.stopPropagation();
-                    closePipMenu();
-                    startPiPForTile(src.tile, src.uid, src.kind);
+                if (!byUid[src.uid]) {
+                    byUid[src.uid] = [];
+                    sections.push({ uid: src.uid, srcs: byUid[src.uid] });
+                }
+                byUid[src.uid].push(src);
+            });
+            sections.forEach(function (sec, si) {
+                if (si > 0) {
+                    var div = document.createElement('div');
+                    div.className = 'voice-pip-sep';
+                    menu.appendChild(div);
+                }
+                var m = S.members[sec.uid] || {};
+                var disp = (sec.uid === selfId) ? 'You' : memberDisplayName(sec.uid, m);
+                var uname = m.username || (sec.uid === selfId ? (S.selfUsername || '') : '') || '';
+                var row = document.createElement('div');
+                row.className = 'voice-pip-user';
+                // Search haystack: display name + username, so either matches.
+                row.setAttribute('data-search', ((disp + ' ' + uname) || '').toLowerCase());
+                var head = document.createElement('div');
+                head.className = 'voice-pip-user-head';
+                // PFP via the same pipeline the member rows use: cached blob
+                // URL now, or an initial placeholder carrying
+                // data-profile-pic-load which getProfilePicUrl() fills in
+                // async (same mechanism chat.js avatars rely on).
+                var entry = (typeof userDisplayNameCache !== 'undefined') ? userDisplayNameCache[sec.uid] : null;
+                var picId = (entry && entry.profile_picture_file_id) || null;
+                var picKey = picId ? (sec.uid + ':' + picId) : '';
+                var picUrl = (picKey && typeof profilePicCache !== 'undefined' && profilePicCache[picKey]) ? profilePicCache[picKey] : null;
+                var av = document.createElement('div');
+                av.className = 'voice-pip-avatar';
+                if (picUrl) {
+                    av.innerHTML = '<img src="' + esc(picUrl) + '" alt="">';
+                } else {
+                    av.textContent = (disp || '?').charAt(0).toUpperCase();
+                    if (picKey) {
+                        av.setAttribute('data-profile-pic-load', picKey);
+                        av.classList.add('voice-pip-avatar-load');
+                        try { getProfilePicUrl(picId, sec.uid); } catch (_) {}
+                    }
+                }
+                head.appendChild(av);
+                var idBox = document.createElement('div');
+                idBox.className = 'voice-pip-id';
+                var dn = document.createElement('div');
+                dn.className = 'voice-pip-dn';
+                var dnStyle = memberNameStyle(sec.uid);
+                if (dnStyle) dn.setAttribute('style', dnStyle);
+                dn.textContent = disp + (sec.uid === selfId ? ' (you)' : '');
+                idBox.appendChild(dn);
+                if (uname) {
+                    var un = document.createElement('div');
+                    un.className = 'voice-pip-un';
+                    un.textContent = '@' + uname;
+                    idBox.appendChild(un);
+                }
+                head.appendChild(idBox);
+                row.appendChild(head);
+                var feeds = document.createElement('div');
+                feeds.className = 'voice-pip-feeds';
+                sec.srcs.forEach(function (src) {
+                    var btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.className = 'voice-pip-feed-btn' + (src.kind === 'screen' ? ' is-screen' : '');
+                    btn.setAttribute('data-uid', src.uid);
+                    btn.setAttribute('data-kind', src.kind);
+                    if (_pipActive && src.uid === _pipUid && src.kind === _pipKind) btn.classList.add('active');
+                    // Feed kind icon: camera or monitor — the visual "which is
+                    // which" cue, same icons the member badges use.
+                    var ic = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+                    ic.setAttribute('class', 'ui-icon');
+                    ic.setAttribute('width', '14');
+                    ic.setAttribute('height', '14');
+                    var use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+                    use.setAttribute('href', src.kind === 'screen' ? '#icon-monitor' : '#icon-camera');
+                    ic.appendChild(use);
+                    btn.appendChild(ic);
+                    var lbl = document.createElement('span');
+                    lbl.textContent = src.kind === 'camera' ? 'Camera' : 'Screen';
+                    btn.appendChild(lbl);
+                    btn.addEventListener('click', function (e) {
+                        e.stopPropagation();
+                        closePipMenu();
+                        startPiPForTile(src.tile, src.uid, src.kind);
+                    });
+                    feeds.appendChild(btn);
                 });
-                menu.appendChild(btn);
+                row.appendChild(feeds);
+                menu.appendChild(row);
             });
         }
         // Show, then position near the button that opened it (clamped to the
@@ -5182,6 +5282,18 @@
     }
     if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
         document.addEventListener('visibilitychange', _updateBackgroundStart);
+        // Mobile sleep/wake recovery. 'visibilitychange' alone misses two real
+        // wake paths (PWA resume; lock-screen without a visibility flip on
+        // some Android browsers), so also listen on 'pageshow' (bfcache
+        // restores) and 'focus' after a long hide. notifyWake() is debounced
+        // and no-ops when not in a call, so the extra listeners are cheap.
+        document.addEventListener('visibilitychange', function () {
+            if (!document.hidden) notifyWake();
+        });
+        window.addEventListener('pageshow', function () { notifyWake(); });
+        window.addEventListener('focus', function () {
+            if (_bgStartedMs !== null || getBackgroundedMinutes() >= 1) notifyWake();
+        });
     }
 
     // How many minutes the app has been continuously backgrounded (0 if
@@ -6226,6 +6338,14 @@
     function dropRelayFeed(uid, kind, feedOn) {
         var fk = uid + '_' + kind;
         var imgs = document.querySelectorAll('img.relay-video[data-uid="' + uid + '"][data-kind="' + kind + '"]');
+        // feedOn=false → the member turned the feed OFF: the cached relay
+        // frame must go too, or every renderPopup/reInjectRelayFrames pass
+        // would resurrect the stale <img> (the "camera off but a frozen frame
+        // stays on screen" bug).
+        if (!feedOn && S._relayVideoFrames[fk]) {
+            URL.revokeObjectURL(S._relayVideoFrames[fk]);
+            delete S._relayVideoFrames[fk];
+        }
         if (!S._relayVideoFrames[fk] && !imgs.length) return;
         if (S._relayVideoFrames[fk]) {
             URL.revokeObjectURL(S._relayVideoFrames[fk]);
@@ -7328,6 +7448,26 @@
                 setTimeout(place, 60);
             }
         })();
+        // Rotation/resize reposition: a portrait→landscape phone flip (or any
+        // viewport resize) relayouts every tile AFTER this function ran, so
+        // the chip's just-computed offset went stale — on a rotated tile the
+        // stale position covered the picture (user report: "after rotating on
+        // mobile the reset view button still covers the whole camera").
+        // Reposition on the next resize/orientationchange while alive; the
+        // element is removed with the chip so no leak.
+        if (!positionResetViewChip._listening) {
+            positionResetViewChip._listening = true;
+            var onRelayout = function () {
+                document.querySelectorAll('.voice-tile-reset-view').forEach(function (c) {
+                    var host = c.parentElement && c.parentElement.querySelector(
+                        'video[data-kind], img.relay-video[data-kind]');
+                    if (host && c.isConnected) positionResetViewChip(c, host);
+                });
+            };
+            positionResetViewChip._onRelayout = onRelayout;
+            window.addEventListener('resize', onRelayout);
+            window.addEventListener('orientationchange', onRelayout);
+        }
     }
 
     function syncResetViewChips(uid, kind) {
@@ -7342,6 +7482,13 @@
             if (!video && v.offsetParent) video = v;
         });
         if (!video) return;
+        // No chip in FULLSCREEN — the fullscreen overlay covers the screen and
+        // there is no nearby render loop to reposition against a fullscreen
+        // relayout, so the stale-positioned chip covered the picture (user
+        // report: "remove reset view button from fullscreen"). The transform
+        // is per-viewer state, not lost: the chip returns when the user exits
+        // fullscreen.
+        if (video.closest && video.closest('.voice-fs-wrap')) return;
         var parent = video.parentElement;
         if (parent && parent.classList && parent.classList.contains('voice-tile-slot')) parent = parent.parentElement;
         if (!parent) return;
@@ -8552,6 +8699,11 @@
                 handleRelayedAudioFrame(decoded.fromUid, plaintext, decoded.kind);
                 return;
             }
+            // Stale-frame guard: the sender stopped this feed (camera/screen
+            // OFF) but a pre-stop frame raced its voice_state — drop it instead
+            // of painting a tile the member's row no longer advertises.
+            var _rm = S.members[decoded.fromUid];
+            if (_rm && _rm[decoded.kind] === false) return;
 
             // Video frame — render as <img>
             var blob = new Blob([plaintext], { type: 'image/jpeg' });
@@ -8594,6 +8746,10 @@
             return;
         }
 
+        // Stale-frame guard (same as the binary path): never resurrect a feed
+        // the sender has already turned off.
+        var _rm2 = S.members[fromUid];
+        if (_rm2 && _rm2[kind] === false) return;
         // Video frame — render as <img> in the appropriate tile
         var blob = new Blob([plaintext], { type: 'image/jpeg' });
         var url = URL.createObjectURL(blob);
@@ -8611,6 +8767,18 @@
         if (!S.members[fromUid]) S.members[fromUid] = {};
         S.members[fromUid][kind === 'camera' ? 'camera' : 'screen'] = true;
         S.members[fromUid]['_relay_' + kind] = Date.now();
+    }
+
+    // Tear a relay capture loop down and rebuild it from the live stream —
+    // used after a phone sleep/wake, where the loop's hidden <video> decoder
+    // stalled on a pre-sleep frame and would keep re-drawing stale/artifacted
+    // captures. stopVideoRelay() clears S._relayTimers[kind] and running
+    // flags; startVideoRelay() then rebuilds the whole pipeline fresh.
+    function restartVideoRelay(kind) {
+        var stream = S.localStreams[kind];
+        if (!stream || !useVideoRelay(kind)) return;
+        try { stopVideoRelay(kind); } catch (_) {}
+        try { startVideoRelay(stream, kind); } catch (_) {}
     }
 
     // Expose relay controls
@@ -10155,6 +10323,54 @@
         syncVideoReconnectChips();
     }
 
+    // ------------------------------------------------------------------
+    // Mobile sleep/wake recovery
+    // ------------------------------------------------------------------
+    // When a phone sleeps with the camera / screen share / mic active, iOS and
+    // Android browsers tear down the media pipeline without firing track 'ended'
+    // — on wake the encoders emit delta frames the receivers can't resync from
+    // (blocky artifact picture), the mic's AudioContext sits suspended, and the
+    // relay capture loops keep drawing from hidden <video> elements whose
+    // decoders stalled on a stale frame. Wake recovery, in order:
+    //   1. resume the (user-gesture-gated) AudioContext,
+    //   2. push a keyframe from every video sender so receivers resync instantly
+    //      (the periodic 2.5s keyframe timer alone can take several frames to
+    //      converge, which is exactly the visible artifacting),
+    //   3. rebuild each relay capture loop that is still marked running — its
+    //      hidden <video> + encoder worker are pointing at pre-sleep decode
+    //      state, and a fresh pipeline guarantees the next frames are real.
+    //   4. re-broadcast our voice state (a sleep can silently stop a track
+    //      without 'ended', so peers re-learn our camera/screen/mute flags).
+    // Debounced: lock-screen/wake fires visibilitychange in bursts.
+    var _lastWakeRecovery = 0;
+    function notifyWake() {
+        if (!S.connected) return;
+        var now = Date.now();
+        if (now - _lastWakeRecovery < 3000) return;
+        _lastWakeRecovery = now;
+        try { ensureAudioCtx(); } catch (_) {}
+        // 2. Keyframe push — the e2ee worker generateKeyFrame()s every live
+        // video sender transform on this message.
+        try {
+            if (e2eeWorker) e2eeWorker.postMessage({ type: 'generate-keyframes' });
+        } catch (_) {}
+        // Also nudge each peer connection: a short ICE 'disconnected' that
+        // started during sleep sometimes never fires its own recovery.
+        for (var uid in S.peers) {
+            var pc = S.peers[uid];
+            try {
+                if (pc && pc.connectionState === 'disconnected' && pc.signalingState !== 'closed') pc.restartIce();
+            } catch (_) {}
+        }
+        // 3. Rebuild relay pipelines that survived the sleep.
+        ['camera', 'screen'].forEach(function (kind) {
+            var state = _relayCanvases[kind];
+            if (state && state.running) restartVideoRelay(kind);
+        });
+        // 4. Re-broadcast state.
+        try { sendVoiceState(); } catch (_) {}
+    }
+
     function restartMicForSettings() {
         if (!S.connected) return;
         if (S.localStreams.mic) {
@@ -10296,7 +10512,13 @@
         if (wrap.parentNode) wrap.remove();
         if (el) {
             reattachTileStream(el);
-            if (el.dataset) applyTileTransform(el, el.dataset.uid, el.dataset.kind);
+            if (el.dataset) {
+                applyTileTransform(el, el.dataset.uid, el.dataset.kind);
+                // Back in the tile view — restore the "Reset view" chip if
+                // this feed still carries a transform (it was suppressed
+                // while fullscreened).
+                try { syncResetViewChips(el.dataset.uid, el.dataset.kind); } catch (_) {}
+            }
         }
     }
 
