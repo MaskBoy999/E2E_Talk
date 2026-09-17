@@ -9449,7 +9449,33 @@ pub async fn disable_soundboard_user(
         return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Only server owner can disable a user's soundboard"}))).into_response();
     }
     match state.db.disable_soundboard_user(&server_id, &target_user_id, &user_id) {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Ok(()) => {
+            // Tell the TARGET (all their devices) live: their soundboard is now
+            // disabled — without this the sound they were PLAYING (self-hear)
+            // and any sound of theirs that members were hearing kept running
+            // until its natural end. Also broadcast to the whole server so
+            // LISTENERS stop a still-playing clip from the disabled user.
+            state.ws_manager.broadcast_to_users(&[target_user_id.clone()], &serde_json::json!({
+                "type": "soundboard_disabled",
+                "server_id": server_id,
+                "user_id": target_user_id,
+                "disabled": true,
+            }).to_string()).await;
+            // Listeners: stop that user's sound inside every server voice room.
+            let room_ids: Vec<String> = state.voice_rooms.read().unwrap()
+                .iter()
+                .filter(|(_, rm)| rm.room_type == "server" && rm.server_id.as_deref() == Some(server_id.as_str()))
+                .map(|(rid, _)| rid.clone())
+                .collect();
+            for rid in room_ids {
+                crate::ws::voice_broadcast(&state, &rid, &serde_json::json!({
+                    "type": "soundboard_stop",
+                    "user_id": target_user_id,
+                    "reason": "soundboard_disabled",
+                })).await;
+            }
+            (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
 }
@@ -9467,7 +9493,19 @@ pub async fn enable_soundboard_user(
         return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Only server owner can enable a user's soundboard"}))).into_response();
     }
     match state.db.enable_soundboard_user(&server_id, &target_user_id, &user_id) {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Ok(()) => {
+            // Mirror of the disable broadcast: the target's own devices learn
+            // they can play/hear again. A clip that was ALREADY playing was
+            // stopped on disable (that state is gone), so there is nothing to
+            // resume here — the next play goes through normally.
+            state.ws_manager.broadcast_to_users(&[target_user_id.clone()], &serde_json::json!({
+                "type": "soundboard_disabled",
+                "server_id": server_id,
+                "user_id": target_user_id,
+                "disabled": false,
+            }).to_string()).await;
+            (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
 }

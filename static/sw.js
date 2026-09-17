@@ -10,7 +10,7 @@
 // Bump this whenever static JS changes: assets are served cache-first, so an
 // unchanged cache name keeps an OLD voice.js/chat.js alive and code fixes look
 // like they "didn't apply".
-const CACHE_NAME = 'e2e-chat-v6';
+const CACHE_NAME = 'e2e-chat-v7';
 const STATIC_ASSETS = [
     '/',
     '/index.html',

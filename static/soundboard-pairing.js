@@ -17,6 +17,8 @@
     var _sbAllPlaying = []; // all active Audio elements (for stop-on-leave)
     var _sbAudioCtx = null; // shared AudioContext for soundboard playback (bypasses autoplay)
     var _sbCurrentClipId = null; // clip ID of the currently playing sound (for overlay button sync)
+    var _sbLoopEnabled = false; // Loop toggle: keep re-playing our clip until manually stopped
+    var _sbLoopSession = null; // { clipId } while OUR clip is looping (cleared on stop/leave/disable)
 
     // Ensure a shared AudioContext for soundboard playback (bypasses browser
     // autoplay restrictions because the context is created during a user gesture
@@ -69,16 +71,63 @@
             });
         };
         if (ctx.state === 'suspended') {
-            return ctx.resume().then(function () { return decode(ctx); }).catch(function () { return decode(ctx); });
+            // A source started on a suspended context is only QUEUED, so the
+            // user hears nothing until the context resumes. Chrome resolves
+            // resume() even when the page still lacks user activation and the
+            // context stays suspended — detect that and REJECT so the caller
+            // falls back to an <audio> element (which plays under the media
+            // engagement policy). Leaving it queued is what made a mid-play
+            // joiner hear nothing at all until they happened to click.
+            return ctx.resume().then(function () {
+                if (ctx.state !== 'running') throw new Error('sb-context-still-suspended');
+                return decode(ctx);
+            });
         }
         return decode(ctx);
     }
+
+    // Autoplay-policy unlock: a play that arrives before the page has had any
+    // user interaction can find the shared AudioContext suspended. Anything
+    // queued on it starts as soon as it resumes, so resume on the first real
+    // gesture (join clicks, tab focus, any pointer/key input).
+    function _unlockSbAudioCtxOnGesture() {
+        if (_sbAudioCtx && _sbAudioCtx.state === 'suspended') {
+            _sbAudioCtx.resume().catch(function () {});
+        }
+    }
+    document.addEventListener('pointerdown', _unlockSbAudioCtxOnGesture, true);
+    document.addEventListener('keydown', _unlockSbAudioCtxOnGesture, true);
+    document.addEventListener('touchstart', _unlockSbAudioCtxOnGesture, true);
 
     // Called when a relayed clip finishes naturally (or is skipped because the
     // position was past its end). Removes the tracking entry and — for our own
     // plays — restores the overlay's play button so the stale stop button
     // doesn't linger after the sound ended.
     function _sbOnClipEnded(userId, clipId) {
+        // Loop FIRST — our own clip finishing a cycle starts the next one
+        // instead of ending. This has to run before the live-entry check
+        // below: with Hear Myself OFF nothing plays locally, so the duration
+        // timer is the only thing that can re-cycle the clip and no entry
+        // ever exists for it.
+        if (userId === window.currentUserId && clipId &&
+            _sbLoopEnabled && _sbLoopSession && _sbLoopSession.clipId === clipId &&
+            !_isSbDisabledGlobal() &&
+            window.ws && window.ws.readyState === 1) {
+            var vsLoop = window.VoiceManager && window.VoiceManager.getVoiceState && window.VoiceManager.getVoiceState();
+            if (vsLoop && vsLoop.inVoice) {
+                // Re-arm the overlay's stop button for the next cycle.
+                // playSoundboardClip() itself resets + re-arms the buttons, so
+                // pass the row's real elements (nulls are fine when the overlay
+                // isn't showing this clip — playback still happens).
+                var loopEl = _sbClips && _sbClips.querySelector('.soundboard-clip[data-clip-id="' + clipId + '"]');
+                playSoundboardClip(clipId,
+                    loopEl && loopEl.querySelector('.sb-pause-btn'),
+                    loopEl && loopEl.querySelector('.sb-play-btn'),
+                    loopEl && loopEl.querySelector('.sb-loading'));
+                return;
+            }
+            _sbLoopSession = null; // left the room — the loop dies here
+        }
         // Only act if a live entry still exists — a manual stop already removed
         // it (source.stop() also fires onended, so this prevents double cleanup
         // and a duplicate soundboard_stop broadcast).
@@ -105,25 +154,12 @@
             }
         }
         if (userId === window.currentUserId && clipId) {
-            _resetSbOverlayForClip(clipId);
-            // Tell the room the clip is over so the server clears its playback
+            // Not looping any more: hand the overlay's stop button back and
+            // tell the room the clip is over so the server clears its playback
             // state (late joiners won't try to sync to a finished clip).
-            var w = window.ws;
-            if (w && w.readyState === 1) {
-                var vs = window.VoiceManager && window.VoiceManager.getVoiceState && window.VoiceManager.getVoiceState();
-                if (vs && vs.inVoice) {
-                    try {
-                        w.send(JSON.stringify({
-                            type: 'soundboard_stop',
-                            user_id: window.currentUserId,
-                            server_id: window.currentServerId || '',
-                            channel_id: vs.channelId || '',
-                            room_type: vs.roomType || 'server',
-                            dm_channel_id: vs.dmChannelId || '',
-                        }));
-                    } catch (_) {}
-                }
-            }
+            _sbLoopSession = null;
+            _resetSbOverlayForClip(clipId);
+            _sendSoundboardStop();
         }
     }
 
@@ -135,6 +171,12 @@
         localStorage.setItem('sb_disabled_global', disabled ? '1' : '0');
         // Sync all three checkboxes
         syncDisableCheckboxes(disabled);
+        // Turning the setting ON must also stop what is ALREADY playing — the
+        // setting covers both playing and hearing, not just future plays.
+        if (disabled) {
+            if (window._stopAllSoundboardAudioAll) window._stopAllSoundboardAudioAll();
+            for (var k in _sbSuppressedPlays) delete _sbSuppressedPlays[k];
+        }
     }
     function syncDisableCheckboxes(disabled) {
         var ids = ['voice-disable-soundboard', 'voice-popup-disable-sb'];
@@ -208,6 +250,21 @@
         _sbSelfHearEl.checked = _sbSelfHear;
         _sbSelfHearEl.addEventListener('change', function () {
             _sbSelfHear = _sbSelfHearEl.checked;
+        });
+    }
+
+    // Loop toggle — persist so the panel comes back the way it was left.
+    // While ON, our clip re-plays (a fresh relayed cycle) every time it ends
+    // naturally, until we stop it, leave the call, or disable the soundboard.
+    var _sbLoopEl = document.getElementById('soundboard-loop');
+    if (_sbLoopEl) {
+        _sbLoopEnabled = localStorage.getItem('sb_loop') === '1';
+        _sbLoopEl.checked = _sbLoopEnabled;
+        _sbLoopEl.addEventListener('change', function () {
+            _sbLoopEnabled = _sbLoopEl.checked;
+            try { localStorage.setItem('sb_loop', _sbLoopEnabled ? '1' : '0'); } catch (_) {}
+            // Turning Loop OFF mid-loop ends the session at the current cycle.
+            if (!_sbLoopEnabled) _sbLoopSession = null;
         });
     }
 
@@ -406,11 +463,13 @@
                 var clipEl = btn.closest('.soundboard-clip');
                 var pauseBtn = clipEl.querySelector('.sb-pause-btn');
                 var loadBtn = clipEl.querySelector('.sb-loading');
+                if (_sbLoopEnabled) _sbLoopSession = { clipId: clipId };
                 playSoundboardClip(clipId, pauseBtn, btn, loadBtn);
             };
         });
         _sbClips.querySelectorAll('.sb-pause-btn').forEach(function (btn) {
             btn.onclick = function () {
+                _sbLoopSession = null; // manual stop always ends the loop
                 _stopAllSoundboardAudio();
                 _sendSoundboardStop();
                 _resetSbButtons();
@@ -480,6 +539,11 @@
             alert('Your soundboard is disabled. Go to Settings → Voice to re-enable it.');
             return;
         }
+        // Owner disabled this account's soundboard (live or persisted)
+        if (_sbIsOwnerDisabledForMe()) {
+            alert('Your soundboard is disabled by the server owner.');
+            return;
+        }
         // Stop any currently playing
         _stopAllSoundboardAudio();
         _resetSbButtons();
@@ -509,6 +573,7 @@
                 if (pauseBtn) pauseBtn.style.display = '';
                 if (playBtn) playBtn.style.display = 'none';
                 _sbCurrentClipId = clipId;
+                _sbLoopSession = _sbLoopEnabled ? { clipId: clipId } : null;
                 var rawB64 = uint8ToBase64(audioBytes);
                 var playStartTime = Date.now();
                 fetch('/api/soundboard/temp-play', {
@@ -531,6 +596,9 @@
                         // Real clip length so late joiners can skip clips that
                         // already finished instead of replaying them from 0.
                         duration_ms: (clip.duration_ms || 0),
+                        // Loop mode: the server stores the flag so late joiners
+                        // know this clip never "has definitely finished".
+                        loop: _sbLoopEnabled,
                     }));
                 }).catch(function(e) {
                     console.error('Soundboard temp upload failed:', e);
@@ -584,6 +652,10 @@
     window._handleSoundboardPlay = function (data) {
         // If soundboard sounds are disabled in settings, block both play and receive
         if (_isSbDisabledGlobal()) return;
+        // Owner disabled OUR soundboard live (or for this server) → we cannot
+        // play or hear. (A relayed play of ours still arrives with disabled
+        // unset when the owner toggle raced it — this local check closes it.)
+        if (data.user_id === window.currentUserId && _sbIsOwnerDisabledForMe()) return;
         // Ignore disabled soundboard (owner disabled for this user)
         if (data.disabled) return;
         // For self: only play if hear-self is toggled on
@@ -591,22 +663,34 @@
             if (!_sbSelfHear) {
                 // We still need the overlay's stop button to flip back when our
                 // clip ends naturally — schedule the cleanup with the known
-                // duration (always sent now). No audio is played for us.
+                // duration (always sent now). No audio is played for us. While
+                // looping, keep the session alive across the silent cycles so
+                // toggling hear-self ON mid-loop picks up the next cycle.
                 var d = data.duration_ms || 0;
                 var cid = data.clip_id;
+                if (_sbLoopEnabled) _sbLoopSession = { clipId: cid };
+                // The timer drives _sbOnClipEnded even with no local audio: with
+                // Loop ON it is what re-cycles the clip (and re-broadcasts it to
+                // the room) while the player themselves hears nothing.
                 if (d > 0 && cid) {
                     setTimeout(function () { _sbOnClipEnded(data.user_id, cid); }, d + 250);
                 }
                 return;
             }
-        } else {
-            // For others: skip if individually muted
-            if (_isUserMuted(data.user_id)) return;
+        } else if (_isUserMuted(data.user_id)) {
+            // For others: muted → SUPPRESS (remember the play) instead of
+            // dropping it. This is what makes unmute work: voice.js calls
+            // _sbResumeForUser(uid) on unmute, which replays this data with a
+            // lazily-sampled offset — the user lands mid-clip like a late
+            // join. This block used to sit AFTER a plain `return`, so the
+            // store was never populated and unmute resumed nothing.
+            _sbSuppressedPlays[data.user_id] = data;
+            return;
         }
         // Deafened users should not hear any soundboard sounds
         if (window.VoiceManager && window.VoiceManager.getState) {
-            var _vs = window.VoiceManager.getState();
-            if (_vs && _vs.deafened) return;
+            var _vsD = window.VoiceManager.getState();
+            if (_vsD && _vsD.deafened) return;
         }
         // Multi-device gate: only the device actually IN the target voice room
         // plays the sound. A second device of the same account that is NOT in
@@ -625,11 +709,10 @@
             // Not in voice and not a late-join synthetic call → ignore
             return;
         }
-        // Mute suppress: store the play data so unmute can resume (like late join)
-        if (data.user_id !== window.currentUserId && _isUserMuted(data.user_id)) {
-            _sbSuppressedPlays[data.user_id] = data;
-            return;
-        }
+        // One sound per player: a second play from the same user replaces the
+        // first (Discord behaviour). Without this, a loop re-cycle would
+        // overlap the still-decoding previous cycle and double the audio.
+        _sbStopEntriesFor(data.user_id);
         // Determine play source: temp_token (fast HTTP fetch) or legacy encrypted_audio
         var playPromise;
         if (data.temp_token) {
@@ -649,28 +732,44 @@
         }
         playPromise.then(function(audioBytes) {
             if (!audioBytes || audioBytes.length === 0) return;
+            // Disabled mid-flight (global toggle or an owner disable that
+            // arrived while the fetch was running) → drop it here.
+            if (_isSbDisabledGlobal() || (data.user_id !== window.currentUserId && _isUserMuted(data.user_id))) return;
             // Track this user as actively playing (for the indicator badge)
             _sbSetPlaying(data.user_id, true);
-            // Late-join offset is sampled lazily (as a function) so it is read
-            // right before the source actually starts — AFTER the fetch above
-            // and AFTER decodeAudioData. That way fetch + decrypt + decode
-            // time counts toward the offset and we start at the position the
-            // room is actually at, not the position when the message arrived.
-            var durationMs = data.duration_ms || 0;
+            // Playback offset — CLOCK-SKEW-PROOF. play_start_ms is the
+            // SERVER's clock, so `Date.now() - play_start_ms` is garbage
+            // whenever the client clock differs from the server's (a skewed
+            // client computed a huge offset and SKIPPED the clip as "already
+            // finished" — the exact "join mid-play and hear nothing" bug).
+            // Both deltas below are differences, so any constant skew cancels:
+            //   elapsed = (serverNow - playStart)   [server clock, at relay]
+            //           + (localNow - localRecv)    [local clock, since arrival]
+            // The AudioContext path samples this lazily right before the
+            // source starts, so fetch + decode time counts toward the offset.
+            var receivedAtMs = data._sbRecvLocalMs || Date.now();
             var offsetProvider = function () {
-                // Prefer the authoritative server-stamped start time and
-                // recompute every call — this is what makes fetch + decrypt
-                // + decode time count toward the offset. _lateJoinOffset is
-                // only a fallback for messages without a timestamp.
-                if (data.play_start_ms) {
-                    return Math.max(0, Date.now() - data.play_start_ms);
+                var off = 0;
+                if (data.play_start_ms && data.server_now_ms) {
+                    var serverElapsed = Math.max(0, data.server_now_ms - data.play_start_ms);
+                    off = serverElapsed + Math.max(0, Date.now() - receivedAtMs);
+                } else if (data.play_start_ms) {
+                    // Fallback: server-stamped start against our clock (small skew only)
+                    off = Math.max(0, Date.now() - data.play_start_ms);
+                } else {
+                    off = data._lateJoinOffset || 0;
                 }
-                return data._lateJoinOffset || 0;
+                // Looping clips: wrap the offset into the current cycle so a
+                // late joiner mid-cycle lands at the right position instead of
+                // being skipped as "already finished".
+                var dMs = durationMsOf(data);
+                if (data.loop && dMs > 0 && off >= dMs) off = off % dMs;
+                return off;
             };
             // Quick skip: if we already know the duration and the offset is
-            // clearly past it, don't even bother decoding.
+            // clearly past it (non-looping), don't even bother decoding.
             var earlyOff = offsetProvider();
-            if (durationMs > 0 && earlyOff >= durationMs) return;
+            if (!data.loop && durationMsOf(data) > 0 && earlyOff >= durationMsOf(data)) return;
             if (_sbAudioCtx || _ensureSbAudioCtx()) {
                 _playViaAudioCtx(audioBytes, function () {
                     // Clip finished naturally (or was skipped: past the end)
@@ -697,6 +796,27 @@
         });
     };
 
+    function durationMsOf(data) { return data.duration_ms || 0; }
+
+    // Stop and drop every active entry played by `userId` (any entry shape:
+    // {type:'ctx',source} objects, Audio elements, the _sbPlaying handle).
+    function _sbStopEntriesFor(userId) {
+        _sbAllPlaying = _sbAllPlaying.filter(function (entry) {
+            var entryUserId = (entry && entry.userId) || (entry && entry._sbUserId) || null;
+            if (entryUserId !== userId) return true;
+            try {
+                if (entry.type === 'ctx' && entry.source) entry.source.stop();
+                else if (entry.pause) { entry.pause(); entry.currentTime = 0; }
+                else if (entry.stop) entry.stop();
+            } catch (_) {}
+            return false;
+        });
+        if (_sbPlaying) {
+            var pid = (_sbPlaying.userId) || (_sbPlaying._sbUserId) || null;
+            if (pid === userId) { _sbPlaying = null; _sbCurrentClipId = null; }
+        }
+    }
+
     function _playSbAudioFallback(audioBytes, userId, clipId, startOffsetMs) {
         try {
             var blob = new Blob([audioBytes], { type: 'audio/wav' });
@@ -705,7 +825,16 @@
             audio._sbUserId = userId;
             audio._sbClipId = clipId;
             if (startOffsetMs && startOffsetMs > 0) {
-                audio.currentTime = startOffsetMs / 1000;
+                var targetSec = startOffsetMs / 1000;
+                audio.currentTime = targetSec;
+                // Some browsers drop a seek issued before the media is ready
+                // and restart at 0 — reapply it once metadata is in so late
+                // joiners / unmuted listeners stay at the room's position.
+                audio.addEventListener('loadedmetadata', function () {
+                    try {
+                        if (Math.abs(audio.currentTime - targetSec) > 0.25) audio.currentTime = targetSec;
+                    } catch (_) {}
+                });
             }
             _sbAllPlaying.push(audio);
             audio.onended = function () {
@@ -803,6 +932,11 @@
                 _sbCurrentClipId = null;
             }
         }
+        // Stopping our own audio always ends a Loop session (manual stop,
+        // starting another clip, or the setting being turned off mid-loop) and
+        // we are no longer "playing" for anyone (badge must not linger).
+        _sbLoopSession = null;
+        if (myId) _sbSetPlaying(myId, false);
     }
 
     // Stop ALL soundboard audio regardless of who played it.
@@ -824,6 +958,14 @@
         _sbAllPlaying = [];
         _sbPlaying = null;
         _sbCurrentClipId = null;
+        // Every caller is a "we are no longer hearing anything" moment (leave,
+        // kick, teardown, soundboard disabled) — the loop must die with it or
+        // we would keep re-broadcasting a clip into a room we left. Every
+        // playing badge goes too: nobody is playing into an empty room.
+        _sbLoopSession = null;
+        var hadIndicators = Object.keys(window._sbPlayingUsers || {}).length > 0;
+        window._sbPlayingUsers = {};
+        if (hadIndicators && window._sbOnSbPlayingChanged) window._sbOnSbPlayingChanged();
     }
     window._stopAllSoundboardAudio = _stopAllSoundboardAudio;
     window._stopAllSoundboardAudioAll = _stopAllSoundboardAudioAll;
@@ -851,6 +993,51 @@
     window._playSoundboardClip = playSoundboardClip;
     window._sendSoundboardStop = _sendSoundboardStop;
     window.syncDisableCheckboxes = syncDisableCheckboxes;
+
+    // Live owner enable/disable of THIS account's soundboard (server rooms).
+    // Disable means BOTH directions stop right now: what we are PLAYING (our
+    // self-hear + the room's copy) and what we could hear. The server also
+    // broadcasts soundboard_stop to every listener room so members stop
+    // hearing the disabled user's clip. Un-disable: only clears the live
+    // block — a stopped clip stays stopped (there is no state to resume).
+    window._handleSoundboardDisabled = function (data) {
+        var serverId = data.server_id || (data.serverId || '');
+        if (serverId && window.currentServerId && serverId !== window.currentServerId) return;
+        var nowDisabled = !!data.disabled;
+        // The server only targets the disabled account's own connections, but
+        // never stop someone else's audio if a stray message shows up.
+        var forSelf = !data.user_id || data.user_id === window.currentUserId;
+        if (nowDisabled && forSelf) {
+            // Stop what WE are playing (our self-hear copy + any loop). Other
+            // members' sounds are left alone — the server also broadcasts
+            // soundboard_stop for our clips to the listeners in the room.
+            _stopAllSoundboardAudio();
+            for (var k in _sbSuppressedPlays) delete _sbSuppressedPlays[k];
+            _resetSbButtons();
+        }
+        // Reflect the state for the rest of this session in THIS server.
+        if (serverId) {
+            _sbOwnerDisabledByServer[serverId] = nowDisabled;
+        } else {
+            window._sbOwnerDisabledLive = nowDisabled;
+        }
+    };
+
+    // Owner-disable state learned live per server (serverId -> bool). Merged
+    // with the REST-learned _sbDisabledUsers list at every gate so a disable
+    // that happens mid-session is honoured without waiting for a reload.
+    var _sbOwnerDisabledByServer = {};
+    function _sbIsOwnerDisabledForMe() {
+        var sid = window.currentServerId;
+        if (sid && _sbOwnerDisabledByServer[sid] === true) return true;
+        if (window._sbOwnerDisabledLive === true) return true;
+        return false;
+    }
+    // Called by voice.js teardownRoom(): the local loop session dies with the
+    // room (leaving must not keep re-broadcasting a clip to a room we left),
+    // while playback for members who stay is unaffected.
+    window._sbClearLoopSession = function () { _sbLoopSession = null; };
+    window._sbIsOwnerDisabledForMe = _sbIsOwnerDisabledForMe;
     Object.defineProperty(window, "_sbClipsCache", { get: function() { return _sbClipsCache; }, configurable: true });
     Object.defineProperty(window, '_sbAllPlaying', { get: function() { return _sbAllPlaying; }, configurable: true });
 
@@ -861,10 +1048,16 @@
         var data = _sbSuppressedPlays[userId];
         if (!data) return;
         delete _sbSuppressedPlays[userId];
-        // Only resume if the clip hasn't finished: compute remaining time
+        // Only resume if the clip hasn't finished: compute the elapsed time
+        // with the same CLOCK-SKEW-PROOF math as _handleSoundboardPlay
+        // (play_start_ms is the SERVER's clock, so a skewed local clock
+        // must never be differenced against it directly).
         var dur = data.duration_ms || 0;
-        var start = data.play_start_ms || 0;
-        if (dur > 0 && start > 0 && (Date.now() - start) >= dur) return; // already over
+        if (dur > 0 && data.play_start_ms && data.server_now_ms) {
+            var serverElapsed = Math.max(0, data.server_now_ms - data.play_start_ms);
+            var sinceRecv = Math.max(0, Date.now() - (data._sbRecvLocalMs || Date.now()));
+            if (serverElapsed + sinceRecv >= dur) return; // already over
+        }
         // Replay via the normal path — offset is recomputed lazily so it
         // lands at the current position (like a late join).
         window._handleSoundboardPlay(data);

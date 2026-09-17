@@ -8,7 +8,7 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <link rel="manifest" href="/manifest.json">
     <title>E2E Chat</title>
-    <link rel="stylesheet" href="style.css?v=16">
+    <link rel="stylesheet" href="style.css?v=17">
 </head>
 <body>
     <!-- Inlined SVG icon sprite (hidden, referenced via <use href="#icon-name">) -->
@@ -2073,6 +2073,10 @@
                         <input type="checkbox" id="soundboard-self-hear" style="width:14px;height:14px;accent-color:var(--accent,#5865f2)">
                         Hear myself
                     </label>
+                    <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-secondary);cursor:pointer">
+                        <input type="checkbox" id="soundboard-loop" style="width:14px;height:14px;accent-color:var(--accent,#5865f2)">
+                        Loop
+                    </label>
                     <span id="soundboard-disable-status" style="font-size:11px"></span>
                 </div>
                 <button class="soundboard-close" id="soundboard-close">&times;</button>
@@ -2295,11 +2299,11 @@
     </div>
 
     <script src="secure-storage.js?v=2"></script>
-    <script src="voice.js?v=15"></script>
-    <script src="soundboard-pairing.js?v=8"></script>
+    <script src="voice.js?v=16"></script>
+    <script src="soundboard-pairing.js?v=9"></script>
     <script src="thread_categories_shortcuts.js?v=3"></script>
     <script src="doc-preview.js?v=2"></script>
-    <script src="chat.js?v=42"></script>
+    <script src="chat.js?v=43"></script>
     <script>
     // PWA: Register service worker
     if ('serviceWorker' in navigator) {

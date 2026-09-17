@@ -1101,6 +1101,13 @@
         clearCalleeRingTimer();
         stopRingtone();
         var prevDmChannelId = S.dmChannelId;
+        // Any room exit (leave, kick, replace, hangup) ends the local loop
+        // session and drops every soundboard sound WE are hearing. This never
+        // stops playback for members who stay: the server keeps the room's
+        // current_soundboard state and the player's client keeps re-cycling a
+        // loop / keeps the relay alive — only listeners who leave go silent.
+        if (window._sbClearLoopSession) window._sbClearLoopSession();
+        if (window._stopAllSoundboardAudioAll) window._stopAllSoundboardAudioAll();
         // Manual video-load state is per-call: every join starts with feeds
         // unloaded (each feed loads individually when the viewer clicks it).
         S._loadedFeeds = {};
@@ -3267,17 +3274,31 @@
             var sb = data.current_soundboard;
             var startedMs = sb.play_start_ms || sb.started_at_ms || 0;
             var durMs = sb.duration_ms || 0;
-            // Skip clips that have definitely finished (duration known).
-            // No 30s hardcoded cap — duration_ms comes from the real clip.
-            var elapsedNow = Date.now() - startedMs;
-            if (!(durMs > 0 && elapsedNow >= durMs)) {
+            var loopSb = !!sb.loop;
+            // "Has it finished?" must be decided WITHOUT mixing clocks.
+            // play_start_ms / server_now_ms are both the SERVER's clock, so
+            // their difference is skew-free; `Date.now() - startedMs` is not —
+            // a skewed client computed a huge offset and skipped a clip that
+            // was still playing (the "join mid-play, hear nothing" bug).
+            var durKnown = durMs > 0;
+            var serverElapsed = (sb.server_now_ms && startedMs)
+                ? Math.max(0, sb.server_now_ms - startedMs)
+                : (startedMs ? Math.max(0, Date.now() - startedMs) : 0); // legacy server: old behaviour
+            var surelyOver = durKnown && !loopSb && serverElapsed >= durMs;
+            // A LOOPING clip is never "definitely finished" — late joiners
+            // always pick it up mid-cycle (the offset math in
+            // _handleSoundboardPlay lands them at the current cycle position).
+            if (!surelyOver) {
                 window._handleSoundboardPlay({
                     user_id: sb.user_id,
                     clip_id: sb.clip_id,
                     temp_token: sb.temp_token,
                     play_start_ms: startedMs,
+                    server_now_ms: sb.server_now_ms || 0,
                     duration_ms: durMs,
-                    _lateJoinOffset: elapsedNow > 0 ? elapsedNow : 0,
+                    loop: loopSb,
+                    _sbRecvLocalMs: Date.now(),
+                    _lateJoinOffset: 0,
                     // Room identity for the multi-device gate
                     room_type: S.roomType || 'server',
                     server_id: S.serverId || '',
@@ -3731,6 +3752,10 @@
             showToast('You were kicked from the voice channel.');
         }
         playSound('leave');
+        // We are out of the room: stop hearing every soundboard sound locally
+        // (leaving never stops the sound for the members who stay — the server
+        // keeps room playback state and the player's relay keeps running).
+        if (window._stopAllSoundboardAudioAll) window._stopAllSoundboardAudioAll();
         teardownRoom();
         hideBar();
         hidePopup();

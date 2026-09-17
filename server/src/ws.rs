@@ -161,6 +161,10 @@ pub struct SoundboardPlayback {
     pub temp_token: String,
     pub started_at_ms: i64, // timestamp when playback started
     pub duration_ms: i64,    // estimated total duration
+    // The player's Loop toggle. A looping clip NEVER "has definitely finished"
+    // for late joiners: they always pick it up at the current cycle position.
+    // (JSON key stays "loop"; `loop` is a Rust keyword so the field is r#loop.)
+    pub r#loop: bool,
 }
 
 fn voice_member_json(m: &VoiceMember) -> serde_json::Value {
@@ -217,7 +221,7 @@ async fn send_to_user(state: &Arc<AppState>, user_id: &str, json: &serde_json::V
 
 /// Broadcast a voice message to every member of a room (via their user ids).
 /// The caller must NOT hold the voice_rooms lock while calling this (it awaits).
-async fn voice_broadcast(state: &Arc<AppState>, room_id: &str, json: &serde_json::Value) {
+pub(crate) async fn voice_broadcast(state: &Arc<AppState>, room_id: &str, json: &serde_json::Value) {
     let ids: Vec<String> = match state.voice_rooms.read() {
         Ok(r) => r.get(room_id).map(|rm| rm.members.keys().cloned().collect()).unwrap_or_default(),
         Err(_) => Vec::new(),
@@ -1732,11 +1736,13 @@ async fn handle_ws_message(
                                     temp_token: parsed.get("temp_token").and_then(|s| s.as_str()).unwrap_or("").to_string(),
                                     started_at_ms: now_ms,
                                     duration_ms: parsed.get("duration_ms").and_then(|v| v.as_i64()).unwrap_or(0),
+                                    r#loop: parsed.get("loop").and_then(|v| v.as_bool()).unwrap_or(false),
                                 });
                             }
                         }
                         if let Some(obj) = parsed.as_object_mut() {
                             obj.insert("play_start_ms".to_string(), serde_json::json!(now_ms));
+                            obj.insert("server_now_ms".to_string(), serde_json::json!(now_ms));
                         }
                         voice_broadcast(state, &room_id, &parsed).await;
                     }
@@ -1766,6 +1772,7 @@ async fn handle_ws_message(
                             // compute the offset against one authoritative clock.
                             let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
                             let duration_ms = parsed.get("duration_ms").and_then(|v| v.as_i64()).unwrap_or(0);
+                            let looping = parsed.get("loop").and_then(|v| v.as_bool()).unwrap_or(false);
                             {
                                 let mut rooms = state.voice_rooms.write().unwrap();
                                 if let Some(room) = rooms.get_mut(&room_id) {
@@ -1775,16 +1782,21 @@ async fn handle_ws_message(
                                         temp_token: parsed.get("temp_token").and_then(|s| s.as_str()).unwrap_or("").to_string(),
                                         started_at_ms: now_ms,
                                         duration_ms: duration_ms,
+                                        r#loop: parsed.get("loop").and_then(|v| v.as_bool()).unwrap_or(false),
                                     });
                                 }
                             }
-                            // Stamp the authoritative start time + duration into the
-                            // relayed message so every receiver computes the same offset.
-                            if let Some(obj) = parsed.as_object_mut() {
-                                obj.insert("play_start_ms".to_string(), serde_json::json!(now_ms));
-                                obj.insert("duration_ms".to_string(), serde_json::json!(duration_ms));
-                            }
-                            voice_broadcast(state, &room_id, &parsed).await;
+                        // Stamp the authoritative start time + duration into the
+                        // relayed message so every receiver computes the same offset.
+                        // server_now_ms is the SAME clock as play_start_ms: the
+                        // skew-free elapsed math on clients needs both.
+                        if let Some(obj) = parsed.as_object_mut() {
+                            obj.insert("play_start_ms".to_string(), serde_json::json!(now_ms));
+                            obj.insert("server_now_ms".to_string(), serde_json::json!(now_ms));
+                            obj.insert("duration_ms".to_string(), serde_json::json!(duration_ms));
+                            obj.insert("loop".to_string(), serde_json::json!(looping));
+                        }
+                        voice_broadcast(state, &room_id, &parsed).await;
                         }
                     }
                 }
@@ -2455,14 +2467,20 @@ async fn handle_voice_join(
             .values()
             .map(voice_member_json)
             .collect();
-        // Include currently playing soundboard clip for late-join sync
+        // Include currently playing soundboard clip for late-join sync.
+        // server_now_ms is stamped NOW (same clock as play_start_ms) so the
+        // joiner computes a skew-free elapsed time: mixing the server's clock
+        // with the client's made skewed clients skip still-playing clips.
         let current_sb_json = room.current_soundboard.as_ref().map(|sb| {
+            let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
             serde_json::json!({
                 "user_id": sb.user_id,
                 "clip_id": sb.clip_id,
                 "temp_token": sb.temp_token,
                 "play_start_ms": sb.started_at_ms,
+                "server_now_ms": now_ms,
                 "duration_ms": sb.duration_ms,
+                "loop": sb.r#loop,
             })
         });
         let joined = serde_json::json!({

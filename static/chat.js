@@ -3523,6 +3523,26 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         return 'Encrypted file';
     }
+    // Vault file size label. Shows the UNCOMPRESSED size the user recognises
+    // first and the COMPRESSED (stored) size in parentheses — the stored size
+    // is the one that actually counts against the vault limit. Files that did
+    // not shrink (already-compressed data, compression 'none') show one size.
+    function _vaultSizeLabel(f) {
+        const original = (f && f.original_size) || 0;
+        const stored = (f && f.stored_size) || 0;
+        const origStr = formatFileSize(original);
+        const storedStr = formatFileSize(stored);
+        // Only show the second size when it is actually different to read —
+        // incompressible files differ by a few bytes of encryption overhead
+        // and rendering "2.0 KB (2.0 KB stored)" would just be noise.
+        if (original > 0 && stored > 0 && origStr !== storedStr) {
+            return origStr +
+                ' <span class="vault-size-stored" title="' + storedStr +
+                ' compressed — this is what counts toward your vault limit">(' +
+                storedStr + ' stored)</span>';
+        }
+        return origStr;
+    }
     function _renderVaultFileList(container, files, searchTerm) {
         const term = (searchTerm || '').toLowerCase();
         const filtered = term ? files.filter(f => {
@@ -3535,7 +3555,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         container.innerHTML = filtered.map(f => {
             const id = f.id || '';
-            const size = f.original_size || f.stored_size || 0;
+            const size = _vaultSizeLabel(f);
             const date = f.created_at ? new Date(f.created_at + 'Z').toLocaleDateString() : '';
             const displayName = _decryptVaultDisplayName(_vaultFileMetaCache[id] || f);
             // Truncate: show first chars + extension
@@ -3553,7 +3573,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return '<div class="vault-file-item" data-id="' + escapeHtml(id) + '" data-name="' + escapeHtml(displayName).toLowerCase() + '">' +
                 '<div class="vault-file-info">' +
                 '<div class="vault-file-name">' + escapeHtml(shortName) + '</div>' +
-                '<div class="vault-file-meta">' + formatFileSize(size) + (date ? ' • ' + date : '') + '</div>' +
+                '<div class="vault-file-meta">' + size + (date ? ' • ' + date : '') + '</div>' +
                 '</div>' +
                 '<div class="vault-file-actions">' +
                 '<button class="vault-dl-btn" title="Download">' + icon('download') + '</button>' +
@@ -3676,7 +3696,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         container.innerHTML = filtered.map(f => {
             const id = f.id || '';
-            const size = f.original_size || f.stored_size || 0;
+            const size = _vaultSizeLabel(f);
             const date = f.created_at ? new Date(f.created_at + 'Z').toLocaleDateString() : '';
             const displayName = _decryptVaultDisplayName(_vaultFileMetaCache[id] || f);
             let shortName = displayName;
@@ -3693,7 +3713,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return '<div class="vault-file-item vault-send-item" data-id="' + escapeHtml(id) + '" style="cursor:pointer">' +
                 '<div class="vault-file-info">' +
                 '<div class="vault-file-name">' + escapeHtml(shortName) + '</div>' +
-                '<div class="vault-file-meta">' + formatFileSize(size) + (date ? ' • ' + date : '') + '</div>' +
+                '<div class="vault-file-meta">' + size + (date ? ' • ' + date : '') + '</div>' +
                 '</div>' +
                 '<div class="vault-file-actions">' +
                 '<button class="vault-send-btn" title="Send to chat">' + icon('send') + '</button>' +
@@ -12841,10 +12861,19 @@ function connectWebSocket(t) {
                 // profile_key_server_sync is no longer sent by the server.
                 break;
             case 'soundboard_play':
+                // Stamp local arrival time so receivers can compute a
+                // CLOCK-SKEW-PROOF offset: (serverNow - playStart) on the
+                // server clock + (localNow - arrival) on the local clock.
+                // Any constant client/server clock skew cancels out.
+                if (data && typeof data === 'object') data._sbRecvLocalMs = Date.now();
                 if (window._handleSoundboardPlay) window._handleSoundboardPlay(data);
                 break;
             case 'soundboard_stop':
                 if (window._handleSoundboardStop) window._handleSoundboardStop(data);
+                break;
+            case 'soundboard_disabled':
+                // Live owner enable/disable of this account's soundboard
+                if (window._handleSoundboardDisabled) window._handleSoundboardDisabled(data);
                 break;
             case 'encrypted_notification':
             {

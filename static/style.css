@@ -2640,6 +2640,10 @@ select.modal-input:focus {
     font-size: 11px;
     color: var(--text-muted, #999);
 }
+.vault-size-stored {
+    opacity: .8;
+    cursor: help;
+}
 .vault-file-actions {
     display: flex;
     gap: 4px;

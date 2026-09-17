@@ -6615,3 +6615,153 @@ preview fit / chip placement / fullscreen right-click) are the uncommitted
 work that followed 681d45f and they verify parts of it: the PiP picker
 ("search, per-user sections, icons — verified and completed") and the chip
 suppression in fullscreen.
+
+## Session: soundboard async playback (unmute resume, join mid-play, Loop, disable) + vault size display
+
+Two user-reported soundboard failures ("mute then unmute while playing → the
+sound never comes back" and "join the call while a sound is already playing →
+you hear nothing"), plus two requested features: a **Loop** toggle and — in the
+File Vault — showing each file's **compressed (stored) size** next to its
+uncompressed size.
+
+### 1. Root cause: the mute→unmute resume was dead code
+
+`_handleSoundboardPlay()` had TWO mute checks: an early `if (_isUserMuted(u))
+return;` for other users, and — below it — a "Mute suppress" block storing
+`_sbSuppressedPlays[u] = data` for `_sbResumeForUser()` to replay on unmute.
+The early return fired first, so the store never ran and unmute had nothing to
+resume. The check now stores the play and returns (single block, no dead code).
+
+### 2. Root cause: offsets mixed the server clock with the client clock
+
+`play_start_ms` is stamped by the **server**. Receivers computed
+`Date.now() - play_start_ms` (client clock minus server clock), so any clock
+skew produced a garbage offset — a client running ahead was "past the end" and
+**skipped the clip entirely**. That is the join-mid-play silence on phones.
+
+Both the relayed play message and the late-join snapshot now carry
+`server_now_ms` (same clock as `play_start_ms`) and the client uses deltas only:
+
+    elapsed = (server_now_ms - play_start_ms)   // server clock, skew-free
+            + (Date.now() - local_recv_ms)      // local clock, skew-free
+
+`chat.js` stamps `_sbRecvLocalMs` on arrival; `voice.js` passes both fields
+through for a late join, and its "has it finished?" check also compares server
+clock to server clock. A muted user who unmutes therefore lands exactly where
+the room is (verified: resume at 6s of an 8s clip, not from 0).
+
+### 3. Loop toggle (new)
+
+- Checkbox `#soundboard-loop` in the soundboard panel header, persisted in
+  `localStorage['sb_loop']`.
+- When a clip ends and Loop is on, `_sbOnClipEnded()` re-runs
+  `playSoundboardClip()` for the same clip instead of broadcasting
+  `soundboard_stop`: a fresh temp token + relayed `soundboard_play` (with
+  `loop: true`) restarts the cycle for the whole room, re-arms the overlay's
+  stop button and keeps the server's late-join state current.
+- The loop branch runs **before** the live-entry guard, because with
+  "Hear myself" OFF no local audio entry exists — the duration timer is what
+  re-cycles the clip there.
+- Loop dies on manual stop, on `_stopAllSoundboardAudio*` (leave/kick/
+  teardown/global disable) and when the checkbox is turned off mid-cycle.
+- Late joiners syncing to a looping clip wrap the offset into the current
+  cycle (`off % duration`) instead of being skipped as "already finished", and
+  the server stores the `loop` flag in `Room.current_soundboard`.
+
+### 4. Leaving stops the sound for the leaver only
+
+`voice.js teardownRoom()` (leave, kick, replace, WS drop, hangup) now calls
+`_sbClearLoopSession()` + `_stopAllSoundboardAudioAll()`, so an exiting member
+stops hearing everything locally while the room keeps playing. The player
+leaving still stops it for everyone (server `player_left` broadcast, unchanged).
+
+### 5. Disable soundboard, in both directions and live
+
+- **Global setting** (Settings → Voice / voice popup): already blocked play and
+  receive; turning it ON mid-play now also stops everything already playing and
+  drops suppressed plays.
+- **Owner per-user disable**: the server already dropped future relays. Now
+  `PUT/DELETE /api/soundboard/disable/:sid/:uid` also broadcasts a live
+  `soundboard_disabled` event to the target (playback stops, further plays are
+  refused client-side too) and a `soundboard_stop` into every voice room of
+  that server, so listeners stop a clip that is still playing. Re-enabling
+  restores playing immediately.
+
+### 6. Smaller correctness fixes found while verifying
+
+- One sound per player: a new play from a user stops their previous entry
+  (`_sbStopEntriesFor`) — without it a loop re-cycle overlapped the decoding
+  previous cycle.
+- `_playViaAudioCtx()` now REJECTS when the AudioContext cannot actually run
+  (Chrome resolves `resume()` yet leaves the context suspended), so playback
+  falls back to an `<audio>` element instead of queueing silently; and a
+  one-time pointer/key/touch listener resumes a suspended context (autoplay
+  policy), which unblocks sounds that arrived before any interaction.
+- The `<audio>` fallback re-applies its start offset on `loadedmetadata`
+  (some browsers drop a seek issued before the media is ready).
+- Stopping all soundboard audio now clears the "playing" indicators
+  (`_sbPlayingUsers`) and the loop session, so no stale badge survives a
+  stop/leave/disable.
+
+### 7. Vault: uncompressed AND compressed size per file
+
+`vault_list_files` already returned both `original_size` (plaintext) and
+`stored_size` (compressed + encrypted — the value counted against the vault
+limit) but the list rendered only `original_size || stored_size`. Both vault
+lists (vault modal and "send from vault") now render
+`1.5 MB (420.0 KB stored)` with a tooltip ("… compressed — this is what counts
+toward your vault limit"), and show a single size when the two are identical
+to read (incompressible files differ only by encryption overhead).
+
+### Verified (this session, against a freshly built server)
+
+- `tests/soundboard-async-loop.spec.ts` (NEW, 4/4): A1 mute→unmute resume
+  audible mid-clip; A2 offsets immune to a +1h client clock skew (and a finished
+  clip still skipped); A3 Loop re-relays (≥2 plays, 0 stops), OFF relays once,
+  leave kills the loop; A4 live owner disable stops playback, blocks new plays,
+  re-enable restores.
+- `tests/soundboard-latesync.spec.ts` (6/6): L1–L4 late-join/stop-button
+  behaviour, **L6 (NEW)** owner disable via API stops the playing clip for the
+  room *and* the player, blocks replays, and re-enabling restores; L5's stale
+  emoji assertion updated (the menu renders inline SVG icons, not emoji — it
+  was failing before this session's changes).
+- `tests/soundboard-multi.spec.ts` + `tests/soundboard-mute-disable.spec.ts`
+  (18/18), `tests/soundboard-spec.spec.ts` (5/5, incl. temp-token multi-fetch,
+  stop clears the token, player-leave stops everyone), `tests/soundboard-3browser.spec.ts`
+  (16/16), `tests/soundboard-pairing.spec.ts` + `tests/soundboard-ui.spec.ts` +
+  `tests/voice-hearself-soundboard.spec.ts` (23/23), voice leave/mobile
+  regression (`tests/voice-leave-all.spec.ts`, `tests/voice-sb-mobile.spec.ts`).
+- `tests/vault-size-display.spec.ts` (NEW): both sizes rendered, tooltip
+  present, single size for incompressible files.
+- `cargo check --release` + `cargo build --release` clean.
+
+Note for future test work: Playwright's headless Chromium in this repo has **no
+audio decoder** — `decodeAudioData()` fails for every WAV and `<audio>` cannot
+load blobs, so no test here can observe real playback or a natural `onended`.
+The new specs therefore drive cycle boundaries through the Hear-Myself-OFF
+duration timer (a real production path) and assert offsets via the fallback
+element's `currentTime`.
+
+### Files touched
+
+- `static/soundboard-pairing.js`: loop session + checkbox, loop-first
+  `_sbOnClipEnded`, skew-proof offsets + loop wrap, mute suppression store,
+  `_sbStopEntriesFor` dedup, AudioContext/gesture/fallback robustness,
+  indicator + loop clearing on stop, live `_handleSoundboardDisabled`,
+  `_sbIsOwnerDisabledForMe` exposed.
+- `static/voice.js`: late-join `server_now_ms` pass-through + skew-free
+  "finished?" check, `loop` flag forwarding, soundboard stop on room teardown.
+- `static/chat.js`: `_sbRecvLocalMs` stamp on relayed plays,
+  `soundboard_disabled` routing, vault size labels.
+- `static/index.html`: Loop checkbox; cache-bust bumps (`voice.js?v=16`,
+  `soundboard-pairing.js?v=9`, `chat.js?v=43`, `style.css?v=17`).
+- `static/style.css`: `.vault-size-stored`.
+- `server/src/ws.rs`: `SoundboardPlayback.looping` (`loop` in the struct, both
+  relay branches of `soundboard_play` — DM and server — and the late-join
+  snapshot), `server_now_ms` stamps on relays and on the late-join snapshot,
+  `voice_broadcast` now `pub(crate)`.
+- `server/src/handlers.rs`: disable/enable endpoints broadcast
+  `soundboard_disabled` to the target and `soundboard_stop` into the server's
+  voice rooms.
+- `tests/`: `soundboard-async-loop.spec.ts`, `vault-size-display.spec.ts` (new),
+  `soundboard-latesync.spec.ts` (L6 + L5 fix).

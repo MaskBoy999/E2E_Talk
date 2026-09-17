@@ -329,6 +329,86 @@ test.describe('Soundboard late-sync & button fixes', () => {
         expect(after.playVisible).toBe(true);
     });
 
+    test('L6: owner disable stops the playing sound live for the room AND the player', async ({ page }) => {
+        test.setTimeout(240000);
+        const u1 = unique('owna');
+        const u2 = unique('ownb');
+        await register(page, u1);
+        await waitForWs(page);
+
+        const ctx2 = await (page.context().browser() as any).newContext();
+        const page2 = await ctx2.newPage();
+        await register(page2, u2);
+        await waitForWs(page2);
+
+        const { serverId, voiceChannelId } = await createServerWithVoice(page);
+        // a 30s clip so it is still playing when the owner disables
+        await connectUsers(page, page2, serverId);
+        await page2.reload();
+        await page2.waitForSelector(`.server-icon[data-id="${serverId}"]`, { timeout: 20000 });
+        await waitForWs(page2);
+        const clipId = await uploadClip(page2, 'own_' + Date.now(), 30);
+        const u2Id = await page2.evaluate(() => (window as any).currentUserId);
+        const token1 = await page.evaluate(() => localStorage.getItem('token'));
+
+        await joinVoice(page, serverId, voiceChannelId);
+        await joinVoice(page2, serverId, voiceChannelId);
+        await page.waitForTimeout(2500);
+
+        // u2 plays → u1 (the room) hears it
+        await page2.evaluate(async () => { if ((window as any)._loadSoundboardClips) await (window as any)._loadSoundboardClips(); });
+        await page2.evaluate((cid: string) => { (window as any)._playSoundboardClip(cid); }, clipId);
+        await page.waitForTimeout(3500);
+
+        const before = await page.evaluate((uid: string) => ({
+            badge: !!(window as any)._sbPlayingUsers?.[uid],
+            entries: (window as any)._sbAllPlaying.length,
+        }), u2Id);
+        expect(before.badge).toBe(true);
+        expect(before.entries).toBeGreaterThanOrEqual(1);
+
+        // Owner disables u2 while the clip is playing
+        const dis = await page.request.put(`${BASE}/api/soundboard/disable/${serverId}/${u2Id}`, {
+            headers: { Authorization: `Bearer ${token1}`, 'Content-Type': 'application/json' },
+        });
+        expect(dis.ok()).toBeTruthy();
+        await page.waitForTimeout(2500);
+
+        // Listeners stop hearing it immediately (server broadcast + local stop)
+        const afterListener = await page.evaluate((uid: string) => ({
+            badge: !!(window as any)._sbPlayingUsers?.[uid],
+            entries: (window as any)._sbAllPlaying.length,
+        }), u2Id);
+        expect(afterListener.badge).toBe(false);
+        expect(afterListener.entries).toBe(0);
+
+        // And the disabled player's own client learns it live (their self-hear stops)
+        const afterPlayer = await page2.evaluate(() => ({
+            entries: (window as any)._sbAllPlaying.length,
+            ownerDisabled: !!(window as any)._sbIsOwnerDisabledForMe && (window as any)._sbIsOwnerDisabledForMe(),
+        }));
+        expect(afterPlayer.ownerDisabled).toBe(true);
+        expect(afterPlayer.entries).toBe(0);
+
+        // A disabled user cannot start new sounds
+        await page2.evaluate((cid: string) => { (window as any)._playSoundboardClip(cid); }, clipId);
+        await page2.waitForTimeout(2500);
+        expect(await page2.evaluate(() => (window as any)._sbAllPlaying.length)).toBe(0);
+
+        // Re-enable → playing works again
+        const en = await page.request.delete(`${BASE}/api/soundboard/disable/${serverId}/${u2Id}`, {
+            headers: { Authorization: `Bearer ${token1}`, 'Content-Type': 'application/json' },
+        });
+        expect(en.ok()).toBeTruthy();
+        await page2.waitForTimeout(1500);
+        expect(await page2.evaluate(() => !!(window as any)._sbIsOwnerDisabledForMe && (window as any)._sbIsOwnerDisabledForMe())).toBe(false);
+        await page2.evaluate((cid: string) => { (window as any)._playSoundboardClip(cid); }, clipId);
+        await page2.waitForTimeout(3500);
+        expect(await page2.evaluate(() => (window as any)._sbAllPlaying.length)).toBeGreaterThanOrEqual(1);
+
+        await ctx2.close();
+    });
+
     test('L5: mute button indicator updates in place (menu stays open)', async ({ page }) => {
         test.setTimeout(120000);
         const u1 = unique('muta');
@@ -414,8 +494,11 @@ test.describe('Soundboard late-sync & button fixes', () => {
             return { open: true, btn: sbBtn ? { text: (sbBtn.textContent || '').trim(), active: sbBtn.className.includes('active') } : null };
         });
         expect(menuAfter2.open).toBe(true);
-        // Back to exactly "🔇 Mute Soundboard" (no checkmark) and inactive
-        expect(menuAfter2.btn?.text).toBe('🔇 Mute Soundboard');
+        // Back to the plain "Mute Soundboard" label (no checkmark, no "Unmute") and
+        // inactive. The label is built from inline SVG icons, so assert on the
+        // text content rather than the old emoji glyphs.
+        expect(menuAfter2.btn?.text).toContain('Mute Soundboard');
+        expect(menuAfter2.btn?.text).not.toContain('Unmute');
         expect(menuAfter2.btn?.active).toBe(false);
 
         await ctx2.close();
