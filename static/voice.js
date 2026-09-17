@@ -3265,30 +3265,38 @@
         updateSelfUI();
         updateChannelChips();
 
-        // Late-join soundboard sync: if a soundboard clip was already playing
-        // when we joined, pick it up from the current position. The offset is
-        // NOT computed here — _handleSoundboardPlay samples Date.now() lazily
-        // right before playback starts, so fetch + decrypt + decode time is
-        // included and we land exactly where the room is.
-        if (data.current_soundboard && window._handleSoundboardPlay) {
-            var sb = data.current_soundboard;
-            var startedMs = sb.play_start_ms || sb.started_at_ms || 0;
-            var durMs = sb.duration_ms || 0;
-            var loopSb = !!sb.loop;
-            // "Has it finished?" must be decided WITHOUT mixing clocks.
-            // play_start_ms / server_now_ms are both the SERVER's clock, so
-            // their difference is skew-free; `Date.now() - startedMs` is not —
-            // a skewed client computed a huge offset and skipped a clip that
-            // was still playing (the "join mid-play, hear nothing" bug).
-            var durKnown = durMs > 0;
-            var serverElapsed = (sb.server_now_ms && startedMs)
-                ? Math.max(0, sb.server_now_ms - startedMs)
-                : (startedMs ? Math.max(0, Date.now() - startedMs) : 0); // legacy server: old behaviour
-            var surelyOver = durKnown && !loopSb && serverElapsed >= durMs;
-            // A LOOPING clip is never "definitely finished" — late joiners
-            // always pick it up mid-cycle (the offset math in
-            // _handleSoundboardPlay lands them at the current cycle position).
-            if (!surelyOver) {
+        // Late-join soundboard sync: the server tracks playback PER PLAYER and
+        // sends EVERY still-playing clip, so a joiner picks up all of them from
+        // their current positions (the singular `current_soundboard` is the
+        // legacy fallback for an older server). We deliberately use the array
+        // when present and ignore the singular field then — otherwise every
+        // clip would be scheduled twice. The offset is NOT computed here —
+        // _handleSoundboardPlay samples Date.now() lazily right before playback
+        // starts, so fetch + decrypt + decode time is included and we land
+        // exactly where the room is.
+        var sbList = Array.isArray(data.current_soundboards)
+            ? data.current_soundboards
+            : (data.current_soundboard ? [data.current_soundboard] : []);
+        if (window._handleSoundboardPlay) {
+            sbList.forEach(function (sb) {
+                if (!sb) return;
+                var startedMs = sb.play_start_ms || sb.started_at_ms || 0;
+                var durMs = sb.duration_ms || 0;
+                var loopSb = !!sb.loop;
+                // "Has it finished?" must be decided WITHOUT mixing clocks.
+                // play_start_ms / server_now_ms are both the SERVER's clock, so
+                // their difference is skew-free; `Date.now() - startedMs` is not
+                // — a skewed client computed a huge offset and skipped a clip
+                // that was still playing (the "join mid-play, hear nothing" bug).
+                var durKnown = durMs > 0;
+                var serverElapsed = (sb.server_now_ms && startedMs)
+                    ? Math.max(0, sb.server_now_ms - startedMs)
+                    : (startedMs ? Math.max(0, Date.now() - startedMs) : 0); // legacy server: old behaviour
+                var surelyOver = durKnown && !loopSb && serverElapsed >= durMs;
+                // A LOOPING clip is never "definitely finished" — late joiners
+                // always pick it up mid-cycle (the offset math in
+                // _handleSoundboardPlay lands them at the current cycle position).
+                if (surelyOver) return;
                 window._handleSoundboardPlay({
                     user_id: sb.user_id,
                     clip_id: sb.clip_id,
@@ -3305,7 +3313,7 @@
                     channel_id: S.channelId || '',
                     dm_channel_id: S.dmChannelId || '',
                 });
-            }
+            });
         }
 
         // Mic: auto start unless force-muted/deafened
@@ -3791,7 +3799,15 @@
             S.forceMuted = !!data.muted;
             S.forceDeafened = !!data.deafened;
             S.muted = !!data.muted || S.forceMuted;
+            var _wasDeafened = S.deafened;
             S.deafened = !!data.deafened;
+            // Server mute/deafen control: a transition into deafen silences the
+            // soundboard, and undeafening resumes suppressed clips mid-way.
+            if (S.deafened && !_wasDeafened) {
+                if (window._stopAllSoundboardAudioAll) window._stopAllSoundboardAudioAll();
+            } else if (!S.deafened && _wasDeafened && window._sbResumeAllSuppressed) {
+                window._sbResumeAllSuppressed();
+            }
             // Force mute → stop sending audio
             if (S.forceMuted || S.forceDeafened) {
                 stopMic();
@@ -4875,9 +4891,15 @@
         if (S.deafened) {
             S.muted = true;
             stopMic();
+            // Deafening must silence the soundboard too — it does not go through
+            // the remote-audio volume gate, so without this a clip kept playing
+            // in our ears. Incoming clips are suppressed while deafened and
+            // undeafening resumes them mid-clip.
+            if (window._stopAllSoundboardAudioAll) window._stopAllSoundboardAudioAll();
         } else {
             S.muted = false;
             if (S.connected) startMic();
+            if (window._sbResumeAllSuppressed) window._sbResumeAllSuppressed();
         }
         // Mute/unmute all remote audio (mic AND screen-share audio)
         Object.keys(S.remoteAudioEls).forEach(function (uid) {
@@ -8208,11 +8230,11 @@
                     nowMuted = window._sbToggleMuteUser(uid);
                 }
                 // Stop any currently playing sounds from this user immediately,
-                // but ONLY when muting. On unmute we must NOT call
-                // _handleSoundboardStop because it deletes _sbSuppressedPlays[uid]
-                // before _sbResumeForUser can read it — which kills the resume.
-                if (nowMuted && window._handleSoundboardStop) {
-                    window._handleSoundboardStop({ user_id: uid });
+                // but ONLY when muting, and WITHOUT dropping the resume record —
+                // _sbStopLiveForUser keeps the last-play entry so unmuting lands
+                // mid-clip (like a late join). A real room stop would delete it.
+                if (nowMuted && window._sbStopLiveForUser) {
+                    window._sbStopLiveForUser(uid);
                 }
                 // Also persist to server (fire-and-forget)
                 var method = nowMuted ? 'PUT' : 'DELETE';
@@ -8254,11 +8276,11 @@
                     window._sbDisabledUsers.push(uid);
                 }
                 var nowDisabled = window._sbDisabledUsers.indexOf(uid) !== -1;
-                // Stop sounds only when DISABLE-ing. On enable, do NOT call
-                // _handleSoundboardStop — it deletes _sbSuppressedPlays[uid]
-                // before _sbResumeForUser can read it (same bug as mute).
-                if (nowDisabled && window._handleSoundboardStop) {
-                    window._handleSoundboardStop({ user_id: uid });
+                // Stop sounds only when DISABLE-ing, keeping the resume record so
+                // enabling lands mid-clip (same as mute). A real room stop would
+                // delete _sbLastPlay[uid] and kill the resume.
+                if (nowDisabled && window._sbStopLiveForUser) {
+                    window._sbStopLiveForUser(uid);
                 }
                 // Also persist to server (fire-and-forget)
                 var method = nowDisabled ? 'PUT' : 'DELETE';

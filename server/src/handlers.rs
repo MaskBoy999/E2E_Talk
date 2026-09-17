@@ -9461,12 +9461,33 @@ pub async fn disable_soundboard_user(
                 "user_id": target_user_id,
                 "disabled": true,
             }).to_string()).await;
-            // Listeners: stop that user's sound inside every server voice room.
-            let room_ids: Vec<String> = state.voice_rooms.read().unwrap()
-                .iter()
-                .filter(|(_, rm)| rm.room_type == "server" && rm.server_id.as_deref() == Some(server_id.as_str()))
-                .map(|(rid, _)| rid.clone())
-                .collect();
+            // Listeners: stop that user's sound inside every server voice room,
+            // AND clear the room's stored playback state — otherwise a late
+            // joiner syncs to a clip that is no longer playing. The temp audio
+            // is freed too. The lock is dropped before any await below.
+            let mut stopped_tokens: Vec<String> = Vec::new();
+            let room_ids: Vec<String> = {
+                let mut rooms = state.voice_rooms.write().unwrap();
+                let ids: Vec<String> = rooms
+                    .iter()
+                    .filter(|(_, rm)| rm.room_type == "server" && rm.server_id.as_deref() == Some(server_id.as_str()))
+                    .map(|(rid, _)| rid.clone())
+                    .collect();
+                for rid in &ids {
+                    if let Some(room) = rooms.get_mut(rid) {
+                        // Each player has their own slot — clear only the target's.
+                        if let Some(sb) = room.current_soundboards.remove(target_user_id.as_str()) {
+                            if !sb.temp_token.is_empty() {
+                                stopped_tokens.push(sb.temp_token);
+                            }
+                        }
+                    }
+                }
+                ids
+            };
+            for tok in stopped_tokens {
+                remove_sb_temp_play(&state, &tok);
+            }
             for rid in room_ids {
                 crate::ws::voice_broadcast(&state, &rid, &serde_json::json!({
                     "type": "soundboard_stop",

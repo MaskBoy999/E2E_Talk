@@ -1,5 +1,106 @@
 # PROGRESS
 
+## Soundboard: resume / stop / disable correctness
+
+Root causes addressed, all in the soundboard playback/tracking path:
+
+- **Mute→unmute of an already-playing clip resumed nothing.** The suppressed-play
+  store was only written when a play arrived *while muted*; a clip already
+  playing when you muted had no record, so unmute was silent. Now every accepted
+  play for another user is recorded in `_sbLastPlay[userId]`, and mute stops the
+  live audio via `_sbStopLiveForUser()` WITHOUT deleting that record. Unmute
+  (`_sbResumeForUser`) replays it with the skew-free offset, landing mid-clip
+  like a late join. Same path for owner-disable/enable and deafen/undeafen.
+- **In-flight plays could overtake a stop (loop restarting, phantom plays).**
+  Added a per-user play epoch (`_sbPlayEpoch`): every play/stop bumps it, async
+  work captures it and aborts if it changed — the temp-token upload→WS send, the
+  fetch→decode→start chain, and the fallback are all guarded.
+- **Natural end / Hear-Myself-OFF never told the room to stop.** With no local
+  audio nothing fired the end handler, so the room's `current_soundboard` stayed
+  set and listeners kept "playing". An own-broadcast pseudo-entry
+  (`_sbOwnBroadcast`) now owns the duration timer, is cancellable on stop, and
+  drives the same end path (stop broadcast + overlay reset). Loop still re-arms
+  before the end path and never sends a stop.
+- **Stop button vanished after reopening the overlay.** A full clip re-render
+  reset every row; `_sbSyncOverlayPlayingState()` re-applies the active stop
+  button for `_sbCurrentClipId` / `_sbOwnBroadcast.clipId`.
+- **Wrong room targeted.** play/stop and the owner-disabled check now use the
+  VOICE room's server id (`VoiceManager.getVoiceState().serverId`), not the
+  viewed server, so navigating to another server mid-call no longer drops the
+  play/stop. The owner-disabled check also consults the REST-loaded
+  `_sbDisabledUsers` list so it survives a reload.
+- **Disabling our soundboard stopped it locally but not for the room.** Turning
+  the setting (or an owner disable) now stops our clip AND broadcasts
+  `soundboard_stop` for us; re-enabling resumes still-playing suppressed clips.
+- **Deafen now silences the soundboard** (it is not routed through the remote
+  audio volume gate) and undeafen resumes suppressed clips — both the local
+  toggle and the server force-deafen control.
+- **Server:** `soundboard_stop` forces `user_id` to the authenticated sender and
+  only clears `room.current_soundboard` when the sender is the clip's actual
+  player (a listener/stale stop can no longer silence the room or wipe the
+  late-join snapshot). `soundboard_play` also force-stamps the sender.
+  `disable_soundboard_user` now clears the target's playback state in every
+  server voice room (and frees the temp token), so late joiners can't sync to a
+  disabled user's stopped clip.
+- **Per-player server playback slots.** `VoiceRoom` now stores
+  `current_soundboards: HashMap<user_id, SoundboardPlayback>` instead of a
+  single `Option`. Two people playing at once no longer clobber each other's
+  state: a stop removes only that player's slot, and the late-join snapshot
+  sends EVERY still-playing clip (`current_soundboards` array; the singular
+  `current_soundboard` is kept as a fallback for older cached clients). The
+  leaver's / owner-disabled user's slot (and its temp audio) is dropped, while
+  other players' clips keep playing.
+- **Multi-user polish.** A past-end late join no longer leaves that user's
+  "playing" badge stuck (nothing fired the end handler for audio that never
+  started), and a player re-playing now frees their REPLACED clip's temp audio
+  instead of leaking it.
+
+### Verified (this session, freshly built server)
+
+- `tests/soundboard-resume.spec.ts` (NEW, 4/4): R1 already-playing→mute→unmute
+  resumes mid-clip; R2 settings-disable sends the room stop + blocks receive and
+  re-enable resumes; R3 deafen silences the soundboard and undeafen resumes
+  mid-clip; R4 overlay rebuild mid-play keeps the stop button.
+- `tests/soundboard-multiuser.spec.ts` (NEW, 7/7): M1 two players at once +
+  per-user mute/unmute (only the muted one is silenced); M2 a stop for one
+  player leaves the other; M3 owner-disable of one keeps the other and preserves
+  the disabled player's resume record; M4 our own clip coexists with another's
+  and stopping ours leaves theirs; M5 a skipped past-end play leaves no stuck
+  badge; **M6/M7 (server, three real browsers)**: one of two players stopping /
+  being owner-disabled leaves the other playing for the room.
+- `tests/soundboard-spec.spec.ts` **T5 (NEW)**: re-playing frees the previous
+  clip's temp token (A 404, B 200) — per-player slot replacement.
+- `tests/soundboard-latesync.spec.ts` **L7 (NEW)**: two players play different
+  30s clips at once; a third user who joins afterwards receives BOTH in the
+  late-join snapshot and plays both (`_sbAllPlaying` ≥ 2).
+- `tests/soundboard-async-loop.spec.ts` (4/4), `tests/soundboard-latesync.spec.ts`
+  (L1–L7), `tests/soundboard-mute-disable.spec.ts` + `tests/soundboard-3browser.spec.ts`
+  (28/28), `tests/soundboard-multi.spec.ts` + `tests/soundboard-spec.spec.ts` +
+  `tests/soundboard-ui.spec.ts` + `tests/soundboard-pairing.spec.ts` +
+  `tests/voice-hearself-soundboard.spec.ts`, `tests/sb-fix-all.spec.ts` +
+  `tests/full-fixes.spec.ts`, `tests/new-features.spec.ts` (Soundboard
+  describes), `tests/voice-leave-all.spec.ts` + `tests/voice-sb-mobile.spec.ts`.
+- `node --check static/soundboard-pairing.js static/voice.js` and
+  `cargo check --release` clean.
+
+### Files touched
+
+- `static/soundboard-pairing.js`: `_sbLastPlay` resume store, per-user play
+  epoch, own-broadcast pseudo-entry, overlay playing-state re-sync,
+  `_sbStopLiveForUser` / `_sbResumeForUser` / `_sbResumeAllSuppressed`,
+  voice-room serverId for play/stop/disable, owner-disabled reload check.
+- `static/voice.js`: mute/owner-disable menu use `_sbStopLiveForUser`; deafen/
+  undeafen (local + server control) stop/resume the soundboard; late-join sync
+  iterates `current_soundboards` (falls back to the singular field).
+- `server/src/ws.rs`: `soundboard_stop`/`soundboard_play` forced sender id;
+  per-player `current_soundboards` map (play/stop/leave/join snapshot).
+- `server/src/handlers.rs`: owner-disable clears the target's per-player slot.
+- `static/index.html`: cache-bust `voice.js?v=18`, `soundboard-pairing.js?v=11`.
+- `tests/soundboard-resume.spec.ts` + `tests/soundboard-multiuser.spec.ts`
+  (new); `tests/soundboard-latesync.spec.ts` L7 (new);
+  `tests/soundboard-spec.spec.ts` T5 (new) + T4 timeout raised (its two-browser
+  setup routinely exceeds the 45s default here).
+
 ## Voice Channels & DM Calls (Discord-style encrypted voice/video)
 
 ### Server-side voice relay implementation (completed this session)

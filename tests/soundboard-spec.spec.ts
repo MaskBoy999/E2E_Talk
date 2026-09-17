@@ -231,6 +231,61 @@ test.describe('Soundboard temp-play endpoint', () => {
         console.log('T2 token after stop:', ok2);
         expect(ok2).toBe(404);
     });
+
+    test('T5: a player re-playing frees the PREVIOUS clip token (per-user slot replace)', async ({ page }) => {
+        test.setTimeout(180000);
+        const u = unique('replay');
+        await register(page, u);
+        await waitForWs(page);
+        const { serverId, voiceChannelId } = await createServerWithVoice(page);
+        const clipA = await uploadIdentityClip(page, 'rpA_' + Date.now());
+        const clipB = await uploadIdentityClip(page, 'rpB_' + Date.now());
+        await page.evaluate(async () => { if ((window as any)._loadSoundboardClips) await (window as any)._loadSoundboardClips(); });
+        await joinVoice(page, serverId, voiceChannelId);
+        await page.waitForTimeout(2500);
+
+        const playAndCapture = (cid: string) => page.evaluate(async (cid: string) => {
+            return new Promise((resolve: any) => {
+                const w = window as any;
+                const origSend = w.ws.send.bind(w.ws);
+                let done = false;
+                w.ws.send = function (s: string) {
+                    try {
+                        const m = JSON.parse(s);
+                        if (m.type === 'soundboard_play' && m.temp_token) {
+                            w.ws.send = origSend;
+                            done = true;
+                            resolve(m.temp_token);
+                        }
+                    } catch (_) {}
+                    return origSend(s);
+                };
+                w._playSoundboardClip(cid);
+                setTimeout(() => { if (!done) { w.ws.send = origSend; resolve(null); } }, 8000);
+            });
+        }, cid);
+
+        const status = (t: string) => page.evaluate(async (tok: string) => {
+            const r = await fetch('/api/soundboard/temp-play/' + tok, { headers: { Authorization: `Bearer ${localStorage.getItem('token')}` } });
+            return r.status;
+        }, t);
+
+        const tokA = await playAndCapture(clipA);
+        expect(typeof tokA).toBe('string');
+        expect(await status(tokA as string)).toBe(200);
+
+        // Play a DIFFERENT clip — the server replaces THIS player's slot and
+        // must free the replaced clip's temp audio (one slot per player).
+        const tokB = await playAndCapture(clipB);
+        expect(typeof tokB).toBe('string');
+        expect(tokB).not.toBe(tokA);
+        await page.waitForTimeout(800);
+        const aAfter = await status(tokA as string);
+        const bAfter = await status(tokB as string);
+        console.log('T5 tokens after re-play: A=' + aAfter + ' B=' + bAfter);
+        expect(aAfter).toBe(404); // replaced → freed
+        expect(bAfter).toBe(200); // current slot still live
+    });
 });
 
 test.describe('Soundboard end-to-end (2 browsers)', () => {
@@ -317,6 +372,8 @@ test.describe('Soundboard end-to-end (2 browsers)', () => {
     });
 
     test('T4: player leaving voice stops the sound for everyone (server clears current_soundboard)', async ({ page }) => {
+        // Two-browser setup + TLS handshakes routinely exceed the 45s default.
+        test.setTimeout(150000);
         const u1 = unique('plv');
         const u2 = unique('plv2');
         await register(page, u1);

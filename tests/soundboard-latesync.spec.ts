@@ -503,4 +503,72 @@ test.describe('Soundboard late-sync & button fixes', () => {
 
         await ctx2.close();
     });
+
+    test('L7: two players at once — a late joiner syncs BOTH clips', async ({ page }) => {
+        test.setTimeout(300000);
+        const u1 = unique('mpa');
+        const u2 = unique('mpb');
+        const u3 = unique('mpc');
+        await register(page, u1);
+        await waitForWs(page);
+
+        const ctx2 = await (page.context().browser() as any).newContext();
+        const page2 = await ctx2.newPage();
+        await register(page2, u2);
+        await waitForWs(page2);
+
+        const ctx3 = await (page.context().browser() as any).newContext();
+        const page3 = await ctx3.newPage();
+        await register(page3, u3);
+        await waitForWs(page3);
+
+        const { serverId, voiceChannelId } = await createServerWithVoice(page);
+        // Both clips are long, so both are still playing when u3 joins.
+        const clipA = await uploadClip(page, 'mpA_' + Date.now(), 30);
+        const clipB = await uploadClip(page2, 'mpB_' + Date.now(), 30);
+        await connectUsers(page, page2, serverId);
+        await connectUsers(page, page3, serverId);
+        await page2.reload();
+        await page2.waitForSelector(`.server-icon[data-id="${serverId}"]`, { timeout: 20000 });
+        await waitForWs(page2);
+        await page3.reload();
+        await page3.waitForSelector(`.server-icon[data-id="${serverId}"]`, { timeout: 20000 });
+        await waitForWs(page3);
+
+        await joinVoice(page, serverId, voiceChannelId);
+        await joinVoice(page2, serverId, voiceChannelId);
+        await page.waitForTimeout(1500);
+
+        // u1 AND u2 play different clips simultaneously — with one playback
+        // slot per room the second play used to wipe the first from the
+        // late-join snapshot.
+        await page.evaluate(async () => { if ((window as any)._loadSoundboardClips) await (window as any)._loadSoundboardClips(); });
+        await page2.evaluate(async () => { if ((window as any)._loadSoundboardClips) await (window as any)._loadSoundboardClips(); });
+        await page.evaluate((cid: string) => { (window as any)._playSoundboardClip(cid); }, clipA);
+        await page2.evaluate((cid: string) => { (window as any)._playSoundboardClip(cid); }, clipB);
+        await page.waitForTimeout(3500);
+
+        // u3 joins the room only NOW and must pick up BOTH clips.
+        await page3.evaluate(() => {
+            const w = window as any;
+            w._sbReceived = [];
+            const orig = w._handleSoundboardPlay;
+            w._handleSoundboardPlay = function (d: any) { w._sbReceived.push({ t: Date.now(), data: d }); return orig.call(this, d); };
+        });
+        await joinVoice(page3, serverId, voiceChannelId);
+        await page3.waitForTimeout(3000);
+
+        const received = await page3.evaluate(() => (window as any)._sbReceived || []);
+        console.log('L7 late-join msgs:', JSON.stringify(received.map((r: any) => ({
+            uid: r.data.user_id, tok: !!r.data.temp_token, dur: r.data.duration_ms,
+        }))));
+        const userIds = new Set(received.map((r: any) => r.data.user_id));
+        // BOTH players' clips arrived in the late-join snapshot.
+        expect(userIds.size).toBe(2);
+        // and u3 is actually playing both (not one entry clobbered by the other).
+        expect(await page3.evaluate(() => ((window as any)._sbAllPlaying || []).length)).toBeGreaterThanOrEqual(2);
+
+        await ctx2.close();
+        await ctx3.close();
+    });
 });

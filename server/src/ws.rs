@@ -148,10 +148,11 @@ pub struct VoiceRoom {
     // and this map is updated so a stale device's later disconnect / page-load
     // voice_leave_all can never evict the device that replaced it.
     pub device_map: HashMap<String, String>,
-    // Currently playing soundboard clip (for late-join sync).
-    // When a new member joins, they receive this so they can pick up playback
-    // from the current position instead of hearing silence.
-    pub current_soundboard: Option<SoundboardPlayback>,
+    // Currently playing soundboard clips, keyed by the player's user id. Each
+    // player gets their OWN slot: one person starting a sound no longer
+    // clobbers another's playback state, so late joiners sync to every clip
+    // that is actually still playing and multiple people can play at once.
+    pub current_soundboards: HashMap<String, SoundboardPlayback>,
 }
 
 #[derive(Clone)]
@@ -1727,22 +1728,35 @@ async fn handle_ws_message(
                     if let Some(room_id) = target_room {
                         // Stamp authoritative start time for late-join offset math
                         let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
-                        {
+                        let replaced_token = {
                             let mut rooms = state.voice_rooms.write().unwrap();
                             if let Some(room) = rooms.get_mut(&room_id) {
-                                room.current_soundboard = Some(SoundboardPlayback {
+                                room.current_soundboards.insert(user_id.to_string(), SoundboardPlayback {
                                     user_id: user_id.to_string(),
                                     clip_id: parsed.get("clip_id").and_then(|s| s.as_str()).unwrap_or("").to_string(),
                                     temp_token: parsed.get("temp_token").and_then(|s| s.as_str()).unwrap_or("").to_string(),
                                     started_at_ms: now_ms,
                                     duration_ms: parsed.get("duration_ms").and_then(|v| v.as_i64()).unwrap_or(0),
                                     r#loop: parsed.get("loop").and_then(|v| v.as_bool()).unwrap_or(false),
-                                });
+                                }).map(|old| old.temp_token)
+                            } else {
+                                None
+                            }
+                        };
+                        // A player re-playing replaced their OWN previous slot —
+                        // free that clip's temp audio so it doesn't leak.
+                        if let Some(tok) = replaced_token {
+                            if !tok.is_empty() {
+                                crate::handlers::remove_sb_temp_play(state, &tok);
                             }
                         }
                         if let Some(obj) = parsed.as_object_mut() {
                             obj.insert("play_start_ms".to_string(), serde_json::json!(now_ms));
                             obj.insert("server_now_ms".to_string(), serde_json::json!(now_ms));
+                            // The sender is always the authenticated user — never
+                            // trust a client-supplied user_id (it would let one
+                            // user impersonate another on stop/disable paths).
+                            obj.insert("user_id".to_string(), serde_json::json!(user_id));
                         }
                         voice_broadcast(state, &room_id, &parsed).await;
                     }
@@ -1773,17 +1787,25 @@ async fn handle_ws_message(
                             let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
                             let duration_ms = parsed.get("duration_ms").and_then(|v| v.as_i64()).unwrap_or(0);
                             let looping = parsed.get("loop").and_then(|v| v.as_bool()).unwrap_or(false);
-                            {
+                            let replaced_token = {
                                 let mut rooms = state.voice_rooms.write().unwrap();
                                 if let Some(room) = rooms.get_mut(&room_id) {
-                                    room.current_soundboard = Some(SoundboardPlayback {
+                                    room.current_soundboards.insert(user_id.to_string(), SoundboardPlayback {
                                         user_id: user_id.to_string(),
                                         clip_id: parsed.get("clip_id").and_then(|s| s.as_str()).unwrap_or("").to_string(),
                                         temp_token: parsed.get("temp_token").and_then(|s| s.as_str()).unwrap_or("").to_string(),
                                         started_at_ms: now_ms,
                                         duration_ms: duration_ms,
                                         r#loop: parsed.get("loop").and_then(|v| v.as_bool()).unwrap_or(false),
-                                    });
+                                    }).map(|old| old.temp_token)
+                                } else {
+                                    None
+                                }
+                            };
+                            // Free the previous clip's temp audio (re-play leak).
+                            if let Some(tok) = replaced_token {
+                                if !tok.is_empty() {
+                                    crate::handlers::remove_sb_temp_play(state, &tok);
                                 }
                             }
                         // Stamp the authoritative start time + duration into the
@@ -1795,6 +1817,8 @@ async fn handle_ws_message(
                             obj.insert("server_now_ms".to_string(), serde_json::json!(now_ms));
                             obj.insert("duration_ms".to_string(), serde_json::json!(duration_ms));
                             obj.insert("loop".to_string(), serde_json::json!(looping));
+                            // Force the authenticated sender (see the DM branch).
+                            obj.insert("user_id".to_string(), serde_json::json!(user_id));
                         }
                         voice_broadcast(state, &room_id, &parsed).await;
                         }
@@ -1815,12 +1839,16 @@ async fn handle_ws_message(
                             .map(|(rid, _)| rid.clone())
                     };
                     if let Some(room_id) = target_room {
-                        // Free the temp audio on explicit stop (DM path)
+                        // Only the clip's OWNER can stop it: never clear another
+                        // user's playback state (late joiners would then sync to
+                        // a silent room for a clip that is actually playing).
                         let stopped_token = {
                             let mut rooms = state.voice_rooms.write().unwrap();
                             let mut tok = String::new();
                             if let Some(room) = rooms.get_mut(&room_id) {
-                                if let Some(sb) = room.current_soundboard.take() {
+                                // Keyed by the sender, so this only ever removes
+                                // the sender's OWN slot (never another user's).
+                                if let Some(sb) = room.current_soundboards.remove(user_id) {
                                     tok = sb.temp_token;
                                 }
                             }
@@ -1828,6 +1856,11 @@ async fn handle_ws_message(
                         };
                         if !stopped_token.is_empty() {
                             crate::handlers::remove_sb_temp_play(state, &stopped_token);
+                        }
+                        // Stamp the authenticated sender so listeners only ever
+                        // stop the sender's own clip.
+                        if let Some(obj) = parsed.as_object_mut() {
+                            obj.insert("user_id".to_string(), serde_json::json!(user_id));
                         }
                         voice_broadcast(state, &room_id, &parsed).await;
                     }
@@ -1848,12 +1881,16 @@ async fn handle_ws_message(
                     };
                         if let Some(room_id) = target_room {
                             // Clear the room's current playback state AND free the
-                            // temp audio so it stops counting against memory.
+                            // temp audio — but ONLY when the sender is the clip's
+                            // actual player. A listener's (or stale) stop must
+                            // never wipe the room state, or late joiners would
+                            // sync to silence for a clip that is still playing.
                             let stopped_token = {
                                 let mut rooms = state.voice_rooms.write().unwrap();
                                 let mut tok = String::new();
                                 if let Some(room) = rooms.get_mut(&room_id) {
-                                    if let Some(sb) = room.current_soundboard.take() {
+                                    // Only the sender's own slot is removed.
+                                    if let Some(sb) = room.current_soundboards.remove(user_id) {
                                         tok = sb.temp_token;
                                     }
                                 }
@@ -1861,6 +1898,11 @@ async fn handle_ws_message(
                             };
                             if !stopped_token.is_empty() {
                                 crate::handlers::remove_sb_temp_play(state, &stopped_token);
+                            }
+                            // Force the authenticated sender: listeners match the
+                            // stop by user_id, so this only stops OUR OWN clip.
+                            if let Some(obj) = parsed.as_object_mut() {
+                                obj.insert("user_id".to_string(), serde_json::json!(user_id));
                             }
                             voice_broadcast(state, &room_id, &parsed).await;
                         }
@@ -2445,7 +2487,7 @@ async fn handle_voice_join(
             session_id: None,
             members: HashMap::new(),
             device_map: HashMap::new(),
-            current_soundboard: None,
+            current_soundboards: HashMap::new(),
         });
         // If this user is already in the room from ANOTHER device, the old
         // device(s) must be kicked before the new device is admitted — "last
@@ -2471,8 +2513,8 @@ async fn handle_voice_join(
         // server_now_ms is stamped NOW (same clock as play_start_ms) so the
         // joiner computes a skew-free elapsed time: mixing the server's clock
         // with the client's made skewed clients skip still-playing clips.
-        let current_sb_json = room.current_soundboard.as_ref().map(|sb| {
-            let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+        let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+        let current_sbs_json: Vec<serde_json::Value> = room.current_soundboards.values().map(|sb| {
             serde_json::json!({
                 "user_id": sb.user_id,
                 "clip_id": sb.clip_id,
@@ -2482,7 +2524,9 @@ async fn handle_voice_join(
                 "duration_ms": sb.duration_ms,
                 "loop": sb.r#loop,
             })
-        });
+        }).collect();
+        // Kept for any older cached client that only understands ONE clip.
+        let singular_sb_fallback = current_sbs_json.last().cloned();
         let joined = serde_json::json!({
             "type": "voice_joined",
             "room_type": room_type,
@@ -2493,7 +2537,10 @@ async fn handle_voice_join(
             "is_owner": is_owner,
             "force_muted": force_muted,
             "force_deafened": force_deafened,
-            "current_soundboard": current_sb_json,
+            // New clients sync EVERY still-playing clip; the singular field is
+            // the backward-compatible fallback for older cached clients.
+            "current_soundboards": current_sbs_json,
+            "current_soundboard": singular_sb_fallback,
         });
         (joined, replaced)
     };
@@ -2715,26 +2762,24 @@ async fn voice_remove_from_room(state: &Arc<AppState>, room_id: &str, user_id: &
     // it. Per spec: "if someone leaves it stops just for them and the sound
     // keeps playing to all others" — that only applies to LISTENERS leaving.
     // When the PLAYER leaves, nobody keeps playing it, so everyone stops.
-    let leaver_was_playing = {
+    let leaver_sb_token = {
         let mut rooms = match state.voice_rooms.write() {
             Ok(r) => r,
             Err(_) => return,
         };
         match rooms.get_mut(room_id) {
-            Some(room) => {
-                let was_playing = room
-                    .current_soundboard
-                    .as_ref()
-                    .map(|sb| sb.user_id == user_id)
-                    .unwrap_or(false);
-                if was_playing {
-                    room.current_soundboard = None;
-                }
-                was_playing
-            }
-            None => false,
+            // Only the leaver's OWN playback slot is dropped; everyone else's
+            // keeps playing for the members who stay.
+            Some(room) => room.current_soundboards.remove(user_id).map(|sb| sb.temp_token),
+            None => None,
         }
     };
+    let leaver_was_playing = leaver_sb_token.is_some();
+    if let Some(tok) = leaver_sb_token {
+        if !tok.is_empty() {
+            crate::handlers::remove_sb_temp_play(state, &tok);
+        }
+    }
 
     // Broadcast leave + updated member list to remaining members (lock already dropped)
     let leave_msg = serde_json::json!({

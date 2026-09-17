@@ -19,6 +19,23 @@
     var _sbCurrentClipId = null; // clip ID of the currently playing sound (for overlay button sync)
     var _sbLoopEnabled = false; // Loop toggle: keep re-playing our clip until manually stopped
     var _sbLoopSession = null; // { clipId } while OUR clip is looping (cleared on stop/leave/disable)
+    // Per-user last accepted play message. Kept while a user is muted / disabled
+    // / deafened so unmute (or re-enable / undeafen) can RESUME their clip from
+    // the room's current position — exactly like a late join. A real stop or a
+    // natural end clears it (there is nothing left to resume).
+    var _sbLastPlay = {}; // userId -> play data
+    // Per-user play epoch: bumped whenever a play starts OR the user's sound is
+    // stopped. Async work (temp-token fetch → decode → play) captures the epoch
+    // when it begins and aborts if it changed, so a stop / a newer play can
+    // never be overtaken by an in-flight one (the "loop restarts after stop" and
+    // "phantom play" bugs).
+    var _sbPlayEpoch = {}; // userId -> int
+    // Our OWN broadcast tracked WITHOUT a local audio entry (Hear-Myself OFF, or
+    // deafened). A real entry exists when we hear ourselves, but with no local
+    // audio nothing would ever fire the natural end — the room's playback state
+    // stayed set and the clip kept "playing" for everyone. This pseudo-entry is
+    // the timer that closes it out (and re-cycles when Loop is on).
+    var _sbOwnBroadcast = null; // { userId, clipId, timer, durationMs }
 
     // Ensure a shared AudioContext for soundboard playback (bypasses browser
     // autoplay restrictions because the context is created during a user gesture
@@ -99,6 +116,30 @@
     document.addEventListener('keydown', _unlockSbAudioCtxOnGesture, true);
     document.addEventListener('touchstart', _unlockSbAudioCtxOnGesture, true);
 
+    // --- Play epoch + suppression helpers ---
+    function _bumpSbEpoch(userId) {
+        if (!userId) return 0;
+        _sbPlayEpoch[userId] = (_sbPlayEpoch[userId] || 0) + 1;
+        return _sbPlayEpoch[userId];
+    }
+    function _sbEpochOf(userId) { return _sbPlayEpoch[userId] || 0; }
+
+    function _sbIsDeafened() {
+        if (!(window.VoiceManager && window.VoiceManager.getState)) return false;
+        var st = window.VoiceManager.getState();
+        return !!(st && st.deafened);
+    }
+
+    // The server id of the voice room we are ACTUALLY in. Using the viewed
+    // server (window.currentServerId) sent play/stop frames to the wrong room
+    // whenever the user navigated to another server mid-call, so the sound
+    // never reached (or never stopped for) the people in the call.
+    function _sbVoiceServerId() {
+        var vs = window.VoiceManager && window.VoiceManager.getVoiceState && window.VoiceManager.getVoiceState();
+        if (vs && vs.inVoice && vs.roomType !== 'dm' && vs.serverId) return vs.serverId;
+        return window.currentServerId || '';
+    }
+
     // Called when a relayed clip finishes naturally (or is skipped because the
     // position was past its end). Removes the tracking entry and — for our own
     // plays — restores the overlay's play button so the stale stop button
@@ -128,29 +169,43 @@
             }
             _sbLoopSession = null; // left the room — the loop dies here
         }
-        // Only act if a live entry still exists — a manual stop already removed
-        // it (source.stop() also fires onended, so this prevents double cleanup
-        // and a duplicate soundboard_stop broadcast).
+        // A natural end means the clip is OVER: drop the resume record for
+        // other users' clips (nothing to land back into). Our own record is
+        // never kept — see _handleSoundboardPlay.
+        if (userId !== window.currentUserId) delete _sbLastPlay[userId];
+        // Act when a live entry still exists — a manual stop already removed it
+        // (source.stop() also fires onended, so this prevents double cleanup and
+        // a duplicate soundboard_stop broadcast). Our own broadcast may ALSO be
+        // tracked as a pseudo-entry when we couldn't hear it locally (Hear
+        // Myself OFF / deafened) — that is the only thing that can fire here in
+        // that case, and it is what sends the room stop.
         var hadLive = _sbAllPlaying.some(function (entry) {
             var eUserId = (entry && entry.userId) || (entry && entry._sbUserId) || null;
             var eClipId = (entry && entry.clipId) || (entry && entry._sbClipId) || null;
             return eUserId === userId && eClipId === clipId;
         });
-        if (!hadLive) return;
-        _sbAllPlaying = _sbAllPlaying.filter(function (entry) {
-            var eUserId = (entry && entry.userId) || (entry && entry._sbUserId) || null;
-            var eClipId = (entry && entry.clipId) || (entry && entry._sbClipId) || null;
-            return !(eUserId === userId && eClipId === clipId);
-        });
-        // If this user has no more entries in _sbAllPlaying, clear the playing indicator
-        var stillPlaying = _sbAllPlaying.some(function (e) { return ((e && e.userId) || (e && e._sbUserId) || null) === userId; });
-        if (!stillPlaying) _sbSetPlaying(userId, false);
-        if (_sbPlaying && !(_sbPlaying.type === 'audio')) {
-            var pUserId = (_sbPlaying.userId) || (_sbPlaying._sbUserId) || null;
-            var pClipId = (_sbPlaying.clipId) || (_sbPlaying._sbClipId) || null;
-            if (pUserId === userId && pClipId === clipId) {
-                _sbPlaying = null;
-                _sbCurrentClipId = null;
+        var ownBroadcast = (_sbOwnBroadcast && _sbOwnBroadcast.userId === userId && _sbOwnBroadcast.clipId === clipId) ? _sbOwnBroadcast : null;
+        if (!hadLive && !ownBroadcast) return;
+        if (ownBroadcast) {
+            clearTimeout(ownBroadcast.timer);
+            _sbOwnBroadcast = null;
+        }
+        if (hadLive) {
+            _sbAllPlaying = _sbAllPlaying.filter(function (entry) {
+                var eUserId = (entry && entry.userId) || (entry && entry._sbUserId) || null;
+                var eClipId = (entry && entry.clipId) || (entry && entry._sbClipId) || null;
+                return !(eUserId === userId && eClipId === clipId);
+            });
+            // If this user has no more entries in _sbAllPlaying, clear the playing indicator
+            var stillPlaying = _sbAllPlaying.some(function (e) { return ((e && e.userId) || (e && e._sbUserId) || null) === userId; });
+            if (!stillPlaying) _sbSetPlaying(userId, false);
+            if (_sbPlaying && !(_sbPlaying.type === 'audio')) {
+                var pUserId = (_sbPlaying.userId) || (_sbPlaying._sbUserId) || null;
+                var pClipId = (_sbPlaying.clipId) || (_sbPlaying._sbClipId) || null;
+                if (pUserId === userId && pClipId === clipId) {
+                    _sbPlaying = null;
+                    _sbCurrentClipId = null;
+                }
             }
         }
         if (userId === window.currentUserId && clipId) {
@@ -158,6 +213,8 @@
             // tell the room the clip is over so the server clears its playback
             // state (late joiners won't try to sync to a finished clip).
             _sbLoopSession = null;
+            _sbPlaying = null;
+            _sbCurrentClipId = null;
             _resetSbOverlayForClip(clipId);
             _sendSoundboardStop();
         }
@@ -171,12 +228,28 @@
         localStorage.setItem('sb_disabled_global', disabled ? '1' : '0');
         // Sync all three checkboxes
         syncDisableCheckboxes(disabled);
-        // Turning the setting ON must also stop what is ALREADY playing — the
-        // setting covers both playing and hearing, not just future plays.
         if (disabled) {
-            if (window._stopAllSoundboardAudioAll) window._stopAllSoundboardAudioAll();
-            for (var k in _sbSuppressedPlays) delete _sbSuppressedPlays[k];
+            // Turning the setting ON must stop OUR sound right now — for us AND
+            // for the room. The local stop used to leave the broadcast running,
+            // so everyone else kept hearing a clip we had "disabled".
+            _sbStopOwnPlaybackBroadcastingStop();
+            // Receiving is blocked while disabled (existing behaviour), but the
+            // last-play records are kept so re-enabling resumes mid-clip.
+            _stopAllSoundboardAudioAll();
+            _resetSbButtons();
+        } else {
+            // Re-enabled: pick up any still-playing clips we suppressed while
+            // disabled, from the room's current position (like a late join).
+            window._sbResumeAllSuppressed();
         }
+    }
+
+    // Stop what WE are playing and tell the room, without touching anyone
+    // else's audio. Used when our own soundboard is turned off (setting or
+    // owner) — "stop it ourselves" on the room's behalf.
+    function _sbStopOwnPlaybackBroadcastingStop() {
+        _stopAllSoundboardAudio();
+        _sendSoundboardStop();
     }
     function syncDisableCheckboxes(disabled) {
         var ids = ['voice-disable-soundboard', 'voice-popup-disable-sb'];
@@ -481,6 +554,25 @@
                 deleteSoundboardClip(clipId);
             };
         });
+        // Re-apply the playing state: a full re-render (opening/closing the
+        // overlay) reset every row, so a clip that is still playing looked
+        // stopped — the stop button vanished and couldn't be clicked.
+        _sbSyncOverlayPlayingState();
+    }
+
+    // Show the stop button for the clip we are currently broadcasting, if any.
+    function _sbSyncOverlayPlayingState() {
+        if (!_sbClips) return;
+        var cid = _sbCurrentClipId || (_sbOwnBroadcast && _sbOwnBroadcast.clipId);
+        if (!cid) return;
+        var clipEl = _sbClips.querySelector('.soundboard-clip[data-clip-id="' + cid + '"]');
+        if (!clipEl) return;
+        var pb = clipEl.querySelector('.sb-play-btn');
+        var pp = clipEl.querySelector('.sb-pause-btn');
+        var ld = clipEl.querySelector('.sb-loading');
+        if (pb) pb.style.display = 'none';
+        if (pp) pp.style.display = '';
+        if (ld) ld.style.display = 'none';
     }
 
     function _resetSbButtons() {
@@ -504,16 +596,22 @@
         if (ld) ld.style.display = 'none';
     }
 
-    // Broadcast soundboard_stop to all room members via WS
+    // Broadcast soundboard_stop to all room members via WS. The server forces
+    // user_id to the authenticated sender and only clears the room's playback
+    // state if that sender is the clip's owner, so this can never stop a clip
+    // we are not playing (and never clears someone else's state).
     function _sendSoundboardStop() {
         var w = window.ws;
         if (!w || w.readyState !== 1) return;
         var vs = window.VoiceManager && window.VoiceManager.getVoiceState && window.VoiceManager.getVoiceState();
         if (!vs || !vs.inVoice) return;
+        var isDm = vs.roomType === 'dm';
         w.send(JSON.stringify({
             type: 'soundboard_stop',
             user_id: window.currentUserId,
-            server_id: window.currentServerId || '',
+            // The VOICE room's server, not the one being viewed — navigating to
+            // another server mid-call used to send the stop to the wrong room.
+            server_id: isDm ? '' : (vs.serverId || ''),
             channel_id: vs.channelId || '',
             room_type: vs.roomType || 'server',
             dm_channel_id: vs.dmChannelId || '',
@@ -574,19 +672,27 @@
                 if (playBtn) playBtn.style.display = 'none';
                 _sbCurrentClipId = clipId;
                 _sbLoopSession = _sbLoopEnabled ? { clipId: clipId } : null;
+                // Snapshot the self epoch: if the user stops (or starts another
+                // clip) while the audio is still uploading, the send is skipped
+                // instead of starting a sound that was already stopped.
+                var _sbSelfEpoch = _sbEpochOf(window.currentUserId);
                 var rawB64 = uint8ToBase64(audioBytes);
                 var playStartTime = Date.now();
+                // The VOICE room's server (not the one being viewed) so the play
+                // reaches the room even if the user navigated elsewhere mid-call.
+                var sendServerId = (vs.roomType === 'dm') ? '' : (vs.serverId || '');
                 fetch('/api/soundboard/temp-play', {
                     method: 'POST',
                     headers: Object.assign({ 'Content-Type': 'application/json' }, authHeaders()),
                     body: JSON.stringify({ audio: rawB64 }),
                 }).then(function(resp) { return resp.json(); }).then(function(data) {
                     if (!data.token) throw new Error('no token');
+                    if (_sbEpochOf(window.currentUserId) !== _sbSelfEpoch) return; // stopped mid-upload
                     window.ws.send(JSON.stringify({
                         type: 'soundboard_play',
                         clip_id: clipId,
                         temp_token: data.token,
-                        server_id: window.currentServerId || '',
+                        server_id: sendServerId,
                         channel_id: vs.channelId || '',
                         user_id: window.currentUserId,
                         disabled: false,
@@ -650,17 +756,27 @@
 
     // Listen for soundboard plays from other users (and self via WS relay) via WS
     window._handleSoundboardPlay = function (data) {
+        if (!data) return;
+        var isSelf = data.user_id === window.currentUserId;
+        // Remember the latest play for every OTHER user, even when we cannot
+        // hear it right now. This IS the mute→unmute / disable→re-enable /
+        // deafen→undeafen resume source: a clip already playing when we muted
+        // keeps its record, so unmuting lands back mid-clip instead of silence.
+        if (!isSelf && data.clip_id) _sbLastPlay[data.user_id] = data;
         // If soundboard sounds are disabled in settings, block both play and receive
         if (_isSbDisabledGlobal()) return;
         // Owner disabled OUR soundboard live (or for this server) → we cannot
         // play or hear. (A relayed play of ours still arrives with disabled
         // unset when the owner toggle raced it — this local check closes it.)
-        if (data.user_id === window.currentUserId && _sbIsOwnerDisabledForMe()) return;
+        if (isSelf && _sbIsOwnerDisabledForMe()) return;
         // Ignore disabled soundboard (owner disabled for this user)
         if (data.disabled) return;
-        // For self: only play if hear-self is toggled on
-        if (data.user_id === window.currentUserId) {
-            if (!_sbSelfHear) {
+        if (!isSelf && _sbIsOwnerDisabledForUser(data.user_id)) return;
+        // For self: play only when Hear Myself is on AND we are not deafened.
+        // Either way we must TRACK the broadcast so its natural end still tells
+        // the room to stop — with no local audio nothing else would fire.
+        if (isSelf) {
+            if (!_sbSelfHear || _sbIsDeafened()) {
                 // We still need the overlay's stop button to flip back when our
                 // clip ends naturally — schedule the cleanup with the known
                 // duration (always sent now). No audio is played for us. While
@@ -671,27 +787,29 @@
                 if (_sbLoopEnabled) _sbLoopSession = { clipId: cid };
                 // The timer drives _sbOnClipEnded even with no local audio: with
                 // Loop ON it is what re-cycles the clip (and re-broadcasts it to
-                // the room) while the player themselves hears nothing.
+                // the room) while the player themselves hears nothing. Keeping
+                // it in _sbOwnBroadcast lets a stop cancel it so a stopped sound
+                // can never spring back to life.
+                if (_sbOwnBroadcast) { clearTimeout(_sbOwnBroadcast.timer); _sbOwnBroadcast = null; }
                 if (d > 0 && cid) {
-                    setTimeout(function () { _sbOnClipEnded(data.user_id, cid); }, d + 250);
+                    _sbOwnBroadcast = {
+                        userId: data.user_id,
+                        clipId: cid,
+                        durationMs: d,
+                        timer: setTimeout(function () { _sbOnClipEnded(data.user_id, cid); }, d + 250),
+                    };
                 }
                 return;
             }
-        } else if (_isUserMuted(data.user_id)) {
-            // For others: muted → SUPPRESS (remember the play) instead of
-            // dropping it. This is what makes unmute work: voice.js calls
-            // _sbResumeForUser(uid) on unmute, which replays this data with a
-            // lazily-sampled offset — the user lands mid-clip like a late
-            // join. This block used to sit AFTER a plain `return`, so the
-            // store was never populated and unmute resumed nothing.
-            _sbSuppressedPlays[data.user_id] = data;
+        } else if (_sbIsUserMuted(data.user_id)) {
+            // For others: muted → SUPPRESS instead of dropping. The play was
+            // already recorded above; voice.js calls _sbResumeForUser(uid) on
+            // unmute, which replays it with a lazily-sampled offset so the
+            // listener lands mid-clip like a late join.
             return;
         }
         // Deafened users should not hear any soundboard sounds
-        if (window.VoiceManager && window.VoiceManager.getState) {
-            var _vsD = window.VoiceManager.getState();
-            if (_vsD && _vsD.deafened) return;
-        }
+        if (_sbIsDeafened()) return;
         // Multi-device gate: only the device actually IN the target voice room
         // plays the sound. A second device of the same account that is NOT in
         // the call must ignore the relay — otherwise it plays audio that
@@ -713,6 +831,9 @@
         // first (Discord behaviour). Without this, a loop re-cycle would
         // overlap the still-decoding previous cycle and double the audio.
         _sbStopEntriesFor(data.user_id);
+        // Claim this play. Bumping the epoch makes any in-flight async work for
+        // this user (a fetch + decode from an older play, or a stop) stale.
+        var _sbMyEpoch = _bumpSbEpoch(data.user_id);
         // Determine play source: temp_token (fast HTTP fetch) or legacy encrypted_audio
         var playPromise;
         if (data.temp_token) {
@@ -731,10 +852,14 @@
             return;
         }
         playPromise.then(function(audioBytes) {
+            // An in-flight play superseded by a newer play or a stop must never
+            // start — this is what made a stopped loop restart itself.
+            if (_sbEpochOf(data.user_id) !== _sbMyEpoch) return;
             if (!audioBytes || audioBytes.length === 0) return;
             // Disabled mid-flight (global toggle or an owner disable that
             // arrived while the fetch was running) → drop it here.
             if (_isSbDisabledGlobal() || (data.user_id !== window.currentUserId && _isUserMuted(data.user_id))) return;
+            if (_sbIsDeafened() && data.user_id !== window.currentUserId) return;
             // Track this user as actively playing (for the indicator badge)
             _sbSetPlaying(data.user_id, true);
             // Playback offset — CLOCK-SKEW-PROOF. play_start_ms is the
@@ -769,12 +894,25 @@
             // Quick skip: if we already know the duration and the offset is
             // clearly past it (non-looping), don't even bother decoding.
             var earlyOff = offsetProvider();
-            if (!data.loop && durationMsOf(data) > 0 && earlyOff >= durationMsOf(data)) return;
+            if (!data.loop && durationMsOf(data) > 0 && earlyOff >= durationMsOf(data)) {
+                // Already over. Clear the badge we just set — with several
+                // players at once a skipped clip would otherwise leave THIS
+                // user's "playing" indicator stuck on forever (nothing fires
+                // the end handler for audio that never started).
+                _sbSetPlaying(data.user_id, false);
+                return;
+            }
             if (_sbAudioCtx || _ensureSbAudioCtx()) {
                 _playViaAudioCtx(audioBytes, function () {
                     // Clip finished naturally (or was skipped: past the end)
                     _sbOnClipEnded(data.user_id, data.clip_id);
                 }, offsetProvider).then(function (source) {
+                    // A stop (or a newer play) landed while we were decoding:
+                    // discard the source instead of starting it.
+                    if (_sbEpochOf(data.user_id) !== _sbMyEpoch) {
+                        if (source) { try { source.stop(); } catch (_) {} }
+                        return;
+                    }
                     if (!source) return;
                     var entry = { type: 'ctx', source: source, userId: data.user_id, clipId: data.clip_id };
                     _sbAllPlaying.push(entry);
@@ -784,6 +922,7 @@
                     }
                 }).catch(function (e) {
                     console.error('Soundboard AudioContext play error:', e);
+                    if (_sbEpochOf(data.user_id) !== _sbMyEpoch) return; // stopped mid-decode
                     // Fall back to Audio() element — pass the current offset
                     // so late-joiners still hear from the right position.
                     _playSbAudioFallback(audioBytes, data.user_id, data.clip_id, offsetProvider());
@@ -853,54 +992,67 @@
         }
     }
 
-    // Listen for soundboard_stop from other users via WS
-    window._handleSoundboardStop = function (data) {
-        // Only stop sounds from a specific user
-        if (data.user_id) {
-            _sbSetPlaying(data.user_id, false);
-            delete _sbSuppressedPlays[data.user_id];
-            var stoppedClipId = null;
-            var stoppedAnything = false;
-            _sbAllPlaying = _sbAllPlaying.filter(function (entry) {
-                // Determine the user who owns this entry
-                var entryUserId = (entry && entry.userId) || (entry && entry._sbUserId) || null;
-                // Only stop entries from the specified user
-                if (entryUserId !== data.user_id) return true; // keep other users'
-                stoppedAnything = true;
+    // Stop one user's live sound and clear their playing indicator. Does NOT
+    // touch the resume record — the caller decides that (mute keeps it so
+    // unmute can resume; a real stop deletes it). Handles real audio entries,
+    // the _sbPlaying handle, and our own pseudo broadcast entry.
+    function _sbStopEntriesAndIndicator(userId) {
+        if (!userId) return null;
+        _sbSetPlaying(userId, false);
+        var stoppedClipId = null;
+        _sbAllPlaying = _sbAllPlaying.filter(function (entry) {
+            var entryUserId = (entry && entry.userId) || (entry && entry._sbUserId) || null;
+            if (entryUserId !== userId) return true; // keep other users'
+            try {
+                if (entry.type === 'ctx' && entry.source) {
+                    entry.source.stop();
+                } else if (entry.pause) {
+                    entry.pause();
+                    entry.currentTime = 0;
+                }
+            } catch (_) {}
+            return false; // remove this entry
+        });
+        if (_sbPlaying) {
+            var playingUserId = (_sbPlaying.userId) || (_sbPlaying._sbUserId) || null;
+            if (playingUserId === userId) {
+                stoppedClipId = _sbCurrentClipId;
                 try {
-                    if (entry.type === 'ctx' && entry.source) {
-                        entry.source.stop();
-                    } else if (entry.pause) {
-                        entry.pause();
-                        entry.currentTime = 0;
+                    if (_sbPlaying.type === 'ctx' && _sbPlaying.source) {
+                        _sbPlaying.source.stop();
+                    } else if (_sbPlaying.pause) {
+                        _sbPlaying.pause();
+                        _sbPlaying.currentTime = 0;
                     }
                 } catch (_) {}
-                return false; // remove this entry
-            });
-            if (_sbPlaying) {
-                var playingUserId = (_sbPlaying.userId) || (_sbPlaying._sbUserId) || null;
-                if (playingUserId === data.user_id) {
-                    stoppedClipId = _sbCurrentClipId;
-                    stoppedAnything = true;
-                    try {
-                        if (_sbPlaying.type === 'ctx' && _sbPlaying.source) {
-                            _sbPlaying.source.stop();
-                        } else if (_sbPlaying.pause) {
-                            _sbPlaying.pause();
-                            _sbPlaying.currentTime = 0;
-                        }
-                    } catch (_) {}
-                    _sbPlaying = null;
-                    _sbCurrentClipId = null;
-                }
-            }
-            // Only reset buttons for the CURRENT user's clip — never wipe
-            // another user's stop across all overlay buttons (that hides the
-            // active pause button while self-hear audio keeps playing).
-            if (stoppedClipId) {
-                _resetSbOverlayForClip(stoppedClipId);
+                _sbPlaying = null;
+                _sbCurrentClipId = null;
             }
         }
+        if (_sbOwnBroadcast && _sbOwnBroadcast.userId === userId) {
+            clearTimeout(_sbOwnBroadcast.timer);
+            stoppedClipId = stoppedClipId || _sbOwnBroadcast.clipId;
+            _sbOwnBroadcast = null;
+        }
+        // Only reset buttons for this user's clip — never wipe another user's
+        // stop across all overlay buttons (that hides the active pause button
+        // while self-hear audio keeps playing).
+        if (stoppedClipId) _resetSbOverlayForClip(stoppedClipId);
+        return stoppedClipId;
+    }
+
+    // Listen for soundboard_stop from the room via WS. The server forces user_id
+    // to the authenticated sender, so this only stops the sender's own clip.
+    window._handleSoundboardStop = function (data) {
+        if (!data || !data.user_id) return;
+        var uid = data.user_id;
+        // Cancel any in-flight async play for this user (the fetch/decode may
+        // still be running) so it cannot start after the stop.
+        _bumpSbEpoch(uid);
+        // A real stop (pressed stop, natural end, player left) ends the resume
+        // record. An owner-disable stop KEEPS it so re-enabling resumes mid-clip.
+        if (data.reason !== 'soundboard_disabled') delete _sbLastPlay[uid];
+        _sbStopEntriesAndIndicator(uid);
     };
 
     // Stop soundboard audio for the current user only (called on voice leave).
@@ -932,6 +1084,10 @@
                 _sbCurrentClipId = null;
             }
         }
+        // Cancel any in-flight own play (temp-token upload still running) and
+        // drop the own-broadcast timer — a stop must beat a late async start.
+        if (myId) _bumpSbEpoch(myId);
+        if (_sbOwnBroadcast) { clearTimeout(_sbOwnBroadcast.timer); _sbOwnBroadcast = null; }
         // Stopping our own audio always ends a Loop session (manual stop,
         // starting another clip, or the setting being turned off mid-loop) and
         // we are no longer "playing" for anyone (badge must not linger).
@@ -958,6 +1114,8 @@
         _sbAllPlaying = [];
         _sbPlaying = null;
         _sbCurrentClipId = null;
+        if (_sbOwnBroadcast) { clearTimeout(_sbOwnBroadcast.timer); _sbOwnBroadcast = null; }
+        _bumpSbEpoch(window.currentUserId);
         // Every caller is a "we are no longer hearing anything" moment (leave,
         // kick, teardown, soundboard disabled) — the loop must die with it or
         // we would keep re-broadcasting a clip into a room we left. Every
@@ -1002,18 +1160,22 @@
     // block — a stopped clip stays stopped (there is no state to resume).
     window._handleSoundboardDisabled = function (data) {
         var serverId = data.server_id || (data.serverId || '');
-        if (serverId && window.currentServerId && serverId !== window.currentServerId) return;
+        // Match against the server of the voice room we are actually in — the
+        // viewed server can differ mid-call, which used to drop the disable.
+        var myVoiceSid = _sbVoiceServerId();
+        if (serverId && myVoiceSid && serverId !== myVoiceSid) return;
         var nowDisabled = !!data.disabled;
         // The server only targets the disabled account's own connections, but
         // never stop someone else's audio if a stray message shows up.
         var forSelf = !data.user_id || data.user_id === window.currentUserId;
         if (nowDisabled && forSelf) {
-            // Stop what WE are playing (our self-hear copy + any loop). Other
-            // members' sounds are left alone — the server also broadcasts
-            // soundboard_stop for our clips to the listeners in the room.
-            _stopAllSoundboardAudio();
-            for (var k in _sbSuppressedPlays) delete _sbSuppressedPlays[k];
+            // Stop what WE are playing (self-hear + the room's copy) and tell
+            // listeners to drop our clip. Other members' sounds are untouched.
+            _sbStopOwnPlaybackBroadcastingStop();
             _resetSbButtons();
+        } else if (!nowDisabled && forSelf) {
+            // Re-enabled: pick up any still-playing suppressed clips mid-way.
+            window._sbResumeAllSuppressed();
         }
         // Reflect the state for the rest of this session in THIS server.
         if (serverId) {
@@ -1027,10 +1189,25 @@
     // with the REST-learned _sbDisabledUsers list at every gate so a disable
     // that happens mid-session is honoured without waiting for a reload.
     var _sbOwnerDisabledByServer = {};
+    // Is this (other) user's soundboard disabled by the owner for the server we
+    // are in? The REST list is loaded per VIEWED server, so it is only trusted
+    // when that matches the voice room's server.
+    function _sbIsOwnerDisabledForUser(userId) {
+        if (!userId) return false;
+        var sid = _sbVoiceServerId();
+        if (sid && sid !== window.currentServerId) return false;
+        return Array.isArray(window._sbDisabledUsers) && window._sbDisabledUsers.indexOf(userId) !== -1;
+    }
     function _sbIsOwnerDisabledForMe() {
         var sid = window.currentServerId;
         if (sid && _sbOwnerDisabledByServer[sid] === true) return true;
         if (window._sbOwnerDisabledLive === true) return true;
+        // Live disables are also keyed by the VOICE room's server.
+        var vsid = _sbVoiceServerId();
+        if (vsid && _sbOwnerDisabledByServer[vsid] === true) return true;
+        // Survives a reload: the REST-loaded disabled list contains OUR id.
+        var myId = window.currentUserId;
+        if (myId && _sbIsOwnerDisabledForUser(myId)) return true;
         return false;
     }
     // Called by voice.js teardownRoom(): the local loop session dies with the
@@ -1041,13 +1218,16 @@
     Object.defineProperty(window, "_sbClipsCache", { get: function() { return _sbClipsCache; }, configurable: true });
     Object.defineProperty(window, '_sbAllPlaying', { get: function() { return _sbAllPlaying; }, configurable: true });
 
-    // --- Per-user disabled list (owner disabled this user's soundboard for everyone) ---
-    // --- Per-user suppression tracking (for mute→unmute resume like late-join) ---
-    var _sbSuppressedPlays = {}; // userId -> data (last play message, kept while muted)
+    // --- Per-user last-play records (mute/disable/deafen → resume like late-join) ---
     window._sbResumeForUser = function (userId) {
-        var data = _sbSuppressedPlays[userId];
+        var data = _sbLastPlay[userId];
         if (!data) return;
-        delete _sbSuppressedPlays[userId];
+        // Still suppressed? (muted / our own soundboard disabled / deafened /
+        // this user's soundboard disabled by the owner)
+        if (_isSbDisabledGlobal()) return;
+        if (_sbIsUserMuted(userId)) return;
+        if (_sbIsDeafened()) return;
+        if (userId !== window.currentUserId && _sbIsOwnerDisabledForUser(userId)) return;
         // Only resume if the clip hasn't finished: compute the elapsed time
         // with the same CLOCK-SKEW-PROOF math as _handleSoundboardPlay
         // (play_start_ms is the SERVER's clock, so a skewed local clock
@@ -1056,11 +1236,28 @@
         if (dur > 0 && data.play_start_ms && data.server_now_ms) {
             var serverElapsed = Math.max(0, data.server_now_ms - data.play_start_ms);
             var sinceRecv = Math.max(0, Date.now() - (data._sbRecvLocalMs || Date.now()));
-            if (serverElapsed + sinceRecv >= dur) return; // already over
+            if (!data.loop && serverElapsed + sinceRecv >= dur) { delete _sbLastPlay[userId]; return; } // already over
         }
-        // Replay via the normal path — offset is recomputed lazily so it
-        // lands at the current position (like a late join).
+        // Replay via the normal path — the offset is recomputed lazily so it
+        // lands at the room's current position (like a late join).
         window._handleSoundboardPlay(data);
+    };
+    // Resume every still-playing suppressed clip. Used when OUR soundboard is
+    // re-enabled or we undeafen. Our own clip is never resumed (it was STOPPED,
+    // not suppressed, so it should stay stopped).
+    window._sbResumeAllSuppressed = function () {
+        Object.keys(_sbLastPlay).forEach(function (uid) {
+            if (uid === window.currentUserId) return;
+            window._sbResumeForUser(uid);
+        });
+    };
+    // Stop a user's live sound WITHOUT dropping their resume record. The voice
+    // menu calls this when muting / owner-disabling someone so unmuting lands
+    // mid-clip instead of silence (a real room stop would delete the record).
+    window._sbStopLiveForUser = function (userId) {
+        if (!userId) return;
+        _bumpSbEpoch(userId);
+        _sbStopEntriesAndIndicator(userId);
     };
     window._sbPlayingUsers = {}; // userId -> true (who is currently playing)
     window._sbOnSbPlayingChanged = null; // callback set by voice.js
