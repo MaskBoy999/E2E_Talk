@@ -160,7 +160,7 @@ test.describe('Soundboard multi-user: several players at once', () => {
         expect(s.badges).toEqual(['user_B']);
     });
 
-    test('M3: owner-disabling one player stops only that player and keeps their resume record', async ({ page }) => {
+    test('M3: owner-disabling one player stops only that player and DROPS their resume record', async ({ page }) => {
         test.setTimeout(120000);
         await register(page, unique('sbmu3'));
         await waitForWs(page);
@@ -178,13 +178,14 @@ test.describe('Soundboard multi-user: several players at once', () => {
         expect(s.entries).toBe(1);
         expect(s.players).toEqual(['user_B']);   // B is untouched by A's disable
 
-        // A's resume record survived the disable stop, so re-enable can resume
-        // A mid-clip... without disturbing B.
+        // A disable is a REAL stop, not a suppression: there is no late-join /
+        // resume afterwards, so re-enabling A must NOT bring the clip back —
+        // while B keeps playing, untouched.
         await page.evaluate(() => (window as any)._sbResumeForUser('user_A'));
         await page.waitForTimeout(900);
         s = await state(page);
-        expect(s.entries).toBe(2);
-        expect(s.players.sort()).toEqual(['user_A', 'user_B']);
+        expect(s.entries).toBe(1);
+        expect(s.players).toEqual(['user_B']);
     });
 
     test('M4: our own clip coexists with another player; stopping ours leaves theirs playing', async ({ page }) => {

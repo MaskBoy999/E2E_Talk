@@ -501,6 +501,9 @@
         });
         // Also update self
         updateMemberBadgesInPlace(getSelfId());
+        // And the channel list (who is in each voice channel) — its chips carry
+        // the same 🎵 badge, so they must refresh when a sound starts/ends.
+        try { updateChannelChips(); } catch (_) {}
     };
 
     // ------------------------------------------------------------------
@@ -8173,6 +8176,78 @@
             menu.appendChild(resetBtn);
         }
 
+        // Soundboard volume — a SEPARATE per-user volume from the mic volume
+        // above (stored as voice_sb_volume_<uid> vs voice_volume_<uid>). It is
+        // applied through a per-user gain node in soundboard-pairing.js, so
+        // moving this slider changes what we hear from that member's soundboard
+        // LIVE — including a sound that is already playing. Available wherever
+        // the member menu is (voice channel rows and DM call tiles), never on
+        // our own row.
+        if (!isScreen && !isVideoOnly && !isSelf) {
+            var sbVolLabel = document.createElement('div');
+            sbVolLabel.className = 'volume-menu-vol-label';
+            sbVolLabel.textContent = 'Soundboard volume';
+            menu.appendChild(sbVolLabel);
+            var savedSbVol = window._sbVolumeForUser ? window._sbVolumeForUser(uid) : 100;
+            var sbSliderRow = document.createElement('div');
+            sbSliderRow.className = 'volume-menu-slider-row';
+            var sbSlider = document.createElement('input');
+            sbSlider.type = 'range';
+            sbSlider.min = 0;
+            sbSlider.max = 500;
+            sbSlider.value = String(Math.min(savedSbVol, 500));
+            sbSlider.className = 'volume-menu-slider sb-volume-slider';
+            var sbVal = document.createElement('span');
+            sbVal.className = 'volume-menu-value sb-volume-value';
+            sbVal.textContent = Math.round(savedSbVol) + '%';
+            // Updates the percentage text + the custom input in place, and
+            // applies the volume to the soundboard audio IMMEDIATELY.
+            function applySbVolDisplay(pct) {
+                if (window._sbSetUserVolume) window._sbSetUserVolume(uid, pct);
+                sbVal.textContent = pct + '%';
+                var ci = menu.querySelector('.sb-volume-input');
+                if (ci) ci.value = String(pct);
+            }
+            sbSlider.addEventListener('input', function () {
+                applySbVolDisplay(parseInt(sbSlider.value, 10));
+            });
+            sbSliderRow.appendChild(sbSlider);
+            sbSliderRow.appendChild(sbVal);
+            menu.appendChild(sbSliderRow);
+            var sbInputRow = document.createElement('div');
+            sbInputRow.className = 'volume-menu-input-row';
+            var sbInp = document.createElement('input');
+            sbInp.type = 'number';
+            sbInp.min = 0;
+            sbInp.max = 100000;
+            sbInp.step = 5;
+            sbInp.value = String(Math.round(savedSbVol));
+            sbInp.className = 'volume-menu-custom-input sb-volume-input';
+            var sbPctLbl = document.createElement('span');
+            sbPctLbl.className = 'volume-menu-custom-pct';
+            sbPctLbl.textContent = '%';
+            function applySbCustomPct() {
+                var raw = parseInt(sbInp.value, 10);
+                if (isNaN(raw)) raw = 100;
+                var pct = Math.max(0, Math.min(100000, raw));
+                applySbVolDisplay(pct);
+                sbSlider.value = String(Math.min(pct, 500));
+            }
+            sbInp.addEventListener('input', applySbCustomPct);
+            sbInp.addEventListener('change', applySbCustomPct);
+            sbInputRow.appendChild(sbInp);
+            sbInputRow.appendChild(sbPctLbl);
+            menu.appendChild(sbInputRow);
+            var sbResetBtn = document.createElement('button');
+            sbResetBtn.className = 'volume-menu-btn';
+            sbResetBtn.innerHTML = icon('reset') + ' Reset soundboard volume (100%)';
+            sbResetBtn.addEventListener('click', function () {
+                applySbVolDisplay(100);
+                sbSlider.value = '100';
+            });
+            menu.appendChild(sbResetBtn);
+        }
+
         // Owner controls — only for the server owner, server rooms, OTHER
         // members, and only on the MEMBER row menu. Right-clicking a camera or
         // screen tile is about the FEED (view transforms / screen audio), not
@@ -8276,11 +8351,14 @@
                     window._sbDisabledUsers.push(uid);
                 }
                 var nowDisabled = window._sbDisabledUsers.indexOf(uid) !== -1;
-                // Stop sounds only when DISABLE-ing, keeping the resume record so
-                // enabling lands mid-clip (same as mute). A real room stop would
-                // delete _sbLastPlay[uid] and kill the resume.
-                if (nowDisabled && window._sbStopLiveForUser) {
-                    window._sbStopLiveForUser(uid);
+                // DISABLE is a real stop, not a suppression: the clip stops for
+                // everyone (the server also broadcasts the stop to the room) and
+                // must NOT come back mid-clip when the user is re-enabled — so
+                // the resume record goes with it. (Mute is the opposite: it keeps
+                // the record so unmuting lands back mid-clip, like a late join.)
+                if (nowDisabled) {
+                    if (window._sbHardStopForUser) window._sbHardStopForUser(uid);
+                    else if (window._sbStopLiveForUser) window._sbStopLiveForUser(uid);
                 }
                 // Also persist to server (fire-and-forget)
                 var method = nowDisabled ? 'PUT' : 'DELETE';
@@ -8289,11 +8367,10 @@
                     method: method,
                     headers: Object.assign({ 'Content-Type': 'application/json' }, _sbAuthToken2 ? { Authorization: 'Bearer ' + _sbAuthToken2 } : {}),
                 }).catch(function () {});
-                // On ENABLE: resume this user's soundboard sound if one was
-                // suppressed while they were disabled (like a late join).
-                if (!nowDisabled && window._sbResumeForUser) {
-                    window._sbResumeForUser(uid);
-                }
+                // On ENABLE: deliberately NOTHING resumes. Disabling stopped the
+                // clip for everyone (state cleared server-side, resume record
+                // dropped), so there is nothing to land back into — the next
+                // play goes through normally.
                 // Update the indicator IN PLACE — menu stays open, label flips.
                 sbDisBtn.className = 'volume-menu-btn' + (nowDisabled ? ' active' : '');
                 sbDisBtn.innerHTML = nowDisabled ? icon('check') + ' ' + icon('volume-on') + ' Enable Soundboard' : icon('close') + ' Disable Soundboard';
@@ -8681,6 +8758,12 @@
                 else if (m.deafened) badges += '<span class="vc-badge" title="Deafened">' + icon('volume-off') + '</span>';
                 if (m.camera) badges += '<span class="vc-badge" title="Camera">' + icon('camera') + '</span>';
                 if (m.screen) badges += '<span class="vc-badge" title="Screen">' + icon('monitor') + '</span>';
+                // Soundboard playing indicator — same 🎵 badge as the voice
+                // popup / DM tiles, so the channel list shows who is playing a
+                // sound (and therefore who to mute) without opening the channel.
+                if (window._sbPlayingUsers && window._sbPlayingUsers[m.user_id]) {
+                    badges += '<span class="vc-badge sb-playing-indicator" title="Playing soundboard">🎵</span>';
+                }
 
                 var chipStyle = memberNameStyle(m.user_id);
                 var isSelfChip = m.user_id === getSelfId();

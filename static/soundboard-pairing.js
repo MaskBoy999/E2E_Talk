@@ -53,6 +53,63 @@
         return _sbAudioCtx;
     }
 
+    // --- Per-user soundboard volume (SEPARATE from that user's mic volume) ---
+    // Stored per user id in localStorage under voice_sb_volume_<uid>, exactly
+    // like the mic volume (voice_volume_<uid>), so the same right-click flow
+    // (0–500% slider + custom % input + reset) applies. The value is applied
+    // through a dedicated GainNode per user, so changing it while a clip is
+    // ALREADY playing takes effect live on the audio being heard.
+    var _sbGainNodes = {};
+    function _sbVolumePctFor(userId) {
+        var saved = parseFloat(localStorage.getItem('voice_sb_volume_' + userId) || '100');
+        if (isNaN(saved)) saved = 100;
+        return Math.max(0, Math.min(100000, saved));
+    }
+    function _sbGainValueFor(userId) {
+        // 100% == unity gain; capped at 1000 (100000%) exactly like the mic
+        // path so the two volumes behave identically.
+        return Math.max(0, Math.min(1000, _sbVolumePctFor(userId) / 100));
+    }
+    function _sbGainFor(userId, ctx) {
+        // Our own soundboard audio is never attenuated by a per-user volume
+        // (the menu has no self volume) — only OTHER members' clips are.
+        if (!userId || userId === window.currentUserId) return null;
+        var c = ctx || _ensureSbAudioCtx();
+        if (!c) return null;
+        var g = _sbGainNodes[userId];
+        if (!g) {
+            try {
+                g = c.createGain();
+                g.connect(c.destination);
+                _sbGainNodes[userId] = g;
+            } catch (_) { return null; }
+        }
+        try { g.gain.value = _sbGainValueFor(userId); } catch (_) {}
+        return g;
+    }
+    window._sbVolumeForUser = function (userId) { return _sbVolumePctFor(userId); };
+    window._sbSetUserVolume = function (userId, pct) {
+        var raw = parseFloat(pct);
+        if (isNaN(raw)) raw = 100;
+        var v = Math.max(0, Math.min(100000, Math.round(raw)));
+        try { localStorage.setItem('voice_sb_volume_' + userId, String(v)); } catch (_) {}
+        // LIVE: an already-playing clip is routed through this gain node, so
+        // updating it changes what the user is hearing right now.
+        if (_sbGainNodes[userId]) {
+            try { _sbGainNodes[userId].gain.value = Math.max(0, Math.min(1000, v / 100)); } catch (_) {}
+        }
+        // Fallback <audio> elements (no AudioContext path) — element volume
+        // caps at 1, same as the mic fallback.
+        _sbAllPlaying.forEach(function (entry) {
+            var uid = (entry && entry.userId) || (entry && entry._sbUserId) || null;
+            if (uid === userId && entry && entry.volume !== undefined && !entry.type) {
+                try { entry.volume = Math.max(0, Math.min(1, v / 100)); } catch (_) {}
+            }
+        });
+        return v;
+    };
+    window.__sbGainNodes = _sbGainNodes;
+
     // Play raw WAV bytes through the AudioContext (bypasses autoplay).
     // `offsetProvider` is either a number (ms) or — preferred — a FUNCTION
     // returning the current position in ms. Passing a function lets us sample
@@ -62,7 +119,7 @@
     // Returns a promise resolving to the source node, or null when the clip
     // was already over (offset past the end) — in that case onEnded still
     // fires so callers clean up their state.
-    function _playViaAudioCtx(wavBytes, onEnded, offsetProvider) {
+    function _playViaAudioCtx(wavBytes, onEnded, offsetProvider, forUserId) {
         var ctx = _ensureSbAudioCtx();
         if (!ctx) return Promise.reject(new Error('no AudioContext'));
         // If the context is suspended, wait for resume() to complete before
@@ -79,9 +136,18 @@
                 }
                 var source = c.createBufferSource();
                 source.buffer = buffer;
-                source.connect(c.destination);
+                // Per-user soundboard gain node (null for our own audio): this is
+                // what makes a listener's volume change apply LIVE to a clip that
+                // is already playing.
+                var sbDest = _sbGainFor(forUserId, c) || c.destination;
+                source.connect(sbDest);
                 source.onended = function () {
-                    if (onEnded) onEnded();
+                    // `_sbIntentional` is set by the local stop helpers (mute,
+                    // owner-disable, deafen, leaving, replacing a clip). An
+                    // intentional stop is NOT the clip ending — treating it as
+                    // one deleted the resume record, which is why mute→unmute
+                    // played nothing until the clip was restarted.
+                    if (onEnded) onEnded(!!source._sbIntentional);
                 };
                 source.start(0, offsetSec);
                 return source;
@@ -144,7 +210,14 @@
     // position was past its end). Removes the tracking entry and — for our own
     // plays — restores the overlay's play button so the stale stop button
     // doesn't linger after the sound ended.
-    function _sbOnClipEnded(userId, clipId) {
+    function _sbOnClipEnded(userId, clipId, intentional) {
+        // A LOCAL suppression stop (mute, owner-disable, deafen, leaving, or
+        // replacing a clip) also fires onended — but the clip did not END, we
+        // were told to stop listening to it. The stopper already removed the
+        // tracking entry, the playing badge and the overlay buttons, and the
+        // resume record MUST survive so unmute / re-enable lands back mid-clip
+        // (like a late join). Bailing out here is what makes that work.
+        if (intentional) return;
         // Loop FIRST — our own clip finishing a cycle starts the next one
         // instead of ending. This has to run before the live-entry check
         // below: with Hear Myself OFF nothing plays locally, so the duration
@@ -903,10 +976,11 @@
                 return;
             }
             if (_sbAudioCtx || _ensureSbAudioCtx()) {
-                _playViaAudioCtx(audioBytes, function () {
-                    // Clip finished naturally (or was skipped: past the end)
-                    _sbOnClipEnded(data.user_id, data.clip_id);
-                }, offsetProvider).then(function (source) {
+                _playViaAudioCtx(audioBytes, function (intentional) {
+                    // Clip finished naturally (or was skipped: past the end).
+                    // `intentional` marks a LOCAL suppression stop.
+                    _sbOnClipEnded(data.user_id, data.clip_id, intentional);
+                }, offsetProvider, data.user_id).then(function (source) {
                     // A stop (or a newer play) landed while we were decoding:
                     // discard the source instead of starting it.
                     if (_sbEpochOf(data.user_id) !== _sbMyEpoch) {
@@ -943,6 +1017,7 @@
         _sbAllPlaying = _sbAllPlaying.filter(function (entry) {
             var entryUserId = (entry && entry.userId) || (entry && entry._sbUserId) || null;
             if (entryUserId !== userId) return true;
+            _sbMarkIntentional(entry);
             try {
                 if (entry.type === 'ctx' && entry.source) entry.source.stop();
                 else if (entry.pause) { entry.pause(); entry.currentTime = 0; }
@@ -963,6 +1038,12 @@
             var audio = new Audio(url);
             audio._sbUserId = userId;
             audio._sbClipId = clipId;
+            // Per-user soundboard volume (separate from that user's mic).
+            try {
+                audio.volume = (userId === window.currentUserId)
+                    ? 1
+                    : Math.max(0, Math.min(1, _sbVolumePctFor(userId) / 100));
+            } catch (_) {}
             if (startOffsetMs && startOffsetMs > 0) {
                 var targetSec = startOffsetMs / 1000;
                 audio.currentTime = targetSec;
@@ -980,7 +1061,7 @@
                 URL.revokeObjectURL(url);
                 var idx = _sbAllPlaying.indexOf(audio);
                 if (idx !== -1) _sbAllPlaying.splice(idx, 1);
-                _sbOnClipEnded(userId, clipId);
+                _sbOnClipEnded(userId, clipId, !!audio._sbIntentional);
             };
             if (userId === window.currentUserId) {
                 _sbPlaying = audio;
@@ -990,6 +1071,16 @@
         } catch (e) {
             console.error('Soundboard fallback play failed:', e);
         }
+    }
+
+    // Mark a tracking entry as stopped ON PURPOSE, so its source's onended
+    // callback does not mistake the stop for the clip ending (see
+    // _sbOnClipEnded). Covers both entry shapes: the AudioContext entry
+    // (entry.source) and the <audio> element entries pushed directly.
+    function _sbMarkIntentional(entry) {
+        if (!entry) return;
+        try { entry._sbIntentional = true; } catch (_) {}
+        if (entry.source) { try { entry.source._sbIntentional = true; } catch (_) {} }
     }
 
     // Stop one user's live sound and clear their playing indicator. Does NOT
@@ -1003,6 +1094,7 @@
         _sbAllPlaying = _sbAllPlaying.filter(function (entry) {
             var entryUserId = (entry && entry.userId) || (entry && entry._sbUserId) || null;
             if (entryUserId !== userId) return true; // keep other users'
+            _sbMarkIntentional(entry);
             try {
                 if (entry.type === 'ctx' && entry.source) {
                     entry.source.stop();
@@ -1049,9 +1141,12 @@
         // Cancel any in-flight async play for this user (the fetch/decode may
         // still be running) so it cannot start after the stop.
         _bumpSbEpoch(uid);
-        // A real stop (pressed stop, natural end, player left) ends the resume
-        // record. An owner-disable stop KEEPS it so re-enabling resumes mid-clip.
-        if (data.reason !== 'soundboard_disabled') delete _sbLastPlay[uid];
+        // A real stop ends the resume record for good — including the
+        // owner-disable stop (`reason: soundboard_disabled`). Disabling a
+        // soundboard must STOP the clip for everyone with NO late-join/resume
+        // when it is re-enabled, so the record goes here. (Mute does not send a
+        // stop at all: the listener keeps the record and resumes mid-clip.)
+        delete _sbLastPlay[uid];
         _sbStopEntriesAndIndicator(uid);
     };
 
@@ -1064,6 +1159,7 @@
             var entryUserId = (entry && entry.userId) || (entry && entry._sbUserId) || null;
             // Only stop sounds played by the current user
             if (myId && entryUserId && entryUserId !== myId) return true; // keep others'
+            _sbMarkIntentional(entry);
             try {
                 if (entry.type === 'ctx' && entry.source) {
                     entry.source.stop();
@@ -1099,6 +1195,7 @@
     // Used when leaving a call: the user should stop hearing everything.
     function _stopAllSoundboardAudioAll() {
         _sbAllPlaying.forEach(function (entry) {
+            _sbMarkIntentional(entry);
             try {
                 if (entry.type === 'ctx' && entry.source) {
                     entry.source.stop();
@@ -1217,6 +1314,7 @@
     window._sbIsOwnerDisabledForMe = _sbIsOwnerDisabledForMe;
     Object.defineProperty(window, "_sbClipsCache", { get: function() { return _sbClipsCache; }, configurable: true });
     Object.defineProperty(window, '_sbAllPlaying', { get: function() { return _sbAllPlaying; }, configurable: true });
+    Object.defineProperty(window, '__sbAudioCtxRef', { get: function() { return _sbAudioCtx; }, configurable: true });
 
     // --- Per-user last-play records (mute/disable/deafen → resume like late-join) ---
     window._sbResumeForUser = function (userId) {
@@ -1259,8 +1357,23 @@
         _bumpSbEpoch(userId);
         _sbStopEntriesAndIndicator(userId);
     };
-    window._sbPlayingUsers = {}; // userId -> true (who is currently playing)
-    window._sbOnSbPlayingChanged = null; // callback set by voice.js
+    // Hard stop: kill the live sound AND drop the resume record, so re-enabling
+    // the player cannot bring the clip back mid-way. Used by the owner's
+    // Disable Soundboard (a disable is a stop, not a suppression).
+    window._sbHardStopForUser = function (userId) {
+        if (!userId) return;
+        _bumpSbEpoch(userId);
+        delete _sbLastPlay[userId];
+        _sbStopEntriesAndIndicator(userId);
+    };
+    // Test/debug hook: is there a still-playing record we could resume for this user?
+    window._sbHasResumeFor = function (userId) { return !!_sbLastPlay[userId]; };
+    window._sbPlayingUsers = window._sbPlayingUsers || {}; // userId -> true (who is currently playing)
+    // NOTE: `_sbOnSbPlayingChanged` belongs to voice.js, which loads BEFORE this
+    // file. Assigning null here used to CLOBBER voice.js's badge-refresh
+    // handler, so the 🎵 playing indicator never updated anywhere (voice popup,
+    // DM call tiles, channel-list chips) even though _sbPlayingUsers was
+    // correct. Never reset it — only read it (see _sbSetPlaying).
     function _sbSetPlaying(userId, playing) {
         if (playing) {
             window._sbPlayingUsers[userId] = true;

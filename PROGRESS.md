@@ -6866,3 +6866,74 @@ element's `currentTime`.
   voice rooms.
 - `tests/`: `soundboard-async-loop.spec.ts`, `vault-size-display.spec.ts` (new),
   `soundboard-latesync.spec.ts` (L6 + L5 fix).
+
+### 120. Soundboard: mute→unmute resume, disable semantics, playing indicators, per-user volume
+
+Four requested behaviours, each backed by a real-browser test in the new
+`tests/soundboard-live.spec.ts` (real clips, real relay, real right-click menus).
+
+**(1) Mute → unmute mid-clip played nothing (fixed — L1 fails pre-fix, passes after).**
+The resume record `_sbLastPlay[uid]` was deleted by the *clip-end* cleanup: the local stop
+helpers (`_sbStopEntriesAndIndicator`, `_sbStopEntriesFor`, `_stopAllSoundboardAudio`,
+`_stopAllSoundboardAudioAll`) stop the `AudioBufferSource`, and `stop()` fires `onended`,
+which ran `_sbOnClipEnded()` and threw the resume record away — unmuting then had nothing
+to replay. It only ever held on the `<audio>` fallback path (pausing fires no `onended`),
+which is why the older suites passed while users heard silence. Entries are now marked
+intentional (`_sbMarkIntentional` → `source._sbIntentional`) before stopping, `onended`
+forwards the flag, and `_sbOnClipEnded(userId, clipId, intentional)` returns early for a
+local stop: the resume record survives, unmute replays through the normal path and lands
+at the room's current position (fetch + decode time included).
+
+**(2) Disable = a real stop with no resume (L2/L3 — semantics guards).**
+`_handleSoundboardStop` no longer special-cases `reason: 'soundboard_disabled'`: any stop
+drops the record, so the owner's Disable (and the player's own Settings → Voice disable)
+stops the clip for everyone with no late-join replay on re-enable. The owner menu calls the
+new `window._sbHardStopForUser(uid)` (kill live + drop the record) and the *enable* path no
+longer calls `_sbResumeForUser`. Note the old behaviour was already invisible to users by
+accident (the server frees the temp-play token on disable, so the doomed resume fetch
+404'd); the new code makes the rule explicit instead of racing a plain stop from the
+disabled player's own client. Other members' sounds are untouched (`_sbStopEntriesAndIndicator`
+is per-user) — asserted with a third player in L2.
+
+**(3) The 🎵 playing indicator never updated anywhere (fixed — L4/L5 fail pre-fix).**
+`soundboard-pairing.js` runs *after* `voice.js` and its module-scope line
+`window._sbOnSbPlayingChanged = null;` **clobbered** the refresh handler voice.js had just
+installed, so `_sbSetPlaying()` updated `_sbPlayingUsers` (correct) but no badge was ever
+rebuilt — voice popup rows, DM call tiles and channel-list chips all stayed blank. That
+line is now a comment-only note. The indicator also gained the channel-list chip
+(`.voice-chip-row` → `.vc-badge.sb-playing-indicator`) and the refresh now repaints the
+chip strip too, so you can see who is playing a sound without opening the channel.
+
+**(4) Per-user soundboard volume, live and separate from the mic (L6).**
+Stored as `voice_sb_volume_<uid>` (the mic keeps `voice_volume_<uid>`), applied through a
+dedicated `GainNode` per user that every relayed clip is routed through (`_sbGainFor`), so
+the value changes audio that is *already playing*. The member context menu now has a
+"Soundboard volume" block right after "Mic volume" — 0–500% slider, custom % box up to
+100000%, reset button — mirroring the mic-volume UI. The `<audio>` fallback honours it via
+`audio.volume` (attenuation only, same as the mic fallback).
+
+**Evidence (real Chromium, 2–3 users per test, `tests/soundboard-live.spec.ts`).**
+
+| test | pre-fix | post-fix |
+| --- | --- | --- |
+| L1 mute→unmute resume | entry never returns after unmute (15 s timeout) | resumes, `10288 ms` left of a 14 s clip (was ~8.5 s in) |
+| L2 owner disable/enable | passes (guard) | B+C stop → disabling B leaves C playing, B gone, no resume on enable |
+| L3 settings disable | passes (guard) | clip gone for the room, no resume on re-enable |
+| L4 channel chip + popup row | `refreshCallback: null`, `badgeCount: 0` | both badges visible, cleared when the clip stops |
+| L5 DM call tile | `badgeCount: 0` | badge visible, cleared when the clip stops |
+| L6 soundboard volume | menu has only `["Mic volume"]` | gain `1 → 0.25` live, RMS `0.3416 → 0.0855` (ratio 0.250) while still playing, `voice_volume_` stays `50`, reset → `1` / `0.3417` |
+
+L1 also asserts the playback path is `ctx` (the `AudioContext` path that regressed) — the
+`<audio>` fallback would have made the test vacuous. A malformed WAV fixture (RIFF header
+written with the chunk size where `"RIFF"` belongs) was the reason playback kept falling
+back; it is now a real RIFF/WAVE file.
+
+**Regressions checked:** `soundboard-multiuser` + `soundboard-resume` (11), `soundboard-mute-disable` (12),
+`soundboard-3browser` + `soundboard-ui` (21), `dm-call-volume`, `voice-hearself-soundboard` — all green.
+M3 in `soundboard-multiuser.spec.ts` was updated to the new disable semantics (it asserted the
+old "keeps their resume record" behaviour).
+
+**Files:** `static/soundboard-pairing.js` (intentional-stop plumbing, gain nodes, hard stop,
+callback fix), `static/voice.js` (owner disable → hard stop, chip badge, chip repaint,
+Soundboard volume menu), `static/index.html` (`voice.js?v=19`, `soundboard-pairing.js?v=12`),
+`tests/soundboard-live.spec.ts` (new), `tests/soundboard-multiuser.spec.ts` (M3).
