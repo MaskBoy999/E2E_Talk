@@ -6937,3 +6937,24 @@ old "keeps their resume record" behaviour).
 callback fix), `static/voice.js` (owner disable → hard stop, chip badge, chip repaint,
 Soundboard volume menu), `static/index.html` (`voice.js?v=19`, `soundboard-pairing.js?v=12`),
 `tests/soundboard-live.spec.ts` (new), `tests/soundboard-multiuser.spec.ts` (M3).
+
+### 121. Channel/Category Permission Editing from Context Menu
+
+Added right-click "Edit Permissions" option on both channel and category context menus.
+Opens a standalone modal where the user can select a role and set per-permission
+Inherit/Allow/Deny overrides for that channel or category.
+
+**Permission gating:**
+- Category context menu: Edit Permissions visible to server owners and users with `MANAGE_ROLES`.
+- Channel context menu: same gate (owner OR `MANAGE_ROLES`).
+- Backend `PUT /api/servers/{sid}/roles/{rid}/overwrite` enforces: caller must have `MANAGE_ROLES`,
+  must outrank the target role, target must belong to the server, and caller cannot grant
+  permissions they do not hold.
+
+**Permission resolution (Discord-like, already existed):**
+`member_permissions()` resolves: @everyone role → member role → @everyone category overwrite →
+everyone channel overwrite → role category overwrite → role channel overwrite. Each level's
+deny clears and allow sets its bits; later levels win.
+
+**Files:** `static/index.html` (channel-perm-modal HTML), `static/roles.js` (`openChannelPermissionsModal`),
+`static/thread_categories_shortcuts.js` (context menu items), `static/style.css` (modal styles).

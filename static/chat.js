@@ -14223,6 +14223,13 @@ async function selectServer(serverId) {
     isOwner = server && server.is_owner;
     currentInviteCode = isOwner ? localStorage.getItem('e2e_invite_' + serverId) : null;
 
+    // Roles are the only source of permissions. Load the role table + the
+    // caller's computed permissions before any permission-driven UI is built.
+    if (window.ServerRoles) {
+        try { await ServerRoles.load(serverId); } catch (_) {}
+        try { await ServerRoles.loadMyPermissions(serverId); } catch (_) {}
+    }
+
     // Decrypt server name for display
     var serverDisplayName = '';
     if (server && server.encrypted_name && server.name_nonce) {
@@ -14250,8 +14257,8 @@ async function selectServer(serverId) {
     document.getElementById('message-list').innerHTML = '<div class="welcome">Select a channel to start chatting</div>';
     document.getElementById('message-input').disabled = true;
     document.getElementById('send-btn').disabled = true;
-    document.getElementById('invite-btn').style.display = isOwner ? '' : 'none';
-    document.getElementById('server-settings-btn').style.display = isOwner ? '' : 'none';
+    document.getElementById('invite-btn').style.display = hasServerPerm('INVITE_MEMBERS') ? '' : 'none';
+    document.getElementById('server-settings-btn').style.display = canOpenServerSettings() ? '' : 'none';
     document.getElementById('members-toggle').style.display = '';
 
     // Ensure we have the server key — retry several times to handle race conditions.
@@ -14332,6 +14339,86 @@ async function selectServer(serverId) {
 
 // --- Channels ---
 
+/**
+ * Encrypted sender metadata for a message payload: the profile snapshot
+ * (display name, colors, PFP id+key) and the encrypted username. Thread replies
+ * use this so they render with the same display name / colour / glow / PFP as
+ * normal messages. Returns an object to Object.assign into the payload.
+ */
+function buildEncryptedSenderFields(encKey) {
+    var fields = {};
+    if (!encKey) return fields;
+    try {
+        if (myProfile) {
+            var snapshot = {
+                display_name: myProfile.display_name || (user && user.username) || null,
+                username_color: myProfile.username_color || (user && user.username_color) || null,
+                username_border_color: myProfile.username_border_color || null,
+                profile_picture_file_id: myProfile.profile_picture_file_id || null,
+                profile_picture_file_key: null,
+            };
+            if (myProfile.profile_picture_file_id && myProfile.profile_picture_file_key) {
+                var identity = E2ECrypto.getIdentityKeyPair();
+                if (identity) {
+                    var rawPicKey = myProfile.profile_picture_file_key;
+                    if (rawPicKey.indexOf(':') > 0) {
+                        var dk = E2ECrypto.decodeEncryptedFileKey(rawPicKey, identity.privateKey);
+                        if (dk) rawPicKey = dk;
+                    }
+                    snapshot.profile_picture_file_key = rawPicKey;
+                }
+            }
+            var pdKeyB64 = profileKeyCache[(user && user.id) + ':profile_data_key'];
+            if (pdKeyB64) snapshot.profile_data_key = pdKeyB64;
+            var encSnapshot = E2ECrypto.encryptMessage(JSON.stringify(snapshot), encKey);
+            if (encSnapshot) {
+                fields.encrypted_profile_snapshot = encSnapshot.ciphertext;
+                fields.profile_snapshot_nonce = encSnapshot.nonce;
+            }
+        }
+    } catch (e) {
+        console.warn('Failed to encrypt profile snapshot:', e);
+    }
+    try {
+        var encUsername = E2ECrypto.encryptSenderUsername(user.username, encKey);
+        if (encUsername) {
+            fields.encrypted_sender_username = encUsername.ciphertext;
+            fields.sender_username_nonce = encUsername.nonce;
+        }
+    } catch (e) {
+        console.warn('Failed to encrypt sender_username:', e);
+    }
+    return fields;
+}
+
+/** Decrypt a channel's display name (used by the roles override picker). */
+function resolveChannelDisplayName(ch, serverId) {
+    if (!ch || !ch.encrypted_name || !ch.name_nonce) return ch && ch.channel_type === 'voice' ? 'Voice' : 'channel';
+    try {
+        var n = tryDecryptWithAllKeys(serverId, ch.encrypted_name, ch.name_nonce);
+        if (n) return n;
+    } catch (_) {}
+    return ch.channel_type === 'voice' ? 'Voice' : 'channel';
+}
+
+/** Server-wide permission check against the caller's computed role perms. */
+function hasServerPerm(key) {
+    if (!window.ServerRoles) return !!isOwner;
+    return ServerRoles.has(ServerRoles.bit(key));
+}
+
+/** Per-channel permission check (channel/category overrides included). */
+function hasChannelPerm(key, channelId) {
+    if (!window.ServerRoles) return !!isOwner;
+    return ServerRoles.hasInChannel(ServerRoles.bit(key), channelId);
+}
+
+/** The settings modal is for anyone the owner has given management powers. */
+function canOpenServerSettings() {
+    return isOwner || hasServerPerm('MANAGE_SERVER') || hasServerPerm('MANAGE_ROLES') ||
+        hasServerPerm('BAN_MEMBERS') || hasServerPerm('MANAGE_CHANNELS');
+}
+
 async function loadChannels(serverId) {
     try {
         const res = await authFetch(`/api/servers/${serverId}/channels`);
@@ -14352,10 +14439,24 @@ async function loadChannels(serverId) {
         var isOwner = server && server.is_owner;
         if (typeof window.renderChannelsWithCategories === 'function') {
             // Load categories first, then render grouped
+            var cats = [];
             if (typeof window.loadCategories === 'function') {
-                await window.loadCategories(serverId);
+                cats = (await window.loadCategories(serverId)) || [];
             }
-            window.renderChannelsWithCategories(channels, serverId, isOwner);
+            // roles.js needs the raw channel/category names for the per-channel
+            // permission override picker.
+            window._serverChannelsForRoles = channels.map(function (ch) {
+                return {
+                    id: ch.id,
+                    channel_type: ch.channel_type,
+                    name: resolveChannelDisplayName(ch, serverId),
+                };
+            });
+            window._serverCategoriesForRoles = cats.map(function (c) {
+                return { id: c.id, name: (typeof window.decryptCategoryName === 'function' ? window.decryptCategoryName(c) : null) || 'Category' };
+            });
+            var canManageChannels = hasServerPerm('MANAGE_CHANNELS');
+            window.renderChannelsWithCategories(channels, serverId, canManageChannels);
             // Render voice member chips for voice channels
             if (window.VoiceManager) {
                 try { VoiceManager.onChannelsRendered && VoiceManager.onChannelsRendered(); } catch (_) {}
@@ -14477,8 +14578,11 @@ async function selectChannel(channelId, channelName, element) {    markChannelR
     element.classList.add('active');
 
     document.getElementById('channel-name').textContent = `# ${channelName}`;
-    document.getElementById('message-input').disabled = false;
-    document.getElementById('send-btn').disabled = false;
+    // Roles can deny SEND_MESSAGES for this channel/category (read-only channel).
+    var canSend = hasChannelPerm('SEND_MESSAGES', channelId);
+    document.getElementById('message-input').disabled = !canSend;
+    document.getElementById('send-btn').disabled = !canSend;
+    document.getElementById('message-input').placeholder = canSend ? 'Type a message...' : 'You do not have permission to send messages here';
 
     // Clear mention badge for this channel
     clearUnreadChannelMentions(channelId);
@@ -15511,9 +15615,10 @@ async function appendMessage(msg) {
     }
 
     var isPinned = !!msg.pinned || msgElHasPin;
-    // Server channels: ONLY the server owner may pin/unpin (enforced server-side
-    // too). DMs have no owner — both members get the button (see appendDmMessage).
-    var canPin = !!isOwner;    const actionsHtml = '<div class="message-actions">' +
+    // Server channels: pinning needs PIN_MESSAGES (a permission the owner can
+    // hand to a role; enforced server-side too). DMs have no owner — both
+    // members get the button (see appendDmMessage).
+    var canPin = hasChannelPerm('PIN_MESSAGES', currentChannelId);    const actionsHtml = '<div class="message-actions">' +
         (canPin ? pinButtonHtml(isPinned) : '') +
         '<button class="msg-action-btn" data-action="react" title="React">&#x1F642;</button>' +
         (isOwn ? '<button class="msg-action-btn" data-action="edit" title="Edit">&#x270E;</button>' : '') +
@@ -16005,7 +16110,7 @@ document.getElementById('message-list').addEventListener('contextmenu', function
 
     if (isPinned) items.push({ label: 'Unpin', icon: 'pin', action: function() { togglePinMessage(msgId, false); }});
 
-    else if (currentServerId && isOwner) items.push({ label: 'Pin', icon: 'pin', action: function() { togglePinMessage(msgId, true); }});
+    else if (currentServerId && hasChannelPerm('PIN_MESSAGES', currentChannelId)) items.push({ label: 'Pin', icon: 'pin', action: function() { togglePinMessage(msgId, true); }});
 
     else if (currentDmChannelId) items.push({ label: 'Pin', icon: 'pin', action: function() { togglePinMessage(msgId, true); }});
 
@@ -18943,11 +19048,20 @@ async function loadMembers(serverId) {
             const initial = (m.username || '?').charAt(0).toUpperCase();
             const isMemberOwner = m.role === 'owner';
             let actionBtns = '';
-            if (isOwner && !isMemberOwner && m.id !== user.id) {
-                actionBtns =
-                    '<button class="btn-kick" data-action="kick" data-user-id="' + escapeAttr(m.id) + '" data-username="' + escapeAttr(m.username) + '" title="Kick"><svg class="ui-icon" width="12" height="12"><use href="#icon-close"/></svg></button>' +
-                    '<button class="btn-ban" data-action="ban" data-user-id="' + escapeAttr(m.id) + '" data-username="' + escapeAttr(m.username) + '" title="Ban"><svg class="ui-icon" width="12" height="12"><use href="#icon-warning"/></svg></button>';
+            if (m.id !== user.id) {
+                if (canModerateMember(m, 'KICK_MEMBERS')) {
+                    actionBtns +=
+                        '<button class="btn-kick" data-action="kick" data-user-id="' + escapeAttr(m.id) + '" data-username="' + escapeAttr(m.username) + '" title="Kick"><svg class="ui-icon" width="12" height="12"><use href="#icon-close"/></svg></button>';
+                }
+                if (canModerateMember(m, 'BAN_MEMBERS')) {
+                    actionBtns +=
+                        '<button class="btn-ban" data-action="ban" data-user-id="' + escapeAttr(m.id) + '" data-username="' + escapeAttr(m.username) + '" title="Ban"><svg class="ui-icon" width="12" height="12"><use href="#icon-warning"/></svg></button>';
+                }
             }
+            // Role circle: one per member, colored by their role, with the role
+            // name on hover. Only shown when roles are available.
+            var roleCircle = (window.ServerRoles && typeof ServerRoles.roleCircleHtml === 'function')
+                ? ServerRoles.roleCircleHtml(m) : '';
             var _mCache = userDisplayNameCache[m.id];
             var memberDisplayName = (_mCache && _mCache.display_name) || m.display_name || m.username || '?';
             var memberColor = (_mCache && _mCache.username_color) || null;
@@ -18965,11 +19079,31 @@ async function loadMembers(serverId) {
             var memberNameStyle = memberColor ? ' style="color:' + memberColor + ';text-shadow:' + getDisplayNameTextShadow(memberColor, memberBorderColor) + '"' : '';
             div.innerHTML =
                 memberAvatarHtml +
+                roleCircle +
                 '<div>' +
                     '<div class="' + memberNameClass + '"' + memberNameStyle + '>' + escapeHtml(memberDisplayName) + '</div>' +
                     (isMemberOwner ? '<div class="member-role">Owner</div>' : '') +
                 '</div>' +
                 '<div class="member-actions">' + actionBtns + '</div>';
+            // Right-click: assign this member's single role (roles ranked below
+            // your own only). Hidden for the owner and for anyone at/above you.
+            div.addEventListener('contextmenu', function (e) {
+                if (!window.ServerRoles) return;
+                var roleItems = ServerRoles.memberContextMenuItems(m);
+                if (!roleItems.length) return;
+                e.preventDefault();
+                e.stopPropagation();
+                var items = roleItems.map(function (it) {
+                    return {
+                        label: it.label,
+                        action: it.action || function () {},
+                        danger: !!it.danger,
+                    };
+                });
+                if (typeof showContextMenuAt === 'function') showContextMenuAt(e, items);
+            });
+            div.setAttribute('data-role-position', String(m.role_position || 0));
+            div.setAttribute('data-role-id', m.role_id || '');
             list.appendChild(div);
         });
         // After rendering members, prefetch display names and PFPs — fetch when the
@@ -18995,6 +19129,25 @@ async function loadMembers(serverId) {
 }
 
 // Update a member list item's display name, colors, and PFP when profile data is fetched asynchronously.
+/**
+ * Role hierarchy check for member moderation: the owner can moderate anyone;
+ * a member can only be moderated (kick/ban/role change) by someone whose role
+ * is ranked strictly higher. The owner is never moderatable.
+ */
+function canModerateMember(member, permKey) {
+    if (!member) return false;
+    if (!hasServerPerm(permKey)) return false;
+    if (member.role === 'owner') return false;
+    if (!window.ServerRoles) return !!isOwner;
+    if (member.role_id && member.role_id === ServerRoles.state.myRoleId) return false;
+    return ServerRoles.state.myPosition > (member.role_position || 0);
+}
+
+// roles.js asks for this after a role save so circles/colours refresh live.
+window.refreshMemberRoleCircles = function () {
+    if (currentServerId) loadMembers(currentServerId);
+};
+
 function updateMemberListItem(userId) {
     var cache = userDisplayNameCache[userId];
     if (!cache) return;
@@ -19167,12 +19320,29 @@ async function deleteChannel(channelId, channelName) {
 }
 
 async function openServerSettings() {
-    if (!currentServerId || !isOwner) return;
+    if (!currentServerId || !canOpenServerSettings()) return;
     document.getElementById('server-settings-modal').style.display = 'flex';
-    await loadServerSettings();
-    await loadBannedUsers();
-    // Show server picture preview in settings
-    updateServerSettingsPreview();
+    // Each section is shown only to whoever holds the permission for it — the
+    // owner can hand moderation/server/role management to roles instead of
+    // doing everything himself.
+    var sec = function (id, can) {
+        var el = document.getElementById(id);
+        if (el) el.style.display = can ? '' : 'none';
+    };
+    var canServer = hasServerPerm('MANAGE_SERVER');
+    sec('server-settings-picture-section', canServer);
+    sec('server-settings-joins-section', canServer);
+    sec('server-settings-bans-section', hasServerPerm('BAN_MEMBERS'));
+    sec('server-roles-section', hasServerPerm('MANAGE_ROLES') || hasServerPerm('CREATE_ROLES') || hasServerPerm('EDIT_ROLES') || isOwner);
+    if (canServer) {
+        await loadServerSettings();
+        updateServerSettingsPreview();
+    }
+    if (hasServerPerm('BAN_MEMBERS')) await loadBannedUsers();
+    if (window.ServerRoles && (hasServerPerm('MANAGE_ROLES') || isOwner)) {
+        ServerRoles.initSettingsUI();
+        ServerRoles.renderRoleList();
+    }
 }
 
 async function loadServerSettings() {

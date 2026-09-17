@@ -5178,6 +5178,44 @@
     // ------------------------------------------------------------------
     // Owner controls (server rooms only)
     // ------------------------------------------------------------------
+
+    /**
+     * May the current user use this owner ability here? The server owner always
+     * may (S.isOwner), and these abilities are delegatable to a role via the
+     * permission system — the server re-checks every action, this only decides
+     * whether the button is worth showing.
+     */
+    function _voiceCan(permKey) {
+        if (S.isOwner) return true;
+        try {
+            if (window.ServerRoles && ServerRoles.state.serverId === window.currentServerId) {
+                return ServerRoles.has(ServerRoles.bit(permKey));
+            }
+        } catch (_) {}
+        return false;
+    }
+
+    /** Can the current user voice-moderate (mute/deafen/kick/disable-sb) target?
+     *  Owner is always immune. Equal roles cannot affect each other. */
+    function _voiceCanTarget(targetUid) {
+        if (S.isOwner) return true;
+        var tm = S.members && S.members[targetUid];
+        if (!tm) return false;
+        // Target is owner -> immune
+        if (tm.is_owner) return false;
+        // Compare role positions from the server
+        var myPos = 0;
+        var tgtPos = 0;
+        try {
+            if (window.ServerRoles && ServerRoles.state.serverId === window.currentServerId) {
+                myPos = ServerRoles.state.myPosition || 0;
+            }
+        } catch (_) {}
+        tgtPos = tm.role_position || 0;
+        // Must be strictly above target
+        return myPos > tgtPos;
+    }
+
     function ownerControl(action, targetUid) {
         if (!S.connected || S.roomType !== 'server') return;
         send({
@@ -8248,11 +8286,12 @@
             menu.appendChild(sbResetBtn);
         }
 
-        // Owner controls — only for the server owner, server rooms, OTHER
-        // members, and only on the MEMBER row menu. Right-clicking a camera or
-        // screen tile is about the FEED (view transforms / screen audio), not
-        // the person — mute/deafen/kick live on the member row.
-        if (!isScreen && !isVideoOnly && S.roomType === 'server' && S.isOwner && uid !== selfId) {
+        // Owner abilities — the server owner always has them, and he can now
+        // delegate them to a role through the permission system (MUTE_MEMBERS /
+        // MOVE_MEMBERS). Server rooms, OTHER members, and only on the MEMBER row
+        // menu: right-clicking a camera or screen tile is about the FEED (view
+        // transforms / screen audio), not the person.
+        if (!isScreen && !isVideoOnly && S.roomType === 'server' && uid !== selfId && _voiceCan('MUTE_MEMBERS') && _voiceCanTarget(uid)) {
             var m = S.members[uid];
             var row1 = document.createElement('button');
             row1.className = 'volume-menu-btn';
@@ -8277,14 +8316,17 @@
                 row2.className = 'volume-menu-btn' + (m.force_deafened ? ' active' : '');
             });
             menu.appendChild(row2);
-            var row3 = document.createElement('button');
-            row3.className = 'volume-menu-btn danger';
-            row3.innerHTML = icon('kick') + ' Kick';
-            row3.addEventListener('click', function () {
-                ownerControl('kick', uid);
-                // Don't close menu — let the member row disappear on its own
-            });
-            menu.appendChild(row3);
+            // Disconnecting someone needs MOVE_MEMBERS (a separate ability).
+            if (_voiceCan('MOVE_MEMBERS')) {
+                var row3 = document.createElement('button');
+                row3.className = 'volume-menu-btn danger';
+                row3.innerHTML = icon('kick') + ' Kick';
+                row3.addEventListener('click', function () {
+                    ownerControl('kick', uid);
+                    // Don't close menu — let the member row disappear on its own
+                });
+                menu.appendChild(row3);
+            }
         }
 
         // Soundboard mute/unmute — available for all users on other members
@@ -8331,10 +8373,10 @@
             menu.appendChild(sbBtn);
         }
 
-        // Owner controls — Disable/Enable this member's soundboard (server owner only)
-        // Merged: the per-user disable is the owner's tool; the global kill-switch
-        // lives in Settings → Voice, so there's no need for a separate context-menu button.
-        if (!isScreen && !isVideoOnly && !isSelf && S.roomType === 'server' && S.isOwner) {
+        // Owner ability — Disable/Enable this member's soundboard. Delegatable
+        // through the MANAGE_SOUNDBOARD permission (the server enforces it too).
+        // The global kill-switch lives in Settings → Voice.
+        if (!isScreen && !isVideoOnly && !isSelf && S.roomType === 'server' && _voiceCan('MANAGE_SOUNDBOARD') && _voiceCanTarget(uid)) {
             var sbDisabledList = (window._sbDisabledUsers || []);
             var isSbDisabled = sbDisabledList.indexOf(uid) !== -1;
             var sbDisBtn = document.createElement('button');

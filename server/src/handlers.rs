@@ -2705,8 +2705,12 @@ pub async fn list_channels(
         }
     };
 
+    // Only channels the caller may see. Role overwrites (channel or category)
+    // can hide a channel from a role entirely, which is how "announcements: only
+    // mods can see/post" categories are wired.
     let channel_infos: Vec<serde_json::Value> = channels
         .iter()
+        .filter(|c| state.db.member_has_permission(&server_id, &user_id, crate::db::PERM_VIEW_CHANNEL, Some(&c.id)))
         .map(|c| {
             serde_json::json!({
                 "id": c.id,
@@ -2742,12 +2746,8 @@ pub async fn create_channel(
         Err(e) => return e.into_response(),
     };
 
-    if !state.db.is_server_owner(&user_id, &server_id).unwrap_or(false) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "Only the server owner can create channels"})),
-        )
-            .into_response();
+    if let Some(denied) = perm_denied(&state, &server_id, &user_id, crate::db::PERM_MANAGE_CHANNELS, None) {
+        return denied;
     }
 
     let encrypted_name_bytes = req.encrypted_name.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
@@ -2799,12 +2799,8 @@ pub async fn get_invite(
         Err(e) => return e.into_response(),
     };
 
-    if !state.db.is_server_owner(&user_id, &server_id).unwrap_or(false) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "Only the server owner can view the invite code"})),
-        )
-            .into_response();
+    if let Some(denied) = perm_denied(&state, &server_id, &user_id, crate::db::PERM_INVITE_MEMBERS, None) {
+        return denied;
     }
 
     let servers = match state.db.list_user_servers(&user_id) {
@@ -2853,6 +2849,10 @@ pub async fn regenerate_invite(
         Ok(id) => id,
         Err(e) => return e.into_response(),
     };
+
+    if let Some(denied) = perm_denied(&state, &server_id, &user_id, crate::db::PERM_INVITE_MEMBERS, None) {
+        return denied;
+    }
 
     use rand::Rng;
     let salt: String = rand::thread_rng().gen::<[u8; 16]>().iter().map(|b| format!("{:02x}", b)).collect();
@@ -2979,12 +2979,8 @@ pub async fn kick_member(
         Err(e) => return e.into_response(),
     };
 
-    if !state.db.is_server_owner(&caller_id, &server_id).unwrap_or(false) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "Only the server owner can kick members"})),
-        )
-            .into_response();
+    if let Some(denied) = perm_denied(&state, &server_id, &caller_id, crate::db::PERM_KICK_MEMBERS, None) {
+        return denied;
     }
 
     if req.user_id == caller_id {
@@ -2993,6 +2989,17 @@ pub async fn kick_member(
             Json(serde_json::json!({"error": "Cannot kick yourself"})),
         )
             .into_response();
+    }
+
+    // Hierarchy: the owner can never be kicked and a member can only kick
+    // members ranked strictly below their own role.
+    if state.db.is_server_owner(&req.user_id, &server_id).unwrap_or(false) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "The server owner cannot be kicked"}))).into_response();
+    }
+    let actor_pos = state.db.member_role_position(&server_id, &caller_id).unwrap_or(0);
+    let target_pos = state.db.member_role_position(&server_id, &req.user_id).unwrap_or(0);
+    if actor_pos <= target_pos {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Cannot kick a member at or above your own role"}))).into_response();
     }
 
     match state.db.kick_member(&server_id, &req.user_id) {
@@ -3104,12 +3111,8 @@ pub async fn ban_member(
         Err(e) => return e.into_response(),
     };
 
-    if !state.db.is_server_owner(&caller_id, &server_id).unwrap_or(false) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "Only the server owner can ban members"})),
-        )
-            .into_response();
+    if let Some(denied) = perm_denied(&state, &server_id, &caller_id, crate::db::PERM_BAN_MEMBERS, None) {
+        return denied;
     }
 
     if req.user_id == caller_id {
@@ -3118,6 +3121,17 @@ pub async fn ban_member(
             Json(serde_json::json!({"error": "Cannot ban yourself"})),
         )
             .into_response();
+    }
+
+    // Hierarchy: the owner can never be banned and a member can only ban
+    // members ranked strictly below their own role.
+    if state.db.is_server_owner(&req.user_id, &server_id).unwrap_or(false) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "The server owner cannot be banned"}))).into_response();
+    }
+    let actor_pos = state.db.member_role_position(&server_id, &caller_id).unwrap_or(0);
+    let target_pos = state.db.member_role_position(&server_id, &req.user_id).unwrap_or(0);
+    if actor_pos <= target_pos {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Cannot ban a member at or above your own role"}))).into_response();
     }
 
     match state.db.ban_member(&server_id, &req.user_id) {
@@ -3154,12 +3168,8 @@ pub async fn unban_member(
         Err(e) => return e.into_response(),
     };
 
-    if !state.db.is_server_owner(&caller_id, &server_id).unwrap_or(false) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "Only the server owner can unban members"})),
-        )
-            .into_response();
+    if let Some(denied) = perm_denied(&state, &server_id, &caller_id, crate::db::PERM_BAN_MEMBERS, None) {
+        return denied;
     }
 
     match state.db.unban_member(&server_id, &user_id) {
@@ -3178,12 +3188,8 @@ pub async fn list_server_bans(
         Err(e) => return e.into_response(),
     };
 
-    if !state.db.is_server_owner(&caller_id, &server_id).unwrap_or(false) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "Only the server owner can view bans"})),
-        )
-            .into_response();
+    if let Some(denied) = perm_denied(&state, &server_id, &caller_id, crate::db::PERM_BAN_MEMBERS, None) {
+        return denied;
     }
 
     match state.db.list_server_bans(&server_id) {
@@ -3216,6 +3222,10 @@ pub async fn set_joins_disabled(
         Err(e) => return e.into_response(),
     };
 
+    if let Some(denied) = perm_denied(&state, &server_id, &caller_id, crate::db::PERM_MANAGE_SERVER, None) {
+        return denied;
+    }
+
     match state.db.set_joins_disabled(&server_id, &caller_id, req.disabled) {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true, "joins_disabled": req.disabled}))).into_response(),
         Err(e) => (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e}))).into_response(),
@@ -3234,6 +3244,14 @@ pub async fn delete_channel(
 
     // Get server_id before deletion for the broadcast
     let server_id = state.db.get_server_id_for_channel(&channel_id);
+
+    if let Ok(sid) = server_id.as_ref() {
+        if let Some(denied) = perm_denied(&state, sid, &user_id, crate::db::PERM_MANAGE_CHANNELS, None) {
+            return denied;
+        }
+    } else {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Channel not found"}))).into_response();
+    }
 
     match state.db.delete_channel_by_owner(&channel_id, &user_id) {
         Ok(()) => {
@@ -3280,7 +3298,7 @@ pub async fn list_server_members(
             .into_response();
     }
 
-    let members = match state.db.get_server_members_with_names(&server_id) {
+    let members = match state.db.get_server_members_with_roles(&server_id) {
         Ok(m) => m,
         Err(e) => {
             return (
@@ -3293,16 +3311,403 @@ pub async fn list_server_members(
 
     let result: Vec<serde_json::Value> = members
         .iter()
-        .map(|(id, username, role, _display_name, _profile_pic)| {
+        .map(|m| {
             serde_json::json!({
-                "id": id,
-                "username": username,
-                "role": role,
+                "id": m.id,
+                "username": m.username,
+                "role": m.role,
+                "role_id": m.role_id,
+                "role_name": m.role_name,
+                "role_color": m.role_color,
+                "role_position": m.role_position,
             })
         })
         .collect();
 
     (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
+// --- Roles & permissions ---------------------------------------------------
+//
+// Permissions are granted exclusively through roles. The server owner holds
+// every permission implicitly and can never be restricted, kicked or banned
+// (db.rs member_permissions / member_role_position). Role management is
+// hierarchy-bound: an actor may only touch roles strictly below their own, may
+// not rank a new role at or above their own, may not grant a permission they do
+// not hold, and may not manage a member whose role is at or above their own.
+
+/// None = the caller holds `perm`; Some(403) = denied.
+fn perm_denied(
+    state: &Arc<AppState>,
+    server_id: &str,
+    user_id: &str,
+    perm: i64,
+    channel_id: Option<&str>,
+) -> Option<axum::response::Response> {
+    if state.db.member_has_permission(server_id, user_id, perm, channel_id) {
+        None
+    } else {
+        Some(
+            (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "Missing permission"})),
+            )
+                .into_response(),
+        )
+    }
+}
+
+fn role_json(role: &crate::db::ServerRole, actor_position: i64, overwrites: &[(String, String, i64, i64)]) -> serde_json::Value {
+    let enc_name_b64 = role.encrypted_name.as_ref().map(|e| base64::engine::general_purpose::STANDARD.encode(e));
+    let nonce_b64 = role.name_nonce.as_ref().map(|e| base64::engine::general_purpose::STANDARD.encode(e));
+    serde_json::json!({
+        "id": role.id,
+        "name": role.name,
+        "color": role.color,
+        "position": role.position,
+        "is_everyone": role.is_everyone,
+        "permissions": role.permissions,
+        "encrypted_name": enc_name_b64,
+        "name_nonce": nonce_b64,
+        // True when the caller's role outranks this one and may therefore edit it.
+        "can_manage": actor_position > role.position as i64,
+        "overwrites": overwrites.iter().map(|(t, id, allow, deny)| serde_json::json!({
+            "target_type": t, "target_id": id, "allow": allow, "deny": deny,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// GET /api/servers/{server_id}/roles — any member may read roles (the member
+/// list needs the name/color), plus the caller's own computed permissions so
+/// the client can hide/disable UI it is not allowed to use.
+pub async fn list_server_roles(
+    Path(server_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    if !state.db.is_member_of_server(&user_id, &server_id).unwrap_or(false) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Not a member of this server"}))).into_response();
+    }
+    let roles = match state.db.list_server_roles(&server_id) {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let is_owner = state.db.is_server_owner(&user_id, &server_id).unwrap_or(false);
+    let my_position = state.db.member_role_position(&server_id, &user_id).unwrap_or(0);
+    let my_permissions = state.db.member_permissions(&server_id, &user_id, None).unwrap_or(0);
+    let my_role_id = state.db.get_member_role_id(&server_id, &user_id).ok().flatten();
+    let result: Vec<serde_json::Value> = roles
+        .iter()
+        .map(|r| {
+            let ow = if my_position > r.position as i64 {
+                state.db.list_role_overwrites(&r.id).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            role_json(r, my_position, &ow)
+        })
+        .collect();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "roles": result,
+            "my_permissions": my_permissions,
+            "my_role_id": my_role_id,
+            "my_position": if is_owner { i32::MAX as i64 } else { my_position },
+            "is_owner": is_owner,
+        })),
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+pub struct CreateRoleRequest {
+    pub name: String,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub permissions: Option<i64>,
+    #[serde(default)]
+    pub position: Option<i32>,
+    #[serde(default)]
+    pub encrypted_name: Option<String>,
+    #[serde(default)]
+    pub name_nonce: Option<String>,
+}
+
+pub async fn create_server_role(
+    Path(server_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateRoleRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    // CREATE_ROLES or MANAGE_ROLES (superset) needed to create.
+    if !state.db.member_has_permission(&server_id, &user_id, crate::db::PERM_CREATE_ROLES, None)
+        && !state.db.member_has_permission(&server_id, &user_id, crate::db::PERM_MANAGE_ROLES, None) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Missing permission"}))).into_response();
+    }
+    let actor_position = state.db.member_role_position(&server_id, &user_id).unwrap_or(0);
+    // Custom roles start at 1 (@everyone owns slot 0). New roles land at the
+    // bottom — like Discord — and are then moved with the role editor's
+    // up/down buttons; either way a role can never be ranked at or above its
+    // creator.
+    let position = req.position.unwrap_or(1).max(1);
+    if actor_position <= position as i64 {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Cannot create a role at or above your own role"}))).into_response();
+    }
+    let permissions = req.permissions.unwrap_or(0);
+    let actor_perms = state.db.member_permissions(&server_id, &user_id, None).unwrap_or(0);
+    if permissions & !actor_perms != 0 {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Cannot grant permissions you do not hold"}))).into_response();
+    }
+    let name = req.name.trim();
+    if name.is_empty() || name.len() > 64 {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid role name"}))).into_response();
+    }
+    let enc_name = req.encrypted_name.as_deref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+    let name_nonce = req.name_nonce.as_deref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+    match state.db.create_role(&server_id, name, req.color.as_deref(), permissions, position, enc_name.as_deref(), name_nonce.as_deref()) {
+        Ok(role) => (StatusCode::OK, Json(role_json(&role, actor_position, &[]))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct UpdateRoleRequest {
+    pub name: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub permissions: Option<i64>,
+    #[serde(default)]
+    pub position: Option<i32>,
+    #[serde(default)]
+    pub encrypted_name: Option<String>,
+    #[serde(default)]
+    pub name_nonce: Option<String>,
+}
+
+pub async fn update_server_role(
+    Path((server_id, role_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UpdateRoleRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    // EDIT_ROLES or MANAGE_ROLES (superset) needed to edit.
+    if !state.db.member_has_permission(&server_id, &user_id, crate::db::PERM_EDIT_ROLES, None)
+        && !state.db.member_has_permission(&server_id, &user_id, crate::db::PERM_MANAGE_ROLES, None) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Missing permission"}))).into_response();
+    }
+    let role = match state.db.get_role(&role_id) {
+        Ok(r) if r.server_id == server_id => r,
+        _ => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Role not found"}))).into_response(),
+    };
+    let actor_position = state.db.member_role_position(&server_id, &user_id).unwrap_or(0);
+    if actor_position <= role.position as i64 {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Cannot modify a role at or above your own role"}))).into_response();
+    }
+    if let Some(perms) = req.permissions {
+        let actor_perms = state.db.member_permissions(&server_id, &user_id, None).unwrap_or(0);
+        // You can only hand out abilities you actually hold yourself.
+        if perms & !actor_perms != 0 {
+            return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Cannot grant permissions you do not hold"}))).into_response();
+        }
+    }
+    let name = req.name.unwrap_or_else(|| role.name.clone());
+    if name.trim().is_empty() || name.len() > 64 {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid role name"}))).into_response();
+    }
+    let color = if req.color.is_some() { req.color.as_deref() } else { role.color.as_deref() };
+    let enc_name = req.encrypted_name.as_deref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+    let name_nonce = req.name_nonce.as_deref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+    if let Err(e) = state.db.update_role(&role_id, name.trim(), color, req.permissions, enc_name.as_deref(), name_nonce.as_deref()) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
+    }
+    if let Some(new_pos) = req.position {
+        if new_pos >= 1 && (new_pos as i64) < actor_position {
+            let _ = state.db.set_role_position(&role_id, new_pos);
+        }
+    }
+    let updated = match state.db.get_role(&role_id) {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let ow = state.db.list_role_overwrites(&role_id).unwrap_or_default();
+    (StatusCode::OK, Json(role_json(&updated, actor_position, &ow))).into_response()
+}
+
+pub async fn delete_server_role(
+    Path((server_id, role_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    // EDIT_ROLES or MANAGE_ROLES (superset) needed to delete.
+    if !state.db.member_has_permission(&server_id, &user_id, crate::db::PERM_EDIT_ROLES, None)
+        && !state.db.member_has_permission(&server_id, &user_id, crate::db::PERM_MANAGE_ROLES, None) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Missing permission"}))).into_response();
+    }
+    let role = match state.db.get_role(&role_id) {
+        Ok(r) if r.server_id == server_id => r,
+        _ => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Role not found"}))).into_response(),
+    };
+    let actor_position = state.db.member_role_position(&server_id, &user_id).unwrap_or(0);
+    if actor_position <= role.position as i64 {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Cannot delete a role at or above your own role"}))).into_response();
+    }
+    match state.db.delete_role(&role_id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct RoleOverwriteRequest {
+    pub target_type: String,
+    pub target_id: String,
+    #[serde(default)]
+    pub allow: i64,
+    #[serde(default)]
+    pub deny: i64,
+}
+
+/// PUT /api/servers/{sid}/roles/{rid}/overwrite — set (or clear, with 0/0) a
+/// role's allow/deny for one channel or one category.
+pub async fn set_role_overwrite(
+    Path((server_id, role_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RoleOverwriteRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    if let Some(denied) = perm_denied(&state, &server_id, &user_id, crate::db::PERM_MANAGE_ROLES, None) {
+        return denied;
+    }
+    let role = match state.db.get_role(&role_id) {
+        Ok(r) if r.server_id == server_id => r,
+        _ => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Role not found"}))).into_response(),
+    };
+    let actor_position = state.db.member_role_position(&server_id, &user_id).unwrap_or(0);
+    if actor_position <= role.position as i64 {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Cannot modify a role at or above your own role"}))).into_response();
+    }
+    // The target must belong to this server.
+    let ok_target = if req.target_type == "channel" {
+        state.db.get_server_id_for_channel(&req.target_id).map(|s| s == server_id).unwrap_or(false)
+    } else if req.target_type == "category" {
+        state.db.get_category_server_id(&req.target_id).map(|s| s == server_id).unwrap_or(false)
+    } else {
+        false
+    };
+    if !ok_target {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid target"}))).into_response();
+    }
+    let actor_perms = state.db.member_permissions(&server_id, &user_id, None).unwrap_or(0);
+    if req.allow & !actor_perms != 0 {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Cannot grant permissions you do not hold"}))).into_response();
+    }
+    match state.db.set_role_overwrite(&role_id, &req.target_type, &req.target_id, req.allow, req.deny) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct SetMemberRoleRequest {
+    #[serde(default)]
+    pub role_id: Option<String>,
+}
+
+/// PUT /api/servers/{sid}/members/{user_id}/role — assign the member's single
+/// role (null clears it, falling back to @everyone).
+pub async fn set_member_role(
+    Path((server_id, target_user_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SetMemberRoleRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    if let Some(denied) = perm_denied(&state, &server_id, &user_id, crate::db::PERM_MANAGE_ROLES, None) {
+        return denied;
+    }
+    if !state.db.is_member_of_server(&target_user_id, &server_id).unwrap_or(false) {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Not a member of this server"}))).into_response();
+    }
+    if state.db.is_server_owner(&target_user_id, &server_id).unwrap_or(false) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "The server owner cannot be restricted"}))).into_response();
+    }
+    let actor_position = state.db.member_role_position(&server_id, &user_id).unwrap_or(0);
+    let target_position = state.db.member_role_position(&server_id, &target_user_id).unwrap_or(0);
+    if actor_position <= target_position {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Cannot manage a member at or above your own role"}))).into_response();
+    }
+    if let Some(rid) = req.role_id.as_deref() {
+        let role = match state.db.get_role(rid) {
+            Ok(r) if r.server_id == server_id => r,
+            _ => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Role not found"}))).into_response(),
+        };
+        if actor_position <= role.position as i64 {
+            return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Cannot assign a role at or above your own role"}))).into_response();
+        }
+    }
+    match state.db.set_member_role(&server_id, &target_user_id, req.role_id.as_deref()) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+/// GET /api/servers/{server_id}/my-permissions — the caller's computed
+/// permissions, server-wide plus per visible channel (used by the client to
+/// hide/disable what it may not do, e.g. the composer in a read-only channel).
+pub async fn get_my_permissions(
+    Path(server_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    if !state.db.is_member_of_server(&user_id, &server_id).unwrap_or(false) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Not a member of this server"}))).into_response();
+    }
+    let is_owner = state.db.is_server_owner(&user_id, &server_id).unwrap_or(false);
+    let server_perms = state.db.member_permissions(&server_id, &user_id, None).unwrap_or(0);
+    let mut channels = serde_json::Map::new();
+    for c in state.db.list_server_channels(&server_id).unwrap_or_default() {
+        let perms = state.db.member_permissions(&server_id, &user_id, Some(&c.id)).unwrap_or(0);
+        channels.insert(c.id, serde_json::json!(perms));
+    }
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "permissions": server_perms,
+            "is_owner": is_owner,
+            "channels": channels,
+        })),
+    )
+        .into_response()
 }
 
 // --- Messages ---
@@ -3335,6 +3740,9 @@ pub async fn list_messages(
             Json(serde_json::json!({"error": "Not a member of this server"})),
         )
             .into_response();
+    }
+    if let Some(denied) = perm_denied(&state, &server_id, &user_id, crate::db::PERM_VIEW_CHANNEL, Some(&channel_id)) {
+        return denied;
     }
 
     let limit: i64 = params.get("limit").and_then(|v| v.parse().ok()).unwrap_or(50);
@@ -3448,6 +3856,9 @@ pub async fn list_thread_messages(
     if !state.db.is_member_of_server(&user_id, &server_id).unwrap_or(false) {
         return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Not a member"}))).into_response();
     }
+    if let Some(denied) = perm_denied(&state, &server_id, &user_id, crate::db::PERM_VIEW_CHANNEL, Some(&channel_id)) {
+        return denied;
+    }
     let limit: i64 = 100;
     let messages = match state.db.list_thread_messages(&parent_id, limit) {
         Ok(m) => m,
@@ -3526,8 +3937,8 @@ pub async fn create_category(
         Ok(id) => id,
         Err(e) => return e.into_response(),
     };
-    if !state.db.is_server_owner(&user_id, &server_id).unwrap_or(false) {
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Only server owner can create categories"}))).into_response();
+    if let Some(denied) = perm_denied(&state, &server_id, &user_id, crate::db::PERM_MANAGE_CHANNELS, None) {
+        return denied;
     }
     let encrypted_name = body.get("encrypted_name").and_then(|v| v.as_str()).and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
     let name_nonce = body.get("name_nonce").and_then(|v| v.as_str()).and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
@@ -3548,8 +3959,8 @@ pub async fn delete_category(
         Ok(id) => id,
         Err(e) => return e.into_response(),
     };
-    if !state.db.is_server_owner(&user_id, &server_id).unwrap_or(false) {
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Only server owner can delete categories"}))).into_response();
+    if let Some(denied) = perm_denied(&state, &server_id, &user_id, crate::db::PERM_MANAGE_CHANNELS, None) {
+        return denied;
     }
     // Prevent deleting the last category
     let cats = state.db.list_categories(&server_id).unwrap_or_default();
@@ -3573,8 +3984,8 @@ pub async fn rename_category(
         Ok(id) => id,
         Err(e) => return e.into_response(),
     };
-    if !state.db.is_server_owner(&user_id, &server_id).unwrap_or(false) {
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Only the server owner can rename categories"}))).into_response();
+    if let Some(denied) = perm_denied(&state, &server_id, &user_id, crate::db::PERM_MANAGE_CHANNELS, None) {
+        return denied;
     }
     let enc_name = match base64::engine::general_purpose::STANDARD.decode(&req.encrypted_name) {
         Ok(b) => b,
@@ -3601,8 +4012,8 @@ pub async fn move_channel_to_category(
         Ok(id) => id,
         Err(e) => return e.into_response(),
     };
-    if !state.db.is_server_owner(&user_id, &server_id).unwrap_or(false) {
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Only server owner can move channels"}))).into_response();
+    if let Some(denied) = perm_denied(&state, &server_id, &user_id, crate::db::PERM_MANAGE_CHANNELS, None) {
+        return denied;
     }
     let category_id = body.get("category_id").and_then(|v| v.as_str());
     match state.db.move_channel_to_category(&channel_id, category_id) {
@@ -3622,8 +4033,8 @@ pub async fn reorder_categories(
         Ok(id) => id,
         Err(e) => return e.into_response(),
     };
-    if !state.db.is_server_owner(&user_id, &server_id).unwrap_or(false) {
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Only server owner can reorder"}))).into_response();
+    if let Some(denied) = perm_denied(&state, &server_id, &user_id, crate::db::PERM_MANAGE_CHANNELS, None) {
+        return denied;
     }
     let ids: Vec<&str> = match body.get("ordered_ids").and_then(|v| v.as_array()) {
         Some(arr) => arr.iter().filter_map(|v| v.as_str()).collect(),
@@ -3647,8 +4058,8 @@ pub async fn reorder_channels(
         Ok(id) => id,
         Err(e) => return e.into_response(),
     };
-    if !state.db.is_server_owner(&user_id, &server_id).unwrap_or(false) {
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Only server owner can reorder"}))).into_response();
+    if let Some(denied) = perm_denied(&state, &server_id, &user_id, crate::db::PERM_MANAGE_CHANNELS, None) {
+        return denied;
     }
     let ids: Vec<&str> = match body.get("ordered_ids").and_then(|v| v.as_array()) {
         Some(arr) => arr.iter().filter_map(|v| v.as_str()).collect(),
@@ -3699,6 +4110,9 @@ pub async fn list_channel_pins(
     };
     if !state.db.is_member_of_server(&user_id, &server_id).unwrap_or(false) {
         return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Not a member of this server"}))).into_response();
+    }
+    if let Some(denied) = perm_denied(&state, &server_id, &user_id, crate::db::PERM_VIEW_CHANNEL, Some(&channel_id)) {
+        return denied;
     }
     let messages = match state.db.get_pinned_messages(&channel_id) {
         Ok(m) => m,
@@ -3843,6 +4257,9 @@ pub async fn list_messages_around(
             Json(serde_json::json!({"error": "Not a member of this server"})),
         )
             .into_response();
+    }
+    if let Some(denied) = perm_denied(&state, &server_id, &user_id, crate::db::PERM_VIEW_CHANNEL, Some(&channel_id)) {
+        return denied;
     }
 
     let messages = match state.db.list_messages_around(&channel_id, &message_id, 100) {
@@ -4227,8 +4644,8 @@ pub async fn update_server_name(
         Ok(id) => id,
         Err(e) => return e.into_response(),
     };
-    if !state.db.is_server_owner(&user_id, &server_id).unwrap_or(false) {
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Only the server owner can update server name"}))).into_response();
+    if let Some(denied) = perm_denied(&state, &server_id, &user_id, crate::db::PERM_MANAGE_SERVER, None) {
+        return denied;
     }
     let enc_name = match base64::engine::general_purpose::STANDARD.decode(&req.encrypted_name) {
         Ok(b) => b,
@@ -4254,8 +4671,8 @@ pub async fn update_server_picture(
         Ok(id) => id,
         Err(e) => return e.into_response(),
     };
-    if !state.db.is_server_owner(&user_id, &server_id).unwrap_or(false) {
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Only the server owner can update the server picture"}))).into_response();
+    if let Some(denied) = perm_denied(&state, &server_id, &user_id, crate::db::PERM_MANAGE_SERVER, None) {
+        return denied;
     }
     let encrypted_key = match base64::engine::general_purpose::STANDARD.decode(&req.encrypted_server_picture_key) {
         Ok(b) => b,
@@ -4302,8 +4719,8 @@ pub async fn update_channel_name(
         Ok(id) => id,
         Err(e) => return e.into_response(),
     };
-    if !state.db.is_server_owner(&user_id, &server_id).unwrap_or(false) {
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Only the server owner can update channel name"}))).into_response();
+    if let Some(denied) = perm_denied(&state, &server_id, &user_id, crate::db::PERM_MANAGE_CHANNELS, None) {
+        return denied;
     }
     let enc_name = match base64::engine::general_purpose::STANDARD.decode(&req.encrypted_name) {
         Ok(b) => b,
@@ -9416,8 +9833,8 @@ pub async fn toggle_soundboard_global_mute(
         Ok(id) => id,
         Err(e) => return e.into_response(),
     };
-    if !state.db.is_server_owner(&user_id, &server_id).unwrap_or(false) {
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Only server owner can toggle soundboard global mute"}))).into_response();
+    if let Some(denied) = perm_denied(&state, &server_id, &user_id, crate::db::PERM_MANAGE_SOUNDBOARD, None) {
+        return denied;
     }
     let muted = body["muted"].as_bool().unwrap_or(false);
     match state.db.set_soundboard_global_mute(&server_id, muted) {
@@ -9445,8 +9862,17 @@ pub async fn disable_soundboard_user(
         Ok(id) => id,
         Err(e) => return e.into_response(),
     };
-    if !state.db.is_server_owner(&user_id, &server_id).unwrap_or(false) {
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Only server owner can disable a user's soundboard"}))).into_response();
+    if let Some(denied) = perm_denied(&state, &server_id, &user_id, crate::db::PERM_MANAGE_SOUNDBOARD, None) {
+        return denied;
+    }
+    // Owner is immune; cannot target a member at or above your role.
+    if state.db.is_server_owner(&target_user_id, &server_id).unwrap_or(false) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "The server owner cannot be soundboard-disabled"}))).into_response();
+    }
+    let actor_pos = state.db.member_role_position(&server_id, &user_id).unwrap_or(0);
+    let target_pos = state.db.member_role_position(&server_id, &target_user_id).unwrap_or(0);
+    if actor_pos <= target_pos {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Cannot soundboard-disable a member at or above your own role"}))).into_response();
     }
     match state.db.disable_soundboard_user(&server_id, &target_user_id, &user_id) {
         Ok(()) => {
@@ -9510,8 +9936,17 @@ pub async fn enable_soundboard_user(
         Ok(id) => id,
         Err(e) => return e.into_response(),
     };
-    if !state.db.is_server_owner(&user_id, &server_id).unwrap_or(false) {
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Only server owner can enable a user's soundboard"}))).into_response();
+    if let Some(denied) = perm_denied(&state, &server_id, &user_id, crate::db::PERM_MANAGE_SOUNDBOARD, None) {
+        return denied;
+    }
+    // Owner is immune; cannot target a member at or above your role.
+    if state.db.is_server_owner(&target_user_id, &server_id).unwrap_or(false) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "The server owner cannot be soundboard-disabled"}))).into_response();
+    }
+    let actor_pos = state.db.member_role_position(&server_id, &user_id).unwrap_or(0);
+    let target_pos = state.db.member_role_position(&server_id, &target_user_id).unwrap_or(0);
+    if actor_pos <= target_pos {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Cannot soundboard-disable a member at or above your own role"}))).into_response();
     }
     match state.db.enable_soundboard_user(&server_id, &target_user_id, &user_id) {
         Ok(()) => {

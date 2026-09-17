@@ -143,6 +143,72 @@
 
 
 
+    /**
+     * Resolve a thread reply's display name, colour/glow and PFP exactly like
+     * the main channel renderer does: profile snapshot first, then the current
+     * conversation profile, then the encrypted username, then cached data.
+     * (Previously the panel printed the first 8 chars of the sender HMAC hash.)
+     */
+    function threadSenderInfo(msg, channelId) {
+        var uid = msg.sender_user_id || null;
+        var cacheKey = uid || msg.sender_id;
+        if (msg.encrypted_profile_snapshot && msg.profile_snapshot_nonce && currentServerId) {
+            try {
+                var snapDec = tryDecryptWithAllKeys(currentServerId, normalizeB64Field(msg.encrypted_profile_snapshot), normalizeB64Field(msg.profile_snapshot_nonce));
+                if (snapDec) {
+                    var snap = JSON.parse(snapDec);
+                    if (snap.display_name) msg.sender_display_name = snap.display_name;
+                    if (snap.username_color) msg.sender_username_color = snap.username_color;
+                    if (snap.username_border_color) msg.sender_username_border_color = snap.username_border_color;
+                    if (snap.profile_picture_file_id) msg.sender_profile_pic = snap.profile_picture_file_id;
+                    if (snap.profile_picture_file_key && typeof userDisplayNameCache !== 'undefined') {
+                        if (!userDisplayNameCache[cacheKey]) userDisplayNameCache[cacheKey] = {};
+                        userDisplayNameCache[cacheKey].profile_picture_file_key = snap.profile_picture_file_key;
+                        if (typeof scheduleUserDisplayNameSave === 'function') scheduleUserDisplayNameSave();
+                    }
+                }
+            } catch (_e) {}
+        }
+        if (msg.conversation_profile && currentServerId) {
+            try {
+                var cpDec = tryDecryptWithAllKeys(currentServerId, msg.conversation_profile.encrypted_profile_data, msg.conversation_profile.nonce);
+                if (cpDec) {
+                    var cp = JSON.parse(cpDec);
+                    if (cp.display_name) msg.sender_display_name = cp.display_name;
+                    if (cp.username_color) msg.sender_username_color = cp.username_color;
+                    if (cp.username_border_color) msg.sender_username_border_color = cp.username_border_color;
+                    if (cp.profile_picture_file_id) msg.sender_profile_pic = cp.profile_picture_file_id;
+                }
+            } catch (_e) {}
+        }
+        if (!msg.sender_username && msg.encrypted_sender_username && msg.sender_username_nonce && currentServerId) {
+            try {
+                var su = tryDecryptWithAllKeysRaw(currentServerId, msg.encrypted_sender_username, msg.sender_username_nonce);
+                if (su) msg.sender_username = su;
+            } catch (_e) {}
+        }
+        var cached = (typeof userDisplayNameCache !== 'undefined' && userDisplayNameCache[cacheKey]) ? userDisplayNameCache[cacheKey] : null;
+        var name = msg.sender_display_name || (cached && cached.display_name) || msg.sender_username ||
+            (msg.sender_id_hash ? String(msg.sender_id_hash).substring(0, 8) : 'User');
+        var pic = msg.sender_profile_pic || (cached && cached.profile_picture_file_id) || null;
+        var color = msg.sender_username_color || (cached && cached.username_color) || null;
+        var border = msg.sender_username_border_color || (cached && cached.username_border_color) || null;
+        var picKey = (uid || msg.sender_id || '') + ':' + pic;
+        return {
+            userId: uid,
+            name: name,
+            color: color,
+            borderColor: border,
+            initial: (name || '?').charAt(0).toUpperCase(),
+            picUrl: (pic && typeof getProfilePicUrl === 'function') ? getProfilePicUrl(pic, uid || msg.sender_id) : null,
+            picKey: picKey,
+        };
+    }
+
+    function threadTime(ts) {
+        try { return new Date(ts).toLocaleTimeString(); } catch (_e) { return ts || ''; }
+    }
+
     async function loadThreadMessages(parentId, channelId) {
 
         var container = document.getElementById('thread-messages');
@@ -207,19 +273,46 @@
 
 
 
+                var info = threadSenderInfo(msg, channelId);
+
                 var msgDiv = document.createElement('div');
 
                 msgDiv.className = 'thread-message';
 
-                msgDiv.innerHTML = '<div class="thread-msg-sender">' +
+                msgDiv.dataset.senderUserId = info.userId || '';
 
-                    (msg.sender_id_hash || 'User').substring(0, 8) +
+                var avatarHtml = info.picUrl
+                    ? '<div class="avatar thread-avatar" data-profile-pic="' + escapeAttr(info.picKey) + '"><img class="avatar-img" src="' + info.picUrl + '" alt=""></div>'
+                    : '<div class="avatar thread-avatar"' + (info.picKey.split(':')[1] ? ' data-profile-pic-load="' + escapeAttr(info.picKey) + '"' : '') + '>' + escapeHtml(info.initial) + '</div>';
 
-                    '</div><div class="thread-msg-content">' +
+                msgDiv.innerHTML = avatarHtml +
+                    '<div class="thread-msg-body">' +
+                        '<div class="thread-msg-head">' +
+                            '<span class="display-name"' + (info.color ? ' style="color:' + escapeAttr(info.color) + ';text-shadow:' + escapeAttr(getDisplayNameTextShadow(info.color, info.borderColor)) + '"' : '') + '>' + escapeHtml(info.name) + '</span>' +
+                            '<span class="thread-msg-time">' + threadTime(msg.timestamp) + '</span>' +
+                        '</div>' +
+                        '<div class="thread-msg-content">' +
+                            (plaintext ? escapeHtml(plaintext) : '<span style="color:#666">[encrypted]</span>') +
+                        '</div>' +
+                    '</div>';
 
-                    (plaintext ? escapeHtml(plaintext) : '<span style="color:#666">[encrypted]</span>') +
+                // The PFP opens the sender's profile view, like the main chat.
 
-                    '</div><div class="thread-msg-time">' + formatTime(msg.timestamp) + '</div>';
+                var avatarEl = msgDiv.querySelector('.thread-avatar');
+
+                if (avatarEl && info.userId) {
+
+                    avatarEl.style.cursor = 'pointer';
+
+                    avatarEl.setAttribute('data-user-id', info.userId);
+
+                    avatarEl.addEventListener('click', function () {
+
+                        if (typeof openProfileModal === 'function') openProfileModal(info.userId);
+
+                    });
+
+                }
 
                 container.appendChild(msgDiv);
 
@@ -246,6 +339,13 @@
         if (!input || !input.value.trim() || !_threadParentId) return;
 
 
+
+        // Roles: replying needs SEND_MESSAGES + REPLY_IN_THREADS in the channel.
+        if (window.ServerRoles && _threadChannelId &&
+            !(ServerRoles.hasInChannel(ServerRoles.bit('SEND_MESSAGES'), _threadChannelId) &&
+              ServerRoles.hasInChannel(ServerRoles.bit('REPLY_IN_THREADS'), _threadChannelId))) {
+            return alert('You do not have permission to reply in this thread');
+        }
 
         var text = input.value.trim();
 
@@ -274,7 +374,15 @@
                 search_tokens: searchTokens,
                 thread_parent_id: _threadParentId
 
-            };            var _wsConn = window._ws || ws;
+            };
+            // Same encrypted sender metadata as normal messages, so thread
+            // replies render with the sender's display name/colour/glow/PFP.
+            if (typeof buildEncryptedSenderFields === 'function') {
+                var senderFields = buildEncryptedSenderFields(serverKey);
+                for (var _k in senderFields) {
+                    if (Object.prototype.hasOwnProperty.call(senderFields, _k)) wsPayload[_k] = senderFields[_k];
+                }
+            }            var _wsConn = window._ws || ws;
             if (_wsConn && _wsConn.readyState === WebSocket.OPEN) {
                 _wsConn.send(JSON.stringify(wsPayload));
 
@@ -1300,6 +1408,7 @@
     }
 
     function _showCategoryContextMenu(x, y, serverId, categoryId, catName, channels) {
+        var canEditPerms = (typeof ServerRoles !== 'undefined' && ServerRoles.has && ServerRoles.has(ServerRoles.bit('MANAGE_ROLES')));
         var items = [
             { label: 'Rename', action: function () {
                 _showCategoryNameModal('Rename Category', 'Rename', function (newName) {
@@ -1317,7 +1426,6 @@
                     if (nameInput) { nameInput.value = ''; nameInput.focus(); }
                 }
             }},
-            '---',
             { label: 'Mute All Channels', action: function () {
                 channels.forEach(function (ch) {
                     if (ch.channel_type !== 'voice') {
@@ -1331,6 +1439,11 @@
                 });
             }},
             '---',
+            { label: 'Edit Permissions', action: function () {
+                if (typeof window.openChannelPermissionsModal === 'function') {
+                    window.openChannelPermissionsModal('category', categoryId, catName);
+                }
+            }},
             { label: 'Delete', danger: true, action: function () {
                 var chCount = channels.length;
                 var msg = 'Delete category "' + catName + '"?';
@@ -1373,6 +1486,15 @@
         items.push({ label: unreadCount > 0 ? 'Clear notifications (' + unreadCount + ')' : 'No notifications', action: function () {
             if (typeof clearUnreadChannelMentions === 'function') clearUnreadChannelMentions(ch.id);
         }});
+        // Edit Permissions (owner or MANAGE_ROLES)
+        var canEditPerms = (typeof ServerRoles !== 'undefined' && ServerRoles.has && ServerRoles.has(ServerRoles.bit('MANAGE_ROLES')));
+        if (isOwner || canEditPerms) {
+            items.push({ label: 'Edit Permissions', action: function () {
+                if (typeof window.openChannelPermissionsModal === 'function') {
+                    window.openChannelPermissionsModal('channel', ch.id, chDisplayName);
+                }
+            }});
+        }
         // Owner-only: delete
         if (isOwner) {
             items.push('---');
@@ -1528,6 +1650,7 @@
     window.loadCategories = loadCategories;
 
     window.renderChannelsWithCategories = renderChannelsWithCategories;
+    window.decryptCategoryName = decryptCategoryName;
 
     window.moveChannelToCategory = moveChannelToCategory;
 

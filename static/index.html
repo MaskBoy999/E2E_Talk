@@ -8,7 +8,7 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <link rel="manifest" href="/manifest.json">
     <title>E2E Chat</title>
-    <link rel="stylesheet" href="style.css?v=17">
+    <link rel="stylesheet" href="style.css?v=18">
 </head>
 <body>
     <!-- Inlined SVG icon sprite (hidden, referenced via <use href="#icon-name">) -->
@@ -415,11 +415,11 @@
 
     <!-- Server Settings Modal -->
     <div class="modal" id="server-settings-modal" style="display:none">
-        <div class="modal-content" style="max-width:500px">
+        <div class="modal-content" style="max-width:620px;max-height:85vh;overflow-y:auto">
             <div class="settings-section">
                 <h3 style="margin-bottom:12px;color:var(--accent);font-size:15px;">Server Settings</h3>
                 <!-- Server Picture -->
-                <div class="settings-group" style="margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid var(--bg-border)">
+                <div class="settings-group" id="server-settings-picture-section" style="margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid var(--bg-border)">
                     <div style="display:flex;align-items:center;gap:14px;margin-bottom:8px;">
                         <div id="server-settings-picture-preview" class="server-settings-picture" style="width:48px;height:48px;border-radius:12px;background:var(--bg-secondary);display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:700;color:var(--text-primary);flex-shrink:0;overflow:hidden;">
                             <span id="server-settings-pic-fallback">#</span>
@@ -452,7 +452,7 @@
                         <div id="server-picture-upload-status" style="font-size:12px;color:var(--accent);display:none;margin-top:6px;"></div>
                     </div>
                 </div>
-                <div class="settings-group" style="margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid var(--bg-border)">
+                <div class="settings-group" id="server-settings-joins-section" style="margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid var(--bg-border)">
                     <label class="settings-toggle" style="display:flex;align-items:center;gap:10px;cursor:pointer">
                         <input type="checkbox" id="disable-joins-toggle">
                         <span class="toggle-slider"></span>
@@ -460,8 +460,52 @@
                     </label>
                     <p class="settings-hint" style="margin-top:6px;font-size:12px;color:var(--text-muted)">When enabled, no one can join this server using the invite code.</p>
                 </div>
-                <h4 style="margin-bottom:8px;color:var(--text-primary);font-size:13px;">Banned Users</h4>
-                <div id="banned-users-list" class="banned-list"></div>
+                <div id="server-settings-bans-section">
+                    <h4 style="margin-bottom:8px;color:var(--text-primary);font-size:13px;">Banned Users</h4>
+                    <div id="banned-users-list" class="banned-list"></div>
+                </div>
+
+                <!-- Roles & permissions (rendered by roles.js / ServerRoles) -->
+                <div class="settings-group" id="server-roles-section" style="margin-top:16px;padding-top:12px;border-top:1px solid var(--bg-border)">
+                    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+                        <h4 style="margin:0;color:var(--text-primary);font-size:13px">Roles &amp; Permissions</h4>
+                        <button class="btn btn-sm" id="create-role-btn" style="font-size:12px;padding:4px 10px;display:none">+ Create Role</button>
+                    </div>
+                    <p class="settings-hint" style="font-size:11px;color:var(--text-muted);margin-bottom:8px">
+                        Permissions are granted through roles (one role per member). <b>@everyone</b> applies to everyone without another role. A role can only affect roles ranked below it — the owner always keeps every permission.
+                    </p>
+                    <div id="roles-list" class="roles-list"></div>
+                    <div id="role-editor" class="role-editor" style="display:none">
+                        <div class="role-editor-head">
+                            <input type="color" id="role-color-input" class="role-color-input" value="#99aab5" title="Role color (member list circle)">
+                            <input type="text" id="role-name-input" class="role-name-input" maxlength="64" placeholder="Role name">
+                            <button class="btn btn-sm" id="role-move-up" title="Move up (stronger)">&#9650;</button>
+                            <button class="btn btn-sm" id="role-move-down" title="Move down (weaker)">&#9660;</button>
+                        </div>
+                        <label class="settings-toggle" style="display:flex;align-items:center;gap:8px;margin:8px 0">
+                            <input type="checkbox" id="role-all-perms">
+                            <span class="toggle-slider"></span>
+                            <span class="toggle-label" style="font-size:13px;color:var(--text-primary)">Grant all permissions</span>
+                        </label>
+                        <div id="role-perm-boxes" class="role-perm-boxes"></div>
+                        <div class="role-overwrite">
+                            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+                                <div style="font-size:12px;color:var(--text-primary);font-weight:600">Channel / category overrides</div>
+                                <div style="display:flex;gap:6px">
+                                    <button class="btn-cancel" id="cancel-role-overwrite-btn" style="font-size:11px;padding:3px 8px;display:none">Cancel</button>
+                                    <button class="btn btn-sm btn-invite" id="save-role-overwrite-btn" style="font-size:11px;padding:3px 8px;display:none;background:var(--accent);border-color:var(--accent)">Save</button>
+                                </div>
+                            </div>
+                            <select id="role-overwrite-target" class="role-ow-target"></select>
+                            <p id="role-overwrite-hint" class="settings-hint" style="font-size:11px"></p>
+                            <div id="role-overwrite-boxes" class="role-ow-boxes"></div>
+                        </div>
+                        <div class="role-editor-actions">
+                            <button class="btn-invite" id="save-role-btn">Save role</button>
+                            <button class="btn-cancel" id="delete-role-btn" style="display:none;color:var(--danger)">Delete role</button>
+                        </div>
+                    </div>
+                </div>
             </div>
             <div class="modal-actions">
                 <button class="btn-cancel" id="close-server-settings">Close</button>
@@ -2273,6 +2317,26 @@
         </div>
     </div>
 
+    <!-- Channel/Category Permissions modal -->
+    <div class="modal" id="channel-perm-modal" style="display:none">
+        <div class="modal-content" style="max-width:500px;max-height:80vh;display:flex;flex-direction:column">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+                <h3 id="channel-perm-modal-title" style="margin:0;color:var(--text-primary);font-size:15px;font-weight:700">Edit Permissions</h3>
+                <div style="display:flex;gap:6px;align-items:center">
+                    <button class="btn-cancel" id="channel-perm-cancel" style="font-size:12px;padding:4px 10px">Cancel</button>
+                    <button class="btn-invite" id="channel-perm-save" style="font-size:12px;padding:4px 10px;background:var(--accent);border-color:var(--accent)">Save</button>
+                    <button id="channel-perm-modal-close" style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:18px;padding:2px 6px" title="Close">&times;</button>
+                </div>
+            </div>
+            <div class="auth-input-row" style="margin-bottom:10px">
+                <label style="color:var(--text-muted);font-size:12px;min-width:36px">Role</label>
+                <select id="channel-perm-role-select" class="modal-input" style="flex:1"></select>
+            </div>
+            <div id="channel-perm-boxes" style="flex:1;overflow-y:auto;max-height:55vh"></div>
+            <p id="channel-perm-hint" style="color:var(--text-muted);font-size:11px;margin:8px 0 0"></p>
+        </div>
+    </div>
+
     <!-- Schedule Message modal -->
     <div class="modal" id="schedule-msg-modal" style="display:none">
         <div class="modal-content" style="max-width:420px">
@@ -2301,9 +2365,10 @@
     <script src="secure-storage.js?v=2"></script>
     <script src="voice.js?v=19"></script>
     <script src="soundboard-pairing.js?v=12"></script>
-    <script src="thread_categories_shortcuts.js?v=3"></script>
+    <script src="thread_categories_shortcuts.js?v=5"></script>
+    <script src="roles.js?v=2"></script>
     <script src="doc-preview.js?v=2"></script>
-    <script src="chat.js?v=43"></script>
+    <script src="chat.js?v=44"></script>
     <script>
     // PWA: Register service worker
     if ('serviceWorker' in navigator) {

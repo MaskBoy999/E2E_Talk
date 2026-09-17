@@ -210,6 +210,80 @@ pub struct ChannelCategory {
     pub position: i32,
 }
 
+/// One server role. Roles are purely a permission vehicle: the color is used
+/// for the member-list circle only and never for the display name (display
+/// name color/glow stays a per-user profile setting).
+#[derive(Debug, Clone)]
+pub struct ServerRole {
+    pub id: String,
+    pub server_id: String,
+    pub name: String,
+    pub color: Option<String>,
+    /// Higher = more powerful. The @everyone role is always position 0.
+    pub position: i32,
+    pub is_everyone: bool,
+    pub permissions: i64,
+    pub encrypted_name: Option<Vec<u8>>,
+    pub name_nonce: Option<Vec<u8>>,
+}
+
+/// A server member plus their single role (None = only @everyone applies).
+#[derive(Debug, Clone)]
+pub struct ServerMemberInfo {
+    pub id: String,
+    pub username: String,
+    /// Legacy membership column: 'owner' | 'member'.
+    pub role: String,
+    pub profile_picture_file_id: Option<String>,
+    pub role_id: Option<String>,
+    pub role_name: Option<String>,
+    pub role_color: Option<String>,
+    pub role_position: i32,
+}
+
+// Server permission bits. The same table lives client-side in static/roles.js —
+// keep the two in sync. Bits are evaluated server-side only; the client uses
+// them purely to hide/disable UI.
+pub const PERM_VIEW_CHANNEL: i64 = 1 << 0;
+pub const PERM_SEND_MESSAGES: i64 = 1 << 1;
+pub const PERM_ADD_REACTIONS: i64 = 1 << 2;
+pub const PERM_REPLY_IN_THREADS: i64 = 1 << 3;
+pub const PERM_ATTACH_FILES: i64 = 1 << 4;
+pub const PERM_CREATE_POLLS: i64 = 1 << 5;
+pub const PERM_PIN_MESSAGES: i64 = 1 << 6;
+pub const PERM_MANAGE_MESSAGES: i64 = 1 << 7;
+pub const PERM_KICK_MEMBERS: i64 = 1 << 8;
+pub const PERM_BAN_MEMBERS: i64 = 1 << 9;
+pub const PERM_MANAGE_CHANNELS: i64 = 1 << 10;
+pub const PERM_MANAGE_SERVER: i64 = 1 << 11;
+pub const PERM_MANAGE_ROLES: i64 = 1 << 12;
+pub const PERM_CONNECT_VOICE: i64 = 1 << 13;
+pub const PERM_SPEAK: i64 = 1 << 14;
+pub const PERM_MUTE_MEMBERS: i64 = 1 << 15;
+pub const PERM_MOVE_MEMBERS: i64 = 1 << 16;
+pub const PERM_MANAGE_SOUNDBOARD: i64 = 1 << 17;
+pub const PERM_USE_SOUNDBOARD: i64 = 1 << 18;
+pub const PERM_CREATE_ROLES: i64 = 1 << 19;
+pub const PERM_INVITE_MEMBERS: i64 = 1 << 20;
+pub const PERM_EDIT_ROLES: i64 = 1 << 21;
+
+/// Everything a role can be granted ((1 << 22) - 1).
+pub const PERM_ALL: i64 = (1 << 22) - 1;
+
+/// Permissions every member gets by default through @everyone: the "normal
+/// chat" abilities (see messages, send, react, reply in threads, attach files,
+/// create polls, talk in voice, play soundboard clips).
+pub const PERM_DEFAULT_EVERYONE: i64 = PERM_VIEW_CHANNEL
+    | PERM_SEND_MESSAGES
+    | PERM_ADD_REACTIONS
+    | PERM_REPLY_IN_THREADS
+    | PERM_ATTACH_FILES
+    | PERM_CREATE_POLLS
+    | PERM_CONNECT_VOICE
+    | PERM_SPEAK
+    | PERM_USE_SOUNDBOARD
+    | PERM_INVITE_MEMBERS;
+
 #[derive(Debug, Clone)]
 pub struct DmMessage {
     pub id: String,
@@ -1278,6 +1352,10 @@ impl Database {
         let _ = conn.execute_batch(include_str!("../migrations/081_soundboard_user_disable.sql"));
         let _ = conn.execute_batch(include_str!("../migrations/082_server_group_color.sql"));
         let _ = conn.execute_batch(include_str!("../migrations/083_soundboard_clip_no_fk.sql"));
+        let _ = conn.execute_batch(include_str!("../migrations/084_server_roles.sql"));
+        let _ = conn.execute_batch(include_str!("../migrations/085_member_role.sql"));
+        let _ = conn.execute_batch(include_str!("../migrations/086_backfill_everyone_role.sql"));
+        let _ = conn.execute_batch(include_str!("../migrations/087_role_name_encryption.sql"));
 
         // Data migration: normalize legacy space-separated CURRENT_TIMESTAMP values
         // ("YYYY-MM-DD HH:MM:SS") to fixed-width RFC3339 ("YYYY-MM-DDTHH:MM:SS.000000Z")
@@ -1910,6 +1988,10 @@ impl Database {
         )
         .map_err(|e| e.to_string())?;
 
+        // Roles: every server starts with its @everyone role (the fallback
+        // permission set for members without a role).
+        Self::ensure_everyone_role_c(&conn, &server_id)?;
+
         // F4: Create default categories "Text Channels" and "Voice Channels"
         let text_cat_id = Uuid::new_v4().to_string();
         let voice_cat_id = Uuid::new_v4().to_string();
@@ -2190,12 +2272,10 @@ impl Database {
         Ok(server)
     }
 
+    /// Join settings. Permission (MANAGE_SERVER) is enforced by the caller.
     pub fn set_joins_disabled(&self, server_id: &str, user_id: &str, disabled: bool) -> Result<(), String> {
+        let _ = user_id;
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-
-        if !Self::is_server_owner_c(&conn, user_id, server_id).unwrap_or(false) {
-            return Err("Only the server owner can change join settings".to_string());
-        }
 
         conn.execute(
             "UPDATE servers SET joins_disabled = ?1 WHERE id = ?2",
@@ -2206,12 +2286,10 @@ impl Database {
         Ok(())
     }
 
+    /// Invite rotation. Permission (MANAGE_SERVER) is enforced by the caller.
     pub fn regenerate_invite(&self, server_id: &str, user_id: &str, new_invite_code_hash: &str, new_invite_code_salt: &str) -> Result<(), String> {
+        let _ = user_id;
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-
-        if !Self::is_server_owner_c(&conn, user_id, server_id).unwrap_or(false) {
-            return Err("Only the server owner can regenerate the invite".to_string());
-        }
 
         conn.execute(
             "UPDATE servers SET invite_code_hash = ?1, invite_code_salt = ?2 WHERE id = ?3",
@@ -2483,19 +2561,12 @@ impl Database {
         Ok(bans)
     }
 
-    pub fn delete_channel_by_owner(&self, channel_id: &str, user_id: &str) -> Result<(), String> {
+    /// Delete a channel. Permission (MANAGE_CHANNELS) is enforced by the caller.
+    pub fn delete_channel_by_owner(&self, channel_id: &str, _user_id: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let server_id: String = conn
-            .query_row(
-                "SELECT server_id FROM channels WHERE id = ?1",
-                params![channel_id],
-                |row| row.get(0),
-            )
-            .map_err(|_| "Channel not found".to_string())?;
-        if !Self::is_server_owner_c(&conn, user_id, &server_id)? {
-            return Err("Only the server owner can delete channels".to_string());
-        }
         conn.execute("DELETE FROM messages WHERE channel_id = ?1", params![channel_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM role_overwrites WHERE target_type = 'channel' AND target_id = ?1", params![channel_id])
             .map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM channels WHERE id = ?1", params![channel_id])
             .map_err(|e| e.to_string())?;
@@ -4498,6 +4569,15 @@ impl Database {
     }
 
     pub fn delete_message(&self, message_id: &str, sender_id: &str) -> Result<(), String> {
+        self.delete_message_inner(message_id, Some(sender_id))
+    }
+
+    /// Delete a message as a moderator (MANAGE_MESSAGES, enforced by the caller).
+    pub fn delete_message_any(&self, message_id: &str) -> Result<(), String> {
+        self.delete_message_inner(message_id, None)
+    }
+
+    fn delete_message_inner(&self, message_id: &str, requiring_sender: Option<&str>) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let existing: (String, Option<String>) = conn
             .query_row(
@@ -4506,8 +4586,10 @@ impl Database {
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
             )
             .map_err(|_| "Message not found".to_string())?;
-        if existing.0 != sender_id {
-            return Err("Not authorized to delete this message".to_string());
+        if let Some(sender_id) = requiring_sender {
+            if existing.0 != sender_id {
+                return Err("Not authorized to delete this message".to_string());
+            }
         }
         // Save the file_id_hash before deleting the message row
         let file_id_hash = existing.1.clone();
@@ -6585,6 +6667,11 @@ impl Database {
             params![channel_id],
         )
         .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM role_overwrites WHERE target_type = 'channel' AND target_id = ?1",
+            params![channel_id],
+        )
+        .map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM channels WHERE id = ?1", params![channel_id])
             .map_err(|e| e.to_string())?;
         Ok(())
@@ -7574,9 +7661,15 @@ impl Database {
         for ch_id in &channel_ids {
             conn.execute("DELETE FROM messages WHERE channel_id = ?1", rusqlite::params![ch_id])
                 .map_err(|e| e.to_string())?;
+            conn.execute("DELETE FROM role_overwrites WHERE target_type = 'channel' AND target_id = ?1", rusqlite::params![ch_id])
+                .map_err(|e| e.to_string())?;
             conn.execute("DELETE FROM channels WHERE id = ?1", rusqlite::params![ch_id])
                 .map_err(|e| e.to_string())?;
         }
+        conn.execute(
+            "DELETE FROM role_overwrites WHERE target_type = 'category' AND target_id = ?1",
+            rusqlite::params![category_id],
+        ).map_err(|e| e.to_string())?;
         conn.execute(
             "DELETE FROM channel_categories WHERE id = ?1",
             rusqlite::params![category_id],
@@ -8325,6 +8418,406 @@ impl Database {
             rusqlite::params![parent_id, group_id, user_id],
         ).map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    // --- Server roles & permissions ---------------------------------------
+    //
+    // Roles are the ONLY way permissions are granted, and a member holds at most
+    // one (server_members.role_id). The @everyone role (is_everyone=1, position
+    // 0) applies to every member and is the fallback for members without a role.
+    // The server owner is not a role: owners implicitly hold PERM_ALL and can
+    // never be restricted, kicked or banned. A role only acts on roles strictly
+    // below its position, which is what keeps the owner (and the roles above)
+    // safe from the roles below.
+
+    /// The @everyone role of a server, created on demand (idempotent).
+    pub fn ensure_everyone_role(&self, server_id: &str) -> Result<String, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        Self::ensure_everyone_role_c(&conn, server_id)
+    }
+
+    fn ensure_everyone_role_c(conn: &Connection, server_id: &str) -> Result<String, String> {
+        if let Ok(id) = conn.query_row(
+            "SELECT id FROM server_roles WHERE server_id = ?1 AND is_everyone = 1",
+            params![server_id],
+            |row| row.get::<_, String>(0),
+        ) {
+            return Ok(id);
+        }
+        let id = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO server_roles (id, server_id, name, color, position, is_everyone, permissions)
+             VALUES (?1, ?2, '@everyone', '#99aab5', 0, 1, ?3)",
+            params![id, server_id, PERM_DEFAULT_EVERYONE],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(id)
+    }
+
+    #[allow(dead_code)]
+    pub fn get_everyone_role_id(&self, server_id: &str) -> Result<String, String> {
+        self.ensure_everyone_role(server_id)
+    }
+
+    /// All roles of a server, strongest first.
+    pub fn list_server_roles(&self, server_id: &str) -> Result<Vec<ServerRole>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        Self::ensure_everyone_role_c(&conn, server_id)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, server_id, name, color, position, is_everyone, permissions, encrypted_name, name_nonce
+                 FROM server_roles WHERE server_id = ?1 ORDER BY position DESC, name ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        let roles = stmt
+            .query_map(params![server_id], Self::role_from_row)
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(roles)
+    }
+
+    fn role_from_row(row: &rusqlite::Row) -> rusqlite::Result<ServerRole> {
+        Ok(ServerRole {
+            id: row.get(0)?,
+            server_id: row.get(1)?,
+            name: row.get(2)?,
+            color: row.get(3)?,
+            position: row.get(4)?,
+            is_everyone: row.get::<_, i64>(5)? != 0,
+            permissions: row.get(6)?,
+            encrypted_name: row.get(7)?,
+            name_nonce: row.get(8)?,
+        })
+    }
+
+    pub fn get_role(&self, role_id: &str) -> Result<ServerRole, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT id, server_id, name, color, position, is_everyone, permissions, encrypted_name, name_nonce FROM server_roles WHERE id = ?1",
+            params![role_id],
+            Self::role_from_row,
+        )
+        .map_err(|_| "Role not found".to_string())
+    }
+
+    pub fn create_role(&self, server_id: &str, name: &str, color: Option<&str>, permissions: i64, position: i32, encrypted_name: Option<&[u8]>, name_nonce: Option<&[u8]>) -> Result<ServerRole, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        Self::ensure_everyone_role_c(&conn, server_id)?;
+        let id = Uuid::new_v4().to_string();
+        let perms = permissions & PERM_ALL;
+        conn.execute(
+            "INSERT INTO server_roles (id, server_id, name, color, position, is_everyone, permissions, encrypted_name, name_nonce)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8)",
+            params![id, server_id, name, color, position.max(1), perms, encrypted_name, name_nonce],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(ServerRole {
+            id,
+            server_id: server_id.to_string(),
+            name: name.to_string(),
+            color: color.map(|c| c.to_string()),
+            position: position.max(1),
+            is_everyone: false,
+            permissions: perms,
+            encrypted_name: encrypted_name.map(|e| e.to_vec()),
+            name_nonce: name_nonce.map(|e| e.to_vec()),
+        })
+    }
+
+    /// Update name / color / permissions of a role. `set_permissions=false`
+    /// leaves the permission bitfield untouched (used by pure renames).
+    pub fn update_role(
+        &self,
+        role_id: &str,
+        name: &str,
+        color: Option<&str>,
+        permissions: Option<i64>,
+        encrypted_name: Option<&[u8]>,
+        name_nonce: Option<&[u8]>,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        match permissions {
+            Some(p) => {
+                conn.execute(
+                    "UPDATE server_roles SET name = ?1, color = ?2, permissions = ?3, encrypted_name = ?5, name_nonce = ?6 WHERE id = ?4",
+                    params![name, color, p & PERM_ALL, role_id, encrypted_name, name_nonce],
+                )
+            }
+            None => conn.execute(
+                "UPDATE server_roles SET name = ?1, color = ?2, encrypted_name = ?4, name_nonce = ?5 WHERE id = ?3",
+                params![name, color, role_id, encrypted_name, name_nonce],
+            ),
+        }
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Delete a role. The @everyone role can never be deleted (it is the
+    /// fallback everyone always has) — callers get an error instead. Members
+    /// holding the role are unassigned, which resets their permissions to
+    /// @everyone, and its overwrites cascade.
+    pub fn delete_role(&self, role_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let is_everyone: bool = conn
+            .query_row(
+                "SELECT COALESCE(is_everyone, 0) != 0 FROM server_roles WHERE id = ?1",
+                params![role_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if is_everyone {
+            return Err("The @everyone role cannot be deleted".to_string());
+        }
+        conn.execute("UPDATE server_members SET role_id = NULL WHERE role_id = ?1", params![role_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM role_overwrites WHERE role_id = ?1", params![role_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM server_roles WHERE id = ?1 AND is_everyone = 0", params![role_id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn set_role_position(&self, role_id: &str, position: i32) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE server_roles SET position = ?1 WHERE id = ?2 AND is_everyone = 0",
+            params![position, role_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Highest role position held by a member. The owner sits above everything
+    /// (i64::MAX); a member with no role is at the @everyone position (0).
+    pub fn member_role_position(&self, server_id: &str, user_id: &str) -> Result<i64, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        Self::member_role_position_c(&conn, server_id, user_id)
+    }
+
+    fn member_role_position_c(conn: &Connection, server_id: &str, user_id: &str) -> Result<i64, String> {
+        if Self::is_server_owner_c(conn, user_id, server_id)? {
+            return Ok(i64::MAX);
+        }
+        let pos: Option<i32> = conn
+            .query_row(
+                "SELECT r.position FROM server_members sm
+                 INNER JOIN server_roles r ON r.id = sm.role_id
+                 WHERE sm.server_id = ?1 AND sm.user_id = ?2",
+                params![server_id, user_id],
+                |row| row.get(0),
+            )
+            .ok();
+        Ok(pos.map(|p| p as i64).unwrap_or(0))
+    }
+
+    pub fn get_member_role_id(&self, server_id: &str, user_id: &str) -> Result<Option<String>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        Ok(conn
+            .query_row(
+                "SELECT role_id FROM server_members WHERE server_id = ?1 AND user_id = ?2",
+                params![server_id, user_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .map_err(|_| "Not a member".to_string())?)
+    }
+
+    /// Assign (or clear, with None) the single role of a member.
+    pub fn set_member_role(&self, server_id: &str, user_id: &str, role_id: Option<&str>) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        if let Some(rid) = role_id {
+            // The role must belong to this server.
+            let belongs: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM server_roles WHERE id = ?1 AND server_id = ?2",
+                    params![rid, server_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+            if !belongs {
+                return Err("Role does not belong to this server".to_string());
+            }
+        }
+        conn.execute(
+            "UPDATE server_members SET role_id = ?1 WHERE server_id = ?2 AND user_id = ?3",
+            params![role_id, server_id, user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    // --- Permission resolution ---
+
+    /// Effective permissions of a member, optionally scoped to one channel
+    /// (which also applies the channel's category overwrite).
+    pub fn member_permissions(&self, server_id: &str, user_id: &str, channel_id: Option<&str>) -> Result<i64, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        Self::member_permissions_c(&conn, server_id, user_id, channel_id)
+    }
+
+    fn member_permissions_c(conn: &Connection, server_id: &str, user_id: &str, channel_id: Option<&str>) -> Result<i64, String> {
+        // The owner always holds everything and can never be restricted.
+        if Self::is_server_owner_c(conn, user_id, server_id)? {
+            return Ok(PERM_ALL);
+        }
+        if !Self::is_member_of_server_c(conn, user_id, server_id)? {
+            return Ok(0);
+        }
+        let everyone_id = Self::ensure_everyone_role_c(conn, server_id)?;
+        let everyone_perms: i64 = conn
+            .query_row("SELECT permissions FROM server_roles WHERE id = ?1", params![everyone_id], |row| row.get(0))
+            .unwrap_or(0);
+        let member_role: Option<String> = conn
+            .query_row(
+                "SELECT role_id FROM server_members WHERE server_id = ?1 AND user_id = ?2",
+                params![server_id, user_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .flatten();
+        // Validate the role still belongs to this server (deleted roles and
+        // stale references fall back to @everyone).
+        let role: Option<(String, i64)> = member_role.and_then(|rid| {
+            conn.query_row(
+                "SELECT id, permissions FROM server_roles WHERE id = ?1 AND server_id = ?2",
+                params![rid, server_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .ok()
+        });
+
+        let mut perms = everyone_perms;
+        if let Some((_, rp)) = &role {
+            perms |= *rp;
+        }
+
+        let channel_id = match channel_id {
+            Some(c) => c,
+            None => return Ok(perms & PERM_ALL),
+        };
+
+        // Overwrite precedence (Discord-like): @everyone category, @everyone
+        // channel, member-role category, member-role channel — each level's
+        // deny clears and allow sets its bits, and later levels win.
+        let apply = |perms: i64, role_id: &str, ttype: &str, tid: &str| -> i64 {
+            match conn.query_row(
+                "SELECT allow, deny FROM role_overwrites WHERE role_id = ?1 AND target_type = ?2 AND target_id = ?3",
+                params![role_id, ttype, tid],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            ) {
+                Ok((allow, deny)) => (perms & !deny) | allow,
+                Err(_) => perms,
+            }
+        };
+
+        let category_id: Option<String> = conn
+            .query_row("SELECT category_id FROM channels WHERE id = ?1", params![channel_id], |row| row.get(0))
+            .ok()
+            .flatten();
+
+        if let Some(cat) = category_id.as_deref() {
+            perms = apply(perms, &everyone_id, "category", cat);
+        }
+        perms = apply(perms, &everyone_id, "channel", channel_id);
+        if let Some((rid, _)) = &role {
+            if let Some(cat) = category_id.as_deref() {
+                perms = apply(perms, rid, "category", cat);
+            }
+            perms = apply(perms, rid, "channel", channel_id);
+        }
+        Ok(perms & PERM_ALL)
+    }
+
+    pub fn member_has_permission(&self, server_id: &str, user_id: &str, perm: i64, channel_id: Option<&str>) -> bool {
+        self.member_permissions(server_id, user_id, channel_id)
+            .map(|p| p & perm == perm)
+            .unwrap_or(false)
+    }
+
+    // --- Role overwrites (per channel or per category) ---
+
+    /// (target_type, target_id, allow, deny) for a role.
+    pub fn list_role_overwrites(&self, role_id: &str) -> Result<Vec<(String, String, i64, i64)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT target_type, target_id, allow, deny FROM role_overwrites WHERE role_id = ?1")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![role_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// Set one overwrite. allow=deny=0 removes it (neutral).
+    pub fn set_role_overwrite(&self, role_id: &str, target_type: &str, target_id: &str, allow: i64, deny: i64) -> Result<(), String> {
+        if target_type != "channel" && target_type != "category" {
+            return Err("target_type must be 'channel' or 'category'".to_string());
+        }
+        let allow = allow & PERM_ALL;
+        let deny = deny & PERM_ALL;
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        if allow == 0 && deny == 0 {
+            conn.execute(
+                "DELETE FROM role_overwrites WHERE role_id = ?1 AND target_type = ?2 AND target_id = ?3",
+                params![role_id, target_type, target_id],
+            )
+            .map_err(|e| e.to_string())?;
+            return Ok(());
+        }
+        conn.execute(
+            "INSERT INTO role_overwrites (role_id, target_type, target_id, allow, deny)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(role_id, target_type, target_id) DO UPDATE SET allow = excluded.allow, deny = excluded.deny",
+            params![role_id, target_type, target_id, allow, deny],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Drop every overwrite pointing at a channel/category that no longer exists.
+    pub fn clear_overwrites_for_target(&self, target_type: &str, target_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM role_overwrites WHERE target_type = ?1 AND target_id = ?2",
+            params![target_type, target_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Members of a server with their role metadata (for the member list).
+    pub fn get_server_members_with_roles(&self, server_id: &str) -> Result<Vec<ServerMemberInfo>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT u.id, u.username, sm.role, u.profile_picture_file_id,
+                        sm.role_id, r.name, r.color, COALESCE(r.position, 0)
+                 FROM server_members sm
+                 INNER JOIN users u ON sm.user_id = u.id
+                 LEFT JOIN server_roles r ON r.id = sm.role_id
+                 WHERE sm.server_id = ?1
+                 ORDER BY sm.role = 'owner' DESC, COALESCE(r.position, 0) DESC, u.username ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        let members = stmt
+            .query_map(params![server_id], |row| {
+                Ok(ServerMemberInfo {
+                    id: row.get(0)?,
+                    username: row.get(1)?,
+                    role: row.get(2)?,
+                    profile_picture_file_id: row.get(3)?,
+                    role_id: row.get(4)?,
+                    role_name: row.get(5)?,
+                    role_color: row.get(6)?,
+                    role_position: row.get(7)?,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(members)
     }
 
 }

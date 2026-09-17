@@ -542,6 +542,12 @@ async fn main() {
         .route("/api/servers", get(handlers::list_servers).post(handlers::create_server))
         .route("/api/servers/{server_id}/channels", get(handlers::list_channels).post(handlers::create_channel))
         .route("/api/servers/{server_id}/members", get(handlers::list_server_members))
+        // Roles & permissions: roles are the only way permissions are granted.
+        .route("/api/servers/{server_id}/roles", get(handlers::list_server_roles).post(handlers::create_server_role))
+        .route("/api/servers/{server_id}/roles/{role_id}", put(handlers::update_server_role).delete(handlers::delete_server_role))
+        .route("/api/servers/{server_id}/roles/{role_id}/overwrite", put(handlers::set_role_overwrite))
+        .route("/api/servers/{server_id}/member-role/{user_id}", put(handlers::set_member_role))
+        .route("/api/servers/{server_id}/my-permissions", get(handlers::get_my_permissions))
         .route("/api/servers/{server_id}/members/kick", post(handlers::kick_member))
         .route("/api/servers/{server_id}/members/ban", post(handlers::ban_member))
         .route("/api/servers/{server_id}/members/unban/{user_id}", post(handlers::unban_member))

@@ -103,6 +103,7 @@ pub struct VoiceMember {
     pub force_muted: bool,
     pub force_deafened: bool,
     pub is_owner: bool,
+    pub role_position: i64,
     // Track ids the member is currently sending. Receivers match incoming
     // video tracks against these so a screen share can never be mistaken for
     // a camera feed (or vice versa) when flags + track arrival race.
@@ -180,6 +181,7 @@ fn voice_member_json(m: &VoiceMember) -> serde_json::Value {
         "force_muted": m.force_muted,
         "force_deafened": m.force_deafened,
         "is_owner": m.is_owner,
+        "role_position": m.role_position,
         "camera_track_id": m.camera_track_id,
         "screen_track_id": m.screen_track_id,
         "recv_camera_res": m.recv_camera_res,
@@ -967,6 +969,14 @@ async fn handle_ws_binary(
     // Screen-share audio is deliberately not covered here (it is its own feed,
     // gated by the sharer stopping the share).
     let is_mic_audio = kind_str == "audio" || kind_str.starts_with("audio_");
+    // Roles can deny SPEAK per voice channel/category (mic audio only).
+    if is_mic_audio && room_type == "server" && !channel_id.is_empty() {
+        if let Ok(sid) = state.db.get_server_id_for_channel(&channel_id) {
+            if !state.db.member_has_permission(&sid, user_id, crate::db::PERM_SPEAK, Some(&channel_id)) {
+                return;
+            }
+        }
+    }
     if is_mic_audio {
         let muted = {
             let rooms = match state.voice_rooms.read() {
@@ -1052,6 +1062,18 @@ async fn handle_ws_message(
                 Err(_) => return,
             };
             if !state.db.is_member_of_server(user_id, &server_id).unwrap_or(false) {
+                return;
+            }
+            // Role permissions: sending needs SEND_MESSAGES in this channel, and
+            // a thread reply needs REPLY_IN_THREADS (both can be denied per
+            // channel or per category).
+            let thread_parent_id_check = parsed.get("thread_parent_id").and_then(|c| c.as_str());
+            let needed = if thread_parent_id_check.is_some() {
+                crate::db::PERM_SEND_MESSAGES | crate::db::PERM_REPLY_IN_THREADS
+            } else {
+                crate::db::PERM_SEND_MESSAGES
+            };
+            if !state.db.member_has_permission(&server_id, user_id, needed, Some(channel_id)) {
                 return;
             }
 
@@ -1452,11 +1474,21 @@ async fn handle_ws_message(
                 Err(_) => return,
             };
 
+            // Own messages can always be deleted; deleting someone else's needs
+            // MANAGE_MESSAGES in this channel.
             match state.db.delete_message(message_id, user_id) {
                 Ok(()) => {}
-                Err(e) => {
-                    tracing::error!("Failed to delete message: {}", e);
-                    return;
+                Err(_) => {
+                    let server_id_for_perm = state.db.get_server_id_for_channel(&channel_id).unwrap_or_default();
+                    if server_id_for_perm.is_empty()
+                        || !state.db.member_has_permission(&server_id_for_perm, user_id, crate::db::PERM_MANAGE_MESSAGES, Some(&channel_id))
+                    {
+                        return;
+                    }
+                    if let Err(e) = state.db.delete_message_any(message_id) {
+                        tracing::error!("Failed to delete message: {}", e);
+                        return;
+                    }
                 }
             };
 
@@ -1715,6 +1747,15 @@ async fn handle_ws_message(
         "soundboard_play" => {
             // Relay soundboard play to all voice room participants
             let room_type = parsed.get("room_type").and_then(|s| s.as_str()).unwrap_or("server");
+            // Playing a clip needs USE_SOUNDBOARD in this server (server rooms
+            // only; DM calls have no server roles).
+            if room_type != "dm" {
+                let sid = parsed.get("server_id").and_then(|s| s.as_str()).unwrap_or("");
+                let ch_id = parsed.get("channel_id").and_then(|s| s.as_str());
+                if sid.is_empty() || !state.db.member_has_permission(sid, user_id, crate::db::PERM_USE_SOUNDBOARD, ch_id) {
+                    return;
+                }
+            }
             if room_type == "dm" {
                 // DM call: relay to the DM voice room
                 let dm_ch = parsed.get("dm_channel_id").and_then(|s| s.as_str()).unwrap_or("").to_string();
@@ -1925,9 +1966,10 @@ async fn handle_ws_message(
             if !state.db.is_member_of_server(user_id, &server_id).unwrap_or(false) {
                 return;
             }
-            // Server channels: only the server OWNER may pin or unpin messages
-            // (no permission system yet — owner is the only elevated role).
-            if !state.db.is_server_owner(user_id, &server_id).unwrap_or(false) {
+            // Server channels: pinning needs PIN_MESSAGES (the owner always has
+            // it; the owner can now hand it to a role instead of moderating
+            // every pin themselves).
+            if !state.db.member_has_permission(&server_id, user_id, crate::db::PERM_PIN_MESSAGES, Some(&channel_id)) {
                 return;
             }
             if msg_type == "message_pin" {
@@ -2013,6 +2055,9 @@ async fn handle_ws_message(
                     Err(_) => return,
                 };
                 if !state.db.is_member_of_server(user_id, &server_id).unwrap_or(false) {
+                    return;
+                }
+                if !state.db.member_has_permission(&server_id, user_id, crate::db::PERM_ADD_REACTIONS, Some(&channel_id)) {
                     return;
                 }
                 if state.db.get_message_channel_id(&message_id).ok().as_deref() != Some(channel_id.as_str()) {
@@ -2105,6 +2150,9 @@ async fn handle_ws_message(
                     Err(_) => return,
                 };
                 if !state.db.is_member_of_server(user_id, &server_id).unwrap_or(false) {
+                    return;
+                }
+                if !state.db.member_has_permission(&server_id, user_id, crate::db::PERM_VIEW_CHANNEL, Some(&channel_id)) {
                     return;
                 }
                 if state.db.get_message_channel_id(&message_id).ok().as_deref() != Some(channel_id.as_str()) {
@@ -2419,6 +2467,10 @@ async fn handle_voice_join(
         } else {
             return;
         }
+        // Roles can deny CONNECT_VOICE per voice channel/category.
+        if !state.db.member_has_permission(&server_id, user_id, crate::db::PERM_CONNECT_VOICE, Some(&channel_id)) {
+            return;
+        }
     } else {
         if dm_channel_id.is_empty() {
             return;
@@ -2436,6 +2488,11 @@ async fn handle_voice_join(
         .unwrap_or_else(|_| "?".to_string());
     let is_owner = room_type == "server"
         && state.db.is_server_owner(user_id, &server_id).unwrap_or(false);
+    let role_position = if room_type == "server" {
+        state.db.member_role_position(&server_id, user_id).unwrap_or(0)
+    } else {
+        0
+    };
     let (force_muted, force_deafened) = if room_type == "server" {
         state.db.get_voice_sanction(&server_id, user_id).unwrap_or((false, false))
     } else {
@@ -2453,6 +2510,7 @@ async fn handle_voice_join(
         force_muted,
         force_deafened,
         is_owner,
+        role_position,
         camera_track_id: None,
         screen_track_id: None,
         recv_camera_res: 0,
@@ -3238,11 +3296,28 @@ async fn handle_voice_control(
     };
     let room_id = voice_room_id(&room_type, &channel_id, &dm_channel_id);
 
-    // Only server rooms have forceful controls; only the server owner can use them
+    // Only server rooms have forceful controls. Moderation actions come from
+    // the role permission system: mute/deafen needs MUTE_MEMBERS, kicking
+    // someone out of voice needs MOVE_MEMBERS. The server owner always has
+    // both, and can now delegate them to a role.
     if room_type != "server" {
         return;
     }
-    if server_id.is_empty() || !state.db.is_server_owner(user_id, &server_id).unwrap_or(false) {
+    if server_id.is_empty() {
+        return;
+    }
+    let needed = if action == "kick" { crate::db::PERM_MOVE_MEMBERS } else { crate::db::PERM_MUTE_MEMBERS };
+    if !state.db.member_has_permission(&server_id, user_id, needed, None) {
+        return;
+    }
+    // Nobody can voice-moderate the owner, and a moderator cannot target a
+    // member whose role is at or above their own.
+    if state.db.is_server_owner(&target_user_id, &server_id).unwrap_or(false) {
+        return;
+    }
+    if state.db.member_role_position(&server_id, user_id).unwrap_or(0)
+        <= state.db.member_role_position(&server_id, &target_user_id).unwrap_or(0)
+    {
         return;
     }
 

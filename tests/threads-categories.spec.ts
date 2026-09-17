@@ -31,7 +31,10 @@ async function registerAndSetup(page: Page, username: string): Promise<{serverId
         const cl = document.getElementById('channel-list');
         return cl && cl.innerHTML.length > 10;
     }, { timeout: 10000 });
-    const createBtn = page.locator('.create-channel-btn').first();
+    // The sidebar renders "+ Category" BEFORE "+ Channel", so .first() would hit
+    // the category modal and this helper would wait for a channel-name input
+    // that never opens. Target the channel button explicitly.
+    const createBtn = page.locator('.create-channel-btn', { hasText: '+ Channel' }).first();
     if (await createBtn.isVisible().catch(() => false)) {
         await createBtn.click();
         await page.waitForSelector('#new-channel-name', { timeout: 5000 });
