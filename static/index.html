@@ -8,7 +8,7 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <link rel="manifest" href="/manifest.json">
     <title>E2E Chat</title>
-    <link rel="stylesheet" href="style.css?v=18">
+    <link rel="stylesheet" href="style.css?v=20">
 </head>
 <body>
     <!-- Inlined SVG icon sprite (hidden, referenced via <use href="#icon-name">) -->
@@ -476,6 +476,11 @@
                     </p>
                     <div id="roles-list" class="roles-list"></div>
                     <div id="role-editor" class="role-editor" style="display:none">
+                        <div class="role-editor-actions" style="margin-bottom:8px">
+                            <button class="btn-invite" id="save-role-btn">Save role</button>
+                            <button class="btn-cancel" id="cancel-role-btn">Cancel</button>
+                            <button class="btn-cancel" id="delete-role-btn" style="display:none;color:var(--danger)">Delete role</button>
+                        </div>
                         <div class="role-editor-head">
                             <input type="color" id="role-color-input" class="role-color-input" value="#99aab5" title="Role color (member list circle)">
                             <input type="text" id="role-name-input" class="role-name-input" maxlength="64" placeholder="Role name">
@@ -499,10 +504,6 @@
                             <select id="role-overwrite-target" class="role-ow-target"></select>
                             <p id="role-overwrite-hint" class="settings-hint" style="font-size:11px"></p>
                             <div id="role-overwrite-boxes" class="role-ow-boxes"></div>
-                        </div>
-                        <div class="role-editor-actions">
-                            <button class="btn-invite" id="save-role-btn">Save role</button>
-                            <button class="btn-cancel" id="delete-role-btn" style="display:none;color:var(--danger)">Delete role</button>
                         </div>
                     </div>
                 </div>
@@ -2365,10 +2366,10 @@
     <script src="secure-storage.js?v=2"></script>
     <script src="voice.js?v=19"></script>
     <script src="soundboard-pairing.js?v=12"></script>
-    <script src="thread_categories_shortcuts.js?v=5"></script>
-    <script src="roles.js?v=2"></script>
+    <script src="thread_categories_shortcuts.js?v=7"></script>
+    <script src="roles.js?v=4"></script>
     <script src="doc-preview.js?v=2"></script>
-    <script src="chat.js?v=44"></script>
+    <script src="chat.js?v=47"></script>
     <script>
     // PWA: Register service worker
     if ('serviceWorker' in navigator) {

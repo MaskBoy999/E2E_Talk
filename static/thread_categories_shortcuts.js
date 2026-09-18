@@ -16,6 +16,62 @@
 
 
 
+    // ─── Drag auto-scroll for the channel list ────────────────────────
+    // While a channel or category is being dragged the sidebar can no longer
+    // be scrolled by hand, so dropping something into a category that is
+    // currently off-screen would be impossible. Holding the pointer near the
+    // top/bottom edge of #channel-list scrolls it for the whole drag.
+    var _clistScroll = { active: false, x: 0, y: 0, raf: null };
+    var CLIST_SCROLL_EDGE = 40;   // px band at each edge that triggers scrolling
+    var CLIST_SCROLL_MAX = 16;    // px per frame at the very edge
+
+    function _clistOnDragOver(e) {
+        _clistScroll.x = e.clientX;
+        _clistScroll.y = e.clientY;
+    }
+
+    function _clistScrollFromPoint(x, y) {
+        var el = document.getElementById('channel-list');
+        if (!el) return;
+        var rect = el.getBoundingClientRect();
+        // Only while the pointer is actually over the sidebar horizontally.
+        if (x < rect.left - 24 || x > rect.right + 24) return;
+        var delta = 0;
+        if (y < rect.top + CLIST_SCROLL_EDGE) {
+            var up = (rect.top + CLIST_SCROLL_EDGE - y) / CLIST_SCROLL_EDGE;
+            delta = -Math.ceil(Math.max(0, Math.min(1, up)) * CLIST_SCROLL_MAX);
+        } else if (y > rect.bottom - CLIST_SCROLL_EDGE) {
+            var down = (y - (rect.bottom - CLIST_SCROLL_EDGE)) / CLIST_SCROLL_EDGE;
+            delta = Math.ceil(Math.max(0, Math.min(1, down)) * CLIST_SCROLL_MAX);
+        }
+        if (delta) el.scrollTop = el.scrollTop + delta;
+    }
+
+    function _clistScrollTick() {
+        if (!_clistScroll.active) { _clistScroll.raf = null; return; }
+        _clistScrollFromPoint(_clistScroll.x, _clistScroll.y);
+        _clistScroll.raf = requestAnimationFrame(_clistScrollTick);
+    }
+
+    function startChannelListAutoScroll() {
+        if (_clistScroll.active) return;
+        if (!document.getElementById('channel-list')) return;
+        _clistScroll.active = true;
+        // Capture so a child calling stopPropagation cannot hide the pointer.
+        document.addEventListener('dragover', _clistOnDragOver, true);
+        if (_clistScroll.raf) cancelAnimationFrame(_clistScroll.raf);
+        _clistScroll.raf = requestAnimationFrame(_clistScrollTick);
+    }
+
+    function stopChannelListAutoScroll() {
+        if (!_clistScroll.active) return;
+        _clistScroll.active = false;
+        document.removeEventListener('dragover', _clistOnDragOver, true);
+        if (_clistScroll.raf) { cancelAnimationFrame(_clistScroll.raf); _clistScroll.raf = null; }
+    }
+
+
+
     // ─── F3: Thread Panel ─────────────────────────────────────────────
 
     var _threadPanelOpen = false;
@@ -724,6 +780,7 @@
         // Drop zone: drop a channel here to remove it from any category
         list.addEventListener('drop', function (e) {
             e.preventDefault();
+            stopChannelListAutoScroll();
             var channelId = e.dataTransfer.getData('text/channel-id') || e.dataTransfer.getData('text/plain');
             if (!channelId) return;
             // Check the drop wasn't inside a category group (those have their own handlers)
@@ -953,6 +1010,9 @@
 
         group.addEventListener('drop', function (e) {
             e.preventDefault();
+            // A drop reloads the channel list, which can remove the drag source
+            // before `dragend` fires — so stop scrolling right here.
+            stopChannelListAutoScroll();
             group.style.background = '';
             group.classList.remove('drag-over-top', 'drag-over-bottom');
             var catId = e.dataTransfer.getData('text/category-id');
@@ -1023,9 +1083,11 @@
                 e.dataTransfer.setData('text/category-id', categoryId);
                 e.dataTransfer.effectAllowed = 'move';
                 setTimeout(function () { group.classList.add('dragging'); }, 0);
+                startChannelListAutoScroll();
             });
             header.addEventListener('dragend', function () {
                 group.classList.remove('dragging');
+                stopChannelListAutoScroll();
                 document.querySelectorAll('.drag-over-top, .drag-over-bottom').forEach(function (el) {
                     el.classList.remove('drag-over-top', 'drag-over-bottom');
                 });
@@ -1094,6 +1156,7 @@
         header.addEventListener('dragover', function (ev) { ev.preventDefault(); });
 
         header.addEventListener('drop', function (ev) {
+            stopChannelListAutoScroll();
 
             ev.preventDefault();
 
@@ -1174,9 +1237,11 @@
                 e.dataTransfer.setData('text/plain', ch.id);
                 e.dataTransfer.effectAllowed = 'move';
                 setTimeout(function () { div.classList.add('dragging'); }, 0);
+                startChannelListAutoScroll();
             });
             div.addEventListener('dragend', function () {
                 div.classList.remove('dragging');
+                stopChannelListAutoScroll();
                 document.querySelectorAll('.drag-over-top, .drag-over-bottom').forEach(function (el) {
                     el.classList.remove('drag-over-top', 'drag-over-bottom');
                 });
@@ -1209,6 +1274,7 @@
             div.addEventListener('drop', function (e) {
                 e.preventDefault();
                 e.stopPropagation();
+                stopChannelListAutoScroll();
                 div.classList.remove('drag-over-top', 'drag-over-bottom');
                 var draggedChId = e.dataTransfer.getData('text/channel-id');
                 if (draggedChId && draggedChId !== ch.id && isOwner) {
@@ -1375,7 +1441,7 @@
                 return;
             }
             var el = document.createElement('div');
-            el.className = 'context-menu-item' + (item.danger ? ' context-menu-danger' : '');
+            el.className = 'context-menu-item' + (item.danger ? ' context-menu-danger' : '') + (item.disabled ? ' disabled' : '');
             // An item may carry `icon` (a sprite name) — render the icon glyph
             // next to the label. The icon markup comes from the trusted local
             // icon() sprite helper; the LABEL is always inserted as text, never
@@ -1389,11 +1455,16 @@
             } else {
                 el.textContent = item.label;
             }
-            el.addEventListener('click', function (e) {
-                e.stopPropagation();
-                menu.remove();
-                item.action();
-            });
+            if (item.disabled) {
+                el.style.opacity = '0.4';
+                el.style.cursor = 'default';
+            } else {
+                el.addEventListener('click', function (e) {
+                    e.stopPropagation();
+                    menu.remove();
+                    item.action();
+                });
+            }
             menu.appendChild(el);
         });
         menu.style.left = x + 'px';

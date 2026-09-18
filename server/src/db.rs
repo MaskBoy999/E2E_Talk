@@ -8509,7 +8509,7 @@ impl Database {
         conn.execute(
             "INSERT INTO server_roles (id, server_id, name, color, position, is_everyone, permissions, encrypted_name, name_nonce)
              VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8)",
-            params![id, server_id, name, color, position.max(1), perms, encrypted_name, name_nonce],
+            params![id, server_id, name, color, position, perms, encrypted_name, name_nonce],
         )
         .map_err(|e| e.to_string())?;
         Ok(ServerRole {
@@ -8517,7 +8517,7 @@ impl Database {
             server_id: server_id.to_string(),
             name: name.to_string(),
             color: color.map(|c| c.to_string()),
-            position: position.max(1),
+            position: position,
             is_everyone: false,
             permissions: perms,
             encrypted_name: encrypted_name.map(|e| e.to_vec()),
@@ -8537,16 +8537,25 @@ impl Database {
         name_nonce: Option<&[u8]>,
     ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        // Use COALESCE to preserve existing encrypted_name/name_nonce when not provided
+        let enc = encrypted_name.map(|v| v.to_vec());
+        let nonce = name_nonce.map(|v| v.to_vec());
         match permissions {
             Some(p) => {
                 conn.execute(
-                    "UPDATE server_roles SET name = ?1, color = ?2, permissions = ?3, encrypted_name = ?5, name_nonce = ?6 WHERE id = ?4",
-                    params![name, color, p & PERM_ALL, role_id, encrypted_name, name_nonce],
+                    "UPDATE server_roles SET name = ?1, color = ?2, permissions = ?3,
+                     encrypted_name = COALESCE(?5, encrypted_name),
+                     name_nonce = COALESCE(?6, name_nonce)
+                     WHERE id = ?4",
+                    params![name, color, p & PERM_ALL, role_id, enc.as_deref(), nonce.as_deref()],
                 )
             }
             None => conn.execute(
-                "UPDATE server_roles SET name = ?1, color = ?2, encrypted_name = ?4, name_nonce = ?5 WHERE id = ?3",
-                params![name, color, role_id, encrypted_name, name_nonce],
+                "UPDATE server_roles SET name = ?1, color = ?2,
+                 encrypted_name = COALESCE(?4, encrypted_name),
+                 name_nonce = COALESCE(?5, name_nonce)
+                 WHERE id = ?3",
+                params![name, color, role_id, enc.as_deref(), nonce.as_deref()],
             ),
         }
         .map_err(|e| e.to_string())?;

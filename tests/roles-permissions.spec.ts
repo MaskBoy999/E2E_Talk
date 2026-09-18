@@ -524,7 +524,11 @@ test.describe('Server roles & permissions', () => {
         expect(saved, 'role persisted').toBeTruthy();
         expect(saved.color).toBe('#ff0055');
         expect(saved.permissions).toBeGreaterThan(DEFAULT_EVERYONE); // master toggle granted everything
-        // Per-channel override UI is present for the selected role.
+        // Saving closes the role editor, so re-select the role to reach its
+        // per-channel overrides.
+        await roleRow.click();
+        await page.waitForTimeout(400);
+        await expect(page.locator('#role-editor')).toBeVisible();
         await expect(page.locator('#role-overwrite-target')).toBeVisible();
         await page.locator('#server-settings-modal #close-server-settings').click();
         await page.waitForTimeout(500);

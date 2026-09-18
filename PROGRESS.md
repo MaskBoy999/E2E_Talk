@@ -6958,3 +6958,132 @@ deny clears and allow sets its bits; later levels win.
 
 **Files:** `static/index.html` (channel-perm-modal HTML), `static/roles.js` (`openChannelPermissionsModal`),
 `static/thread_categories_shortcuts.js` (context menu items), `static/style.css` (modal styles).
+
+### 122. Owner immunity for role operations
+
+**Bug:** Server owner got "Cannot grant permissions you do not hold" and "Cannot modify a role at or above your own role" when creating/updating/deleting roles or setting overwrites. The owner has no role assigned, so `member_role_position` returns 0, and every role has position >= 0 — meaning the position check `actor_position <= role.position` always blocked the owner.
+
+**Fix:** All four role CRUD handlers (`create_server_role`, `update_server_role`, `delete_server_role`, `set_role_overwrite`) now compute `is_owner` once and skip both the position check and the "cannot grant permissions" check for the owner. The owner is never restricted in any way.
+
+**Files:** `server/src/handlers.rs`
+
+### 123. Role tier reordering via arrows and drag-and-drop
+
+**Bug:** Moving a role with arrows merged it into the adjacent tier (same position) instead of creating a new tier between tiers. No drag-and-drop was supported.
+
+**Fix:**
+- `moveRole()` now calculates a new position BETWEEN the current and target tier (midpoint), creating a new tier. If gap is too small, it shifts the target tier.
+- Role rows are draggable between tiers — dropping on a tier assigns the role to that tier's position.
+- Tier labels are draggable for reordering entire tiers.
+- Added `moveRoleToPosition()` and `batchReorderRolePositions()` for drag-and-drop.
+- Added `PUT /api/servers/{sid}/roles/reorder` batch endpoint for atomic multi-role reordering.
+- Added CSS for drag indicators (`.role-row.dragging`, `.role-tier-group.drag-over`, `.role-drop-indicator`).
+
+**Files:** `static/roles.js`, `static/style.css`, `server/src/handlers.rs`, `server/src/main.rs`
+
+### 124. Role tiers: arrows in/out, real drag-and-drop, single-role outlines, mobile drag
+
+**Bugs:**
+- Arrows could move a role *out* of a tier but never *into* one — the midpoint math always
+  invented a new tier.
+- Dragging a role never worked: the drop logic merged into a tier instead of offering
+  "new tier" placements, and the insertion strips were flex-shrunk to 2 px by the scroll
+  container, so they were impossible to hit.
+- A lone role showed no visible tier outline (the border fallback was `rgba(255,255,255,0.08)`).
+- The member right-click menu's `— Role —` section header was a clickable dead option.
+- Reordering a role (position-only update) wiped its `encrypted_name`/`name_nonce` to NULL.
+
+**Fixes:**
+- `roles.js` now models tiers explicitly (`buildTiers()`): one tier = all roles sharing a
+  `position`. Every edit recomputes the whole tier order and renumbers only the tiers the
+  caller may manage (`computeTierPositionUpdates()`), pushing it through the batch
+  `PUT /api/servers/{sid}/roles/reorder` endpoint. Positions stay evenly spaced (10 / 20 / 30 …)
+  and never run out of integer gaps.
+- **Arrows:** a role that *shares* its tier peels off into its own new tier (move OUT); a role
+  *alone* in its tier merges into the neighbour (move IN). The top/bottom tier simply creates a
+  new strongest/weakest tier, so both directions work with no modifier key.
+- **Drag-and-drop:** each tier is a "join this tier" target and a thin insertion strip sits above
+  every tier (plus one trailing strip) for "create a new tier here". Dropping a tier *label*
+  moves the whole tier. All strips/highlights are constant-height so hovering never reflows the
+  list. `.roles-list > * { flex: 0 0 auto }` stops the scroll container shrinking rows or strips.
+- **Outlines:** tier boxes now use a visible border + faint background, so a one-role tier still
+  reads as a tier.
+- **Mobile:** long-press (320 ms) picks a role up, a fixed ghost follows the finger, and a small
+  move before the timer fires cancels the pick-up so scrolling still works. The tap that ends a
+  drag is swallowed. The same hardening was applied to the server-icon touch drag (axis-aware
+  cancel, ghost placed at the current finger position, post-drag click suppressed).
+- `update_role()` in `db.rs` now uses `COALESCE(?n, encrypted_name)` so a position-only update no
+  longer nulls the encrypted role name.
+- Context-menu renderers (`chat.js` `showContextMenuAt`, `thread_categories_shortcuts.js`
+  `_showContextMenu`) honour `disabled`; the member menu mapping no longer drops the flag.
+  The overwrite-target `<select>` placeholder is `disabled selected hidden`.
+- New roles are created as their own tier below the weakest one instead of colliding at position 0.
+
+**Tests:** `tests/role-tiers.spec.ts` (new, 5 tests) drives a real browser: three single-role
+outlined tiers, arrow merge/peel, drag-to-join + drag-to-insert-strip + whole-tier drag, the
+disabled menu header, and a 390 px touch viewport long-press drag. Screenshots land in
+`test-results/role-tiers/`. `tests/roles-permissions.spec.ts` UI test updated (saving a role now
+closes the editor by design).
+
+**Files:** `static/roles.js`, `static/chat.js`, `static/style.css`, `static/index.html`,
+`static/thread_categories_shortcuts.js`, `server/src/db.rs`, `tests/role-tiers.spec.ts`,
+`tests/roles-permissions.spec.ts`
+
+### 125. Drag auto-scroll for the server rail and the channel sidebar
+
+While an HTML5 drag is in flight the browser owns the pointer, so the user cannot scroll the
+list by hand — which made moving a server to an off-screen folder (or a channel to an off-screen
+category) impossible. Both scrollable sidebars now scroll themselves while a drag is held near
+their top/bottom edge.
+
+- **Server rail** (`chat.js`): `startStripAutoScroll()` / `stopStripAutoScroll()` run a
+  `requestAnimationFrame` ticker that reads the last `dragover` position (captured on `document`
+  so a child calling `stopPropagation()` cannot hide it) and scrolls `#server-strip` by up to
+  18 px/frame inside a 44 px edge band. It only scrolls while the pointer is horizontally over
+  the rail, so dragging across the app does not move it.
+- Started from both rail drag sources — server icons and group headers — and stopped on `dragend`
+  *and* on every drop target (icon, group wrapper, list background), because a drop re-renders
+  the rail and can remove the drag source before `dragend` ever fires.
+- The mobile long-press touch drag calls the same point-based scroll helper from `touchmove`, so
+  touch dragging scrolls the rail too.
+- **Channel sidebar** (`thread_categories_shortcuts.js`): the same ticker for `#channel-list`,
+  started from channel and category drag sources and stopped on `dragend` plus the three drop
+  targets (category group, category header, channel item, list background).
+
+**Tests:** `tests/server-rail-scroll.spec.ts` (new, 5 tests, real Chromium, screenshots in
+`test-results/server-rail-scroll/`) — the rail actually overflows, holding a dragged server at
+the bottom edge scrolls it down and the top edge scrolls it back up, scrolling stops on release,
+a pointer held over the channel list does *not* scroll the rail, a dragged channel auto-scrolls
+the sidebar, and a 390 px phone viewport scrolls the rail from a long-press touch drag. Both
+scroll tests were verified to fail with the feature disabled, so they are not vacuous.
+
+**Files:** `static/chat.js`, `static/thread_categories_shortcuts.js`, `static/index.html`,
+`tests/server-rail-scroll.spec.ts`
+
+### 126. Security audit — verified findings + implementation plan (research only, no code changed)
+
+Full plan in `SECURITY_FIX_PLAN.md`. Measured, not inferred:
+
+- **Role names are plaintext in the DB and the API (REAL).** A probe role renamed
+  `Top Secret Role` appears 1× in `server/e2e_chat.db-wal` byte scan, while the control strings
+  `Secret Lab` (server name) and `General Voice` (channel name) appear 0× — role names are the
+  one field that never got encrypted end to end. `GET /api/servers/{id}/roles` returns
+  `"name": "Top Secret Role"` next to the ciphertext, and the members endpoint returns
+  `role_name` in cleartext. Three ordered phases (stop writing → client migrates legacy rows →
+  stop serving/wipe) because the plaintext column is the *only* copy for pre-migration-087 rows.
+- **Identity private keys are NOT raw in localStorage (audit claim false).** Raw read after a
+  real registration gives `~3bb7e094073b1aa8.1C…` — they match the `e2e_` sensitive prefix and
+  are wrapped exactly like the JWT. Correct action is a regression test, not a rewrite.
+- **The XOR storage layer is defeated by the same dump it defends (REAL, worse than reported).**
+  `e2e_device_key` + `e2e_encrypted_password` are plaintext bootstrap keys; the probe recovered
+  the real password from them, and the password + fixed public salt derive the storage key. So
+  every `~` value is recoverable from a single localStorage dump. Fix: v2 format
+  `~v2.<b64(nonce24‖XChaCha20-Poly1305)>` via libsodium (already loaded, synchronous once
+  ready), legacy `~tag.b64` stays readable, `_secUpgradeToAead()` re-writes in place with the
+  same key. Note `_secInit()` runs before `sodium.ready` resolves, so it must be deferred.
+- **CSP note:** `script-src 'unsafe-inline'` means XSS still executes, so localStorage
+  encryption is hygiene rather than an XSS defence today (`server/src/main.rs:110`, `:321`).
+
+**Evidence artefacts:** `tests/_probe-security-storage.spec.ts`,
+`tests/_probe-security-storage2.spec.ts` (untracked probes, both passing).
+

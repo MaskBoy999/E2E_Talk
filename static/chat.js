@@ -13544,6 +13544,9 @@ function renderServerList() {
         if (s.server_picture_file_id) { getServerPictureUrl(s.server_picture_file_id, s.id); }
         return '';
     }
+    // Set when a touch drag ends, so the synthetic click the browser fires
+    // after a long-press drag does not also switch servers.
+    var _serverTouchDragEndedAt = 0;
     function makeServerIcon(s, opts) {
         opts = opts || {};
         var div = document.createElement('div');
@@ -13555,6 +13558,8 @@ function renderServerList() {
         div.dataset.id = s.id;
         if (!opts.noSelect) {
             div.addEventListener('click', function(e) {
+                // Swallow the click that follows a touch drag.
+                if (Date.now() - _serverTouchDragEndedAt < 400) return;
                 if (e.isTrusted && window.VoiceManager && window.VoiceManager.exitVoiceChannelView) {
                     try { window.VoiceManager.exitVoiceChannelView(); } catch (_) {}
                 }
@@ -13708,6 +13713,68 @@ function renderServerList() {
             el.classList.remove('drag-over-top', 'drag-over-bottom', 'drag-over-group');
         });
     }
+    // ─── Drag auto-scroll for the server rail ────────────────────────────
+    // Hold the mouse button down for a drag and you cannot scroll the rail
+    // any more, so dragging a server to a folder that is off-screen would be
+    // impossible. Holding the pointer near the rail's top/bottom edge scrolls
+    // it for the duration of the drag.
+    var _stripAutoScroll = { active: false, el: null, x: 0, y: 0, raf: null };
+    var STRIP_SCROLL_EDGE = 44;   // px band at each edge that triggers scrolling
+    var STRIP_SCROLL_MAX = 18;    // px per frame at the very edge
+
+    function _onStripDragOverCapture(e) {
+        _stripAutoScroll.x = e.clientX;
+        _stripAutoScroll.y = e.clientY;
+    }
+
+    function _stripAutoScrollTick() {
+        var st = _stripAutoScroll;
+        if (!st.active) { st.raf = null; return; }
+        _stripAutoScrollFromPoint(st.x, st.y);
+        st.raf = requestAnimationFrame(_stripAutoScrollTick);
+    }
+
+    // Scroll the rail if (x, y) sits in its top/bottom edge band. Shared by the
+    // mouse-drag ticker and the mobile touch-drag handler.
+    function _stripAutoScrollFromPoint(x, y) {
+        var el = document.getElementById('server-strip');
+        if (!el) return;
+        var rect = el.getBoundingClientRect();
+        // Only while the pointer is actually over the rail horizontally —
+        // otherwise dragging across the middle of the app would scroll it.
+        var overRail = x >= rect.left - 24 && x <= rect.right + 24;
+        if (!overRail) return;
+        var delta = 0;
+        if (y < rect.top + STRIP_SCROLL_EDGE) {
+            var up = (rect.top + STRIP_SCROLL_EDGE - y) / STRIP_SCROLL_EDGE;
+            delta = -Math.ceil(Math.max(0, Math.min(1, up)) * STRIP_SCROLL_MAX);
+        } else if (y > rect.bottom - STRIP_SCROLL_EDGE) {
+            var down = (y - (rect.bottom - STRIP_SCROLL_EDGE)) / STRIP_SCROLL_EDGE;
+            delta = Math.ceil(Math.max(0, Math.min(1, down)) * STRIP_SCROLL_MAX);
+        }
+        if (delta) el.scrollTop = el.scrollTop + delta;
+    }
+
+    function startStripAutoScroll() {
+        if (_stripAutoScroll.active) return;
+        var el = document.getElementById('server-strip');
+        if (!el) return;
+        _stripAutoScroll.active = true;
+        _stripAutoScroll.el = el;
+        // Capture so a child calling stopPropagation cannot hide the pointer.
+        document.addEventListener('dragover', _onStripDragOverCapture, true);
+        if (_stripAutoScroll.raf) cancelAnimationFrame(_stripAutoScroll.raf);
+        _stripAutoScroll.raf = requestAnimationFrame(_stripAutoScrollTick);
+    }
+
+    function stopStripAutoScroll() {
+        if (!_stripAutoScroll.active) return;
+        _stripAutoScroll.active = false;
+        document.removeEventListener('dragover', _onStripDragOverCapture, true);
+        if (_stripAutoScroll.raf) { cancelAnimationFrame(_stripAutoScroll.raf); _stripAutoScroll.raf = null; }
+        _stripAutoScroll.el = null;
+    }
+
     function setupDraggableServer(el) {
         el.draggable = true;
         el.addEventListener('dragstart', function(e) {
@@ -13715,9 +13782,11 @@ function renderServerList() {
             e.dataTransfer.setData('text/server-id', id);
             e.dataTransfer.effectAllowed = 'move';
             setTimeout(function() { el.classList.add('dragging'); }, 0);
+            startStripAutoScroll();
         });
         el.addEventListener('dragend', function() {
             el.classList.remove('dragging');
+            stopStripAutoScroll();
             clearDragIndicators();
         });
     }
@@ -13737,6 +13806,9 @@ function renderServerList() {
         el.addEventListener('drop', function(e) {
             e.preventDefault();
             e.stopPropagation();
+            // A drop re-renders the list, which can remove the drag source
+            // before `dragend` fires — so stop scrolling right here.
+            stopStripAutoScroll();
             clearDragIndicators();
             var draggedId = e.dataTransfer.getData('text/server-id');
             if (!draggedId || draggedId === el.dataset.id) return;
@@ -13775,9 +13847,11 @@ function renderServerList() {
                 e.dataTransfer.setData('text/group-id', gId);
                 e.dataTransfer.effectAllowed = 'move';
                 setTimeout(function() { wrapper.classList.add('dragging'); }, 0);
+                startStripAutoScroll();
             });
             hdr.addEventListener('dragend', function() {
                 wrapper.classList.remove('dragging');
+                stopStripAutoScroll();
                 clearDragIndicators();
             });
         }
@@ -13817,6 +13891,9 @@ function renderServerList() {
             if (e.target.closest && e.target.closest('.server-icon')) return;
             e.preventDefault();
             e.stopPropagation();
+            // A drop re-renders the list, which can remove the drag source
+            // before `dragend` fires — so stop scrolling right here.
+            stopStripAutoScroll();
             clearDragIndicators();
             var draggedGroupId = e.dataTransfer.getData('text/group-id');
             var draggedServerId = e.dataTransfer.getData('text/server-id');
@@ -13866,6 +13943,7 @@ function renderServerList() {
     });
     list.addEventListener('drop', function(e) {
         e.preventDefault();
+        stopStripAutoScroll();
         clearDragIndicators();
         var draggedId = e.dataTransfer.getData('text/server-id');
         if (draggedId) {
@@ -13884,33 +13962,38 @@ function renderServerList() {
 
     // --- Touch-based drag for mobile ---
     (function() {
-        var _touchDrag = { active: false, el: null, id: null, ghost: null, timer: null, startY: 0 };
+        var _touchDrag = { active: false, el: null, id: null, ghost: null, timer: null, startX: 0, startY: 0, lastX: 0, lastY: 0 };
         var LONG_PRESS_MS = 350;
         list.querySelectorAll('.server-icon').forEach(function(el) {
             el.addEventListener('touchstart', function(e) {
                 if (!el.dataset.id) return;
                 var touch = e.touches[0];
-                _touchDrag.startY = touch.clientY;
+                _touchDrag.startX = _touchDrag.lastX = touch.clientX;
+                _touchDrag.startY = _touchDrag.lastY = touch.clientY;
                 _touchDrag.el = el;
                 _touchDrag.id = el.dataset.id;
                 _touchDrag.timer = setTimeout(function() {
                     // Start drag
                     _touchDrag.active = true;
                     el.classList.add('dragging');
-                    // Create ghost
+                    // Create ghost at the finger's CURRENT position (not where the
+                    // press started, which is stale by the time the timer fires).
                     var ghost = el.cloneNode(true);
                     ghost.style.cssText = 'position:fixed;z-index:99999;pointer-events:none;opacity:0.85;transform:scale(1.15);transition:none;';
-                    ghost.style.left = (touch.clientX - 20) + 'px';
-                    ghost.style.top = (touch.clientY - 20) + 'px';
+                    ghost.style.left = (_touchDrag.lastX - 20) + 'px';
+                    ghost.style.top = (_touchDrag.lastY - 20) + 'px';
                     document.body.appendChild(ghost);
                     _touchDrag.ghost = ghost;
                     if (navigator.vibrate) navigator.vibrate(30);
                 }, LONG_PRESS_MS);
             }, { passive: false });
             el.addEventListener('touchmove', function(e) {
+                var t0 = e.touches[0];
+                if (t0) { _touchDrag.lastX = t0.clientX; _touchDrag.lastY = t0.clientY; }
                 if (_touchDrag.timer) {
-                    var touch = e.touches[0];
-                    if (Math.abs(touch.clientY - _touchDrag.startY) > 10) {
+                    // Any real movement means the user is scrolling — abort the
+                    // pending long-press instead of hijacking the scroll.
+                    if (t0 && (Math.abs(t0.clientX - _touchDrag.startX) > 10 || Math.abs(t0.clientY - _touchDrag.startY) > 10)) {
                         clearTimeout(_touchDrag.timer);
                         _touchDrag.timer = null;
                     }
@@ -13918,6 +14001,9 @@ function renderServerList() {
                 if (!_touchDrag.active) return;
                 e.preventDefault();
                 var touch = e.touches[0];
+                // Holding near the rail's edge scrolls it, so a server can be
+                // dragged onto a folder that is currently off-screen.
+                _stripAutoScrollFromPoint(touch.clientX, touch.clientY);
                 // Move ghost
                 if (_touchDrag.ghost) {
                     _touchDrag.ghost.style.left = (touch.clientX - 20) + 'px';
@@ -13939,6 +14025,7 @@ function renderServerList() {
                 _touchDrag.timer = null;
                 if (!_touchDrag.active) return;
                 _touchDrag.active = false;
+                _serverTouchDragEndedAt = Date.now();
                 el.classList.remove('dragging');
                 if (_touchDrag.ghost) { _touchDrag.ghost.remove(); _touchDrag.ghost = null; }
                 // Find drop target
@@ -13967,6 +14054,7 @@ function renderServerList() {
                 _touchDrag.timer = null;
                 if (!_touchDrag.active) return;
                 _touchDrag.active = false;
+                _serverTouchDragEndedAt = Date.now();
                 el.classList.remove('dragging');
                 if (_touchDrag.ghost) { _touchDrag.ghost.remove(); _touchDrag.ghost = null; }
                 clearDragIndicators();
@@ -19098,6 +19186,9 @@ async function loadMembers(serverId) {
                         label: it.label,
                         action: it.action || function () {},
                         danger: !!it.danger,
+                        // Carry section headers ("— Role —") through as disabled
+                        // so they render greyed out and cannot be clicked.
+                        disabled: !!it.disabled,
                     };
                 });
                 if (typeof showContextMenuAt === 'function') showContextMenuAt(e, items);
@@ -25373,14 +25464,20 @@ function showContextMenuAt(e, items) {
     menu.style.left = e.clientX + 'px';
     menu.style.top = e.clientY + 'px';
     items.forEach(function (it) {
+        if (!it || (it.label === undefined && it.action === undefined)) return; // skip separators/nulls
         var item = document.createElement('div');
-        item.className = 'context-menu-item' + (it.danger ? ' context-menu-danger' : '');
+        item.className = 'context-menu-item' + (it.danger ? ' context-menu-danger' : '') + (it.disabled ? ' disabled' : '');
         item.textContent = it.label; // textContent — never inject
-        item.addEventListener('click', function (ev) {
-            ev.stopPropagation();
-            menu.remove();
-            try { it.action(); } catch (err) { console.warn('Context action failed:', err); }
-        });
+        if (it.disabled) {
+            item.style.opacity = '0.4';
+            item.style.cursor = 'default';
+        } else {
+            item.addEventListener('click', function (ev) {
+                ev.stopPropagation();
+                menu.remove();
+                try { it.action(); } catch (err) { console.warn('Context action failed:', err); }
+            });
+        }
         menu.appendChild(item);
     });
     document.body.appendChild(menu);

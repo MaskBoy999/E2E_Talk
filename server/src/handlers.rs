@@ -3425,6 +3425,49 @@ pub async fn list_server_roles(
 }
 
 #[derive(Deserialize)]
+pub struct ReorderRolesRequest {
+    pub ordered_ids: Vec<ReorderEntry>,
+}
+
+#[derive(Deserialize)]
+pub struct ReorderEntry {
+    pub id: String,
+    pub position: i32,
+}
+
+/// PUT /api/servers/{sid}/roles/reorder — batch reorder role positions.
+pub async fn reorder_roles(
+    Path(server_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ReorderRolesRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    let is_owner = state.db.is_server_owner(&user_id, &server_id).unwrap_or(false);
+    if !is_owner {
+        if let Some(denied) = perm_denied(&state, &server_id, &user_id, crate::db::PERM_MANAGE_ROLES, None) {
+            return denied;
+        }
+    }
+    let actor_position = if is_owner { i32::MAX } else { state.db.member_role_position(&server_id, &user_id).unwrap_or(0) as i32 };
+    for entry in &req.ordered_ids {
+        if let Some(role) = state.db.get_role(&entry.id).ok() {
+            if role.server_id != server_id || role.is_everyone {
+                continue;
+            }
+            if !is_owner && entry.position >= actor_position {
+                continue;
+            }
+            let _ = state.db.set_role_position(&entry.id, entry.position);
+        }
+    }
+    (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+}
+
+#[derive(Deserialize)]
 pub struct CreateRoleRequest {
     pub name: String,
     #[serde(default)]
@@ -3455,22 +3498,24 @@ pub async fn create_server_role(
         return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Missing permission"}))).into_response();
     }
     let actor_position = state.db.member_role_position(&server_id, &user_id).unwrap_or(0);
-    // Custom roles start at 1 (@everyone owns slot 0). New roles land at the
-    // bottom — like Discord — and are then moved with the role editor's
-    // up/down buttons; either way a role can never be ranked at or above its
-    // creator.
-    let position = req.position.unwrap_or(1).max(1);
-    if actor_position <= position as i64 {
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Cannot create a role at or above your own role"}))).into_response();
+    let is_owner = state.db.is_server_owner(&user_id, &server_id).unwrap_or(false);
+    let position = req.position.unwrap_or(0);
+    // Owner is never restricted; non-owners can only create roles below themselves.
+    if !is_owner {
+        if actor_position <= position as i64 {
+            return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Cannot create a role at or above your own role"}))).into_response();
+        }
     }
     let permissions = req.permissions.unwrap_or(0);
-    let actor_perms = state.db.member_permissions(&server_id, &user_id, None).unwrap_or(0);
-    if permissions & !actor_perms != 0 {
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Cannot grant permissions you do not hold"}))).into_response();
-    }
     let name = req.name.trim();
     if name.is_empty() || name.len() > 64 {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid role name"}))).into_response();
+    }
+    if !is_owner {
+        let actor_perms = state.db.member_permissions(&server_id, &user_id, None).unwrap_or(0);
+        if permissions & !actor_perms != 0 {
+            return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Cannot grant permissions you do not hold"}))).into_response();
+        }
     }
     let enc_name = req.encrypted_name.as_deref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
     let name_nonce = req.name_nonce.as_deref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
@@ -3515,14 +3560,18 @@ pub async fn update_server_role(
         _ => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Role not found"}))).into_response(),
     };
     let actor_position = state.db.member_role_position(&server_id, &user_id).unwrap_or(0);
-    if actor_position <= role.position as i64 {
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Cannot modify a role at or above your own role"}))).into_response();
-    }
-    if let Some(perms) = req.permissions {
-        let actor_perms = state.db.member_permissions(&server_id, &user_id, None).unwrap_or(0);
-        // You can only hand out abilities you actually hold yourself.
-        if perms & !actor_perms != 0 {
-            return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Cannot grant permissions you do not hold"}))).into_response();
+    let is_owner = state.db.is_server_owner(&user_id, &server_id).unwrap_or(false);
+    // Owner is never restricted; non-owners can only modify roles below themselves.
+    if !is_owner {
+        if actor_position <= role.position as i64 {
+            return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Cannot modify a role at or above your own role"}))).into_response();
+        }
+        if let Some(perms) = req.permissions {
+            let actor_perms = state.db.member_permissions(&server_id, &user_id, None).unwrap_or(0);
+            // You can only hand out abilities you actually hold yourself.
+            if perms & !actor_perms != 0 {
+                return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Cannot grant permissions you do not hold"}))).into_response();
+            }
         }
     }
     let name = req.name.unwrap_or_else(|| role.name.clone());
@@ -3536,7 +3585,7 @@ pub async fn update_server_role(
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
     }
     if let Some(new_pos) = req.position {
-        if new_pos >= 1 && (new_pos as i64) < actor_position {
+        if new_pos >= 0 && (new_pos as i64) < actor_position {
             let _ = state.db.set_role_position(&role_id, new_pos);
         }
     }
@@ -3567,7 +3616,8 @@ pub async fn delete_server_role(
         _ => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Role not found"}))).into_response(),
     };
     let actor_position = state.db.member_role_position(&server_id, &user_id).unwrap_or(0);
-    if actor_position <= role.position as i64 {
+    let is_owner = state.db.is_server_owner(&user_id, &server_id).unwrap_or(false);
+    if !is_owner && actor_position <= role.position as i64 {
         return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Cannot delete a role at or above your own role"}))).into_response();
     }
     match state.db.delete_role(&role_id) {
@@ -3606,8 +3656,12 @@ pub async fn set_role_overwrite(
         _ => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Role not found"}))).into_response(),
     };
     let actor_position = state.db.member_role_position(&server_id, &user_id).unwrap_or(0);
-    if actor_position <= role.position as i64 {
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Cannot modify a role at or above your own role"}))).into_response();
+    let is_owner = state.db.is_server_owner(&user_id, &server_id).unwrap_or(false);
+    // Owner is never restricted; non-owners can only overwrite roles below themselves.
+    if !is_owner {
+        if actor_position <= role.position as i64 {
+            return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Cannot modify a role at or above your own role"}))).into_response();
+        }
     }
     // The target must belong to this server.
     let ok_target = if req.target_type == "channel" {
@@ -3620,9 +3674,11 @@ pub async fn set_role_overwrite(
     if !ok_target {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid target"}))).into_response();
     }
-    let actor_perms = state.db.member_permissions(&server_id, &user_id, None).unwrap_or(0);
-    if req.allow & !actor_perms != 0 {
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Cannot grant permissions you do not hold"}))).into_response();
+    if !is_owner {
+        let actor_perms = state.db.member_permissions(&server_id, &user_id, None).unwrap_or(0);
+        if req.allow & !actor_perms != 0 {
+            return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Cannot grant permissions you do not hold"}))).into_response();
+        }
     }
     match state.db.set_role_overwrite(&role_id, &req.target_type, &req.target_id, req.allow, req.deny) {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
