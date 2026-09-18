@@ -1711,6 +1711,74 @@
                 _lastTapTime = now;
             }
         });
+
+        // DM items: double-tap opens DM context menu
+        document.getElementById('channel-list').addEventListener('touchend', function(e) {
+            var dmItem = e.target.closest('.dm-item[data-dm-id]');
+            if (!dmItem) return;
+            var now = Date.now();
+            if (dmItem === _lastTapTarget && (now - _lastTapTime) < DOUBLE_TAP_MS) {
+                e.preventDefault();
+                e.stopPropagation();
+                var touch = e.changedTouches ? e.changedTouches[0] : null;
+                if (touch && typeof showDmContextMenu === 'function') {
+                    var fakeEvt = { clientX: touch.clientX, clientY: touch.clientY, preventDefault: function(){}, stopPropagation: function(){} };
+                    showDmContextMenu(fakeEvt, dmItem.dataset.dmId, dmItem.dataset.username || 'user');
+                }
+                _lastTapTarget = null;
+            } else {
+                _lastTapTarget = dmItem;
+                _lastTapTime = now;
+            }
+        });
+
+        // DM strip button: double-tap opens DM strip context menu
+        (function() {
+            var dmBtn = document.getElementById('dm-strip-btn');
+            if (!dmBtn) return;
+            var _dmLastTap = 0;
+            dmBtn.addEventListener('touchend', function(e) {
+                var now = Date.now();
+                if (now - _dmLastTap < DOUBLE_TAP_MS) {
+                    e.preventDefault();
+                    var touch = e.changedTouches ? e.changedTouches[0] : null;
+                    if (touch && typeof showDmStripContextMenu === 'function') {
+                        var fakeEvt = { clientX: touch.clientX, clientY: touch.clientY, preventDefault: function(){}, stopPropagation: function(){} };
+                        showDmStripContextMenu(fakeEvt);
+                    }
+                    _dmLastTap = 0;
+                } else {
+                    _dmLastTap = now;
+                }
+            });
+        })();
+
+        // Mentions strip button: double-tap opens mentions context menu
+        (function() {
+            var mtBtn = document.getElementById('mentions-strip-btn');
+            if (!mtBtn) return;
+            var _mtLastTap = 0;
+            mtBtn.addEventListener('touchend', function(e) {
+                var now = Date.now();
+                if (now - _mtLastTap < DOUBLE_TAP_MS) {
+                    e.preventDefault();
+                    var touch = e.changedTouches ? e.changedTouches[0] : null;
+                    if (touch) {
+                        // The button already has a contextmenu handler — fire it synthetically
+                        var fakeEvt = new MouseEvent('contextmenu', {
+                            clientX: touch.clientX,
+                            clientY: touch.clientY,
+                            bubbles: true,
+                            cancelable: true
+                        });
+                        mtBtn.dispatchEvent(fakeEvt);
+                    }
+                    _mtLastTap = 0;
+                } else {
+                    _mtLastTap = now;
+                }
+            });
+        })();
     }
 
     // Expose category API

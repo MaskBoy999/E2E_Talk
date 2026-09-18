@@ -13636,6 +13636,12 @@ function renderServerList() {
             e.stopPropagation();
             showServerContextMenu(e, s.id, s.name);
         });
+        div.addEventListener('dblclick', function(e) {
+            if (opts.noSelect) return;
+            e.preventDefault();
+            e.stopPropagation();
+            showServerContextMenu(e, s.id, s.name);
+        });
         return div;
     }
 
@@ -13734,23 +13740,14 @@ function renderServerList() {
                 });
                 header.appendChild(toggle);
             }
-            header.addEventListener('dblclick', async function(e) {
-                e.preventDefault();
-                var newName = await uiPrompt('Rename group:', g.name);
-                if (newName && newName !== g.name) {
-                    authFetch('/api/server-groups/' + g.id, {
-                        method: 'PATCH',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ name: newName })
-                    }).then(function() {
-                        g.name = newName;
-                        renderServerList();
-                    });
-                }
-            });
-            // Right-click for group context menu
+            // Right-click for group context menu (also mobile double-tap)
             header.addEventListener('contextmenu', function(e) {
                 e.preventDefault();
+                showGroupContextMenu(e, g);
+            });
+            header.addEventListener('dblclick', function(e) {
+                e.preventDefault();
+                e.stopPropagation();
                 showGroupContextMenu(e, g);
             });
             wrapper.appendChild(header);
@@ -14127,6 +14124,36 @@ function renderServerList() {
         });
     })();
 
+    // Mobile double-tap on group headers for context menu
+    if (('ontouchstart' in window || navigator.maxTouchPoints > 0) && !list._grpTapBound) {
+        list._grpTapBound = true;
+        var _grpLastTap = null, _grpLastTapTime = 0;
+        list.addEventListener('touchend', function(e) {
+            var hdr = e.target.closest('.server-group-header');
+            if (!hdr) { _grpLastTap = null; return; }
+            var now = Date.now();
+            if (hdr === _grpLastTap && (now - _grpLastTapTime) < 350) {
+                e.preventDefault();
+                e.stopPropagation();
+                var touch = e.changedTouches ? e.changedTouches[0] : null;
+                if (touch) {
+                    var w = hdr.closest('.server-group');
+                    if (w && w.dataset.groupId) {
+                        var g = serverGroups.find(function(g) { return g.id === w.dataset.groupId; });
+                        if (g) {
+                            var fakeEvt = { clientX: touch.clientX, clientY: touch.clientY, preventDefault: function(){}, stopPropagation: function(){} };
+                            showGroupContextMenu(fakeEvt, g);
+                        }
+                    }
+                }
+                _grpLastTap = null;
+            } else {
+                _grpLastTap = hdr;
+                _grpLastTapTime = now;
+            }
+        });
+    }
+
     function getAllServerIds() {
         // Collect all server IDs in DOM order (flat, across groups)
         var result = [];
@@ -14302,7 +14329,7 @@ function renderServerList() {
                     });
             } else if (action === 'delete') {
                 (serversByGroup[group.id] || []).forEach(function(s) {
-                    s.group_id = null;
+                    moveServerToGroup(s.id, null);
                 });
                 authFetch('/api/server-groups/' + group.id, { method: 'DELETE' })
                     .then(function() {
