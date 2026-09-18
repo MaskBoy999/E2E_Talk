@@ -131,8 +131,8 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
 .auth-card {
     background: var(--bg-secondary);
     padding: clamp(20px, 5vw, 40px);
-    border-radius: clamp(8px, 2vw, 12px);
-    box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+    border-radius: 20px;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.4);
     width: 100%;
     max-width: min(400px, 90vw);
 }
@@ -161,15 +161,17 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     padding: clamp(10px, 2.5vw, 12px) clamp(12px, 3vw, 16px);
     margin-bottom: 4%;
     border: 1px solid var(--bg-border);
-    border-radius: clamp(6px, 1.5vw, 8px);
+    border-radius: 12px;
     background: var(--bg-primary);
     color: var(--text-primary);
     font-size: 16px;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
 .auth-card input:not(.auth-code-input):focus {
     outline: none;
     border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(0,0,0,0.2);
 }
 
 /* ===== Auth Input Row (with toggle visibility) ===== */
@@ -253,15 +255,24 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     background: var(--accent);
     color: var(--bg-primary);
     border: none;
-    border-radius: clamp(6px, 1.5vw, 8px);
+    border-radius: 12px;
     font-size: clamp(14px, 2.5vw, 16px);
     font-weight: 600;
     cursor: pointer;
     margin-top: 8px;
+    transition: transform 0.15s ease, box-shadow 0.2s ease;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.3);
 }
 
 .auth-card button[type="submit"]:hover {
     background: var(--accent-hover);
+    box-shadow: 0 6px 20px rgba(0,0,0,0.4);
+    transform: translateY(-2px);
+}
+
+.auth-card button[type="submit"]:active {
+    transform: translateY(0);
+    box-shadow: 0 2px 10px rgba(0,0,0,0.3);
 }
 
 .auth-card .toggle {
@@ -343,7 +354,7 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
 .server-icon {
     width: clamp(36px, 6vw, 48px);
     height: clamp(36px, 6vw, 48px);
-    border-radius: clamp(12px, 2.5vw, 16px);
+    border-radius: 16px;
     background: var(--bg-secondary);
     color: var(--text-muted);
     display: flex;
@@ -352,19 +363,20 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     font-weight: 700;
     font-size: clamp(14px, 2.5vw, 18px);
     cursor: pointer;
-    transition: border-radius 0.15s ease, background 0.15s ease, color 0.15s ease;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
     border: 2px solid transparent;
     flex-shrink: 0;
 }
 
 .server-icon:hover {
-    border-radius: clamp(8px, 2vw, 12px);
+    border-radius: 12px;
     background: var(--accent);
     color: var(--bg-primary);
+    transform: translateY(-2px);
 }
 
 .server-icon.active {
-    border-radius: clamp(8px, 2vw, 12px);
+    border-radius: 12px;
     background: var(--accent);
     color: var(--bg-primary);
 }
@@ -428,8 +440,9 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     font-size: 18px;
     cursor: pointer;
     padding: 2px 6px;
-    border-radius: 4px;
+    border-radius: 8px;
     line-height: 1;
+    transition: background 0.2s, color 0.2s;
 }
 
 .invite-btn:hover {
@@ -447,9 +460,10 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     font-size: clamp(12px, 2vw, 14px);
     cursor: pointer;
     padding: clamp(8px, 1.5vw, 10px) clamp(8px, 2vw, 12px);
-    border-radius: 0;
+    border-radius: 8px;
     text-align: left;
     flex-shrink: 0;
+    transition: background 0.2s, color 0.2s;
 }
 
 .create-channel-btn:hover {
@@ -476,11 +490,12 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
 
 .channel-item {
     padding: clamp(8px, 1.5vw, 10px) clamp(8px, 2vw, 12px);
-    border-radius: clamp(4px, 1vw, 6px);
+    border-radius: 10px;
     cursor: pointer;
     margin-bottom: clamp(2px, 0.5vw, 4px);
     font-size: clamp(12px, 2vw, 14px);
     color: var(--text-muted);
+    transition: background 0.2s ease, color 0.2s ease;
 }
 
 .channel-item:hover {
@@ -522,7 +537,8 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     text-decoration: none;
     font-size: clamp(11px, 1.5vw, 12px);
     padding: 4px 8px;
-    border-radius: 4px;
+    border-radius: 8px;
+    transition: background 0.2s, color 0.2s;
 }
 
 .admin-link:hover {
@@ -535,8 +551,9 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     border: 1px solid var(--danger);
     color: var(--danger);
     padding: clamp(4px, 1vw, 6px) clamp(8px, 2vw, 12px);
-    border-radius: 6px;
+    border-radius: 8px;
     cursor: pointer;
+    transition: background 0.2s, color 0.2s;
     font-size: clamp(11px, 1.5vw, 12px);
 }
 
@@ -551,7 +568,7 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     gap: 4px;
     padding: 4px 8px;
     background: var(--bg-primary);
-    border-radius: 6px;
+    border-radius: 10px;
     margin-top: 6px;
     font-size: 11px;
 }
@@ -578,10 +595,11 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     border: 1px solid var(--bg-border);
     color: var(--text-muted);
     padding: 2px 6px;
-    border-radius: 4px;
+    border-radius: 8px;
     cursor: pointer;
     font-size: 12px;
     line-height: 1;
+    transition: all 0.2s ease;
 }
 
 .identity-key-display .key-btn:hover {
@@ -833,6 +851,7 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     z-index: 10;
     box-shadow: -4px 0 16px rgba(0,0,0,0.15);
     pointer-events: none;
+    border-radius: 16px 0 0 16px;
 }
 
 .members-panel.open {
@@ -878,8 +897,9 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     align-items: center;
     gap: clamp(6px, 1vw, 8px);
     padding: clamp(4px, 0.8vw, 6px) clamp(6px, 1vw, 8px);
-    border-radius: clamp(4px, 0.8vw, 6px);
+    border-radius: 10px;
     cursor: default;
+    transition: background 0.2s ease;
 }
 
 .member-item:hover {
@@ -975,16 +995,19 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     background: none;
     border: 1px solid #c62828;
     color: #c62828;
-    border-radius: 4px;
+    border-radius: 10px;
     padding: 2px 8px;
     cursor: pointer;
     font-size: 11px;
     margin-left: auto;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .btn-leave-server:hover {
     background: #c62828;
     color: #fff;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
 }
 
 .server-settings-btn {
@@ -994,8 +1017,9 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     font-size: clamp(14px, 2vw, 18px);
     cursor: pointer;
     padding: 2px 6px;
-    border-radius: 4px;
+    border-radius: 8px;
     line-height: 1;
+    transition: background 0.2s, color 0.2s;
 }
 
 .server-settings-btn:hover {
@@ -1083,13 +1107,16 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     color: white;
     border: none;
     padding: 4px 10px;
-    border-radius: 4px;
+    border-radius: 10px;
     cursor: pointer;
     font-size: 12px;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .btn-unban:hover {
     background: #43a047;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
 }
 
 .btn-delete-channel {
@@ -1138,7 +1165,8 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     gap: clamp(4px, 1vw, 8px);
     padding: 3px 6px;
     border-left: 3px solid transparent;
-    transition: background 0.15s ease, border-color 0.15s ease;
+    border-radius: 0 12px 12px 0;
+    transition: background 0.2s ease, border-color 0.2s ease;
 }
 
 .message:hover {
@@ -1259,8 +1287,8 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
 .mention {
     color: #4fc3f7;
     background: rgba(79,195,247,0.12);
-    padding: 0 2px;
-    border-radius: 3px;
+    padding: 2px 4px;
+    border-radius: 6px;
     font-weight: 500;
 }
 
@@ -1275,11 +1303,11 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     right: 0;
     background: #1e1e2e;
     border: 1px solid #2a2a4a;
-    border-radius: 8px;
+    border-radius: 14px;
     max-height: 220px;
     overflow-y: auto;
     z-index: 1000;
-    box-shadow: 0 -4px 16px rgba(0,0,0,0.4);
+    box-shadow: 0 -8px 30px rgba(0,0,0,0.4);
 }
 
 .mention-item {
@@ -1288,7 +1316,8 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     gap: 10px;
     padding: 6px 12px;
     cursor: pointer;
-    transition: background 0.1s;
+    transition: background 0.2s ease;
+    border-radius: 8px;
 }
 
 .mention-item:hover,
@@ -1454,7 +1483,7 @@ body.show-msg-times-hover .message:hover .file-card .time-hover {
     flex: 1;
     padding: clamp(8px, 1.5vw, 10px) clamp(10px, 2.5vw, 16px);
     border: 1px solid var(--bg-border);
-    border-radius: clamp(6px, 1.5vw, 8px);
+    border-radius: 14px;
     background: var(--bg-secondary);
     color: var(--text-primary);
     font-size: 16px;
@@ -1466,11 +1495,13 @@ body.show-msg-times-hover .message:hover .file-card .time-hover {
     min-height: 36px;
     max-height: 120px;
     line-height: 1.4;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
 .chat-input textarea:focus {
     outline: none;
     border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(0,0,0,0.2);
 }
 
 .chat-input textarea:disabled {
@@ -1483,12 +1514,21 @@ body.show-msg-times-hover .message:hover .file-card .time-hover {
     background: var(--accent);
     color: var(--bg-primary);
     border: none;
-    border-radius: clamp(6px, 1.5vw, 8px);
+    border-radius: 12px;
     font-weight: 600;
     cursor: pointer;
     font-size: clamp(13px, 2vw, 14px);
     white-space: nowrap;
     flex-shrink: 0;
+    transition: transform 0.15s ease, box-shadow 0.2s ease;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+}
+.chat-input button:hover {
+    box-shadow: 0 6px 16px rgba(0,0,0,0.3);
+    transform: translateY(-2px);
+}
+.chat-input button:active {
+    transform: translateY(0);
 }
 
 .chat-input button:hover {
@@ -1504,8 +1544,8 @@ body.show-msg-times-hover .message:hover .file-card .time-hover {
 .admin-card {
     background: var(--bg-secondary);
     padding: clamp(16px, 4vw, 32px);
-    border-radius: clamp(8px, 2vw, 12px);
-    box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+    border-radius: 16px;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.4);
     width: 100%;
     max-width: min(800px, 90vw);
     max-height: 90vh;
@@ -1582,14 +1622,17 @@ body.show-msg-times-hover .message:hover .file-card .time-hover {
     border: 1px solid var(--danger);
     color: var(--danger);
     padding: clamp(4px, 1vw, 6px) clamp(10px, 2vw, 16px);
-    border-radius: 6px;
+    border-radius: 10px;
     cursor: pointer;
     font-size: clamp(11px, 2vw, 13px);
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .btn-delete-sm:hover {
     background: var(--danger);
     color: white;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
 }
 
 /* ===== Modal ===== */
@@ -1610,8 +1653,8 @@ body.show-msg-times-hover .message:hover .file-card .time-hover {
 .modal-content {
     background: var(--bg-secondary);
     padding: clamp(20px, 5vw, 32px);
-    border-radius: clamp(8px, 2vw, 12px);
-    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    border-radius: 16px;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.4);
     width: 100%;
     max-width: min(420px, 90vw);
 }
@@ -1643,14 +1686,22 @@ body.show-msg-times-hover .message:hover .file-card .time-hover {
     border: 1px solid var(--bg-border);
     color: var(--text-muted);
     padding: clamp(8px, 1.5vw, 10px) clamp(14px, 3vw, 20px);
-    border-radius: clamp(6px, 1.5vw, 8px);
+    border-radius: 10px;
     cursor: pointer;
     font-size: clamp(13px, 2vw, 14px);
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .btn-cancel:hover {
     border-color: var(--text-muted);
     color: var(--text-primary);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+}
+
+.btn-cancel:active {
+    transform: translateY(1px) scale(0.98);
+    box-shadow: none;
 }
 
 .btn-delete {
@@ -1658,14 +1709,17 @@ body.show-msg-times-hover .message:hover .file-card .time-hover {
     border: none;
     color: white;
     padding: clamp(8px, 1.5vw, 10px) clamp(14px, 3vw, 20px);
-    border-radius: clamp(6px, 1.5vw, 8px);
+    border-radius: 10px;
     cursor: pointer;
     font-size: clamp(13px, 2vw, 14px);
     font-weight: 600;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .btn-delete:hover {
     background: var(--danger-dark);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
 }
 
 .btn-delete:disabled {
@@ -1678,14 +1732,17 @@ body.show-msg-times-hover .message:hover .file-card .time-hover {
     border: none;
     color: white;
     padding: clamp(8px, 1.5vw, 10px) clamp(14px, 3vw, 20px);
-    border-radius: clamp(6px, 1.5vw, 8px);
+    border-radius: 10px;
     cursor: pointer;
     font-size: clamp(13px, 2vw, 14px);
     font-weight: 600;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .btn-invite:hover {
     background: #43a047;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
 }
 
 /* ===== Generic app buttons (.btn family) =====
@@ -1700,20 +1757,23 @@ body.show-msg-times-hover .message:hover .file-card .time-hover {
     border: 1px solid var(--bg-border);
     color: var(--text-primary);
     padding: 8px 16px;
-    border-radius: 8px;
+    border-radius: 10px;
     cursor: pointer;
     font-size: 13px;
     font-weight: 600;
     line-height: 1.2;
     white-space: nowrap;
-    transition: background 0.15s, border-color 0.15s, color 0.15s, filter 0.15s, transform 0.05s;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 .btn:hover {
     border-color: var(--accent);
     color: var(--accent);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
 }
 .btn:active {
-    transform: translateY(1px);
+    transform: translateY(1px) scale(0.98);
+    box-shadow: none;
 }
 .btn:disabled {
     opacity: 0.5;
@@ -2073,17 +2133,20 @@ select.modal-input:focus {
     border: 1px solid var(--bg-border);
     color: var(--text-primary);
     padding: 6px 12px;
-    border-radius: 6px;
+    border-radius: 10px;
     cursor: pointer;
     font-size: 12px;
     flex: 1;
     min-width: 0;
     text-align: center;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .dm-action-btn:hover {
     background: var(--accent);
     color: var(--bg-primary);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
 }
 
 .friend-requests-btn {
@@ -2097,14 +2160,17 @@ select.modal-input:focus {
     background: var(--accent);
     color: var(--bg-primary);
     border: none;
-    border-radius: 6px;
+    border-radius: 10px;
     cursor: pointer;
     font-weight: 600;
     font-size: 13px;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .create-dm-btn:hover {
     background: var(--accent-hover);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
 }
 
 .dm-list .dm-item {
@@ -2201,14 +2267,17 @@ select.modal-input:focus {
     color: #fff;
     border: none;
     padding: 6px 14px;
-    border-radius: 6px;
+    border-radius: 10px;
     cursor: pointer;
     font-size: 12px;
     font-weight: 600;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .btn-accept:hover {
     opacity: 0.85;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
 }
 
 .btn-decline {
@@ -2216,14 +2285,17 @@ select.modal-input:focus {
     color: #fff;
     border: none;
     padding: 6px 14px;
-    border-radius: 6px;
+    border-radius: 10px;
     cursor: pointer;
     font-size: 12px;
     font-weight: 600;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .btn-decline:hover {
     opacity: 0.85;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
 }
 
 /* Notification badges */
@@ -2351,7 +2423,7 @@ select.modal-input:focus {
 .dm-item.active {
     background: var(--accent) !important;
     color: var(--bg-primary);
-    border-radius: clamp(4px, 1vw, 6px);
+    border-radius: 12px;
 }
 .dm-item.active .dm-name {
     color: var(--bg-primary);
@@ -2828,10 +2900,10 @@ select.modal-input:focus {
     z-index: 10000;
     background: var(--bg-secondary);
     border: 1px solid var(--border-color);
-    border-radius: 8px;
+    border-radius: 16px;
     padding: 4px 0;
     min-width: 160px;
-    box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+    box-shadow: 0 12px 40px rgba(0,0,0,0.4);
 }
 .context-menu-item {
     display: flex;
@@ -2899,17 +2971,17 @@ select.modal-input:focus {
     z-index: 50;
     padding: 8px 20px;
     border: none;
-    border-radius: 20px;
+    border-radius: 24px;
     background: var(--accent);
     color: var(--bg-primary);
     font-size: 13px;
     font-weight: 600;
     cursor: pointer;
-    box-shadow: 0 2px 12px rgba(0,0,0,0.35);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.4);
     opacity: 0;
     pointer-events: none;
     transform: translateY(8px);
-    transition: opacity 0.25s ease, transform 0.25s ease, background 0.15s ease;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
     white-space: nowrap;
     flex-shrink: 0;
 }
@@ -2990,6 +3062,7 @@ select.modal-input:focus {
     font-size: 14px;
     cursor: pointer;
     transition: color 0.15s, border-color 0.15s;
+    border-radius: 8px 8px 0 0;
 }
 .settings-tab:hover {
     color: var(--accent);
@@ -3510,16 +3583,23 @@ select.modal-input:focus {
     border: 1px solid var(--bg-border);
     color: var(--text-muted);
     padding: 6px 14px;
-    border-radius: 6px;
+    border-radius: 10px;
     cursor: pointer;
     font-size: 12px;
-    transition: background 0.15s, color 0.15s, border-color 0.15s;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .btn-profile-action:hover {
     border-color: var(--accent);
     color: var(--accent);
     background: rgba(79, 195, 247, 0.05);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+}
+
+.btn-profile-action:active {
+    transform: translateY(1px) scale(0.98);
+    box-shadow: none;
 }
 
 .btn-profile-action.btn-danger {
@@ -3857,7 +3937,7 @@ select.modal-input:focus {
     width: 40px;
     height: 22px;
     background: #444;
-    border-radius: 11px;
+    border-radius: 12px;
     transition: background 0.2s ease;
     flex-shrink: 0;
 }
@@ -3871,7 +3951,7 @@ select.modal-input:focus {
     height: 18px;
     background: #fff;
     border-radius: 50%;
-    transition: transform 0.2s ease;
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .settings-toggle input:checked + .toggle-slider {
@@ -4153,10 +4233,11 @@ select.modal-input:focus {
     padding: 24px 16px;
     background: var(--bg-primary);
     border: 2px solid var(--bg-border);
-    border-radius: 12px;
+    border-radius: 16px;
     cursor: pointer;
     transition: border-color 0.2s ease, background 0.2s ease, transform 0.1s ease;
     text-align: center;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.4);
 }
 
 .server-choice-btn:hover {
@@ -4286,7 +4367,7 @@ select.modal-input:focus {
     height: clamp(40px, 8vw, 44px);
     background: var(--bg-secondary);
     border: 1px solid var(--bg-border);
-    border-radius: 8px;
+    border-radius: 12px;
     color: var(--text-muted);
     font-size: 22px;
     cursor: pointer;
@@ -4294,8 +4375,12 @@ select.modal-input:focus {
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
-    transition: color 0.15s, border-color 0.15s, background 0.15s;
+    transition: all 0.2s ease;
     line-height: 1;
+}
+
+.attach-btn:hover {
+    transform: translateY(-2px);
 }
 
 /* Small yellow badge on the + button while disappearing messages are armed */
@@ -4329,10 +4414,10 @@ select.modal-input:focus {
     left: 0;
     background: #1e1e2e;
     border: 1px solid #2a2a4a;
-    border-radius: 10px;
+    border-radius: 16px;
     padding: 6px;
     z-index: 100;
-    box-shadow: 0 -4px 20px rgba(0,0,0,0.5);
+    box-shadow: 0 12px 40px rgba(0,0,0,0.4);
     display: flex;
     flex-direction: column;
     gap: 2px;
@@ -4399,24 +4484,28 @@ select.modal-input:focus {
 .recording-bar-send {
     background: #4caf50;
     border: none;
-    border-radius: 6px;
+    border-radius: 10px;
     padding: 5px 14px;
     color: #fff;
     font-size: 13px;
     font-weight: 600;
     cursor: pointer;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 .recording-bar-send:hover {
     background: #388e3c;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
 }
 .recording-bar-cancel {
     background: none;
     border: 1px solid #555;
-    border-radius: 6px;
+    border-radius: 10px;
     padding: 5px 14px;
     color: #aaa;
     font-size: 13px;
     cursor: pointer;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 .recording-bar-cancel:hover {
     border-color: #f44336;
@@ -4447,10 +4536,11 @@ select.modal-input:focus {
     gap: 10px;
     background: var(--bg-secondary);
     border: 1px solid var(--bg-border);
-    border-radius: 8px;
+    border-radius: 16px;
     padding: 10px 12px;
     margin-top: 4px;
     max-width: min(420px, 85vw);
+    box-shadow: 0 12px 40px rgba(0,0,0,0.4);
 }
 
 .file-download-btn {
@@ -5742,10 +5832,11 @@ select.modal-input:focus {
 .msg-file-gallery {
     background: var(--bg-secondary);
     border: 1px solid var(--bg-border);
-    border-radius: 8px;
+    border-radius: 16px;
     padding: 10px 12px;
     margin-top: 4px;
     max-width: min(480px, 85vw);
+    box-shadow: 0 12px 40px rgba(0,0,0,0.4);
 }
 
 .msg-gallery-nav {
@@ -6009,11 +6100,13 @@ select.modal-input:focus {
     color: #aaa;
     cursor: pointer;
     padding: 4px 8px;
-    border-radius: 4px;
+    border-radius: 10px;
     font-size: 14px;
     line-height: 1;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
-.msg-action-btn:hover { background: #3d3d3d; color: #fff; }
+.msg-action-btn:hover { background: #3d3d3d; color: #fff; transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
+.msg-action-btn:active { transform: translateY(1px) scale(0.98); box-shadow: none; }
 
 /* Message effects */
 @keyframes msg-fireworks {
@@ -6101,17 +6194,19 @@ select.modal-input:focus {
     gap: 6px;
     background: rgba(255,255,255,0.06);
     border: 1px solid rgba(255,255,255,0.12);
-    border-radius: 13px;
+    border-radius: 10px;
     padding: 3px 10px;
     color: #ccc;
     font-size: 13.5px;
     cursor: pointer;
     line-height: 1.4;
-    transition: background 0.15s ease, border-color 0.15s ease;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 .reaction-pill:hover {
     background: rgba(255,255,255,0.12);
     border-color: rgba(255,255,255,0.25);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
 }
 .reaction-pill.mine {
     background: rgba(79, 195, 247, 0.18);
@@ -6224,15 +6319,17 @@ select.modal-input:focus {
 .reaction-pick {
     background: none;
     border: none;
-    border-radius: 8px;
+    border-radius: 10px;
     padding: 4px;
     font-size: 20px;
     cursor: pointer;
     line-height: 1;
-    transition: background 0.12s ease;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 .reaction-pick:hover {
     background: rgba(255,255,255,0.12);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
 }
 .reaction-pick-custom .emoji-inline,
 .reaction-pick-custom .emoji-inline.emoji-alone,
@@ -6354,7 +6451,7 @@ select.modal-input:focus {
     margin-bottom: 4px;
     border-left: 3px solid #569cd6;
     background: rgba(86,156,214,0.06);
-    border-radius: 0 4px 4px 0;
+    border-radius: 0 10px 10px 0;
     cursor: pointer;
     font-size: 12px;
     color: #aaa;
@@ -6699,12 +6796,12 @@ body.show-msg-times .forward-preview .time-hover {
     z-index: 210;
     background: var(--bg-secondary, #23233a);
     border: 1px solid var(--bg-border, #2f2f4a);
-    border-radius: 10px;
+    border-radius: 16px;
     padding: 4px;
     display: flex;
     flex-direction: column;
     min-width: 130px;
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.45);
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
 }
 .disappear-option {
     background: none;
@@ -6857,17 +6954,19 @@ body.show-msg-status-hover .message:hover .content .msg-status {
     width: 100%;
     background: rgba(255,255,255,0.05);
     border: 1px solid rgba(255,255,255,0.14);
-    border-radius: 8px;
+    border-radius: 10px;
     padding: 7px 10px;
     color: #ddd;
     font-size: 13px;
     cursor: pointer;
     overflow: hidden;
-    transition: background 0.15s ease, border-color 0.15s ease;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 .poll-option:hover {
     background: rgba(255,255,255,0.1);
     border-color: rgba(255,255,255,0.28);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
 }
 .poll-option.mine {
     background: rgba(79, 195, 247, 0.16);
@@ -7054,11 +7153,11 @@ body.show-msg-status-hover .message:hover .content .msg-status {
     height: min(60vh, 440px);
     background: var(--bg-secondary);
     border: 1px solid var(--bg-border);
-    border-radius: 12px;
+    border-radius: 16px;
     z-index: 100;
     display: flex;
     flex-direction: column;
-    box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+    box-shadow: 0 12px 40px rgba(0,0,0,0.4);
 }
 
 @media (max-width: 480px) {
@@ -7610,10 +7709,11 @@ body.show-msg-status-hover .message:hover .content .msg-status {
     max-width: 440px;
     padding: 0;
     overflow: hidden;
-    border-radius: 12px;
+    border-radius: 16px;
     background: var(--bg-secondary);
     position: relative;
     transition: max-width 0.2s ease;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.4);
 }
 
 /* Wider modal when editing on desktop */
@@ -7677,9 +7777,9 @@ body.show-msg-status-hover .message:hover .content .msg-status {
 /* Banner */
 .profile-view-card {
     background: var(--bg-secondary);
-    border-radius: 12px;
+    border-radius: 16px;
     overflow: hidden;
-    box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+    box-shadow: 0 12px 40px rgba(0,0,0,0.4);
 }
 
 .profile-banner {
@@ -8847,11 +8947,11 @@ body.streamer-mode .dm-avatar:hover {
     flex-direction: column;
     gap: 6px;
     min-width: 200px;
-    padding: 10px 12px;
+    padding: 12px 14px;
     background: var(--bg-secondary, #232338);
     border: 1px solid var(--bg-border, #2a2a4a);
-    border-radius: 10px;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    border-radius: 14px;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
     font-size: 13px;
     color: var(--text-primary, #e0e0e0);
     /* Draggable: grab anywhere except the control buttons */
@@ -8886,21 +8986,22 @@ body.streamer-mode .dm-avatar:hover {
     gap: 4px;
 }
 .voice-bar-btn {
-    width: 32px;
-    height: 32px;
+    width: 34px;
+    height: 34px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     border: none;
-    border-radius: 8px;
+    border-radius: 10px;
     background: var(--bg-primary, #1a1a2e);
     color: var(--text-primary, #e0e0e0);
     cursor: pointer;
     font-size: 15px;
-    transition: background 0.15s ease, transform 0.1s ease;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
 }
-.voice-bar-btn:hover { background: #2c2c46; }
-.voice-bar-btn:active { transform: scale(0.92); }
+.voice-bar-btn:hover { background: #2c2c46; transform: translateY(-1px); box-shadow: 0 3px 10px rgba(0, 0, 0, 0.25); }
+.voice-bar-btn:active { transform: scale(0.92); box-shadow: none; }
 .voice-bar-btn.active { background: #4c3a2a; color: #ffb74d; }
 .voice-bar-btn.locked { background: #3a2230; color: #ef5350; cursor: not-allowed; }
 .voice-bar-btn.voice-bar-leave { background: #3a1622; color: #ff6b6b; }
@@ -9133,8 +9234,12 @@ video.remote-video-tile.mirrored {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding-bottom: 10px;
+    padding: 12px 16px;
+    margin: -16px -16px 0 -16px;
+    padding-bottom: 12px;
     border-bottom: 1px solid var(--bg-border, #2a2a4a);
+    background: rgba(0, 0, 0, 0.1);
+    border-radius: 16px 16px 0 0;
 }
 .voice-popup-title { font-size: 16px; font-weight: 700; color: var(--accent, #4fc3f7); }
 .voice-popup-actions {
@@ -9145,23 +9250,27 @@ video.remote-video-tile.mirrored {
 }
 .voice-popup-fullscreen {
     background: none; border: none; color: var(--text-muted, #888);
-    font-size: 15px; cursor: pointer; line-height: 1; padding: 2px 5px;
-    border-radius: 6px;
+    font-size: 15px; cursor: pointer; line-height: 1; padding: 4px 8px;
+    border-radius: 8px;
+    transition: all 0.2s ease;
 }
-.voice-popup-fullscreen:hover { color: #fff; background: rgba(255, 255, 255, 0.08); }
+.voice-popup-fullscreen:hover { color: #fff; background: rgba(255, 255, 255, 0.1); }
 .voice-popup-close {
     background: none; border: none; color: var(--text-muted, #888);
     font-size: 22px; cursor: pointer; line-height: 1;
+    padding: 4px 8px; border-radius: 8px;
+    transition: all 0.2s ease;
 }
-.voice-popup-close:hover { color: #fff; }
+.voice-popup-close:hover { color: #fff; background: rgba(255, 255, 255, 0.1); }
 .voice-popup-self {
     display: flex;
     gap: 10px;
     flex-wrap: wrap;
     min-height: 90px;
-    padding: 8px;
-    border-radius: 10px;
+    padding: 10px;
+    border-radius: 14px;
     background: var(--bg-secondary, #232338);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
 }
 .voice-popup-members {
     display: flex;
@@ -9172,10 +9281,11 @@ video.remote-video-tile.mirrored {
     display: flex;
     align-items: center;
     gap: 12px;
-    padding: 8px 10px;
-    border-radius: 10px;
+    padding: 10px 12px;
+    border-radius: 14px;
     cursor: default;
-    transition: background 0.12s ease;
+    transition: background 0.2s ease;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
 }
 .voice-member-row:hover { background: rgba(255, 255, 255, 0.05); }
 .voice-member-ident {
@@ -9512,18 +9622,20 @@ video.remote-video-tile.mirrored {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding-top: 10px;
+    padding: 12px 0;
     border-top: 1px solid var(--bg-border, #2a2a4a);
 }
 .voice-popup-btn {
-    width: 40px; height: 40px;
-    border: none; border-radius: 10px;
+    width: 42px; height: 42px;
+    border: none; border-radius: 12px;
     background: var(--bg-primary, #1a1a2e);
     color: var(--text-primary, #e0e0e0);
     font-size: 17px; cursor: pointer;
-    transition: background 0.15s ease;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
 }
-.voice-popup-btn:hover { background: #2c2c46; }
+.voice-popup-btn:hover { background: #2c2c46; transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3); }
+.voice-popup-btn:active { transform: translateY(0); box-shadow: none; }
 .voice-popup-btn.active { background: #4c3a2a; color: #ffb74d; }
 .voice-popup-btn.locked { background: #3a2230; color: #ef5350; cursor: not-allowed; }
 .voice-popup-btn.voice-popup-leave { background: #3a1622; color: #ff6b6b; }
@@ -9531,9 +9643,10 @@ video.remote-video-tile.mirrored {
     display: flex;
     flex-direction: column;
     gap: 8px;
-    padding: 10px;
-    border-radius: 10px;
+    padding: 12px;
+    border-radius: 14px;
     background: var(--bg-secondary, #232338);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
 }
 .voice-popup-setting-row {
     display: flex; align-items: center; gap: 10px;
@@ -9621,17 +9734,21 @@ video.remote-video-tile.mirrored {
     flex-direction: column;
     background: var(--bg-secondary, #232338);
     border-bottom: 1px solid var(--bg-border, #2a2a4a);
-    border-radius: 0 0 14px 14px;
-    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+    border-radius: 0 0 20px 20px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+    overflow: hidden;
 }
 .dm-call-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 8px 14px;
+    padding: 10px 16px;
     font-size: 14px;
     color: var(--text-primary, #e0e0e0);
     border-bottom: 1px solid var(--bg-border, #2a2a4a);
+    background: rgba(0, 0, 0, 0.15);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
 }
 .dm-call-header-right {
     display: flex;
@@ -9651,26 +9768,26 @@ video.remote-video-tile.mirrored {
     color: var(--text-muted, #888);
     font-size: 15px;
     cursor: pointer;
-    padding: 2px 6px;
-    border-radius: 6px;
+    padding: 4px 8px;
+    border-radius: 8px;
     line-height: 1;
     flex-shrink: 0;
-    transition: background 0.15s ease, color 0.15s ease;
+    transition: all 0.2s ease;
 }
-.dm-call-expand:hover { color: #fff; background: rgba(255, 255, 255, 0.08); }
+.dm-call-expand:hover { color: #fff; background: rgba(255, 255, 255, 0.1); }
 .dm-call-close {
     background: none;
     border: none;
     color: var(--text-muted, #888);
     font-size: 15px;
     cursor: pointer;
-    padding: 2px 6px;
-    border-radius: 6px;
+    padding: 4px 8px;
+    border-radius: 8px;
     line-height: 1;
     flex-shrink: 0;
-    transition: background 0.15s ease, color 0.15s ease;
+    transition: all 0.2s ease;
 }
-.dm-call-close:hover { color: #fff; background: rgba(255, 255, 255, 0.08); }
+.dm-call-close:hover { color: #fff; background: rgba(255, 255, 255, 0.1); }
 /* Expanded DM call + fullscreen voice view: cover the ENTIRE viewport
    (left/top/bottom are set inline by syncOverlayBounds) so you see only the
    call — handy on phones to watch your own camera + screen and the other
@@ -9729,14 +9846,19 @@ body.resizing-dm { cursor: ns-resize !important; user-select: none; }
     position: relative;
     min-width: 220px;
     min-height: 150px;
-    border-radius: 10px;
+    border-radius: 16px;
     background: var(--bg-primary, #1a1a2e);
     border: 1px solid var(--bg-border, #2a2a4a);
     padding: 8px;
     display: flex; flex-direction: column; gap: 6px;
     flex: 1 1 45%;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
-.dm-call-tile.speaking { border-color: #23a55a; }
+.dm-call-tile.speaking {
+    border-color: #23a55a;
+    box-shadow: 0 0 0 2px rgba(35, 165, 90, 0.35), 0 4px 16px rgba(0, 0, 0, 0.25);
+}
 .dm-call-tile-head {
     display: flex; align-items: center; gap: 8px;
 }
@@ -9864,18 +9986,23 @@ body.resizing-dm { cursor: ns-resize !important; user-select: none; }
 .dm-call-controls {
     display: flex; align-items: center; justify-content: center; gap: 10px;
     flex-wrap: wrap;
-    padding: 10px;
+    padding: 12px;
     border-top: 1px solid var(--bg-border, #2a2a4a);
+    background: rgba(0, 0, 0, 0.15);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
 }
 .dm-call-btn {
-    width: 42px; height: 42px;
+    width: 44px; height: 44px;
     border: none; border-radius: 50%;
     background: var(--bg-primary, #1a1a2e);
     color: var(--text-primary, #e0e0e0);
     font-size: 18px; cursor: pointer;
-    transition: background 0.15s ease, transform 0.1s ease;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
 }
-.dm-call-btn:hover { background: #2c2c46; }
+.dm-call-btn:hover { background: #2c2c46; transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3); }
+.dm-call-btn:active { transform: translateY(0); box-shadow: none; }
 .dm-call-btn.active { background: #4c3a2a; color: #ffb74d; }
 .dm-call-btn.locked { background: #3a2230; color: #ef5350; cursor: not-allowed; }
 .dm-call-btn.dm-call-end { background: #3a1622; color: #ff6b6b; }
@@ -9890,11 +10017,11 @@ body.resizing-dm { cursor: ns-resize !important; user-select: none; }
     display: flex;
     flex-direction: column;
     gap: 6px;
-    padding: 8px 10px;
+    padding: 10px 12px;
     background: var(--bg-secondary, #232338);
     border: 1px solid var(--bg-border, #2a2a4a);
-    border-radius: 10px;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    border-radius: 14px;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
     /* Draggable: grab anywhere except the control buttons */
     cursor: grab;
     touch-action: none;
@@ -9938,7 +10065,8 @@ body.resizing-dm { cursor: ns-resize !important; user-select: none; }
 .dm-mini-bar-body {
     background: none; border: none; color: var(--accent, #4fc3f7);
     font-size: 13px; font-weight: 600; cursor: pointer;
-    padding: 4px 6px; border-radius: 6px;
+    padding: 4px 8px; border-radius: 8px;
+    transition: background 0.2s ease;
 }
 .dm-mini-bar-body:hover { background: rgba(255, 255, 255, 0.06); }
 
@@ -9955,8 +10083,8 @@ body.resizing-dm { cursor: ns-resize !important; user-select: none; }
     max-width: min(420px, calc(100vw - 32px));
     background: var(--bg-secondary, #232338);
     border: 1px solid var(--accent, #4fc3f7);
-    border-radius: 12px;
-    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+    border-radius: 16px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.55);
 }
 .incoming-call-name {
     min-width: 0;
@@ -9966,9 +10094,12 @@ body.resizing-dm { cursor: ns-resize !important; user-select: none; }
 }
 .incoming-call-name { font-size: 14px; font-weight: 600; color: var(--text-primary, #e0e0e0); }
 .incoming-call-btn {
-    border: none; border-radius: 8px; padding: 8px 14px;
+    border: none; border-radius: 10px; padding: 8px 14px;
     font-size: 13px; font-weight: 600; cursor: pointer;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
+.incoming-call-btn:hover { transform: translateY(-1px); box-shadow: 0 3px 10px rgba(0, 0, 0, 0.25); }
+.incoming-call-btn:active { transform: translateY(0); box-shadow: none; }
 .incoming-call-btn.accept { background: #23a55a; color: #fff; }
 .incoming-call-btn.decline { background: #da373c; color: #fff; }
 /* Waiting state: caller rang for 30s without an answer — the bar persists
@@ -10010,7 +10141,7 @@ body.resizing-dm { cursor: ns-resize !important; user-select: none; }
     min-width: 200px;
     background: var(--bg-secondary, #232338);
     border: 1px solid var(--bg-border, #2a2a4a);
-    border-radius: 10px;
+    border-radius: 14px;
     box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
     padding: 10px;
     display: flex;
@@ -11176,8 +11307,8 @@ body.resizing-dm { cursor: ns-resize !important; user-select: none; }
 .ui-dialog-box {
     background: var(--bg-secondary, #16213e);
     border: 1px solid var(--bg-border, #2a2a4a);
-    border-radius: 10px;
-    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    border-radius: 16px;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.4);
     padding: 20px;
     width: 100%;
     max-width: min(420px, 90vw);
