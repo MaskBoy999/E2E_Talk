@@ -1867,6 +1867,45 @@ select.modal-input:focus {
         font-size: clamp(20px, 5vw, 26px);
     }
 
+    /* Collapsed group grid — scale down on mobile so the 2x2 mini-icons
+       don't overflow the narrow server strip or overlap neighbours.
+       Specificity bumped with .server-strip to beat the base rules
+       that appear later in the file. */
+    .server-strip .server-group-collapsed-grid {
+        width: clamp(34px, 9vw, 42px);
+        height: clamp(34px, 9vw, 42px);
+        border-radius: 10px;
+        box-sizing: border-box;
+    }
+    .server-strip .server-group-collapsed-grid .server-group-mini {
+        width: 16px;
+        height: 16px;
+        font-size: 9px;
+    }
+    .server-strip .server-group-header {
+        width: clamp(30px, 9vw, 42px);
+        height: clamp(16px, 4vw, 22px);
+        border-radius: 6px;
+    }
+    .server-strip .server-group-inner {
+        padding: 4px 3px;
+        margin: 2px 2px 4px;
+        border-radius: 10px;
+    }
+    .server-strip .group-badge {
+        font-size: 8px;
+        padding: 0 3px;
+        min-width: 12px;
+        line-height: 12px;
+        border-radius: 6px;
+    }
+    .server-strip .server-group-more-badge {
+        font-size: 7px;
+        padding: 0 2px;
+        line-height: 10px;
+        border-radius: 6px;
+    }
+
     .sidebar {
         position: fixed;
         top: 0;
@@ -2051,6 +2090,21 @@ select.modal-input:focus {
 
 /* ===== Very small screens: 380px and below ===== */
 @media (max-width: 380px) {
+    /* Even smaller collapsed grid on tiny phones — specificity via .server-strip */
+    .server-strip .server-group-collapsed-grid {
+        width: 32px;
+        height: 32px;
+        border-radius: 8px;
+    }
+    .server-strip .server-group-collapsed-grid .server-group-mini {
+        width: 14px;
+        height: 14px;
+        font-size: 8px;
+    }
+    .server-strip .server-group-header {
+        width: 30px;
+        height: 16px;
+    }
     .sidebar-footer {
         gap: 6px;
         align-items: center;
