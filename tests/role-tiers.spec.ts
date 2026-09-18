@@ -74,8 +74,25 @@ async function openRoles(page: Page, sid: string) {
 async function roleIds(page: Page, sid: string): Promise<Record<string, string>> {
     const r = await api(page, `/api/servers/${sid}/roles`);
     expect(r.status).toBe(200);
+    // Phase A: plaintext names are empty (''), so map by encrypted_name instead.
+    // The client-side decryptRoleName() can decrypt them, but tests use the API
+    // response directly, so we need the client to tell us the names.
+    const roles = (r.body.roles as any[]).filter((x) => !x.is_everyone);
+    // Decrypt names client-side using the page's E2ECrypto
+    const names = await page.evaluate((rs: any[]) => {
+        const sid = (window as any).currentServerId || '';
+        return rs.map((r) => {
+            if (r.encrypted_name && r.name_nonce && (window as any).E2ECrypto) {
+                try {
+                    const key = (window as any).E2ECrypto.getServerKey(sid);
+                    if (key) return (window as any).E2ECrypto.decryptMessage(r.encrypted_name, r.name_nonce, key) || '';
+                } catch (_) {}
+            }
+            return r.name || '';
+        });
+    }, roles);
     const map: Record<string, string> = {};
-    (r.body.roles as any[]).forEach((x) => { if (!x.is_everyone) map[x.name] = x.id; });
+    roles.forEach((x, i) => { map[names[i]] = x.id; });
     return map;
 }
 
@@ -100,14 +117,30 @@ async function apiTiers(page: Page, sid: string) {
     roles.forEach((x) => {
         const k = String(x.position);
         (byPos[k] = byPos[k] || []).push(x);
-    });
+    });    // Decrypt names client-side for the API tier view
+    const decryptedByPos: Record<string, { name: string; encOk: boolean }[]> = {};
+    for (const [pos, rs] of Object.entries(byPos)) {
+        decryptedByPos[pos] = await page.evaluate((roles: any[]) => {
+            const sid = (window as any).currentServerId || '';
+            return roles.map((r) => {
+                let name = r.name || '';
+                if (r.encrypted_name && r.name_nonce && (window as any).E2ECrypto) {
+                    try {
+                        const key = (window as any).E2ECrypto.getServerKey(sid);
+                        if (key) name = (window as any).E2ECrypto.decryptMessage(r.encrypted_name, r.name_nonce, key) || name;
+                    } catch (_) {}
+                }
+                return { name, encOk: !!r.encrypted_name && !!r.name_nonce };
+            });
+        }, rs);
+    }
     return Object.keys(byPos)
         .map(Number)
         .sort((a, b) => b - a)
         .map((p) => ({
             position: p,
-            names: byPos[String(p)].map((x) => x.name).sort(),
-            encOk: byPos[String(p)].every((x) => !!x.encrypted_name && !!x.name_nonce),
+            names: decryptedByPos[String(p)].map((x) => x.name).sort(),
+            encOk: decryptedByPos[String(p)].every((x) => x.encOk),
         }));
 }
 

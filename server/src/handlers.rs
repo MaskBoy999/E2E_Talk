@@ -3317,7 +3317,11 @@ pub async fn list_server_members(
                 "username": m.username,
                 "role": m.role,
                 "role_id": m.role_id,
-                "role_name": m.role_name,
+                "role_name": "",
+                "role_encrypted_name": m.role_encrypted_name.as_ref()
+                    .map(|e| base64::engine::general_purpose::STANDARD.encode(e)),
+                "role_name_nonce": m.role_name_nonce.as_ref()
+                    .map(|e| base64::engine::general_purpose::STANDARD.encode(e)),
                 "role_color": m.role_color,
                 "role_position": m.role_position,
             })
@@ -3469,7 +3473,8 @@ pub async fn reorder_roles(
 
 #[derive(Deserialize)]
 pub struct CreateRoleRequest {
-    pub name: String,
+    #[serde(default)]
+    pub name: Option<String>,
     #[serde(default)]
     pub color: Option<String>,
     #[serde(default)]
@@ -3507,9 +3512,13 @@ pub async fn create_server_role(
         }
     }
     let permissions = req.permissions.unwrap_or(0);
-    let name = req.name.trim();
-    if name.is_empty() || name.len() > 64 {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid role name"}))).into_response();
+    let enc_name = req.encrypted_name.as_deref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+    let name_nonce = req.name_nonce.as_deref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+    if enc_name.is_none() || name_nonce.is_none() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Encrypted role name required"}))).into_response();
+    }
+    if enc_name.as_ref().map_or(0, |e| e.len()) > 512 || name_nonce.as_ref().map_or(0, |n| n.len()) != 24 {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid role name payload"}))).into_response();
     }
     if !is_owner {
         let actor_perms = state.db.member_permissions(&server_id, &user_id, None).unwrap_or(0);
@@ -3517,9 +3526,7 @@ pub async fn create_server_role(
             return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Cannot grant permissions you do not hold"}))).into_response();
         }
     }
-    let enc_name = req.encrypted_name.as_deref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
-    let name_nonce = req.name_nonce.as_deref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
-    match state.db.create_role(&server_id, name, req.color.as_deref(), permissions, position, enc_name.as_deref(), name_nonce.as_deref()) {
+    match state.db.create_role(&server_id, req.color.as_deref(), permissions, position, enc_name.as_deref(), name_nonce.as_deref()) {
         Ok(role) => (StatusCode::OK, Json(role_json(&role, actor_position, &[]))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
@@ -3574,14 +3581,10 @@ pub async fn update_server_role(
             }
         }
     }
-    let name = req.name.unwrap_or_else(|| role.name.clone());
-    if name.trim().is_empty() || name.len() > 64 {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid role name"}))).into_response();
-    }
     let color = if req.color.is_some() { req.color.as_deref() } else { role.color.as_deref() };
     let enc_name = req.encrypted_name.as_deref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
     let name_nonce = req.name_nonce.as_deref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
-    if let Err(e) = state.db.update_role(&role_id, name.trim(), color, req.permissions, enc_name.as_deref(), name_nonce.as_deref()) {
+    if let Err(e) = state.db.update_role(&role_id, color, req.permissions, enc_name.as_deref(), name_nonce.as_deref()) {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
     }
     if let Some(new_pos) = req.position {

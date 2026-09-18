@@ -909,7 +909,7 @@ function renderUsers(users) {
 
 // Force-disable 2FA for a user (admin action).
 async function disableUser2fa(userId, username) {
-    if (!confirm('Disable two-factor authentication for "' + username + '"?\nThey will no longer need a code to log in. This cannot be undone by the user.')) return;
+    if (!(await uiConfirm('Disable two-factor authentication for "' + username + '"?\nThey will no longer need a code to log in. This cannot be undone by the user.'))) return;
     try {
         const adminToken = sessionStorage.getItem('admin_token') || '';
         const res = await fetch('/api/admin/users/' + encodeURIComponent(userId) + '/disable-2fa', {

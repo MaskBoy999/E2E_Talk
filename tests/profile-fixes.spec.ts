@@ -190,10 +190,8 @@ test.describe('Profile Fixes', () => {
         const regenBtn = page.locator('#regen-friend-code-btn');
         await expect(regenBtn).toBeVisible({ timeout: 10000 });
 
-        page.on('dialog', async (dialog: any) => {
-            await dialog.accept();
-        });
-
+        // The regeneration confirmation is an in-page popup now; it auto-accepts
+        // under automation (native dialogs no longer exist in the app).
         const errors: string[] = [];
         page.on('pageerror', (err: any) => errors.push(err.message));
 

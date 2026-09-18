@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { createHash } from 'crypto';
+import { dialogLog, resetDialogs } from './_ui-dialogs';
 
 const BASE = 'https://localhost:3443';
 
@@ -169,19 +170,16 @@ await page2.click('#register-form button[type="submit"]');
 
         // Load chat and check member list
         await page.goto(`${BASE}/index.html`);
+        await resetDialogs(page);
         await page.waitForSelector('.server-icon:not(.add-server)', { timeout: 10000 });
         await page.click('.server-icon:not(.add-server)');
         await page.waitForSelector('.channel-item', { timeout: 10000 });
 
-        // The XSS payload should not have been executed (no alert dialog)
-        let alertFired = false;
-        page.on('dialog', async dialog => {
-            alertFired = true;
-            await dialog.dismiss();
-        });
-
+        // The XSS payload should not have been executed. Popups are in-page now
+        // (static/ui-dialog.js), so an alert() from the payload would land in the
+        // dialog log rather than a native dialog.
         await page.waitForTimeout(2000);
-        expect(alertFired).toBeFalsy();
+        expect((await dialogLog(page)).filter((d) => d.type === 'alert')).toEqual([]);
 
         // Check the member list HTML doesn't contain raw script tags
         const memberListHtml = await page.evaluate(() => {

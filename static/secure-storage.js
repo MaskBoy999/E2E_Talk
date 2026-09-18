@@ -29,15 +29,8 @@
  *
  * STORED FORMAT
  * ─────────────
- *   ~<8-char-hex-tag>.<xor-base64>
- *
- * The 8-hex-char tag is a checksum of the plaintext, computed via _mixHash.
- * On decryption, we verify the tag; if it doesn't match, the session key has
- * changed since encryption (e.g., password changed on another device). In
- * that case null is returned, signaling stale data to the caller.
- *
- * Old-format values (encrypted before the tag was added) are still read
- * successfully — they lack the tag separator, so decryption skips verification.
+ * v2 format:  ~v2.<base64(nonce24 || XChaCha20-Poly1305(utf8))>
+ * legacy:     ~<8-char-hex-tag>.<xor-base64>  (read-only, upgrade on next write)
  *
  * PLAINTEXT MIGRATION
  * ───────────────────
@@ -45,15 +38,13 @@
  * transparently encrypted in-place. The migration uses the original
  * Storage.prototype methods to avoid double-encrypting through the interceptor.
  *
- * WHY XOR INSTEAD OF AES-GCM?
- * ────────────────────────────
- * Web Crypto API is exclusively asynchronous. The codebase contains hundreds
- * of synchronous localStorage calls (especially in crypto.js), making an
- * async wrapper impractical. XOR + password-derived key:
- *   • Is synchronous and fast
- *   • Is NOT plaintext (XSS attacker sees only encrypted bytes)
- *   • Cannot be decrypted without the password (same across all devices)
- *   • Provides defense-in-depth against XSS/localStorage scraping
+ * CIPHER: v2 XChaCha20-Poly1305 (AEAD) via libsodium
+ * ─────────────────────────────────────────────────────
+ * v2 uses libsodium's XChaCha20-Poly1305 AEAD for authenticated encryption.
+ * libsodium is already loaded on every page and is synchronous once `sodium.ready`
+ * resolves — which is exactly why the old XOR existed (WebCrypto is async).
+ * Legacy XOR values are still readable; _secUpgradeToAead() re-writes them
+ * once sodium is ready.
  *
  * USAGE
  * ─────
@@ -122,6 +113,40 @@
             if (key.indexOf(SENSITIVE_PREFIXES[i]) === 0) return true;
         }
         return false;
+    }
+
+    // ─── v2: authenticated encryption (libsodium, synchronous once ready) ────
+    var V2_PREFIX = 'v2.';
+    var AEAD_NONCE_LEN = 24;
+
+    function _aeadReady() {
+        return typeof sodium !== 'undefined'
+            && typeof sodium.crypto_aead_xchacha20poly1305_ietf_encrypt === 'function'
+            && typeof sodium.crypto_aead_xchacha20poly1305_ietf_decrypt === 'function';
+    }
+
+    function _aeadEncryptWithKey(plaintext, key) {
+        var nonce = sodium.randombytes_buf(AEAD_NONCE_LEN);
+        var msg = new TextEncoder().encode(plaintext);
+        var ct = sodium.crypto_aead_xchacha20poly1305_ietf_encrypt(msg, null, null, nonce, key);
+        var combined = new Uint8Array(nonce.length + ct.length);
+        combined.set(nonce);
+        combined.set(ct, nonce.length);
+        return V2_PREFIX + _bytesToBase64(combined);
+    }
+
+    /** Returns undefined when `inner` is not v2, a string on success, null when v2 fails to open. */
+    function _aeadDecryptWithKey(inner, key) {
+        if (inner.indexOf(V2_PREFIX) !== 0) return undefined;
+        if (!_aeadReady()) return null;
+        try {
+            var combined = _base64ToBytes(inner.substring(V2_PREFIX.length));
+            if (combined.length <= AEAD_NONCE_LEN) return null;
+            var nonce = combined.subarray(0, AEAD_NONCE_LEN);
+            var ct = combined.subarray(AEAD_NONCE_LEN);
+            var pt = sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(null, ct, null, nonce, key);
+            return new TextDecoder().decode(pt);
+        } catch (_) { return null; }   // wrong key or tampered — authenticated, so this is safe
     }
 
     /**
@@ -292,6 +317,29 @@
     }
 
     /**
+     * Encrypt a value: produce v2 AEAD when libsodium is ready, else legacy XOR.
+     * Legacy XOR is kept for the brief window between page load and sodium.ready.
+     */
+    function _encryptInner(plaintext) {
+        var key = _ensureKey();
+        if (_aeadReady()) return _aeadEncryptWithKey(String(plaintext), key);
+        return _xorEncrypt(String(plaintext));
+    }
+
+    /**
+     * Decrypt an inner value (without MAGIC prefix) with an explicit key.
+     * Handles v2 AEAD, legacy tag.b64, and legacy bare b64.
+     * Returns undefined when `inner` is not v2 (caller should try legacy).
+     * Returns null on v2 failure (wrong key / tampered).
+     * Returns the plaintext string on success.
+     */
+    function _decryptInnerWithKey(inner, key) {
+        var v2 = _aeadDecryptWithKey(inner, key);
+        if (v2 !== undefined) return v2;
+        return _decryptWithKey(inner, key);      // legacy formats
+    }
+
+    /**
      * XOR decrypt tag.b64 with an EXPLICIT key (no _ensureKey call — safe to
      * use from _tryDeriveFromEncryptedPassword / _secReKey without recursion).
      * Verifies the integrity tag. If it doesn't match, the key has changed
@@ -405,7 +453,7 @@
     function _decryptStored(val) {
         if (!_isEncrypted(val)) return val;
         try {
-            return _xorDecrypt(val.substring(1));
+            return _decryptInnerWithKey(val.substring(1), _ensureKey());
         } catch (_) {
             return null;
         }
@@ -413,7 +461,7 @@
 
     /** Encrypt and prepend magic prefix */
     function _encryptForStore(plaintext) {
-        return MAGIC + _xorEncrypt(String(plaintext));
+        return MAGIC + _encryptInner(plaintext);
     }
 
     /**
@@ -512,7 +560,7 @@
                 var val = _origGet.call(this, key);
                 if (val !== null && _isEncrypted(val)) {
                     try {
-                        return _xorDecrypt(val.substring(1));
+                        return _decryptInnerWithKey(val.substring(1), _ensureKey());
                     } catch (_) {
                         // Decryption failed — return as-is (legacy plaintext)
                         return val;
@@ -528,7 +576,7 @@
             if (key && isSensitive(key)) {
                 _ensureKey();
                 try {
-                    var enc = MAGIC + _xorEncrypt(String(value));
+                    var enc = MAGIC + _encryptInner(String(value));
                     _origSet.call(this, key, enc);
                     return;
                 } catch (_) {
@@ -581,7 +629,7 @@
             var val = _origGet.call(localStorage, k);
             if (val !== null && val.charAt(0) === MAGIC) {
                 try {
-                    var plain = _xorDecrypt(val.substring(1));
+                    var plain = _decryptInnerWithKey(val.substring(1), _ensureKey());
                     if (plain !== null) { _origSet.call(localStorage, k, plain); return; }
                 } catch (_) {}
                 _origRemove.call(localStorage, k);
@@ -602,7 +650,11 @@
                 var val = _origGet.call(localStorage, k);
                 if (val !== null && !_isEncrypted(val)) {
                     try {
-                        var enc = MAGIC + _xorEncrypt(String(val));
+                        // _encryptInner writes v2 AEAD once libsodium is ready and
+                        // falls back to legacy XOR before that (upgraded later by
+                        // _secUpgradeToAead()), so no value is written XOR-only
+                        // when this migration runs with sodium available.
+                        var enc = MAGIC + _encryptInner(String(val));
                         _origSet.call(localStorage, k, enc);
                     } catch (_) {}
                 }
@@ -615,6 +667,41 @@
 
         return true;
     };
+
+    /**
+     * Re-encrypt every legacy XOR value under the v2 AEAD using the SAME key.
+     * Idempotent; safe to call after every _secReKey/_secRekeyToPassword.
+     */
+    window._secUpgradeToAead = function () {
+        if (!_aeadReady()) return false;
+        var key = _currentKeyRaw();
+        if (!key) return false;
+        var changed = 0;
+        for (var i = 0; i < localStorage.length; i++) {
+            var k = localStorage.key(i);
+            if (!k || !isSensitive(k)) continue;
+            var raw = _realOrigGet.call(localStorage, k);
+            if (raw === null || !_isEncrypted(raw)) continue;
+            var inner = raw.substring(1);
+            if (inner.indexOf(V2_PREFIX) === 0) continue;
+            var plain = _decryptWithKey(inner, key);      // legacy formats only
+            if (plain === null) continue;                 // stale key — leave it alone
+            _realOrigSet.call(localStorage, k, MAGIC + _aeadEncryptWithKey(plain, key));
+            changed++;
+        }
+        return changed > 0;
+    };
+
+    function _afterSodium(fn) {
+        if (typeof sodium !== 'undefined' && sodium.ready && typeof sodium.ready.then === 'function') {
+            sodium.ready.then(function () { try { fn(); } catch (_) {} });
+        }
+    }
+    // Deferred so the first pass uses AEAD instead of XOR (sodium is not ready at parse time).
+    _afterSodium(function () {
+        if (typeof window._secUpgradeToAead === 'function') window._secUpgradeToAead();
+        if (typeof window._secInit === 'function') window._secInit();
+    });
 
     /**
      * Check if the user has an active session (sessionStorage key + stored token).
@@ -666,7 +753,7 @@
         if (!key) return null;
         var val = _realOrigGet.call(localStorage, key);
         if (val !== null && _isEncrypted(val)) {
-            try { return _xorDecrypt(val.substring(1)); } catch (_) { return null; }
+            try { return _decryptInnerWithKey(val.substring(1), _ensureKey()); } catch (_) { return null; }
         }
         return val; // Not encrypted, return as-is
     };
@@ -714,7 +801,7 @@
 
     window._secReKey = function () {
         // Capture the CURRENT key BEFORE clearing anything: the plaintexts must
-        // be decrypted with the key they were encrypted under. _ensureKey()/_xorDecrypt
+        // be decrypted with the key they were encrypted under. _ensureKey()
         // must NOT be used here — once e2e_encrypted_password is derivable (e.g.
         // a fresh login stored it), _ensureKey would flip to the password-derived
         // key mid-collection and every old-key value would be lost.
@@ -735,10 +822,16 @@
             if (k && isSensitive(k)) {
                 var raw = _realOrigGet.call(localStorage, k);
                 if (raw !== null) {
-                    // Decrypt with the OLD key if it's encrypted
+                    // Decrypt with the OLD key if it's encrypted. MUST use the
+                    // v2/legacy-aware decryptor: values written after libsodium
+                    // is ready are ~v2 AEAD, and _decryptWithKey() only handles
+                    // the legacy XOR format, so it would silently skip them and
+                    // the rekey would orphan them under the discarded old key
+                    // (identity keys and server keys become undecryptable — see
+                    // the fresh-device login path).
                     if (_isEncrypted(raw)) {
                         try {
-                            var decrypted = oldKey ? _decryptWithKey(raw.substring(1), oldKey) : null;
+                            var decrypted = oldKey ? _decryptInnerWithKey(raw.substring(1), oldKey) : null;
                             if (decrypted !== null) plaintexts[k] = decrypted;
                         } catch (_) {}
                     } else {
@@ -756,13 +849,12 @@
         // password-derived key that will be found first by _ensureKey).
         try { _realOrigRemove.call(localStorage, LOCAL_KEY_NAME); } catch (_) {}
 
-        // Re-encrypt all values with the new key.
-        // Use _realOrigSet (saved before interception) to bypass the interceptor,
-        // because the value already has the ~ prefix from _xorEncrypt.
+        // Re-encrypt all values with the new key using AEAD.
+        // Use _realOrigSet (saved before interception) to bypass the interceptor.
         for (var key in plaintexts) {
             if (plaintexts.hasOwnProperty(key)) {
                 try {
-                    var enc = MAGIC + _xorEncrypt(String(plaintexts[key]));
+                    var enc = MAGIC + _aeadEncryptWithKey(String(plaintexts[key]), newKey);
                     _realOrigSet.call(localStorage, key, enc);
                 } catch (_) {}
             }
@@ -793,7 +885,7 @@
                     if (raw !== null) {
                         if (_isEncrypted(raw)) {
                             try {
-                                var decrypted = oldKey ? _decryptWithKey(raw.substring(1), oldKey) : null;
+                                var decrypted = oldKey ? _decryptInnerWithKey(raw.substring(1), oldKey) : null;
                                 if (decrypted !== null) plaintexts[k] = decrypted;
                             } catch (_) {}
                         } else {
@@ -817,12 +909,11 @@
             if (!_tryDeriveFromEncryptedPassword()) return false;
             try { _realOrigRemove.call(localStorage, LOCAL_KEY_NAME); } catch (_) {}
 
-            // 4. Re-write the collected plaintexts — _xorEncrypt() now uses the
-            //    NEW password-derived key via _ensureKey().
+            // 4. Re-write the collected plaintexts using AEAD.
             for (var key in plaintexts) {
                 if (plaintexts.hasOwnProperty(key)) {
                     try {
-                        _realOrigSet.call(localStorage, key, MAGIC + _xorEncrypt(String(plaintexts[key])));
+                        _realOrigSet.call(localStorage, key, MAGIC + _aeadEncryptWithKey(String(plaintexts[key]), _key));
                     } catch (_) {}
                 }
             }

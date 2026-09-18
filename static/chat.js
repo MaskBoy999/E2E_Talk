@@ -3500,7 +3500,7 @@ document.addEventListener('DOMContentLoaded', () => {
             vaultFileList.querySelectorAll('.vault-delete-btn').forEach(btn => {
                 btn.addEventListener('click', async () => {
                     const fid = btn.closest('.vault-file-item').dataset.id;
-                    if (!confirm('Delete this vault file?')) return;
+                    if (!(await uiConfirm('Delete this vault file?'))) return;
                     await vaultDeleteFile(fid);
                     loadVaultFiles();
                 });
@@ -3675,7 +3675,7 @@ document.addEventListener('DOMContentLoaded', () => {
             vaultFileList.querySelectorAll('.vault-delete-btn').forEach(btn => {
                 btn.addEventListener('click', async () => {
                     const fid = btn.closest('.vault-file-item').dataset.id;
-                    if (!confirm('Delete this vault file?')) return;
+                    if (!(await uiConfirm('Delete this vault file?'))) return;
                     await vaultDeleteFile(fid);
                     loadVaultFiles();
                 });
@@ -6036,8 +6036,8 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('delete-account-confirm-btn').addEventListener('click', async function () {
             var pw = document.getElementById('delete-account-password').value;
             if (!pw) { setDeleteAcctStatus('Enter your password to delete the account', 'error'); return; }
-            if (!confirm('Are you sure you want to delete your account? This cannot be undone.')) return;
-            if (!confirm('Really? All your messages, servers, files, and keys will be permanently lost.')) return;
+            if (!(await uiConfirm('Are you sure you want to delete your account? This cannot be undone.'))) return;
+            if (!(await uiConfirm('Really? All your messages, servers, files, and keys will be permanently lost.'))) return;
             setDeleteAcctStatus('Deleting account…', '');
             try {
                 const current_password = await computeHashedPasswordGlobal(pw);
@@ -6066,7 +6066,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Clear all data button in settings — robust logout + wipe sequence
     document.getElementById('clear-all-data-btn').addEventListener('click', async () => {
-        if (!confirm('This will clear ALL local data (logins, keys, settings) and sign you out. The session-duration setting (Settings → Security) is kept. Continue?')) return;
+        if (!(await uiConfirm('This will clear ALL local data (logins, keys, settings) and sign you out. The session-duration setting (Settings → Security) is kept. Continue?'))) return;
         // 1. Close websocket first so no more messages arrive
         if (ws) { try { ws.close(); } catch (_) {} ws = null; }
         // 2. Call server logout to clear HttpOnly cookie (while token is still present)
@@ -6519,46 +6519,18 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             restoreBackupConfirmBtn.disabled = true;
             restoreBackupConfirmBtn.innerHTML = icon('refresh') + ' Restoring...';
-            try {
-                // Ensure encrypted password exists for _secReKey
-                if (!localStorage.getItem('e2e_encrypted_password')) {
-                    storeEncryptedPassword(pw);
-                }
-                if (restoreBackupStatus) { restoreBackupStatus.textContent = 'Fetching key backup from server...'; restoreBackupStatus.style.color = 'var(--text-muted)'; }
-                var blobRes = await authFetch('/api/key-blob');
-                if (!blobRes.ok) {
-                    var errData = null;
-                    try { errData = await blobRes.json(); } catch (_) {}
-                    throw new Error((errData && errData.error) || 'Failed to fetch key backup');
-                }
-                var blobData = await blobRes.json();
-                if (!blobData.encrypted_blob || !blobData.salt || !blobData.nonce) {
-                    throw new Error('No key backup found on server. Keys are saved automatically at login and registration.');
-                }
-                if (restoreBackupStatus) restoreBackupStatus.textContent = 'Decrypting key backup...';
-                var bundle = E2ECrypto.decryptKeyBundle(blobData.encrypted_blob, pw, blobData.salt, blobData.nonce);
-                if (!bundle) throw new Error('Wrong password or corrupted backup.');
-                E2ECrypto.restoreKeyBundle(bundle);
-                // Re-key secure-storage to use the password-derived key
-                if (window._secReKey) {
-                    try { window._secReKey(); } catch (_) {}
-                }
-                storeEncryptedPassword(pw);
-                // Also restore friend code if present
-                if (bundle['e2e_friend_code']) {
-                    myFriendCode = bundle['e2e_friend_code'];
-                }
-                // Save updated blob back so newly joined servers are included
-                saveKeyBlobToServer();
-                if (restoreBackupStatus) { restoreBackupStatus.textContent = 'Keys restored successfully! All encryption keys, media caches, and friend code have been recovered.'; restoreBackupStatus.style.color = '#43b581'; }
-                // Clear password field
+            var result = await restoreKeysFromBackup(pw, function (msg, color) {
+                if (restoreBackupStatus) { restoreBackupStatus.textContent = msg; restoreBackupStatus.style.color = color || 'var(--text-muted)'; }
+            });
+            if (result.ok) {
+                if (restoreBackupStatus) { restoreBackupStatus.textContent = 'Keys restored successfully! All encryption keys, server keys, media caches, and friend code have been recovered.'; restoreBackupStatus.style.color = '#43b581'; }
                 if (restoreBackupPassword) restoreBackupPassword.value = '';
-            } catch (e) {
-                if (restoreBackupStatus) { restoreBackupStatus.textContent = (e.message || 'Recovery failed'); restoreBackupStatus.style.color = 'var(--danger)'; }
-            } finally {
-                restoreBackupConfirmBtn.disabled = false;
-                restoreBackupConfirmBtn.innerHTML = icon('refresh') + ' Restore';
+            } else if (restoreBackupStatus) {
+                restoreBackupStatus.textContent = result.error;
+                restoreBackupStatus.style.color = 'var(--danger)';
             }
+            restoreBackupConfirmBtn.disabled = false;
+            restoreBackupConfirmBtn.innerHTML = icon('refresh') + ' Restore';
         });
     }
 
@@ -6914,8 +6886,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (ksRemoveBtn) {
         ksRemoveBtn.addEventListener('click', async function () {
-            if (!confirm('Remove the kill switch? Login returns to normal password-only.')) return;
-            var cur = prompt('Enter your current password to remove the kill switch:');
+            if (!(await uiConfirm('Remove the kill switch? Login returns to normal password-only.'))) return;
+            var cur = await uiPrompt('Enter your current password to remove the kill switch:');
             if (!cur) return;
             try {
                 var payload = { current_password: await computeHashedPasswordGlobal(cur) };
@@ -7006,7 +6978,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (!pw) { setSdStatus('Enter your password to confirm', 'error'); return; }
                 var days = _pendingDays;
                 if (days > 0) {
-                    if (!confirm('Enable self-destruct? Your account will be permanently deleted after ' + days + ' days of inactivity (no sign-in).')) return;
+                    if (!(await uiConfirm('Enable self-destruct? Your account will be permanently deleted after ' + days + ' days of inactivity (no sign-in).'))) return;
                 }
                 setSdStatus('Saving…', '');
                 try {
@@ -11037,7 +11009,7 @@ function showServerContextMenu(e, serverId, serverName) {
         var msg = isOwnerOfServer
             ? 'Delete this server permanently? All channels, messages, and members will be removed. This cannot be undone.'
             : 'Leave this server? You will lose access to all channels and messages.';
-        if (!confirm(msg)) return;
+        if (!(await uiConfirm(msg))) return;
         try {
             var res = await authFetch('/api/servers/' + serverId + '/leave', { method: 'POST' });
             var data = await res.json();
@@ -11687,11 +11659,7 @@ function connectWebSocket(t) {
                     // Re-fetch server keys and re-upload conversation profiles in case
                     // keys changed while we were offline (e.g. someone rotated on leave)
                     if (servers && servers.length > 0) {
-                        for (const s of servers) {
-                            if (!E2ECrypto.getServerKey(s.id)) {
-                                await fetchAndDecryptServerKey(s.id);
-                            }
-                        }
+                        await ensureServerKeysForAllServers();
                         try { await uploadCurrentProfileToConversations(); } catch (_) {}
                     }
                     // Refresh the currently viewed channel/DM to catch any missed messages,
@@ -11987,6 +11955,11 @@ function connectWebSocket(t) {
                     var needKey = E2ECrypto.getServerKey(data.server_id);
                     if (needKey) {
                         try { await uploadServerKeyForUser(data.server_id, data.user_id); } catch (_) {}
+                    } else {
+                        // We don't hold this server's key either. The broadcast means
+                        // keys are being (re)distributed, so try to fetch ours now
+                        // instead of waiting for the next reconnect.
+                        try { await ensureServerKey(data.server_id); } catch (_) {}
                     }
                 }
                 break;
@@ -12007,9 +11980,14 @@ function connectWebSocket(t) {
                         // with the new key. The real reason is history visibility.)
                         // Use raw_user_id (raw UUID) for API calls — user_id is HMAC'd
                         await uploadServerKeyForUser(data.server_id, data.raw_user_id || data.user_id);
-                    } else {
-                        // Non-owner: fetch the server key
-                        await fetchAndDecryptServerKey(data.server_id);
+                    }
+                    // Self-heal: whoever receives member_joined, if we're a member
+                    // without a usable key for this server, fetch it. This covers a
+                    // joiner whose own join-fetch raced the owner's upload, a member
+                    // who missed the event while offline, and every member other
+                    // than the joiner (who previously did nothing here).
+                    try { await ensureServerKey(data.server_id); } catch (_) {}
+                    if (!ownedByMe) {
                         // Re-upload our conversation profile with the potentially new key
                         try { await uploadCurrentProfileToConversations(); } catch (_) {}
                     }
@@ -13163,6 +13141,101 @@ async function fetchAndDecryptServerKey(serverId) {
     }
 }
 
+// Servers whose key we are currently fetching. Every self-heal trigger goes
+// through ensureServerKey(), so overlapping events (server-list refresh,
+// member_joined, key_needed, WS reconnect) can't fire parallel requests for
+// the same server.
+var _serverKeyFetchInFlight = {};
+
+/**
+ * Self-heal: make sure we hold a usable key for a server, fetching it when it
+ * is missing (or when `force` says the cached one is stale). Returns true when
+ * a key is present afterwards.
+ */
+async function ensureServerKey(serverId, force) {
+    if (!serverId) return false;
+    if (!force && E2ECrypto.getServerKey(serverId)) return true;
+    if (_serverKeyFetchInFlight[serverId]) return _serverKeyFetchInFlight[serverId];
+    _serverKeyFetchInFlight[serverId] = (async function () {
+        try { return await fetchAndDecryptServerKey(serverId); }
+        catch (_) { return false; }
+        finally { delete _serverKeyFetchInFlight[serverId]; }
+    })();
+    return _serverKeyFetchInFlight[serverId];
+}
+
+/**
+ * Run ensureServerKey() for every server we're a member of. A missing key is
+ * fetched; a key that can't decrypt the server name is stale (the key was
+ * rotated since our last blob save) and is re-fetched. `force` re-fetches even
+ * keys that currently look usable — used after restoring a key backup, where
+ * the local key came from a blob that may predate the current server key.
+ */
+async function ensureServerKeysForAllServers(force) {
+    if (!servers || !servers.length) return;
+    for (const s of servers) {
+        if (!s || !s.id) continue;
+        var hasKey = E2ECrypto.getServerKey(s.id);
+        var stale = hasKey && s.encrypted_name && s.name_nonce &&
+                    !tryDecryptWithAllKeys(s.id, s.encrypted_name, s.name_nonce);
+        if (!hasKey) await ensureServerKey(s.id);
+        else if (force || stale) await ensureServerKey(s.id, true);
+    }
+}
+
+/**
+ * Restore identity + server keys (plus media caches and the friend code) from
+ * the password-encrypted key blob on the server, then repair any server key the
+ * blob didn't cover. Runs while logged in — no logout required — so an account
+ * whose keys were orphaned (identity key unreadable => "cannot decrypt server
+ * key") can recover in place. `onStatus(msg, color)` is optional progress
+ * reporting for the Settings UI. Returns { ok: true } or { ok: false, error }.
+ */
+async function restoreKeysFromBackup(password, onStatus) {
+    var report = typeof onStatus === 'function' ? onStatus : function () {};
+    if (!password) return { ok: false, error: 'Please enter your password.' };
+    try {
+        // Ensure encrypted password exists for _secReKey
+        if (!localStorage.getItem('e2e_encrypted_password')) storeEncryptedPassword(password);
+        report('Fetching key backup from server...', 'var(--text-muted)');
+        var blobRes = await authFetch('/api/key-blob');
+        if (!blobRes.ok) {
+            var errData = null;
+            try { errData = await blobRes.json(); } catch (_) {}
+            throw new Error((errData && errData.error) || 'Failed to fetch key backup');
+        }
+        var blobData = await blobRes.json();
+        if (!blobData.encrypted_blob || !blobData.salt || !blobData.nonce) {
+            throw new Error('No key backup found on server. Keys are saved automatically at login and registration.');
+        }
+        report('Decrypting key backup...', 'var(--text-muted)');
+        var bundle = E2ECrypto.decryptKeyBundle(blobData.encrypted_blob, password, blobData.salt, blobData.nonce);
+        if (!bundle) throw new Error('Wrong password or corrupted backup.');
+        E2ECrypto.restoreKeyBundle(bundle);
+        // Re-key secure-storage onto the password-derived key
+        if (window._secReKey) { try { window._secReKey(); } catch (_) {} }
+        storeEncryptedPassword(password);
+        if (bundle['e2e_friend_code']) myFriendCode = bundle['e2e_friend_code'];
+
+        // The blob can predate the current server key (rotation) or omit a key
+        // added since the last save, so re-fetch every server key we may have
+        // lost. This is what makes orphaned server keys recoverable in place.
+        report('Restoring server keys...', 'var(--text-muted)');
+        try { await ensureServerKeysForAllServers(true); } catch (_) {}
+
+        // Save the (now complete) bundle back and re-render with the keys.
+        saveKeyBlobToServer();
+        try { renderServerList(); } catch (_) {}
+        if (currentServerId) { try { await loadMembers(currentServerId); } catch (_) {} }
+        if (currentChannelId) { try { await loadMessages(currentChannelId); } catch (_) {} }
+        return { ok: true };
+    } catch (e) {
+        return { ok: false, error: (e && e.message) || 'Recovery failed' };
+    }
+}
+// Programmatic entry point (Settings button uses the same function).
+window.recoverEncryptionKeys = restoreKeysFromBackup;
+
 async function rotateServerKey(serverId) {
     const identity = E2ECrypto.getIdentityKeyPair();
     if (!identity) return false;
@@ -13432,15 +13505,7 @@ async function loadServers() {
         // may be a previous version if the server key was rotated since the last
         // blob save. In that case getServerKey() returns non-null but the name
         // can't be decrypted. We check name decryptability to detect stale keys.
-        for (const s of servers) {
-            var hasKey = E2ECrypto.getServerKey(s.id);
-            if (hasKey && s.encrypted_name && s.name_nonce) {
-                // Key exists — verify it can decrypt the server name
-                var canDecryptName = tryDecryptWithAllKeys(s.id, s.encrypted_name, s.name_nonce);
-                if (canDecryptName) continue; // Key is fine, skip fetch
-            }
-            await fetchAndDecryptServerKey(s.id);
-        }
+        await ensureServerKeysForAllServers();
 
         // Re-render server list with decrypted names now that keys are available
         renderServerList();
@@ -13669,9 +13734,9 @@ function renderServerList() {
                 });
                 header.appendChild(toggle);
             }
-            header.addEventListener('dblclick', function(e) {
+            header.addEventListener('dblclick', async function(e) {
                 e.preventDefault();
-                var newName = prompt('Rename group:', g.name);
+                var newName = await uiPrompt('Rename group:', g.name);
                 if (newName && newName !== g.name) {
                     authFetch('/api/server-groups/' + g.id, {
                         method: 'PATCH',
@@ -14201,11 +14266,11 @@ function renderServerList() {
             });
         }
 
-        menu.addEventListener('click', function(ev) {
+        menu.addEventListener('click', async function(ev) {
             var action = ev.target.dataset.action;
             if (!action) return;
             if (action === 'rename') {
-                var newName = prompt('Rename group:', group.name);
+                var newName = await uiPrompt('Rename group:', group.name);
                 if (newName && newName !== group.name) {
                     authFetch('/api/server-groups/' + group.id, {
                         method: 'PATCH',
@@ -16842,8 +16907,8 @@ function handleEdit(messageId, msgDiv) {
     });
 }
 
-function handleDelete(messageId, msgDiv) {
-    if (!confirm('Delete this message?')) return;
+async function handleDelete(messageId, msgDiv) {
+    if (!(await uiConfirm('Delete this message?'))) return;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     if (viewMode === 'dms') {
         ws.send(JSON.stringify({ type: 'dm_delete', message_id: messageId }));
@@ -19063,7 +19128,7 @@ async function sendDmMessage() {
 }
 
 async function unfriend(otherUserId, otherUsername) {
-    if (!confirm('Unfriend ' + otherUsername + '? The DM conversation and all messages will be deleted.')) return;
+    if (!(await uiConfirm('Unfriend ' + otherUsername + '? The DM conversation and all messages will be deleted.'))) return;
     try {
         const res = await authFetch('/api/friends/remove', {
             method: 'POST',
@@ -19319,7 +19384,7 @@ function updatePresenceDots() {
 }
 
 async function kickMember(targetUserId, username) {
-    if (!confirm('Kick ' + username + ' from this server? A new server key will be generated.')) return;
+    if (!(await uiConfirm('Kick ' + username + ' from this server? A new server key will be generated.'))) return;
     try {
         const res = await authFetch(`/api/servers/${currentServerId}/members/kick`, {
             method: 'POST',
@@ -19338,7 +19403,7 @@ async function kickMember(targetUserId, username) {
 }
 
 async function banMember(targetUserId, username) {
-    if (!confirm('Ban ' + username + ' from this server? They will be removed and unable to rejoin.')) return;
+    if (!(await uiConfirm('Ban ' + username + ' from this server? They will be removed and unable to rejoin.'))) return;
     try {
         const res = await authFetch(`/api/servers/${currentServerId}/members/ban`, {
             method: 'POST',
@@ -19361,7 +19426,7 @@ async function leaveServer() {
     const msg = isOwner
         ? 'Delete this server permanently? All channels, messages, and members will be removed. This cannot be undone.'
         : 'Leave this server? You will lose access to all channels and messages.';
-    if (!confirm(msg)) return;
+    if (!(await uiConfirm(msg))) return;
     try {
         const res = await authFetch(`/api/servers/${currentServerId}/leave`, {
             method: 'POST',
@@ -19387,7 +19452,7 @@ async function leaveServer() {
 }
 
 async function deleteChannel(channelId, channelName) {
-    if (!confirm('Delete channel #' + channelName + '? All messages will be lost.')) return;
+    if (!(await uiConfirm('Delete channel #' + channelName + '? All messages will be lost.'))) return;
     try {
         const res = await authFetch(`/api/channels/${channelId}`, {
             method: 'DELETE',
@@ -19497,7 +19562,7 @@ async function loadBannedUsers() {
 }
 
 async function unbanUser(targetUserId, username) {
-    if (!confirm('Unban ' + username + '? They will be able to rejoin with an invite code.')) return;
+    if (!(await uiConfirm('Unban ' + username + '? They will be able to rejoin with an invite code.'))) return;
     try {
         const res = await authFetch(`/api/servers/${currentServerId}/members/unban/${targetUserId}`, {
             method: 'POST',
@@ -19695,8 +19760,8 @@ async function showInviteModal() {
 
     // QR Code for invite code
     if (qrBtn) {
-        qrBtn.onclick = () => {
-            if (!confirm('Anyone who photographs this QR code can join this server. Continue?')) return;
+        qrBtn.onclick = async () => {
+            if (!(await uiConfirm('Anyone who photographs this QR code can join this server. Continue?'))) return;
             inviteQrContainer.style.display = 'block';
             const inviteQrCanvas = document.getElementById('invite-qr-canvas');
             inviteQrCanvas.innerHTML = '';
@@ -19750,7 +19815,7 @@ async function showInviteModal() {
 
 async function regenerateInvite() {
     if (!currentServerId) return;
-    if (!confirm('Regenerate invite code? The old code will stop working immediately.')) return;
+    if (!(await uiConfirm('Regenerate invite code? The old code will stop working immediately.'))) return;
 
     try {
         const inviteCode = generateCode(16);
@@ -19882,12 +19947,12 @@ async function loadMyFriendCode() {
             };
             // QR Code for friend code
             if (qrBtn && friendQrContainer) {
-                qrBtn.onclick = () => {
+                qrBtn.onclick = async () => {
                     if (!el.dataset.value) {
                         alert('No friend code available. Please re-register.');
                         return;
                     }
-                    if (!confirm('Anyone who photographs this QR code can send you a friend request. Continue?')) return;
+                    if (!(await uiConfirm('Anyone who photographs this QR code can send you a friend request. Continue?'))) return;
                     friendQrContainer.style.display = 'block';
                     const friendQrCanvas = document.getElementById('friend-qr-canvas');
                     friendQrCanvas.innerHTML = '';
@@ -19948,7 +20013,7 @@ async function loadMyFriendCode() {
                 regenBtn.onclick = async function () {
                     var pw = await verifyStoredPassword();
                     if (!pw) return;
-                    if (!confirm('Generate a new friend code? Your old one will stop working immediately.')) return;
+                    if (!(await uiConfirm('Generate a new friend code? Your old one will stop working immediately.'))) return;
                     handleFriendCodeRegenerate(pw);
                 };
             }
@@ -20219,7 +20284,7 @@ async function handleFriendCodeRegenerate(preverifiedPw) {
         return;
     }
     if (regenStatusEl) regenStatusEl.textContent = '';
-    if (!confirm('Are you sure? Your old friend code will stop working immediately. Anyone who had it will no longer be able to send you friend requests.')) return;
+    if (!(await uiConfirm('Are you sure? Your old friend code will stop working immediately. Anyone who had it will no longer be able to send you friend requests.'))) return;
     if (errorEl) errorEl.style.display = 'none';
     if (successEl) successEl.style.display = 'none';
     // Show loading state
@@ -26802,7 +26867,7 @@ function renderEmojiGrid(container, searchQuery) {
             }
             delBtn.addEventListener('click', async (e) => {
                 e.stopPropagation();
-                if (!confirm('Delete emoji :' + name + ':?')) return;
+                if (!(await uiConfirm('Delete emoji :' + name + ':?'))) return;
                 if (cacheEntry && cacheEntry.id) {
                     try {
                         await authFetch('/api/users/me/stickers/' + cacheEntry.id, { method: 'DELETE' });
@@ -27360,7 +27425,7 @@ function renderStickerItems(grid, stickers) {
         }
         delBtn.addEventListener('click', async (e) => {
             e.stopPropagation();
-            if (!confirm('Delete sticker "' + sticker.sticker_name + '"?')) return;
+            if (!(await uiConfirm('Delete sticker "' + sticker.sticker_name + '"?'))) return;
             try {
                 const res = await authFetch('/api/users/me/stickers/' + sticker.id, { method: 'DELETE' });
                 if (res.ok) item.remove();
@@ -27467,7 +27532,7 @@ function renderGifPanel(container, searchQuery) {
             }
             delBtn.addEventListener('click', async (e) => {
                 e.stopPropagation();
-                if (!confirm('Delete "' + sticker.sticker_name + '"?')) return;
+                if (!(await uiConfirm('Delete "' + sticker.sticker_name + '"?'))) return;
                 try {
                     const res = await authFetch('/api/users/me/stickers/' + sticker.id, { method: 'DELETE' });
                     if (res.ok) item.remove();
@@ -30906,7 +30971,7 @@ async function verifyStoredPassword() {
         }
     }
     // Stored password is missing or wrong — ask the user
-    var newPassword = prompt('Your password has changed. Please enter your current password:');
+    var newPassword = await uiPrompt('Your password has changed. Please enter your current password:');
     if (newPassword) {
         storeEncryptedPassword(newPassword);
         // Also update the token via reauth with the new password

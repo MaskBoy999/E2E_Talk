@@ -236,7 +236,8 @@ pub struct ServerMemberInfo {
     pub role: String,
     pub profile_picture_file_id: Option<String>,
     pub role_id: Option<String>,
-    pub role_name: Option<String>,
+    pub role_encrypted_name: Option<Vec<u8>>,
+    pub role_name_nonce: Option<Vec<u8>>,
     pub role_color: Option<String>,
     pub role_position: i32,
 }
@@ -273,6 +274,11 @@ pub const PERM_ALL: i64 = (1 << 22) - 1;
 /// Permissions every member gets by default through @everyone: the "normal
 /// chat" abilities (see messages, send, react, reply in threads, attach files,
 /// create polls, talk in voice, play soundboard clips).
+///
+/// INVITE_MEMBERS is deliberately NOT included — inviting is grant-only, so the
+/// owner (implicit PERM_ALL) or a custom role the owner grants it to can invite,
+/// without every member inheriting the ability. Keep
+/// `migrations/086_backfill_everyone_role.sql` (and its literal) in sync.
 pub const PERM_DEFAULT_EVERYONE: i64 = PERM_VIEW_CHANNEL
     | PERM_SEND_MESSAGES
     | PERM_ADD_REACTIONS
@@ -281,8 +287,7 @@ pub const PERM_DEFAULT_EVERYONE: i64 = PERM_VIEW_CHANNEL
     | PERM_CREATE_POLLS
     | PERM_CONNECT_VOICE
     | PERM_SPEAK
-    | PERM_USE_SOUNDBOARD
-    | PERM_INVITE_MEMBERS;
+    | PERM_USE_SOUNDBOARD;
 
 #[derive(Debug, Clone)]
 pub struct DmMessage {
@@ -1356,6 +1361,8 @@ impl Database {
         let _ = conn.execute_batch(include_str!("../migrations/085_member_role.sql"));
         let _ = conn.execute_batch(include_str!("../migrations/086_backfill_everyone_role.sql"));
         let _ = conn.execute_batch(include_str!("../migrations/087_role_name_encryption.sql"));
+        let _ = conn.execute_batch(include_str!("../migrations/088_role_name_wipe.sql"));
+        let _ = conn.execute_batch(include_str!("../migrations/089_everyone_drop_invite.sql"));
 
         // Data migration: normalize legacy space-separated CURRENT_TIMESTAMP values
         // ("YYYY-MM-DD HH:MM:SS") to fixed-width RFC3339 ("YYYY-MM-DDTHH:MM:SS.000000Z")
@@ -8447,7 +8454,7 @@ impl Database {
         let id = Uuid::new_v4().to_string();
         conn.execute(
             "INSERT INTO server_roles (id, server_id, name, color, position, is_everyone, permissions)
-             VALUES (?1, ?2, '@everyone', '#99aab5', 0, 1, ?3)",
+             VALUES (?1, ?2, '', '#99aab5', 0, 1, ?3)",
             params![id, server_id, PERM_DEFAULT_EVERYONE],
         )
         .map_err(|e| e.to_string())?;
@@ -8466,7 +8473,7 @@ impl Database {
         let mut stmt = conn
             .prepare(
                 "SELECT id, server_id, name, color, position, is_everyone, permissions, encrypted_name, name_nonce
-                 FROM server_roles WHERE server_id = ?1 ORDER BY position DESC, name ASC",
+                 FROM server_roles WHERE server_id = ?1 ORDER BY position DESC, created_at ASC, id ASC",
             )
             .map_err(|e| e.to_string())?;
         let roles = stmt
@@ -8501,21 +8508,21 @@ impl Database {
         .map_err(|_| "Role not found".to_string())
     }
 
-    pub fn create_role(&self, server_id: &str, name: &str, color: Option<&str>, permissions: i64, position: i32, encrypted_name: Option<&[u8]>, name_nonce: Option<&[u8]>) -> Result<ServerRole, String> {
+    pub fn create_role(&self, server_id: &str, color: Option<&str>, permissions: i64, position: i32, encrypted_name: Option<&[u8]>, name_nonce: Option<&[u8]>) -> Result<ServerRole, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         Self::ensure_everyone_role_c(&conn, server_id)?;
         let id = Uuid::new_v4().to_string();
         let perms = permissions & PERM_ALL;
         conn.execute(
             "INSERT INTO server_roles (id, server_id, name, color, position, is_everyone, permissions, encrypted_name, name_nonce)
-             VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8)",
-            params![id, server_id, name, color, position, perms, encrypted_name, name_nonce],
+             VALUES (?1, ?2, '', ?3, ?4, 0, ?5, ?6, ?7)",
+            params![id, server_id, color, position, perms, encrypted_name, name_nonce],
         )
         .map_err(|e| e.to_string())?;
         Ok(ServerRole {
             id,
             server_id: server_id.to_string(),
-            name: name.to_string(),
+            name: String::new(),
             color: color.map(|c| c.to_string()),
             position: position,
             is_everyone: false,
@@ -8530,7 +8537,6 @@ impl Database {
     pub fn update_role(
         &self,
         role_id: &str,
-        name: &str,
         color: Option<&str>,
         permissions: Option<i64>,
         encrypted_name: Option<&[u8]>,
@@ -8538,24 +8544,26 @@ impl Database {
     ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         // Use COALESCE to preserve existing encrypted_name/name_nonce when not provided
+        // (pure reorders pass None and must not wipe the encrypted name).
+        // name column is always set to '' — plaintext role names are no longer stored.
         let enc = encrypted_name.map(|v| v.to_vec());
         let nonce = name_nonce.map(|v| v.to_vec());
         match permissions {
             Some(p) => {
                 conn.execute(
-                    "UPDATE server_roles SET name = ?1, color = ?2, permissions = ?3,
-                     encrypted_name = COALESCE(?5, encrypted_name),
-                     name_nonce = COALESCE(?6, name_nonce)
-                     WHERE id = ?4",
-                    params![name, color, p & PERM_ALL, role_id, enc.as_deref(), nonce.as_deref()],
+                    "UPDATE server_roles SET name = '', color = ?1, permissions = ?2,
+                     encrypted_name = COALESCE(?4, encrypted_name),
+                     name_nonce = COALESCE(?5, name_nonce)
+                     WHERE id = ?3",
+                    params![color, p & PERM_ALL, role_id, enc.as_deref(), nonce.as_deref()],
                 )
             }
             None => conn.execute(
-                "UPDATE server_roles SET name = ?1, color = ?2,
-                 encrypted_name = COALESCE(?4, encrypted_name),
-                 name_nonce = COALESCE(?5, name_nonce)
-                 WHERE id = ?3",
-                params![name, color, role_id, enc.as_deref(), nonce.as_deref()],
+                "UPDATE server_roles SET name = '', color = ?1,
+                 encrypted_name = COALESCE(?3, encrypted_name),
+                 name_nonce = COALESCE(?4, name_nonce)
+                 WHERE id = ?2",
+                params![color, role_id, enc.as_deref(), nonce.as_deref()],
             ),
         }
         .map_err(|e| e.to_string())?;
@@ -8802,7 +8810,7 @@ impl Database {
         let mut stmt = conn
             .prepare(
                 "SELECT u.id, u.username, sm.role, u.profile_picture_file_id,
-                        sm.role_id, r.name, r.color, COALESCE(r.position, 0)
+                        sm.role_id, r.encrypted_name, r.name_nonce, r.color, COALESCE(r.position, 0)
                  FROM server_members sm
                  INNER JOIN users u ON sm.user_id = u.id
                  LEFT JOIN server_roles r ON r.id = sm.role_id
@@ -8818,9 +8826,10 @@ impl Database {
                     role: row.get(2)?,
                     profile_picture_file_id: row.get(3)?,
                     role_id: row.get(4)?,
-                    role_name: row.get(5)?,
-                    role_color: row.get(6)?,
-                    role_position: row.get(7)?,
+                    role_encrypted_name: row.get(5)?,
+                    role_name_nonce: row.get(6)?,
+                    role_color: row.get(7)?,
+                    role_position: row.get(8)?,
                 })
             })
             .map_err(|e| e.to_string())?

@@ -2,6 +2,7 @@ import { test, expect, type Page } from '@playwright/test';
 import { spawn, execSync, type ChildProcess } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
+import { dialogMessages, queuePromptAnswer } from './_ui-dialogs';
 
 const BASE = 'https://localhost:3443';
 const DB = 'server/e2e_chat.db';
@@ -403,17 +404,15 @@ test.describe('Kill Switch', () => {
 
         // Armed: the kill-switch login deletes the account… but first, disarm
         // via the UI (prompt asks for the current password).
-        const dialogs: string[] = [];
-        page.on('dialog', async (d) => {
-            dialogs.push(d.message());
-            await d.accept('password123');
-        });
+        // Remove confirms, then asks for the password — both in-page popups now
+        // (static/ui-dialog.js). Script the answer for the prompt.
+        await queuePromptAnswer(page, 'password123');
         await page.click('#kill-switch-remove-btn');
         await page.waitForFunction(() => {
             const el = document.getElementById('kill-switch-status-line');
             return el && el.textContent && el.textContent.indexOf('OFF') !== -1;
         }, { timeout: 10000 });
-        expect(dialogs.length).toBeGreaterThan(0);
+        expect((await dialogMessages(page)).length).toBeGreaterThan(0);
 
         // Disarmed: the kill-switch columns are gone, so no proof can even be
         // produced — the client sends the raw password (legacy path) and the
@@ -598,8 +597,8 @@ test.describe('Kill Switch', () => {
         await page.click('#delete-account-cancel-btn');
         await page.waitForSelector('#delete-account-section', { state: 'hidden', timeout: 5000 });
 
-        // Reopen, fill the real password, confirm (dismiss the two confirm dialogs).
-        page.on('dialog', async (d) => d.accept());
+        // Reopen, fill the real password, confirm (the two confirmations are
+        // in-page popups now and auto-accept under automation).
         await page.click('#delete-account-btn');
         await page.fill('#delete-account-password', 'password123');
         await page.click('#delete-account-confirm-btn');

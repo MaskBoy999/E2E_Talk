@@ -5,7 +5,10 @@ const PASSWORD = 'testpass1234';
 
 // Default @everyone permission set (server/src/db.rs PERM_DEFAULT_EVERYONE):
 // VIEW_CHANNEL | SEND_MESSAGES | ADD_REACTIONS | REPLY_IN_THREADS | ATTACH_FILES
-// | CREATE_POLLS | CONNECT_VOICE | SPEAK | USE_SOUNDBOARD
+// | CREATE_POLLS | CONNECT_VOICE | SPEAK | USE_SOUNDBOARD (= 286783).
+// INVITE_MEMBERS is intentionally NOT part of it: inviting is grant-only (the
+// owner holds it implicitly, or a custom role the owner grants it to), so this
+// value must match db.rs and migrations/086 + 089 exactly.
 const DEFAULT_EVERYONE = 286783;
 
 const BITS = {
@@ -109,10 +112,18 @@ async function roles(page: Page, serverId: string) {
     return r.body as any;
 }
 
+function dummyEncryptedName(name: string) {
+    // Server requires encrypted_name + name_nonce; generate dummy encrypted payload
+    const encBytes = Buffer.from(name + ':' + Date.now()).toString('base64');
+    const nonceBytes = Buffer.alloc(24).fill(0).toString('base64');
+    return { encrypted_name: encBytes, name_nonce: nonceBytes };
+}
+
 async function createRole(page: Page, serverId: string, name: string, permissions: number, color = '#ff5500', position?: number) {
+    const enc = dummyEncryptedName(name);
     return await api(page, `/api/servers/${serverId}/roles`, {
         method: 'POST',
-        body: JSON.stringify(position ? { name, permissions, color, position } : { name, permissions, color }),
+        body: JSON.stringify(position ? { ...enc, name, permissions, color, position } : { ...enc, name, permissions, color }),
     });
 }
 
@@ -239,7 +250,7 @@ test.describe('Server roles & permissions', () => {
         const memberRows = await members(page, serverId);
         const modRow = memberRows.find((m) => m.id === adminId.id);
         expect(modRow.role_id).toBe(adminRole.id);
-        expect(modRow.role_name).toBe('Admin');
+        expect(modRow.role_name).toBe('');  // Phase A: plaintext role names no longer served
         expect(modRow.role_color).toBe('#ff5500');
         expect(modRow.role_position).toBeGreaterThan(memberRows.find((m) => m.id === lowId.id).role_position);
 
@@ -322,7 +333,7 @@ test.describe('Server roles & permissions', () => {
 
         // The member list exposes the role so the client can render the circle.
         let rows = await members(page, serverId);
-        expect(rows.find((m) => m.id === memberId).role_name).toBe('VIP');
+        expect(rows.find((m) => m.id === memberId).role_name).toBe('');  // Phase A: plaintext role names no longer served
 
         // Kick -> membership (and therefore the role assignment) is gone.
         expect((await api(page, `/api/servers/${serverId}/members/kick`, {
@@ -520,7 +531,9 @@ test.describe('Server roles & permissions', () => {
 
         const roleRow = page.locator('.role-row', { hasText: 'Moderator' });
         await expect(roleRow).toBeVisible();
-        const saved = (await roles(page, serverId)).roles.find((r: any) => r.name === 'Moderator');
+        // Phase A: plaintext names are empty, so find by encrypted_name instead
+        const allRoles = (await roles(page, serverId)).roles;
+        const saved = allRoles.find((r: any) => r.encrypted_name && !r.is_everyone);
         expect(saved, 'role persisted').toBeTruthy();
         expect(saved.color).toBe('#ff0055');
         expect(saved.permissions).toBeGreaterThan(DEFAULT_EVERYONE); // master toggle granted everything

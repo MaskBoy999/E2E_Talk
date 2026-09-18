@@ -140,8 +140,7 @@ test.describe('Admin panel: every tab renders and XSS payloads stay escaped', ()
 
     test('XSS payloads in usernames and other plaintext fields are escaped everywhere', async ({ page, request }) => {
         test.setTimeout(180000);
-        const dialogs: string[] = [];
-        page.on('dialog', (d) => { dialogs.push(d.message()); d.accept(); });
+        // Popups are in-page now (static/ui-dialog.js) and auto-accept under automation.
         await loginAdminPage(page);
 
         // Register a user whose username is a full XSS payload. The server does

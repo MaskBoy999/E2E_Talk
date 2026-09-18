@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { dialogMessages } from './_ui-dialogs';
 
 const BASE = 'https://localhost:3443';
 
@@ -107,16 +108,13 @@ test.describe('Heartbeat refresh options + reauth custom duration', () => {
         await page.click('.settings-tab[data-tab="security-settings"]');
         await page.locator('#reauth-duration-select').selectOption('3600');
 
-        let alertMsg = '';
-        page.on('dialog', (d: any) => { alertMsg = d.message(); d.dismiss(); });
-
         await page.click('#reauth-btn');
         await page.fill('#reauth-password', 'password123');
         await page.click('#reauth-confirm-btn');
         await page.waitForTimeout(1500);
 
-        // The success alert reflects the chosen duration
-        expect(alertMsg).toContain('1 hour');
+        // The success popup (in-page now, static/ui-dialog.js) reflects the chosen duration
+        expect((await dialogMessages(page)).join('|')).toContain('1 hour');
 
         const token = await page.evaluate(() => localStorage.getItem('token'));
         expect(token).toBeTruthy();
@@ -139,7 +137,6 @@ test.describe('Heartbeat refresh options + reauth custom duration', () => {
 
         // Re-auth with a 1-hour duration
         await page.locator('#reauth-duration-select').selectOption('3600');
-        page.on('dialog', (d: any) => d.dismiss());
         await page.click('#reauth-btn');
         await page.fill('#reauth-password', 'password123');
         await page.click('#reauth-confirm-btn');

@@ -331,3 +331,114 @@ test.describe('Cross-Device Storage Key', () => {
     });
 });
 
+// Regression: _secReKey() used the legacy XOR-only decryptor to collect
+// plaintexts, so every ~v2 (XChaCha20) value was silently skipped and then
+// orphaned by the rekey. On a fresh device the server-restored key bundle
+// (identity keys, server keys) is written while the PRE-LOGIN random fallback
+// key is active, then completeLogin() calls _secReKey() to move to the
+// password-derived key and drops the fallback — leaving those keys
+// undecryptable ("cannot decrypt server key").
+test('rekey from the pre-login fallback key preserves AEAD values', async ({ page }) => {
+    await gotoMinimalPage(page);
+    // Ensure libsodium is usable so writes take the v2 AEAD path.
+    await page.waitForFunction(() => {
+        const s = (window as any).sodium;
+        return !!s && typeof s.crypto_aead_xchacha20poly1305_ietf_encrypt === 'function';
+    }, { timeout: 15000 });
+
+    const result = await page.evaluate(() => {
+        const W: any = window;
+
+        // Pre-login state: no e2e_encrypted_password yet, so _secInit() is using
+        // a random fallback key. A sensitive write is stored as ~v2 under it.
+        const SECRET = 'rekey-must-survive';
+        localStorage.setItem('token_rekey_probe', SECRET);
+        const rawBefore = W._secGetRaw('token_rekey_probe');
+
+        // Now make a password-derived key available, exactly like completeLogin().
+        const pw = 'rekey-probe-pw-123';
+        const devKeyB64 = W.E2ECrypto.arrayBufferToBase64(W.E2ECrypto.randomBytes(32));
+        localStorage.setItem('e2e_device_key', devKeyB64); // bootstrap key: plaintext
+        const devKey = new Uint8Array(W.E2ECrypto.base64ToArrayBuffer(devKeyB64));
+        localStorage.setItem('e2e_encrypted_password',
+            W.E2ECrypto.encodeEncryptedFileKey(btoa(pw), devKey));
+
+        const rekeyed = W._secReKey();
+        const rawAfter = W._secGetRaw('token_rekey_probe');
+        const after = localStorage.getItem('token_rekey_probe');
+
+        localStorage.removeItem('token_rekey_probe');
+
+        return {
+            rawBeforeV2: rawBefore !== null && rawBefore.indexOf('~v2.') === 0,
+            rekeyed,
+            rawAfterV2: rawAfter !== null && rawAfter.indexOf('~v2.') === 0,
+            after,
+        };
+    });
+
+    expect(result.rawBeforeV2, 'probe must be stored as v2 AEAD before the rekey').toBe(true);
+    expect(result.rekeyed, '_secReKey must succeed once a password is available').toBe(true);
+    expect(result.rawAfterV2, 'value must still be v2 AEAD after the rekey').toBe(true);
+    expect(result.after, 'value must survive the rekey').toBe('rekey-must-survive');
+});
+
+test.describe('Identity Private Key Encryption', () => {
+    test('identity private key is encrypted at rest and round-trips', async ({ browser }) => {
+        const username = `id_key_test_${Date.now()}`;
+        const password = 'id-key-test-pw-123';
+
+        // Register to create identity keys
+        const ctx = await browser.newContext({ ignoreHTTPSErrors: true });
+        const page = await ctx.newPage();
+        await page.goto(`${BASE}/login.html`);
+        await page.waitForSelector('#show-register', { timeout: 10000 });
+        await page.click('#show-register');
+        await page.fill('#register-username', username);
+        await page.fill('#register-password', password);
+        await page.fill('#register-confirm-password', password);
+        await page.click('#register-form button[type="submit"]');
+        await page.waitForURL('**/index.html', { timeout: 15000 });
+        await page.waitForTimeout(2000);
+
+        const state = await page.evaluate(() => {
+            const W: any = window;
+            const uid = JSON.parse(localStorage.getItem('user') || '{}').id;
+            const raw = W._secGetRaw ? W._secGetRaw('e2e_identity_private_' + uid) : null;
+            const kp = W.E2ECrypto && W.E2ECrypto.getIdentityKeyPair ? W.E2ECrypto.getIdentityKeyPair() : null;
+            return {
+                rawPrefix: raw && raw.substring(0, 10),
+                encryptedAtRest: !!raw && raw.charAt(0) === '~',
+                roundTrip: !!kp && W._secGet('e2e_identity_private_' + uid)
+                             === W.E2ECrypto.arrayBufferToBase64(kp.privateKey),
+            };
+        });
+
+        // Regression: identity private key must be encrypted at rest (not raw base64)
+        expect(state.encryptedAtRest, 'identity private key must be encrypted at rest').toBe(true);
+        // Regression: interceptor must decrypt it transparently
+        expect(state.roundTrip, 'interceptor must decrypt it transparently').toBe(true);
+
+        // Verify after page reload
+        await page.reload({ waitUntil: 'networkidle' });
+        await page.waitForTimeout(2000);
+
+        const stateAfterReload = await page.evaluate(() => {
+            const W: any = window;
+            const uid = JSON.parse(localStorage.getItem('user') || '{}').id;
+            const raw = W._secGetRaw ? W._secGetRaw('e2e_identity_private_' + uid) : null;
+            const kp = W.E2ECrypto && W.E2ECrypto.getIdentityKeyPair ? W.E2ECrypto.getIdentityKeyPair() : null;
+            return {
+                encryptedAtRest: !!raw && raw.charAt(0) === '~',
+                roundTrip: !!kp && W._secGet('e2e_identity_private_' + uid)
+                             === W.E2ECrypto.arrayBufferToBase64(kp.privateKey),
+            };
+        });
+
+        expect(stateAfterReload.encryptedAtRest, 'identity private key still encrypted after reload').toBe(true);
+        expect(stateAfterReload.roundTrip, 'round-trip still works after reload').toBe(true);
+
+        await ctx.close();
+    });
+});
+

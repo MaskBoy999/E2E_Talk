@@ -62,19 +62,21 @@
                 raw === testVal ? 'OK' : 'WRONG: ' + String(raw).slice(0, 40));
         } catch (e) { addResult('Non-sensitive key test', false, e.message); }
 
-        // Test 4: Encrypted format validation: ~<tag>.<b64>
+        // Test 4: Encrypted format validation: v2 AEAD (~v2.<b64>) or legacy (~<tag>.<b64>)
         try {
             localStorage.setItem('e2e_test_format', 'format-check');
             var raw2 = window._secGetRaw('e2e_test_format');
             localStorage.removeItem('e2e_test_format');
             var hasMagic = raw2 !== null && raw2.charAt(0) === '~';
             var afterMagic = raw2 ? raw2.substring(1) : '';
+            var isV2 = afterMagic.indexOf('v2.') === 0;
             var dotIdx = afterMagic.indexOf('.');
             var hasDot = dotIdx > 0;
             var tagPart = hasDot ? afterMagic.substring(0, dotIdx) : '';
             var tagIs8Hex = /^[0-9a-f]{8}$/.test(tagPart);
-            addResult('Encrypted format ~<tag>.<b64>', hasMagic && hasDot && tagIs8Hex,
-                (hasMagic && hasDot && tagIs8Hex) ? 'Format OK, tag=' + tagPart : 'Format WRONG');
+            var formatOk = hasMagic && (isV2 || (hasDot && tagIs8Hex));
+            addResult('Encrypted format v2 AEAD or legacy', formatOk,
+                formatOk ? 'Format OK, ' + (isV2 ? 'v2 AEAD' : 'legacy tag=' + tagPart) : 'Format WRONG');
         } catch (e) { addResult('Encrypted format check', false, e.message); }
 
         // Test 5: Reading back via public API (_secGet)

@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { spawn, type ChildProcess } from 'child_process';
+import { dialogMessages } from './_ui-dialogs';
 import path from 'path';
 import fs from 'fs';
 
@@ -130,8 +131,9 @@ test.describe('Admin backup encryption + raw tables (isolated server)', () => {
 
     test('password-encrypted export is Argon2id (v2) and round-trips; wrong password rejected', async ({ page, request }) => {
         test.setTimeout(180000);
-        const dialogs: string[] = [];
-        page.on('dialog', (d) => { dialogs.push(d.message()); d.accept(); });
+        // Popups are in-page now (static/ui-dialog.js) and auto-accept under
+        // automation; their text is read back from the dialog log instead of
+        // page.on('dialog'), which only ever fired for native popups.
 
         await loginAdminPage(page);
         const token = (await page.evaluate(() => sessionStorage.getItem('admin_token'))) || '';
@@ -194,7 +196,7 @@ test.describe('Admin backup encryption + raw tables (isolated server)', () => {
         await page.waitForSelector('#import-db-password-modal', { state: 'visible', timeout: 10000 });
         await page.fill('#import-password-input', 'wrongpass');
         await page.click('#confirm-import-db');
-        await expect.poll(() => dialogs.join('|'), { timeout: 20000 }).toContain('Wrong password');
+        await expect.poll(async () => (await dialogMessages(page)).join('|'), { timeout: 20000 }).toContain('Wrong password');
         const loginAfterWrong = await request.post(`${ALT}/api/admin/login`, { data: { password: ADMIN_PW } });
         expect(loginAfterWrong.ok(), 'DB intact after wrong password').toBeTruthy();
 
@@ -209,7 +211,7 @@ test.describe('Admin backup encryption + raw tables (isolated server)', () => {
         await page.waitForSelector('#import-db-password-modal', { state: 'visible', timeout: 10000 });
         await page.fill('#import-password-input', 'backup-pass');
         await page.click('#confirm-import-db');
-        await expect.poll(() => dialogs.join('|'), { timeout: 30000 }).toContain('imported successfully');
+        await expect.poll(async () => (await dialogMessages(page)).join('|'), { timeout: 30000 }).toContain('imported successfully');
 
         // Re-login: the imported DB preserved admin_config + audit rows.
         await loginAdminPage(page);
@@ -222,8 +224,9 @@ test.describe('Admin backup encryption + raw tables (isolated server)', () => {
 
     test('Validate Backup (dry run) checks a file without touching the live DB', async ({ page, request }) => {
         test.setTimeout(180000);
-        const dialogs: string[] = [];
-        page.on('dialog', (d) => { dialogs.push(d.message()); d.accept(); });
+        // Popups are in-page now (static/ui-dialog.js) and auto-accept under
+        // automation; their text is read back from the dialog log instead of
+        // page.on('dialog'), which only ever fired for native popups.
 
         await loginAdminPage(page);
         const token = (await page.evaluate(() => sessionStorage.getItem('admin_token'))) || '';
@@ -340,8 +343,9 @@ test.describe('Admin backup encryption + raw tables (isolated server)', () => {
 
     test('legacy v1 (SHA-256 + AES-GCM) encrypted backups still import', async ({ page }) => {
         test.setTimeout(180000);
-        const dialogs: string[] = [];
-        page.on('dialog', (d) => { dialogs.push(d.message()); d.accept(); });
+        // Popups are in-page now (static/ui-dialog.js) and auto-accept under
+        // automation; their text is read back from the dialog log instead of
+        // page.on('dialog'), which only ever fired for native popups.
 
         await loginAdminPage(page);
 
@@ -372,7 +376,7 @@ test.describe('Admin backup encryption + raw tables (isolated server)', () => {
         await page.waitForSelector('#import-confirm-modal', { state: 'visible', timeout: 10000 });
         await page.click('#continue-import-confirm');
         await expect(page.locator('#import-db-password-modal')).toBeHidden({ timeout: 5000 });
-        await expect.poll(() => dialogs.join('|'), { timeout: 20000 }).toContain('imported successfully');
+        await expect.poll(async () => (await dialogMessages(page)).join('|'), { timeout: 20000 }).toContain('imported successfully');
 
         // The import reloaded the page and cleared the session — log back in.
         await loginAdminPage(page);
@@ -414,13 +418,14 @@ test.describe('Admin backup encryption + raw tables (isolated server)', () => {
         await page.waitForSelector('#import-db-password-modal', { state: 'visible', timeout: 10000 });
         await page.fill('#import-password-input', 'legacy-pass');
         await page.click('#confirm-import-db');
-        await expect.poll(() => dialogs.join('|'), { timeout: 30000 }).toContain('imported successfully');
+        await expect.poll(async () => (await dialogMessages(page)).join('|'), { timeout: 30000 }).toContain('imported successfully');
     });
 
     test('“Validate before importing” dry-runs then imports the same backup in one flow', async ({ page, request }) => {
         test.setTimeout(180000);
-        const dialogs: string[] = [];
-        page.on('dialog', (d) => { dialogs.push(d.message()); d.accept(); });
+        // Popups are in-page now (static/ui-dialog.js) and auto-accept under
+        // automation; their text is read back from the dialog log instead of
+        // page.on('dialog'), which only ever fired for native popups.
 
         await loginAdminPage(page);
         const token = (await page.evaluate(() => sessionStorage.getItem('admin_token'))) || '';
@@ -466,7 +471,7 @@ test.describe('Admin backup encryption + raw tables (isolated server)', () => {
 
         // Import this backup → real import succeeds and reloads.
         await page.click('#import-from-results');
-        await expect.poll(() => dialogs.join('|'), { timeout: 30000 }).toContain('imported successfully');
+        await expect.poll(async () => (await dialogMessages(page)).join('|'), { timeout: 30000 }).toContain('imported successfully');
         await page.waitForLoadState('domcontentloaded').catch(() => {});
         await page.waitForTimeout(1500);
 
@@ -481,8 +486,9 @@ test.describe('Admin backup encryption + raw tables (isolated server)', () => {
 
     test('a backup that fails the dry run is blocked until IMPORT is typed', async ({ page, request }) => {
         test.setTimeout(180000);
-        const dialogs: string[] = [];
-        page.on('dialog', (d) => { dialogs.push(d.message()); d.accept(); });
+        // Popups are in-page now (static/ui-dialog.js) and auto-accept under
+        // automation; their text is read back from the dialog log instead of
+        // page.on('dialog'), which only ever fired for native popups.
 
         await loginAdminPage(page);
 
@@ -536,7 +542,7 @@ test.describe('Admin backup encryption + raw tables (isolated server)', () => {
 
         // Confirm → the corrupt backup actually imports and reloads.
         await riskyBtn.click();
-        await expect.poll(() => dialogs.join('|'), { timeout: 30000 }).toContain('imported successfully');
+        await expect.poll(async () => (await dialogMessages(page)).join('|'), { timeout: 30000 }).toContain('imported successfully');
         await page.waitForLoadState('domcontentloaded').catch(() => {});
         await page.waitForTimeout(1500);
 
@@ -813,8 +819,9 @@ test.describe('Admin backup restores uploaded files (isolated server)', () => {
 
     test('export → wipe → import restores the uploaded file bytes', async ({ page, request }) => {
         test.setTimeout(240000);
-        const dialogs: string[] = [];
-        page.on('dialog', (d) => { dialogs.push(d.message()); d.accept(); });
+        // Popups are in-page now (static/ui-dialog.js) and auto-accept under
+        // automation; their text is read back from the dialog log instead of
+        // page.on('dialog'), which only ever fired for native popups.
 
         // 1. Register a real user on the isolated server.
         const ts = Date.now().toString(36);
@@ -897,7 +904,7 @@ test.describe('Admin backup restores uploaded files (isolated server)', () => {
         await chooser.setFiles(outPath);
         await page.waitForSelector('#import-confirm-modal', { state: 'visible', timeout: 10000 });
         await page.click('#continue-import-confirm');
-        await expect.poll(() => dialogs.join('|'), { timeout: 40000 }).toContain('imported successfully');
+        await expect.poll(async () => (await dialogMessages(page)).join('|'), { timeout: 40000 }).toContain('imported successfully');
         // The import reloads the page (admin.js window.location.reload) — let it
         // settle before navigating again, or the goto races the reload.
         await page.waitForLoadState('domcontentloaded').catch(() => {});

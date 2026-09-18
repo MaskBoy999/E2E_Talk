@@ -820,7 +820,7 @@
     }
 
     async function deleteSoundboardClip(clipId) {
-        if (!confirm('Delete this sound?')) return;
+        if (!(await uiConfirm('Delete this sound?'))) return;
         try {
             await fetch('/api/soundboard/clip/' + clipId, { method: 'DELETE', headers: authHeaders() });
             loadSoundboardClips();

@@ -95,6 +95,8 @@
             state.myPosition = data.my_position || 0;
             state.isOwner = !!data.is_owner;
         } catch (_) { /* offline / no permission: leave previous state */ }
+        // Phase B: migrate legacy plaintext role names to encrypted form (best-effort).
+        migrateLegacyRoleNames().catch(function () {});
         return state;
     }
 
@@ -140,13 +142,21 @@
      */
     function roleCircleHtml(member) {
         var color = member.role_color;
-        var name = member.role_name;
+        var name = '';
+        if (member.role_encrypted_name && member.role_name_nonce) {
+            try {
+                var key = window.E2ECrypto && window.E2ECrypto.getServerKey(currentServerId);
+                if (key) name = window.E2ECrypto.decryptMessage(
+                    member.role_encrypted_name, member.role_name_nonce, key) || '';
+            } catch (_) {}
+        }
         if (!name) {
             if (member.role === 'owner') { name = 'Owner'; color = 'var(--accent)'; }
-            else { name = '@everyone'; color = '#99aab5'; }
+            else { name = '@everyone'; color = color || '#99aab5'; }
         }
         if (!color) color = '#99aab5';
-        return '<span class="role-circle" data-role-name="' + escapeAttr(name) + '" title="' + escapeAttr(name) + '" style="background:' + escapeAttr(color) + '"></span>';
+        return '<span class="role-circle" data-role-name="' + escapeAttr(name) +
+               '" title="' + escapeAttr(name) + '" style="background:' + escapeAttr(color) + '"></span>';
     }
 
     // ─── Settings UI ─────────────────────────────────────────────────────
@@ -859,15 +869,55 @@
         } catch (_) { return {}; }
     }
 
-    /** Decrypt a role name if encrypted_name and name_nonce are present. */
+    /**
+     * Decrypt a role name. Handles every state:
+     *   - encrypted_name present → decrypt with server key
+     *   - is_everyone → '@everyone' label
+     *   - plaintext name (legacy, phase B) → return as-is
+     *   - fallback → 'Role' (phase C for unmigratable rows)
+     */
     function decryptRoleName(role, serverId) {
-        if (!role.encrypted_name || !role.name_nonce) return role.name;
-        try {
-            var key = window.E2ECrypto && window.E2ECrypto.getServerKey(serverId || state.serverId);
-            if (!key) return role.name;
-            var dec = window.E2ECrypto.decryptMessage(role.encrypted_name, role.name_nonce, key);
-            return dec || role.name;
-        } catch (_) { return role.name; }
+        if (!role) return '';
+        if (role.encrypted_name && role.name_nonce) {
+            try {
+                var key = window.E2ECrypto && window.E2ECrypto.getServerKey(serverId || state.serverId);
+                if (key) {
+                    var dec = window.E2ECrypto.decryptMessage(role.encrypted_name, role.name_nonce, key);
+                    if (dec) return dec;
+                }
+            } catch (_) { /* fall through */ }
+        }
+        if (role.is_everyone) return '@everyone';
+        if (role.name) return role.name;      // phase B: legacy plaintext still readable
+        return 'Role';                        // phase C fallback for an unmigratable row
+    }
+
+    /**
+     * Phase B: re-encrypt legacy role names that have no encrypted_name yet.
+     * These were created before role-name encryption (migration 087) and their
+     * plaintext is the only copy left. Re-encrypt once, then the server drops
+     * the plaintext mirror on the write (see db.rs update_role).
+     */
+    var _migratedServers = {};
+    async function migrateLegacyRoleNames() {
+        var serverId = state.serverId;
+        if (!serverId || _migratedServers[serverId]) return;
+        var legacy = state.roles.filter(function (r) {
+            return !r.is_everyone && r.name && !r.encrypted_name && !r.name_nonce;
+        });
+        if (!legacy.length) return;
+        _migratedServers[serverId] = true;
+        for (var i = 0; i < legacy.length; i++) {
+            var enc = encryptRoleName(legacy[i].name, serverId);
+            if (!enc.encrypted_name) return;           // no server key yet — try again next load
+            try {
+                await api('/api/servers/' + serverId + '/roles/' + legacy[i].id, {
+                    method: 'PUT',
+                    body: JSON.stringify(enc)              // note: no plaintext `name` field
+                });
+            } catch (_) { /* best effort */ }
+        }
+        await load(serverId);
     }
 
     async function saveRole() {
@@ -935,7 +985,7 @@
 
     async function deleteRole() {
         var role = roleById(state.selectedRoleId);
-        if (!role || !confirm('Delete role "' + decryptRoleName(role) + '"? Members with it fall back to @everyone.')) return;
+        if (!role || !(await uiConfirm('Delete role "' + decryptRoleName(role) + '"? Members with it fall back to @everyone.'))) return;
         var res = await api('/api/servers/' + state.serverId + '/roles/' + role.id, { method: 'DELETE' });
         var data = await res.json().catch(function () { return {}; });
         if (!res.ok) { alert(data.error || 'Failed to delete role'); return; }

@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { createHash } from 'crypto';
+import { dialogMessages, resetDialogs } from './_ui-dialogs';
 
 const BASE = 'https://localhost:3443';
 
@@ -29,12 +30,9 @@ test.describe('E2E Chat', () => {
 await page.click('#register-form button[type="submit"]');
         await page.waitForURL('**/index.html', { timeout: 10000 });
 
-        // Intercept any native dialogs - they should NOT appear
-        let nativeDialogShown = false;
-        page.on('dialog', async dialog => {
-            nativeDialogShown = true;
-            await dialog.accept();
-        });
+        // Popups are in-page now (static/ui-dialog.js): this flow must not raise
+        // any popup at all.
+        await resetDialogs(page);
 
         // Click + button
         await page.click('#add-server-btn');
@@ -48,8 +46,8 @@ await page.click('#register-form button[type="submit"]');
         await expect(page.locator('#choice-create-server')).toBeVisible();
         await expect(page.locator('#choice-join-server')).toBeVisible();
 
-        // No native browser confirm should have been shown
-        expect(nativeDialogShown).toBeFalsy();
+        // No popup should have been raised for this flow
+        expect(await dialogMessages(page)).toEqual([]);
 
         // Cancel should close it
         await page.click('#cancel-server-choice');

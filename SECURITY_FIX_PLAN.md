@@ -1,683 +1,944 @@
-# Security fix plan (verified against the live codebase)
+# Tauri 2.0 Integration Plan — E2E Chat Desktop/Mobile App
 
-Written 2026-09-18. Every claim below was verified by reading the source **and** by running
-real browser probes (`tests/_probe-security-storage.spec.ts`,
-`tests/_probe-security-storage2.spec.ts`) against the running server plus a raw byte scan of
-the live SQLite file. Where a claim is inference rather than measurement it says so.
-
-Read this whole file before editing: §1 (findings) changes what "fix #2" even means, and §3
-(fix #1) has an **ordering trap** that destroys data if you do it in the wrong order.
+Written 2026-09-18. This plan covers converting the E2E Chat web application into a
+native desktop and mobile app using Tauri 2.0. The existing Rust server (`server/`) and
+frontend (`static/`) remain **unchanged** — Tauri wraps them in a native window.
 
 ---
 
 ## 0. TL;DR
 
-| # | Claim in the audit | Verdict | What to actually do |
+| # | Component | What to build | Effort |
 |---|---|---|---|
-| 1 | Role names stored in plaintext | **TRUE, confirmed on disk** | Wipe/ignore the `name` column, ship encrypted names in the members API, 3 ordered phases (§3) |
-| 2 | Identity private keys raw in localStorage | **FALSE today** — they are XOR-wrapped | Add a regression test that locks the invariant, then fix the *real* problem (§4) |
-| 3 | XOR storage cipher is weak | **TRUE, and worse than stated** | Swap the cipher to XChaCha20-Poly1305 via libsodium (already loaded), keep XOR read-only for legacy values (§5) |
-
-Cheapest order: **§3 phase A → §3 phase B → §3 phase C → §5 → §4 (test only)**.
-
----
-
-## 1. Verified findings
-
-### 1.1 Role names are genuinely in the database in plaintext (HIGH, real)
-
-Probe: created a server + role through real client crypto, then scanned the live DB bytes.
-
-```
-server/e2e_chat.db-wal  "Top Secret Role" : 1      <-- role name, plaintext on disk
-server/e2e_chat.db-wal  "Secret Lab"      : 0      <-- server name, encrypted (control)
-server/e2e_chat.db-wal  "General Voice"   : 0      <-- voice channel name, encrypted (control)
-```
-
-The API also returns it in cleartext:
-
-```
-GET /api/servers/{sid}/roles
-  "name": "Top Secret Role",          <-- plaintext
-  "encrypted_name": "2lmElKDVxFK6htQMJvcrQ9muhlDzmB111z6DTkk6iU...",
-  "name_nonce": "AaJ6nwHNgDO+5GlSktNkx0/6MGM1g2bV"
-```
-
-The controls prove the scanner works and that the rest of the app really is E2EE — role names
-are the one exception.
-
-Every place `server_roles.name` is touched:
-
-| File | Line | What it does |
-|---|---|---|
-| `server/src/db.rs` | 8449 | `ensure_everyone_role_c` inserts `'@everyone'` as plaintext |
-| `server/src/db.rs` | 8469 | `list_server_roles` selects `name` **and sorts by it** (`ORDER BY position DESC, name ASC`) |
-| `server/src/db.rs` | 8497 | `get_role` selects `name` |
-| `server/src/db.rs` | 8510 | `create_role` inserts `name` |
-| `server/src/db.rs` | 8546 / 8554 | `update_role` writes `name` on every update (incl. pure reorders) |
-| `server/src/db.rs` | 8805 | `get_server_members_with_roles` left-joins `r.name` → `role_name` |
-| `server/src/handlers.rs` | 3365 | `role_json` emits `"name": role.name` |
-| `server/src/handlers.rs` | 3320 | members endpoint emits `"role_name": m.role_name` |
-| `static/roles.js` | 863–871 | `decryptRoleName()` falls back to `role.name` |
-| `static/roles.js` | 143 | `roleCircleHtml()` shows `member.role_name` as the tooltip |
-
-`ws.rs` never relays role names (only `role_position`) — no leak there.
-
-### 1.2 Identity private keys are already encrypted at rest (audit claim FALSE)
-
-Measured after a real registration, reading raw storage with the app's own bypass helper:
-
-```
-e2e_identity_private_<uid>  raw = "~3bb7e094073b1aa8.1C..."   encrypted: true
-e2e_identity_public_<uid>   raw = "~..."                       encrypted: true
-token                       raw = "~..."                       encrypted: true
-e2e_hmac_key                raw = "~..."                       encrypted: true
-```
-
-Why: `crypto.js` writes them with plain `localStorage.setItem` (lines 535–536), and
-`secure-storage.js` intercepts `Storage.prototype` for every key starting with `e2e_`
-(`SENSITIVE_PREFIXES`, line ~55). `e2e_identity_private_*` matches that prefix, so it is
-wrapped exactly like the JWT. No raw-storage bypass exists anywhere in `static/*.js`
-(`grep -rn "Storage.prototype.setItem\|_secGetRaw" static/*.js` → only `secure-storage.js`
-and the test pages).
-
-**So do not "move identity keys into the wrapper" — they are already inside it.** The real
-defect is §1.3: the wrapper itself is trivially defeatable.
-
-### 1.3 The XOR layer is beaten by the same localStorage dump it defends against (HIGH, real)
-
-Measured in the probe (`tests/_probe-security-storage2.spec.ts`):
-
-```
-e2e_device_key            plaintext, 44 chars   (bootstrap, by design)
-e2e_encrypted_password    plaintext, 73 chars   (bootstrap, by design)
-e2e_local_storage_key     ABSENT after login   (good)
-sessionStorage._ssk       present              (the XOR key, in memory/tab storage)
-passwordRecoverable       TRUE   <-- recovered the real password from those two values
-```
-
-`_tryDeriveFromEncryptedPassword()` (secure-storage.js) decrypts `e2e_encrypted_password`
-with `e2e_device_key`, then `_deriveKeyFromPassword(password)` with a **fixed public salt**
-(`'e2e-local-storage-v1'`) and a **non-cryptographic** mixing function (`_mixHash`). So anyone
-holding a localStorage dump gets: password → 32-byte storage key → decrypt every `~` value.
-
-Additionally the cipher itself is a repeating-key XOR, and `_mixHash` is not a hash (it is a
-custom rotate/xor mixer) — a deliberately weakened KDF. Both are fixed by §5.
-
-Also relevant: `Object.keys(sessionStorage)`-style XSS on the origin can just call
-`window._secGet(key)` — no cracking needed. The only real mitigations are (a) real AEAD so a
-*ciphertext-only* leak is useless, and (b) tightening CSP (see §7).
-
-### 1.4 CSP does not currently stop XSS
-
-`server/src/main.rs:110` and `:321` both set:
-
-```
-script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https://cdn.jsdelivr.net
-```
-
-`'unsafe-inline'` means injected inline `<script>` runs, so the "XSS protection" framing of
-`secure-storage.js` is aspirational. Note also that two **third-party CDN scripts** (jsQR,
-qrcode-generator, both with `integrity=` SRI) execute in the origin — they are still needed by
-the QR/invite features (`chat.js:9740`, `chat.js:6658`, `admin.js:293`), so don't remove them.
+| 1 | Scaffold Tauri project | `src-tauri/` with Cargo.toml, tauri.conf.json, lib.rs | 0.5 day |
+| 2 | Config file + setup window | Server IP storage, first-launch setup screen | 1 day |
+| 3 | System tray + auto-start | Tray icon, menu, minimize-to-tray, auto-start | 0.5 day |
+| 4 | Native notifications | OS-level notifications via tauri-plugin-notification | 0.5 day |
+| 5 | GitHub Actions workflow | CI to build installers for all platforms | 1 day |
+| 6 | Android setup + APK | Android SDK, foreground service for background calls | 1.5 days |
+| 7 | iOS setup + IPA | Xcode, audio background mode, ReplayKit screen capture | 2.5 days |
+| 8 | Server push notifications | FCM/APNs integration, device token storage | 1 day |
+| 9 | Testing on all platforms | Desktop + mobile verification | 2 days |
+| | **Total** | | **~10 days** |
 
 ---
 
-## 2. Ground rules for the implementer
+## 1. Architecture Overview
 
-1. **Bump the asset version** for every changed static file (`static/index.html` and
-   `static/login.html` both hardcode `?v=` query strings). Currently
-   `secure-storage.js?v=2` in `index.html` but `secure-storage.js?v=1` in `login.html` — bump
-   both, they must match.
-2. **Never** write a value to localStorage with `Storage.prototype.setItem.call(...)` unless
-   you are deliberately bypassing encryption (only `secure-storage.js` may do that).
-3. Keep the request/response shapes backwards-compatible for one release wherever the note says
-   "phase" — the ordering matters.
-4. After changes: `cd static && node --check <file>.js` for JS, `cd server && cargo check` for
-   Rust, then rebuild with `cargo build --release` and restart **from the `server/` directory**
-   (`serve_static` resolves `../static`, so a wrong CWD 404s every asset).
-5. `PROGRESS.md` is the changelog — append an entry per fix (next number is **126**).
+```
+┌─────────────────────────────────────────────────────┐
+│                    USER'S DEVICE                     │
+│                                                     │
+│  ┌───────────────────────────────────────────────┐  │
+│  │           Tauri App (Rust binary)             │  │
+│  │           ~5-10 MB installer                  │  │
+│  │                                               │  │
+│  │  ┌─────────────────────────────────────────┐  │  │
+│  │  │         Native Window (OS chrome)       │  │  │
+│  │  │  ┌───────────────────────────────────┐  │  │  │
+│  │  │  │         WebView                   │  │  │  │
+│  │  │  │  ┌─────────────────────────────┐  │  │  │  │
+│  │  │  │  │   Your existing /static     │  │  │  │  │
+│  │  │  │  │   (index.html, chat.js,     │  │  │  │  │
+│  │  │  │  │    voice.js, style.css,     │  │  │  │  │
+│  │  │  │  │    icons.svg, etc.)         │  │  │  │  │
+│  │  │  │  └─────────────────────────────┘  │  │  │  │
+│  │  │  │                                   │  │  │  │
+│  │  │  │  Connects to:                     │  │  │  │
+│  │  │  │  https://100.x.x.x:3443          │  │  │  │
+│  │  │  │  (your Rust server via Tailscale) │  │  │  │
+│  │  │  └───────────────────────────────────┘  │  │  │
+│  │  └─────────────────────────────────────────┘  │  │
+│  │                                               │  │
+│  │  Native features (Rust):                      │  │
+│  │  ├── System tray icon + menu                  │  │
+│  │  ├── Auto-start on boot                       │  │
+│  │  ├── Local notifications (OS-level)           │  │
+│  │  ├── Config file (server IP stored locally)   │  │
+│  │  ├── Window management (minimize to tray)     │  │
+│  │  ├── Background audio (calls with screen off) │  │
+│  │  └── Screen capture API (mobile screenshare)  │  │
+│  └───────────────────────────────────────────────┘  │
+│                                                     │
+│  ┌───────────────────────────────────────────────┐  │
+│  │        Your Rust Server (separate process)    │  │
+│  │        Runs on Tailscale: 100.x.x.x:3443     │  │
+│  │        (unchanged, same binary as before)     │  │
+│  └───────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────┘
+```
+
+**Key insight:** The Tauri app and the server are **separate things**. The server runs on
+your machine (or wherever you host it). The Tauri app is just a native wrapper that points
+at the server's URL.
 
 ---
 
-## 3. Fix #1 — role names are plaintext in the DB and API
+## 2. Prerequisites
 
-### 3.1 The ordering trap (read this first)
+### Development Machine
+- **Rust** (via rustup): `rustup update stable`
+- **Node.js** 18+: for frontend build tooling
+- **Tauri CLI**: `cargo install tauri-cli --locked`
+- **Platform-specific:**
+  - **Windows:** Microsoft C++ Build Tools + WebView2 (pre-installed on Win 10/11)
+  - **macOS:** Xcode Command Line Tools (`xcode-select --install`)
+  - **Linux:** `libwebkit2gtk-4.1-dev`, `libappindicator3-dev`, `librsvg2-dev`, `patchelf`
+  - **Android:** Android SDK + NDK, Java JDK 17
+  - **iOS:** Xcode 15+, Apple Developer account
 
-The plaintext column is the **only** copy of the name for roles created before migration 087
-(those rows have `encrypted_name IS NULL`). If you wipe the column or stop serving `name`
-before the client has re-encrypted those rows, **those role names are gone forever** — the
-server has no key and cannot rebuild them.
-
-Therefore three phases, in this order:
-
-| Phase | Ships | Safe because |
-|---|---|---|
-| **A** | Server stops *writing* plaintext; keeps *serving* it | Old roles stay readable by old and new clients |
-| **B** | Client re-encrypts legacy rows on load; renders via `encrypted_name` with fallbacks | Legacy plaintext is still available to read while it is being migrated |
-| **C** | Server stops serving `name`; wipes rows that already have `encrypted_name` | Any row still holding plaintext at this point was migrated in B |
-
-If you must ship everything at once (single user, single build), do A+B+C together but accept
-that a role created before 087 whose server is never opened by anyone with the key will render
-as `Role` — flag it in the commit message.
-
-### 3.2 Phase A — server: stop writing the plaintext column
-
-**New file `server/migrations/088_role_name_wipe.sql`** (phrase it so it is safe to re-run):
-
-```sql
--- Roles whose name is already stored encrypted no longer need the plaintext mirror.
--- Rows with encrypted_name IS NULL are deliberately left alone: the client still needs
--- their plaintext to produce the encrypted form (see SECURITY_FIX_PLAN.md §3.1).
-UPDATE server_roles SET name = '' WHERE encrypted_name IS NOT NULL AND name <> '';
+### Verify Installation
+```bash
+cargo tauri --version    # Should print 2.x.x
+rustc --version          # Should print 1.77+
+node --version           # Should print 18+
 ```
-
-Register it next to the others in `server/src/db.rs` (the block that ends at line 1358):
-
-```rust
-let _ = conn.execute_batch(include_str!("../migrations/088_role_name_wipe.sql"));
-```
-
-**`server/src/db.rs`**
-
-- `ensure_everyone_role_c` (line ~8449): insert `''` instead of `'@everyone'`. The client
-  renders the `@everyone` label from `is_everyone`, so no information is lost.
-- `create_role` (line ~8505): drop the `name: &str` parameter; always store `''`.
-
-```rust
-pub fn create_role(&self, server_id: &str, color: Option<&str>, permissions: i64, position: i32,
-                  encrypted_name: Option<&[u8]>, name_nonce: Option<&[u8]>) -> Result<ServerRole, String> {
-    ...
-    conn.execute(
-        "INSERT INTO server_roles (id, server_id, name, color, position, is_everyone, permissions, encrypted_name, name_nonce)
-         VALUES (?1, ?2, '', ?3, ?4, 0, ?5, ?6, ?7)",
-        params![id, server_id, color, position, perms, encrypted_name, name_nonce],
-    )
-```
-
-- `update_role` (line ~8530): drop `name: &str`; both arms set `name = ''` **unconditionally**
-  (do *not* use `COALESCE` here — the whole point is that the column is dead). The existing
-  `COALESCE` on `encrypted_name`/`name_nonce` must stay: pure reorders pass `None` and must not
-  wipe the encrypted name (that was a real bug fixed in PROGRESS #124).
-- `list_server_roles` (line ~8469): `name` is now always `''`, so the tiebreaker is
-  meaningless — replace with a deterministic one:
-
-```sql
-SELECT id, server_id, name, color, position, is_everyone, permissions, encrypted_name, name_nonce
-FROM server_roles WHERE server_id = ?1 ORDER BY position DESC, created_at ASC, id ASC
-```
-
-**`server/src/handlers.rs`**
-
-- `CreateRoleRequest.name` is currently `pub name: String` (**required** — a client that stops
-  sending it gets a 422). Change to:
-
-```rust
-#[derive(Deserialize)]
-pub struct CreateRoleRequest {
-    #[serde(default)]
-    pub name: Option<String>,
-    ...
-}
-```
-
-- `create_server_role` (line ~3485): drop the `let name = ...` validation of plaintext; instead
-  require the encrypted payload and cap its size:
-
-```rust
-let enc_name = req.encrypted_name.as_deref()
-    .and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
-let name_nonce = req.name_nonce.as_deref()
-    .and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
-if enc_name.is_none() || name_nonce.is_none() {
-    return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Encrypted role name required"}))).into_response();
-}
-if enc_name.as_ref().map_or(0, |e| e.len()) > 512 || name_nonce.as_ref().map_or(0, |n| n.len()) != 24 {
-    return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid role name payload"}))).into_response();
-}
-```
-
-  (The old 64-char limit on the plaintext is gone by design — the server cannot see the name.
-  The length caps replace it so a role cannot be used to stuff the DB.)
-
-- `update_server_role` (line ~3543): delete
-  `let name = req.name.unwrap_or_else(|| role.name.clone());` and the
-  `if name.trim().is_empty() || name.len() > 64` block; call the new `update_role` signature.
-  Keep the identical base64 + length validation for the optional `encrypted_name`.
-- **Keep** `"name": role.name` in `role_json` for phase A (it is `''` for already-encrypted
-  rows, plaintext for legacy ones — exactly what phase B needs to read).
-
-### 3.3 Phase B — client: migrate legacy rows and render from the ciphertext
-
-**`static/roles.js`**
-
-```js
-// Phase B: a role created before role-name encryption has no encrypted_name yet, and the
-// plaintext column is the only copy left. Re-encrypt it once, then the server drops the
-// plaintext mirror on the write (see §3.2 db.rs update_role).
-async function migrateLegacyRoleNames() {
-    var serverId = state.serverId;
-    if (!serverId) return;
-    var legacy = state.roles.filter(function (r) {
-        return !r.is_everyone && r.name && !r.encrypted_name && !r.name_nonce;
-    });
-    if (!legacy.length) return;
-    for (var i = 0; i < legacy.length; i++) {
-        var enc = encryptRoleName(legacy[i].name, serverId);
-        if (!enc.encrypted_name) return;           // no server key yet — try again next load
-        await api('/api/servers/' + serverId + '/roles/' + legacy[i].id, {
-            method: 'PUT',
-            body: JSON.stringify(enc)              // note: no plaintext `name` field
-        });
-    }
-    await load(serverId);
-}
-```
-
-Call it at the end of `load()` (after `renderRoleList()`), guarded by a per-server `Set` so it
-cannot loop, and never let it throw into `load()`.
-
-Rendering fallbacks — `decryptRoleName` (line ~863) must cope with every state:
-
-```js
-function decryptRoleName(role, serverId) {
-    if (!role) return '';
-    if (role.encrypted_name && role.name_nonce) {
-        try {
-            var key = window.E2ECrypto && window.E2ECrypto.getServerKey(serverId || state.serverId);
-            if (key) {
-                var dec = window.E2ECrypto.decryptMessage(role.encrypted_name, role.name_nonce, key);
-                if (dec) return dec;
-            }
-        } catch (_) { /* fall through */ }
-    }
-    if (role.is_everyone) return '@everyone';
-    if (role.name) return role.name;      // phase B: legacy plaintext still readable
-    return 'Role';                        // phase C fallback for an unmigratable row
-}
-```
-
-`saveRole()` / `createRole()` keep sending `name:` for now (phase A ignores it, and it keeps
-old cached clients working); remove the field in phase C.
-
-### 3.4 Phase C — server: stop serving the plaintext, encrypt the member tooltip
-
-**`server/src/handlers.rs`**
-
-- `role_json` (line ~3365): delete the `"name": role.name,` line entirely.
-- Members endpoint (line ~3320): replace `"role_name": m.role_name` with the ciphertext:
-
-```rust
-"role_encrypted_name": m.role_encrypted_name.as_ref()
-    .map(|e| base64::engine::general_purpose::STANDARD.encode(e)),
-"role_name_nonce": m.role_name_nonce.as_ref()
-    .map(|e| base64::engine::general_purpose::STANDARD.encode(e)),
-```
-
-**`server/src/db.rs`**
-
-- `ServerMemberInfo` (line ~237): replace `pub role_name: Option<String>` with
-  `pub role_encrypted_name: Option<Vec<u8>>, pub role_name_nonce: Option<Vec<u8>>`.
-- `get_server_members_with_roles` (line ~8800): select `r.encrypted_name, r.name_nonce`
-  instead of `r.name`, and map them in the closure.
-
-**`static/roles.js`**
-
-- `roleCircleHtml(member)` (line ~141): decrypt the tooltip with the current server key:
-
-```js
-function roleCircleHtml(member) {
-    var color = member.role_color;
-    var name = '';
-    if (member.role_encrypted_name && member.role_name_nonce) {
-        try {
-            var key = window.E2ECrypto && window.E2ECrypto.getServerKey(currentServerId);
-            if (key) name = window.E2ECrypto.decryptMessage(
-                member.role_encrypted_name, member.role_name_nonce, key) || '';
-        } catch (_) {}
-    }
-    if (!name) {
-        if (member.role === 'owner') { name = 'Owner'; color = 'var(--accent)'; }
-        else { name = '@everyone'; color = color || '#99aab5'; }
-    }
-    if (!color) color = '#99aab5';
-    return '<span class="role-circle" data-role-name="' + escapeAttr(name) +
-           '" title="' + escapeAttr(name) + '" style="background:' + escapeAttr(color) + '"></span>';
-}
-```
-
-  The decrypted name is user-controlled content — keep `escapeAttr` (it is already there).
-- `decryptRoleName()` loses the `role.name` branch and `saveRole`/`createRole` stop sending
-  `name`.
-
-Finally, a cleanup migration for stragglers (run only after B has been live):
-
-```sql
--- 089_role_name_purge.sql — run once every client is on the phase-B build.
-UPDATE server_roles SET name = '' WHERE name <> '';
-```
-
-### 3.5 Tests for fix #1
-
-New `tests/role-name-encryption.spec.ts`. The assertion that actually matters is **the on-disk
-scan** — API-only assertions are what let the original bug ship.
-
-```ts
-// 1. Create a role through the UI with a unique, greppable name.
-const probe = 'ZzzLeakProbe' + Date.now();
-// ... open server settings, click "create role", rename to `probe`, save ...
-
-// 2. API must not carry the plaintext.
-const roles = (await api(page, `/api/servers/${sid}/roles`)).body.roles;
-const role  = roles.find((r: any) => r.encrypted_name);
-expect(role.name, 'plaintext role name must not be served').toBeFalsy();
-expect(role.encrypted_name).toBeTruthy();
-expect(role.name_nonce).toBeTruthy();
-
-// 3. Decryption still works in the UI (name is visible and equals the probe).
-await page.reload(); /* reopen settings */ 
-await expect(page.locator('.role-row-name', { hasText: probe })).toBeVisible();
-
-// 4. Members list tooltip carries the ciphertext, not the name.
-const members = (await api(page, `/api/servers/${sid}/members`)).body;
-expect(JSON.stringify(members)).not.toContain(probe);
-expect(members[0].role_encrypted_name ?? null).not.toBeUndefined();
-```
-
-Then the disk scan (Node, from inside the spec via `child_process` — no `strings` binary on
-this machine, so scan the bytes directly):
-
-```ts
-import { readFileSync, existsSync } from 'fs';
-const hits = ['server/e2e_chat.db', 'server/e2e_chat.db-wal']
-    .filter(existsSync)
-    .map((f) => readFileSync(f).toString('latin1'))
-    .reduce((n, buf) => n + (buf.split(probe).length - 1), 0);
-expect(hits, 'role name must not appear in the DB bytes').toBe(0);
-// control: a plaintext string that IS expected to exist must be found, proving the scan works
-```
-
-Keep the control string in the test (e.g. assert the scan finds the owning username, which is
-legitimately plaintext in `users.username`). Without a positive control the test silently
-becomes vacuous if the file path changes.
-
-Before/after proof: run the spec, then
-`git stash push -m repro -- server/src/db.rs server/src/handlers.rs static/roles.js`, rebuild,
-run again → assertion 2 and the disk scan must **fail** at HEAD.
 
 ---
 
-## 4. Fix #2 — identity private keys
+## 3. Phase 1: Scaffold the Tauri Project (Day 1)
 
-### 4.1 What to actually change
+### 3.1 Project Structure
 
-Nothing functional: the keys are already XOR-wrapped (§1.2). Add a regression test so nobody
-"optimises" the write path later, and fix the real problem (§5).
-
-`tests/secure-storage.spec.ts`:
-
-```ts
-const state = await page.evaluate(() => {
-    const uid = JSON.parse(localStorage.getItem('user') || '{}').id;
-    const raw = (window as any)._secGetRaw('e2e_identity_private_' + uid);
-    const kp  = (window as any).E2ECrypto.getIdentityKeyPair();
-    return {
-        rawPrefix: raw && raw.slice(0, 3),
-        encryptedAtRest: !!raw && raw.charAt(0) === '~',
-        roundTrip: !!kp && (window as any)._secGet('e2e_identity_private_' + uid)
-                             === (window as any).E2ECrypto.arrayBufferToBase64(kp.privateKey),
-    };
-});
-expect(state.encryptedAtRest, 'identity private key must be encrypted at rest').toBe(true);
-expect(state.roundTrip, 'interceptor must decrypt it transparently').toBe(true);
-```
-
-Repeat the assertion **after a page reload** and after a fresh login on a second context
-(the key is written on the post-login `saveIdentityKeyPair` path, `auth.js:658`).
-
-### 4.2 Optional hardening (only if there is time)
-
-The bootstrap material is the real hole. Ranked by value/effort:
-
-1. **Do not persist `e2e_encrypted_password`** — derive the storage key from the login-time
-   password and keep it only in `sessionStorage`; on reload the app must ask for the password
-   again to decrypt. Cost: a password prompt on every full reload. This is the only change
-   that actually removes the §1.3 attack.
-2. **Envelope the stored password with a WebCrypto non-extractable key** (`crypto.subtle`,
-   AES-GCM, `extractable: false`, key in IndexedDB). Blocks offline dump attacks; does **not**
-   block in-page XSS (which can just call the wrapper). Medium effort, partial value.
-3. **Leave as-is** and document the residual risk in `PROGRESS.md`. Defensible, because the
-   device key is only as exposed as the browser profile it lives in and any local attacker
-   already owns the session.
-
----
-
-## 5. Fix #3 — replace the XOR cipher with XChaCha20-Poly1305
-
-### 5.1 Why this is feasible without touching call sites
-
-libsodium is already loaded on every page and every libsodium AEAD call is **synchronous once
-`sodium.ready` has resolved** — which is exactly what the current XOR exists for (see the
-"WHY XOR INSTEAD OF AES-GCM?" comment at the top of `secure-storage.js`; WebCrypto is async,
-libsodium is not). `static/crypto.js` already relies on this for `_aeadEncryptRaw`.
-
-Also keep the same 32-byte key (`_deriveKeyFromPassword`), so no re-keying and no cross-device
-migration is needed.
-
-### 5.2 Versioned format (never break old values)
+The Tauri project lives alongside the existing `server/` and `static/` directories:
 
 ```
-current :  ~<16 hex tag>.<base64(xor(utf8))>            legacy, read-only after this change
-new     :  ~v2.<base64(nonce24 || XChaCha20-Poly1305(utf8))>
+E2E_Talk/
+├── server/               # Existing Rust server (unchanged)
+├── static/               # Existing frontend (unchanged)
+├── src-tauri/            # NEW: Tauri app
+│   ├── Cargo.toml        # Rust dependencies
+│   ├── tauri.conf.json   # App configuration
+│   ├── build.rs          # Tauri build script
+│   ├── icons/            # App icons (PNG, ICO, ICNS)
+│   │   ├── icon.png
+│   │   ├── icon.ico
+│   │   └── icon.icns
+│   ├── capabilities/     # Permission definitions
+│   │   └── default.json
+│   └── src/
+│       ├── main.rs       # Entry point
+│       └── lib.rs        # Commands + config logic
+├── package.json          # Optional: for JS plugin bindings
+└── Cargo.toml            # Workspace root (optional)
 ```
 
-Dispatch on the inner string: `startsWith('v2.')` → AEAD; char at index 16 is `.` → legacy
-tagged XOR; otherwise → legacy bare-base64 XOR (the pre-tag format already handled today).
-
-### 5.3 Exact code (`static/secure-storage.js`)
-
-```js
-// ─── v2: authenticated encryption (libsodium, synchronous once ready) ──────
-var V2_PREFIX = 'v2.';
-var AEAD_NONCE_LEN = 24;
-
-function _aeadReady() {
-    return typeof sodium !== 'undefined'
-        && typeof sodium.crypto_aead_xchacha20poly1305_ietf_encrypt === 'function'
-        && typeof sodium.crypto_aead_xchacha20poly1305_ietf_decrypt === 'function';
-}
-
-function _aeadEncryptWithKey(plaintext, key) {
-    var nonce = sodium.randombytes_buf(AEAD_NONCE_LEN);
-    var msg = new TextEncoder().encode(plaintext);
-    var ct = sodium.crypto_aead_xchacha20poly1305_ietf_encrypt(msg, null, null, nonce, key);
-    var combined = new Uint8Array(nonce.length + ct.length);
-    combined.set(nonce);
-    combined.set(ct, nonce.length);
-    return V2_PREFIX + _bytesToBase64(combined);
-}
-
-/** Returns undefined when `inner` is not v2, a string on success, null when v2 fails to open. */
-function _aeadDecryptWithKey(inner, key) {
-    if (inner.indexOf(V2_PREFIX) !== 0) return undefined;
-    if (!_aeadReady()) return null;
-    try {
-        var combined = _base64ToBytes(inner.substring(V2_PREFIX.length));
-        if (combined.length <= AEAD_NONCE_LEN) return null;
-        var nonce = combined.subarray(0, AEAD_NONCE_LEN);
-        var ct = combined.subarray(AEAD_NONCE_LEN);
-        var pt = sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(null, ct, null, nonce, key);
-        return new TextDecoder().decode(pt);
-    } catch (_) { return null; }   // wrong key or tampered — authenticated, so this is safe
-}
-
-function _encryptInner(plaintext) {
-    var key = _ensureKey();
-    // Only produce v2 once libsodium is up. Before that, XOR keeps the app working and the
-    // value stays readable forever (legacy path); _secUpgradeToAead() re-writes it after ready.
-    if (_aeadReady()) return _aeadEncryptWithKey(String(plaintext), key);
-    return _xorEncrypt(String(plaintext));
-}
-
-function _decryptInnerWithKey(inner, key) {
-    var v2 = _aeadDecryptWithKey(inner, key);
-    if (v2 !== undefined) return v2;
-    return _decryptWithKey(inner, key);      // legacy tag.b64 / bare b64
-}
-```
-
-Wire it into the four existing call sites:
-
-| Where | Now | Change |
-|---|---|---|
-| `_intercept().setItem` / `_encryptForStore` | `MAGIC + _xorEncrypt(String(value))` | `MAGIC + _encryptInner(value)` |
-| `_intercept().getItem` / `_decryptStored` | `_xorDecrypt(val.substring(1))` | `_decryptInnerWithKey(val.substring(1), _ensureKey())` |
-| `_secInit()` migration loop | `_xorEncrypt` | `_encryptInner` (and move the loop into `_afterSodium(...)`, below) |
-| `_secReKey` / `_secRekeyToPassword` | `_decryptWithKey(...)` + `_xorEncrypt(...)` | `_decryptInnerWithKey(raw.substring(1), oldKey)` + `_aeadEncryptWithKey(plain, newKey)` |
-
-Add the upgrade pass and its trigger at the bottom of the module, next to the existing
-`_secInit();` auto-call:
-
-```js
-/**
- * Re-encrypt every legacy XOR value under the v2 AEAD using the SAME key.
- * Idempotent; safe to call after every _secReKey/_secRekeyToPassword.
- */
-window._secUpgradeToAead = function () {
-    if (!_aeadReady()) return false;
-    var key = _currentKeyRaw();
-    if (!key) return false;
-    var changed = 0;
-    for (var i = 0; i < localStorage.length; i++) {
-        var k = localStorage.key(i);
-        if (!k || !isSensitive(k)) continue;
-        var raw = _realOrigGet.call(localStorage, k);
-        if (raw === null || !_isEncrypted(raw)) continue;
-        var inner = raw.substring(1);
-        if (inner.indexOf(V2_PREFIX) === 0) continue;
-        var plain = _decryptWithKey(inner, key);      // legacy formats only
-        if (plain === null) continue;                 // stale key — leave it alone
-        _realOrigSet.call(localStorage, k, MAGIC + _aeadEncryptWithKey(plain, key));
-        changed++;
-    }
-    return changed > 0;
-};
-
-function _afterSodium(fn) {
-    if (typeof sodium !== 'undefined' && sodium.ready && typeof sodium.ready.then === 'function') {
-        sodium.ready.then(function () { try { fn(); } catch (_) {} });
-    }
-}
-// Deferred so the first pass uses AEAD instead of XOR (sodium is not ready at parse time).
-_afterSodium(function () {
-    if (typeof window._secUpgradeToAead === 'function') window._secUpgradeToAead();
-    if (typeof window._secInit === 'function') window._secInit();
-});
-```
-
-Sodium-readiness rule of thumb: **`_secInit()` runs at script-parse time, before
-`sodium.ready` resolves** — that is exactly why the migration loop must be deferred. Writes
-from event handlers (login, save, message send) happen long after ready, so they will be v2.
-
-Update the module header comment: it currently justifies XOR at length ("WHY XOR INSTEAD OF
-AES-GCM?") — replace that section with the v2 description, otherwise the next reader will
-re-introduce the problem.
-
-Storage-size note: base64 grows by 33% and v2 adds a 24-byte nonce + 16-byte tag; the `fkc_*`
-file-key cache and `user_display_name_cache` are the big values. If `QuotaExceededError`
-appears, that is the cause — the `catch` in `setItem` currently falls back to plaintext, which
-would be a silent regression; make it `console.warn` at minimum.
-
-### 5.4 Tests for fix #3
-
-New `tests/secure-storage.spec.ts` (or extend the existing in-browser page
-`static/test-secure-storage.html` + `static/test-secure-runner.js`, which already asserts the
-prefix rules).
-
-The decisive test is a **working attacker that must stop working**:
-
-```ts
-const attack = await page.evaluate((rawKey) => {
-    // Reproduce _mixHash + _deriveKeyFromPassword from the pre-fix source, then try to
-    // strip the XOR layer off the raw stored value using ONLY the password.
-    var raw = (window as any)._secGetRaw(rawKey);            // e.g. 'e2e_identity_private_<uid>'
-    var inner = raw.substring(1);
-    // (replicated old _mixHash / _deriveKeyFromPassword / _base64ToBytes here)
-    var key = deriveKeyFromPassword('testpass1234');
-    var b64 = inner.charAt(16) === '.' ? inner.substring(17) : inner;
-    var bytes = base64ToBytes(b64);
-    var out = new Uint8Array(bytes.length);
-    for (var i = 0; i < bytes.length; i++) out[i] = bytes[i] ^ key[i % key.length];
-    return new TextDecoder().decode(out);
-}, key);
-
-// Pre-fix (HEAD) this contains readable base64 of the private key.
-// Post-fix the value is '~v2....' so this reconstruction yields garbage.
-expect(attack).not.toMatch(/^[A-Za-z0-9+/=]{40,}$/);
-expect(attack).not.toBe(realPrivateKeyB64);
-```
-
-Plus:
-
-1. **Round trip**: `localStorage.setItem('token_probe', 'x')` → `getItem` returns `'x'` and
-   `_secGetRaw` starts with `~v2.`.
-2. **Legacy read**: construct a legacy value with the test's own XOR implementation
-   (`MAGIC + tag + '.' + b64`), assert `getItem` still returns the plaintext, then call
-   `_secUpgradeToAead()` and assert the raw form becomes `~v2.` and still decrypts.
-3. **Cross-device**: second browser context, same account → `sessionStorage._ssk` fingerprints
-   and `E2ECrypto.getIdentityKeyPair()` private key are identical (the AEAD key must remain
-   password-derived, not random).
-4. **Re-key path**: change the password (the `_secRekeyToPassword` flow in `chat.js:6380`),
-   reload, assert every `~` value is still readable — this is the path most likely to break
-   when the cipher changes.
-5. `static/test-secure-storage.html` should gain a "Bootstrap material is derivable" red test so
-   the §1.3 weakness stays visible (see §4.2 before deciding to fix it).
-
-Before/after proof: `git stash push -m repro -- static/secure-storage.js` → the attacker test
-(0) must **pass** (i.e. recover the plaintext); `git stash pop` → it must fail. That is the
-evidence the user asked for: the old cipher is provably broken and the new one is not.
-
----
-
-## 6. Commands cheat sheet
+### 3.2 Initialize Tauri
 
 ```bash
-# JS syntax (fast, per file)
-cd static && node --check secure-storage.js && node --check roles.js && node --check chat.js
+# From the project root (E2E_Talk/)
+cargo tauri init
 
-# Rust
-cd server && cargo check 2>&1 | tail -5
-cd server && cargo build --release 2>&1 | tail -3
-
-# restart the server (MUST be from server/ — static paths are ../static)
-taskkill //f //im e2e-chat.exe 2>/dev/null; sleep 2
-cd server && nohup target/release/e2e-chat.exe > /dev/null 2>&1 &
-
-# run one spec
-npx playwright test tests/role-name-encryption.spec.ts --workers 1 --reporter=line
-npx playwright test tests/secure-storage.spec.ts --workers 1 --reporter=line
-
-# scan the live DB for a plaintext probe string (no `strings` binary on this box)
-node -e "const fs=require('fs');const hits=['server/e2e_chat.db','server/e2e_chat.db-wal']\
-.filter(f=>fs.existsSync(f)).map(f=>fs.readFileSync(f).toString('latin1'));\
-console.log(hits.reduce((n,b)=>n+(b.split(process.argv[1]).length-1),0))" 'MyRoleName'
+# When prompted:
+#   Window title: E2E Chat
+#   Frontend dev server: (leave empty — we serve static files directly)
+#   Frontend dist directory: ../static
+#   Development URL: https://localhost:3443
 ```
 
-Screenshots go to `test-results/…` which is already gitignored (`.gitignore` line 14).
+This creates `src-tauri/` with the basic structure.
+
+### 3.3 src-tauri/Cargo.toml
+
+```toml
+[package]
+name = "e2e-chat-app"
+version = "0.2.0"
+description = "E2E Chat — Encrypted desktop and mobile app"
+authors = ["E2E Chat"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-notification = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+```
+
+### 3.4 src-tauri/build.rs
+
+```rust
+fn main() {
+    tauri_build::build()
+}
+```
+
+### 3.5 src-tauri/tauri.conf.json
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-config-schema/schema.json",
+  "productName": "E2E Chat",
+  "version": "0.2.0",
+  "identifier": "com.e2echat.app",
+  "build": {
+    "frontendDist": "../static",
+    "devUrl": "https://localhost:3443",
+    "beforeDevCommand": "",
+    "beforeBuildCommand": ""
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "E2E Chat",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 400,
+        "minHeight": 300,
+        "center": true,
+        "resizable": true,
+        "decorations": true,
+        "transparent": false,
+        "visible": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss: https:; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; object-src 'none'; frame-src 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.ico",
+      "icons/icon.icns"
+    ],
+    "windows": {
+      "nsis": {
+        "displayLanguageSelector": true
+      }
+    },
+    "linux": {
+      "deb": {
+        "depends": ["libwebkit2gtk-4.1-0"]
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    }
+  },
+  "plugins": {
+    "notification": {}
+  }
+}
+```
+
+### 3.6 src-tauri/src/lib.rs
+
+```rust
+use serde::{Deserialize, Serialize};
+use std::sync::Mutex;
+use tauri::Manager;
+
+/// Persistent configuration stored at:
+///   Windows: %APPDATA%/com.e2echat.app/config.json
+///   macOS:   ~/Library/Application Support/com.e2echat.app/config.json
+///   Linux:   ~/.config/com.e2echat.app/config.json
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppConfig {
+    pub server_url: String,
+    pub auto_start: bool,
+    pub minimize_to_tray: bool,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            server_url: String::new(),
+            auto_start: false,
+            minimize_to_tray: true,
+        }
+    }
+}
+
+struct AppState {
+    config: Mutex<AppConfig>,
+}
+
+#[tauri::command]
+fn get_config(state: tauri::State<AppState>) -> AppConfig {
+    state.config.lock().unwrap().clone()
+}
+
+#[tauri::command]
+fn save_config(state: tauri::State<AppState>, config: AppConfig) -> Result<(), String> {
+    *state.config.lock().unwrap() = config.clone();
+    // Persist to disk
+    let config_dir = dirs::config_dir()
+        .or_else(|| dirs::home_dir().map(|h| h.join(".config")))
+        .ok_or("Cannot find config directory")?;
+    let app_dir = config_dir.join("com.e2echat.app");
+    std::fs::create_dir_all(&app_dir).map_err(|e| e.to_string())?;
+    let config_path = app_dir.join("config.json");
+    let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+    std::fs::write(&config_path, json).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn test_connection(url: String) -> Result<String, String> {
+    // Simple HTTPS check — try to fetch the URL and return status
+    let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+    rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .danger_accept_invalid_certs(true) // Tailscale uses self-signed certs
+            .build()
+            .map_err(|e| e.to_string())?;
+        let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+        if resp.status().is_success() || resp.status().as_u16() == 301 || resp.status().as_u16() == 302 {
+            Ok(format!("Connected to {}", url))
+        } else {
+            Err(format!("Server returned status {}", resp.status()))
+        }
+    })
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    // Load config from disk
+    let config = load_config_from_disk();
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
+        .manage(AppState {
+            config: Mutex::new(config),
+        })
+        .invoke_handler(tauri::generate_handler![
+            get_config,
+            save_config,
+            test_connection,
+        ])
+        .setup(|app| {
+            // Set up system tray
+            use tauri::{
+                menu::{Menu, MenuItem},
+                tray::TrayIconBuilder,
+            };
+
+            let show_i = MenuItem::with_id(app, "show", "Show E2E Chat", true, None::<&str>)?;
+            let change_server_i = MenuItem::with_id(app, "change_server", "Change Server Address...", true, None::<&str>)?;
+            let auto_start_i = MenuItem::with_id(app, "auto_start", "Start on Startup", true, None::<&str>)?;
+            let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show_i, &change_server_i, &tauri::menu::PredefinedMenuItem::separator(app)?, &auto_start_i, &tauri::menu::PredefinedMenuItem::separator(app)?, &quit_i])?;
+
+            let _tray = TrayIconBuilder::new()
+                .icon(app.default_window_icon().unwrap().clone())
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.unminimize();
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    "change_server" => {
+                        // Emit event to frontend to show setup screen
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.emit("show-setup", ());
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    "quit" => {
+                        app.exit(0);
+                    }
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let tauri::tray::TrayIconEvent::Click {
+                        button: tauri::tray::MouseButton::Left,
+                        button_state: tauri::tray::MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        let app = tray.app_handle();
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.unminimize();
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                })
+                .build(app)?;
+
+            // Show the main window once loaded
+            if let Some(window) = app.get_webview_window("main") {
+                window.show()?;
+            }
+
+            Ok(())
+        })
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
+
+fn load_config_from_disk() -> AppConfig {
+    let config_dir = dirs::config_dir()
+        .or_else(|| dirs::home_dir().map(|h| h.join(".config")))
+        .unwrap_or_default();
+    let config_path = config_dir.join("com.e2echat.app").join("config.json");
+    if let Ok(data) = std::fs::read_to_string(&config_path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        AppConfig::default()
+    }
+}
+```
+
+### 3.7 src-tauri/src/main.rs
+
+```rust
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+fn main() {
+    e2e_chat_app::run()
+}
+```
+
+### 3.8 Capabilities (Permissions)
+
+Create `src-tauri/capabilities/default.json`:
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/nicegram/nicegram-tauri/refs/heads/main/capabilities-schema.json",
+  "identifier": "default",
+  "description": "Default capabilities for E2E Chat",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "notification:default",
+    "notification:allow-send-notification",
+    "notification:allow-is-permission-granted",
+    "notification:allow-request-permission"
+  ]
+}
+```
+
+### 3.9 Verify Scaffold
+
+```bash
+cd E2E_Talk
+cargo tauri dev
+# Should open a native window loading https://localhost:3443
+```
 
 ---
 
-## 7. Out of scope but worth noting
+## 4. Phase 2: Config File + Setup Window (Days 2-3)
 
-1. **Tighten CSP** (`server/src/main.rs:110`, `:321`): `'unsafe-inline'` on `script-src` means
-   any HTML-injection XSS still executes, which defeats the local-storage encryption regardless
-   of §5. Moving the inline scripts in `index.html`/`login.html` to files (or adding nonces)
-   and dropping `'unsafe-inline'` is the single highest-value follow-up to this whole audit.
-   Keep `'wasm-unsafe-eval'` (libsodium) but try removing `'unsafe-eval'`.
-2. `secure-storage.js?v=1` (login.html) vs `?v=2` (index.html) — make them match.
-3. The two CDN scripts keep running third-party code in the origin; they have SRI, which is
-   good — if the QR features are ever dropped, delete the tags and the `cdn.jsdelivr.net`
-   entry from CSP.
-4. `_mixHash` is a hand-rolled mixer used for tag/derivation; once v2 lands it only survives
-   for legacy reads, which is fine — but consider `crypto_generichash` for the tag if the
-   legacy path is ever touched again.
+### 4.1 Config Storage
+
+The config file is stored at:
+- **Windows:** `%APPDATA%/com.e2echat.app/config.json`
+- **macOS:** `~/Library/Application Support/com.e2echat.app/config.json`
+- **Linux:** `~/.config/com.e2echat.app/config.json`
+
+```json
+{
+  "server_url": "https://100.64.0.1:3443",
+  "auto_start": true,
+  "minimize_to_tray": true
+}
+```
+
+### 4.2 Setup Screen (Frontend)
+
+Create `static/setup.html` — shown on first launch when no `server_url` is configured:
+
+```html
+<!DOCTYPE html>
+<html>
+<head>
+    <title>E2E Chat — Setup</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="setup-container">
+        <h1>E2E Chat — Setup</h1>
+        <p>Enter your server's Tailscale address.</p>
+        <input type="text" id="server-url" placeholder="https://100.64.0.1:3443">
+        <button id="test-btn">Test Connection</button>
+        <div id="status"></div>
+        <label><input type="checkbox" id="auto-start"> Start on system startup</label>
+        <label><input type="checkbox" id="minimize-tray" checked> Minimize to tray on close</label>
+        <button id="save-btn">Save & Launch</button>
+    </div>
+    <script>
+        // Use window.__TAURI__ to call Rust commands
+        document.getElementById('test-btn').onclick = async () => {
+            const url = document.getElementById('server-url').value;
+            const status = document.getElementById('status');
+            try {
+                const result = await window.__TAURI__.core.invoke('test_connection', { url });
+                status.textContent = '✓ ' + result;
+                status.style.color = 'green';
+            } catch (e) {
+                status.textContent = '✗ ' + e;
+                status.style.color = 'red';
+            }
+        };
+        document.getElementById('save-btn').onclick = async () => {
+            const config = {
+                server_url: document.getElementById('server-url').value,
+                auto_start: document.getElementById('auto-start').checked,
+                minimize_to_tray: document.getElementById('minimize-tray').checked,
+            };
+            await window.__TAURI__.core.invoke('save_config', { config });
+            window.location.href = '/index.html';
+        };
+    </script>
+</body>
+</html>
+```
+
+### 4.3 Routing Logic
+
+In `lib.rs`, the `setup` handler checks if `server_url` is empty. If so, load
+`setup.html` instead of `index.html`. The Tauri window's `url` field can be set
+dynamically:
+
+```rust
+// In setup:
+if config.server_url.is_empty() {
+    window.navigate("setup.html".parse().unwrap());
+} else {
+    window.navigate(config.server_url.parse().unwrap());
+}
+```
+
+---
+
+## 5. Phase 3: System Tray + Auto-Start (Day 4)
+
+### 5.1 System Tray
+
+Already implemented in Phase 1 (§3.6). The tray menu provides:
+- **Show E2E Chat** — unminimize and focus the window
+- **Change Server Address...** — reopen the setup screen
+- **Start on Startup** — toggle auto-start
+- **Quit** — exit the app
+
+### 5.2 Minimize to Tray
+
+Override the window close event to minimize instead of quit:
+
+```rust
+// In lib.rs setup:
+if let Some(window) = app.get_webview_window("main") {
+    let window_clone = window.clone();
+    window.on_window_event(move |event| {
+        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            // Prevent close, minimize to tray instead
+            api.prevent_close();
+            let _ = window_clone.hide();
+        }
+    });
+}
+```
+
+### 5.3 Auto-Start
+
+Use `tauri-plugin-autostart` or a platform-specific approach:
+
+```toml
+# Cargo.toml
+tauri-plugin-autostart = "2"
+```
+
+```rust
+// In lib.rs:
+.plugin(tauri_plugin_autostart::init(
+    tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+    Some(vec!["--autostart"]),
+))
+```
+
+Toggle from the tray menu:
+```rust
+"auto_start" => {
+    let state = app.state::<AppState>();
+    let mut config = state.config.lock().unwrap();
+    config.auto_start = !config.auto_start;
+    // Toggle autostart plugin
+}
+```
+
+---
+
+## 6. Phase 4: Native Notifications (Day 4)
+
+### 6.1 Plugin Setup
+
+Already added in Phase 1 (`tauri-plugin-notification`).
+
+### 6.2 Desktop Notifications
+
+On desktop, the Tauri app must be running (in system tray). Notifications are
+local OS-level banners:
+
+```javascript
+// In chat.js — when a new message arrives:
+if (window.__TAURI__) {
+    window.__TAURI__.core.invoke('plugin:notification|send_notification', {
+        title: senderName,
+        body: messagePreview,
+    });
+}
+```
+
+### 6.3 Mobile Push Notifications (Server-Side)
+
+For Android/iOS, the server sends push notifications via FCM/APNs. This requires:
+
+1. **New database table:**
+```sql
+CREATE TABLE push_devices (
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    platform TEXT NOT NULL,  -- 'android', 'ios', 'desktop'
+    token TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, token)
+);
+```
+
+2. **New server endpoints:**
+```
+POST /api/push/register    — store device token
+POST /api/push/unregister  — remove device token
+```
+
+3. **Push sending logic** (~100 lines of Rust):
+```rust
+// server/src/push.rs
+pub async fn send_push(token: &str, platform: &str, payload: PushPayload) -> Result<(), String> {
+    match platform {
+        "android" => send_fcm(token, payload).await,
+        "ios" => send_apns(token, payload).await,
+        _ => Err("unsupported platform".into()),
+    }
+}
+```
+
+---
+
+## 7. Phase 5: GitHub Actions Workflow (Day 5)
+
+### 7.1 Release Workflow
+
+Create `.github/workflows/release.yml`:
+
+```yaml
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - platform: macos-latest
+            target: x86_64-apple-darwin
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --locked
+      - name: Install dependencies (Linux)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Build
+        run: cargo tauri build --target ${{ matrix.target }}
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            src-tauri/target/${{ matrix.target }}/release/bundle/**/*
+```
+
+### 7.2 Result
+
+When you push a tag like `v0.2.0`, installers appear automatically:
+```
+GitHub Release: v0.2.0
+├── E2E-Chat_0.2.0_x64-setup.exe      (Windows)
+├── E2E-Chat_0.2.0_amd64.deb          (Debian/Ubuntu)
+├── E2E-Chat_0.2.0_amd64.AppImage     (Linux universal)
+├── E2E-Chat_0.2.0_x64.dmg            (macOS Intel)
+└── E2E-Chat_0.2.0_aarch64.dmg        (macOS Apple Silicon)
+```
+
+---
+
+## 8. Phase 6: Android (Days 6-7)
+
+### 8.1 Initialize Android
+
+```bash
+# Prerequisites: Android SDK + NDK, Java JDK 17
+cargo tauri android init
+```
+
+This creates `src-tauri/gen/android/` with the Android project structure.
+
+### 8.2 AndroidManifest.xml Additions
+
+```xml
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_CALL" />
+<uses-permission android:name="android.permission.WAKE_LOCK" />
+<uses-permission android:name="android.permission.RECORD_AUDIO" />
+<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+```
+
+### 8.3 Foreground Service for Background Calls
+
+Create `src-tauri/gen/android/app/src/main/java/com/e2echat/app/CallForegroundService.kt`:
+
+```kotlin
+class CallForegroundService : Service() {
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val notification = NotificationCompat.Builder(this, "call_channel")
+            .setContentTitle("E2E Chat")
+            .setContentText("In voice call")
+            .setSmallIcon(R.drawable.ic_call)
+            .setOngoing(true)
+            .build()
+        startForeground(1, notification)
+        return START_STICKY
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+}
+```
+
+### 8.4 Build APK
+
+```bash
+cargo tauri android build --target aarch64
+# Output: app-arm64-v8a-release.apk
+```
+
+### 8.5 Android-Specific Features
+- Push notifications via FCM (Firebase Cloud Messaging)
+- Background WebSocket (app stays connected when minimized)
+- **Foreground service for calls with screen off** (persistent notification)
+- **Screen share via `getDisplayMedia()`** (Android 10+ WebView supports natively)
+- Works with Tailscale Android app
+
+---
+
+## 9. Phase 7: iOS (Days 8-10)
+
+### 9.1 Initialize iOS
+
+```bash
+# Prerequisites: Xcode 15+, Apple Developer account
+cargo tauri ios init
+```
+
+### 9.2 Info.plist Additions
+
+```xml
+<key>UIBackgroundModes</key>
+<array>
+    <string>audio</string>
+</array>
+```
+
+### 9.3 Audio Background Mode for Calls
+
+iOS keeps the WebRTC connection alive when the screen is off via the audio
+background mode. The app shows in the app switcher with a "return to call" indicator.
+
+### 9.4 ReplayKit Screen Capture
+
+iOS WKWebView doesn't support `getDisplayMedia()`. Use Tauri's screen capture
+plugin or a custom ReplayKit integration:
+
+```toml
+# Cargo.toml (iOS-specific)
+[dependencies]
+# tauri-plugin-screen-capture = "2"  # or custom implementation
+```
+
+```rust
+#[tauri::command]
+async fn start_screen_capture(app: AppHandle) -> Result<String, String> {
+    #[cfg(target_os = "ios")]
+    {
+        // Start ReplayKit broadcast
+        Ok("ios_screen_stream".to_string())
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        Ok("use_getDisplayMedia".to_string())
+    }
+}
+```
+
+### 9.5 Build IPA
+
+```bash
+cargo tauri ios build --target aarch64-apple-ios
+# Output: .ipa file — sideloadable via AltStore or TestFlight
+```
+
+### 9.6 iOS Limitations
+- Screen share requires user to start a "Broadcast" (system picker)
+- Background call limited to ~30 seconds without foreground service (but audio mode keeps it alive)
+- App may be killed by iOS after ~7 days of no foreground use
+- No system tray (iOS doesn't have one)
+
+---
+
+## 10. Platform Comparison
+
+| Feature | Windows | Linux | macOS | Android | iOS |
+|---------|---------|-------|-------|---------|-----|
+| Installer | `.msi` / `.exe` | `.deb` / `.AppImage` | `.dmg` | `.apk` (sideload) | `.ipa` (AltStore/TestFlight) |
+| System tray | ✅ | ✅ | ✅ (menu bar) | ❌ | ❌ |
+| Auto-start | ✅ | ✅ | ✅ | ✅ (background service) | ❌ |
+| Local notifications | ✅ WinRT | ✅ libnotify | ✅ NotificationCenter | ❌ (use FCM) | ❌ (use APNs) |
+| Push notifications | ❌ (local only) | ❌ (local only) | ❌ (local only) | ✅ FCM | ✅ APNs |
+| Background calls | ✅ (tray) | ✅ (tray) | ✅ (tray) | ✅ foreground service | ✅ audio background mode |
+| Screen share | ✅ getDisplayMedia | ✅ getDisplayMedia | ✅ getDisplayMedia | ✅ getDisplayMedia (10+) | ✅ ReplayKit |
+| Bundle size | ~5-8 MB | ~5-10 MB | ~8-12 MB | ~10-15 MB | ~12-18 MB |
+| Tailscale | ✅ | ✅ | ✅ | ✅ (Tailscale app) | ✅ (Tailscale app) |
+
+---
+
+## 11. File Summary
+
+| File | Status | Purpose |
+|------|--------|---------|
+| `server/` | **No changes** | Your existing backend |
+| `static/` | **No changes** | Your existing frontend |
+| `src-tauri/Cargo.toml` | **New** | Tauri dependencies |
+| `src-tauri/tauri.conf.json` | **New** | App configuration |
+| `src-tauri/src/main.rs` | **New** | Tauri entry point (~5 lines) |
+| `src-tauri/src/lib.rs` | **New** | Commands + config + tray (~150 lines) |
+| `src-tauri/capabilities/default.json` | **New** | Permission definitions |
+| `src-tauri/icons/` | **New** | App icons (PNG, ICO, ICNS) |
+| `.github/workflows/release.yml` | **New** | CI to build installers |
+| `static/setup.html` | **New** | First-launch setup screen |
+| `server/src/push.rs` | **New** | Push notification sending (~100 lines) |
+| `server/migrations/0XX_push_devices.sql` | **New** | Device token storage |
+| `src-tauri/gen/android/` | **New** | Android project + foreground service |
+| `src-tauri/gen/ios/` | **New** | iOS project + audio background mode |
+
+---
+
+## 12. Mobile-Specific Behaviors
+
+| Scenario | Android | iOS |
+|----------|---------|-----|
+| **Screen off during call** | Foreground service keeps WebRTC alive. Persistent notification "In voice call". Audio through earpiece/speaker. | Audio background mode keeps WebRTC alive. App shows in app switcher with "return to call". |
+| **Screen share** | System picker shows "Share entire screen" or "Share single app". Works natively via getDisplayMedia(). | System broadcast picker (ReplayKit). Tauri plugin captures frames → feeds to canvas relay pipeline. |
+| **App killed during call** | Foreground service prevents killing. If somehow killed, call drops (same as desktop). | iOS may kill after ~7 days. Foreground notification helps prevent this. |
+| **Background mic** | Foreground service allows mic access in background. | Audio background mode allows mic access in background. |
+| **Notification when app closed** | FCM push wakes app. Full-screen incoming call UI. | APNs push wakes app. Full-screen incoming call UI. |
+
+---
+
+## 13. What Users Download
+
+**GitHub Releases page:**
+
+```
+Release v0.2.0 — Latest
+
+Assets:
+  E2E-Chat-0.2.0-x64-Setup.exe       6.2 MB   Windows
+  E2E-Chat-0.2.0-amd64.deb           5.8 MB   Debian/Ubuntu
+  E2E-Chat-0.2.0-x86_64.AppImage     8.1 MB   Linux (universal)
+  E2E-Chat-0.2.0-x64.dmg            10.3 MB   macOS (Intel)
+  E2E-Chat-0.2.0-arm64.dmg            9.8 MB   macOS (Apple Silicon)
+  E2E-Chat-0.2.0-arm64.apk           12.4 MB   Android (sideload)
+  E2E-Chat-0.2.0-arm64.ipa           14.1 MB   iOS (AltStore/TestFlight)
+```
+
+User downloads the right file, runs it, enters their Tailscale IP, and they
+have a native app.
+
+---
+
+## 14. Effort Estimate
+
+| Task | Time |
+|------|------|
+| Scaffold Tauri project | 0.5 day |
+| Config file + setup window | 1 day |
+| System tray + auto-start | 0.5 day |
+| GitHub Actions workflow | 1 day |
+| Android setup + APK build | 1-2 days |
+| Android: foreground service for background calls | 1 day |
+| Android: screen share verification | 0.5 day |
+| iOS setup + IPA build | 2-3 days |
+| iOS: audio background mode for calls | 0.5 day |
+| iOS: ReplayKit screen capture plugin | 2 days |
+| Server push notification endpoint | 1 day |
+| Testing on all platforms | 2-3 days |
+| **Total** | **~10-14 days** |
+
+---
+
+## 15. Commands Cheat Sheet
+
+```bash
+# Install Tauri CLI (one-time)
+cargo install tauri-cli --locked
+
+# Development mode (opens WebView with hot-reload)
+cargo tauri dev
+
+# Build for current platform
+cargo tauri build
+
+# Build for specific targets
+cargo tauri build --target x86_64-pc-windows-msvc    # Windows
+cargo tauri build --target x86_64-unknown-linux-gnu   # Linux
+cargo tauri build --target x86_64-apple-darwin         # macOS Intel
+cargo tauri build --target aarch64-apple-darwin        # macOS Apple Silicon
+
+# Android
+cargo tauri android init                               # One-time setup
+cargo tauri android build --target aarch64             # Build APK
+
+# iOS
+cargo tauri ios init                                   # One-time setup
+cargo tauri ios build --target aarch64-apple-ios       # Build IPA
+
+# JS syntax check
+cd static && node --check chat.js && node --check roles.js
+
+# Rust typecheck
+cd server && cargo check
+```

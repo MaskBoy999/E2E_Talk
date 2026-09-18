@@ -7087,3 +7087,74 @@ Full plan in `SECURITY_FIX_PLAN.md`. Measured, not inferred:
 **Evidence artefacts:** `tests/_probe-security-storage.spec.ts`,
 `tests/_probe-security-storage2.spec.ts` (untracked probes, both passing).
 
+### 127. Security fixes implemented (role-name E2EE + v2 AEAD storage) + rekey data-loss bug
+
+Implemented the §3/§4/§5 fixes from `SECURITY_FIX_PLAN.md`:
+
+- **Role names (§3, phases A+B+C).** `server_roles.name` is now dead: migration
+  `088_role_name_wipe.sql` blanks it for rows that already have `encrypted_name`, `create_role`
+  always stores `''`, `update_role` sets `name = ''` unconditionally (the `COALESCE` on
+  `encrypted_name`/`name_nonce` stays so a pure reorder can't wipe the ciphertext), and
+  `list_server_roles` sorts on `created_at, id` instead of the now-empty name. The members
+  endpoint serves `role_encrypted_name`/`role_name_nonce` instead of `role_name`; `static/roles.js`
+  decrypts with the server key (`decryptRoleName`, member tooltips) and re-encrypts legacy
+  plaintext rows once via `migrateLegacyRoleNames()`. Create/update require a base64 ciphertext
+  and a 24-byte nonce (≤512-byte ciphertext cap) — the plaintext 64-char check is gone by design.
+- **Storage cipher (§5).** `secure-storage.js` writes `~v2.<b64(nonce24‖XChaCha20-Poly1305)>`
+  once libsodium is ready, keeps reading legacy `~tag.b64`, and `_secUpgradeToAead()` re-writes
+  legacy values in place after `sodium.ready` (the `_secInit()` plaintext-migration loop now goes
+  through `_encryptInner`, so nothing is written legacy-only when sodium is available).
+- **Fixed a data-loss regression the cipher swap introduced.** `_secReKey()` still collected
+  plaintexts with the XOR-only `_decryptWithKey`, so every `~v2` value was silently skipped and
+  then orphaned when the rekey discarded the old key. On a fresh device the login path restores
+  the key bundle (identity keys, server keys) while the pre-login *random fallback* key is active,
+  then calls `_secReKey()` — so identity keys became unreadable and the server key could no longer
+  be decrypted for the owner or any new joiner/login (the reported "cannot decrypt server key").
+  It now uses the v2-aware `_decryptInnerWithKey`, matching `_secRekeyToPassword`.
+- Regression test: `tests/secure-storage.spec.ts` → "rekey from the pre-login fallback key
+  preserves AEAD values" (loses the value at HEAD, passes with the fix). `tests/secure-storage.spec.ts`
+  is 9/9 green.
+
+**Files:** `server/migrations/088_role_name_wipe.sql`, `server/src/db.rs`, `server/src/handlers.rs`,
+`static/roles.js`, `static/secure-storage.js`, `static/index.html`, `static/login.html`,
+`static/admin.html`, `static/test-secure-runner.js`, `tests/role-tiers.spec.ts`,
+`tests/roles-permissions.spec.ts`, `tests/secure-storage.spec.ts`
+
+### 128. Every browser popup is now an in-page popup (Tauri prep)
+
+Browser-native `alert`/`confirm`/`prompt` render in browser chrome (and the Tauri webview), can't
+be themed, and block the JS thread. All of them now live inside the page:
+
+- **New `static/ui-dialog.js`.** Overrides `window.alert(message)` with an in-page modal — same
+  signature, so the ~100 existing `alert(...)` call sites were left untouched and inline/3rd-party
+  callers are covered too. Adds async `uiAlert`/`uiConfirm`/`uiPrompt` (resolve to the same values as
+  native: `confirm` → bool, `prompt` → string or `null` on cancel), plus `window.uiDialog`. One modal
+  at a time (a promise chain serialises overlapping calls) like native; Escape cancels, Enter accepts,
+  backdrop cancels (accepts for alerts), prompts whose text mentions "password" get a masked input.
+- **47 native call sites converted** across `chat.js` (27), `doc-preview.js` (14),
+  `thread_categories_shortcuts.js` (3), and 1 each in `roles.js`/`admin.js`/`soundboard-pairing.js`:
+  `if (!confirm(x)) return;` → `if (!(await uiConfirm(x))) return;`, `prompt(...)` → `await uiPrompt(...)`,
+  making the five enclosing handlers that weren't already async async (harmless: no caller uses their
+  return value). `window.confirm`/`window.prompt` are deliberately NOT overridden — giving them a
+  promise return would make `if (!confirm(...))` truthy and silently skip the confirmation.
+- **Automation contract.** Playwright sets `navigator.webdriver`, so dialogs are answered without
+  being rendered (an unclicked modal would hang the awaited flow): `window.__uiDialogQueue.{
+  confirm,prompt}` pre-seeds answers and `window.__uiDialogLog` records `{type, message, result}`
+  (mirrored to `sessionStorage['ui_dialog_log']` so it survives the navigations the admin import
+  flow performs). `window.__uiDialogForceShow` forces the real modal under Playwright. New
+  `tests/_ui-dialogs.ts` wraps that for the 10 specs that used `page.on('dialog')`.
+- **Regression guard:** `tests/ui-dialogs.spec.ts` renders/asserts the real modal (buttons, Escape,
+  prompt masking, alert) and scans `static/**.js|html` to fail if a native `confirm()`/`prompt()`
+  call site ever comes back (47 matches at HEAD, 0 now).
+- **Also in this change set:** `PERM_DEFAULT_EVERYONE` dropped `PERM_INVITE_MEMBERS` (286783, matching
+  migration 086 and the tests) with new `migrations/089_everyone_drop_invite.sql` rewriting only
+  untouched `@everyone` rows, and `chat.js` self-heals a missing server key on `member_joined`/
+  `key_needed`/server-list refresh plus a Settings "restore keys without a logout" action
+  (`tests/server-key-distribution.spec.ts`).
+
+**Files:** `static/ui-dialog.js` (new), `static/style.css`, `static/index.html`, `static/login.html`,
+`static/admin.html`, `static/chat.js`, `static/doc-preview.js`, `static/roles.js`, `static/admin.js`,
+`static/soundboard-pairing.js`, `static/thread_categories_shortcuts.js`, `tests/_ui-dialogs.ts` (new),
+`tests/ui-dialogs.spec.ts` (new), `tests/{chat,clear-data-signout,heartbeat-reauth,kill-switch,
+profile-fixes,security,server-groups,ux-features,admin-backup,admin-panel-complete}.spec.ts`
+

@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { queuePromptAnswer } from './_ui-dialogs';
 
 const BASE = 'https://localhost:3443';
 
@@ -133,10 +134,8 @@ test.describe('Server Groups', () => {
         // Rename group
         const header = page.locator('.server-group-header').first();
         if (await header.count() > 0) {
-            // Double-click to rename (dismissible prompt)
-            page.once('dialog', async (dialog: any) => {
-                await dialog.accept('Renamed');
-            });
+            // Double-click to rename (in-page prompt, auto-answered under automation)
+            await queuePromptAnswer(page, 'Renamed');
             await header.dblclick();
             await page.waitForTimeout(1000);
 

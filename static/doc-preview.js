@@ -1255,10 +1255,10 @@ var DocPreview = (function () {
         }
     }
 
-    function pdfEditorDeletePage() {
+    async function pdfEditorDeletePage() {
         var count = _pdfEditor.pages.filter(function (p) { return !p.deleted; }).length;
         if (count <= 1) { alert('Cannot delete the last page'); return; }
-        if (!confirm('Delete this page?')) return;
+        if (!(await uiConfirm('Delete this page?'))) return;
         var visibleIdx = 0;
         for (var i = 0; i < _pdfEditor.pages.length; i++) {
             if (_pdfEditor.pages[i].deleted) continue;
@@ -1304,7 +1304,7 @@ var DocPreview = (function () {
                 var mergeBytes = new Uint8Array(await file.arrayBuffer());
                 var mergeDoc = await PDFLib.PDFDocument.load(mergeBytes);
                 var mergePageCount = mergeDoc.getPageCount();
-                if (!confirm('Merge ' + mergePageCount + ' page' + (mergePageCount > 1 ? 's' : '') + ' from ' + file.name + '?')) return;
+                if (!(await uiConfirm('Merge ' + mergePageCount + ' page' + (mergePageCount > 1 ? 's' : '') + ' from ' + file.name + '?'))) return;
 
                 // Add pages to end
                 for (var i = 0; i < mergePageCount; i++) {
@@ -1355,12 +1355,12 @@ var DocPreview = (function () {
 
     // ── Annotations ─────────────────────────────────────────────────────
 
-    function pdfEditorAnnotateText() {
-        var text = prompt('Enter text to add:');
+    async function pdfEditorAnnotateText() {
+        var text = await uiPrompt('Enter text to add:');
         if (!text) return;
-        var x = parseFloat(prompt('X position (inches from left, 0-8.5):', '1')) || 1;
-        var y = parseFloat(prompt('Y position (inches from bottom, 0-11):', '9')) || 9;
-        var size = parseFloat(prompt('Font size:', '14')) || 14;
+        var x = parseFloat(await uiPrompt('X position (inches from left, 0-8.5):', '1')) || 1;
+        var y = parseFloat(await uiPrompt('Y position (inches from bottom, 0-11):', '9')) || 9;
+        var size = parseFloat(await uiPrompt('Font size:', '14')) || 14;
 
         try {
             var visibleIdx = 0;
@@ -1385,11 +1385,11 @@ var DocPreview = (function () {
         }
     }
 
-    function pdfEditorAnnotateWhiteout() {
-        var x = parseFloat(prompt('X position (inches from left, 0-8.5):', '1')) || 1;
-        var y = parseFloat(prompt('Y position (inches from bottom, 0-11):', '9')) || 9;
-        var w = parseFloat(prompt('Width (inches):', '3')) || 3;
-        var h = parseFloat(prompt('Height (inches):', '1')) || 1;
+    async function pdfEditorAnnotateWhiteout() {
+        var x = parseFloat(await uiPrompt('X position (inches from left, 0-8.5):', '1')) || 1;
+        var y = parseFloat(await uiPrompt('Y position (inches from bottom, 0-11):', '9')) || 9;
+        var w = parseFloat(await uiPrompt('Width (inches):', '3')) || 3;
+        var h = parseFloat(await uiPrompt('Height (inches):', '1')) || 1;
 
         try {
             var visibleIdx = 0;
@@ -1536,11 +1536,11 @@ var DocPreview = (function () {
     }
 
     // Crop
-    function pdfEditorCrop() {
-        var left = parseFloat(prompt('Left margin to remove (inches):', '0.5')) || 0;
-        var bottom = parseFloat(prompt('Bottom margin to remove (inches):', '0.5')) || 0;
-        var right = parseFloat(prompt('Right margin to remove (inches):', '0.5')) || 0;
-        var top = parseFloat(prompt('Top margin to remove (inches):', '0.5')) || 0;
+    async function pdfEditorCrop() {
+        var left = parseFloat(await uiPrompt('Left margin to remove (inches):', '0.5')) || 0;
+        var bottom = parseFloat(await uiPrompt('Bottom margin to remove (inches):', '0.5')) || 0;
+        var right = parseFloat(await uiPrompt('Right margin to remove (inches):', '0.5')) || 0;
+        var top = parseFloat(await uiPrompt('Top margin to remove (inches):', '0.5')) || 0;
 
         if (left + right >= 8.5 || bottom + top >= 11) {
             alert('Crop margins too large');

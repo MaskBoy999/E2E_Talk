@@ -310,12 +310,7 @@ test.describe('Encrypted Friend Code', () => {
         const oldFC = body.friendCode;
         expect(oldFC).toBeTruthy();
 
-        // Set up dialog handler BEFORE clicking (Playwright auto-dismisses by default, we need accept)
-        page.on('dialog', dialog => {
-            console.log('Dialog:', dialog.message());
-            dialog.accept();
-        });
-
+        // Popups are in-page now (static/ui-dialog.js) and auto-accept under automation.
         await page.click('#dm-strip-btn');
         await page.waitForTimeout(2000);
         await page.locator('#recover-friend-code-btn').click();

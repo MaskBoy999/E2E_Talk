@@ -11159,3 +11159,52 @@ body.resizing-dm { cursor: ns-resize !important; user-select: none; }
     padding: 6px 8px;
     font-size: 13px;
 }
+
+/* === In-page dialogs (ui-dialog.js) ===
+   Replacements for the native alert/confirm/prompt popups. Sits above every
+   other layer so it also covers panels/context menus. */
+.ui-dialog {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.7);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 100004;
+    padding: 5%;
+}
+.ui-dialog-box {
+    background: var(--bg-secondary, #16213e);
+    border: 1px solid var(--bg-border, #2a2a4a);
+    border-radius: 10px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    padding: 20px;
+    width: 100%;
+    max-width: min(420px, 90vw);
+    max-height: 80vh;
+    overflow-y: auto;
+}
+.ui-dialog-message {
+    color: var(--text-primary, #e0e0e0);
+    font-size: 14px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    margin-bottom: 16px;
+}
+.ui-dialog-input {
+    width: 100%;
+    box-sizing: border-box;
+    background: var(--bg-primary, #1a1a2e);
+    color: var(--text-primary, #e0e0e0);
+    border: 1px solid var(--bg-border, #2a2a4a);
+    border-radius: 6px;
+    padding: 9px 10px;
+    font-size: 14px;
+    font-family: inherit;
+    margin-bottom: 16px;
+}
+.ui-dialog-input:focus {
+    outline: none;
+    border-color: var(--accent, #4fc3f7);
+}

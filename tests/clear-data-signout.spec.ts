@@ -83,11 +83,8 @@ test.describe('Clear Data and Sign Out Flows', () => {
         // 3. Open settings and click Clear All Data
         await openSettings(page);
 
-        // Accept confirm dialog
-        page.once('dialog', async (dialog: any) => {
-            await dialog.accept();
-        });
-
+        // The confirmation is an in-page popup (static/ui-dialog.js) and auto-accepts
+        // under automation, so there is no native dialog left to handle here.
         await page.click('#clear-all-data-btn');
 
         // 4. Should redirect to login page

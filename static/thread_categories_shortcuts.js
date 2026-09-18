@@ -1515,14 +1515,14 @@
                     window.openChannelPermissionsModal('category', categoryId, catName);
                 }
             }},
-            { label: 'Delete', danger: true, action: function () {
+            { label: 'Delete', danger: true, action: async function () {
                 var chCount = channels.length;
                 var msg = 'Delete category "' + catName + '"?';
                 if (chCount > 0) {
                     msg += '\n\nThis will permanently delete ' + chCount + ' channel' + (chCount > 1 ? 's' : '') + ' and ALL messages inside them.';
                 }
                 msg += '\n\nThis cannot be undone.';
-                if (!confirm(msg)) return;
+                if (!(await uiConfirm(msg))) return;
                 deleteCategory(serverId, categoryId).then(function (result) {
                     if (result && result.ok) {
                         loadChannels(serverId);
@@ -1569,11 +1569,11 @@
         // Owner-only: delete
         if (isOwner) {
             items.push('---');
-            items.push({ label: 'Delete', danger: true, action: function () {
+            items.push({ label: 'Delete', danger: true, action: async function () {
                 var msg = 'Delete channel "' + chDisplayName + '"?';
                 msg += '\n\nThis will permanently delete ALL messages inside it.';
                 msg += '\n\nThis cannot be undone.';
-                if (!confirm(msg)) return;
+                if (!(await uiConfirm(msg))) return;
                 deleteChannel(ch.id, ch.name);
             }});
         }
@@ -2895,8 +2895,8 @@
             // Clear slot
             var clearBtn = document.getElementById('css-clear-slot');
             if (clearBtn) {
-                clearBtn.addEventListener('click', function () {
-                    if (!confirm('Clear this CSS slot?')) return;
+                clearBtn.addEventListener('click', async function () {
+                    if (!(await uiConfirm('Clear this CSS slot?'))) return;
                     authFetch('/api/user-css/slot/' + activeSlot, { method: 'DELETE' }).then(function () {
                         invalidateCssSlotCache();
                         localStorage.removeItem('css_editing_slot');
