@@ -351,6 +351,66 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     padding-top: 4px;
 }
 
+/* Drop gaps between rail entries: always laid out so they are real hit targets,
+   highlighted while a drag hovers them. The rail is a centred flex column, and
+   a flex item that sets no width collapses to 0px there — an indicator that is
+   both invisible and impossible to point at, which is why every gap drop fell
+   through to the list-level handler and landed at the end of the rail. */
+.server-drop-gap {
+    width: 100%;
+    height: 6px;
+    flex: 0 0 auto;
+    margin: 2px 0;
+    border-radius: 3px;
+    background: transparent;
+    transition: background 0.15s ease;
+}
+
+.server-list-dragging .server-drop-gap {
+    background: rgba(255, 255, 255, 0.06);
+}
+
+/* Slots *inside* an expanded folder: the same in-between space loose servers
+   get, so members can be reordered and a server can be dropped between two of
+   them. Slimmer than the top-level slots so a folder does not grow much. */
+.server-drop-gap.inside {
+    height: 4px;
+    margin: 1px 0;
+}
+
+/* Slot above the first entry ("put it at the very top"): a folder at the top of
+   the rail would otherwise leave nothing to drop onto above it. */
+.server-drop-gap.top {
+    height: 4px;
+    margin: 0 0 2px;
+}
+
+/* The DM list gets the same in-between slots as the rail: a conversation can be
+   dropped *between* two others, not only onto a row's top/bottom half. */
+.dm-drop-gap {
+    height: 6px;
+    margin: 1px 4px;
+    border-radius: 3px;
+    background: transparent;
+    transition: background 0.15s ease;
+}
+.dm-drop-gap.top {
+    height: 4px;
+    margin: 0 4px 2px;
+}
+.dm-list-dragging .dm-drop-gap {
+    background: rgba(255, 255, 255, 0.06);
+}
+.dm-drop-gap.drop-active {
+    background: var(--accent);
+    box-shadow: 0 0 8px var(--accent);
+}
+
+.server-drop-gap.drop-active {
+    background: var(--accent);
+    box-shadow: 0 0 8px var(--accent);
+}
+
 .server-icon {
     width: clamp(36px, 6vw, 48px);
     height: clamp(36px, 6vw, 48px);
@@ -10653,6 +10713,7 @@ body.resizing-dm { cursor: ns-resize !important; user-select: none; }
 .drag-over-top { border-top: 2px solid var(--accent,#5865f2) !important; }
 .drag-over-bottom { border-bottom: 2px solid var(--accent,#5865f2) !important; }
 .server-icon.dragging { opacity: 0.4; }
+.server-group.dragging { opacity: 0.4; }
 .drag-over-category {
     background: rgba(79, 195, 247, 0.08) !important;
 }

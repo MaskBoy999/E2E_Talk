@@ -7158,3 +7158,109 @@ be themed, and block the JS thread. All of them now live inside the page:
 `tests/ui-dialogs.spec.ts` (new), `tests/{chat,clear-data-signout,heartbeat-reauth,kill-switch,
 profile-fixes,security,server-groups,ux-features,admin-backup,admin-panel-complete}.spec.ts`
 
+### 129. A held drag ended by itself — the drop indicators flashed and vanished
+
+Reported: pick a server up and the in-between lines appear for about half a second and disappear;
+letting go anywhere after that does nothing.
+
+Root causes:
+
+- **The cleanup net read a pointer artifact as a release.** It ignored pointer events for 250ms
+  after `dragstart` ("too early to be real") and treated everything else as a release. But
+  browsers emit pointer events *throughout* a native drag: Chrome fires `pointercancel` the moment
+  a drag starts, others a synthetic `mouseup` as the drag is handed to the OS. A late one landed
+  outside the window, ended the gesture with the button still down, and then the parked re-render
+  rebuilt the rail out from under the still-live session — so the release afterwards hit nothing.
+  No timing window can tell those apart from a real release, so pointer events no longer end a drag
+  while the browser's own session is alive (`_nativeDragActive`); they are the recovery net only
+  when no session is live or the source is already gone.
+- **On a phone the browser started its own drag.** Icons are `draggable=true`, so a long press made
+  Chrome begin a native drag at ~500ms and cancel the app's touch stream (`touchcancel`) — the same
+  half-second death. `draggable` is now off for the life of a touch gesture, the long-press context
+  menu is suppressed while a drag is armed, and touch state is per element so a second finger or a
+  re-render cannot leave half a gesture behind.
+- **`renderServerList`/`renderDmSidebar` deleted the drag source.** A dozen WS-driven callers rebuild
+  the whole list, and `dragend` only ever fires on the source element — once it is gone, nothing can
+  report the end. Renders are now parked while a drag is live and flushed after it
+  (`_serverDragPendingRerender`/`_dmDragPendingRerender`), with one exit path per list
+  (`endServerDrag`/`endDmDrag`), a document-level net on `pointerup`/`pointercancel`/`mouseup`/
+  `Escape`/`drop`/`dragend`/blur, and a watchdog for a detached source.
+- **DM rows had no protection at all**, and the rail's drop gaps were 0px wide (the rail is a centred
+  flex column, so a gap that sets no width also has no area to point at) — every gap drop fell
+  through to the list-level handler, i.e. "append to the end". Gaps now have a real size and are
+  highlighted (`.drop-active`, `.server-list-dragging`), and a fingertip release falls back to the
+  nearest gap within 40px instead of silently doing nothing. Reorder also writes `position` locally
+  before rendering (it rendered from stale positions), and the `#server-list` drop listeners are
+  bound once instead of stacking a pair on every render.
+- **A stale service worker was ruled out, then hardened anyway.** The SW's own header warns that an
+  unchanged cache name keeps an old `chat.js` alive; it cannot even install on this self-signed
+  localhost (`SecurityError: SSL certificate error occurred when fetching the script`), so a desktop
+  browser is never served a frozen copy — but a device that trusts the CA does install it, so the
+  cache name and the `?v=` on `chat.js`/`style.css` were bumped.
+
+**Verified:** `tests/server-rail-dragdrop.spec.ts` — mouse reorder + persistence, a mid-drag render
+deferred then flushed, a lost drag source, Escape, and a stray `pointercancel` + synthetic `mouseup`
+during a held drag (the reported failure, now a regression test), plus three phone tests driving real
+CDP touch input on a Pixel 5 profile (pick up + drop onto another icon, drop into a gap, and a
+dead-space release resolving to the nearest gap). `server-rail-scroll.spec.ts` touch auto-scroll
+stays green: my first version seeded the scroll ticker from `dragover` only, so touch drags scrolled
+from stale `(0,0)` coordinates and cancelled the finger's own scroll.
+
+**Files:** `static/chat.js`, `static/style.css`, `static/sw.js`, `static/index.html`,
+`tests/server-rail-dragdrop.spec.ts`
+
+### 130. Rail and DM ordering: one free order, folder slots, and the missing in-between space
+
+Reported: a closed group cannot be dragged like a server, an opened group has none of the
+in-between space loose servers have, and dragging a server under (or above) a group puts it *in*
+the group instead.
+
+Root causes:
+
+- **Folders and loose servers were two separate orders.** The render always drew every folder
+  (by `server_groups.position`) above every loose server (by `server_members.position`), so "drop
+  this just below that folder" could only ever mean "below all of them".
+- **The slot below a folder joined the folder.** It passed `afterGroup` straight into
+  `setServerGroupLocal`, contradicting its own comment ("sit behind this folder … leave whatever
+  folder you were in"), and a drop anywhere on a folder's body meant "add to this group" for a
+  server drag — so there was no way to say "outside it, right here".
+- **Folders had no in-between slots and the slots only accepted `text/server-id`.** With one folder
+  in the rail, a folder drag had no valid drop target anywhere.
+- **`getAllServerIds()` read the DOM**, and a collapsed folder renders only its first four members —
+  a reorder silently left the rest with stale positions.
+
+What changed:
+
+- **One free order (Discord-like).** A folder sits where its first member sits; entries are sorted by
+  a single key (a folder's topmost member position, else the server's own position), so folders and
+  loose servers interleave and a drop lands where it is aimed. Existing rails may shuffle folders
+  once, because `server_groups.position` no longer decides the order (it is still written, kept in
+  step with the screen).
+- **An entry-based order model** (`groupMembersOf`, `buildRailEntries`, `findRailGroup`,
+  `removeServerFromEntries`, `railInsertIndex`, `commitRailOrder`) built from data rather than the
+  DOM: a folder is one entry carrying its members, a loose server is one entry, and every drop
+  renumbers the whole flat sequence (positions locally, the same order to `PUT /api/servers/reorder`).
+- **Explicit slot semantics.** Inside a folder = join it right there (expandable folders now render a
+  slot above their first member and after every member); below a folder = outside it, directly under
+  it; above the first entry = a new top slot (with a folder at the top there was nothing to drop onto
+  above it). A folder's handle decides above / into / below for both kinds of drag, with the band
+  capped so a short collapsed folder keeps a usable centre.
+- **Folders drag like servers:** every top-level slot takes a folder (members travel together, one
+  renumbered order, `mergeGroups` unchanged for the centre drop and now appending the merged members
+  to the end of the target), the dead space below the rail takes them too, and the touch path handles
+  them as well (`setupTouchDragItem(wrapper, 'group', header)`) with the same ghost, auto-scroll
+  probe and post-drag click suppression as server icons.
+- **The DM list got the same in-between space:** a `.dm-drop-gap` above the first row and after every
+  row, shown while a drag is live (`.dm-list-dragging`), with `applyDmGapDrop` building the payload
+  from `dmConversations` instead of the DOM. Row-level drops (top/bottom half) still work as coarse
+  targets and route into the same slot code, so both paths share one implementation.
+
+**Verified:** `tests/server-rail-dragdrop.spec.ts`, now 11 tests — the additions cover a collapsed
+folder dragged to a slot staying whole and persisting, the slot below a folder keeping a server out
+of it, an expanded folder's inner slots placing a server between two members, the slot above the
+first entry, and a DM sidebar test that seeds conversations and drags one between two others.
+`server-groups.spec.ts` unchanged (its `.group-badge` failure also fails at HEAD), and
+`server-rail-scroll.spec.ts` touch auto-scroll green.
+
+**Files:** `static/chat.js`, `static/style.css`, `tests/server-rail-dragdrop.spec.ts`
+

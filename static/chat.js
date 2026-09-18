@@ -13578,15 +13578,306 @@ function decryptWithOldKey(serverId, encryptedName, nameNonce) {
     } catch (_) { return null; }
 }
 
+/* ── Server rail drag & drop ────────────────────────────────────────────────
+   Every piece of gesture state lives out here rather than inside
+   renderServerList(). The rail is rebuilt from scratch on every render, and
+   ~26 WS handlers call renderServerList(), so a drag can have the ground pulled
+   out from under it at any moment. Native HTML5 drag reports the end of a
+   gesture only through `dragend` on the *source* element — so when the source is
+   re-rendered away mid-drag the browser never says the drag is over: the drop
+   indicator, the `.dragging` styling and the rail's auto-scroll loop all stay
+   up and the rail looks like it is dragging forever. Hence one exit point
+   (endServerDrag), state that survives a re-render, and a document-level safety
+   net for the endings no element handler can hear. */
+
+var _serverDragActive = false;           // a rail drag is in flight
+var _serverDragPendingRerender = false;  // a render was asked for mid-drag
+var _serverDragSourceEl = null;          // element the gesture started on
+var _serverDragStartedAt = 0;
+var _serverDragWatchdog = null;
+// Set when a touch drag ends, so the synthetic click the browser fires after a
+// long-press drag does not also switch servers — or collapse the folder that
+// was just dragged.
+var _serverTouchDragEndedAt = 0;
+function _touchDragJustEnded() { return Date.now() - _serverTouchDragEndedAt < 400; }
+// True while the *browser's* own drag-and-drop session is in flight, for any of
+// the app's native drags (rail icons, group headers, DM rows). DnD cancels the
+// pointer stream when it starts, so pointer events seen during a live session
+// are artifacts of the drag, not releases — and mistaking one for a release is
+// what killed a deliberately held drag mid-flight.
+var _nativeDragActive = false;
+// The DM sidebar needs the same protection the rail got: a dozen callers rebuild
+// it, and a rebuild mid-drag deletes the drag source.
+var _dmDragActive = false;
+var _dmDragPendingRerender = false;
+var _dmDragSourceEl = null;
+var _dmDragWatchdog = null;
+
+function flushServerDragRerender() {
+    if (!_serverDragPendingRerender) return;
+    _serverDragPendingRerender = false;
+    renderServerList();
+}
+
+function beginDmDrag(sourceEl) {
+    _dmDragActive = true;
+    _dmDragSourceEl = sourceEl || null;
+    _nativeDragActive = true;
+    var dmList = document.getElementById('dm-list');
+    if (dmList) dmList.classList.add('dm-list-dragging');
+    // Same watchdog reasoning as the rail: `dragend` is the one handler that
+    // would notice the source going away, and it cannot fire once it has.
+    if (!_dmDragWatchdog) {
+        _dmDragWatchdog = setInterval(function() {
+            if (!_dmDragActive) return;
+            if (!_dmDragSourceEl || !_dmDragSourceEl.isConnected) endDmDrag();
+        }, 200);
+    }
+}
+
+function endDmDrag() {
+    if (!_dmDragActive) return;
+    _dmDragActive = false;
+    _dmDragSourceEl = null;
+    if (_dmDragWatchdog) { clearInterval(_dmDragWatchdog); _dmDragWatchdog = null; }
+    var list = document.getElementById('dm-list');
+    if (list) {
+        list.classList.remove('dm-list-dragging');
+        list.querySelectorAll('.dragging').forEach(function(el) { el.classList.remove('dragging'); });
+    }
+    clearDmDragIndicators();
+    flushDmRerender();
+}
+
+function clearDmDragIndicators(exceptGap) {
+    var list = document.getElementById('dm-list');
+    if (!list) return;
+    list.querySelectorAll('.drag-over-top,.drag-over-bottom').forEach(function(el) {
+        el.classList.remove('drag-over-top', 'drag-over-bottom');
+    });
+    list.querySelectorAll('.dm-drop-gap.drop-active').forEach(function(gap) {
+        if (gap !== exceptGap) gap.classList.remove('drop-active');
+    });
+}
+
+function flushDmRerender() {
+    if (!_dmDragPendingRerender) return;
+    _dmDragPendingRerender = false;
+    renderDmSidebar();
+}
+
+function clearServerDragIndicators(exceptGap) {
+    var list = document.getElementById('server-list');
+    if (!list) return;
+    list.querySelectorAll('.drag-over-top,.drag-over-bottom,.drag-over-group').forEach(function(el) {
+        el.classList.remove('drag-over-top', 'drag-over-bottom', 'drag-over-group');
+    });
+    list.querySelectorAll('.server-drop-gap.drop-active').forEach(function(gap) {
+        if (gap !== exceptGap) gap.classList.remove('drop-active');
+    });
+}
+
+// ─── Drag auto-scroll for the server rail ────────────────────────────────
+// With the button held you cannot scroll the rail any more, so dragging a
+// server onto a folder that is off-screen would be impossible. Holding the
+// pointer near the rail's top/bottom edge scrolls it while the drag lasts.
+var _stripAutoScroll = { active: false, el: null, x: 0, y: 0, raf: null };
+var STRIP_SCROLL_EDGE = 44;   // px band at each edge that triggers scrolling
+var STRIP_SCROLL_MAX = 18;    // px per frame at the very edge
+
+function _onStripDragOverCapture(e) {
+    _stripAutoScroll.x = e.clientX;
+    _stripAutoScroll.y = e.clientY;
+}
+
+function _stripAutoScrollTick() {
+    var st = _stripAutoScroll;
+    if (!st.active) { st.raf = null; return; }
+    _stripAutoScrollFromPoint(st.x, st.y);
+    st.raf = requestAnimationFrame(_stripAutoScrollTick);
+}
+
+// Scroll the rail if (x, y) sits in its top/bottom edge band. Shared by the
+// mouse-drag ticker and the mobile touch-drag handler.
+function _stripAutoScrollFromPoint(x, y) {
+    var el = document.getElementById('server-strip');
+    if (!el) return;
+    // No probe position yet — a stale one from the previous gesture would
+    // scroll the rail on its own.
+    if (x < 0 || y < 0) return;
+    var rect = el.getBoundingClientRect();
+    // Only while the pointer is actually over the rail horizontally —
+    // otherwise dragging across the middle of the app would scroll it.
+    var overRail = x >= rect.left - 24 && x <= rect.right + 24;
+    if (!overRail) return;
+    var delta = 0;
+    if (y < rect.top + STRIP_SCROLL_EDGE) {
+        var up = (rect.top + STRIP_SCROLL_EDGE - y) / STRIP_SCROLL_EDGE;
+        delta = -Math.ceil(Math.max(0, Math.min(1, up)) * STRIP_SCROLL_MAX);
+    } else if (y > rect.bottom - STRIP_SCROLL_EDGE) {
+        var down = (y - (rect.bottom - STRIP_SCROLL_EDGE)) / STRIP_SCROLL_EDGE;
+        delta = Math.ceil(Math.max(0, Math.min(1, down)) * STRIP_SCROLL_MAX);
+    }
+    if (delta) el.scrollTop = el.scrollTop + delta;
+}
+
+function startStripAutoScroll() {
+    if (_stripAutoScroll.active) return;
+    var el = document.getElementById('server-strip');
+    if (!el) return;
+    _stripAutoScroll.active = true;
+    _stripAutoScroll.el = el;
+    // Capture so a child calling stopPropagation cannot hide the pointer.
+    document.addEventListener('dragover', _onStripDragOverCapture, true);
+    if (_stripAutoScroll.raf) cancelAnimationFrame(_stripAutoScroll.raf);
+    _stripAutoScroll.raf = requestAnimationFrame(_stripAutoScrollTick);
+}
+
+function stopStripAutoScroll() {
+    if (!_stripAutoScroll.active) return;
+    _stripAutoScroll.active = false;
+    document.removeEventListener('dragover', _onStripDragOverCapture, true);
+    if (_stripAutoScroll.raf) { cancelAnimationFrame(_stripAutoScroll.raf); _stripAutoScroll.raf = null; }
+    _stripAutoScroll.el = null;
+}
+
+function beginServerDrag(sourceEl) {
+    _serverDragActive = true;
+    _serverDragPendingRerender = false;
+    _serverDragSourceEl = sourceEl || null;
+    _serverDragStartedAt = Date.now();
+    var list = document.getElementById('server-list');
+    if (list) list.classList.add('server-list-dragging');
+    // Seed the auto-scroll probe with the source's own position; dragovers and
+    // touch moves refine it from there.
+    var seed = sourceEl && sourceEl.getBoundingClientRect ? sourceEl.getBoundingClientRect() : null;
+    _stripAutoScroll.x = seed ? seed.left + seed.width / 2 : -1;
+    _stripAutoScroll.y = seed ? seed.top + seed.height / 2 : -1;
+    startStripAutoScroll();
+    // `dragend` is the one handler that would notice the source disappearing —
+    // and the one that cannot fire once it has. Cheap watchdog for the times
+    // when nothing else does either.
+    if (!_serverDragWatchdog) {
+        _serverDragWatchdog = setInterval(function() {
+            if (!_serverDragActive) return;
+            if (!_serverDragSourceEl || !_serverDragSourceEl.isConnected) endServerDrag();
+        }, 200);
+    }
+}
+
+function endServerDrag() {
+    if (!_serverDragActive) return;
+    // Read this before the state is cleared: it decides whether the parked
+    // render may run now or has to wait for the drag session to really end.
+    var sessionLive = _nativeDragActive && _serverDragSourceEl && _serverDragSourceEl.isConnected;
+    _serverDragActive = false;
+    _serverDragSourceEl = null;
+    _serverDragStartedAt = 0;
+    if (_serverDragWatchdog) { clearInterval(_serverDragWatchdog); _serverDragWatchdog = null; }
+    stopStripAutoScroll();
+    var list = document.getElementById('server-list');
+    if (list) {
+        list.classList.remove('server-list-dragging');
+        list.querySelectorAll('.dragging').forEach(function(el) { el.classList.remove('dragging'); });
+    }
+    clearServerDragIndicators();
+    document.querySelectorAll('body > .server-drag-ghost').forEach(function(g) { g.remove(); });
+    // A render requested mid-drag was parked so it could not delete the nodes
+    // the gesture runs on. Run it once the drag session is really over: swapping
+    // the rail out from under a live session is what makes the browser abandon
+    // it, and an abandoned session delivers no drop at all.
+    if (!sessionLive) flushServerDragRerender();
+}
+
+// The nearest drop gap to (x, y), or null when the release was nowhere near
+// one. A fingertip is a lot fatter than a 6px gap, so touch drops resolve
+// through this instead of silently failing on a near miss. `topLevelOnly`
+// skips the slots inside folders, which only take servers.
+function nearestServerDropGap(x, y, topLevelOnly) {
+    var NEAREST_GAP_PX = 40;
+    var best = null;
+    var bestDist = Infinity;
+    document.querySelectorAll('#server-list .server-drop-gap').forEach(function(gap) {
+        if (topLevelOnly && gap.dataset.inside) return;
+        var r = gap.getBoundingClientRect();
+        if (!r.width && !r.height) return;
+        var dx = Math.max(r.left - x, 0, x - r.right);
+        var dy = Math.max(r.top - y, 0, y - r.bottom);
+        var dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < bestDist) { bestDist = dist; best = gap; }
+    });
+    return bestDist <= NEAREST_GAP_PX ? best : null;
+}
+
+// The drag preview that follows a finger. cloneNode keeps the source's classes
+// — including .server-icon, which is what gives it its size — so add the marker
+// class rather than assigning className, or the ghost collapses to an empty box.
+function makeTouchGhost(el, x, y) {
+    var ghost = el.cloneNode(true);
+    ghost.classList.add('server-drag-ghost');
+    ghost.style.cssText = 'position:fixed;z-index:99999;pointer-events:none;opacity:0.85;transform:scale(1.15);transition:none;';
+    moveTouchGhost(ghost, x, y);
+    document.body.appendChild(ghost);
+    return ghost;
+}
+
+function moveTouchGhost(ghost, x, y) {
+    if (!ghost) return;
+    ghost.style.left = (x - 20) + 'px';
+    ghost.style.top = (y - 20) + 'px';
+}
+
+// One net for every ending no element handler can hear: `dragend` only fires on
+// the source element, and is skipped entirely for Escape, a drag out of the
+// window, or a source that was re-rendered away.
+function _serverDragEndedByInput() {
+    if (!_serverDragActive && !_dmDragActive) return;
+    // While the browser's own drag session is live it owns the gesture: the
+    // endings that count are `dragend` and `drop`. DnD cancels the pointer
+    // stream when it starts (one browser fires pointercancel the instant a drag
+    // begins, another fires a synthetic mouseup as it hands the drag to the OS),
+    // and no timing window can tell those apart from a real release — the old
+    // 250ms guess is why a held drag could end half a second in. Pointer events
+    // are still the recovery net when no session is live, or when the drag's
+    // source is gone and no ending can reach us at all.
+    if (_nativeDragActive) {
+        var source = _serverDragSourceEl || _dmDragSourceEl;
+        if (!source || source.isConnected) return;
+    }
+    _nativeDragActive = false;
+    endServerDrag();
+    endDmDrag();
+}
+
+// Whichever drag is finishing, by the time this runs the browser session is over.
+function _nativeDragSessionEnded() {
+    _nativeDragActive = false;
+    endServerDrag();
+    endDmDrag();
+    flushServerDragRerender();
+    flushDmRerender();
+}
+
+document.addEventListener('pointerup', _serverDragEndedByInput, true);
+document.addEventListener('pointercancel', _serverDragEndedByInput, true);
+document.addEventListener('mouseup', _serverDragEndedByInput, true);
+document.addEventListener('drop', _nativeDragSessionEnded, true);
+document.addEventListener('dragend', _nativeDragSessionEnded, true);
+document.addEventListener('keydown', function(e) { if (e.key === 'Escape') _nativeDragSessionEnded(); }, true);
+window.addEventListener('blur', function() { _nativeDragSessionEnded(); });
+
 function renderServerList() {
+    // A drag owns the rail right now: rebuilding the list would delete the drag
+    // source — and with it the only element that could report the drag ending.
+    // Park the render and run it when the drag finishes instead.
+    if (_serverDragActive) { _serverDragPendingRerender = true; return; }
+    _serverDragPendingRerender = false;
+
     const list = document.getElementById('server-list');
     list.innerHTML = '';
 
-    // Clean up any orphaned touch-drag ghost left behind by a cancelled touch
-    // or a mid-drag re-render (ghost is appended to document.body, not #server-list)
-    document.querySelectorAll('body > [style*="z-index:99999"]').forEach(function(g) {
-        if (g.style.pointerEvents === 'none') g.remove();
-    });
+    // Sweep away any touch ghost a cancelled gesture left behind on <body>.
+    document.querySelectorAll('body > .server-drag-ghost').forEach(function(g) { g.remove(); });
 
     // --- helpers ---
     function decryptServerName(s) {
@@ -13609,9 +13900,6 @@ function renderServerList() {
         if (s.server_picture_file_id) { getServerPictureUrl(s.server_picture_file_id, s.id); }
         return '';
     }
-    // Set when a touch drag ends, so the synthetic click the browser fires
-    // after a long-press drag does not also switch servers.
-    var _serverTouchDragEndedAt = 0;
     function makeServerIcon(s, opts) {
         opts = opts || {};
         var div = document.createElement('div');
@@ -13634,6 +13922,10 @@ function renderServerList() {
         div.addEventListener('contextmenu', function(e) {
             e.preventDefault();
             e.stopPropagation();
+            // A long press that armed a drag belongs to the drag: on a phone the
+            // context menu fires at roughly the moment the drag becomes real, and
+            // opening it takes the gesture away from the finger.
+            if (_serverDragActive) return;
             showServerContextMenu(e, s.id, s.name);
         });
         div.addEventListener('dblclick', function(e) {
@@ -13645,43 +13937,24 @@ function renderServerList() {
         return div;
     }
 
-    // --- build ordered flat list (groups expand inline, collapsed groups = single icon) ---
-    // Sort groups by position
-    var sortedGroups = (serverGroups || []).slice().sort(function(a, b) { return (a.position || 0) - (b.position || 0); });
-    // Map: groupId -> [servers sorted by position]
-    var serversByGroup = {};
-    servers.forEach(function(s) { var gid = s.group_id || ''; if (gid) { (serversByGroup[gid] = serversByGroup[gid] || []).push(s); } });
-    Object.keys(serversByGroup).forEach(function(gid) {
-        serversByGroup[gid].sort(function(a, b) { return (a.position || 0) - (b.position || 0); });
-    });
+    // --- the rail is ONE free order: folders and loose servers interleave ---
+    // Folders used to be pinned above every loose server, so "drop this just
+    // below that folder" could only ever mean "below every folder". A folder now
+    // sits where its first member sits, and member positions are the same
+    // per-user sequence the loose servers use — so one list orders the whole
+    // rail, and a folder really does end up where it is dropped.
+    var items = buildRailEntries();
 
-    // Build flat ordered items: [{type:'group',group}, {type:'server',server}]
-    var items = [];
-    var groupedServerIds = {};
-    sortedGroups.forEach(function(g) {
-        items.push({ type: 'group', group: g });
-        (serversByGroup[g.id] || []).forEach(function(s) {
-            groupedServerIds[s.id] = true;
-            items.push({ type: 'server', server: s });
-        });
-    });
-    // Ungrouped servers (sorted by position)
-    // Also include servers whose group_id points to a non-existent group (orphaned)
-    servers.filter(function(s) {
-        if (!groupedServerIds[s.id]) return true; // not in any group
-        // In a group but the group doesn't exist in sortedGroups — orphaned
-        var gid = s.group_id || '';
-        return !sortedGroups.some(function(g) { return g.id === gid; });
-    })
-        .sort(function(a, b) { return (a.position || 0) - (b.position || 0); })
-        .forEach(function(s) { items.push({ type: 'server', server: s }); });
+    // Slot above the first entry: with a folder at the top there is nowhere else
+    // to put something over it.
+    if (items.length) list.appendChild(makeServerDropGap('', '', false, true));
 
     // Render items
     items.forEach(function(item) {
         if (item.type === 'group') {
             var g = item.group;
             var isCollapsed = g.collapsed;
-            var groupServers = serversByGroup[g.id] || [];
+            var groupServers = item.members;
             var wrapper = document.createElement('div');
             wrapper.className = 'server-group' + (isCollapsed ? ' collapsed' : '');
             wrapper.dataset.groupId = g.id;
@@ -13715,6 +13988,7 @@ function renderServerList() {
                 }
                 grid.addEventListener('click', function(e) {
                     e.stopPropagation();
+                    if (_touchDragJustEnded()) return;
                     toggleGroup(g.id);
                 });
                 header.appendChild(grid);
@@ -13723,7 +13997,7 @@ function renderServerList() {
                 badge.textContent = groupServers.length;
                 header.appendChild(badge);
                 header.addEventListener('click', function(e) {
-                    if (e.target === header) toggleGroup(g.id);
+                    if (e.target === header && !_touchDragJustEnded()) toggleGroup(g.id);
                 });
             } else {
                 // Expanded: show group name and servers
@@ -13736,6 +14010,7 @@ function renderServerList() {
                 toggle.textContent = '\u25BC ' + g.name;
                 toggle.title = 'Click to collapse ' + g.name;
                 toggle.addEventListener('click', function() {
+                    if (_touchDragJustEnded()) return;
                     toggleGroup(g.id);
                 });
                 header.appendChild(toggle);
@@ -13753,103 +14028,358 @@ function renderServerList() {
             wrapper.appendChild(header);
 
             if (!isCollapsed) {
-                // Render servers inside group
+                // Render servers inside group, with a drop slot between every
+                // pair — the same in-between space loose servers have, so members
+                // can be reordered inside the folder and a server can be dropped
+                // in between two of them.
                 var inner = document.createElement('div');
                 inner.className = 'server-group-inner';
                 inner.dataset.groupId = g.id;
+                inner.appendChild(makeServerDropGap('', g.id, true));
                 groupServers.forEach(function(s) {
                     inner.appendChild(makeServerIcon(s));
+                    inner.appendChild(makeServerDropGap(s.id, g.id, true));
                 });
                 wrapper.appendChild(inner);
             }
             list.appendChild(wrapper);
-        } else if (item.type === 'server' && !item.server.group_id) {
+            // Slot below the folder. The slots *inside* it (above) mean "stay in
+            // this folder"; this one means the opposite — "sit under this folder,
+            // outside it". Two intentions, two different slots, which is what
+            // made dragging a server out of a folder (or under one it was never
+            // in) land inside the folder instead.
+            list.appendChild(makeServerDropGap('', g.id));
+        } else {
             list.appendChild(makeServerIcon(item.server));
+            list.appendChild(makeServerDropGap(item.server.id, ''));
         }
     });
 
+    // ── The rail's order model ──────────────────────────────────────────────
+    // Everything below works on entries, not DOM nodes: a folder is one entry
+    // carrying its members, a loose server is one entry. Built from data, never
+    // from the DOM — a collapsed folder renders only its first four members, so
+    // the DOM is not the list, and a drop has to renumber all of them or the
+    // members it never rendered keep stale positions.
+    function groupMembersOf(groupId) {
+        return servers.filter(function(sv) { return (sv.group_id || '') === groupId; })
+            .sort(function(a, b) { return (a.position || 0) - (b.position || 0); });
+    }
+
+    function buildRailEntries() {
+        var knownGroup = {};
+        var entries = [];
+        (serverGroups || []).forEach(function(g) {
+            knownGroup[g.id] = true;
+            var members = groupMembersOf(g.id);
+            entries.push({
+                type: 'group', group: g, members: members,
+                // A folder sits where its first member sits. One with no members
+                // yet goes last (it is deleted as soon as it empties).
+                key: members.length ? (members[0].position || 0) : 1e9
+            });
+        });
+        servers.forEach(function(s) {
+            // A group_id pointing at a folder that no longer exists renders as a
+            // loose server (orphan), so it orders like one too.
+            if (s.group_id && knownGroup[s.group_id]) return;
+            entries.push({ type: 'server', server: s, key: s.position || 0 });
+        });
+        entries.sort(function(a, b) {
+            if (a.key !== b.key) return a.key - b.key;
+            if (a.type === b.type) return 0;
+            return a.type === 'group' ? -1 : 1;   // only when positions tie
+        });
+        return entries;
+    }
+
+    function findRailGroup(entries, groupId) {
+        for (var i = 0; i < entries.length; i++) {
+            if (entries[i].type === 'group' && entries[i].group.id === groupId) return entries[i];
+        }
+        return null;
+    }
+
+    function railIndexOf(entries, item) {
+        for (var i = 0; i < entries.length; i++) if (entries[i] === item) return i;
+        return -1;
+    }
+
+    // Pull a server out of the entry list, wherever it currently sits.
+    function removeServerFromEntries(entries, serverId) {
+        for (var i = 0; i < entries.length; i++) {
+            var e = entries[i];
+            if (e.type === 'server') {
+                if (e.server.id === serverId) { entries.splice(i, 1); return; }
+            } else {
+                for (var j = 0; j < e.members.length; j++) {
+                    if (e.members[j].id === serverId) { e.members.splice(j, 1); return; }
+                }
+            }
+        }
+    }
+
+    // Where a slot's anchor points in `entries`. A server anchor inside a folder
+    // resolves to the folder's own slot — callers that wanted to go *inside* a
+    // folder splice into that folder's members instead.
+    function railInsertIndex(entries, anchorServerId, anchorGroupId, atTop) {
+        if (atTop) return 0;
+        if (anchorServerId) {
+            for (var i = 0; i < entries.length; i++) {
+                if (entries[i].type === 'server' && entries[i].server.id === anchorServerId) return i + 1;
+            }
+            return entries.length;
+        }
+        if (anchorGroupId) {
+            for (var k = 0; k < entries.length; k++) {
+                if (entries[k].type === 'group' && entries[k].group.id === anchorGroupId) return k + 1;
+            }
+        }
+        return entries.length;
+    }
+
+    // Flatten to the one sequence the API stores, then write it: positions
+    // locally first (the render reads them), then the same order on the server.
+    // Folder ranks go along too so `server_groups.position` keeps matching the
+    // screen, even though nothing orders by it any more.
+    function commitRailOrder(entries) {
+        var gids = entries.filter(function(e) { return e.type === 'group'; })
+            .map(function(e) { return e.group.id; });
+        gids.forEach(function(gid, i) {
+            var g = serverGroups.find(function(x) { return x.id === gid; });
+            if (g) g.position = i;
+        });
+        saveServerGroupsLocal();
+        authFetch('/api/server-groups/reorder', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ordered_ids: gids })
+        }).catch(function() {});
+        var ids = [];
+        entries.forEach(function(e) {
+            if (e.type === 'group') e.members.forEach(function(m) { ids.push(m.id); });
+            else ids.push(e.server.id);
+        });
+        reorderServers(ids);
+    }
+
+    // Above / into / below, judged from the folder's own handle. The band is
+    // capped so a short collapsed folder still keeps a usable centre.
+    function dragZone(el, clientY) {
+        var r = el.getBoundingClientRect();
+        var band = Math.max(4, Math.min(r.height * 0.25, 12));
+        if (clientY < r.top + band) return 'above';
+        if (clientY > r.bottom - band) return 'below';
+        return 'into';
+    }
+
+    function zoneClass(zone) {
+        return zone === 'above' ? 'drag-over-top'
+            : zone === 'below' ? 'drag-over-bottom' : 'drag-over-group';
+    }
+
+    // A loose server directly above/below a folder (outside it).
+    function placeServerBesideFolder(serverId, groupId, zone) {
+        var s = servers.find(function(sv) { return sv.id === serverId; });
+        if (!s) return;
+        setServerGroupLocal(s, null);
+        var entries = buildRailEntries();
+        removeServerFromEntries(entries, serverId);
+        var at = railInsertIndex(entries, '', groupId, false);
+        if (zone === 'above') at = Math.max(0, at - 1);
+        entries.splice(at, 0, { type: 'server', server: s, key: 0 });
+        commitRailOrder(entries);
+    }
+
+    // Join the folder, after its last member.
+    function addServerToFolderEnd(serverId, groupId) {
+        var s = servers.find(function(sv) { return sv.id === serverId; });
+        if (!s) return;
+        setServerGroupLocal(s, groupId);
+        var entries = buildRailEntries();
+        var target = findRailGroup(entries, groupId);
+        removeServerFromEntries(entries, serverId);
+        if (target) target.members.push(s);
+        commitRailOrder(entries);
+    }
+
+    // A whole folder above/below another one.
+    function placeGroupBesideGroup(draggedGroupId, targetGroupId, zone) {
+        var entries = buildRailEntries();
+        var mine = findRailGroup(entries, draggedGroupId);
+        var idx = railIndexOf(entries, mine);
+        if (!mine || idx === -1) return;
+        entries.splice(idx, 1);
+        var at = railInsertIndex(entries, '', targetGroupId, false);
+        if (zone === 'above') at = Math.max(0, at - 1);
+        entries.splice(at, 0, mine);
+        commitRailOrder(entries);
+    }
+
     // --- Server drag-to-reorder with grouping support ---
     // 25% center zone = group with target; above/below 25% = reorder
-    function clearDragIndicators() {
-        list.querySelectorAll('.drag-over-top,.drag-over-bottom,.drag-over-group').forEach(function(el) {
-            el.classList.remove('drag-over-top', 'drag-over-bottom', 'drag-over-group');
-        });
-    }
-    // ─── Drag auto-scroll for the server rail ────────────────────────────
-    // Hold the mouse button down for a drag and you cannot scroll the rail
-    // any more, so dragging a server to a folder that is off-screen would be
-    // impossible. Holding the pointer near the rail's top/bottom edge scrolls
-    // it for the duration of the drag.
-    var _stripAutoScroll = { active: false, el: null, x: 0, y: 0, raf: null };
-    var STRIP_SCROLL_EDGE = 44;   // px band at each edge that triggers scrolling
-    var STRIP_SCROLL_MAX = 18;    // px per frame at the very edge
 
-    function _onStripDragOverCapture(e) {
-        _stripAutoScroll.x = e.clientX;
-        _stripAutoScroll.y = e.clientY;
-    }
-
-    function _stripAutoScrollTick() {
-        var st = _stripAutoScroll;
-        if (!st.active) { st.raf = null; return; }
-        _stripAutoScrollFromPoint(st.x, st.y);
-        st.raf = requestAnimationFrame(_stripAutoScrollTick);
-    }
-
-    // Scroll the rail if (x, y) sits in its top/bottom edge band. Shared by the
-    // mouse-drag ticker and the mobile touch-drag handler.
-    function _stripAutoScrollFromPoint(x, y) {
-        var el = document.getElementById('server-strip');
-        if (!el) return;
-        var rect = el.getBoundingClientRect();
-        // Only while the pointer is actually over the rail horizontally —
-        // otherwise dragging across the middle of the app would scroll it.
-        var overRail = x >= rect.left - 24 && x <= rect.right + 24;
-        if (!overRail) return;
-        var delta = 0;
-        if (y < rect.top + STRIP_SCROLL_EDGE) {
-            var up = (rect.top + STRIP_SCROLL_EDGE - y) / STRIP_SCROLL_EDGE;
-            delta = -Math.ceil(Math.max(0, Math.min(1, up)) * STRIP_SCROLL_MAX);
-        } else if (y > rect.bottom - STRIP_SCROLL_EDGE) {
-            var down = (y - (rect.bottom - STRIP_SCROLL_EDGE)) / STRIP_SCROLL_EDGE;
-            delta = Math.ceil(Math.max(0, Math.min(1, down)) * STRIP_SCROLL_MAX);
+    // Dropping a server on another one always means "put these in a folder".
+    function dropServerOnServerIcon(draggedId, icon) {
+        var targetId = icon.dataset.id || '';
+        if (!draggedId || !targetId || draggedId === targetId) return;
+        var targetGroupId = icon.dataset.groupId || null;
+        if (!targetGroupId) {
+            var parentInner = icon.closest('.server-group-inner');
+            if (parentInner) targetGroupId = parentInner.dataset.groupId || null;
         }
-        if (delta) el.scrollTop = el.scrollTop + delta;
+        if (!targetGroupId) {
+            // Mini icons of a collapsed folder — and anything else drawn inside
+            // a folder's box — belong to that folder, not to a new one.
+            var parentWrapper = icon.closest('.server-group');
+            if (parentWrapper) targetGroupId = parentWrapper.dataset.groupId || null;
+        }
+        if (targetGroupId) {
+            // Join the folder the target lives in, at its end — the same path a
+            // drop into a folder's body takes, so the order is renumbered too.
+            addServerToFolderEnd(draggedId, targetGroupId);
+        } else {
+            createGroupWithServers(draggedId, targetId);
+        }
     }
 
-    function startStripAutoScroll() {
-        if (_stripAutoScroll.active) return;
-        var el = document.getElementById('server-strip');
-        if (!el) return;
-        _stripAutoScroll.active = true;
-        _stripAutoScroll.el = el;
-        // Capture so a child calling stopPropagation cannot hide the pointer.
-        document.addEventListener('dragover', _onStripDragOverCapture, true);
-        if (_stripAutoScroll.raf) cancelAnimationFrame(_stripAutoScroll.raf);
-        _stripAutoScroll.raf = requestAnimationFrame(_stripAutoScrollTick);
+    // Move a server in or out of a folder locally — the caller is about to
+    // re-render the full new order, so this must not render itself — and delete
+    // the folder if the move emptied it.
+    function setServerGroupLocal(s, groupId) {
+        var oldGroupId = s.group_id || null;
+        if (oldGroupId === groupId) return;
+        s.group_id = groupId;
+        authFetch('/api/servers/' + s.id + '/group', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ group_id: groupId })
+        }).catch(function() {});
+        if (oldGroupId) {
+            var remaining = servers.filter(function(sv) { return sv.group_id === oldGroupId; });
+            if (remaining.length === 0) {
+                serverGroups = serverGroups.filter(function(g) { return g.id !== oldGroupId; });
+                saveServerGroupsLocal();
+                authFetch('/api/server-groups/' + oldGroupId, { method: 'DELETE' }).catch(function() {});
+            }
+        }
     }
 
-    function stopStripAutoScroll() {
-        if (!_stripAutoScroll.active) return;
-        _stripAutoScroll.active = false;
-        document.removeEventListener('dragover', _onStripDragOverCapture, true);
-        if (_stripAutoScroll.raf) { cancelAnimationFrame(_stripAutoScroll.raf); _stripAutoScroll.raf = null; }
-        _stripAutoScroll.el = null;
+    // A drop slot: between two rail entries, inside a folder (inside=true:
+    // "join this folder, right here"), or above everything (top).
+    function makeServerDropGap(afterServerId, afterGroupId, inside, top) {
+        var gap = document.createElement('div');
+        gap.className = 'server-drop-gap' + (inside ? ' inside' : '') + (top ? ' top' : '');
+        if (afterServerId) gap.dataset.afterServer = afterServerId;
+        if (afterGroupId) gap.dataset.afterGroup = afterGroupId;
+        if (inside) gap.dataset.inside = '1';
+        // No anchor at all: this slot only exists above the first entry, and it
+        // has to say so or the drop would fall through to "append at the end".
+        if (top) gap.dataset.top = '1';
+        gap.addEventListener('dragover', function(e) {
+            var types = e.dataTransfer.types;
+            var isSvDrag = types.indexOf('text/server-id') !== -1;
+            var isGroupDrag = types.indexOf('text/group-id') !== -1;
+            if (!isSvDrag && !isGroupDrag) return;
+            // A folder cannot go *inside* another folder — the way into a folder
+            // is onto it, which merges. Its own slots still take it.
+            if (isGroupDrag && !isSvDrag && gap.dataset.inside) return;
+            e.preventDefault();
+            e.stopPropagation();
+            e.dataTransfer.dropEffect = 'move';
+            clearServerDragIndicators(gap);
+            gap.classList.add('drop-active');
+        });
+        gap.addEventListener('dragleave', function() {
+            gap.classList.remove('drop-active');
+        });
+        gap.addEventListener('drop', function(e) {
+            var draggedServerId = e.dataTransfer.getData('text/server-id');
+            var draggedGroupId = e.dataTransfer.getData('text/group-id');
+            if (!draggedServerId && !draggedGroupId) return;
+            e.preventDefault();
+            e.stopPropagation();
+            endServerDrag();
+            if (draggedServerId) applyServerGapDrop(draggedServerId, gap);
+            else applyGroupGapDrop(draggedGroupId, gap);
+        });
+        return gap;
+    }
+
+    // Put a server where the slot says, and persist the order.
+    function applyServerGapDrop(draggedId, gap) {
+        var s = servers.find(function(sv) { return sv.id === draggedId; });
+        if (!s) return;
+        var anchorServerId = gap.dataset.afterServer || '';
+        var anchorGroupId = gap.dataset.afterGroup || '';
+        // Inside a folder = join it, right there. Anywhere else = be a loose
+        // server right there — including the slot directly below a folder, which
+        // is how a server is dragged back out of one.
+        var insideGroupId = gap.dataset.inside ? (anchorGroupId || null) : null;
+        // A slot immediately after the thing being dragged is not a move. The
+        // anchor disappears along with the item, which then looked like "no
+        // anchor at all" and sent it to the end of the rail (or the top of its
+        // folder) — the slip a mouse overshoot makes, and where a fingertip
+        // lands most of the time.
+        if (anchorServerId === draggedId) return;
+        setServerGroupLocal(s, insideGroupId);
+
+        var entries = buildRailEntries();
+        var target = insideGroupId ? findRailGroup(entries, insideGroupId) : null;
+        removeServerFromEntries(entries, draggedId);
+        if (target) {
+            var at = 0;
+            for (var j = 0; j < target.members.length; j++) {
+                if (target.members[j].id === anchorServerId) { at = j + 1; break; }
+            }
+            target.members.splice(at, 0, s);
+        } else {
+            entries.splice(
+                railInsertIndex(entries, anchorServerId, anchorGroupId, !!gap.dataset.top),
+                0, { type: 'server', server: s, key: 0 }
+            );
+        }
+        commitRailOrder(entries);
+    }
+
+    // Put a whole folder where the slot says: its members travel with it.
+    function applyGroupGapDrop(draggedGroupId, gap) {
+        // Its own trailing slot: not a move, for the same reason as a server.
+        if ((gap.dataset.afterGroup || '') === draggedGroupId) return;
+        var entries = buildRailEntries();
+        var mine = findRailGroup(entries, draggedGroupId);
+        var idx = railIndexOf(entries, mine);
+        if (!mine || idx === -1) return;
+        entries.splice(idx, 1);
+        var at = railInsertIndex(
+            entries,
+            gap.dataset.afterServer || '',
+            gap.dataset.afterGroup || '',
+            !!gap.dataset.top
+        );
+        entries.splice(at, 0, mine);
+        commitRailOrder(entries);
     }
 
     function setupDraggableServer(el) {
         el.draggable = true;
         el.addEventListener('dragstart', function(e) {
-            var id = el.dataset.id || '';
-            e.dataTransfer.setData('text/server-id', id);
+            // A drag that starts on a child must not also reach the group
+            // header's drag handler.
+            e.stopPropagation();
+            e.dataTransfer.setData('text/server-id', el.dataset.id || '');
             e.dataTransfer.effectAllowed = 'move';
+            // Hand the gesture to the browser's own drag session: from here the
+            // only trustworthy endings are `dragend` and `drop`.
+            _nativeDragActive = true;
+            beginServerDrag(el);
+            // The browser snapshots the drag image before styles land, so dim
+            // the source on the next tick.
             setTimeout(function() { el.classList.add('dragging'); }, 0);
-            startStripAutoScroll();
         });
         el.addEventListener('dragend', function() {
             el.classList.remove('dragging');
-            stopStripAutoScroll();
-            clearDragIndicators();
+            endServerDrag();
         });
     }
     function setupDropOnServerIcon(el) {
@@ -13857,8 +14387,9 @@ function renderServerList() {
             var isSvDrag = e.dataTransfer.types.indexOf('text/server-id') !== -1;
             if (!isSvDrag) return;
             e.preventDefault();
+            e.stopPropagation();
             e.dataTransfer.dropEffect = 'move';
-            clearDragIndicators();
+            clearServerDragIndicators();
             // Always show "add to group" indicator
             el.classList.add('drag-over-group');
         });
@@ -13866,27 +14397,158 @@ function renderServerList() {
             el.classList.remove('drag-over-top', 'drag-over-bottom', 'drag-over-group');
         });
         el.addEventListener('drop', function(e) {
+            var draggedId = e.dataTransfer.getData('text/server-id');
             e.preventDefault();
             e.stopPropagation();
-            // A drop re-renders the list, which can remove the drag source
-            // before `dragend` fires — so stop scrolling right here.
-            stopStripAutoScroll();
-            clearDragIndicators();
-            var draggedId = e.dataTransfer.getData('text/server-id');
-            if (!draggedId || draggedId === el.dataset.id) return;
-            // Find the group this server icon belongs to (from DOM parent)
-            var targetGroupId = el.dataset.groupId || null;
-            if (!targetGroupId) {
-                var parentInner = el.closest('.server-group-inner');
-                if (parentInner) targetGroupId = parentInner.dataset.groupId || null;
-            }
-            // Always add dragged server to the target server's group
-            if (targetGroupId) {
-                moveServerToGroup(draggedId, targetGroupId);
-            } else {
-                createGroupWithServers(draggedId, el.dataset.id);
-            }
+            endServerDrag();
+            dropServerOnServerIcon(draggedId, el);
         });
+    }
+
+    // Touch drag: long-press to pick something up, drag, release. State is per
+    // element (not one object shared by every icon) so a re-render or a second
+    // finger can never leave half a gesture behind on another icon.
+    // `kind` is 'server' (el = the icon) or 'group' (el = the folder wrapper,
+    // handleEl = the header that carries `draggable`).
+    function setupTouchDragItem(el, kind, handleEl) {
+        var LONG_PRESS_MS = 350;
+        var isGroup = kind === 'group';
+        var st = {
+            timer: null, active: false, ghost: null,
+            id: '', startX: 0, startY: 0, lastX: 0, lastY: 0,
+        };
+        el.addEventListener('touchstart', function(e) {
+            var t = e.touches[0];
+            if (!t) return;
+            // Members of an expanded folder are their own drag sources, so a
+            // touch on one belongs to it — except the mini icons of a collapsed
+            // folder, which are part of the folder's own handle.
+            if (isGroup && e.target.closest && e.target.closest('.server-icon')
+                && !e.target.closest('.server-group-collapsed-grid')) return;
+            st.id = isGroup ? (el.dataset.groupId || '') : (el.dataset.id || '');
+            if (!st.id) return;
+            // Take the element off the browser's own long-press drag path. On a
+            // phone a long press on a draggable element starts a *native* drag,
+            // which cancels this gesture's touch stream about half a second in —
+            // right when the long press arms — so the ghost vanished and the
+            // release had nothing left to drop onto.
+            if (handleEl) handleEl.draggable = false;
+            st.startX = st.lastX = t.clientX;
+            st.startY = st.lastY = t.clientY;
+            st.timer = setTimeout(function() {
+                st.timer = null;
+                st.active = true;
+                el.classList.add('dragging');
+                beginServerDrag(handleEl || el);
+                // Ghost goes at the finger's CURRENT position, not where the
+                // press started — that is stale by the time the timer fires.
+                st.ghost = makeTouchGhost(handleEl || el, st.lastX, st.lastY);
+                if (navigator.vibrate) navigator.vibrate(30);
+            }, LONG_PRESS_MS);
+        }, { passive: false });
+        el.addEventListener('touchmove', function(e) {
+            var t = e.touches[0];
+            if (t) { st.lastX = t.clientX; st.lastY = t.clientY; }
+            if (st.timer) {
+                // Any real movement means the user is scrolling — abort the
+                // pending long-press instead of hijacking the scroll.
+                if (t && (Math.abs(t.clientX - st.startX) > 10 || Math.abs(t.clientY - st.startY) > 10)) {
+                    clearTimeout(st.timer);
+                    st.timer = null;
+                }
+            }
+            if (!st.active) return;
+            e.preventDefault();
+            moveTouchGhost(st.ghost, st.lastX, st.lastY);
+            // Holding near the rail's edge scrolls it, so a server can be
+            // dragged onto a folder that is currently off-screen. Feeding the
+            // shared probe (rather than scrolling here) lets the rAF ticker keep
+            // scrolling while the finger rests at the edge.
+            _stripAutoScroll.x = st.lastX;
+            _stripAutoScroll.y = st.lastY;
+            var under = document.elementFromPoint(st.lastX, st.lastY);
+            var gap = under && under.closest ? under.closest('.server-drop-gap') : null;
+            // Slots inside a folder only take servers; a folder drag skips them.
+            if (gap && isGroup && gap.dataset.inside) gap = null;
+            clearServerDragIndicators(gap);
+            if (gap) { gap.classList.add('drop-active'); return; }
+            if (!isGroup) {
+                var icon = under && under.closest ? under.closest('.server-icon') : null;
+                if (icon && icon.dataset.id && icon.dataset.id !== st.id
+                    && !icon.closest('.server-group-collapsed-grid')) {
+                    icon.classList.add('drag-over-group');
+                    return;
+                }
+            }
+            var wrapper = under && under.closest ? under.closest('.server-group') : null;
+            if (wrapper && wrapper.dataset.groupId && wrapper.dataset.groupId !== st.id) {
+                var handle = wrapper.querySelector('.server-group-header') || wrapper;
+                wrapper.classList.add(zoneClass(dragZone(handle, st.lastY)));
+            }
+        }, { passive: false });
+        el.addEventListener('touchend', function(e) {
+            if (handleEl) handleEl.draggable = true;
+            if (st.timer) { clearTimeout(st.timer); st.timer = null; }
+            if (!st.active) return;
+            st.active = false;
+            _serverTouchDragEndedAt = Date.now();
+            var t = e.changedTouches[0];
+            if (st.ghost) { st.ghost.remove(); st.ghost = null; }
+            endServerDrag();
+            if (t) resolveTouchDrop(kind, st.id, t.clientX, t.clientY);
+        });
+        el.addEventListener('touchcancel', function() {
+            if (handleEl) handleEl.draggable = true;
+            if (st.timer) { clearTimeout(st.timer); st.timer = null; }
+            if (!st.active) return;
+            st.active = false;
+            _serverTouchDragEndedAt = Date.now();
+            if (st.ghost) { st.ghost.remove(); st.ghost = null; }
+            endServerDrag();
+        });
+    }
+
+    // Where a finger lets go is much fuzzier than a mouse: a 6px slot is thinner
+    // than a fingertip. Resolve the exact target first, then fall back to the
+    // nearest slot that takes this kind of drag, so releasing roughly in the
+    // right place still drops instead of silently doing nothing (the "picks up
+    // but never drops" report).
+    function resolveTouchDrop(kind, id, x, y) {
+        var under = document.elementFromPoint(x, y);
+        var gap = under && under.closest ? under.closest('.server-drop-gap') : null;
+        if (gap && kind === 'group' && gap.dataset.inside) gap = null;
+        if (gap) {
+            if (kind === 'group') applyGroupGapDrop(id, gap);
+            else applyServerGapDrop(id, gap);
+            return;
+        }
+        if (kind === 'server') {
+            var icon = under && under.closest ? under.closest('.server-icon') : null;
+            if (icon && icon.dataset.id && icon.dataset.id !== id
+                && !icon.closest('.server-group-collapsed-grid')) {
+                dropServerOnServerIcon(id, icon);
+                return;
+            }
+        }
+        var wrapper = under && under.closest ? under.closest('.server-group') : null;
+        var targetGroupId = wrapper ? (wrapper.dataset.groupId || '') : '';
+        if (targetGroupId && targetGroupId !== (kind === 'group' ? id : '')) {
+            var handle = wrapper.querySelector('.server-group-header') || wrapper;
+            var zone = dragZone(handle, y);
+            if (kind === 'group') {
+                if (zone === 'into') mergeGroups(id, targetGroupId);
+                else placeGroupBesideGroup(id, targetGroupId, zone);
+            } else if (zone === 'into') {
+                addServerToFolderEnd(id, targetGroupId);
+            } else {
+                placeServerBesideFolder(id, targetGroupId, zone);
+            }
+            return;
+        }
+        gap = nearestServerDropGap(x, y, kind === 'group');
+        if (!gap) return;
+        if (kind === 'group') applyGroupGapDrop(id, gap);
+        else applyServerGapDrop(id, gap);
     }
 
     // Setup drag on all server icons (skip mini-icons inside collapsed group grids — those are part of the group drag handle)
@@ -13894,6 +14556,7 @@ function renderServerList() {
         if (el.closest('.server-group-collapsed-grid')) return;
         setupDraggableServer(el);
         setupDropOnServerIcon(el);
+        setupTouchDragItem(el, 'server', el);
     });
 
     // Setup drag on group wrappers: header = drag source, whole wrapper = drop target
@@ -13908,41 +14571,36 @@ function renderServerList() {
                 e.stopPropagation();
                 e.dataTransfer.setData('text/group-id', gId);
                 e.dataTransfer.effectAllowed = 'move';
+                _nativeDragActive = true;
+                beginServerDrag(hdr);
                 setTimeout(function() { wrapper.classList.add('dragging'); }, 0);
-                startStripAutoScroll();
             });
             hdr.addEventListener('dragend', function() {
                 wrapper.classList.remove('dragging');
-                stopStripAutoScroll();
-                clearDragIndicators();
+                endServerDrag();
             });
         }
-        // The whole wrapper is a drop target (group reorder + server adds)
+        // A long press picks the folder up on a phone too: same gesture, same
+        // slots, same resolution as a server drag.
+        setupTouchDragItem(wrapper, 'group', hdr || wrapper);
+
+        // The whole wrapper is a drop target. Its handle decides which of the
+        // three things a drop means: above it, into it, or below it. For a
+        // server, "into" is join the folder and "above"/"below" is sit outside
+        // it — dropping under a folder used to always mean "add to that folder".
         wrapper.addEventListener('dragover', function(e) {
-            var isGroupDrag = e.dataTransfer.types.indexOf('text/group-id') !== -1;
-            var isSvDrag = e.dataTransfer.types.indexOf('text/server-icon') !== -1 || e.dataTransfer.types.indexOf('text/server-id') !== -1;
+            var types = e.dataTransfer.types;
+            var isGroupDrag = types.indexOf('text/group-id') !== -1;
+            var isSvDrag = types.indexOf('text/server-id') !== -1;
             if (!isGroupDrag && !isSvDrag) return;
             var target = e.target;
-            if (isSvDrag && target.closest && target.closest('.server-icon') && !target.closest('.server-group-header')) return;
+            // Mini icons inside a collapsed folder are part of the folder's own
+            // handle, so a drag over them still belongs to the folder.
+            if (target.closest && target.closest('.server-icon') && !target.closest('.server-group-header')) return;
             e.preventDefault();
             e.dataTransfer.dropEffect = 'move';
-            clearDragIndicators();
-            var rect = wrapper.getBoundingClientRect();
-            var midY = rect.top + rect.height / 2;
-            var range = rect.height * 0.25;
-            if (isGroupDrag) {
-                // Center zone (25%) = merge; top/bottom = reorder
-                if (e.clientY >= midY - range && e.clientY <= midY + range) {
-                    wrapper.classList.add('drag-over-group');
-                } else if (e.clientY < midY) {
-                    wrapper.classList.add('drag-over-top');
-                } else {
-                    wrapper.classList.add('drag-over-bottom');
-                }
-            } else {
-                // Server drag: always show as "add to group" regardless of position
-                wrapper.classList.add('drag-over-group');
-            }
+            clearServerDragIndicators();
+            wrapper.classList.add(zoneClass(dragZone(hdr || wrapper, e.clientY)));
         });
         wrapper.addEventListener('dragleave', function(e) {
             if (!wrapper.contains(e.relatedTarget)) {
@@ -13950,179 +14608,68 @@ function renderServerList() {
             }
         });
         wrapper.addEventListener('drop', function(e) {
-            if (e.target.closest && e.target.closest('.server-icon')) return;
+            if (e.target.closest && e.target.closest('.server-icon') && !e.target.closest('.server-group-header')) return;
             e.preventDefault();
             e.stopPropagation();
             // A drop re-renders the list, which can remove the drag source
-            // before `dragend` fires — so stop scrolling right here.
-            stopStripAutoScroll();
-            clearDragIndicators();
+            // before `dragend` fires — so end the drag right here.
+            endServerDrag();
             var draggedGroupId = e.dataTransfer.getData('text/group-id');
             var draggedServerId = e.dataTransfer.getData('text/server-id');
-            var rect = wrapper.getBoundingClientRect();
-            var midY = rect.top + rect.height / 2;
-            var range = rect.height * 0.25;
-            var isCenter = e.clientY >= midY - range && e.clientY <= midY + range;
+            var zone = dragZone(hdr || wrapper, e.clientY);
             if (draggedGroupId && draggedGroupId !== gId) {
-                if (isCenter) {
-                    // Merge: dragged group into this group (this = target)
-                    mergeGroups(draggedGroupId, gId);
-                } else {
-                    // Reorder groups
-                    var allGids = serverGroups.map(function(g) { return g.id; });
-                    var fromIdx = allGids.indexOf(draggedGroupId);
-                    if (fromIdx !== -1) allGids.splice(fromIdx, 1);
-                    var toIdx = allGids.indexOf(gId);
-                    if (toIdx === -1) toIdx = allGids.length;
-                    if (e.clientY > midY) toIdx++;
-                    allGids.splice(toIdx, 0, draggedGroupId);
-                    allGids.forEach(function(id, i) {
-                        var grp = serverGroups.find(function(g) { return g.id === id; });
-                        if (grp) grp.position = i;
-                    });
-                    renderServerList();
-                    saveServerGroupsLocal();
-                    authFetch('/api/server-groups/reorder', {
-                        method: 'PUT',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ ordered_ids: allGids })
-                    }).catch(function() {});
-                }
+                // Center = merge the two folders; top/bottom = put this folder
+                // above/below that one in the rail's single order.
+                if (zone === 'into') mergeGroups(draggedGroupId, gId);
+                else placeGroupBesideGroup(draggedGroupId, gId, zone);
             } else if (draggedServerId) {
-                // Always add server to this group (regardless of drop position)
-                moveServerToGroup(draggedServerId, gId);
+                if (zone === 'into') addServerToFolderEnd(draggedServerId, gId);
+                else placeServerBesideFolder(draggedServerId, gId, zone);
             }
         });
     });
 
-    // List-level drop: handles drops in gaps
-    list.addEventListener('dragover', function(e) {
-        var isSvDrag = e.dataTransfer.types.indexOf('text/server-id') !== -1;
-        var isGroupDrag = e.dataTransfer.types.indexOf('text/group-id') !== -1;
-        if (!isSvDrag && !isGroupDrag) return;
-        e.preventDefault();
-        e.dataTransfer.dropEffect = 'move';
-    });
-    list.addEventListener('drop', function(e) {
-        e.preventDefault();
-        stopStripAutoScroll();
-        clearDragIndicators();
-        var draggedId = e.dataTransfer.getData('text/server-id');
-        if (draggedId) {
-            // Drop on empty area: ungroup and place at end
+    // List-level drop: the rail's dead space, e.g. below the last entry.
+    // Bound once: #server-list is a static element that is never recreated, so
+    // binding this inside the render stacked a fresh handler pair on every
+    // render and one drop then fired once per render of the session's life.
+    if (!list._serverDropBound) {
+        list._serverDropBound = true;
+        list.addEventListener('dragover', function(e) {
+            var isSvDrag = e.dataTransfer.types.indexOf('text/server-id') !== -1;
+            var isGroupDrag = e.dataTransfer.types.indexOf('text/group-id') !== -1;
+            if (!isSvDrag && !isGroupDrag) return;
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'move';
+        });
+        list.addEventListener('drop', function(e) {
+            var draggedId = e.dataTransfer.getData('text/server-id');
+            var draggedGroupId = e.dataTransfer.getData('text/group-id');
+            if (!draggedId && !draggedGroupId) return;
+            e.preventDefault();
+            endServerDrag();
+            // Drop on the rail's empty area: ungroup (or un-nest the folder) and
+            // put it at the end of the rail.
+            var entries = buildRailEntries();
+            if (draggedGroupId) {
+                var mine = findRailGroup(entries, draggedGroupId);
+                var idx = railIndexOf(entries, mine);
+                if (idx === -1) return;
+                entries.push(entries.splice(idx, 1)[0]);
+                commitRailOrder(entries);
+                return;
+            }
             var draggedSv = servers.find(function(s) { return s.id === draggedId; });
-            if (draggedSv && draggedSv.group_id) {
-                moveServerToGroup(draggedId, null); // ungroup
+            if (!draggedSv) return;
+            if (draggedSv.group_id) {
+                setServerGroupLocal(draggedSv, null);
+                entries = buildRailEntries();   // membership just changed
             }
-            var ids = getAllServerIds();
-            var fromIdx = ids.indexOf(draggedId);
-            if (fromIdx !== -1) ids.splice(fromIdx, 1);
-            ids.push(draggedId);
-            reorderServers(ids);
-        }
-    });
-
-    // --- Touch-based drag for mobile ---
-    (function() {
-        var _touchDrag = { active: false, el: null, id: null, ghost: null, timer: null, startX: 0, startY: 0, lastX: 0, lastY: 0 };
-        var LONG_PRESS_MS = 350;
-        list.querySelectorAll('.server-icon').forEach(function(el) {
-            el.addEventListener('touchstart', function(e) {
-                if (!el.dataset.id) return;
-                var touch = e.touches[0];
-                _touchDrag.startX = _touchDrag.lastX = touch.clientX;
-                _touchDrag.startY = _touchDrag.lastY = touch.clientY;
-                _touchDrag.el = el;
-                _touchDrag.id = el.dataset.id;
-                _touchDrag.timer = setTimeout(function() {
-                    // Start drag
-                    _touchDrag.active = true;
-                    el.classList.add('dragging');
-                    // Create ghost at the finger's CURRENT position (not where the
-                    // press started, which is stale by the time the timer fires).
-                    var ghost = el.cloneNode(true);
-                    ghost.style.cssText = 'position:fixed;z-index:99999;pointer-events:none;opacity:0.85;transform:scale(1.15);transition:none;';
-                    ghost.style.left = (_touchDrag.lastX - 20) + 'px';
-                    ghost.style.top = (_touchDrag.lastY - 20) + 'px';
-                    document.body.appendChild(ghost);
-                    _touchDrag.ghost = ghost;
-                    if (navigator.vibrate) navigator.vibrate(30);
-                }, LONG_PRESS_MS);
-            }, { passive: false });
-            el.addEventListener('touchmove', function(e) {
-                var t0 = e.touches[0];
-                if (t0) { _touchDrag.lastX = t0.clientX; _touchDrag.lastY = t0.clientY; }
-                if (_touchDrag.timer) {
-                    // Any real movement means the user is scrolling — abort the
-                    // pending long-press instead of hijacking the scroll.
-                    if (t0 && (Math.abs(t0.clientX - _touchDrag.startX) > 10 || Math.abs(t0.clientY - _touchDrag.startY) > 10)) {
-                        clearTimeout(_touchDrag.timer);
-                        _touchDrag.timer = null;
-                    }
-                }
-                if (!_touchDrag.active) return;
-                e.preventDefault();
-                var touch = e.touches[0];
-                // Holding near the rail's edge scrolls it, so a server can be
-                // dragged onto a folder that is currently off-screen.
-                _stripAutoScrollFromPoint(touch.clientX, touch.clientY);
-                // Move ghost
-                if (_touchDrag.ghost) {
-                    _touchDrag.ghost.style.left = (touch.clientX - 20) + 'px';
-                    _touchDrag.ghost.style.top = (touch.clientY - 20) + 'px';
-                }
-                // Find drop target
-                clearDragIndicators();
-                var target = document.elementFromPoint(touch.clientX, touch.clientY);
-                if (target) {
-                    var icon = target.closest('.server-icon');
-                    if (icon && icon.dataset.id && icon.dataset.id !== _touchDrag.id) {
-                        // Always show "add to group" indicator
-                        icon.classList.add('drag-over-group');
-                    }
-                }
-            }, { passive: false });
-            el.addEventListener('touchend', function(e) {
-                clearTimeout(_touchDrag.timer);
-                _touchDrag.timer = null;
-                if (!_touchDrag.active) return;
-                _touchDrag.active = false;
-                _serverTouchDragEndedAt = Date.now();
-                el.classList.remove('dragging');
-                if (_touchDrag.ghost) { _touchDrag.ghost.remove(); _touchDrag.ghost = null; }
-                // Find drop target
-                var touch = e.changedTouches[0];
-                var target = document.elementFromPoint(touch.clientX, touch.clientY);
-                if (target) {
-                    var icon = target.closest('.server-icon');
-                    if (icon && icon.dataset.id && icon.dataset.id !== _touchDrag.id) {
-                        // Always add dragged server to the target server's group
-                        var targetGroupId = icon.dataset.groupId || null;
-                        if (!targetGroupId) {
-                            var parentInner = icon.closest('.server-group-inner');
-                            if (parentInner) targetGroupId = parentInner.dataset.groupId || null;
-                        }
-                        if (targetGroupId) {
-                            moveServerToGroup(_touchDrag.id, targetGroupId);
-                        } else {
-                            createGroupWithServers(_touchDrag.id, icon.dataset.id);
-                        }
-                    }
-                }
-                clearDragIndicators();
-            });
-            el.addEventListener('touchcancel', function() {
-                clearTimeout(_touchDrag.timer);
-                _touchDrag.timer = null;
-                if (!_touchDrag.active) return;
-                _touchDrag.active = false;
-                _serverTouchDragEndedAt = Date.now();
-                el.classList.remove('dragging');
-                if (_touchDrag.ghost) { _touchDrag.ghost.remove(); _touchDrag.ghost = null; }
-                clearDragIndicators();
-            });
+            removeServerFromEntries(entries, draggedId);
+            entries.push({ type: 'server', server: draggedSv, key: 0 });
+            commitRailOrder(entries);
         });
-    })();
+    }
 
     // Mobile double-tap on group headers for context menu
     if (('ontouchstart' in window || navigator.maxTouchPoints > 0) && !list._grpTapBound) {
@@ -14131,6 +14678,8 @@ function renderServerList() {
         list.addEventListener('touchend', function(e) {
             var hdr = e.target.closest('.server-group-header');
             if (!hdr) { _grpLastTap = null; return; }
+            // A long press that picked the folder up was a drag, not a tap.
+            if (Date.now() - _serverTouchDragEndedAt < 400) { _grpLastTap = null; return; }
             var now = Date.now();
             if (hdr === _grpLastTap && (now - _grpLastTapTime) < 350) {
                 e.preventDefault();
@@ -14154,16 +14703,14 @@ function renderServerList() {
         });
     }
 
-    function getAllServerIds() {
-        // Collect all server IDs in DOM order (flat, across groups)
-        var result = [];
-        list.querySelectorAll('.server-icon').forEach(function(el) {
-            if (el.dataset.id) result.push(el.dataset.id);
-        });
-        return result;
-    }
     function reorderServers(ids) {
-        servers.sort(function(a, b) { return ids.indexOf(a.id) - ids.indexOf(b.id); });
+        // The rail renders from `position`, so record the new sequence locally
+        // before re-rendering; the API call stores the same order for next load.
+        ids.forEach(function(id, i) {
+            var sv = servers.find(function(x) { return x.id === id; });
+            if (sv) sv.position = i;
+        });
+        servers.sort(function(a, b) { return (a.position || 0) - (b.position || 0); });
         renderServerList();
         authFetch('/api/servers/reorder', {
             method: 'PUT',
@@ -14310,14 +14857,13 @@ function renderServerList() {
                 menu.remove();
             } else if (action === 'mark-read') {
                 // Clear notification badges on all servers in this group
-                var gServers = serversByGroup[group.id] || [];
-                gServers.forEach(function(s) {
+                groupMembersOf(group.id).forEach(function(s) {
                     s.unread_count = 0;
                     s.mention_count = 0;
                 });
                 renderServerList();
             } else if (action === 'ungroup') {
-                (serversByGroup[group.id] || []).forEach(function(s) {
+                groupMembersOf(group.id).forEach(function(s) {
                     moveServerToGroup(s.id, null);
                 });
                 // Auto-delete empty group
@@ -14328,7 +14874,7 @@ function renderServerList() {
                         saveServerGroupsLocal();
                     });
             } else if (action === 'delete') {
-                (serversByGroup[group.id] || []).forEach(function(s) {
+                groupMembersOf(group.id).forEach(function(s) {
                     moveServerToGroup(s.id, null);
                 });
                 authFetch('/api/server-groups/' + group.id, { method: 'DELETE' })
@@ -14355,12 +14901,15 @@ function renderServerList() {
             method: 'PUT'
         }).then(function() {
             // Update local state: move servers to target group
-            (serversByGroup[sourceGroupId] || []).forEach(function(s) {
-                s.group_id = targetGroupId;
-            });
+            var moved = groupMembersOf(sourceGroupId);
+            moved.forEach(function(s) { s.group_id = targetGroupId; });
             serverGroups = serverGroups.filter(function(g) { return g.id !== sourceGroupId; });
-            renderServerList();
-            saveServerGroupsLocal();
+            // The merged members land at the end of the target folder rather
+            // than wherever their old positions happen to fall.
+            var entries = buildRailEntries();
+            var target = findRailGroup(entries, targetGroupId);
+            if (target) moved.forEach(function(s) { target.members.push(s); });
+            commitRailOrder(entries);
         }).catch(function() {});
     }
 
@@ -17821,6 +18370,11 @@ function refreshDmSidebarItem(userId) {
 }
 
 function renderDmSidebar() {
+    // A DM drag owns the sidebar while it lasts: this rebuilds the whole list,
+    // which would delete the drag source mid-gesture — after that the browser
+    // has no session left to deliver the drop to, so the release does nothing.
+    if (_dmDragActive) { _dmDragPendingRerender = true; return; }
+    _dmDragPendingRerender = false;
     const container = document.getElementById('channel-list');
     let html = '<div class="dm-header">';
     html += '<div class="identity-key-box" style="margin-bottom:10px">';
@@ -17847,6 +18401,11 @@ function renderDmSidebar() {
     html += '<div class="channel-list dm-list" id="dm-list">';
     if (dmConversations.length === 0) {
         html += '<div style="color:#666;padding:12px;font-size:13px">No conversations yet</div>';
+    } else {
+        // Slot above the first conversation — the same in-between space the
+        // server rail has, so a row can be dropped between two others instead of
+        // only onto another row's top/bottom half.
+        html += '<div class="dm-drop-gap top" data-after-dm=""></div>';
     }
     for (const c of dmConversations) {
         var cacheEntry = userDisplayNameCache[c.other_user_id];
@@ -17937,6 +18496,7 @@ function renderDmSidebar() {
             callBadge +
             (unreadDms[c.dm_channel_id] ? '<span class="badge"></span>' : '') +
             '</div>';
+        html += '<div class="dm-drop-gap" data-after-dm="' + escapeAttr(c.dm_channel_id) + '"></div>';
     }
     html += '</div>';
     container.innerHTML = html;
@@ -17967,13 +18527,11 @@ function renderDmSidebar() {
         el.addEventListener('dragstart', function(e) {
             e.dataTransfer.setData('text/dm-id', el.dataset.dmId);
             e.dataTransfer.effectAllowed = 'move';
+            beginDmDrag(el);
             setTimeout(function() { el.classList.add('dragging'); }, 0);
         });
         el.addEventListener('dragend', function() {
-            el.classList.remove('dragging');
-            document.querySelectorAll('.dm-item.drag-over-top,.dm-item.drag-over-bottom').forEach(function(s) {
-                s.classList.remove('drag-over-top', 'drag-over-bottom');
-            });
+            endDmDrag();
         });
         el.addEventListener('dragover', function(e) {
             var isDmDrag = e.dataTransfer.types.indexOf('text/dm-id') !== -1;
@@ -17982,6 +18540,7 @@ function renderDmSidebar() {
             e.dataTransfer.dropEffect = 'move';
             var rect = el.getBoundingClientRect();
             var midY = rect.top + rect.height / 2;
+            clearDmDragIndicators();
             el.classList.remove('drag-over-top', 'drag-over-bottom');
             if (e.clientY < midY) el.classList.add('drag-over-top');
             else el.classList.add('drag-over-bottom');
@@ -17994,24 +18553,75 @@ function renderDmSidebar() {
             el.classList.remove('drag-over-top', 'drag-over-bottom');
             var draggedId = e.dataTransfer.getData('text/dm-id');
             if (!draggedId || draggedId === el.dataset.dmId) return;
-            var ids = Array.from(document.querySelectorAll('.dm-item[data-dm-id]')).map(function(d) { return d.dataset.dmId; });
-            var fromIdx = ids.indexOf(draggedId);
-            if (fromIdx !== -1) ids.splice(fromIdx, 1);
-            var toIdx = ids.indexOf(el.dataset.dmId);
+            endDmDrag();
+            // Dropping on a row stays a coarse target: its top half means "the
+            // slot above this row", its bottom half "the slot below it" — both
+            // routes end in the same slot implementation.
+            var order = dmConversations.map(function(c) { return c.dm_channel_id; });
+            var idx = order.indexOf(el.dataset.dmId);
             var rect = el.getBoundingClientRect();
-            if (e.clientY > rect.top + rect.height / 2) toIdx++;
-            ids.splice(toIdx, 0, draggedId);
-            // Reorder locally
-            dmConversations.sort(function(a, b) { return ids.indexOf(a.dm_channel_id) - ids.indexOf(b.dm_channel_id); });
-            renderDmSidebar();
-            // Persist to server
-            authFetch('/api/dm/reorder', {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ ordered_ids: ids })
-            }).catch(function() {});
+            var afterDmId;
+            if (e.clientY > rect.top + rect.height / 2) {
+                afterDmId = el.dataset.dmId;
+            } else {
+                afterDmId = idx > 0 ? order[idx - 1] : '';
+            }
+            applyDmGapDrop(draggedId, afterDmId);
         });
     });
+
+    // Slots *between* the DM rows. Rebuilt with the sidebar, so they are bound
+    // on every render (a row drag re-renders, and dragend fires on the node the
+    // drop replaced — endDmDrag picks the gesture up from there).
+    document.querySelectorAll('#dm-list .dm-drop-gap').forEach(function(gap) {
+        gap.addEventListener('dragover', function(e) {
+            if (e.dataTransfer.types.indexOf('text/dm-id') === -1) return;
+            e.preventDefault();
+            e.stopPropagation();
+            e.dataTransfer.dropEffect = 'move';
+            clearDmDragIndicators(gap);
+            gap.classList.add('drop-active');
+        });
+        gap.addEventListener('dragleave', function() {
+            gap.classList.remove('drop-active');
+        });
+        gap.addEventListener('drop', function(e) {
+            var draggedId = e.dataTransfer.getData('text/dm-id');
+            if (!draggedId) return;
+            e.preventDefault();
+            e.stopPropagation();
+            endDmDrag();
+            applyDmGapDrop(draggedId, gap.dataset.afterDm || '');
+        });
+    });
+
+    // Put `draggedId` right after `afterDmId` (empty = the top of the list) and
+    // persist the order. Built from the conversation list rather than the DOM,
+    // so a sidebar mid-rebuild can never drop a row out of the payload.
+    function applyDmGapDrop(draggedId, afterDmId) {
+        // The slot right after the row being dragged: not a move (the anchor
+        // would be gone and the row would be appended instead).
+        if (afterDmId === draggedId) return;
+        var ids = dmConversations.map(function(c) { return c.dm_channel_id; });
+        var fromIdx = ids.indexOf(draggedId);
+        if (fromIdx === -1) return;
+        ids.splice(fromIdx, 1);
+        var insertAt = 0;
+        if (afterDmId) {
+            var anchorIdx = ids.indexOf(afterDmId);
+            insertAt = anchorIdx === -1 ? ids.length : anchorIdx + 1;
+        }
+        ids.splice(insertAt, 0, draggedId);
+        dmConversations.sort(function(a, b) {
+            return ids.indexOf(a.dm_channel_id) - ids.indexOf(b.dm_channel_id);
+        });
+        renderDmSidebar();
+        authFetch('/api/dm/reorder', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ordered_ids: ids })
+        }).catch(function() {});
+    }
 
     // Restore DM muted UI after render
     updateDmMutedUI();
