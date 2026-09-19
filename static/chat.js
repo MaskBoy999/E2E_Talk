@@ -13713,6 +13713,8 @@ var _dmDragPendingRerender = false;
 var _dmDragSourceEl = null;
 var _dmDragWatchdog = null;
 var _dmTouchDragActive = false;
+var _dmTapPending = false; // true during DM double-tap detection window
+var _chTapPending = false; // true during channel double-tap detection window
 
 function flushServerDragRerender() {
     if (!_serverDragPendingRerender) return;
@@ -14017,13 +14019,35 @@ function renderServerList() {
         div.title = dn;
         div.dataset.id = s.id;
         if (!opts.noSelect) {
+            // Double-tap detection for servers: first tap delays selectServer
+            // so a second tap within ~300 ms opens the context menu instead.
+            var _svLastTap = 0, _svLastTarget = null, _svTapTimer = null;
             div.addEventListener('click', function(e) {
                 // Swallow the click that follows a touch drag.
                 if (Date.now() - _serverTouchDragEndedAt < 400) return;
-                if (e.isTrusted && window.VoiceManager && window.VoiceManager.exitVoiceChannelView) {
-                    try { window.VoiceManager.exitVoiceChannelView(); } catch (_) {}
+                if ('ontouchstart' in window) {
+                    var now = Date.now();
+                    if (div === _svLastTarget && (now - _svLastTap) < 150) {
+                        clearTimeout(_svTapTimer); _svTapTimer = null;
+                        _svLastTarget = null;
+                        if (!opts.noSelect) showServerContextMenu(e, s.id, s.name);
+                        return;
+                    }
+                    _svLastTarget = div;
+                    _svLastTap = now;
+                    _svTapTimer = setTimeout(function () {
+                        _svTapTimer = null; _svLastTarget = null;
+                        if (e.isTrusted && window.VoiceManager && window.VoiceManager.exitVoiceChannelView) {
+                            try { window.VoiceManager.exitVoiceChannelView(); } catch (_) {}
+                        }
+                        selectServer(s.id);
+                    }, 150);
+                } else {
+                    if (e.isTrusted && window.VoiceManager && window.VoiceManager.exitVoiceChannelView) {
+                        try { window.VoiceManager.exitVoiceChannelView(); } catch (_) {}
+                    }
+                    selectServer(s.id);
                 }
-                selectServer(s.id);
             });
         }
         div.addEventListener('contextmenu', function(e) {
@@ -14103,8 +14127,26 @@ function renderServerList() {
                 badge.className = 'group-badge';
                 badge.textContent = groupServers.length;
                 header.appendChild(badge);
+                var _grpLastTap = 0, _grpLastTarget = null, _grpTapTimer = null;
                 header.addEventListener('click', function(e) {
-                    if (e.target === header && !_touchDragJustEnded()) toggleGroup(g.id);
+                    if (e.target !== header || _touchDragJustEnded()) return;
+                    if ('ontouchstart' in window) {
+                        var now = Date.now();
+                        if (header === _grpLastTarget && (now - _grpLastTap) < 150) {
+                            clearTimeout(_grpTapTimer); _grpTapTimer = null;
+                            _grpLastTarget = null;
+                            showGroupContextMenu(e, g);
+                            return;
+                        }
+                        _grpLastTarget = header;
+                        _grpLastTap = now;
+                        _grpTapTimer = setTimeout(function () {
+                            _grpTapTimer = null; _grpLastTarget = null;
+                            toggleGroup(g.id);
+                        }, 150);
+                    } else {
+                        toggleGroup(g.id);
+                    }
                 });
             } else {
                 // Expanded: show group name and servers
@@ -14116,9 +14158,26 @@ function renderServerList() {
                 }
                 toggle.textContent = '\u25BC ' + g.name;
                 toggle.title = 'Click to collapse ' + g.name;
-                toggle.addEventListener('click', function() {
+                var _grpLastTap2 = 0, _grpLastTarget2 = null, _grpTapTimer2 = null;
+                toggle.addEventListener('click', function(e) {
                     if (_touchDragJustEnded()) return;
-                    toggleGroup(g.id);
+                    if ('ontouchstart' in window) {
+                        var now = Date.now();
+                        if (toggle === _grpLastTarget2 && (now - _grpLastTap2) < 150) {
+                            clearTimeout(_grpTapTimer2); _grpTapTimer2 = null;
+                            _grpLastTarget2 = null;
+                            showGroupContextMenu(e, g);
+                            return;
+                        }
+                        _grpLastTarget2 = toggle;
+                        _grpLastTap2 = now;
+                        _grpTapTimer2 = setTimeout(function () {
+                            _grpTapTimer2 = null; _grpLastTarget2 = null;
+                            toggleGroup(g.id);
+                        }, 150);
+                    } else {
+                        toggleGroup(g.id);
+                    }
                 });
                 header.appendChild(toggle);
             }
@@ -15431,7 +15490,15 @@ async function selectChannel(channelId, channelName, element) {    markChannelR
 
     await loadMessages(channelId);
 
-    if (window._closeSidebar) window._closeSidebar();
+    // On mobile, delay sidebar close so a second tap can reach the channel item
+    // for double-tap → context menu.
+    if (window._closeSidebar) {
+        if (_chTapPending) {
+            // Sidebar will close after the double-tap window expires.
+        } else {
+            window._closeSidebar();
+        }
+    }
 }
 
 // --- Messages ---
@@ -18616,17 +18683,41 @@ function renderDmSidebar() {
     container.innerHTML = html;
 
     // Event delegation for DM items
+    // Double-tap detection shared state for DM items
+    var _dmLastTap = 0, _dmLastTarget = null, _dmTapTimer = null;
+
     document.querySelectorAll('.dm-item[data-dm-id]').forEach(item => {
         item.addEventListener('click', (e) => {
-            // A real user click on a DM dismisses the voice channel view
-            // overlay immediately (synthetic re-render clicks never close it).
-            if (e.isTrusted && window.VoiceManager && window.VoiceManager.exitVoiceChannelView) {
-                try { window.VoiceManager.exitVoiceChannelView(); } catch (_) {}
+            if ('ontouchstart' in window) {
+                var now = Date.now();
+                if (item === _dmLastTarget && (now - _dmLastTap) < 150) {
+                    // Double-tap: show context menu, suppress primary action.
+                    clearTimeout(_dmTapTimer); _dmTapTimer = null;
+                    _dmLastTarget = null;
+                    _dmTapPending = false;
+                    showDmContextMenu(e, item.dataset.dmId, item.dataset.username || 'user');
+                    return;
+                }
+                _dmLastTarget = item;
+                _dmLastTap = now;
+                _dmTapPending = true;
+                _dmTapTimer = setTimeout(function () {
+                    _dmTapTimer = null; _dmLastTarget = null; _dmTapPending = false;
+                    if (e.isTrusted && window.VoiceManager && window.VoiceManager.exitVoiceChannelView) {
+                        try { window.VoiceManager.exitVoiceChannelView(); } catch (_) {}
+                    }
+                    selectDmChannel(item.dataset.dmId, item.dataset.userId, item.dataset.username, item);
+                }, 150);
+            } else {
+                if (e.isTrusted && window.VoiceManager && window.VoiceManager.exitVoiceChannelView) {
+                    try { window.VoiceManager.exitVoiceChannelView(); } catch (_) {}
+                }
+                selectDmChannel(item.dataset.dmId, item.dataset.userId, item.dataset.username, item);
             }
-            selectDmChannel(item.dataset.dmId, item.dataset.userId, item.dataset.username, item);
         });
         // Right-click context menu for mute/unmute
         item.addEventListener('contextmenu', function (e) {
+            if (_dmDragTimerPending) return; // suppress during long-press
             e.preventDefault();
             e.stopPropagation();
             var dmId = item.dataset.dmId;
@@ -18636,6 +18727,7 @@ function renderDmSidebar() {
     });
     
     // DM drag-to-reorder
+    var _dmDragTimerPending = false; // true while any DM long-press timer is ticking
     document.querySelectorAll('.dm-item[data-dm-id]').forEach(function(el) {
         el.draggable = true;
         el.addEventListener('dragstart', function(e) {
@@ -18660,8 +18752,10 @@ function renderDmSidebar() {
                 el.draggable = false;
                 st.startX = st.lastX = t.clientX;
                 st.startY = st.lastY = t.clientY;
+                _dmDragTimerPending = true;
                 st.timer = setTimeout(function () {
                     st.timer = null;
+                    _dmDragTimerPending = false;
                     st.active = true;
                     _dmTouchDragActive = true;
                     el.classList.add('dragging');
@@ -18680,6 +18774,7 @@ function renderDmSidebar() {
                 if (st.timer) {
                     if (t && (Math.abs(t.clientX - st.startX) > 10 || Math.abs(t.clientY - st.startY) > 10)) {
                         clearTimeout(st.timer); st.timer = null;
+                        _dmDragTimerPending = false;
                     }
                 }
                 if (!st.active) return;
@@ -18705,6 +18800,7 @@ function renderDmSidebar() {
             }, { passive: false });
             el.addEventListener('touchend', function (e) {
                 el.draggable = true;
+                _dmDragTimerPending = false;
                 if (st.timer) { clearTimeout(st.timer); st.timer = null; }
                 if (!st.active) { _dmTouchDragActive = false; return; }
                 st.active = false;
@@ -18945,7 +19041,15 @@ async function selectDmChannel(dmChannelId, otherUserId, otherUsername, element)
         window.VoiceManager.updateDmCallUI && window.VoiceManager.updateDmCallUI();
     }
 
-    if (window._closeSidebar) window._closeSidebar();
+    // On mobile, delay sidebar close so a second tap can reach the DM item
+    // for double-tap → context menu.
+    if (window._closeSidebar) {
+        if (_dmTapPending) {
+            // Sidebar will close after the double-tap window expires.
+        } else {
+            window._closeSidebar();
+        }
+    }
 }
 
 // Re-sync the server-persisted DM-call waiting state from the API. Merges

@@ -74,6 +74,7 @@
     // Mirrors setupTouchDragItem in chat.js but for the channel sidebar.
     // `el` is the drag source, `kind` is 'channel' or 'category', `getId()`
     // returns the item's ID, and `onDrop(x, y)` resolves the drop target.
+    var _chDragTimerPending = false; // true while any channel/category long-press timer is ticking
     function _setupChannelTouchDrag(el, kind, getId, onDrop) {
         var LONG_PRESS = 350;
         var s = { timer: null, active: false, ghost: null, sx: 0, sy: 0, lx: 0, ly: 0 };
@@ -83,7 +84,9 @@
             el.draggable = false;
             s.sx = s.lx = t.clientX;
             s.sy = s.ly = t.clientY;
+            _chDragTimerPending = true;
             s.timer = setTimeout(function () {
+                _chDragTimerPending = false;
                 s.timer = null;
                 s.active = true;
                 el.classList.add('dragging');
@@ -111,6 +114,7 @@
             if (s.timer) {
                 if (Math.abs(t.clientX - s.sx) > 10 || Math.abs(t.clientY - s.sy) > 10) {
                     clearTimeout(s.timer); s.timer = null;
+                    _chDragTimerPending = false;
                 }
             }
             if (!s.active) return;
@@ -153,6 +157,7 @@
         }, { passive: false });
         el.addEventListener('touchend', function (e) {
             el.draggable = true;
+            _chDragTimerPending = false;
             if (s.timer) { clearTimeout(s.timer); s.timer = null; }
             if (!s.active) return;
             s.active = false;
@@ -1250,6 +1255,7 @@
         // Right-click context menu for category header (owner only)
         if (isOwner && categoryId) {
             header.addEventListener('contextmenu', function (e) {
+                if (_chDragTimerPending) return; // suppress during long-press
                 e.preventDefault();
                 e.stopPropagation();
                 _showCategoryContextMenu(e.clientX, e.clientY, serverId, categoryId, name, channels);
@@ -1293,11 +1299,29 @@
 
 
 
-        // Click to collapse/expand
-
+        // Click to collapse/expand — on mobile, double-tap shows context menu
+        // instead of toggling.
+        var _catLastTap = 0, _catLastTarget = null, _catTapTimer = null;
         header.addEventListener('click', function (e) {
-            group.classList.toggle('collapsed');
-
+            if ('ontouchstart' in window) {
+                var now = Date.now();
+                if (header === _catLastTarget && (now - _catLastTap) < 150) {
+                    clearTimeout(_catTapTimer); _catTapTimer = null;
+                    _catLastTarget = null;
+                    if (isOwner && categoryId) {
+                        _showCategoryContextMenu(e.clientX, e.clientY, serverId, categoryId, name, channels);
+                    }
+                    return;
+                }
+                _catLastTarget = header;
+                _catLastTap = now;
+                _catTapTimer = setTimeout(function () {
+                    _catTapTimer = null; _catLastTarget = null;
+                    group.classList.toggle('collapsed');
+                }, 150);
+            } else {
+                group.classList.toggle('collapsed');
+            }
         });
 
 
@@ -1500,35 +1524,51 @@
 
                     if (window.VoiceManager) VoiceManager.joinServerVoice(serverId, ch.id, chDisplayName);
 
-                });
-
-            } else {
-
+                });            } else {
+                // Double-tap detection for text channels: first tap delays the
+                // action so a second tap within ~300 ms can open the context menu
+                // instead of entering the channel.
+                var _chLastTap = 0, _chLastTarget = null, _chTapTimer = null;
                 div.addEventListener('click', function (ev) {
-
-                    if (ev.isTrusted && window.VoiceManager && window.VoiceManager.exitVoiceChannelView) {
-
-                        try { window.VoiceManager.exitVoiceChannelView(); } catch (_) {}
-
+                    if ('ontouchstart' in window) {
+                        var now = Date.now();
+                        if (div === _chLastTarget && (now - _chLastTap) < 150) {
+                            // Double-tap: show context menu, suppress primary action.
+                            clearTimeout(_chTapTimer); _chTapTimer = null;
+                            _chLastTarget = null;
+                            window._chTapPending = false;
+                            _showChannelContextMenu(ev.clientX, ev.clientY, serverId, ch, chDisplayName, categoryId, isOwner);
+                            return;
+                        }
+                        _chLastTarget = div;
+                        _chLastTap = now;
+                        window._chTapPending = true;
+                        _chTapTimer = setTimeout(function () {
+                            _chTapTimer = null; _chLastTarget = null;
+                            window._chTapPending = false;
+                            if (ev.isTrusted && window.VoiceManager && window.VoiceManager.exitVoiceChannelView) {
+                                try { window.VoiceManager.exitVoiceChannelView(); } catch (_) {}
+                            }
+                            selectChannel(ch.id, chDisplayName, div);
+                        }, 150);
+                    } else {
+                        if (ev.isTrusted && window.VoiceManager && window.VoiceManager.exitVoiceChannelView) {
+                            try { window.VoiceManager.exitVoiceChannelView(); } catch (_) {}
+                        }
+                        selectChannel(ch.id, chDisplayName, div);
                     }
-
-                    selectChannel(ch.id, chDisplayName, div);
-
                 });
-
             }
 
 
 
             var nameSpan = document.createElement('span');
-
             nameSpan.innerHTML = (isVoiceCh ? icon('volume-on') + ' ' : '# ') + chDisplayName;
-
             nameSpan.style.flex = '1';
-
             div.appendChild(nameSpan);
             // Right-click context menu for channel (all users)
             div.addEventListener('contextmenu', function (e) {
+                if (_chDragTimerPending) return; // suppress during long-press
                 e.preventDefault();
                 e.stopPropagation();
                 _showChannelContextMenu(e.clientX, e.clientY, serverId, ch, chDisplayName, categoryId, isOwner);
