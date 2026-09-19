@@ -3,54 +3,10 @@ function escapeHtml(str) {
     return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-// The persistent device key that identifies THIS browser in the session/
-// device list (Settings → Security → Devices).
-function getDeviceId() {
-    var k = localStorage.getItem('e2e_device_key');
-    if (!k) {
-        k = E2ECrypto.arrayBufferToBase64(E2ECrypto.randomBytes(32));
-        localStorage.setItem('e2e_device_key', k);
-    }
-    return k;
-}
-
-// Derive a non-reversible device ID for network use (WS auth, login requests).
-// Uses HMAC-SHA256 so the raw e2e_device_key is never sent over the wire.
-function getWsDeviceId() {
-    var devKey = localStorage.getItem('e2e_device_key');
-    if (!devKey) return undefined;
-    try {
-        var keyBytes = E2ECrypto.base64ToArrayBuffer(devKey);
-        var domain = new TextEncoder().encode('ws-device-id-v1');
-        var tag = sodium.crypto_auth_hmacsha256(domain, new Uint8Array(keyBytes));
-        return E2ECrypto.arrayBufferToBase64(tag.buffer).substring(0, 22);
-    } catch (_) {
-        // Fallback: truncated raw key (less ideal but functional)
-        return devKey.substring(0, 22);
-    }
-}
-
-// A short human-readable name for this browser/device, e.g. "Chrome on
-// Windows". Shown in the Devices panel to identify which entry is which.
-function getDeviceName() {
-    try {
-        var ua = navigator.userAgent;
-        var browser = 'Browser';
-        if (/Edg\//.test(ua)) browser = 'Edge';
-        else if (/OPR\//.test(ua) || /Opera/.test(ua)) browser = 'Opera';
-        else if (/Chrome\//.test(ua)) browser = 'Chrome';
-        else if (/Firefox\//.test(ua)) browser = 'Firefox';
-        else if (/Safari\//.test(ua)) browser = 'Safari';
-        else if (/MSIE|Trident/.test(ua)) browser = 'IE';
-        var os = 'Device';
-        if (/Windows/.test(ua)) os = 'Windows';
-        else if (/Android/.test(ua)) os = 'Android';
-        else if (/iPhone|iPad|iPod/.test(ua)) os = 'iOS';
-        else if (/Mac OS X/.test(ua)) os = 'macOS';
-        else if (/Linux/.test(ua)) os = 'Linux';
-        return browser + ' on ' + os;
-    } catch (_) { return 'Unknown device'; }
-}
+// Device identity (getDeviceId / getWsDeviceId / getDeviceName) now lives in
+// crypto.js, which BOTH login.html and index.html load. It used to be defined
+// only here, so the app page had no getWsDeviceId and silently fell back to
+// sending the raw device key while the session row held the HMAC.
 
 // Custom session duration chosen in Settings → Security (seconds). Applies to
 // login, registration, and re-authentication. Defaults to 30 days; floored at
@@ -162,7 +118,7 @@ document.addEventListener('DOMContentLoaded', () => {
             btn.addEventListener('click', () => {
                 visible = !visible;
                 input.type = visible ? 'text' : 'password';
-                btn.innerHTML = visible ? '&#128064;' : '&#128065;';
+                btn.innerHTML = visible ? '<svg class="ui-icon" width="14" height="14"><use href="#icon-eye-off"/></svg>' : '<svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg>';
                 btn.classList.toggle('active', visible);
             });
         }

@@ -7264,3 +7264,87 @@ first entry, and a DM sidebar test that seeds conversations and drags one betwee
 
 **Files:** `static/chat.js`, `static/style.css`, `tests/server-rail-dragdrop.spec.ts`
 
+### 131. Multi-device sessions, a live mirror for ALL local state, and the inert in-between lines
+
+**Why only one device could be signed in.** `getWsDeviceId()` returned `undefined` on a browser
+that had never signed in (no `e2e_device_key` yet — the key was only created *after* the login
+response). The server stores one session per `(user, device_id)` and deletes older rows for the same
+pair, so every keyless browser looked like the SAME device: signing in on a second one deleted the
+first one's session row, its next API/WS check failed, and it was signed out. Fixed by creating the
+device key inside `getWsDeviceId()` (before the request) and by never collapsing sessions when
+`device_id` is empty (`upsert_auth_session` returns early).
+
+**The device helpers now live in `crypto.js`.** `getDeviceId` / `getWsDeviceId` / `getDeviceName`
+were only in `auth.js`, which `index.html` does not load — so on the app page the
+`typeof getWsDeviceId === 'function'` guards silently fell back to sending the RAW device key while
+the session row held the HMAC of it. The two ids never matched, which also broke targeted messages
+(force-kick notices, per-device voice scoping). One canonical copy, loaded by both pages.
+
+**The cross-device signal never fired.** `groups_changed` / `blob_updated` were sent with
+`localStorage.getItem('e2e_device_id')` — a key nothing in the codebase ever writes, so every device
+announced `''` and every receiver compared it with its own `''` and `break`-ed, treating the message
+as its own echo. Now they send the real id, receivers only self-skip on a non-empty match, and the
+server announces a committed blob itself (the PUT carries the writer's `device_id`, and
+`broadcast_to_users_except_device` skips it).
+
+**Everything in localStorage is account state.** The bundle gained the shared app state — server
+folders + assignments, mutes, per-user microphone/soundboard/screen volumes, soundboard prefs,
+themes and other settings (`BUNDLE_VERSION` 4, `isBundleKey` exported) — and a `Storage.prototype`
+interceptor pushes any write to one of those keys to the server blob and lets the server tell the
+account's other devices to pull. `restoreKeyBundle` clears the mirror flag while it applies a pull,
+so a pull can never schedule a push (no echo loop).
+
+**Concurrent writers can no longer drop each other's keys.** `user_key_blobs.rev` (migration 090)
+is a revision counter: a PUT states the revision it extends, a stale one is answered `409` with the
+CURRENT blob, and the client restores it (restores are additive) before retrying on the winner's
+revision. One PUT is in flight per device; a queued change runs after it.
+
+**The in-between lines were inert.** For DMs the strips were their own drop targets, each a ~12px
+element with its own `dragover` — and the browser throttles/coalesces those, so a pointer sitting on
+a strip could produce no event for it at all: the line never lit up and the drop landed on a row
+instead. One list-level resolver now names the slot from the pointer's position (`dmSlotAtY`) and
+owns both the highlight and the drop, so every position — top, bottom, between — is a real target.
+For categories the cause was starker: `group.draggable = true` with `dragstart` bound to the child
+HEADER meant the browser dispatched `dragstart` on the GROUP, the listener never ran, no
+`text/category-id` was ever set, and dropping a category did nothing at all. The header is now the
+drag source and the whole group is the drop target. Role strips had two more holes: a whole-tier
+drag never marked the list as dragging (so the strips never appeared) and a re-render mid-gesture
+could delete the drag source, after which `dragend` never fired — the list stayed in drag state
+forever. Now one exit point (`beginRoleDrag`/`endRoleDrag`) with a watchdog and a document-level
+capture safety net, and re-renders are deferred (then flushed) while a drag is live. The strips also
+paint with `--accent` instead of `var(--border-color, …)`: that variable is defined as an EMPTY
+value at the root, and `var(--empty, fallback)` substitutes nothing, so the declaration was invalid
+and the line stayed transparent.
+
+**Verified (before/after).** New `tests/multidevice-sessions.spec.ts` (5) and
+`tests/reorder-dnd.spec.ts` (2, real conversations over a real friendship and a real server) — with
+the client files stashed to their pre-fix state all 7 fail (`getWsDeviceId is not a function`,
+`isBundleKey is not a function`, "the server blob contains the new local state", "the slot above the
+first conversation lights up", "the category being dragged is marked"), and all 7 pass with them.
+`tests/role-tiers.spec.ts` is now 7 tests: the new one starts a whole-tier drag, asserts the strips
+are painted and survive a re-render mid-drag, and asserts release clears every marker; two existing
+tests in that file had never actually run — the auto-scroll one picked the owner row (not a drag
+source) and `createServer` returned the first icon in the rail instead of the new server, so its
+roles were created on the wrong server. `blob-multidevice-writeback.spec.ts` no longer hardcodes the
+bundle version. `multidevice`, `multidevice-api`, `blob-multidevice-writeback`, `security-devices`,
+`latejoin-blob-live` and `blob-bug-integration` all green.
+
+**Files:** `static/crypto.js`, `static/auth.js`, `static/chat.js`, `static/roles.js`,
+`static/thread_categories_shortcuts.js`, `static/style.css`, `static/index.html`,
+`static/login.html`, `server/src/db.rs`, `server/src/handlers.rs`,
+`server/migrations/090_key_blob_rev.sql`, `tests/multidevice-sessions.spec.ts`,
+`tests/reorder-dnd.spec.ts`, `tests/role-tiers.spec.ts`, `tests/blob-multidevice-writeback.spec.ts`
+
+### 132. Touch drag for DM conversations, categories, and channels on mobile
+
+**Bug:** DM conversations, channel categories, and channels had native HTML5 drag only (`el.draggable = true` + `dragstart`/`dragend`). Touch/mobile has no native HTML5 drag support, so long-press + drag on phones did nothing — the in-between lines never appeared and drops never fired. Server rail and groups already had `setupTouchDragItem()` but DM and channel sidebar were never wired in.
+
+**Root cause for DM (the "lines appear but don't work" report):** Even after touch handlers were added, there was a race condition: on mobile, `pointerup` fires BEFORE `touchend`. The global handler `_serverDragEndedByInput` called `endDmDrag()` → `flushDmRerender()` which destroyed the DOM (including gap elements) BEFORE the touch handler's `touchend` could call `applyDmGapDrop()`. The `dmSlotAtY()` resolver then queried a rebuilt DOM and returned stale data.
+
+**Fixes:**
+- **DM touch drag** (`chat.js`): Added touch handlers (touchstart/touchmove/touchend/touchcancel) to every `.dm-item` inside `renderDmSidebar()`, right after the native drag setup. Long-press (350ms) arms the drag, a ghost follows the finger, `dmSlotAtY()` resolves the gap, and `applyDmGapDrop()` commits the reorder. Touchmove also auto-scrolls the DM list near its edges (44px band, 18px/frame).
+- **Race condition fix** (`chat.js`): Added `_dmTouchDragActive` flag. Set in the touch handler's long-press timer, cleared on touchend/touchcancel. `_serverDragEndedByInput` now checks this flag and bails if set — preventing `pointerup` from destroying the DOM before the touch handler's drop logic runs.
+- **Category touch drag** (`thread_categories_shortcuts.js`): Added `_setupChannelTouchDrag()` generic helper (mirrors `setupTouchDragItem` from chat.js but targets channel/category elements). Wired for category headers — long-press picks up the category, touchmove highlights before/after indicators on target categories, touchend reorders via `reorderCategoriesAPI()`.
+- **Channel touch drag** (`thread_categories_shortcuts.js`): Wired for channel items (owner only). Touchmove highlights targets (category groups get a blue background, channel items get before/after indicators). Touchend handles same-category reorder via `reorderChannelsAPI()`, cross-category move via `moveChannelToCategory()` + reorder, and drops outside any category move to uncategorized. Auto-scrolls the channel list near edges.
+
+**Files:** `static/chat.js`, `static/thread_categories_shortcuts.js`, `static/index.html`

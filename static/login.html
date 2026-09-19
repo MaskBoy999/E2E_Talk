@@ -7,6 +7,10 @@
     <link rel="stylesheet" href="style.css?v=4">
 </head>
 <body>
+    <svg xmlns="http://www.w3.org/2000/svg" style="display:none">
+<symbol id="icon-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></symbol>
+<symbol id="icon-eye-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></symbol>
+</svg>
     <div class="auth-container">
         <div class="auth-card">
             <h1>E2E Chat</h1>
@@ -21,7 +25,7 @@
                 <input type="text" id="login-username" placeholder="Username" required autocomplete="username">
                 <div class="auth-input-row">
                     <input type="password" id="login-password" placeholder="Password" required autocomplete="current-password" class="auth-code-input">
-                    <button type="button" class="toggle-visibility-btn" id="toggle-login-password" title="Show/Hide">&#128065;</button>
+                    <button type="button" class="toggle-visibility-btn" id="toggle-login-password" title="Show/Hide"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>
                 </div>
                 <button type="submit">Login</button>
                 <p class="toggle">Don't have an account? <a href="#" id="show-register">Register</a></p>
@@ -44,11 +48,11 @@
                 <input type="text" id="register-username" placeholder="Pick a username" required autocomplete="username">
                 <div class="auth-input-row">
                     <input type="password" id="register-password" placeholder="Password (min 6 chars)" required minlength="6" autocomplete="new-password" class="auth-code-input">
-                    <button type="button" class="toggle-visibility-btn" id="toggle-register-password" title="Show/Hide">&#128065;</button>
+                    <button type="button" class="toggle-visibility-btn" id="toggle-register-password" title="Show/Hide"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>
                 </div>
                 <div class="auth-input-row">
                     <input type="password" id="register-confirm-password" placeholder="Confirm password" required autocomplete="off" class="auth-code-input">
-                    <button type="button" class="toggle-visibility-btn" id="toggle-register-confirm-password" title="Show/Hide">&#128065;</button>
+                    <button type="button" class="toggle-visibility-btn" id="toggle-register-confirm-password" title="Show/Hide"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>
                 </div>
                 <button type="submit">Register</button>
                 <p class="toggle">Already have an account? <a href="#" id="show-login">Login</a></p>
@@ -59,9 +63,9 @@
     </div>
     <script src="libsodium-sumo.js"></script>
     <script src="libsodium-wrappers.js"></script>
-    <script src="crypto.js?v=8"></script>
+    <script src="crypto.js?v=10"></script>
     <script src="secure-storage.js?v=3"></script>
     <script src="ui-dialog.js?v=1"></script>
-    <script src="auth.js?v=6"></script>
+    <script src="auth.js?v=8"></script>
 </body>
 </html>

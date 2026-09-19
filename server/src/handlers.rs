@@ -2220,6 +2220,14 @@ pub struct SaveKeyBlobRequest {
     pub encrypted_blob: String,
     pub salt: String,
     pub nonce: String,
+    /// Which device wrote this. The server skips it when announcing the new
+    /// blob, so the writer doesn't pull its own write back down.
+    #[serde(default)]
+    pub device_id: Option<String>,
+    /// Revision the written blob is based on (see `save_user_key_blob_checked`).
+    /// Missing means "force" (used by the first save of a session).
+    #[serde(default)]
+    pub base_rev: Option<i64>,
 }
 
 pub async fn save_user_key_blob(
@@ -2232,14 +2240,61 @@ pub async fn save_user_key_blob(
         Err(e) => return e.into_response(),
     };
 
-    match state.db.save_user_key_blob(&user_id, &req.encrypted_blob, &req.salt, &req.nonce) {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
+    let saved = match state.db.save_user_key_blob_checked(
+        &user_id,
+        &req.encrypted_blob,
+        &req.salt,
+        &req.nonce,
+        req.base_rev,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
+
+    let rev = match saved {
+        Some(rev) => rev,
+        None => {
+            // Another device wrote while this one was composing its blob. Hand
+            // back the CURRENT blob so the client can merge it (restores are
+            // additive) and retry on top of this revision — nobody's keys are
+            // dropped just because the two writes overlapped.
+            let current = state.db.get_user_key_blob(&user_id).ok().flatten();
+            let mut body = serde_json::json!({
+                "error": "conflict",
+                "rev": state.db.key_blob_rev(&user_id).unwrap_or(0),
+            });
+            if let Some((blob, salt, nonce, _, _, _)) = current {
+                body["encrypted_blob"] = serde_json::json!(blob);
+                body["salt"] = serde_json::json!(salt);
+                body["nonce"] = serde_json::json!(nonce);
+            }
+            return (StatusCode::CONFLICT, Json(body)).into_response();
+        }
+    };
+
+    // Announce the new blob to the account's OTHER devices: they pull it and
+    // re-apply everything (keys, folders, mutes, settings). Broadcast only
+    // after the write committed, so a pull can never read a stale blob.
+    let msg = serde_json::json!({
+        "type": "blob_updated",
+        "device_id": req.device_id.clone().unwrap_or_default(),
+    });
+    state
+        .ws_manager
+        .broadcast_to_users_except_device(
+            &[user_id.clone()],
+            req.device_id.as_deref().unwrap_or(""),
+            &msg.to_string(),
         )
-            .into_response(),
-    }
+        .await;
+
+    (StatusCode::OK, Json(serde_json::json!({"ok": true, "rev": rev}))).into_response()
 }
 
 // --- Profile Data Key (server-side backup) ---
@@ -2544,13 +2599,14 @@ pub async fn get_user_key_blob(
     };
 
     match state.db.get_user_key_blob(&user_id) {
-        Ok(Some((encrypted_blob, salt, nonce, needs_rebuild, updated_at))) => {
+        Ok(Some((encrypted_blob, salt, nonce, needs_rebuild, updated_at, rev))) => {
             (StatusCode::OK, Json(serde_json::json!({
                 "encrypted_blob": encrypted_blob,
                 "salt": salt,
                 "nonce": nonce,
                 "needs_rebuild": needs_rebuild,
                 "updated_at": updated_at,
+                "rev": rev,
             }))).into_response()
         }
         Ok(None) => {
@@ -2587,8 +2643,13 @@ pub async fn create_server(
         Err(e) => return e.into_response(),
     };
 
+    // Per-user server-spam budget. Env-overridable with CREATE_SERVER_MAX
+    // (0 disables) so suites that reuse one long-lived account and create
+    // dozens of servers in a run don't 429 part-way through — same pattern as
+    // LOGIN_IP_MAX / REGISTER_IP_MAX / MUTATION_USER_MAX.
+    let cs_max: u32 = std::env::var("CREATE_SERVER_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(30);
     let rate_key = format!("create_server:{}", user_id);
-    if !CREATE_SERVER_RATE_LIMITER.check_and_increment(&rate_key, 30, Duration::from_secs(3600)) {
+    if cs_max > 0 && !CREATE_SERVER_RATE_LIMITER.check_and_increment(&rate_key, cs_max, Duration::from_secs(3600)) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": "Too many servers created. Try again in 1 hour."})),

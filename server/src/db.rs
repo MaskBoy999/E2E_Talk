@@ -97,6 +97,16 @@ pub fn hmac_sha256_hex(key: &[u8], data: &str) -> String {
 /// Shared by the key-blob endpoint and the password-change flow so the blob
 /// always lands encrypted with the CURRENT password. needs_rebuild=0 clears
 /// the stale-rebuild flag whenever the client re-saves the blob.
+fn key_blob_has_column(conn: &Connection, name: &str) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) > 0 FROM pragma_table_info('user_key_blobs') WHERE name = ?1",
+        params![name],
+        |row| row.get::<_, i32>(0),
+    )
+    .map(|c| c > 0)
+    .unwrap_or(false)
+}
+
 fn upsert_user_key_blob(conn: &Connection, user_id: &str, encrypted_blob: &str, salt: &str, nonce: &str) -> Result<(), String> {
     // Include needs_rebuild=0 in the insert/update so the flag is cleared
     // when the client re-saves the blob after a rebuild.
@@ -1363,6 +1373,7 @@ impl Database {
         let _ = conn.execute_batch(include_str!("../migrations/087_role_name_encryption.sql"));
         let _ = conn.execute_batch(include_str!("../migrations/088_role_name_wipe.sql"));
         let _ = conn.execute_batch(include_str!("../migrations/089_everyone_drop_invite.sql"));
+        let _ = conn.execute_batch(include_str!("../migrations/090_key_blob_rev.sql"));
 
         // Data migration: normalize legacy space-separated CURRENT_TIMESTAMP values
         // ("YYYY-MM-DD HH:MM:SS") to fixed-width RFC3339 ("YYYY-MM-DDTHH:MM:SS.000000Z")
@@ -3131,8 +3142,89 @@ impl Database {
     // --- User Key Blob (password-encrypted key bundle) ---
 
     pub fn save_user_key_blob(&self, user_id: &str, encrypted_blob: &str, salt: &str, nonce: &str) -> Result<(), String> {
+        self.save_user_key_blob_checked(user_id, encrypted_blob, salt, nonce, None).map(|_| ())
+    }
+
+    /// The blob's current revision (0 when the column or the row is missing).
+    pub fn key_blob_rev(&self, user_id: &str) -> Result<i64, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        upsert_user_key_blob(&conn, user_id, encrypted_blob, salt, nonce)
+        if !key_blob_has_column(&conn, "rev") {
+            return Ok(0);
+        }
+        Ok(conn
+            .query_row(
+                "SELECT COALESCE(rev, 0) FROM user_key_blobs WHERE user_id = ?1",
+                params![user_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .unwrap_or(0))
+    }
+
+    /// Write the key blob with optimistic concurrency.
+    ///
+    /// `base_rev` is the revision the client's copy is based on. Returns
+    /// `Ok(Some(new_rev))` when the write landed, `Ok(None)` when another device
+    /// wrote in between (the caller answers 409 with the current blob so the
+    /// client can merge and retry), and `Err` on a real failure.
+    pub fn save_user_key_blob_checked(
+        &self,
+        user_id: &str,
+        encrypted_blob: &str,
+        salt: &str,
+        nonce: &str,
+        base_rev: Option<i64>,
+    ) -> Result<Option<i64>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        if !key_blob_has_column(&conn, "rev") {
+            upsert_user_key_blob(&conn, user_id, encrypted_blob, salt, nonce)?;
+            return Ok(Some(0));
+        }
+        let current: Option<i64> = conn
+            .query_row(
+                "SELECT COALESCE(rev, 0) FROM user_key_blobs WHERE user_id = ?1",
+                params![user_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if let (Some(base), Some(cur)) = (base_rev, current) {
+            if base != cur {
+                return Ok(None);
+            }
+        }
+        let next = current.unwrap_or(0) + 1;
+        let has_rebuild = key_blob_has_column(&conn, "needs_rebuild");
+        if has_rebuild {
+            conn.execute(
+                "INSERT INTO user_key_blobs (user_id, encrypted_blob, salt, nonce, updated_at, needs_rebuild, rev)
+                 VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP, 0, ?5)
+                 ON CONFLICT(user_id) DO UPDATE SET
+                    encrypted_blob = excluded.encrypted_blob,
+                    salt = excluded.salt,
+                    nonce = excluded.nonce,
+                    updated_at = CURRENT_TIMESTAMP,
+                    needs_rebuild = 0,
+                    rev = excluded.rev",
+                params![user_id, encrypted_blob, salt, nonce, next],
+            )
+            .map_err(|e| e.to_string())?;
+        } else {
+            conn.execute(
+                "INSERT INTO user_key_blobs (user_id, encrypted_blob, salt, nonce, updated_at, rev)
+                 VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP, ?5)
+                 ON CONFLICT(user_id) DO UPDATE SET
+                    encrypted_blob = excluded.encrypted_blob,
+                    salt = excluded.salt,
+                    nonce = excluded.nonce,
+                    updated_at = CURRENT_TIMESTAMP,
+                    rev = excluded.rev",
+                params![user_id, encrypted_blob, salt, nonce, next],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        Ok(Some(next))
     }
 
     /// Password change: swap the client-side password hash and every
@@ -3216,7 +3308,7 @@ impl Database {
         tx.commit().map_err(|e| e.to_string())
     }
 
-    pub fn get_user_key_blob(&self, user_id: &str) -> Result<Option<(String, String, String, bool, Option<String>)>, String> {
+    pub fn get_user_key_blob(&self, user_id: &str) -> Result<Option<(String, String, String, bool, Option<String>, i64)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         // Check if needs_rebuild column exists (migration 026)
         let rebuild_col: bool = conn
@@ -3227,11 +3319,16 @@ impl Database {
             )
             .map(|c| c > 0)
             .unwrap_or(false);
+        let rev_expr = if key_blob_has_column(&conn, "rev") { "COALESCE(rev, 0)" } else { "0" };
         if rebuild_col {
+            let sql = format!(
+                "SELECT encrypted_blob, salt, nonce, COALESCE(needs_rebuild, 0), updated_at, {} FROM user_key_blobs WHERE user_id = ?1",
+                rev_expr
+            );
             let result = conn.query_row(
-                "SELECT encrypted_blob, salt, nonce, COALESCE(needs_rebuild, 0), updated_at FROM user_key_blobs WHERE user_id = ?1",
+                &sql,
                 params![user_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i32>(3)? != 0, row.get::<_, Option<String>>(4)?)),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i32>(3)? != 0, row.get::<_, Option<String>>(4)?, row.get::<_, i64>(5)?)),
             );
             match result {
                 Ok(row) => Ok(Some(row)),
@@ -3239,10 +3336,14 @@ impl Database {
                 Err(e) => Err(e.to_string()),
             }
         } else {
+            let sql = format!(
+                "SELECT encrypted_blob, salt, nonce, updated_at, {} FROM user_key_blobs WHERE user_id = ?1",
+                rev_expr
+            );
             let result = conn.query_row(
-                "SELECT encrypted_blob, salt, nonce, updated_at FROM user_key_blobs WHERE user_id = ?1",
+                &sql,
                 params![user_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, false, row.get::<_, Option<String>>(3)?)),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, false, row.get::<_, Option<String>>(3)?, row.get::<_, i64>(4)?)),
             );
             match result {
                 Ok(row) => Ok(Some(row)),
@@ -7460,6 +7561,15 @@ impl Database {
         // delete them (a re-auth on the same browser must not leave a stale
         // "signed in" ghost, nor an extra row for the same device). Deletion
         // also invalidates the old token on the next validation.
+        //
+        // NEVER do this for an empty device id: a client that cannot identify
+        // itself (old build, blocked crypto) would otherwise look like the same
+        // device as every OTHER unidentified client, so signing in on a second
+        // device would delete the first device's session — the "only one device
+        // can be signed in at once" bug. Sessions without an id simply coexist.
+        if device_id.is_empty() {
+            return Ok(());
+        }
         conn.execute(
             "DELETE FROM auth_sessions WHERE user_id = ?1 AND device_id = ?2 AND id != ?3",
             rusqlite::params![user_id, device_id, id],

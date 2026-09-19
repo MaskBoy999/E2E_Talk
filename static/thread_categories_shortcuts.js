@@ -70,7 +70,123 @@
         if (_clistScroll.raf) { cancelAnimationFrame(_clistScroll.raf); _clistScroll.raf = null; }
     }
 
-
+    // ─── Touch drag helper for channels and categories ─────────────────
+    // Mirrors setupTouchDragItem in chat.js but for the channel sidebar.
+    // `el` is the drag source, `kind` is 'channel' or 'category', `getId()`
+    // returns the item's ID, and `onDrop(x, y)` resolves the drop target.
+    function _setupChannelTouchDrag(el, kind, getId, onDrop) {
+        var LONG_PRESS = 350;
+        var s = { timer: null, active: false, ghost: null, sx: 0, sy: 0, lx: 0, ly: 0 };
+        el.addEventListener('touchstart', function (e) {
+            var t = e.touches[0]; if (!t) return;
+            var id = getId(); if (!id) return;
+            el.draggable = false;
+            s.sx = s.lx = t.clientX;
+            s.sy = s.ly = t.clientY;
+            s.timer = setTimeout(function () {
+                s.timer = null;
+                s.active = true;
+                el.classList.add('dragging');
+                if (kind === 'category') {
+                    var grp = el.closest('.channel-category-group');
+                    if (grp) grp.classList.add('dragging');
+                }
+                startChannelListAutoScroll();
+                s.ghost = el.cloneNode(true);
+                s.ghost.classList.add('role-drag-ghost');
+                s.ghost.style.cssText = 'position:fixed;z-index:99999;pointer-events:none;opacity:0.85;transform:scale(1.15);';
+                s.ghost.style.left = (s.lx - 20) + 'px';
+                s.ghost.style.top = (s.ly - 20) + 'px';
+                document.body.appendChild(s.ghost);
+                if (navigator.vibrate) try { navigator.vibrate(30); } catch (_) {}
+            }, LONG_PRESS);
+        }, { passive: false });
+        // Suppress browser context menu during long-press on channel/category items
+        el.addEventListener('contextmenu', function (e) {
+            if (s.timer || s.active) { e.preventDefault(); }
+        });
+        el.addEventListener('touchmove', function (e) {
+            var t = e.touches[0]; if (!t) return;
+            s.lx = t.clientX; s.ly = t.clientY;
+            if (s.timer) {
+                if (Math.abs(t.clientX - s.sx) > 10 || Math.abs(t.clientY - s.sy) > 10) {
+                    clearTimeout(s.timer); s.timer = null;
+                }
+            }
+            if (!s.active) return;
+            e.preventDefault();
+            if (s.ghost) {
+                s.ghost.style.left = (s.lx - 20) + 'px';
+                s.ghost.style.top = (s.ly - 20) + 'px';
+            }
+            // Auto-scroll the channel list near edges
+            var cl = document.getElementById('channel-list');
+            if (cl) {
+                var cr = cl.getBoundingClientRect();
+                var EDGE = 44, MAX = 18;
+                if (s.ly < cr.top + EDGE && s.ly >= cr.top - 24) {
+                    cl.scrollTop -= Math.ceil(Math.max(0, Math.min(1, (cr.top + EDGE - s.ly) / EDGE)) * MAX);
+                } else if (s.ly > cr.bottom - EDGE && s.ly <= cr.bottom + 24) {
+                    cl.scrollTop += Math.ceil(Math.max(0, Math.min(1, (s.ly - (cr.bottom - EDGE)) / EDGE)) * MAX);
+                }
+            }
+            // Highlight drop target
+            var hit = document.elementFromPoint(s.lx, s.ly);
+            document.querySelectorAll('.drag-over-top,.drag-over-bottom,.drop-active').forEach(function (el) {
+                el.classList.remove('drag-over-top', 'drag-over-bottom', 'drop-active');
+                el.style.background = '';
+            });
+            if (!hit) return;
+            var grp = hit.closest('.channel-category-group');
+            var chItem = hit.closest('.channel-item[data-id]');
+            if (grp && kind === 'category') {
+                var rect = grp.getBoundingClientRect();
+                if (s.ly < rect.top + rect.height / 2) grp.classList.add('drag-over-top');
+                else grp.classList.add('drag-over-bottom');
+            } else if (grp && kind === 'channel') {
+                grp.style.background = 'rgba(79,195,247,0.1)';
+            } else if (chItem && kind === 'channel' && chItem !== el) {
+                var r2 = chItem.getBoundingClientRect();
+                if (s.ly < r2.top + r2.height / 2) chItem.classList.add('drag-over-top');
+                else chItem.classList.add('drag-over-bottom');
+            }
+        }, { passive: false });
+        el.addEventListener('touchend', function (e) {
+            el.draggable = true;
+            if (s.timer) { clearTimeout(s.timer); s.timer = null; }
+            if (!s.active) return;
+            s.active = false;
+            stopChannelListAutoScroll();
+            document.querySelectorAll('.drag-over-top,.drag-over-bottom,.drop-active').forEach(function (el2) {
+                el2.classList.remove('drag-over-top', 'drag-over-bottom', 'drop-active');
+                el2.style.background = '';
+            });
+            if (s.ghost && s.ghost.parentNode) s.ghost.parentNode.removeChild(s.ghost);
+            s.ghost = null;
+            if (kind === 'category') {
+                var grp2 = el.closest('.channel-category-group');
+                if (grp2) grp2.classList.remove('dragging');
+            }
+            onDrop(s.lx, s.ly);
+        });
+        el.addEventListener('touchcancel', function () {
+            el.draggable = true;
+            if (s.timer) { clearTimeout(s.timer); s.timer = null; }
+            if (!s.active) return;
+            s.active = false;
+            stopChannelListAutoScroll();
+            document.querySelectorAll('.drag-over-top,.drag-over-bottom,.drop-active').forEach(function (el2) {
+                el2.classList.remove('drag-over-top', 'drag-over-bottom', 'drop-active');
+                el2.style.background = '';
+            });
+            if (s.ghost && s.ghost.parentNode) s.ghost.parentNode.removeChild(s.ghost);
+            s.ghost = null;
+            if (kind === 'category') {
+                var grp3 = el.closest('.channel-category-group');
+                if (grp3) grp3.classList.remove('dragging');
+            }
+        });
+    }
 
     // ─── F3: Thread Panel ─────────────────────────────────────────────
 
@@ -978,23 +1094,28 @@
         // Drag-drop: allow dropping channels into this category
 
         group.addEventListener('dragover', function (e) {
-            e.preventDefault();
             var isCatDrag = e.dataTransfer.types.indexOf('text/category-id') !== -1;
             var isChDrag = e.dataTransfer.types.indexOf('text/channel-id') !== -1;
+            if (!isCatDrag && !isChDrag) return;
+            e.preventDefault();
             e.dataTransfer.dropEffect = 'move';
-            // For category reorder, show indicator on the header only
-            if (isCatDrag && categoryId && e.target.closest && e.target.closest('.channel-category-header') && e.target !== group) {
-                var rect = group.getBoundingClientRect();
-                var midY = rect.top + rect.height / 2;
-                // Clean previous indicators on all category groups
-                document.querySelectorAll('.drag-over-top, .drag-over-bottom').forEach(function (el) {
-                    el.classList.remove('drag-over-top', 'drag-over-bottom');
-                });
-                if (e.clientY < midY) {
-                    group.classList.add('drag-over-top');
-                } else {
-                    group.classList.add('drag-over-bottom');
+            // For a category reorder the WHOLE group is the target, not just its
+            // header: the header is a ~24px strip, so aiming "before" or "after"
+            // this category was a game of precision. Top half = drop before this
+            // category, bottom half = drop after it — matching what the drop
+            // handler below then does.
+            if (isCatDrag) {
+                if (!categoryId) return;   // nothing to order against
+                if (e.target === group && !group.classList.contains('drag-over-top')) {
+                    group.classList.remove('drag-over-bottom');
                 }
+                var rect = group.getBoundingClientRect();
+                var beforeThis = e.clientY < rect.top + rect.height / 2;
+                document.querySelectorAll('.channel-category-group').forEach(function (g) {
+                    if (g !== group) g.classList.remove('drag-over-top', 'drag-over-bottom');
+                });
+                group.classList.toggle('drag-over-top', beforeThis);
+                group.classList.toggle('drag-over-bottom', !beforeThis);
             } else if (isChDrag) {
                 group.style.background = 'rgba(79,195,247,0.1)';
             }
@@ -1077,7 +1198,16 @@
 
         // Category drag-to-reorder (owner only)
         if (isOwner && categoryId) {
-            group.draggable = true;
+            // The HEADER is the drag handle, not the group.
+            //
+            // Marking the group draggable made the browser dispatch `dragstart`
+            // on the GROUP (the draggable element is the drag source, and events
+            // target it, not the child that was pressed) — so the listener below,
+            // which is on the header, never ran: no `text/category-id` was ever
+            // set, every drop was ignored, and dragging a category did nothing.
+            // Making the header itself the drag source also keeps a channel drag
+            // (the channel rows are draggable too) from being swallowed.
+            header.draggable = true;
             header.addEventListener('dragstart', function (e) {
                 e.stopPropagation();
                 e.dataTransfer.setData('text/category-id', categoryId);
@@ -1091,6 +1221,29 @@
                 document.querySelectorAll('.drag-over-top, .drag-over-bottom').forEach(function (el) {
                     el.classList.remove('drag-over-top', 'drag-over-bottom');
                 });
+            });
+            // Touch drag for category reordering on mobile
+            _setupChannelTouchDrag(header, 'category', function () { return categoryId; }, function (x, y) {
+                var hit = document.elementFromPoint(x, y);
+                if (!hit) return;
+                var targetGrp = hit.closest('.channel-category-group[data-category-id]');
+                if (targetGrp && categoryId) {
+                    var targetCatId = targetGrp.getAttribute('data-category-id');
+                    if (targetCatId && targetCatId !== categoryId) {
+                        (async function () {
+                            var groups = document.querySelectorAll('.channel-category-group[data-category-id]');
+                            var ids = Array.from(groups).map(function (g) { return g.getAttribute('data-category-id'); });
+                            var fromIdx = ids.indexOf(categoryId);
+                            if (fromIdx !== -1) ids.splice(fromIdx, 1);
+                            var rect = targetGrp.getBoundingClientRect();
+                            var insertIdx = ids.indexOf(targetCatId);
+                            if (y > rect.top + rect.height / 2) insertIdx++;
+                            ids.splice(insertIdx, 0, categoryId);
+                            await reorderCategoriesAPI(serverId, ids);
+                            if (typeof window.loadChannels === 'function') window.loadChannels(serverId);
+                        })();
+                    }
+                }
             });
         }
 
@@ -1246,6 +1399,45 @@
                     el.classList.remove('drag-over-top', 'drag-over-bottom');
                 });
             });
+            // Touch drag for channel reorder on mobile
+            if (isOwner) {
+                _setupChannelTouchDrag(div, 'channel', function () { return ch.id; }, function (x, y) {
+                    var hit = document.elementFromPoint(x, y);
+                    if (!hit) return;
+                    var targetGrp = hit.closest('.channel-category-group');
+                    if (targetGrp) {
+                        var targetCatId = targetGrp.getAttribute('data-category-id') || null;
+                        // Move channel to target category at the correct position
+                        (async function () {
+                            var chDivs = targetGrp.querySelectorAll('.channel-item[data-id]');
+                            var ids = Array.from(chDivs).map(function (d) { return d.getAttribute('data-id'); });
+                            var insertIdx = ids.length;
+                            for (var ci = 0; ci < chDivs.length; ci++) {
+                                var r = chDivs[ci].getBoundingClientRect();
+                                if (y < r.top + r.height / 2) { insertIdx = ci; break; }
+                            }
+                            // If same category, reorder
+                            if (categoryId === targetCatId) {
+                                ids = ids.filter(function (id) { return id !== ch.id; });
+                                ids.splice(insertIdx, 0, ch.id);
+                                await reorderChannelsAPI(serverId, ids);
+                            } else {
+                                // Cross-category: move then reorder
+                                await moveChannelToCategory(serverId, ch.id, targetCatId);
+                                var freshDivs = targetGrp.querySelectorAll('.channel-item[data-id]');
+                                var freshIds = Array.from(freshDivs).map(function (d) { return d.getAttribute('data-id'); });
+                                freshIds = freshIds.filter(function (id) { return id !== ch.id; });
+                                freshIds.splice(insertIdx, 0, ch.id);
+                                await reorderChannelsAPI(serverId, freshIds);
+                            }
+                            if (typeof window.loadChannels === 'function') window.loadChannels(serverId);
+                        })();
+                    } else {
+                        // Dropped outside any category — move to uncategorized
+                        moveChannelToCategory(serverId, ch.id, null);
+                    }
+                });
+            }
             // Channel drag-to-reorder within category
             div.addEventListener('dragover', function (e) {
                 e.preventDefault();

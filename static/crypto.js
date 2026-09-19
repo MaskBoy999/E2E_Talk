@@ -644,7 +644,10 @@ var E2ECrypto = (() => {
     // v3: + user_display_name_cache (display names + raw profile pic/banner
     // keys), so a complete localStorage clear on a new device restores the
     // media caches instantly instead of waiting for conversation re-fetches.
-    const BUNDLE_VERSION = 3;
+    // v4: + the shared local app state (server folders + assignments, mutes,
+    // per-user volumes, soundboard prefs, themes and other settings), so every
+    // device of one account converges instead of each keeping its own copy.
+    const BUNDLE_VERSION = 4;
 
     // All encryption/identity key types that must be recoverable. Kept as a
     // single source of truth so every key kind added in the future is simply
@@ -657,6 +660,12 @@ var E2ECrypto = (() => {
         'e2e_file_key_',
         'e2e_invite_',
         'fkc_',
+        // Shared local app state (per account, mirrored by the blob).
+        'e2e_server_groups_',            // server folders: name, color, order, nesting
+        'e2e_server_group_assignments_', // which server sits in which folder
+        'voice_volume_',                 // per-user mic volume
+        'voice_sb_volume_',              // per-user soundboard volume
+        'voice_screen_volume_',          // per-user screen-share volume
     ];
     const BUNDLE_EXACT_KEYS = [
         'profile_key_cache',
@@ -667,8 +676,23 @@ var E2ECrypto = (() => {
         'e2e_hmac_key',
         'e2e_auth_key',
         'e2e_friend_code',
+        // Legacy unscoped folder-assignment key.
+        'e2e_server_group_assignments',
+        // Mutes (servers / channels / DMs / folders) and soundboard prefs.
+        'muted_servers', 'muted_channels', 'muted_dms', 'muted_folders',
+        'sb_muted', 'sb_disabled_global', 'sb_loop',
+        // Voice settings and other account-level preferences.
+        'voice_settings', 'session_duration_seconds', 'dm_call_panel_h',
+        'streamerMode', 'theme_mode', 'theme_color', 'theme_bg_color',
+        'show_msg_times', 'show_msg_status', 'autoLoadPreviews',
+        'notif_volume', 'notif_background_only',
+        'ringtone_name', 'ringtone_volume',
+        'notification_sound_name', 'notification_sound_url',
+        'custom_css_text', 'custom_shortcuts',
+        'last_dm_channel_id',
     ];
 
+    /** Is this localStorage key part of the synced key bundle? */
     function isBundleKey(k) {
         if (!k) return false;
         for (let i = 0; i < BUNDLE_EXACT_KEYS.length; i++) {
@@ -703,18 +727,92 @@ var E2ECrypto = (() => {
 
     function restoreKeyBundle(bundle) {
         if (!bundle || typeof bundle !== 'object') return;
-        for (const k in bundle) {
-            // Skip metadata keys (bundle version) — only restore real keys.
-            if (k === 'v') continue;
-            if (bundle.hasOwnProperty(k) && bundle[k] != null) {
-                localStorage.setItem(k, bundle[k]);
+        // A restore is a PULL, not a local edit: suppress the local-state mirror
+        // while it writes, or every applied blob would immediately schedule
+        // another push (an endless echo between the devices of one account).
+        const prevSuppressed = window._localMirrorSuppressed;
+        window._localMirrorSuppressed = true;
+        try {
+            for (const k in bundle) {
+                // Skip metadata keys (bundle version) — only restore real keys.
+                if (k === 'v') continue;
+                if (bundle.hasOwnProperty(k) && bundle[k] != null) {
+                    localStorage.setItem(k, bundle[k]);
+                }
             }
+        } finally {
+            window._localMirrorSuppressed = prevSuppressed;
         }
     }
 
     // Expose the current bundle version so auth.js can detect stale blobs
     // restored from an older client (missing newer key types).
     window._BUNDLE_VERSION = BUNDLE_VERSION;
+
+    // ---- Device identity (loaded by BOTH login.html and index.html) ----
+    // One browser, one device. `e2e_device_key` is the persistent random key
+    // that identifies this device in the session list; `getWsDeviceId()` is the
+    // non-reversible HMAC of it sent over the wire.
+    //
+    // These live here rather than in auth.js because auth.js is only loaded on
+    // the login page: on the app page the helpers were undefined, so the callers'
+    // `typeof getWsDeviceId === 'function'` guards silently fell back to sending
+    // the RAW device key while the session row stored the HMAC. The two ids never
+    // matched, so anything targeted at a device (force-kick notices, per-device
+    // voice scoping, "which device wrote this blob") could not find its socket.
+    function getDeviceId() {
+        var k = localStorage.getItem('e2e_device_key');
+        if (!k) {
+            k = arrayBufferToBase64(randomBytes(32));
+            localStorage.setItem('e2e_device_key', k);
+        }
+        return k;
+    }
+
+    /** Stable, non-reversible id for this browser ('' when unavailable). */
+    function getWsDeviceId() {
+        var devKey = localStorage.getItem('e2e_device_key');
+        if (!devKey) {
+            // A fresh browser must identify itself BEFORE its first request:
+            // an empty device id made every browser look like the same device,
+            // so signing in on a second one deleted the first one's session.
+            try { devKey = getDeviceId(); } catch (_) { devKey = null; }
+        }
+        if (!devKey) return '';
+        try {
+            var keyBytes = base64ToArrayBuffer(devKey);
+            var domain = new TextEncoder().encode('ws-device-id-v1');
+            var tag = sodium.crypto_auth_hmacsha256(domain, new Uint8Array(keyBytes));
+            return arrayBufferToBase64(tag.buffer).substring(0, 22);
+        } catch (_) {
+            return devKey.substring(0, 22);
+        }
+    }
+
+    /** Short human-readable name for this browser, e.g. "Chrome on Windows". */
+    function getDeviceName() {
+        try {
+            var ua = navigator.userAgent;
+            var browser = 'Browser';
+            if (/Edg\//.test(ua)) browser = 'Edge';
+            else if (/OPR\//.test(ua) || /Opera/.test(ua)) browser = 'Opera';
+            else if (/Chrome\//.test(ua)) browser = 'Chrome';
+            else if (/Firefox\//.test(ua)) browser = 'Firefox';
+            else if (/Safari\//.test(ua)) browser = 'Safari';
+            else if (/MSIE|Trident/.test(ua)) browser = 'IE';
+            var os = 'Device';
+            if (/Windows/.test(ua)) os = 'Windows';
+            else if (/Android/.test(ua)) os = 'Android';
+            else if (/iPhone|iPad|iPod/.test(ua)) os = 'iOS';
+            else if (/Mac OS X/.test(ua)) os = 'macOS';
+            else if (/Linux/.test(ua)) os = 'Linux';
+            return browser + ' on ' + os;
+        } catch (_) { return 'Unknown device'; }
+    }
+
+    window.getDeviceId = getDeviceId;
+    window.getWsDeviceId = getWsDeviceId;
+    window.getDeviceName = getDeviceName;
 
     // ---- Build public API ----
     return {
@@ -738,6 +836,7 @@ var E2ECrypto = (() => {
 
         // Key Bundle (password-encrypted key backup)
         buildKeyBundle: buildKeyBundle,
+        isBundleKey: isBundleKey,
         encryptKeyBundle: encryptKeyBundle,
         decryptKeyBundle: decryptKeyBundle,
         restoreKeyBundle: restoreKeyBundle,
@@ -746,6 +845,9 @@ var E2ECrypto = (() => {
         arrayBufferToBase64: arrayBufferToBase64,
         base64ToArrayBuffer: base64ToArrayBuffer,
         randomBytes: randomBytes,
+        getDeviceId: getDeviceId,
+        getWsDeviceId: getWsDeviceId,
+        getDeviceName: getDeviceName,
 
         // X25519
         x25519GenerateKeyPair: x25519GenerateKeyPair,

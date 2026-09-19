@@ -128,7 +128,7 @@ document.addEventListener('DOMContentLoaded', () => {
         adminToggleBtn.addEventListener('click', function () {
             const visible = adminPasswordInput.type === 'text';
             adminPasswordInput.type = visible ? 'password' : 'text';
-            adminToggleBtn.innerHTML = visible ? '&#128065;' : '&#128064;';
+            adminToggleBtn.innerHTML = visible ? icon('eye') : icon('eye-off');
             adminToggleBtn.classList.toggle('active', !visible);
         });
     }
@@ -580,7 +580,7 @@ function setupPasswordToggle(toggleId, inputId) {
         toggleBtn.addEventListener('click', function () {
             const visible = input.type === 'text';
             input.type = visible ? 'password' : 'text';
-            toggleBtn.innerHTML = visible ? '&#128065;' : '&#128064;';
+            toggleBtn.innerHTML = visible ? icon('eye') : icon('eye-off');
             toggleBtn.classList.toggle('active', !visible);
         });
     }

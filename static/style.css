@@ -392,18 +392,27 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     margin: 1px 4px;
     border-radius: 3px;
     background: transparent;
-    transition: background 0.15s ease;
+    transition: background 0.15s ease, height 0.15s ease, box-shadow 0.15s ease;
 }
 .dm-drop-gap.top {
     height: 4px;
     margin: 0 4px 2px;
 }
 .dm-list-dragging .dm-drop-gap {
+    height: 12px;
+    margin: 2px 4px;
     background: rgba(255, 255, 255, 0.06);
+    position: relative;
+    z-index: 1;
+}
+.dm-list-dragging .dm-drop-gap.top {
+    height: 10px;
+    margin: 0 4px 2px;
 }
 .dm-drop-gap.drop-active {
     background: var(--accent);
     box-shadow: 0 0 8px var(--accent);
+    height: 12px;
 }
 
 .server-drop-gap.drop-active {
@@ -2241,6 +2250,21 @@ select.modal-input:focus {
     gap: 6px;
     flex-wrap: wrap;
 }
+
+.dm-search {
+    margin: 0 8px 6px;
+    padding: 6px 9px;
+    border-radius: 7px;
+    border: 1px solid var(--border-color, #3a3a55);
+    background: var(--bg-primary, #1a1a2e);
+    color: var(--text-primary, #e0e0e0);
+    font-size: 12px;
+    outline: none;
+    box-sizing: border-box;
+    width: calc(100% - 16px);
+}
+.dm-search:focus { border-color: var(--accent); }
+.dm-search::placeholder { color: var(--text-muted, #888); }
 
 .dm-action-btn {
     background: var(--bg-primary);
@@ -11136,6 +11160,19 @@ body.resizing-dm { cursor: ns-resize !important; user-select: none; }
 .role-row[draggable="true"] { cursor: grab; }
 .role-row[draggable="true"]:active { cursor: grabbing; }
 
+/* Suppress native long-press context menu on draggable items (mobile).
+   The browser's context menu interrupts touch-drag sequences — the touch
+   gets cancelled and the drop indicators vanish.   JS contextmenu handlers are too late; CSS is the only reliable fix. */
+.role-row[draggable="true"],
+.server-icon[draggable="true"],
+.server-group-header[draggable="true"],
+.dm-item[draggable="true"],
+.channel-item[draggable="true"],
+.channel-category-group[data-managed="1"] {
+    -webkit-touch-callout: none;
+    touch-action: manipulation;
+}
+
 /* Drag-and-drop indicators */
 .role-row.dragging {
     opacity: 0.4;
@@ -11187,21 +11224,28 @@ body.resizing-dm { cursor: ns-resize !important; user-select: none; }
 .roles-list.role-dragging .role-drop-gap {
     background: rgba(79, 195, 247, 0.06);
 }
+/* Accent, not `--border-color`: a theme can define that variable to an EMPTY
+   value, and `var(--empty, fallback)` substitutes nothing — the declaration then
+   becomes invalid at computed-value time and the strip silently stays
+   transparent (which is why the in-between lines looked like they were there
+   but not working). `--accent` is always a colour. */
 .roles-list.role-dragging .role-drop-gap > span {
-    background: var(--border-color, rgba(255, 255, 255, 0.16));
+    opacity: 0.75;
+    background: var(--accent, #4fc3f7);
 }
 .role-drop-gap.drop-active {
     background: rgba(79, 195, 247, 0.20);
 }
 .role-drop-gap.drop-active > span {
-    height: 2px;
-    background: var(--accent);
+    height: 3px;
+    opacity: 1;
+    background: var(--accent, #4fc3f7);
 }
 .role-drop-gap-tail {
     height: 20px;
     min-height: 20px;
     margin-bottom: 6px;
-    border: 1px dashed var(--border-color, rgba(255, 255, 255, 0.16));
+    border: 1px dashed rgba(255, 255, 255, 0.22);
 }
 /* Off-screen clone used as the HTML5 drag image, so dragging one role (or one
    tier) never shows the whole list as the drag preview. */

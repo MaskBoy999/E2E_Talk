@@ -59,6 +59,10 @@ export default defineConfig({
             // machine — raise the per-user + per-IP budgets and storage quota.
             MUTATION_USER_MAX: '100000',
             MUTATION_IP_MAX: '100000',
+            // Server creation is rate-limited per user (30/hour by default) and
+            // several suites reuse one long-lived account to build rails of
+            // servers — raise it so a re-run never 429s mid-suite.
+            CREATE_SERVER_MAX: '100000',
             FILE_STORAGE_QUOTA_BYTES: '100000000000',
         },
     },

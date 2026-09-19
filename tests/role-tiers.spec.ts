@@ -25,18 +25,27 @@ async function register(page: Page, username: string) {
 
 async function createServer(page: Page, name: string): Promise<string> {
     await page.waitForSelector('#add-server-btn', { timeout: 20000 });
+    // Identify the NEW server by diffing the rail: returning the first icon
+    // would hand back whatever server the account already had, and every later
+    // step (role creation included) would silently run against the wrong one.
+    const before = await page.evaluate(() => Array.from(
+        document.querySelectorAll('.server-icon[data-id]')).map((el) => el.getAttribute('data-id')));
     await page.click('#add-server-btn');
     await page.waitForSelector('#choice-create-server', { state: 'visible', timeout: 10000 });
     await page.click('#choice-create-server');
     await page.waitForSelector('#create-server-modal', { state: 'visible', timeout: 10000 });
     await page.fill('#new-server-name', name);
     await page.click('#confirm-create-server');
-    await page.waitForSelector('.server-icon[data-id]:not(.add-server)', { timeout: 25000 });
-    await page.locator('.server-icon[data-id]:not(.add-server)').first().click();
-    await page.waitForTimeout(2000);
-    const sid = await page.evaluate(() =>
-        document.querySelector('.server-icon[data-id]:not(.add-server)')?.getAttribute('data-id') || '');
+    await expect.poll(async () => page.evaluate(() =>
+        document.querySelectorAll('.server-icon[data-id]').length), { timeout: 30000 }).toBeGreaterThan(before.length);
+    const sid = await page.evaluate((known) => {
+        const ids = Array.from(document.querySelectorAll('.server-icon[data-id]'))
+            .map((el) => el.getAttribute('data-id')) as string[];
+        return ids.filter((id) => known.indexOf(id) === -1)[0] || '';
+    }, before);
     expect(sid).toBeTruthy();
+    await page.click(`.server-icon[data-id="${sid}"]`);
+    await page.waitForTimeout(2500);
     return sid;
 }
 
@@ -388,6 +397,73 @@ test.describe.serial('Server role tiers', () => {
         await page.screenshot({ path: `${SHOT}/09-drag-whole-tier.png` });
     });
 
+    test('dragging a whole tier shows the in-between strips, even across a re-render', async () => {
+        test.setTimeout(120000);
+        // Two bugs in one gesture: a tier drag never marked the list as dragging
+        // (so the insertion strips stayed invisible — “the lines are just there,
+        // they do nothing”), and a re-render during the gesture deleted the drag
+        // source, after which the browser never reported the end of the drag.
+        await setLayout(page, sid, { Alpha: 30, Beta: 20, Gamma: 10 });
+        const before = (await domTiers(page)).map((t) => t.names.join('+'));
+
+        const started = await page.evaluate(() => {
+            const label = document.querySelector('.role-tier-group:not(.role-tier-owner) .role-tier-label') as HTMLElement;
+            const dt = new DataTransfer();
+            label.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: dt }));
+            const list = document.getElementById('roles-list') as HTMLElement;
+            return {
+                dragging: list.classList.contains('role-dragging'),
+                gaps: list.querySelectorAll('.role-drop-gap').length,
+            };
+        });
+        expect(started.dragging, 'the list knows a tier drag is in flight').toBe(true);
+        expect(started.gaps, 'there are in-between strips').toBeGreaterThan(1);
+
+        // The strip's colour transitions in, so read it once it has settled.
+        await page.waitForTimeout(300);
+        const visible = await page.evaluate(() => {
+            const list = document.getElementById('roles-list') as HTMLElement;
+            const spans = Array.from(list.querySelectorAll('.role-drop-gap > span')) as HTMLElement[];
+            return spans.filter((s) => {
+                const bg = getComputedStyle(s).backgroundColor;
+                return !!bg && bg !== 'transparent' && bg !== 'rgba(0, 0, 0, 0)';
+            }).length;
+        });
+        expect(visible, 'and they are actually visible while dragging').toBeGreaterThan(0);
+        await page.screenshot({ path: `${SHOT}/14-tier-drag-strips.png` });
+
+        // A re-render mid-drag must NOT tear the strips (or the drag) down.
+        const afterRender = await page.evaluate(async (s) => {
+            const SR = (window as any).ServerRoles;
+            await SR.load(s);
+            const list = document.getElementById('roles-list') as HTMLElement;
+            return {
+                dragging: list.classList.contains('role-dragging'),
+                gaps: list.querySelectorAll('.role-drop-gap').length,
+                tiers: list.querySelectorAll('.role-tier-group').length,
+            };
+        }, sid);
+        expect(afterRender.dragging, 'a re-render during the drag is deferred').toBe(true);
+        expect(afterRender.gaps, 'so the strips survive it').toBeGreaterThan(1);
+
+        const ended = await page.evaluate(() => {
+            const label = document.querySelector('.role-tier-group:not(.role-tier-owner) .role-tier-label') as HTMLElement;
+            const dt = new DataTransfer();
+            label.dispatchEvent(new DragEvent('dragend', { bubbles: true, cancelable: true, dataTransfer: dt }));
+            const list = document.getElementById('roles-list') as HTMLElement;
+            return {
+                dragging: list.classList.contains('role-dragging'),
+                active: list.querySelectorAll('.drop-active, .drop-join, .drop-above, .drop-below').length,
+            };
+        });
+        expect(ended.dragging, 'releasing clears the drag state').toBe(false);
+        expect(ended.active, 'and every drop marker').toBe(0);
+
+        await page.waitForTimeout(700);
+        const after = (await domTiers(page)).map((t) => t.names.join('+'));
+        expect(after, 'the layout is intact after the deferred re-render').toEqual(before);
+    });
+
     test('context-menu section headers render disabled and cannot be clicked', async () => {
         test.setTimeout(120000);
         // The member right-click menu lists "— Role —" as a section header. It
@@ -421,14 +497,38 @@ test.describe.serial('Server role tiers', () => {
         test.setTimeout(180000);
         // Restore the real 190px scroll container for this test.
         if (noScrollStyle) { await noScrollStyle.evaluate((el: any) => el.remove()); noScrollStyle = null; }
+        // This spec shares one page across tests, and an earlier test can leave
+        // the server-settings modal open — it then intercepts the click on
+        // "create server" for the whole timeout. Close anything still open.
+        await page.evaluate(() => {
+            document.querySelectorAll('.modal').forEach(function (m: any) {
+                if (getComputedStyle(m).display !== 'none') m.style.display = 'none';
+            });
+        });
 
         const sid2 = await createServer(page, 'Scroll Lab');
         for (let i = 0; i < 10; i++) {
+            // Role names are stored encrypted with the server key (migration
+            // 087+), and the API rejects a role with no ciphertext — so the
+            // name has to be encrypted here exactly like the app does.
+            const body = await page.evaluate((args) => {
+                const [sid, idx] = args as [string, number];
+                const key = (window as any).E2ECrypto.getServerKey(sid);
+                const enc = (window as any).E2ECrypto.encryptMessage('Scroll' + idx, key);
+                return {
+                    name: 'Scroll' + idx,
+                    color: '#4fc3f7',
+                    permissions: 0,
+                    position: 10 * (10 - idx),
+                    encrypted_name: enc.ciphertext,
+                    name_nonce: enc.nonce,
+                };
+            }, [sid2, i] as const);
             const res = await api(page, `/api/servers/${sid2}/roles`, {
                 method: 'POST',
-                body: JSON.stringify({ name: 'Scroll' + i, color: '#4fc3f7', permissions: 0, position: 10 * (10 - i) }),
+                body: JSON.stringify(body),
             });
-            expect(res.status).toBe(200);
+            expect(res.status, JSON.stringify(res.body)).toBe(200);
         }
         await page.click('#server-settings-btn');
         await page.waitForSelector('#server-settings-modal', { state: 'visible' });
@@ -440,7 +540,8 @@ test.describe.serial('Server role tiers', () => {
                 overflow: getComputedStyle(el).overflowY,
                 scrollHeight: el.scrollHeight,
                 clientHeight: el.clientHeight,
-                rows: el.querySelectorAll('.role-tier-group').length,
+                // The owner box is a `.role-tier-group` too — count real tiers.
+                rows: el.querySelectorAll('.role-tier-group:not(.role-tier-owner)').length,
             };
         });
         expect(scrollable.rows).toBe(10);
@@ -448,7 +549,9 @@ test.describe.serial('Server role tiers', () => {
 
         const run = async (edge: 'top' | 'bottom', ms: number) => await page.evaluate(async ([which, wait]) => {
             const el = document.getElementById('roles-list') as HTMLElement;
-            const row = el.querySelector('.role-row') as HTMLElement;
+            // A REAL tier row: the owner box is the first `.role-row` on screen
+            // and is not a drag source, so picking it made this test a no-op.
+            const row = el.querySelector('.role-tier-group:not(.role-tier-owner) .role-row') as HTMLElement;
             const dt = new DataTransfer();
             row.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: dt }));
             const rect = el.getBoundingClientRect();

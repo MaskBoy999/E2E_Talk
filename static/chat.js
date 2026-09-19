@@ -79,6 +79,17 @@ let user = null;
 let servers = [];
 let serverGroups = []; // {id, name, position, collapsed, parent_group_id, color}
 // --- Server groups: stored in localStorage + synced via blob ---
+//
+// This browser's network device id (the HMAC of `e2e_device_key`), or ''. Used
+// to sign cross-device WS signals and to recognise OUR OWN echo of them. It
+// used to read a key called `e2e_device_id` that nothing ever writes, so every
+// device announced itself as '' and every receiver treated the message as its
+// own and skipped the pull — cross-device sync could never fire.
+function _myWsDeviceId() {
+    try {
+        return (typeof getWsDeviceId === 'function' ? getWsDeviceId() : '') || '';
+    } catch (_) { return ''; }
+}
 function _getServerGroupsKey() {
     var userId = (user && user.id) ? user.id : 'anon';
     return 'e2e_server_groups_' + userId;
@@ -105,8 +116,7 @@ function _broadcastGroupsChanged() {
     if (_groupsChangeTimer) clearTimeout(_groupsChangeTimer);
     _groupsChangeTimer = setTimeout(function() {
         if (window.ws && window.ws.readyState === 1) {
-            var deviceId = localStorage.getItem('e2e_device_id') || '';
-            window.ws.send(JSON.stringify({ type: 'groups_changed', device_id: deviceId }));
+            window.ws.send(JSON.stringify({ type: 'groups_changed', device_id: _myWsDeviceId() }));
         }
     }, 500);
 }
@@ -117,8 +127,7 @@ function _broadcastBlobUpdated() {
     if (_blobUpdateTimer) clearTimeout(_blobUpdateTimer);
     _blobUpdateTimer = setTimeout(function() {
         if (window.ws && window.ws.readyState === 1) {
-            var deviceId = localStorage.getItem('e2e_device_id') || '';
-            window.ws.send(JSON.stringify({ type: 'blob_updated', device_id: deviceId }));
+            window.ws.send(JSON.stringify({ type: 'blob_updated', device_id: _myWsDeviceId() }));
         }
     }, 1000);
 }
@@ -511,33 +520,79 @@ function loadProfileKeyCache() {
     }
 }
 
-// Key blob save to server for recovery after cookie clear
+// Key blob save to server for recovery after cookie clear.
+//
+// This blob IS the shared state of the account: every device's local key cache
+// and app state (folders, mutes, volumes, settings) lives in one encrypted
+// document, so a change on any device has to reach the server and be announced
+// to the others. Two devices saving at the same instant must not silently drop
+// one another's keys, so the server keeps a revision counter: a PUT states the
+// revision it is based on, and a stale one is answered with 409 + the current
+// blob, which this device then merges (restores are additive) before retrying.
 var _keyBlobTimer = null;
-function scheduleKeyBlobSave() {
-    if (_keyBlobTimer) clearTimeout(_keyBlobTimer);
-    _keyBlobTimer = setTimeout(saveKeyBlobToServer, 3000);
+var _keyBlobRev = null;            // revision this device last saw
+var _keyBlobInFlight = false;      // one PUT at a time (queued behind it)
+var _keyBlobQueued = false;
+function _rememberBlobRev(v) {
+    if (typeof v === 'number') _keyBlobRev = v;
+}
+// Revision of a blob response, from any of the fetches around the app.
+function _captureBlobRev(blobData) {
+    if (blobData && typeof blobData.rev === 'number') _rememberBlobRev(blobData.rev);
+}
+// Wrapping the blob for the server runs an Argon2id key derivation, which costs
+// roughly 0.6s of MAIN THREAD. The mirror fires on every local-state write, so a
+// save could easily start in the middle of a drag or a phone long-press and make
+// the gesture feel dead (a 350ms long-press arming a second late is enough for
+// the browser's own native drag to win and cancel it). A save requested while a
+// gesture is in flight simply waits for the gesture to finish.
+var _activeTouches = 0;
+try {
+    document.addEventListener('touchstart', function () { _activeTouches++; }, true);
+    document.addEventListener('touchend', function () { _activeTouches = Math.max(0, _activeTouches - 1); }, true);
+    document.addEventListener('touchcancel', function () { _activeTouches = Math.max(0, _activeTouches - 1); }, true);
+} catch (_) {}
+
+function _gestureInFlight() {
+    try {
+        if (_activeTouches > 0) return true;
+        if (window._serverDragActive || window._dmDragActive) return true;
+        if (_stripAutoScroll && _stripAutoScroll.active) return true;
+        // The role list marks itself while a role/tier drag is live.
+        if (document.querySelector('.roles-list.role-dragging')) return true;
+    } catch (_) {}
+    return false;
 }
 
-function saveKeyBlobToServer() {
+function scheduleKeyBlobSave() {
+    if (_keyBlobTimer) clearTimeout(_keyBlobTimer);
+    _keyBlobTimer = setTimeout(function () {
+        if (_gestureInFlight()) { scheduleKeyBlobSave(); return; }
+        saveKeyBlobToServer();
+    }, 1500);
+}
+
+// Password used to wrap the blob, recovered from e2e_encrypted_password.
+function _keyBlobPassword() {
     try {
         const encPw = localStorage.getItem('e2e_encrypted_password');
         const devKeyStr = localStorage.getItem('e2e_device_key');
-        if (!encPw || !devKeyStr) {
-            console.error('saveKeyBlobToServer: missing e2e_encrypted_password or e2e_device_key');
-            return;
-        }
+        if (!encPw || !devKeyStr) return null;
         const dk = new Uint8Array(E2ECrypto.base64ToArrayBuffer(devKeyStr));
         const pwB64 = E2ECrypto.decodeEncryptedFileKey(encPw, dk);
-        if (!pwB64) {
-            console.error('saveKeyBlobToServer: failed to decode password from e2e_encrypted_password');
-            return;
-        }
-        const pw = atob(pwB64);
+        return pwB64 ? atob(pwB64) : null;
+    } catch (_) { return null; }
+}
+
+function saveKeyBlobToServer(attempt) {
+    attempt = attempt || 0;
+    try {
         const t = localStorage.getItem('token');
-        if (!t) {
-            console.error('saveKeyBlobToServer: no auth token available');
-            return;
-        }
+        const pw = _keyBlobPassword();
+        // Not signed in / keys not ready yet — a queued save is pointless.
+        if (!t || !pw) return;
+        if (_keyBlobInFlight) { _keyBlobQueued = true; return; }
+        _keyBlobInFlight = true;
         const bundle = E2ECrypto.buildKeyBundle();
         const enc = E2ECrypto.encryptKeyBundle(bundle, pw);
         fetch('/api/key-blob', {
@@ -550,16 +605,81 @@ function saveKeyBlobToServer() {
                 encrypted_blob: enc.encrypted_private_key,
                 salt: enc.salt,
                 nonce: enc.nonce,
+                // Which device wrote this (the server excludes it when it
+                // announces the new blob) and what revision it extends.
+                device_id: _myWsDeviceId(),
+                base_rev: _keyBlobRev,
             })
-        }).then(function() {
-            _broadcastBlobUpdated();
-        }).catch(function(err) {
-            console.error('saveKeyBlobToServer: HTTP PUT failed', err);
+        }).then(function (res) {
+            if (res.status === 409 && attempt < 3) {
+                // Someone else wrote first. Take their keys (restoreKeyBundle
+                // only adds), re-apply the shared state on top, then retry on
+                // their revision — so neither device's keys are lost.
+                return res.json().then(function (cur) {
+                    _keyBlobInFlight = false;
+                    if (cur && cur.encrypted_blob) {
+                        const b = E2ECrypto.decryptKeyBundle(cur.encrypted_blob, pw, cur.salt, cur.nonce);
+                        if (b) {
+                            E2ECrypto.restoreKeyBundle(b);
+                            _rememberBlobRev(cur.rev);
+                            try { loadServerGroupsLocal(); renderServerList(); } catch (_) {}
+                        }
+                    }
+                    return saveKeyBlobToServer(attempt + 1);
+                }).catch(function () { _keyBlobInFlight = false; });
+            }
+            return res.json().catch(function () { return {}; }).then(function (j) {
+                _keyBlobInFlight = false;
+                _captureBlobRev(j);
+                // The server announces the new blob to the account's other
+                // devices itself (they pull and re-apply), so nothing to send.
+                if (_keyBlobQueued) { _keyBlobQueued = false; saveKeyBlobToServer(); }
+            });
+        }).catch(function (err) {
+            _keyBlobInFlight = false;
+            // Offline / server unreachable: leave it for the next change.
+            if (window.__DEV_LOGS) console.error('saveKeyBlobToServer: HTTP PUT failed', err);
         });
     } catch (err) {
-        console.error('saveKeyBlobToServer: unexpected error', err);
+        _keyBlobInFlight = false;
+        if (window.__DEV_LOGS) console.error('saveKeyBlobToServer: unexpected error', err);
     }
 }
+
+// ── Local-state mirror ─────────────────────────────────────────────────────
+// "Everything in localStorage is account state": any change to a bundle key is
+// pushed to the server blob, and the server tells the account's other devices
+// to pull. Writes are intercepted at Storage.prototype so no caller has to
+// remember to announce itself — a new preference is synced the moment it is
+// added to the bundle list in crypto.js. Re-entrancy is prevented on both ends
+// (restoreKeyBundle clears the flag while it applies a pull).
+function _mirrorLocalKeyChange(k) {
+    if (!k || window._localMirrorSuppressed) return;
+    var isBundle = false;
+    try { isBundle = !!(E2ECrypto.isBundleKey && E2ECrypto.isBundleKey(k)); } catch (_) {}
+    if (!isBundle) return;
+    // Only while actually signed in — before that the writes are the keys the
+    // blob is made of, not a change to mirror.
+    try { if (!localStorage.getItem('token')) return; } catch (_) { return; }
+    scheduleKeyBlobSave();
+}
+(function installLocalStateMirror() {
+    try {
+        var proto = Storage.prototype;
+        var prevSet = proto.setItem;
+        var prevRemove = proto.removeItem;
+        proto.setItem = function (k, v) {
+            var r = prevSet.apply(this, arguments);
+            try { if (this === localStorage) _mirrorLocalKeyChange(k); } catch (_) {}
+            return r;
+        };
+        proto.removeItem = function (k) {
+            var r = prevRemove.apply(this, arguments);
+            try { if (this === localStorage) _mirrorLocalKeyChange(k); } catch (_) {}
+            return r;
+        };
+    } catch (_) {}
+})();
 
 // ── Boot-time media-key cache audit ─────────────────────────────────────────
 // The secure-storage interceptor returns the RAW '~'-prefixed ciphertext when
@@ -1201,25 +1321,8 @@ function fmtDuration(secs) {
 
 // Human-readable name for this browser/device, shown in the Devices panel
 // (Settings → Security → Devices).
-function getDeviceName() {
-    try {
-        var ua = navigator.userAgent;
-        var browser = 'Browser';
-        if (/Edg\//.test(ua)) browser = 'Edge';
-        else if (/OPR\//.test(ua) || /Opera/.test(ua)) browser = 'Opera';
-        else if (/Chrome\//.test(ua)) browser = 'Chrome';
-        else if (/Firefox\//.test(ua)) browser = 'Firefox';
-        else if (/Safari\//.test(ua)) browser = 'Safari';
-        else if (/MSIE|Trident/.test(ua)) browser = 'IE';
-        var os = 'Device';
-        if (/Windows/.test(ua)) os = 'Windows';
-        else if (/Android/.test(ua)) os = 'Android';
-        else if (/iPhone|iPad|iPod/.test(ua)) os = 'iOS';
-        else if (/Mac OS X/.test(ua)) os = 'macOS';
-        else if (/Linux/.test(ua)) os = 'Linux';
-        return browser + ' on ' + os;
-    } catch (_) { return 'Unknown device'; }
-}
+// getDeviceName / getDeviceId / getWsDeviceId are defined in crypto.js now —
+// one canonical copy for both login.html and index.html.
 
 // Custom session duration chosen in Settings → Security (seconds). Applies to
 // login, registration, and re-authentication. Defaults to 30 days; floored at
@@ -6208,7 +6311,7 @@ document.addEventListener('DOMContentLoaded', () => {
         reauthToggleBtn.addEventListener('click', function () {
             const visible = reauthPasswordInput.type === 'text';
             reauthPasswordInput.type = visible ? 'password' : 'text';
-            reauthToggleBtn.innerHTML = visible ? '&#128065;' : '&#128064;';
+            reauthToggleBtn.innerHTML = visible ? icon('eye') : icon('eye-off');
             reauthToggleBtn.classList.toggle('active', !visible);
         });
     }
@@ -6947,7 +7050,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (!sdPwInput) return;
                 var visible = sdPwInput.type === 'text';
                 sdPwInput.type = visible ? 'password' : 'text';
-                this.innerHTML = visible ? '&#128065;' : '&#128064;';
+                this.innerHTML = visible ? icon('eye') : icon('eye-off');
                 this.classList.toggle('active', !visible);
             });
         }
@@ -12110,10 +12213,10 @@ function connectWebSocket(t) {
             case 'groups_changed':
                 // Another device of the same account changed server groups.
                 // Re-fetch blob from server and re-apply groups.
-                if (data.device_id !== undefined) {
-                    // Skip if this is our own device
-                    var myDeviceId = localStorage.getItem('e2e_device_id') || '';
-                    if (data.device_id === myDeviceId) break;
+                if (data.device_id) {
+                    // Skip if this is our own device (never when either side is
+                    // '' — an unidentified device must not look like us).
+                    if (data.device_id === _myWsDeviceId()) break;
                 }
                 try {
                     // Re-fetch the key blob from server and re-apply groups
@@ -12146,10 +12249,7 @@ function connectWebSocket(t) {
                 // Another device saved a new key blob. Re-fetch and restore all
                 // keys so server keys, DM keys, file keys, profiles, etc. are
                 // all up-to-date on this device.
-                if (data.device_id !== undefined) {
-                    var _myDevId = localStorage.getItem('e2e_device_id') || '';
-                    if (data.device_id === _myDevId) break;
-                }
+                if (data.device_id && data.device_id === _myWsDeviceId()) break;
                 (async function() {
                     try {
                         var _encPw = localStorage.getItem('e2e_encrypted_password');
@@ -13612,6 +13712,7 @@ var _dmDragActive = false;
 var _dmDragPendingRerender = false;
 var _dmDragSourceEl = null;
 var _dmDragWatchdog = null;
+var _dmTouchDragActive = false;
 
 function flushServerDragRerender() {
     if (!_serverDragPendingRerender) return;
@@ -13639,6 +13740,7 @@ function endDmDrag() {
     if (!_dmDragActive) return;
     _dmDragActive = false;
     _dmDragSourceEl = null;
+    _dmTouchDragActive = false;
     if (_dmDragWatchdog) { clearInterval(_dmDragWatchdog); _dmDragWatchdog = null; }
     var list = document.getElementById('dm-list');
     if (list) {
@@ -13832,6 +13934,11 @@ function moveTouchGhost(ghost, x, y) {
 // window, or a source that was re-rendered away.
 function _serverDragEndedByInput() {
     if (!_serverDragActive && !_dmDragActive) return;
+    // A touch-initiated DM drag owns its own lifecycle — the touchend handler
+    // calls endDmDrag + applyDmGapDrop. pointerup fires before touchend on
+    // mobile, so letting this handler end the drag first would destroy the DOM
+    // (via flushDmRerender) before the drop logic can read the slot.
+    if (_dmTouchDragActive) return;
     // While the browser's own drag session is live it owns the gesture: the
     // endings that count are `dragend` and `drop`. DnD cancels the pointer
     // stream when it starts (one browser fires pointercancel the instant a drag
@@ -14446,6 +14553,12 @@ function renderServerList() {
                 if (navigator.vibrate) navigator.vibrate(30);
             }, LONG_PRESS_MS);
         }, { passive: false });
+        // Suppress the browser's native context menu on mobile when a
+        // long-press timer is pending (prevents the menu from popping up
+        // while the user intends to drag).
+        el.addEventListener('contextmenu', function(e) {
+            if (st.timer || st.active) { e.preventDefault(); }
+        });
         el.addEventListener('touchmove', function(e) {
             var t = e.touches[0];
             if (t) { st.lastX = t.clientX; st.lastY = t.clientY; }
@@ -18398,6 +18511,7 @@ function renderDmSidebar() {
     html += '<button class="dm-action-btn" id="add-friend-btn">+ Add Friend</button>';
     html += '<button class="dm-action-btn friend-requests-btn" id="friend-requests-btn">Requests <span id="friend-request-badge" class="inline-badge" style="display:' + (pendingFriendRequests > 0 ? 'block' : 'none') + '"></span></button>';
     html += '</div></div>';
+    html += '<input type="text" class="dm-search" id="dm-search" placeholder="Search conversations..." autocomplete="off" spellcheck="false">';
     html += '<div class="channel-list dm-list" id="dm-list">';
     if (dmConversations.length === 0) {
         html += '<div style="color:#666;padding:12px;font-size:13px">No conversations yet</div>';
@@ -18533,67 +18647,134 @@ function renderDmSidebar() {
         el.addEventListener('dragend', function() {
             endDmDrag();
         });
-        el.addEventListener('dragover', function(e) {
-            var isDmDrag = e.dataTransfer.types.indexOf('text/dm-id') !== -1;
-            if (!isDmDrag) return;
-            e.preventDefault();
-            e.dataTransfer.dropEffect = 'move';
-            var rect = el.getBoundingClientRect();
-            var midY = rect.top + rect.height / 2;
-            clearDmDragIndicators();
-            el.classList.remove('drag-over-top', 'drag-over-bottom');
-            if (e.clientY < midY) el.classList.add('drag-over-top');
-            else el.classList.add('drag-over-bottom');
-        });
-        el.addEventListener('dragleave', function() {
-            el.classList.remove('drag-over-top', 'drag-over-bottom');
-        });
-        el.addEventListener('drop', function(e) {
-            e.preventDefault();
-            el.classList.remove('drag-over-top', 'drag-over-bottom');
-            var draggedId = e.dataTransfer.getData('text/dm-id');
-            if (!draggedId || draggedId === el.dataset.dmId) return;
-            endDmDrag();
-            // Dropping on a row stays a coarse target: its top half means "the
-            // slot above this row", its bottom half "the slot below it" — both
-            // routes end in the same slot implementation.
-            var order = dmConversations.map(function(c) { return c.dm_channel_id; });
-            var idx = order.indexOf(el.dataset.dmId);
-            var rect = el.getBoundingClientRect();
-            var afterDmId;
-            if (e.clientY > rect.top + rect.height / 2) {
-                afterDmId = el.dataset.dmId;
-            } else {
-                afterDmId = idx > 0 ? order[idx - 1] : '';
-            }
-            applyDmGapDrop(draggedId, afterDmId);
-        });
+        // Touch drag support for mobile — mirrors the server rail's
+        // setupTouchDragItem but targets DM gaps instead of server gaps.
+        (function () {
+            var LONG_PRESS_MS = 350;
+            var st = { timer: null, active: false, ghost: null, id: '', startX: 0, startY: 0, lastX: 0, lastY: 0 };
+            el.addEventListener('touchstart', function (e) {
+                var t = e.touches[0];
+                if (!t) return;
+                st.id = el.dataset.dmId || '';
+                if (!st.id) return;
+                el.draggable = false;
+                st.startX = st.lastX = t.clientX;
+                st.startY = st.lastY = t.clientY;
+                st.timer = setTimeout(function () {
+                    st.timer = null;
+                    st.active = true;
+                    _dmTouchDragActive = true;
+                    el.classList.add('dragging');
+                    beginDmDrag(el);
+                    st.ghost = makeTouchGhost(el, st.lastX, st.lastY);
+                    if (navigator.vibrate) navigator.vibrate(30);                }, LONG_PRESS_MS);
+            }, { passive: false });
+            // Suppress browser context menu during long-press on DM items
+            el.addEventListener('contextmenu', function (e) {
+                if (st.timer || st.active) { e.preventDefault(); }
+            });
+            el.addEventListener('touchmove', function (e) {
+                var t = e.touches[0];
+                if (t) { st.lastX = t.clientX; st.lastY = t.clientY; }
+
+                if (st.timer) {
+                    if (t && (Math.abs(t.clientX - st.startX) > 10 || Math.abs(t.clientY - st.startY) > 10)) {
+                        clearTimeout(st.timer); st.timer = null;
+                    }
+                }
+                if (!st.active) return;
+                e.preventDefault();
+                moveTouchGhost(st.ghost, st.lastX, st.lastY);
+                // Auto-scroll the DM list when dragging near its edges
+                var dmList = document.getElementById('dm-list');
+                if (dmList) {
+                    var rect = dmList.getBoundingClientRect();
+                    var EDGE = 44;
+                    var MAX = 18;
+                    if (st.lastY < rect.top + EDGE && st.lastY >= rect.top - 24) {
+                        var up = (rect.top + EDGE - st.lastY) / EDGE;
+                        dmList.scrollTop -= Math.ceil(Math.max(0, Math.min(1, up)) * MAX);
+                    } else if (st.lastY > rect.bottom - EDGE && st.lastY <= rect.bottom + 24) {
+                        var down = (st.lastY - (rect.bottom - EDGE)) / EDGE;
+                        dmList.scrollTop += Math.ceil(Math.max(0, Math.min(1, down)) * MAX);
+                    }
+                }
+                var slot = dmSlotAtY(st.lastY);
+                clearDmDragIndicators(slot.gap);
+                if (slot.gap) slot.gap.classList.add('drop-active');
+            }, { passive: false });
+            el.addEventListener('touchend', function (e) {
+                el.draggable = true;
+                if (st.timer) { clearTimeout(st.timer); st.timer = null; }
+                if (!st.active) { _dmTouchDragActive = false; return; }
+                st.active = false;
+                _dmTouchDragActive = false;
+                if (st.ghost) { st.ghost.remove(); st.ghost = null; }
+                var t = e.changedTouches[0];
+                var afterDmId = t ? dmSlotAtY(t.clientY).afterDmId : '';
+                endDmDrag();
+                applyDmGapDrop(st.id, afterDmId);
+            });
+            el.addEventListener('touchcancel', function () {
+                el.draggable = true;
+                if (st.timer) { clearTimeout(st.timer); st.timer = null; }
+                if (!st.active) { _dmTouchDragActive = false; return; }
+                st.active = false;
+                _dmTouchDragActive = false;
+                if (st.ghost) { st.ghost.remove(); st.ghost = null; }
+                endDmDrag();
+            });
+        })();
     });
 
-    // Slots *between* the DM rows. Rebuilt with the sidebar, so they are bound
-    // on every render (a row drag re-renders, and dragend fires on the node the
-    // drop replaced — endDmDrag picks the gesture up from there).
-    document.querySelectorAll('#dm-list .dm-drop-gap').forEach(function(gap) {
-        gap.addEventListener('dragover', function(e) {
+    // One slot resolver for the whole list.
+    //
+    // The slots used to be their own drop targets, each a ~12px strip with its
+    // own `dragover` handler. That is unreliable in practice: the browser
+    // throttles `dragover` (a handful per second) and coalesces movements, so a
+    // pointer sitting on a strip could produce NO event for it at all — the
+    // in-between line stayed dark and the drop landed on a row instead, which is
+    // exactly the "the lines are there but do nothing" report. Naming the slot
+    // from the pointer's position over the list always works, at any speed, and
+    // gives every position — including the very top and bottom — a real target.
+    function dmSlotAtY(clientY) {
+        var rows = Array.prototype.slice.call(document.querySelectorAll('#dm-list .dm-item[data-dm-id]'));
+        var afterDmId = '';
+        for (var i = 0; i < rows.length; i++) {
+            var r = rows[i].getBoundingClientRect();
+            if (r.height === 0) continue; // hidden by the search filter
+            if (clientY > r.top + r.height / 2) afterDmId = rows[i].dataset.dmId;
+        }
+        var sel = afterDmId
+            ? '.dm-drop-gap[data-after-dm="' + afterDmId + '"]'
+            : '.dm-drop-gap.top';
+        return { afterDmId: afterDmId, gap: document.querySelector('#dm-list ' + sel) };
+    }
+
+    var dmListEl = document.getElementById('dm-list');
+    if (dmListEl) {
+        dmListEl.addEventListener('dragover', function(e) {
             if (e.dataTransfer.types.indexOf('text/dm-id') === -1) return;
             e.preventDefault();
-            e.stopPropagation();
             e.dataTransfer.dropEffect = 'move';
-            clearDmDragIndicators(gap);
-            gap.classList.add('drop-active');
+            var slot = dmSlotAtY(e.clientY);
+            clearDmDragIndicators(slot.gap);
+            if (slot.gap) slot.gap.classList.add('drop-active');
         });
-        gap.addEventListener('dragleave', function() {
-            gap.classList.remove('drop-active');
+        dmListEl.addEventListener('dragleave', function(e) {
+            if (!dmListEl.contains(e.relatedTarget)) clearDmDragIndicators();
         });
-        gap.addEventListener('drop', function(e) {
+        dmListEl.addEventListener('drop', function(e) {
             var draggedId = e.dataTransfer.getData('text/dm-id');
             if (!draggedId) return;
             e.preventDefault();
-            e.stopPropagation();
+            // The slot is resolved from WHERE the pointer was released, not from
+            // the element the browser chose as the target.
+            var afterDmId = dmSlotAtY(e.clientY).afterDmId;
             endDmDrag();
-            applyDmGapDrop(draggedId, gap.dataset.afterDm || '');
+            applyDmGapDrop(draggedId, afterDmId);
         });
-    });
+    }
 
     // Put `draggedId` right after `afterDmId` (empty = the top of the list) and
     // persist the order. Built from the conversation list rather than the DOM,
@@ -18625,6 +18806,43 @@ function renderDmSidebar() {
 
     // Restore DM muted UI after render
     updateDmMutedUI();
+
+    // DM search — filter conversations by display name or username
+    var dmSearchEl = document.getElementById('dm-search');
+    if (dmSearchEl) {
+        // Restore previous search text across re-renders
+        if (window._dmSearchText) dmSearchEl.value = window._dmSearchText;
+        dmSearchEl.addEventListener('input', function() {
+            window._dmSearchText = dmSearchEl.value;
+            var q = dmSearchEl.value.trim().toLowerCase();
+            var items = document.querySelectorAll('#dm-list .dm-item[data-dm-id]');
+            var gaps = document.querySelectorAll('#dm-list .dm-drop-gap');
+            items.forEach(function(item) {
+                var name = (item.querySelector('.dm-name') || {}).textContent || '';
+                var username = (item.getAttribute('data-username') || '').toLowerCase();
+                var hay = (name + ' ' + username).toLowerCase();
+                item.style.display = (!q || hay.indexOf(q) !== -1) ? '' : 'none';
+            });
+            // Hide gaps next to hidden items
+            gaps.forEach(function(gap) {
+                var next = gap.nextElementSibling;
+                var prev = gap.previousElementSibling;
+                var nextHidden = next && next.classList.contains('dm-item') && next.style.display === 'none';
+                var prevHidden = prev && prev.classList.contains('dm-item') && prev.style.display === 'none';
+                // Show gap only if at least one adjacent item is visible
+                var nextVisible = next && next.classList.contains('dm-item') && next.style.display !== 'none';
+                var prevVisible = prev && prev.classList.contains('dm-item') && prev.style.display !== 'none';
+                // The 'top' gap: show only if first item is visible
+                if (gap.classList.contains('top')) {
+                    var firstItem = document.querySelector('#dm-list .dm-item[data-dm-id]');
+                    gap.style.display = (firstItem && firstItem.style.display !== 'none') ? '' : 'none';
+                } else {
+                    gap.style.display = (nextVisible || prevVisible) ? '' : 'none';
+                }
+            });
+        });
+        dmSearchEl.addEventListener('click', function(e) { e.stopPropagation(); });
+    }
 
     // Re-bind context menu to DM items after async profile pic loads change their content
 
@@ -25879,7 +26097,7 @@ async function loadMediaPreview(container, fileData) {
                         '<div style="font-size:13px;color:var(--text-primary,#eee);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(fileData.filename) + '</div>' +
                         '<div style="font-size:11px;color:var(--text-muted,#999)">' + formatFileSize(fileData.file_size) + ' — click to preview</div>' +
                     '</div>' +
-                    '<span style="font-size:18px;opacity:0.6">👁️</span>' +
+                    '<span style="font-size:18px;opacity:0.6">' + icon('eye', 18) + '</span>' +
                     '</div>';
                 // Click to open preview modal
                 container.querySelector('.doc-preview-hint').addEventListener('click', function () {
