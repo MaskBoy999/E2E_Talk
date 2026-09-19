@@ -2,7 +2,6 @@
 //!
 //! Stored as JSON under the OS per-app config directory:
 //!   Windows: %APPDATA%/com.e2echat.app/config.json
-//!   macOS:   ~/Library/Application Support/com.e2echat.app/config.json
 //!   Linux:   ~/.config/com.e2echat.app/config.json
 
 use serde::{Deserialize, Serialize};

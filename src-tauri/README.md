@@ -107,8 +107,8 @@ teardown, guarded by `window.__TAURI__` and an Android user-agent check.
 - **Done:** setup/config/connection test, tray + auto-start (desktop), navigation
   allowlist, native-notification bridge, Android-ready crate + config + CI, the
   call-service plugin, and release checksums + APK auto-attach.
-- **Needs external setup:** push notifications (Firebase/APNs), code-signing
-  certificates (Windows PFX / Apple Developer ID — CI steps are written and
-  dormant until the secrets exist), cert pinning, and `tauri-plugin-updater`.
+- **Needs external setup:** push notifications (Firebase), code-signing
+  certificates (Windows PFX — the CI step is written and dormant until the
+  secrets exist), and cert pinning.
 - **Remaining Android wiring:** the Gradle module + `POST_NOTIFICATIONS` request
   in `gen/android/` (see android-templates/README.md). The plugin itself is done.

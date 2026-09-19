@@ -21,9 +21,6 @@
 //! here could only reach an event loop in the webview, not Android's
 //! `ServiceManager`. Going straight to the Kotlin command avoids that hop, and
 //! on desktop the plugin is inert — calls already survive window minimise there.
-//!
-//! Not supported on iOS: `UIBackgroundModes: audio` (see the master plan §A3.4)
-//! is declarative, so there is nothing to invoke at runtime.
 
 use tauri::plugin::{Builder, TauriPlugin};
 use tauri::Runtime;

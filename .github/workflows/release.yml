@@ -8,13 +8,6 @@ name: Build Desktop Box
 # builds still succeed, they just warn on first launch (SmartScreen / Gatekeeper).
 # Configure these repository secrets to get rid of the warnings:
 #
-#   macOS  APPLE_CERTIFICATE          base64 of a Developer ID Application .p12
-#          APPLE_CERTIFICATE_PASSWORD password for that .p12
-#          APPLE_SIGNING_IDENTITY     e.g. "Developer ID Application: Name (TEAMID)"
-#          APPLE_ID                   Apple ID email used for notarization
-#          APPLE_PASSWORD             app-specific password for that Apple ID
-#          APPLE_TEAM_ID              10-char team id from developer.apple.com
-#
 #   Windows WINDOWS_CERTIFICATE       base64 of a code-signing .pfx
 #          WINDOWS_CERTIFICATE_PASSWORD password for that .pfx
 #
@@ -30,12 +23,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-latest
-            args: '--target aarch64-apple-darwin'
-            label: macos-arm64
-          - platform: macos-latest
-            args: '--target x86_64-apple-darwin'
-            label: macos-x64
           - platform: ubuntu-22.04
             args: ''
             label: linux-x64
@@ -46,7 +33,6 @@ jobs:
     # `secrets` is not usable in step `if:` conditions, so the signing secrets
     # are surfaced as env vars and the gates below test `env.*`.
     env:
-      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
       WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
     steps:
       - uses: actions/checkout@v4
@@ -59,8 +45,6 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - uses: actions/setup-node@v4
         with:
@@ -69,17 +53,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-
-      # ---------------------------------------------------------------------
-      # macOS: import the Developer ID cert. Skipped unless the secret exists,
-      # so forks and unsigned builds keep working.
-      # ---------------------------------------------------------------------
-      - name: Import Apple code signing certificate
-        if: matrix.platform == 'macos-latest' && env.APPLE_CERTIFICATE != ''
-        uses: apple-actions/import-codesign-certs@v3
-        with:
-          p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
-          p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
 
       # ---------------------------------------------------------------------
       # Windows: import the .pfx, read its thumbprint, and hand Tauri a config
@@ -116,12 +89,6 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Notarization. Tauri signs with the imported keychain identity and
-          # notarizes/staple automatically when these are present.
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'E2E Chat ${{ github.ref_name }}'
@@ -130,8 +97,8 @@ jobs:
 
             **Install:** download the file for your platform below and run it.
             - Windows: `.msi` or `.exe` (NSIS)
-            - macOS: `.dmg`
             - Linux: `.AppImage` or `.deb`
+            - Android: `.apk` (attached by the Android workflow)
 
             Verify your download against `SHA256SUMS-<platform>.txt`.
 
@@ -170,8 +137,7 @@ jobs:
             h=$(sha256sum "$f" | cut -d' ' -f1)
             echo "$h  $(basename "$f")" >> "$out"
           done < <(find src-tauri/target -type f \
-            \( -name '*.exe' -o -name '*.msi' -o -name '*.dmg' \
-               -o -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' \) -print0)
+            \( -name '*.exe' -o -name '*.msi' -o -name '*.AppImage' -o -name '*.deb' \) -print0)
           echo "--- $out"
           cat "$out"
 

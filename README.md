@@ -30,7 +30,7 @@ isn't published yet, **Actions** → *Build Desktop Box* / *Build Android APK* �
 - **Debian/Ubuntu** — `sudo apt install ./E2E-Chat_*_amd64.deb`.
 - Both need `libwebkit2gtk-4.1` (installed automatically by the `.deb`).
 
-### Android (no iOS yet)
+### Android
 1. Download `E2E-Chat_<version>_android.apk`
    (or `app-universal-release.apk` / `app-arm64-v8a-release.apk` for most phones)
    from the release, or the `e2e-chat-android` artifact from a manual Actions run.
@@ -44,7 +44,7 @@ Each release also publishes `SHA256SUMS-<platform>.txt`. Check your file against
 and you never have to trust the download blindly:
 
 ```bash
-# Linux / macOS / Git Bash on Windows
+# Linux / Git Bash on Windows
 sha256sum -c SHA256SUMS-linux-x64.txt
 
 # Windows PowerShell
@@ -91,7 +91,7 @@ npx playwright test
 ```
 server/     Rust backend (Axum + SQLite): auth, sessions, relay, encrypted storage
 static/     Frontend: chat, voice, crypto, secure-storage (the app itself)
-src-tauri/  Native desktop shell (Tauri 2) — see src-tauri/README.md
+src-tauri/  Native desktop shell (Tauri 2; Windows & Linux) — see src-tauri/README.md
 tests/      Playwright end-to-end suite
 tools/      Small build helpers (icon generation, etc.)
 ```
