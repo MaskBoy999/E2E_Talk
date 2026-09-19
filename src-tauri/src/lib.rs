@@ -57,6 +57,36 @@ fn fingerprint_blocking(url: &str) -> Result<String, String> {
     tauri::async_runtime::block_on(async move { fingerprint(url).await })
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression guard for the "Save & Launch closes the app" bug.
+    ///
+    /// Mirrors save_config's TOFU re-check: it runs *on* tauri's async runtime
+    /// (spawn), exactly like an async command does. The old code reached the
+    /// probe through `fingerprint_blocking` → `async_runtime::block_on`, which
+    /// panics a tokio worker with "cannot start a runtime from within a
+    /// runtime"; with `panic = "abort"` in the release profile that aborted the
+    /// process, so the app vanished with no error. This must stay await-based.
+    #[test]
+    fn async_pin_recheck_does_not_block_on_its_own_runtime() {
+        let handle = tauri::async_runtime::spawn(async {
+            // Port 1 refuses instantly, so the probe errors out fast and
+            // check_pinned_cert treats an unprobeable host as acceptable.
+            check_pinned_cert(
+                "deadbeef",
+                fingerprint("https://127.0.0.1:1".to_string()).await,
+            )
+        });
+        let out = tauri::async_runtime::block_on(handle);
+        assert!(
+            out.expect("the recheck task panicked on its own runtime").is_ok(),
+            "an unreachable host must not be treated as a certificate mismatch"
+        );
+    }
+}
+
 // ── Windows ──────────────────────────────────────────────────────────────
 
 /// Grant the *remote* app origin access to a small set of IPC commands.
@@ -104,35 +134,53 @@ fn grant_remote_ipc(app: &tauri::AppHandle, server_url: &str) {
     }
 }
 
+/// The certificate fingerprint the user trusted, if any.
+fn pinned_cert(app: &tauri::AppHandle) -> Option<String> {
+    app.state::<AppState>()
+        .cfg
+        .lock()
+        .ok()
+        .and_then(|c| c.pinned_cert_sha256.clone())
+}
+
+/// TOFU enforcement: refuse to open the app for a host whose certificate no
+/// longer matches the pinned fingerprint. The user re-trusts (or aborts) from
+/// the setup screen.
+///
+/// Only a *mismatch* is fatal. If the probe can't complete (host offline,
+/// Tailscale down) we still treat it as acceptable: the page will show its own
+/// connection error, and a temporary outage must never masquerade as a
+/// certificate problem or force the user back through setup.
+fn check_pinned_cert(pinned: &str, probed: Result<String, String>) -> Result<(), String> {
+    match probed {
+        Ok(actual) if actual != pinned => Err(cert_probe::mismatch_message()),
+        Ok(_) => Ok(()),
+        Err(e) => {
+            eprintln!("certificate pin not checked: {e}");
+            Ok(())
+        }
+    }
+}
+
 /// Open (or focus/navigate) the main window at the configured server URL.
+///
+/// Sync entry point for the main-thread call sites (startup, tray menu, second
+/// instance). It probes the pin with `fingerprint_blocking`, which blocks the
+/// calling thread — so it must never be reached from an async command. Those
+/// await the probe themselves and call `open_main_window` directly.
 fn open_main(app: &tauri::AppHandle, server_url: &str) -> Result<(), String> {
+    if let Some(expected) = pinned_cert(app) {
+        check_pinned_cert(&expected, fingerprint_blocking(server_url))?;
+    }
+    open_main_window(app, server_url)
+}
+
+/// Create (or focus/navigate) the main window. Does no certificate probing —
+/// callers are responsible for checking the pin first.
+fn open_main_window(app: &tauri::AppHandle, server_url: &str) -> Result<(), String> {
     let parsed: tauri::Url = server_url
         .parse()
         .map_err(|e| format!("Invalid server address: {e}"))?;
-
-    // TOFU enforcement on every launch: refuse to open the app for a host
-    // whose certificate no longer matches the pinned fingerprint. The user
-    // re-trusts (or aborts) from the setup screen.
-    //
-    // Only a *mismatch* is fatal. If the probe can't complete (host offline,
-    // Tailscale down) we still open the window: the page will show its own
-    // connection error, and a temporary outage must never masquerade as a
-    // certificate problem or force the user back through setup.
-    {
-        let pinned = app
-            .state::<AppState>()
-            .cfg
-            .lock()
-            .ok()
-            .and_then(|c| c.pinned_cert_sha256.clone());
-        if let Some(expected) = pinned {
-            match fingerprint_blocking(server_url) {
-                Ok(actual) if actual != expected => return Err(cert_probe::mismatch_message()),
-                Ok(_) => {}
-                Err(e) => eprintln!("certificate pin not checked: {e}"),
-            }
-        }
-    }
 
     // Allow the remote page to raise native notifications / listen to events.
     grant_remote_ipc(app, server_url);
@@ -151,6 +199,13 @@ fn open_main(app: &tauri::AppHandle, server_url: &str) -> Result<(), String> {
         .title("E2E Chat")
         .inner_size(1200.0, 780.0)
         .min_inner_size(720.0, 480.0)
+        // Tauri installs a *native* drop handler on the webview by default
+        // (`dragDropEnabled`, default true). On Windows that handler swallows
+        // HTML5 drag-and-drop inside the page, so every drag target in the app
+        // silently stops firing — while the same page works in a browser,
+        // which has no such handler. The UI uses HTML5 DnD exclusively and
+        // never Tauri's `tauri://drag-*` events, so turn the native one off.
+        .disable_drag_drop_handler()
         // Navigation allowlist: the window may only ever show the configured
         // host (or local blob:/data: URLs). Anything else — a link in a
         // message, a redirect to another site — is handed to the system
@@ -354,7 +409,24 @@ async fn save_config(
         };
     }
 
-    open_main(&app, &server_url)?;
+    // TOFU re-check, deliberately awaited here. This command already runs on
+    // Tauri's async runtime, so routing through the sync `open_main` reached
+    // `fingerprint_blocking` → `async_runtime::block_on` from inside that very
+    // runtime, which panics ("cannot start a runtime from within a runtime").
+    // With `panic = "abort"` in the release profile that panic aborted the
+    // process, so "Save & Launch" silently closed the app — after the config
+    // had been written, which is why relaunching worked.
+    //
+    // Skipped when the block above just (re)trusted the certificate: that probe
+    // already read the live fingerprint, so comparing it to itself would only
+    // cost another TLS round trip.
+    if !pin_cert {
+        if let Some(expected) = pinned_cert(&app) {
+            check_pinned_cert(&expected, fingerprint(server_url.clone()).await)?;
+        }
+    }
+
+    open_main_window(&app, &server_url)?;
     if let Some(w) = app.get_webview_window(SETUP_LABEL) {
         let _ = w.close();
     }

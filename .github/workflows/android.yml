@@ -9,11 +9,16 @@ name: Build Android APK
 # The APK is signed in CI (see "Sign the APK") because a Tauri release build is
 # unsigned by default and Android refuses to install an unsigned APK.
 #
-# The CLI is PINNED: `"^2"` floats to whatever shipped last night, and its
-# `android init` template can then require a newer AGP/SDK than the tools
-# installed below — the Gradle phase dies with "exit code 1" and no useful
-# message, exactly what happened on the v0.2.1–v0.2.3 tags. 2.11.2 matches
-# the SDK/NDK pinned below and the local dev CLI.
+# The CLI is PINNED (2.11.2): `"^2"` floats to whatever shipped overnight and
+# would silently change the generated Gradle template underneath us.
+#
+# That pin is load-bearing on the SDK packages installed below: the template at
+# this tag declares `compileSdk = 36` / `targetSdk = 36`, so the setup step MUST
+# install `platforms;android-36`. It installed `platforms;android-34` instead,
+# so Gradle could never configure the project — and because licences had been
+# accepted against the wrong sdk_root, AGP could not auto-download 36 either.
+# That is why every APK build from v0.2.1 through v0.2.4 died with a bare
+# "exit code 1" while the desktop job published normally.
 on:
   push:
     tags: ['v*']
@@ -43,7 +48,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-          ANDROID_HOME="$HOME/android-sdk"
+          export ANDROID_HOME="$HOME/android-sdk"
           mkdir -p "$ANDROID_HOME/cmdline-tools"
           curl -sSLo cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
           unzip -q cmdline-tools.zip -d "$ANDROID_HOME/cmdline-tools"
@@ -55,8 +60,19 @@ jobs:
           # sdkmanager by absolute path (a bare `sdkmanager` here fails with
           # "command not found").
           SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-          yes | "$SDKM" --licenses > /dev/null || true
-          "$SDKM" --sdk_root="$ANDROID_HOME" "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;27.0.12077973"
+          # Licences MUST be accepted against the same --sdk_root we install
+          # into. This call previously had no --sdk_root and ANDROID_HOME was
+          # not exported, so the acceptances landed on the default root.
+          # Consequence: anything Gradle auto-installs into OUR root later fails
+          # with "some licences have not been accepted", and the build dies.
+          yes | "$SDKM" --sdk_root="$ANDROID_HOME" --licenses > /dev/null || true
+          # compileSdk/targetSdk are 36 in the pinned CLI's own template
+          # (tauri-cli-v2.11.2 crates/tauri-cli/templates/mobile/android/app/
+          # build.gradle.kts). The previous platform build-tools 34.0.0 pins
+          # could never satisfy that, which is what broke every APK build.
+          "$SDKM" --sdk_root="$ANDROID_HOME" \
+            "platform-tools" "platforms;android-36" "build-tools;36.0.0" \
+            "ndk;27.0.12077973"
           echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
@@ -115,10 +131,29 @@ jobs:
         shell: bash
         run: |
           echo "Build exit code: ${BUILD_EXIT:-0}"
-          if [ -f android-build.log ]; then
-            tail -n 120 android-build.log
-          else
+          if [ ! -f android-build.log ]; then
             echo "(no android-build.log produced)"
+            exit 0
+          fi
+          tail -n 120 android-build.log
+
+          # Job logs need auth even on a public repo, so the failing line above
+          # is invisible to anyone who is not signed in as the owner.
+          # Annotations ARE public, so on failure re-emit the tail as ::error::
+          # annotations and the real Gradle/Rust cause shows up in the job's
+          # Annotations panel. `%` and CR must be escaped or GitHub drops the
+          # message.
+          if [ "${BUILD_EXIT:-0}" != "0" ]; then
+            echo "--- annotations ---"
+            tail -n 8 android-build.log \
+              | sed -e 's/%/%25/g' -e 's/\r$//' \
+              | while IFS= read -r line; do
+                  # `if` not `&&`: a false test here would leave the pipeline
+                  # exiting 1 and paint this diagnostic step red.
+                  if [ -n "$line" ]; then
+                    printf '::error::%s\n' "${line:0:800}"
+                  fi
+                done
           fi
 
       - name: Sign the APK

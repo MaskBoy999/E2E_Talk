@@ -1,6 +1,6 @@
 [package]
 name = "e2e-chat-app"
-version = "0.2.4"
+version = "0.2.5"
 description = "E2E Chat — native desktop shell for the encrypted chat app"
 authors = ["E2E Chat"]
 edition = "2021"
@@ -39,5 +39,9 @@ tauri-plugin-single-instance = "2"
 codegen-units = 1
 lto = true
 opt-level = "s"
-panic = "abort"
+# Deliberately NOT `panic = "abort"`. Aborting turns any panic into an instant,
+# silent process death: the windowed subsystem hides stderr, so a bug in a
+# command looks like "the app just closed" with nothing to go on (that is
+# exactly how the Save & Launch crash presented). Unwinding lets the panic
+# surface and keeps the app alive.
 strip = true
