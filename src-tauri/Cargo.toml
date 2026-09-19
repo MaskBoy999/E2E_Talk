@@ -1,6 +1,6 @@
 [package]
 name = "e2e-chat-app"
-version = "0.2.3"
+version = "0.2.4"
 description = "E2E Chat — native desktop shell for the encrypted chat app"
 authors = ["E2E Chat"]
 edition = "2021"
@@ -29,6 +29,11 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
 sha2 = "0.10"
 url = "2"
+
+# Desktop-only: a second launch focuses the first instance's window instead of
+# spawning a duplicate app (two tray icons, racing config writers).
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-single-instance = "2"
 
 [profile.release]
 codegen-units = 1

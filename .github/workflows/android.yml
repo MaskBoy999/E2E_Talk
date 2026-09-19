@@ -8,6 +8,12 @@ name: Build Android APK
 #
 # The APK is signed in CI (see "Sign the APK") because a Tauri release build is
 # unsigned by default and Android refuses to install an unsigned APK.
+#
+# The CLI is PINNED: `"^2"` floats to whatever shipped last night, and its
+# `android init` template can then require a newer AGP/SDK than the tools
+# installed below — the Gradle phase dies with "exit code 1" and no useful
+# message, exactly what happened on the v0.2.1–v0.2.3 tags. 2.11.2 matches
+# the SDK/NDK pinned below and the local dev CLI.
 on:
   push:
     tags: ['v*']
@@ -66,16 +72,26 @@ jobs:
           workspaces: src-tauri
 
       - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "^2" --locked
+        run: cargo install tauri-cli --version 2.11.2 --locked
 
       - name: Init Android project (idempotent)
         working-directory: src-tauri
         run: |
           if [ ! -d gen/android ]; then cargo tauri android init; fi
 
+      # The Gradle error summary is buried thousands of lines above the final
+      # exit code, so a plain `run:` step shows "exit code 1" with nothing
+      # actionable. Tee the full output to a file and ALWAYS dump its tail in
+      # the next step (where the Gradle "What went wrong" block lives).
       - name: Build APK
         working-directory: src-tauri
-        run: cargo tauri android build --apk
+        shell: bash
+        run: |
+          set -o pipefail
+          EXIT=0
+          cargo tauri android build --apk 2>&1 | tee android-build.log || EXIT=$?
+          echo "BUILD_EXIT=$EXIT" >> "$GITHUB_ENV"
+          exit $EXIT
 
       # ---------------------------------------------------------------------
       # Android refuses to install an UNSIGNED apk, and a release build here is
@@ -90,6 +106,21 @@ jobs:
       # Either way the result is verified with `apksigner verify`, so an
       # uninstallable APK can never be published silently.
       # ---------------------------------------------------------------------
+      # Runs whether the build passed or failed: on failure this is the only
+      # place the actual Gradle/Rust error is visible (job logs need auth to
+      # read on public repos too).
+      - name: Show build log tail (always)
+        if: always()
+        working-directory: src-tauri
+        shell: bash
+        run: |
+          echo "Build exit code: ${BUILD_EXIT:-0}"
+          if [ -f android-build.log ]; then
+            tail -n 120 android-build.log
+          else
+            echo "(no android-build.log produced)"
+          fi
+
       - name: Sign the APK
         shell: bash
         env:

@@ -69,30 +69,38 @@ fn grant_remote_ipc(app: &tauri::AppHandle, server_url: &str) {
     let Ok(url) = server_url.parse::<tauri::Url>() else {
         return;
     };
-    let Some(host) = url.host_str().map(str::to_string) else {
-        return;
+    // Capabilities match remote origins with URLPattern constructor strings,
+    // which REQUIRE a scheme: `100.x.x.x:3443` panics the ACL resolver at
+    // startup ("a relative input without a base URL is not valid"), taking the
+    // whole app down before any window opens. An origin (scheme + host[:port],
+    // default port already normalized away by the url crate) is both valid and
+    // exactly what the page URL looks like, and pathname/search/hash are
+    // auto-wildcarded from there.
+    let origin = match url.port() {
+        Some(port) => format!("{}://{}:{port}", url.scheme(), url.host_str().unwrap_or_default()),
+        None => format!("{}://{}", url.scheme(), url.host_str().unwrap_or_default()),
     };
 
     // Core capability (events + native notifications). This one must hold:
     // if it fails, the web app silently falls back to browser notifications.
     let capability = CapabilityBuilder::new("remote-main")
-        .remote(host.clone())
+        .remote(origin.clone())
         .window(MAIN_LABEL)
         .permission("core:event:default")
         .permission("notification:default");
     if let Err(e) = app.add_capability(capability) {
-        eprintln!("grant_remote_ipc({host}) failed: {e}");
+        eprintln!("grant_remote_ipc({origin}) failed: {e}");
     }
 
     // Android-only call keepalive, added as its own capability so that a
     // problem resolving it can never take notifications down with it. On
     // desktop the plugin has no commands, so JS never invokes this.
     let call_service = CapabilityBuilder::new("remote-call-service")
-        .remote(host.clone())
+        .remote(origin.clone())
         .window(MAIN_LABEL)
         .permission("call-service:default");
     if let Err(e) = app.add_capability(call_service) {
-        eprintln!("grant_remote_ipc: call-service for {host} failed: {e}");
+        eprintln!("grant_remote_ipc: call-service for {origin} failed: {e}");
     }
 }
 
@@ -427,7 +435,37 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let builder = tauri::Builder::default()
+    // Desktop: enforce one app instance. It must be the FIRST plugin: plugins'
+    // setup hooks run in registration order, and this one claims the OS-wide
+    // lock and forwards latecomers to the already-running instance before any
+    // other plugin touches the app.
+    #[cfg(desktop)]
+    let builder = tauri::Builder::default().plugin(tauri_plugin_single_instance::init(
+        |app, _args, _cwd| {
+            if let Some(w) = app.get_webview_window(MAIN_LABEL) {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+            } else {
+                // Not yet configured / window closed to tray: show setup instead.
+                let url = app
+                    .state::<AppState>()
+                    .cfg
+                    .lock()
+                    .ok()
+                    .and_then(|c| c.server_url.clone());
+                let _ = match url {
+                    Some(u) => open_main(app, &u),
+                    None => open_setup(app),
+                };
+            }
+        },
+    ));
+
+    #[cfg(not(desktop))]
+    let builder = tauri::Builder::default();
+
+    let builder = builder
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         // Android foreground-service keepalive for voice calls. Registered on
