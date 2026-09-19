@@ -6133,7 +6133,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!inp) return;
             var visible = inp.type === 'text';
             inp.type = visible ? 'password' : 'text';
-            this.innerHTML = visible ? '&#128065;' : '&#128064;';
+            this.innerHTML = visible ? icon('eye') : icon('eye-off');
             this.classList.toggle('active', !visible);
         });
         document.getElementById('delete-account-confirm-btn').addEventListener('click', async function () {
@@ -6276,7 +6276,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!inp) return;
             var visible = inp.type === 'text';
             inp.type = visible ? 'password' : 'text';
-            kickAllToggle.innerHTML = visible ? '&#128065;' : '&#128064;';
+            kickAllToggle.innerHTML = visible ? icon('eye') : icon('eye-off');
             kickAllToggle.classList.toggle('active', !visible);
         });
     }
@@ -6407,7 +6407,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!inp) return;
             var visible = inp.type === 'text';
             inp.type = visible ? 'password' : 'text';
-            tgl.innerHTML = visible ? '&#128065;' : '&#128064;';
+            tgl.innerHTML = visible ? icon('eye') : icon('eye-off');
             tgl.classList.toggle('active', !visible);
         });
     });
@@ -6694,7 +6694,7 @@ document.addEventListener('DOMContentLoaded', () => {
             var inp = document.getElementById('twofa-password');
             var visible = inp.type === 'text';
             inp.type = visible ? 'password' : 'text';
-            twofaToggleBtn.innerHTML = visible ? '&#128065;' : '&#128064;';
+            twofaToggleBtn.innerHTML = visible ? icon('eye') : icon('eye-off');
             twofaToggleBtn.classList.toggle('active', !visible);
         });
     }
@@ -6950,7 +6950,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!inp) return;
             var visible = inp.type === 'text';
             inp.type = visible ? 'password' : 'text';
-            tgl.innerHTML = visible ? '&#128065;' : '&#128064;';
+            tgl.innerHTML = visible ? icon('eye') : icon('eye-off');
             tgl.classList.toggle('active', !visible);
         });
     });

@@ -20,6 +20,31 @@
     --active-bg: rgba(79, 195, 247, 0.18);
 }
 
+/* ─── Global scrollbar styling ─────────────────────────────────────── */
+/* Thin, subtle, rounded scrollbars that match the dark theme. */
+::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.12);
+    border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.22);
+}
+::-webkit-scrollbar-corner {
+    background: transparent;
+}
+/* Firefox */
+* {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
+}
+
 /* UI icon utility — used by the icon() JS helper */
 .ui-icon {
     vertical-align: middle;
@@ -1560,7 +1585,6 @@ body.show-msg-times-hover .message:hover .file-card .time-hover {
     font-family: inherit;
     resize: none;
     overflow-y: auto;
-    scrollbar-width: thin;
     min-height: 36px;
     max-height: 120px;
     line-height: 1.4;
@@ -3439,16 +3463,7 @@ select.modal-input:focus {
     overflow-y: auto;
     padding-right: 4px;
 }
-.scheduled-list-container::-webkit-scrollbar {
-    width: 6px;
-}
-.scheduled-list-container::-webkit-scrollbar-track {
-    background: transparent;
-}
-.scheduled-list-container::-webkit-scrollbar-thumb {
-    background: var(--bg-border);
-    border-radius: 3px;
-}
+
 .sch-empty-state {
     color: var(--text-muted);
     font-size: 13px;
@@ -4896,16 +4911,6 @@ select.modal-input:focus {
 .text-viewer-content::-webkit-scrollbar {
     width: 8px;
     height: 8px;
-}
-.text-viewer-content::-webkit-scrollbar-track {
-    background: #1e1e1e;
-}
-.text-viewer-content::-webkit-scrollbar-thumb {
-    background: #555;
-    border-radius: 4px;
-}
-.text-viewer-content::-webkit-scrollbar-thumb:hover {
-    background: #777;
 }
 
 .file-preview audio {
@@ -6409,7 +6414,6 @@ select.modal-input:focus {
     gap: 4px;
     max-height: 50vh;
     overflow-y: auto;
-    scrollbar-width: thin;
 }
 /* On small screens (phones), shrink the reaction picker grid to fluid
    columns so the ~1000-emoji popover fits the viewport width. */
