@@ -97,3 +97,5 @@ probe-*.js
 *.png
 !tests/**/*.png
 !static/icons/*.png
+# Tauri app icons are required by the build (tauri.conf.json bundle.icon)
+!src-tauri/icons/*.png
