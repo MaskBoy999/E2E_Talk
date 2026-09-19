@@ -188,6 +188,12 @@ fn open_main_window(app: &tauri::AppHandle, server_url: &str) -> Result<(), Stri
     if let Some(w) = app.get_webview_window(MAIN_LABEL) {
         // Address changed (tray → Change Server Address) — point it at the new host.
         let _ = w.navigate(parsed);
+        // `unminimize` is desktop-only in Tauri (it lives in a
+        // `#[cfg(desktop)] impl`), and this function compiles for every
+        // platform — so calling it unguarded failed the Android build with
+        // E0599 "no method named unminimize". `show` is enough on mobile,
+        // which has no minimised state.
+        #[cfg(desktop)]
         let _ = w.unminimize();
         let _ = w.show();
         let _ = w.set_focus();
