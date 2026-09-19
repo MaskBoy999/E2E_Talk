@@ -13713,8 +13713,19 @@ var _dmDragPendingRerender = false;
 var _dmDragSourceEl = null;
 var _dmDragWatchdog = null;
 var _dmTouchDragActive = false;
-var _dmTapPending = false; // true during DM double-tap detection window
 var _chTapPending = false; // true during channel double-tap detection window
+// DM double-tap → context menu. Detection is driven off the delayed single-tap
+// action: the first tap schedules the selection 150 ms out, and a second tap on
+// the same row before that timer fires cancels it and opens the context menu.
+// This keeps the detection window and the action delay in lockstep instead of
+// comparing touch timestamps that can drift from the click that actually acts.
+// State lives at module scope (not inside renderDmSidebar) because the selection
+// rebuilds the whole list, wiping per-item closure state mid-gesture.
+var _DM_DOUBLE_TAP_MS = 150;  // how long a single tap waits before acting
+var _dmTapLastId = null;      // dm-id whose selection is pending
+var _dmTapActionTimer = null; // the delayed selection: pending == double-tap window open
+var _dmDragEndedAt = 0;       // guards the click that follows a drag release
+function _dmDragJustEnded() { return Date.now() - _dmDragEndedAt < 400; }
 
 function flushServerDragRerender() {
     if (!_serverDragPendingRerender) return;
@@ -13743,6 +13754,7 @@ function endDmDrag() {
     _dmDragActive = false;
     _dmDragSourceEl = null;
     _dmTouchDragActive = false;
+    _dmDragEndedAt = Date.now();
     if (_dmDragWatchdog) { clearInterval(_dmDragWatchdog); _dmDragWatchdog = null; }
     var list = document.getElementById('dm-list');
     if (list) {
@@ -14019,35 +14031,27 @@ function renderServerList() {
         div.title = dn;
         div.dataset.id = s.id;
         if (!opts.noSelect) {
-            // Double-tap detection for servers: first tap delays selectServer
-            // so a second tap within ~300 ms opens the context menu instead.
-            var _svLastTap = 0, _svLastTarget = null, _svTapTimer = null;
-            div.addEventListener('click', function(e) {
-                // Swallow the click that follows a touch drag.
+            // Touch-based double-tap for servers: double-tap opens context menu
+            var _svLastTE = 0, _svLastTETarget = null;
+            div.addEventListener('touchend', function () {
                 if (Date.now() - _serverTouchDragEndedAt < 400) return;
-                if ('ontouchstart' in window) {
-                    var now = Date.now();
-                    if (div === _svLastTarget && (now - _svLastTap) < 150) {
-                        clearTimeout(_svTapTimer); _svTapTimer = null;
-                        _svLastTarget = null;
-                        if (!opts.noSelect) showServerContextMenu(e, s.id, s.name);
-                        return;
-                    }
-                    _svLastTarget = div;
-                    _svLastTap = now;
-                    _svTapTimer = setTimeout(function () {
-                        _svTapTimer = null; _svLastTarget = null;
-                        if (e.isTrusted && window.VoiceManager && window.VoiceManager.exitVoiceChannelView) {
-                            try { window.VoiceManager.exitVoiceChannelView(); } catch (_) {}
-                        }
-                        selectServer(s.id);
-                    }, 150);
-                } else {
-                    if (e.isTrusted && window.VoiceManager && window.VoiceManager.exitVoiceChannelView) {
-                        try { window.VoiceManager.exitVoiceChannelView(); } catch (_) {}
-                    }
-                    selectServer(s.id);
+                var now = Date.now();
+                if (div === _svLastTETarget && (now - _svLastTE) < 150) {
+                    _svLastTETarget = null;
+                    window._doubleTapJustFired = true;
+                    if (!opts.noSelect) showServerContextMenu({ clientX: 0, clientY: 0, preventDefault: function(){}, stopPropagation: function(){} }, s.id, s.name);
+                    return;
                 }
+                _svLastTETarget = div;
+                _svLastTE = now;
+            }, { passive: true });
+            div.addEventListener('click', function(e) {
+                if (window._doubleTapJustFired) { window._doubleTapJustFired = false; return; }
+                if (Date.now() - _serverTouchDragEndedAt < 400) return;
+                if (e.isTrusted && window.VoiceManager && window.VoiceManager.exitVoiceChannelView) {
+                    try { window.VoiceManager.exitVoiceChannelView(); } catch (_) {}
+                }
+                selectServer(s.id);
             });
         }
         div.addEventListener('contextmenu', function(e) {
@@ -14127,26 +14131,24 @@ function renderServerList() {
                 badge.className = 'group-badge';
                 badge.textContent = groupServers.length;
                 header.appendChild(badge);
-                var _grpLastTap = 0, _grpLastTarget = null, _grpTapTimer = null;
-                header.addEventListener('click', function(e) {
-                    if (e.target !== header || _touchDragJustEnded()) return;
-                    if ('ontouchstart' in window) {
-                        var now = Date.now();
-                        if (header === _grpLastTarget && (now - _grpLastTap) < 150) {
-                            clearTimeout(_grpTapTimer); _grpTapTimer = null;
-                            _grpLastTarget = null;
-                            showGroupContextMenu(e, g);
-                            return;
-                        }
-                        _grpLastTarget = header;
-                        _grpLastTap = now;
-                        _grpTapTimer = setTimeout(function () {
-                            _grpTapTimer = null; _grpLastTarget = null;
-                            toggleGroup(g.id);
-                        }, 150);
-                    } else {
-                        toggleGroup(g.id);
+                // Touch-based double-tap for collapsed group header
+                var _grpLastTE = 0, _grpLastTETarget = null;
+                header.addEventListener('touchend', function () {
+                    if (_touchDragJustEnded()) return;
+                    var now = Date.now();
+                    if (header === _grpLastTETarget && (now - _grpLastTE) < 150) {
+                        _grpLastTETarget = null;
+                        window._doubleTapJustFired = true;
+                        showGroupContextMenu({ clientX: 0, clientY: 0, preventDefault: function(){}, stopPropagation: function(){} }, g);
+                        return;
                     }
+                    _grpLastTETarget = header;
+                    _grpLastTE = now;
+                }, { passive: true });
+                header.addEventListener('click', function(e) {
+                    if (window._doubleTapJustFired) { window._doubleTapJustFired = false; return; }
+                    if (e.target !== header || _touchDragJustEnded()) return;
+                    toggleGroup(g.id);
                 });
             } else {
                 // Expanded: show group name and servers
@@ -14158,26 +14160,24 @@ function renderServerList() {
                 }
                 toggle.textContent = '\u25BC ' + g.name;
                 toggle.title = 'Click to collapse ' + g.name;
-                var _grpLastTap2 = 0, _grpLastTarget2 = null, _grpTapTimer2 = null;
-                toggle.addEventListener('click', function(e) {
+                // Touch-based double-tap for expanded group toggle
+                var _grpLastTE2 = 0, _grpLastTETarget2 = null;
+                toggle.addEventListener('touchend', function () {
                     if (_touchDragJustEnded()) return;
-                    if ('ontouchstart' in window) {
-                        var now = Date.now();
-                        if (toggle === _grpLastTarget2 && (now - _grpLastTap2) < 150) {
-                            clearTimeout(_grpTapTimer2); _grpTapTimer2 = null;
-                            _grpLastTarget2 = null;
-                            showGroupContextMenu(e, g);
-                            return;
-                        }
-                        _grpLastTarget2 = toggle;
-                        _grpLastTap2 = now;
-                        _grpTapTimer2 = setTimeout(function () {
-                            _grpTapTimer2 = null; _grpLastTarget2 = null;
-                            toggleGroup(g.id);
-                        }, 150);
-                    } else {
-                        toggleGroup(g.id);
+                    var now = Date.now();
+                    if (toggle === _grpLastTETarget2 && (now - _grpLastTE2) < 150) {
+                        _grpLastTETarget2 = null;
+                        window._doubleTapJustFired = true;
+                        showGroupContextMenu({ clientX: 0, clientY: 0, preventDefault: function(){}, stopPropagation: function(){} }, g);
+                        return;
                     }
+                    _grpLastTETarget2 = toggle;
+                    _grpLastTE2 = now;
+                }, { passive: true });
+                toggle.addEventListener('click', function(e) {
+                    if (window._doubleTapJustFired) { window._doubleTapJustFired = false; return; }
+                    if (_touchDragJustEnded()) return;
+                    toggleGroup(g.id);
                 });
                 header.appendChild(toggle);
             }
@@ -18682,38 +18682,44 @@ function renderDmSidebar() {
     html += '</div>';
     container.innerHTML = html;
 
-    // Event delegation for DM items
-    // Double-tap detection shared state for DM items
-    var _dmLastTap = 0, _dmLastTarget = null, _dmTapTimer = null;
-
+    // Event delegation for DM items.
+    // A touch double-tap mirrors right-click: it opens the DM context menu.
+    // Detection is purely "is the previous tap's selection still waiting?": if a
+    // second tap lands on the same row before the 150 ms timer fires it becomes
+    // the context menu instead, so there is no separate window that can drift.
     document.querySelectorAll('.dm-item[data-dm-id]').forEach(item => {
         item.addEventListener('click', (e) => {
-            if ('ontouchstart' in window) {
-                var now = Date.now();
-                if (item === _dmLastTarget && (now - _dmLastTap) < 150) {
-                    // Double-tap: show context menu, suppress primary action.
-                    clearTimeout(_dmTapTimer); _dmTapTimer = null;
-                    _dmLastTarget = null;
-                    _dmTapPending = false;
-                    showDmContextMenu(e, item.dataset.dmId, item.dataset.username || 'user');
-                    return;
-                }
-                _dmLastTarget = item;
-                _dmLastTap = now;
-                _dmTapPending = true;
-                _dmTapTimer = setTimeout(function () {
-                    _dmTapTimer = null; _dmLastTarget = null; _dmTapPending = false;
-                    if (e.isTrusted && window.VoiceManager && window.VoiceManager.exitVoiceChannelView) {
-                        try { window.VoiceManager.exitVoiceChannelView(); } catch (_) {}
-                    }
-                    selectDmChannel(item.dataset.dmId, item.dataset.userId, item.dataset.username, item);
-                }, 150);
-            } else {
-                if (e.isTrusted && window.VoiceManager && window.VoiceManager.exitVoiceChannelView) {
+            // The click synthesized on release of a long-press drag is not a tap.
+            if (_dmDragJustEnded()) return;
+            var dmId = item.dataset.dmId;
+            if (_dmTapActionTimer && dmId === _dmTapLastId) {
+                // Second tap before the pending selection fired → double tap.
+                clearTimeout(_dmTapActionTimer);
+                _dmTapActionTimer = null;
+                _dmTapLastId = null;
+                // Don't let this click bubble to the menu's outside-click handler.
+                e.stopPropagation();
+                var r = item.getBoundingClientRect();
+                showDmContextMenu(
+                    { clientX: e.clientX || (r.left + 24), clientY: e.clientY || (r.top + r.height / 2), preventDefault: function(){}, stopPropagation: function(){} },
+                    dmId, item.dataset.username || 'user'
+                );
+                return;
+            }
+            // First tap: wait 150 ms before acting so a second tap can be seen.
+            if (_dmTapActionTimer) clearTimeout(_dmTapActionTimer);
+            _dmTapLastId = dmId;
+            var userId = item.dataset.userId;
+            var username = item.dataset.username;
+            var isTrusted = e.isTrusted;
+            _dmTapActionTimer = setTimeout(function () {
+                _dmTapActionTimer = null;
+                _dmTapLastId = null;
+                if (isTrusted && window.VoiceManager && window.VoiceManager.exitVoiceChannelView) {
                     try { window.VoiceManager.exitVoiceChannelView(); } catch (_) {}
                 }
-                selectDmChannel(item.dataset.dmId, item.dataset.userId, item.dataset.username, item);
-            }
+                selectDmChannel(dmId, userId, username, item);
+            }, _DM_DOUBLE_TAP_MS);
         });
         // Right-click context menu for mute/unmute
         item.addEventListener('contextmenu', function (e) {
@@ -19041,15 +19047,9 @@ async function selectDmChannel(dmChannelId, otherUserId, otherUsername, element)
         window.VoiceManager.updateDmCallUI && window.VoiceManager.updateDmCallUI();
     }
 
-    // On mobile, delay sidebar close so a second tap can reach the DM item
-    // for double-tap → context menu.
-    if (window._closeSidebar) {
-        if (_dmTapPending) {
-            // Sidebar will close after the double-tap window expires.
-        } else {
-            window._closeSidebar();
-        }
-    }
+    // A double tap never reaches here — it cancels the delayed single-tap
+    // selection in the DM click handler — so closing outright is safe.
+    if (window._closeSidebar) window._closeSidebar();
 }
 
 // Re-sync the server-persisted DM-call waiting state from the API. Merges

@@ -1299,29 +1299,25 @@
 
 
 
-        // Click to collapse/expand — on mobile, double-tap shows context menu
-        // instead of toggling.
-        var _catLastTap = 0, _catLastTarget = null, _catTapTimer = null;
-        header.addEventListener('click', function (e) {
-            if ('ontouchstart' in window) {
-                var now = Date.now();
-                if (header === _catLastTarget && (now - _catLastTap) < 150) {
-                    clearTimeout(_catTapTimer); _catTapTimer = null;
-                    _catLastTarget = null;
-                    if (isOwner && categoryId) {
-                        _showCategoryContextMenu(e.clientX, e.clientY, serverId, categoryId, name, channels);
-                    }
-                    return;
+        // Touch-based double-tap for category header: double-tap opens
+        // context menu instead of collapsing/expanding.
+        var _catLastTE = 0, _catLastTETarget = null;
+        header.addEventListener('touchend', function () {
+            var now = Date.now();
+            if (header === _catLastTETarget && (now - _catLastTE) < 150) {
+                _catLastTETarget = null;
+                window._doubleTapJustFired = true;
+                if (isOwner && categoryId) {
+                    _showCategoryContextMenu(0, 0, serverId, categoryId, name, channels);
                 }
-                _catLastTarget = header;
-                _catLastTap = now;
-                _catTapTimer = setTimeout(function () {
-                    _catTapTimer = null; _catLastTarget = null;
-                    group.classList.toggle('collapsed');
-                }, 150);
-            } else {
-                group.classList.toggle('collapsed');
+                return;
             }
+            _catLastTETarget = header;
+            _catLastTE = now;
+        }, { passive: true });
+        header.addEventListener('click', function (e) {
+            if (window._doubleTapJustFired) { window._doubleTapJustFired = false; return; }
+            group.classList.toggle('collapsed');
         });
 
 
@@ -1525,38 +1521,30 @@
                     if (window.VoiceManager) VoiceManager.joinServerVoice(serverId, ch.id, chDisplayName);
 
                 });            } else {
-                // Double-tap detection for text channels: first tap delays the
-                // action so a second tap within ~300 ms can open the context menu
-                // instead of entering the channel.
-                var _chLastTap = 0, _chLastTarget = null, _chTapTimer = null;
-                div.addEventListener('click', function (ev) {
-                    if ('ontouchstart' in window) {
-                        var now = Date.now();
-                        if (div === _chLastTarget && (now - _chLastTap) < 150) {
-                            // Double-tap: show context menu, suppress primary action.
-                            clearTimeout(_chTapTimer); _chTapTimer = null;
-                            _chLastTarget = null;
-                            window._chTapPending = false;
-                            _showChannelContextMenu(ev.clientX, ev.clientY, serverId, ch, chDisplayName, categoryId, isOwner);
-                            return;
-                        }
-                        _chLastTarget = div;
-                        _chLastTap = now;
-                        window._chTapPending = true;
-                        _chTapTimer = setTimeout(function () {
-                            _chTapTimer = null; _chLastTarget = null;
-                            window._chTapPending = false;
-                            if (ev.isTrusted && window.VoiceManager && window.VoiceManager.exitVoiceChannelView) {
-                                try { window.VoiceManager.exitVoiceChannelView(); } catch (_) {}
-                            }
-                            selectChannel(ch.id, chDisplayName, div);
-                        }, 150);
-                    } else {
-                        if (ev.isTrusted && window.VoiceManager && window.VoiceManager.exitVoiceChannelView) {
-                            try { window.VoiceManager.exitVoiceChannelView(); } catch (_) {}
-                        }
-                        selectChannel(ch.id, chDisplayName, div);
+                // Double-tap detection via touchstart (instant, no delay).
+                // If the same channel is tapped twice within 150 ms, show the
+                // context menu instead of entering the channel.
+                var _chLastTouchEnd = 0, _chLastTouchTarget = null;
+                div.addEventListener('touchend', function () {
+                    var now = Date.now();
+                    if (div === _chLastTouchTarget && (now - _chLastTouchEnd) < 150) {
+                        _chLastTouchTarget = null;
+                        window._chTapPending = false;
+                        window._doubleTapJustFired = true;
+                        _showChannelContextMenu(0, 0, serverId, ch, chDisplayName, categoryId, isOwner);
+                        return;
                     }
+                    _chLastTouchTarget = div;
+                    _chLastTouchEnd = now;
+                    window._chTapPending = true;
+                    setTimeout(function () { window._chTapPending = false; }, 200);
+                }, { passive: true });
+                div.addEventListener('click', function (ev) {
+                    if (window._doubleTapJustFired) { window._doubleTapJustFired = false; return; }
+                    if (ev.isTrusted && window.VoiceManager && window.VoiceManager.exitVoiceChannelView) {
+                        try { window.VoiceManager.exitVoiceChannelView(); } catch (_) {}
+                    }
+                    selectChannel(ch.id, chDisplayName, div);
                 });
             }
 
