@@ -295,6 +295,30 @@
       "type": "string",
       "oneOf": [
         {
+          "description": "Enables the cancelIncoming command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-cancel-incoming",
+          "markdownDescription": "Enables the cancelIncoming command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the cancelIncoming command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-cancel-incoming",
+          "markdownDescription": "Denies the cancelIncoming command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the incomingCall command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-incoming-call",
+          "markdownDescription": "Enables the incomingCall command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the incomingCall command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-incoming-call",
+          "markdownDescription": "Denies the incomingCall command without any pre-configured scope."
+        },
+        {
           "description": "Enables the start command without any pre-configured scope.",
           "type": "string",
           "const": "allow-start",
@@ -319,10 +343,10 @@
           "markdownDescription": "Denies the stop command without any pre-configured scope."
         },
         {
-          "description": "Start and stop the Android foreground service that keeps an active voice call\nalive while the screen is off or the app is backgrounded.\n\n#### This default permission set includes:\n\n- `allow-start`\n- `allow-stop`",
+          "description": "Keep an active voice call alive while the screen is off or the app is\nbackgrounded (start/stop the Android foreground service), and raise the\nfull-screen incoming-call notification when a call arrives while the app is\nnot in the foreground.\n\n#### This default permission set includes:\n\n- `allow-start`\n- `allow-stop`\n- `allow-incoming-call`\n- `allow-cancel-incoming`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Start and stop the Android foreground service that keeps an active voice call\nalive while the screen is off or the app is backgrounded.\n\n#### This default permission set includes:\n\n- `allow-start`\n- `allow-stop`"
+          "markdownDescription": "Keep an active voice call alive while the screen is off or the app is\nbackgrounded (start/stop the Android foreground service), and raise the\nfull-screen incoming-call notification when a call arrives while the app is\nnot in the foreground.\n\n#### This default permission set includes:\n\n- `allow-start`\n- `allow-stop`\n- `allow-incoming-call`\n- `allow-cancel-incoming`"
         }
       ]
     }

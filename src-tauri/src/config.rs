@@ -17,6 +17,11 @@ pub struct Config {
     pub auto_start: bool,
     /// Closing the window hides it to the tray instead of quitting.
     pub minimize_to_tray: bool,
+    /// TOFU: SHA-256 of the host's leaf certificate (DER, hex), captured on the
+    /// first successful "Save & Launch" and checked on every launch after.
+    /// The server uses a self-signed cert, so pinning the fingerprint is what
+    /// lets us reject a swapped/MITM certificate instead of trusting anything.
+    pub pinned_cert_sha256: Option<String>,
 }
 
 impl Default for Config {
@@ -25,6 +30,7 @@ impl Default for Config {
             server_url: None,
             auto_start: false,
             minimize_to_tray: true,
+            pinned_cert_sha256: None,
         }
     }
 }

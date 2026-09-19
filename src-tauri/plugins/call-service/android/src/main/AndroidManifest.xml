@@ -3,6 +3,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_CALL" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Ring over the lock screen / other apps while the WebView is frozen. -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
 
     <application>
         <!-- merged into the app manifest at build time -->
@@ -10,5 +12,9 @@
             android:name="com.e2echat.callservice.CallForegroundService"
             android:exported="false"
             android:foregroundServiceType="mediaCall" />
+
+        <receiver
+            android:name="com.e2echat.callservice.IncomingCallActionReceiver"
+            android:exported="false" />
     </application>
 </manifest>

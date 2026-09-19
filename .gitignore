@@ -34,6 +34,11 @@ server/server_err*.txt
 # TLS certificates (auto-generated)
 certs/
 
+# Web Push (VAPID) keypair — auto-generated next to the database. SECRET:
+# committing this would let anyone send push notifications as the server.
+vapid_private.pem
+*.pem
+
 # Environment files
 .env
 

@@ -16,6 +16,7 @@ mod auth;
 mod config;
 mod db;
 mod handlers;
+mod push;
 mod totp;
 mod ws;
 
@@ -39,6 +40,17 @@ pub struct AppState {
     /// Clients upload decrypted audio here, send the token via WS,
     /// and receivers fetch via HTTP — avoids base64-enormous WS payloads.
     pub sb_temp_play: std::sync::RwLock<std::collections::HashMap<String, (Vec<u8>, std::time::Instant)>>,
+    /// VAPID keypair for Web Push (self-generated on first boot, persisted
+    /// next to the database). None if key generation failed — push is then
+    /// disabled but everything else keeps working.
+    pub vapid: Option<push::VapidKeys>,
+    /// Optional Firebase service-account key (env `FCM_SERVICE_ACCOUNT_JSON`,
+    /// raw JSON or a path). None = Android push off.
+    pub fcm: Option<push::FcmCredentials>,
+    /// Cached OAuth2 access token for the FCM v1 API.
+    pub fcm_token: push::FcmTokenCache,
+    /// Shared HTTP client for push sends (connection pooling).
+    pub push_http: reqwest::Client,
 }
 
 /// G2 limits that can be tuned at runtime from the admin panel.
@@ -426,6 +438,23 @@ async fn main() {
     let fresh = db.is_fresh_db().unwrap_or(true);
     tracing::info!("Database setup status: {}", if fresh { "fresh — redirecting to admin setup" } else { "configured" });
     let runtime_tuning = std::sync::Arc::new(std::sync::RwLock::new(RuntimeTuning::load(&db)));
+
+    // Web Push (VAPID): load or self-generate the keypair. Failure disables
+    // push but must never take the server down.
+    let vapid = match push::load_or_create_vapid(std::path::Path::new(&config.database_url)) {
+        Ok(k) => Some(k),
+        Err(e) => {
+            tracing::warn!("push: VAPID keys unavailable, Web Push disabled: {e}");
+            None
+        }
+    };
+    let fcm = push::load_fcm_credentials();
+    if fcm.is_none() {
+        tracing::info!(
+            "push: no Firebase service account set (FCM_SERVICE_ACCOUNT_JSON) — Android push disabled"
+        );
+    }
+
     let state = Arc::new(AppState {
         setup_complete: AtomicBool::new(!fresh),
         db,
@@ -434,6 +463,10 @@ async fn main() {
         voice_rooms: std::sync::RwLock::new(std::collections::HashMap::new()),
         runtime_tuning,
         sb_temp_play: std::sync::RwLock::new(std::collections::HashMap::new()),
+        vapid,
+        fcm,
+        fcm_token: tokio::sync::Mutex::new(None),
+        push_http: reqwest::Client::new(),
     });
 
     // Run orphan file cleanup on startup, then periodically every hour
@@ -538,6 +571,9 @@ async fn main() {
         .route("/api/2fa/verify-enroll", post(handlers::verify_enroll_2fa))
         .route("/api/2fa/disable", post(handlers::disable_2fa))
         .route("/api/2fa/status", get(handlers::get_2fa_status))
+        .route("/api/push/vapid-public-key", get(handlers::push_vapid_public_key))
+        .route("/api/push/register", post(handlers::push_register))
+        .route("/api/push/unregister", post(handlers::push_unregister))
         .route("/api/password/change", post(handlers::change_password))
         .route("/api/servers", get(handlers::list_servers).post(handlers::create_server))
         .route("/api/servers/{server_id}/channels", get(handlers::list_channels).post(handlers::create_channel))

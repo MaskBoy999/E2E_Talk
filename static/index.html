@@ -587,6 +587,19 @@
                 <button class="settings-tab" data-tab="voice-settings">Voice</button>
                 <button class="settings-tab" data-tab="shortcut-settings">Shortcuts</button>
                 <button class="settings-tab" data-tab="custom-css-settings">CSS</button>
+                <!-- Box app only; shown by chat.js when running in the native shell. -->
+                <button class="settings-tab" data-tab="connection-settings" id="connection-settings-tab" style="display:none">Connection</button>
+            </div>
+
+            <!-- Connection (box app only; hidden in a plain browser) -->
+            <div class="settings-panel" id="connection-settings" style="display:none">
+                <div class="settings-group">
+                    <h4>Server</h4>
+                    <p class="settings-hint">This app talks to your own E2E Chat server. Any host and port work — <code>3443</code> is only the default.</p>
+                    <p id="connection-server-address" style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;color:var(--text-primary);margin:6px 0 12px">…</p>
+                    <button class="btn btn-secondary" id="connection-change-server-btn">Change server address…</button>
+                    <p class="settings-hint">Opens the setup screen, where you can change the IP/hostname and the port, and re-trust the certificate if the server's was rotated.</p>
+                </div>
             </div>
 
             <!-- User Settings -->
@@ -2371,6 +2384,7 @@
     <script src="roles.js?v=5"></script>
     <script src="doc-preview.js?v=2"></script>
     <script src="chat.js?v=52"></script>
+    <script src="push-client.js?v=2"></script>
     <script>
     // PWA: Register service worker
     if ('serviceWorker' in navigator) {

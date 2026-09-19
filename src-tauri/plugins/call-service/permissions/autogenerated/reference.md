@@ -1,12 +1,16 @@
 ## Default Permission
 
-Start and stop the Android foreground service that keeps an active voice call
-alive while the screen is off or the app is backgrounded.
+Keep an active voice call alive while the screen is off or the app is
+backgrounded (start/stop the Android foreground service), and raise the
+full-screen incoming-call notification when a call arrives while the app is
+not in the foreground.
 
 #### This default permission set includes the following:
 
 - `allow-start`
 - `allow-stop`
+- `allow-incoming-call`
+- `allow-cancel-incoming`
 
 ## Permission Table
 
@@ -16,6 +20,58 @@ alive while the screen is off or the app is backgrounded.
 <th>Description</th>
 </tr>
 
+
+<tr>
+<td>
+
+`call-service:allow-cancel-incoming`
+
+</td>
+<td>
+
+Enables the cancelIncoming command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`call-service:deny-cancel-incoming`
+
+</td>
+<td>
+
+Denies the cancelIncoming command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`call-service:allow-incoming-call`
+
+</td>
+<td>
+
+Enables the incomingCall command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`call-service:deny-incoming-call`
+
+</td>
+<td>
+
+Denies the incomingCall command without any pre-configured scope.
+
+</td>
+</tr>
 
 <tr>
 <td>

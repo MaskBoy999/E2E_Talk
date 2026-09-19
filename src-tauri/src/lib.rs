@@ -10,10 +10,10 @@
 //! Desktop-only pieces (tray, auto-start, close-to-tray) are `cfg(desktop)`;
 //! the same crate builds for Android via `cargo tauri android build`.
 
+mod cert_probe;
 mod config;
 
 use std::sync::Mutex;
-use std::time::Duration;
 
 use tauri::ipc::CapabilityBuilder;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
@@ -40,6 +40,21 @@ const SETUP_PAGE: &str = "box-setup.html";
 #[derive(Default)]
 pub struct AppState {
     pub cfg: Mutex<Config>,
+}
+
+// ── Certificate pinning helpers ──────────────────────────────────────────
+
+/// Run the blocking TOFU probe off the async worker pool.
+async fn fingerprint(url: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || cert_probe::fingerprint_of(&url))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Blocking variant for the sync call sites (startup, tray menu).
+fn fingerprint_blocking(url: &str) -> Result<String, String> {
+    let url = url.to_string();
+    tauri::async_runtime::block_on(async move { fingerprint(url).await })
 }
 
 // ── Windows ──────────────────────────────────────────────────────────────
@@ -87,6 +102,30 @@ fn open_main(app: &tauri::AppHandle, server_url: &str) -> Result<(), String> {
         .parse()
         .map_err(|e| format!("Invalid server address: {e}"))?;
 
+    // TOFU enforcement on every launch: refuse to open the app for a host
+    // whose certificate no longer matches the pinned fingerprint. The user
+    // re-trusts (or aborts) from the setup screen.
+    //
+    // Only a *mismatch* is fatal. If the probe can't complete (host offline,
+    // Tailscale down) we still open the window: the page will show its own
+    // connection error, and a temporary outage must never masquerade as a
+    // certificate problem or force the user back through setup.
+    {
+        let pinned = app
+            .state::<AppState>()
+            .cfg
+            .lock()
+            .ok()
+            .and_then(|c| c.pinned_cert_sha256.clone());
+        if let Some(expected) = pinned {
+            match fingerprint_blocking(server_url) {
+                Ok(actual) if actual != expected => return Err(cert_probe::mismatch_message()),
+                Ok(_) => {}
+                Err(e) => eprintln!("certificate pin not checked: {e}"),
+            }
+        }
+    }
+
     // Allow the remote page to raise native notifications / listen to events.
     grant_remote_ipc(app, server_url);
 
@@ -133,6 +172,26 @@ fn open_main(app: &tauri::AppHandle, server_url: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Build the **main** window showing the local setup page.
+///
+/// Fallback for single-window platforms: Tauri can only open a second window
+/// on Android 12L+ / iOS 13+, so on anything older `open_setup` cannot work at
+/// all. Without this the app would launch to a blank screen with no way to
+/// enter the server address.
+fn open_main_at_setup(app: &tauri::AppHandle) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window(MAIN_LABEL) {
+        let _ = w.show();
+        let _ = w.set_focus();
+        return Ok(());
+    }
+    WebviewWindowBuilder::new(app, MAIN_LABEL, WebviewUrl::App(SETUP_PAGE.into()))
+        .title("E2E Chat — Setup")
+        .inner_size(560.0, 660.0)
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Open (or focus) the local setup window.
 fn open_setup(app: &tauri::AppHandle) -> Result<(), String> {
     if let Some(w) = app.get_webview_window(SETUP_LABEL) {
@@ -163,16 +222,22 @@ struct ConnResult {
     detail: String,
 }
 
-/// Reachability probe for the setup screen. The server uses a self-signed
-/// certificate (Tailscale), so certificate validation is accepted here; the
-/// pinned-fingerprint trust flow is a later hardening step.
+/// Reachability probe for the setup screen. TLS is verified via the TOFU
+/// fingerprint pinned in the config (see `cert_probe.rs`) — a self-signed
+/// Tailscale cert is accepted once the user has trusted it, and a *swapped*
+/// cert is refused with a re-trust prompt in the UI.
 #[tauri::command]
-async fn test_connection(url: String) -> Result<ConnResult, String> {
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .timeout(Duration::from_secs(8))
-        .build()
-        .map_err(|e| e.to_string())?;
+async fn test_connection(
+    app: tauri::AppHandle,
+    url: String,
+) -> Result<ConnResult, String> {
+    let state = app.state::<AppState>();
+    let pinned = state
+        .cfg
+        .lock()
+        .ok()
+        .and_then(|c| c.pinned_cert_sha256.clone());
+    let client = cert_probe::pinned_client(pinned.as_deref(), &url)?;
 
     let target = url.trim_end_matches('/').to_string();
     match client.get(&target).send().await {
@@ -209,15 +274,23 @@ async fn test_connection(url: String) -> Result<ConnResult, String> {
     }
 }
 
+/// Fetch the host certificate's SHA-256 fingerprint (TOFU). The setup screen
+/// calls this before saving so the user can pin what they saw at first trust.
+#[tauri::command]
+async fn probe_certificate(url: String) -> Result<String, String> {
+    fingerprint(url).await
+}
+
 /// Persist the chosen server + preferences, apply auto-start, then open the
 /// app window and close the setup window.
 #[tauri::command]
-fn save_config(
+async fn save_config(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     server_url: String,
     auto_start: bool,
     minimize_to_tray: bool,
+    pin_cert: bool,
 ) -> Result<(), String> {
     let server_url = server_url.trim().to_string();
     if server_url.is_empty() {
@@ -228,11 +301,36 @@ fn save_config(
         .parse()
         .map_err(|_| "That doesn't look like a valid address (try https://100.x.x.x:3443)".to_string())?;
 
+    // TOFU pinning. The TLS handshake is awaited off the main thread, so the
+    // setup window never freezes during "Save & Launch".
+    let existing_pin = state
+        .cfg
+        .lock()
+        .map(|c| c.pinned_cert_sha256.clone())
+        .unwrap_or(None);
+    let new_pin = if pin_cert {
+        // Ticked = trust (or deliberately re-trust) whatever the host presents
+        // now. This is the escape hatch after a legitimate certificate
+        // rotation, which is exactly what the setup copy instructs.
+        Some(fingerprint(server_url.clone()).await.map_err(|e| {
+            format!(
+                "Could not read the server certificate: {e}\n\nCheck the address, \
+                 or untick \"Trust this server's certificate\"."
+            )
+        })?)
+    } else {
+        // Unticked: keep any pin already established — never silently drop one.
+        existing_pin
+    };
+
     {
         let mut cfg = state.cfg.lock().unwrap();
         cfg.server_url = Some(server_url.clone());
         cfg.auto_start = auto_start;
         cfg.minimize_to_tray = minimize_to_tray;
+        if new_pin.is_some() {
+            cfg.pinned_cert_sha256 = new_pin;
+        }
         config::save(&app, &cfg)?;
     }
 
@@ -265,9 +363,7 @@ fn show_setup(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 fn quit_app(app: tauri::AppHandle) {
     app.exit(0);
-}
-
-/// Native (OS-level) notification. The web app calls this when it's running
+}/// Native (OS-level) notification. The web app calls this when it's running
 /// inside the box; on desktop it renders as a system banner, on Android as a
 /// notification — in both cases far richer than the Web Notification API
 /// (which Android WebView does not support at all).
@@ -349,6 +445,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_config,
             test_connection,
+            probe_certificate,
             save_config,
             show_setup,
             quit_app,
@@ -371,7 +468,16 @@ pub fn run() {
                     }
                 }
                 None => {
-                    let _ = open_setup(&handle);
+                    // First run. If the platform refuses a second window, show
+                    // the setup page in the main window instead — the address
+                    // can still be entered, and `save_config` navigates that
+                    // same window to the server afterwards.
+                    if let Err(e) = open_setup(&handle) {
+                        eprintln!("open_setup failed ({e}); showing setup in the main window");
+                        if let Err(e) = open_main_at_setup(&handle) {
+                            eprintln!("setup fallback window failed: {e}");
+                        }
+                    }
                 }
             }
 

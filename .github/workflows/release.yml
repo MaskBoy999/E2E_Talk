@@ -1,21 +1,32 @@
 name: Build Desktop Box
 
-# Push a tag like v0.2.0 to publish installers users can download straight from
+# Push a tag like v0.2.2 to publish installers users can download straight from
 # the GitHub Releases page. Run it manually from the Actions tab to get the
 # installers as workflow artifacts without publishing a release.
 #
 # Code signing is OPTIONAL and secret-gated: with no secrets configured the
-# builds still succeed, they just warn on first launch (SmartScreen / Gatekeeper).
-# Configure these repository secrets to get rid of the warnings:
+# builds still succeed, they just warn on first launch (SmartScreen). Configure
+# these repository secrets to turn it on:
 #
-#   Windows WINDOWS_CERTIFICATE       base64 of a code-signing .pfx
-#          WINDOWS_CERTIFICATE_PASSWORD password for that .pfx
+#   Windows code signing
+#     WINDOWS_CERTIFICATE             base64 of a code-signing .pfx
+#     WINDOWS_CERTIFICATE_PASSWORD    password for that .pfx
 #
-# See WEBSITE_IN_A_BOX_MASTER_PLAN.md §10.4 for how to obtain each of these.
+# There is deliberately NO auto-updater (users re-download each release — see
+# WEBSITE_IN_A_BOX_MASTER_PLAN.md §8), so no update-signing key is involved.
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
+
+# tauri-action creates/updates the Release, so the token needs write access.
+# Without this the build succeeds but publishing fails silently in some repos.
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -55,8 +66,24 @@ jobs:
           workspaces: src-tauri
 
       # ---------------------------------------------------------------------
-      # Windows: import the .pfx, read its thumbprint, and hand Tauri a config
-      # override that signs every .exe/.msi with it.
+      # A single config file carries the optional build tweaks, so we never have
+      # to pass two `--config` flags (their precedence is easy to get wrong).
+      # Starts as an empty object; the Windows step below merges the cert into
+      # it when a certificate secret exists.
+      # ---------------------------------------------------------------------
+      - name: Prepare signing config
+        shell: bash
+        run: |
+          echo '{}' > ci-signing.conf.json
+          # `pwd -W` (Git Bash) yields a Windows path the Rust CLI can open;
+          # plain `pwd` is the POSIX path on Linux.
+          workdir="$(pwd -W 2>/dev/null || pwd)"
+          echo "SIGNING_ARGS=--config \"$workdir/ci-signing.conf.json\"" >> "$GITHUB_ENV"
+          cat ci-signing.conf.json
+
+      # ---------------------------------------------------------------------
+      # Windows: import the .pfx, read its thumbprint, and merge it into the
+      # same config file so every .exe/.msi is signed with it.
       # ---------------------------------------------------------------------
       - name: Import Windows code signing certificate
         id: win-sign
@@ -70,17 +97,17 @@ jobs:
           [IO.File]::WriteAllBytes($pfx, $bytes)
           $pw = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -Force -AsPlainText
           $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $pw
-          $conf = Join-Path $env:GITHUB_WORKSPACE 'windows-signing.conf.json'
-          @{
-            bundle = @{
-              windows = @{
-                certificateThumbprint = $cert.Thumbprint
-                digestAlgorithm       = 'sha256'
-                timestampUrl          = 'http://timestamp.digicert.com'
-              }
-            }
-          } | ConvertTo-Json -Depth 5 | Set-Content -Path $conf -Encoding utf8
-          "args=--config `"$conf`"" >> $env:GITHUB_OUTPUT
+          $conf = Join-Path $env:GITHUB_WORKSPACE 'ci-signing.conf.json'
+          $json = if (Test-Path $conf) { Get-Content $conf -Raw | ConvertFrom-Json } else { [pscustomobject]@{} }
+          if (-not $json.PSObject.Properties['bundle']) {
+            $json | Add-Member -NotePropertyName bundle -NotePropertyValue ([pscustomobject]@{})
+          }
+          $json.bundle | Add-Member -NotePropertyName windows -NotePropertyValue ([pscustomobject]@{
+            certificateThumbprint = $cert.Thumbprint
+            digestAlgorithm       = 'sha256'
+            timestampUrl          = 'http://timestamp.digicert.com'
+          }) -Force
+          $json | ConvertTo-Json -Depth 8 | Set-Content -Path $conf -Encoding utf8
           Write-Host "Signing with thumbprint $($cert.Thumbprint)"
 
       # Tag push → build AND publish a downloadable release.
@@ -104,16 +131,36 @@ jobs:
 
             On first launch, enter your server's Tailscale address
             (e.g. `https://100.x.x.x:3443`) and click **Test connection**.
+
+            To update later, download the new installer from this page again.
           releaseDraft: false
           prerelease: false
-          args: ${{ matrix.args }} ${{ steps.win-sign.outputs.args }}
+          args: ${{ matrix.args }} ${{ env.SIGNING_ARGS }}
 
       # Manual run → build only; the installers are uploaded as artifacts.
       - name: Build installers (manual run)
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         uses: tauri-apps/tauri-action@v0
         with:
-          args: ${{ matrix.args }} ${{ steps.win-sign.outputs.args }}
+          args: ${{ matrix.args }} ${{ env.SIGNING_ARGS }}
+
+      # ---------------------------------------------------------------------
+      # Fail loudly if the bundle produced nothing. Without this the release
+      # job "succeeds" while publishing a release with only the auto-generated
+      # source archives — the exact symptom this guard exists to prevent.
+      # ---------------------------------------------------------------------
+      - name: Verify installers were produced
+        shell: bash
+        run: |
+          found=$(find src-tauri/target -type f \
+            \( -name '*.exe' -o -name '*.msi' -o -name '*.AppImage' -o -name '*.deb' \) | wc -l)
+          echo "Found $found installer file(s):"
+          find src-tauri/target -type f \
+            \( -name '*.exe' -o -name '*.msi' -o -name '*.AppImage' -o -name '*.deb' \) -print
+          if [ "$found" -eq 0 ]; then
+            echo "::error::No installers were bundled — the build did not produce a release artifact."
+            exit 1
+          fi
 
       - name: Upload installers (manual run)
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
@@ -121,7 +168,7 @@ jobs:
         with:
           name: e2e-chat-${{ matrix.label }}
           path: src-tauri/target/**/release/bundle/**
-          if-no-files-found: warn
+          if-no-files-found: error
 
       # ---------------------------------------------------------------------
       # Checksums: one file per platform so a partial download only ever
@@ -147,3 +194,24 @@ jobs:
         with:
           files: SHA256SUMS-*.txt
           fail_on_unmatched_files: false
+
+      # ---------------------------------------------------------------------
+      # Signing is wired but was never *verified* — prove it on every release
+      # that has a certificate, so a silent mis-configuration can't ship.
+      # ---------------------------------------------------------------------
+      - name: Verify Windows signature
+        if: matrix.platform == 'windows-latest' && env.WINDOWS_CERTIFICATE != ''
+        shell: pwsh
+        run: |
+          $bad = 0
+          Get-ChildItem -Path src-tauri/target -Recurse -Include *.exe,*.msi |
+            Where-Object { $_.FullName -match '\\bundle\\' } |
+            ForEach-Object {
+              $sig = Get-AuthenticodeSignature $_.FullName
+              Write-Host "$($_.Name): $($sig.Status)"
+              if ($sig.Status -ne 'Valid') { $bad++ }
+            }
+          if ($bad -gt 0) {
+            Write-Error "$bad bundled file(s) are not validly signed."
+            exit 1
+          }

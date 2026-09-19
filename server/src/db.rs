@@ -9,6 +9,14 @@ use base64::Engine;
 use std::sync::Mutex;
 use uuid::Uuid;
 
+/// One registered push target (Web Push subscription or FCM token).
+pub struct PushDevice {
+    pub token: String,
+    pub platform: String,
+    pub p256dh: Option<String>,
+    pub auth: Option<String>,
+}
+
 /// Map a `messages` row (the 14-column shape used by list_messages and the
 /// search functions) to a Message.
 fn message_from_row(row: &rusqlite::Row) -> rusqlite::Result<Message> {
@@ -1374,6 +1382,7 @@ impl Database {
         let _ = conn.execute_batch(include_str!("../migrations/088_role_name_wipe.sql"));
         let _ = conn.execute_batch(include_str!("../migrations/089_everyone_drop_invite.sql"));
         let _ = conn.execute_batch(include_str!("../migrations/090_key_blob_rev.sql"));
+        let _ = conn.execute_batch(include_str!("../migrations/091_push_devices.sql"));
 
         // Data migration: normalize legacy space-separated CURRENT_TIMESTAMP values
         // ("YYYY-MM-DD HH:MM:SS") to fixed-width RFC3339 ("YYYY-MM-DDTHH:MM:SS.000000Z")
@@ -1836,6 +1845,67 @@ impl Database {
         let ct_b64 = base64::engine::general_purpose::STANDARD.encode(&ciphertext);
         
         Ok(format!("{}:{}:{}", epk_b64, nonce_b64, ct_b64))
+    }
+
+    // ── Push device registrations (Web Push + FCM) ──────────────────────
+
+    /// Upsert one device by its unique token. Web devices carry their ECDH
+    /// keys (p256dh/auth); Android devices carry just the FCM token.
+    pub fn upsert_push_device(
+        &self,
+        user_id: &str,
+        platform: &str,
+        token: &str,
+        p256dh: Option<&str>,
+        auth: Option<&str>,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO push_devices (user_id, platform, token, p256dh, auth) VALUES (?1, ?2, ?3, ?4, ?5)\n             ON CONFLICT(token) DO UPDATE SET user_id = excluded.user_id, platform = excluded.platform,\n                 p256dh = excluded.p256dh, auth = excluded.auth, updated_at = CURRENT_TIMESTAMP",
+            params![user_id, platform, token, p256dh, auth],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn delete_push_device(&self, user_id: &str, token: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM push_devices WHERE user_id = ?1 AND token = ?2",
+            params![user_id, token],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Bulk-prune dead subscriptions reported by the push senders.
+    pub fn delete_push_devices(&self, tokens: &[String]) {
+        if tokens.is_empty() {
+            return;
+        }
+        if let Ok(conn) = self.conn.lock() {
+            for t in tokens {
+                let _ = conn.execute("DELETE FROM push_devices WHERE token = ?1", params![t]);
+            }
+        }
+    }
+
+    pub fn push_devices_for_user(&self, user_id: &str) -> Result<Vec<PushDevice>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT token, platform, p256dh, auth FROM push_devices WHERE user_id = ?1")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![user_id], |row| {
+                Ok(PushDevice {
+                    token: row.get(0)?,
+                    platform: row.get(1)?,
+                    p256dh: row.get(2)?,
+                    auth: row.get(3)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
     }
 
     pub fn save_pending_notification(&self, user_id: &str, notification_type: &str, payload: &str, hmac_key: &[u8]) -> Result<(), String> {

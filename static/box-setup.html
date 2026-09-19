@@ -84,6 +84,7 @@
         <button id="test-btn" type="button">Test connection</button>
     </div>
     <div id="status"></div>
+    <p class="hint" id="cert-info" style="display:none"></p>
     <div class="trouble" id="trouble">
         <h2>If it won't connect</h2>
         <ul>
@@ -91,12 +92,22 @@
             <li>Open Tailscale on this device and make sure it's connected.</li>
             <li>Confirm the address matches your host's Tailscale IP.</li>
             <li>Make sure port <code>3443</code> isn't blocked by a firewall.</li>
+            <li>"Certificate changed" — you regenerated the server's cert. Tick
+                <em>Trust this server's certificate</em> and save again.</li>
         </ul>
     </div>
 
     <fieldset>
         <label class="check"><input id="auto-start" type="checkbox"> Start on system startup</label>
         <label class="check"><input id="min-tray" type="checkbox" checked> Minimize to tray on close</label>
+        <label class="check" title="Pins the server certificate so a later swap is refused">
+            <input id="pin-cert" type="checkbox" checked> Trust this server's certificate
+        </label>
+        <p class="hint">
+            The server uses a self-signed certificate. Trusting it pins its
+            SHA-256 fingerprint: if the certificate ever changes without you
+            re-trusting it here, the app refuses to connect.
+        </p>
     </fieldset>
 
     <div class="footer">
@@ -114,6 +125,12 @@
     var saveBtn = document.getElementById('save-btn');
     var autoStartEl = document.getElementById('auto-start');
     var minTrayEl = document.getElementById('min-tray');
+    var pinCertEl = document.getElementById('pin-cert');
+    var certInfoEl = document.getElementById('cert-info');
+
+    function shortFp(fp) {
+        return fp.slice(0, 8) + '…' + fp.slice(-8);
+    }
 
     function setStatus(kind, text) {
         statusEl.className = kind;
@@ -145,6 +162,10 @@
             if (cfg && cfg.server_url) urlInput.value = cfg.server_url;
             if (cfg && typeof cfg.auto_start === 'boolean') autoStartEl.checked = cfg.auto_start;
             if (cfg && typeof cfg.minimize_to_tray === 'boolean') minTrayEl.checked = cfg.minimize_to_tray;
+            if (cfg && cfg.pinned_cert_sha256) {
+                certInfoEl.style.display = 'block';
+                certInfoEl.textContent = 'Trusted certificate: ' + shortFp(cfg.pinned_cert_sha256);
+            }
             urlInput.focus();
         }).catch(function () {});
     }
@@ -159,6 +180,14 @@
         invoke('test_connection', { url: url }).then(function (r) {
             if (r && r.ok) setStatus('ok', r.detail || 'Connected.');
             else setStatus('err', (r && r.detail) || 'Could not connect.');
+            // Show the fingerprint this host presents right now, so the user
+            // can see (and later verify) exactly what they are pinning.
+            if (r && r.ok) {
+                invoke('probe_certificate', { url: url }).then(function (fp) {
+                    certInfoEl.style.display = 'block';
+                    certInfoEl.textContent = 'Certificate fingerprint (SHA-256): ' + shortFp(fp);
+                }).catch(function () {});
+            }
         }).catch(function (e) {
             setStatus('err', String(e && e.message ? e.message : e));
         }).finally(function () {
@@ -175,7 +204,8 @@
         invoke('save_config', {
             serverUrl: url,
             autoStart: autoStartEl.checked,
-            minimizeToTray: minTrayEl.checked
+            minimizeToTray: minTrayEl.checked,
+            pinCert: pinCertEl.checked
         }).then(function () {
             // The Rust side opens the main window and closes this one.
         }).catch(function (e) {

@@ -14,9 +14,17 @@ class StartArgs {
     var channelName: String? = null
 }
 
+@InvokeArg
+class IncomingCallArgs {
+    var callerName: String? = null
+    var dmChannelId: String? = null
+}
+
 /**
  * Webview-facing half of the plugin. Called from JS as
- * `invoke('plugin:call-service|start', { channelName })` and `…|stop`.
+ * `invoke('plugin:call-service|start', { channelName })` and `…|stop`, plus the
+ * `…|incomingCall` / `…|cancelIncoming` pair that raises a full-screen-intent
+ * incoming-call notification while the app is backgrounded (static/voice.js).
  */
 @TauriPlugin
 class CallServicePlugin(private val activity: Activity) : Plugin(activity) {
@@ -53,6 +61,37 @@ class CallServicePlugin(private val activity: Activity) : Plugin(activity) {
             invoke.resolve()
         } catch (e: Exception) {
             invoke.reject("Could not stop the call service: ${e.message}")
+        }
+    }
+
+    /**
+     * Raise the incoming-call notification with a full-screen intent. Android
+     * shows it over the lock screen / other apps (subject to the
+     * USE_FULL_SCREEN_INTENT permission and the user's notification settings),
+     * which is the only way to visibly "ring" while our WebView is frozen.
+     */
+    @Command
+    fun incomingCall(invoke: Invoke) {
+        val args = invoke.parseArgs(IncomingCallArgs::class.java)
+        try {
+            IncomingCallNotifier.show(
+                activity,
+                args.callerName ?: "Someone",
+                args.dmChannelId ?: ""
+            )
+            invoke.resolve()
+        } catch (e: Exception) {
+            invoke.reject("Could not show the incoming call: ${e.message}")
+        }
+    }
+
+    @Command
+    fun cancelIncoming(invoke: Invoke) {
+        try {
+            IncomingCallNotifier.cancel(activity)
+            invoke.resolve()
+        } catch (e: Exception) {
+            invoke.reject("Could not cancel the incoming call: ${e.message}")
         }
     }
 }

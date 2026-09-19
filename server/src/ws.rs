@@ -1156,6 +1156,19 @@ async fn handle_ws_message(
             match state.db.get_server_members(&server_id) {
                 Ok(members) => {
                     state.ws_manager.broadcast_to_users(&members, &json).await;
+                    // Push (app-closed): metadata-only payload — no message
+                    // plaintext ever leaves the E2EE layer — to devices of
+                    // members with no live websocket.
+                    let recipients: Vec<String> =
+                        members.iter().filter(|m| *m != user_id).cloned().collect();
+                    crate::handlers::spawn_push_to_users(
+                        state,
+                        recipients,
+                        "E2E Chat".to_string(),
+                        "New message in a channel".to_string(),
+                        format!("ch:{channel_id}"),
+                        format!("/?server={server_id}&channel={channel_id}"),
+                    );
                 }
                 Err(e) => {
                     tracing::error!("Failed to get server members: {}", e);
@@ -1330,6 +1343,17 @@ async fn handle_ws_message(
             match state.db.get_dm_members(dm_channel_id) {
                 Ok(members) => {
                     state.ws_manager.broadcast_to_users(&members, &json).await;
+                    // Push (app-closed) for the offline side of the DM.
+                    let recipients: Vec<String> =
+                        members.iter().filter(|m| *m != user_id).cloned().collect();
+                    crate::handlers::spawn_push_to_users(
+                        state,
+                        recipients,
+                        "E2E Chat".to_string(),
+                        "New direct message".to_string(),
+                        format!("dm:{dm_channel_id}"),
+                        format!("/?dm={dm_channel_id}"),
+                    );
                     // Save notification for offline members. B4: the payload is
                     // wrapped with "type" so the client can dispatch it purely
                     // from the decrypted payload (the DB/envelope type is blinded).
@@ -3440,6 +3464,15 @@ async fn handle_dm_call_ring(
     });
     let others: Vec<String> = members.into_iter().filter(|m| m != user_id).collect();
     state.ws_manager.broadcast_to_users(&others, &ring.to_string()).await;
+    // Push the ring to devices of callees whose app is closed (no websocket).
+    crate::handlers::spawn_push_to_users(
+        state,
+        others,
+        format!("Incoming call from {username}"),
+        "Tap to open E2E Chat".to_string(),
+        format!("call:{dm_channel_id}"),
+        format!("/?dm={dm_channel_id}"),
+    );
 }
 
 /// The caller has stopped ringing (30s unanswered). Tells the callee to stop

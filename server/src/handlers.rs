@@ -10369,3 +10369,184 @@ pub async fn move_group_to_group(
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
 }
+
+// ── Push notifications (Web Push + FCM) ──────────────────────────────────
+
+/// Public VAPID application server key for `pushManager.subscribe`.
+pub async fn push_vapid_public_key(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match &state.vapid {
+        Some(keys) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "publicKey": keys.public_b64 })),
+        )
+            .into_response(),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "push not available" })),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct PushRegisterBody {
+    pub platform: String, // "web" | "android"
+    pub token: String,
+    pub p256dh: Option<String>,
+    pub auth: Option<String>,
+}
+
+/// Register (or refresh) this device for push. Web clients pass their Push
+///Subscription's endpoint + ECDH keys; the Android box passes its FCM token.
+pub async fn push_register(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<PushRegisterBody>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    let platform_ok = body.platform == "web" || body.platform == "android";
+    if !platform_ok || body.token.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "platform must be 'web'|'android' and token required" })),
+        )
+            .into_response();
+    }
+    // Web Push needs both ECDH keys to be able to encrypt to this device.
+    if body.platform == "web" && (body.p256dh.is_none() || body.auth.is_none()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "web push requires p256dh and auth" })),
+        )
+            .into_response();
+    }
+    match state.db.upsert_push_device(
+        &user_id,
+        &body.platform,
+        body.token.trim(),
+        body.p256dh.as_deref(),
+        body.auth.as_deref(),
+    ) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e }))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct PushUnregisterBody {
+    pub token: String,
+}
+
+pub async fn push_unregister(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<PushUnregisterBody>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    match state.db.delete_push_device(&user_id, body.token.trim()) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e }))).into_response(),
+    }
+}
+
+/// Fire-and-forget push fan-out. Called from the WS layer after a message is
+/// saved and broadcast: builds the metadata-only payload, then delivers it to
+/// every registered device of every recipient who is NOT currently connected
+/// via websocket (those get the in-app path already).
+pub(crate) async fn push_to_users(
+    state: &Arc<AppState>,
+    user_ids: &[String],
+    title: String,
+    body: String,
+    tag: String,
+    url: String,
+) {
+    if state.vapid.is_none() && state.fcm.is_none() {
+        return; // push fully disabled
+    }
+    let payload = crate::push::PushPayload { title, body, tag, url };
+
+    for uid in user_ids {
+        // Only devices of users with no live websocket get pushed; a connected
+        // client renders notifications itself.
+        if state.ws_manager.is_user_connected(uid).await {
+            continue;
+        }
+        let devices = match state.db.push_devices_for_user(uid) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        let mut dead: Vec<String> = Vec::new();
+        for dev in devices {
+            let res = match dev.platform.as_str() {
+                "web" => {
+                    if let (Some(keys), Some(p), Some(a)) =
+                        (&state.vapid, dev.p256dh.as_deref(), dev.auth.as_deref())
+                    {
+                        crate::push::send_webpush(keys, &state.push_http, &dev.token, p, a, &payload).await
+                    } else {
+                        continue;
+                    }
+                }
+                "android" => {
+                    if let Some(creds) = &state.fcm {
+                        // FCM's notification block is rendered by Google Play
+                        // services and travels in plaintext, so Android banners
+                        // stay identity-free: no usernames, no channel names.
+                        // `data` still carries the deep-link for the tap.
+                        let android_payload = crate::push::PushPayload {
+                            title: "E2E Chat".to_string(),
+                            body: if payload.tag.starts_with("call:") {
+                                "Incoming call".to_string()
+                            } else {
+                                "You have a new message".to_string()
+                            },
+                            tag: payload.tag.clone(),
+                            url: payload.url.clone(),
+                        };
+                        crate::push::send_fcm(
+                            &state.push_http,
+                            &state.fcm_token,
+                            creds,
+                            &dev.token,
+                            &android_payload,
+                        )
+                        .await
+                    } else {
+                        continue;
+                    }
+                }
+                _ => continue,
+            };
+            match res {
+                Ok(true) => {}
+                Ok(false) => dead.push(dev.token),
+                Err(e) => tracing::debug!("push to {} failed: {e}", dev.platform),
+            }
+        }
+        state.db.delete_push_devices(&dead);
+    }
+}
+
+/// Spawn [`push_to_users`] so the websocket path never waits on a push
+/// service. Best-effort by design: a failed or slow push must not delay or
+/// fail message delivery, which is what actually matters to the sender.
+pub(crate) fn spawn_push_to_users(
+    state: &Arc<AppState>,
+    user_ids: Vec<String>,
+    title: String,
+    body: String,
+    tag: String,
+    url: String,
+) {
+    let state = state.clone();
+    tokio::spawn(async move {
+        push_to_users(&state, &user_ids, title, body, tag, url).await;
+    });
+}

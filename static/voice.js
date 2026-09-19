@@ -1060,6 +1060,25 @@
         });
     }
 
+    // Full-screen incoming call (Android). While the WebView is backgrounded
+    // our in-app ring bar cannot render, so the native side posts a
+    // high-importance notification with a full-screen intent (which Android is
+    // allowed to show over the lock screen). No-op in a browser or on desktop.
+    function _boxIncomingCall(action, call) {
+        var tauri = window.__TAURI__;
+        if (!tauri || !tauri.core || !tauri.core.invoke) return;
+        if (!/Android/i.test(navigator.userAgent || '')) return;
+        var args = action === 'incomingCall'
+            ? {
+                callerName: (call && call.callerUsername) || 'Someone',
+                dmChannelId: (call && call.dmChannelId) || ''
+            }
+            : {};
+        tauri.core.invoke('plugin:call-service|' + action, args).catch(function (e) {
+            console.warn('[box] incoming call ' + action + ' failed:', e);
+        });
+    }
+
     // ------------------------------------------------------------------
     // Joining / leaving
     // ------------------------------------------------------------------
@@ -7464,10 +7483,14 @@
         if (acceptBtn) acceptBtn.textContent = 'Accept';
         var declineBtn = el('incoming-call-decline');
         if (declineBtn) declineBtn.style.display = '';
+        // Android + backgrounded: raise the full-screen ring notification so
+        // the call is visible with the screen off / another app in front.
+        if (document.hidden) _boxIncomingCall('incomingCall', call);
     }
 
     function hideIncomingCall() {
         clearCalleeRingTimer();
+        _boxIncomingCall('cancelIncoming');
         var b = el('incoming-call-bar');
         if (b) {
             b.style.display = 'none';

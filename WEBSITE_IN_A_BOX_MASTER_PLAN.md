@@ -1,8 +1,14 @@
 # Website-in-a-Box (Tauri 2) + Mobile Session Persistence — Master Plan
 
-Status: **in progress** — Phase 0 (session persistence) and the Phase 1 desktop/Android
-**scaffold** are implemented; push, background-call service wiring, signing and cert
-pinning remain. Per-feature status, how each is built, and **where to debug it** are in §9.
+Status: **feature-complete for Windows / Linux / Android** — Phase 0 (session persistence),
+Phase 1 (desktop + Android scaffold), Phase 2 (background-call service wiring + full-screen
+incoming call), Phase 3 (push: Web Push live, FCM server-side ready) and Phase 4 (cert
+pinning, CI hardening) have all landed. There is deliberately **no auto-updater** —
+desktop and Android builds update by re-downloading the new installer (§8.4). The only things left are **external
+gates** that need *your* accounts/keys: a Firebase project (Android FCM) and the signing
+certificates (§10.4). macOS/iOS stay out of scope by decision (§8).
+Per-feature status, **how each is built**, and **where to debug it** are in §9;
+downloads/installs are §10.
 Companion doc: `SECURITY_FIX_PLAN.md` (earlier, narrower Tauri scaffold plan — this
 document supersedes it and adds the verification harness + the session-persistence workstream).
 
@@ -174,29 +180,53 @@ Each feature: **Goal / Strategy / Proof / Risk.**
   dispatch.
 - **Risk:** Windows banners depend on Focus Assist; Linux needs a notification daemon (libnotify).
 
-#### A3.5 Push notifications — mobile, app **closed**
+#### A3.5 Push notifications — mobile, app **closed** — ✅ implemented (FCM needs your Firebase project)
 - **Goal:** Message/call notifications arrive when the box hasn't been opened.
-- **Strategy:** Server gains ~100 lines (`server/src/push.rs`) + a `push_devices` table +
-  `POST /api/push/register|unregister`. Android→FCM (`messages:send`). The box registers
-  its device token on launch and on token refresh. Payload contract =
-  the one `sw.js`'s `push` handler already parses (`title/body/tag/url/actions`), plus a
-  `type: "incoming_call"` variant.
-- **Proof:** App force-stopped → server sends a message → notification appears → tap opens
-  the correct DM. Repeat for a call → full-screen incoming call.
-- **Risk:** **No push without a Firebase account.** This is the single biggest
-  external dependency; make it a Phase-3 gate with a documented "local-only desktop"
-  fallback so the box is useful before FCM exists.
+- **How it's built:**
+  - **Server (`server/src/push.rs`, new):** self-bootstrapping **Web Push** — generates a
+    VAPID P-256 keypair on first boot (`vapid_private.pem` next to the DB, gitignored) and
+    serves the public half at `GET /api/push/vapid-public-key`. Includes a hand-rolled
+    RFC 8291 `aes128gcm` payload encryption + ES256 VAPID JWT (no extra HTTP stack), and an
+    **FCM** sender for Android via the **HTTP v1** API, authenticating with an
+    OAuth2 token minted from a Firebase *service account* key
+    (`FCM_SERVICE_ACCOUNT_JSON`, raw JSON or a path) and caching it until expiry.
+    (The old `/fcm/send` server-key endpoint was retired by Google, so it is not used.)
+  - **Correctness:** the RFC 8291 derivation is pinned by the spec's own test
+    vector — `cargo test push` asserts the intermediate CEK/NONCE and the full
+    144-octet body for "When I grow up, I want to be a watermelon", plus a
+    receiver-side decrypt round-trip. Hand-rolled crypto without that vector is
+    how a push silently never renders.
+  - **DB:** migration `091_push_devices.sql` + `db.rs` upsert/delete/query helpers.
+  - **API:** `POST /api/push/register` (auth required; validates platform + web ECDH keys),
+    `POST /api/push/unregister`.
+  - **Fan-out:** `handlers::push_to_users` is called from `ws.rs` after a channel message, a
+    DM, and a `dm_call_ring`. It **skips any user with a live websocket** (they get the
+    in-app notification) and prunes dead subscriptions (HTTP 404/410).
+  - **Payload:** metadata only — `{title, body, tag, url}` — the exact contract `static/sw.js`'s
+    `push` handler already parses. Message plaintext never leaves the E2EE layer.
+  - **Client (`static/push-client.js`, new):** subscribes the service worker with the
+    server's VAPID key and registers/unregisters the subscription; on the Android box it
+    registers an FCM token instead (see the Firebase gate below).
+- **Proof:** `tests/push-notifications.spec.ts` (5/5 green against a real server) covers the
+  VAPID endpoint, auth/platform/ECDH validation, upsert + unregister, FCM registration, and
+  that `index.html` loads each client script exactly once. `cargo test push` (2/2) proves the
+  payload encryption against the RFC 8291 test vector.
+- **Firebase gate (the one remaining external step):** Android WebView has **no** Push API,
+  so Android push needs FCM — create a Firebase project, drop `google-services.json` into
+  `src-tauri/gen/android/app/` and add the `firebase-messaging` Gradle dependency. Until
+  then Android push is simply off; the desktop box and browsers get Web Push today.
 
-#### A3.6 Incoming-call UX (foreground + background)
+#### A3.6 Incoming-call UX (foreground + background) — ✅ implemented
 - **Goal:** A call looks like WhatsApp/Discord, even from a cold start.
-- **Strategy:** Push/local notification carries `{type:"incoming_call", caller, dm_channel_id,
-  ring_token}`. Tapping it deep-links into the call view (`sw.js`'s `notificationclick`
-  already implements `navigate` to a URL — reuse it). On Android a full-screen intent
-  shows the incoming call.
-- **Proof:** Call while app is (a) foreground, (b) backgrounded, (c) force-closed → all
-  three show the incoming call and Accept joins.
-- **Risk:** Android full-screen intents need the manifest/Kotlin wiring from the
-  call-service plugin — scope explicitly.
+- **How it's built:** an incoming `dm_call_ring` now also pushes `{tag:"call:<dm>",
+  url:"/?dm=<dm>"}` to callees with no live socket, so a cold-started app gets the ring.
+  When the WebView is backgrounded, `static/voice.js` `showIncomingCall()` additionally
+  invokes the native `plugin:call-service|incomingCall`, which posts a high-importance
+  notification with a **full-screen intent** (+ ringtone/vibration, and a *Decline* action
+  receiver) — `IncomingCallNotifier.kt`. `hideIncomingCall()` calls `cancelIncoming`.
+  Foreground rings keep using the in-app bar (`showIncomingCall`), unchanged.
+- **Proof (device):** call while the app is (a) foreground, (b) backgrounded, (c)
+  force-closed → all three ring; Accept joins. Needs an Android device (see §10.3).
 
 #### A3.7 Mobile: hold calls with the screen off
 - **Goal:** Lock the phone → audio continues both ways, like a phone call.
@@ -237,10 +267,19 @@ Each feature: **Goal / Strategy / Proof / Risk.**
   from the keychain without re-login.
 - **Risk:** Extra native surface; keep it optional and feature-flagged.
 
-#### A3.10 Auto-update / release channel — ❌ dropped
-- **Decision (2026-09):** `tauri-plugin-updater` is **not adopted** — it adds a signing-key
-  and `latest.json` manifest burden for little gain on a sideloaded app. Users re-download
-  each release from the Releases page (§10).
+#### A3.10 Auto-update / release channel — ❌ **not adopted: manual updates**
+- **Decision (2026-09, final):** there is **no** `tauri-plugin-updater`. Users update by
+  downloading the new installer from the Releases page; the Android APK is re-installed, and
+  the web app in any browser is always current by definition. This was briefly reversed and
+  then reverted — an updater needs its own Ed25519 signing key, a `latest.json` release asset
+  and a background check, which buys little for a self-hosted app that ships a few builds.
+- **Consequence:** nothing to configure and no extra secrets, and one less background network
+  call in the box. `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_UPDATER_PUBKEY` no longer exist
+  anywhere (removed from `release.yml`, `lib.rs`, `Cargo.toml`, `tauri.conf.json`,
+  `static/box-updater.js`).
+- **To add it later:** register `tauri-plugin-updater`, generate keys with
+  `cargo tauri signer generate`, publish `latest.json`, and turn `bundle.createUpdaterArtifacts`
+  on in CI. The release job is structured so that is a purely additive change.
 
 #### A3.11 Tailscale host + self-signed certs (hardening over the draft plan)
 - **Goal:** Reach `https://100.x.x.x:3443` without disabling TLS verification globally.
@@ -251,9 +290,20 @@ Each feature: **Goal / Strategy / Proof / Risk.**
 - **Proof:** Connect to a self-signed host (✓ after TOFU); swap the cert → warning appears;
   MITM with a different cert → refused.
 - **Risk:** Cert rotation forces a re-trust step — acceptable and safer than blind trust.
+- **Important scope limit (be honest about this):** pinning covers *our* HTTP client
+  (`test_connection`, `probe_certificate`, every launch check). The **main window is a
+  WebView**, and WebView2 / Android WebView / WebKitGTK do their own TLS validation —
+  Tauri exposes no per-request certificate hook, so the pin does not extend to the page
+  load. Consequence: with a **self-signed** cert the WebView shows its own certificate
+  error and never reaches the app UI. Practical fix, pick one:
+  1. put a *trusted* cert behind the host — `tailscale cert <name>.ts.net` and point
+     `TLS_CERT_PATH`/`TLS_KEY_PATH` at it (real Let's Encrypt cert, valid in every
+     WebView); or
+  2. install the server's `certs/` CA/leaf into the OS trust store on each client.
+  Recommended: (1). This is a documented limitation, not a silent one.
 
 #### A3.12 Security hardening
-- **Capabilities:** only `notification`, `updater`, `autostart`, `store`/`stronghold`,
+- **Capabilities:** only `notification`, `autostart`, `store`/`stronghold`,
   `dialog`. No shell.
 - **Navigation allowlist:** the WebView may only navigate to the configured origin; external
   links open in the system browser.
@@ -276,11 +326,21 @@ Each feature: **Goal / Strategy / Proof / Risk.**
 |---|---|---|---|
 | Tray | ✅ | ✅(appindicator) | ❌ |
 | Auto-start | ✅ | ✅ | ✅ |
-| Native local notif | ✅ | ✅ | ❌(push) |
-| Push (app closed) | ❌ | ❌ | FCM |
-| Background call, screen off | tray | tray | foreground svc |
+| Native local notif (app running) | ✅ | ✅ | ✅ (`notify` bridge; WebView has no Web Notification API) |
+| Push (app **closed**) | ⚠️ Web Push *if* the WebView's Push API is available; otherwise: leave it in the tray | ⚠️ same as Windows | ✅ FCM — **needs your Firebase project** (§A3.5) |
+| Full-screen incoming call | – (ring bar) | – (ring bar) | ✅ full-screen intent (device test owed) |
+| Background call, screen off | tray | tray | ✅ `mediaCall` foreground service |
 | Screen share | getDisplayMedia | ✅ | getDisplayMedia (API 29+) |
+| Cert pinning (TOFU) | ✅ | ✅ | ✅ |
+| Auto-update | ✖ manual re-download | ✖ manual re-download | ✖ re-install the APK |
 | Session in keychain | ✅ | ✅(libsecret) | ✅ |
+
+> **Read the push row carefully.** Web Push is implemented and works in a real
+> browser (Chrome/Edge/Firefox). The *desktop box* is a WebView: WebView2 often
+> lacks the Push API, so treat "notified while the box is fully closed" as
+> best-effort there — the intended desktop behaviour is to leave the box running
+> in the tray, where the WebSocket delivers notifications natively. Android has no
+> Push API at all and therefore genuinely requires FCM.
 
 ### A6. Effort & phasing (see §6 for sequencing)
 
@@ -433,14 +493,24 @@ Android** (macOS/iOS dropped — §8); adopt **FCM** for push.
 close-to-tray, navigation allowlist, native-notification bridge, CI) — see §6b. Remaining:
 the proof-harness evidence rows (screen recordings/screenshots).
 
-**Phase 2 — Android (3–4 days):** APK build, foreground-service calls, getDisplayMedia
-screenshare verification, FCM registration, proof rows 1–4 (Android side).
+**Phase 2 — Android:** ✅ **implemented** — APK build (CI), foreground-service calls
+(`plugins/call-service` + the `_boxCallService()` hook in `voice.js`), full-screen
+incoming call (Kotlin `IncomingCallNotifier` + the `_boxIncomingCall()` hook),
+getDisplayMedia screenshare (works via the web app). **Device verification still owed.**
 
-**Phase 3 — push + calls infra (1.5–2 days):** `server/src/push.rs`, `push_devices`
-migration, `/api/push/*`, contract shared with `sw.js`. **External gate:** a Firebase account.
+**Phase 3 — push + calls infra:** ✅ **implemented** — `server/src/push.rs`, the
+`push_devices` migration, `/api/push/*`, and the `sw.js`-shared payload contract, covered by
+`tests/push-notifications.spec.ts`. **External gate:** a Firebase account for Android FCM
+(Web Push works today without one).
 
-**Phase 4 — polish (1–2 days):** Windows signing (optional), keychain-backed storage
-(A3.9), docs. (The old iOS phase and the updater item were dropped — §8.)
+**Phase 4 — polish:** ✅ **implemented** — TOFU cert pinning (A3.11, `src-tauri/src/cert_probe.rs`
++ the trust checkbox in `box-setup.html`) and CI hardening (loud "no installers were
+bundled" guard + a Windows signature verification step). Auto-update was **not adopted**
+(A3.10): updates are manual re-downloads.
+Keychain-backed storage (A3.9) remains optional/deferred; the session-persistence fix (Phase 0)
+solved the actual reported symptom.
+
+The old iOS phase and the macOS target remain dropped — §8.
 
 ### 6b. Phase 1 — desktop scaffold (implemented)
 
@@ -471,8 +541,12 @@ Follow-ups landed since:
   code gated behind `cfg(desktop)`, `bundle.android.minSdkVersion = 29`, a Kotlin
   `CallForegroundService` template, and `.github/workflows/android.yml` (APK).
 
-Still open: push notifications (FCM — needs a Firebase account), the Android
-mobile plugin that starts/stops the foreground service, cert pinning.
+Since then (this pass): push (Web Push live + FCM server-side), the Android
+foreground-service JS wiring, the full-screen incoming call, TOFU cert pinning, the in-app
+**Connection** settings tab (change the server address without a tray), and CI hardening all
+landed — see §9.1 for the per-feature detail.
+Still open: **external** gates only (a Firebase project for Android FCM, the Windows signing
+certificate), plus device verification on real hardware.
 
 ### 6a. Phase 0 — implemented
 
@@ -517,10 +591,14 @@ Verified: the 3 new tests pass; `tests/secure-storage.spec.ts` and
    self-hosted, sideload-distributed app. The web app itself still runs in any browser
    (including Safari), so Apple users keep a supported path.
 3. Push: **FCM (Android).** ✅ APNs/iOS dropped along with the platform.
-4. Auto-updater (`tauri-plugin-updater`): **not adopted** — users re-download each
-   release from the Releases page (§10).
+4. Auto-updater (`tauri-plugin-updater`): **not adopted — manual updates** (A3.10). Desktop
+   users re-download the installer, Android re-installs the APK, and the web app in any
+   browser is always current. Keeps the release pipeline key-free.
+5. Cert trust: **TOFU fingerprint pinning**, not a bundled CA or blanket
+   `danger_accept_invalid_certs` — see A3.11.
 
-Next up: Phase 2 (Android device run) and Phase 3 (FCM push).
+Next up: the external gates — a Firebase project for Android FCM and the Windows
+code-signing certificate — and the Android device verification run (§10.3).
 
 ---
 
@@ -558,8 +636,8 @@ tauri.core.invoke('notify', { title: 'hi', body: 'test' })   // native banner
 
 | Feature | Status | Implemented in | How to debug |
 |---|---|---|---|
-| **First-run setup** (host ID) | ✅ done | `static/box-setup.html`; `open_setup()` + `save_config` in `src-tauri/src/lib.rs`; `src-tauri/src/config.rs` | Delete `config.json` and relaunch → setup should appear. Inspect the file after saving. `save_config` validates the URL before writing (a bad address can't brick startup). |
-| **Change host ID** | ✅ done | tray item `change` → `open_setup()`; existing window gets `w.navigate(new_url)` | Tray → *Change Server Address…*; confirm the window reloads the new origin; check stderr for `open_main failed` |
+| **First-run setup** (host ID) | ✅ done | `static/box-setup.html`; `open_setup()` + `save_config` in `src-tauri/src/lib.rs`; `src-tauri/src/config.rs`; `open_main_at_setup()` is the single-window fallback (Android below 12L cannot open a second window) | Delete `config.json` and relaunch → setup should appear. Inspect the file after saving. `save_config` validates the URL before writing (a bad address can't brick startup). |
+| **Change host ID** | ✅ done (now in-app too) | desktop tray item `change` → `open_setup()`; **Settings → Connection** tab (`static/index.html` + `initConnectionSettings()` in `static/chat.js`) calls `show_setup()`, so Android can re-point the app as well; the existing window gets `w.navigate(new_url)` | Tray → *Change Server Address…*, or in-app Settings → Connection → *Change server address…*. Any host **and port** are accepted (`normalize()` in `box-setup.html` only defaults a missing scheme / the port to `3443`). Confirm the window reloads the new origin; check stderr for `open_main failed` |
 | **Connection test / warning** | ✅ done | `test_connection` (`reqwest`, 8 s timeout, `danger_accept_invalid_certs`) | From the setup screen or console (one-liner above). Compare with `curl -sk <url>`; error text distinguishes timeout vs refused vs HTTP status |
 | **No browser / standalone window** | ✅ done | runtime window creation in `open_main()` | Launch the binary either way; DevTools is the only "browser UI" |
 | **Tray + auto-start + close-to-tray** | ✅ done (desktop) | `build_tray()`; `on_window_event(CloseRequested)`; `tauri-plugin-autostart` | Tray menu ids: `show`, `change`, `quit`. Toggle auto-start in setup → on Linux check `~/.config/autostart/*.desktop`, Windows: Task Manager → Startup |
@@ -567,13 +645,14 @@ tauri.core.invoke('notify', { title: 'hi', body: 'test' })   // native banner
 | **Native notifications (desktop + Android, app open)** | ✅ done | Rust `notify` command; `grant_remote_ipc()` (dynamic `CapabilityBuilder` → `add_capability`); `showBrowserNotification()` in `static/chat.js` | If `window.__TAURI__` is `undefined` **on the remote page**, the capability wasn't granted — watch stderr for `grant_remote_ipc(...) failed`. Test directly with the `notify` one-liner. On Windows check Focus Assist; on Linux check a notification daemon is running |
 | **Session persistence (mobile)** | ✅ done | `static/secure-storage.js` (`_hasPasswordBootstrap`, `_ensureKey` order, `_secRedriveKey`, `_afterSodium`), `static/chat.js` boot self-heal | Console: `window._secGetRaw('token')` (ciphertext) vs `window._secGet('token')` (plaintext, `null` = key mismatch). Force a cold start: `sessionStorage.clear(); location.reload()`. Automated: `npx playwright test tests/session-persistence.spec.ts` (see §6a) |
 | **Screen share (Android)** | ✅ works via web app | existing `startScreen()`/`getDisplayMedia` in `static/voice.js` | In-app console: `typeof navigator.mediaDevices.getDisplayMedia` → `'function'` on Android 10+ (minSdk 29). Remote peer should see frames; check the relay logs |
-| **Android build target** | ⏳ ready, needs toolchain | `#[cfg_attr(mobile, tauri::mobile_entry_point)]`, `cfg(desktop)` gates, `bundle.android.minSdkVersion=29`; `.github/workflows/android.yml` | `cargo tauri android init` → `cargo tauri android build --apk`. Install: `adb install -r <apk>`. Logs: `adb logcat | grep -iE 'e2echat|RustStdoutStderr'`. Remote DevTools: `chrome://inspect` (debug builds) |
-| **Background calls (screen off)** | ✅ plugin built (Android wiring pending) | `src-tauri/plugins/call-service/` — Rust `init()` + `build.rs` (`android_path`), Kotlin `CallServicePlugin.kt` (`@Command start`/`stop`) + `CallForegroundService.kt`, plugin `AndroidManifest.xml`; called from `_boxCallService()` in `static/voice.js` (`handleVoiceJoined` / `teardownRoom`) | Console: `tauri.core.invoke('plugin:call-service|start', {channelName:'t'})`. Service up? `adb shell dumpsys activity services \| grep -i CallForegroundService` while in a call, gone after hang-up. Permission rejected → `adb logcat \| grep -iE 'callservice\|RustStdoutStderr'` and confirm `grant_remote_ipc: call-service …` didn't fail |
-| **Push notifications (app closed)** | ❌ not built | planned: `server/src/push.rs`, `push_devices` migration, `/api/push/register` + `/api/push/unregister`, FCM | Needs a Firebase project (`google-services.json`) first. Debug later via FCM response codes and `SELECT * FROM push_devices` |
-| **Full-screen incoming call** | ⛔ partial | push/local notification + deep-link (`sw.js` `notificationclick` already navigates) | Test after push exists; Android full-screen intent is a manifest/Kotlin addition |
-| **Code signing (Windows)** | ✅ wired in CI (needs your cert) | `.github/workflows/release.yml`: PowerShell PFX import → `windows-signing.conf.json` passed via `--config` | Gated on job-level `env.*` (secrets are not usable in step `if:`) — with no secret the build still succeeds and is simply unsigned. Debug: read the step log; `Get-AuthenticodeSignature` on a Windows build |
-| **Cert pinning** | ❌ not built | planned: pinned cert fingerprint in `config.json` | n/a yet |
-| **Release artifacts + checksums** | ✅ done | `release.yml` / `android.yml`: APK staged to `dist/E2E-Chat-<tag>-android.apk` and attached with `SHA256SUMS-android.txt`; desktop publishes `SHA256SUMS-<platform>.txt` | After a tag push, the release must list one APK, four desktop installers and five checksum files. Verify locally: `sha256sum -c SHA256SUMS-android.txt` (or `certutil -hashfile … SHA256` on Windows) |
+| **Android build target** | ⏳ ready, needs toolchain | `#[cfg_attr(mobile, tauri::mobile_entry_point)]`, `cfg(desktop)` gates, `bundle.android.minSdkVersion=29`; `.github/workflows/android.yml` | `cargo tauri android init` → `cargo tauri android build --apk` (CI then **signs** the output with `apksigner`, because an unsigned release APK is uninstallable; locally add `--debug` for an installable build). Install: `adb install -r <apk>`. Logs: `adb logcat | grep -iE 'e2echat|RustStdoutStderr'`. Remote DevTools: `chrome://inspect` (debug builds) |
+| **Background calls (screen off)** | ✅ done (Android wiring wired, device test owed) | `src-tauri/plugins/call-service/` — Rust `init()` + `build.rs` (`android_path`), Kotlin `CallServicePlugin.kt`/`CallForegroundService.kt`, plugin `AndroidManifest.xml`; started/stopped from `_boxCallService()` in `static/voice.js` (call join → `start`, every `teardownRoom` → `stop`) | Console: `tauri.core.invoke('plugin:call-service|start', {channelName:'t'})`. Service up? `adb shell dumpsys activity services \| grep -i CallForegroundService` while in a call, gone after hang-up. Permission rejected → `adb logcat \| grep -iE 'callservice\|RustStdoutStderr'` and confirm `grant_remote_ipc: call-service …` didn't fail |
+| **Push notifications (app closed)** | ✅ done (Web Push live; FCM awaits your Firebase project) | `server/src/push.rs` (VAPID self-bootstrap, RFC 8291 encryption, ES256 JWT, FCM sender), `server/migrations/091_push_devices.sql`, `db.rs` helpers, `/api/push/vapid-public-key\|register\|unregister` (`handlers.rs`), fan-out from `ws.rs` (`handlers::push_to_users`), `static/push-client.js` | `tests/push-notifications.spec.ts`. Live: `curl -k https://<host>:3443/api/push/vapid-public-key`; check `vapid_private.pem` appeared next to the DB on first boot. FCM needs a Firebase service-account key in `FCM_SERVICE_ACCOUNT_JSON` (raw JSON or a path) — a missing key just disables the Android leg. Crypto: `cargo test push` (RFC 8291 test vector + round-trip) |
+| **Full-screen incoming call** | ✅ done (device test owed) | `static/voice.js` `_boxIncomingCall()` (called from `showIncomingCall` when `document.hidden`, cancelled in `hideIncomingCall`); Kotlin `IncomingCallNotifier.kt` (high-importance channel, ringtone, full-screen intent, Decline receiver); `USE_FULL_SCREEN_INTENT` in the plugin manifest; the `dm_call_ring` push carries `/?dm=<id>` | `adb logcat \| grep -iE 'incomingCall\|IncomingCallNotifier\|RustStdoutStderr'`. Confirm the notification permission was granted (Android 13+) — without it the native ring is silently dropped and only the in-app bar shows |
+| **Updates** | ❌ **not adopted — manual re-download** (§A3.10) | nothing to configure: no `tauri-plugin-updater`, no signing key, no `latest.json` | Grab the newest installer from <https://github.com/MaskBoy999/E2E_Talk/releases> (Android: re-install the APK). A browser never needs updating |
+| **Code signing (Windows)** | ✅ wired in CI **and auto-verified** (needs your cert) | `.github/workflows/release.yml`: the PowerShell PFX import merges `bundle.windows` into `ci-signing.conf.json`, passed via a single `--config`; a later step runs `Get-AuthenticodeSignature` over every bundled `.exe`/`.msi` and **fails the job** if any is not `Valid` — so a silent signing misconfiguration can no longer ship | Gated on job-level `env.*` (secrets are not usable in step `if:`) — with no secret the build still succeeds and is simply unsigned. Debug: read the step log; `Get-AuthenticodeSignature` on a Windows build |
+| **Cert pinning (TOFU)** | ✅ done for the Rust client (WebView TLS is out of reach — see §A3.11) | `src-tauri/src/cert_probe.rs` (rustls fingerprint verifier + leaf-cert capture), `pinned_cert_sha256` in `src-tauri/src/config.rs`, enforcement in `open_main`, trust checkbox + `probe_certificate` in `static/box-setup.html` | Delete `config.json` → setup → *Test connection* shows the fingerprint → *Save & Launch* pins it. Swap the server cert and relaunch: startup must refuse with the "certificate changed" message (`open_main failed` on stderr). If the app window shows a certificate error instead of the login page, that is the WebView (not the pin) — use a Tailscale-issued cert or trust `certs/` in the OS store |
+| **Release artifacts + checksums** | ✅ done (+ a guard so an empty release can't happen silently) | `release.yml` / `android.yml`: APK staged to `dist/E2E-Chat-<tag>-android.apk` and attached with `SHA256SUMS-android.txt`; desktop publishes `SHA256SUMS-<platform>.txt`. New: `permissions: contents: write` (so publishing can't 403), a **Verify installers were produced** step that fails the job when the bundle is empty, and a **Verify Windows signature** step when a certificate is present | After a tag push, the release must list one APK, the desktop installers and the checksum files. Verify locally: `sha256sum -c SHA256SUMS-android.txt` (or `certutil -hashfile … SHA256` on Windows) |
 
 ### 9.2 Debugging the two trickiest areas
 
@@ -640,17 +719,36 @@ APK path was wrong).
 ### 10.1 How a release is produced (the download pipeline)
 
 1. Bump the version in `src-tauri/tauri.conf.json` (and commit).
-2. Tag and push: `git tag v0.2.1 && git push origin v0.2.1`.
+2. Tag and push: `git tag v0.2.2 && git push origin v0.2.2`.
 3. GitHub Actions builds and publishes:
    - `.github/workflows/release.yml` — desktop matrix (Windows `.exe`/`.msi`, Linux
      `.AppImage`/`.deb`) and creates a **non-draft Release**
-     ("E2E Chat v0.2.1") whose body carries the install notes.
-   - `.github/workflows/android.yml` — builds the **APK** and uploads it as a workflow
-     artifact (attach it to the release, or download it from the run).
-4. Users land on the repo's **Releases** page; the README links to `../../releases/latest`.
+     ("E2E Chat v0.2.2") whose body carries the install notes. Needs
+     `permissions: contents: write` (now set) or publishing 403s.
+   - `.github/workflows/android.yml` — builds the **APK** and attaches it to the *same*
+     release as `E2E-Chat-<tag>-android.apk` plus `SHA256SUMS-android.txt`.
+4. **Where to find them:** the repo's **Releases** page —
+   `https://github.com/<owner>/<repo>/releases` (this repo:
+   `https://github.com/MaskBoy999/E2E_Talk/releases`). The README links to
+   `../../releases/latest`.
+
+> **"I only see a target zip in Releases."** That zip is *not* an app. Two things can
+> look like this and neither is a shipped release:
+> 1. **The auto-generated source archives** GitHub adds to every release
+>    (*Source code (zip)* / *(tar.gz)*) — they are on the page even when the build job
+>    produced no installers.
+> 2. **A workflow artifact** from a manual *Run workflow*, which `actions/upload-artifact`
+>    zips out of `src-tauri/target/**` — visible under the finished run's
+>    **Artifacts** section, **not** on the Releases page.
+>
+> The fix that now makes this loud instead of silent: the release job ends with a
+> **Verify installers were produced** step that fails when no `.exe`/`.msi`/`.AppImage`/`.deb`
+> was bundled, and `android.yml` fails when no `.apk` was found. So the next tag either
+> publishes real installers or shows a red run to debug.
 
 **No release published yet?** Actions → *Build Desktop Box* / *Build Android APK* →
-**Run workflow** → download the artifact from the finished run.
+**Run workflow** → download the artifact from the finished run (or re-run after a tag push
+if the first attempt failed, e.g. on the missing `icon.png`).
 
 ### 10.2 Per-platform download & install
 
@@ -666,7 +764,20 @@ APK path was wrong).
 > codebase the box wraps.
 
 First launch on every platform: enter `https://100.x.x.x:3443` → **Test connection** →
-**Save & Launch** (see §9.1).
+**Save & Launch** (see §9.1). That first save also **pins the server's certificate**
+(TOFU), so a later certificate swap is refused until you re-trust it.
+
+#### Opening the app after it is installed
+
+| Platform | How you launch it every day | Notes |
+|---|---|---|
+| **Windows** | Start menu / desktop shortcut **E2E Chat**, or the tray icon after you close the window | The installer creates both shortcuts. Closing the window **hides to the tray** (it is still running) — use the tray's *Quit* to exit, or re-open from the tray |
+| **Linux (AppImage)** | Double-click the `.AppImage`, or run `./E2E-Chat_<ver>_amd64.AppImage` from a terminal | `chmod +x` once after download; needs FUSE (`libfuse2`) |
+| **Linux (.deb)** | Launcher entry **E2E Chat** (installed system-wide), or run `e2e-chat-app` | `sudo apt install ./E2E-Chat_<ver>_amd64.deb` |
+| **Android** | App drawer icon **E2E Chat** | Sideload the APK, allow *Install unknown apps*; connect the **Tailscale** app first, and grant notification + microphone permissions so background calls and the full-screen ring work |
+
+If the window opens but the app says it cannot connect, it is almost always the host
+address (see §9.1, *Connection test / warning*), not the install.
 
 ### 10.3 Alternative: build it yourself (when no release exists yet)
 
@@ -684,11 +795,25 @@ Android additionally needs the Android SDK + NDK and Java 17.
 
 - ✅ **Checksums** are published (`SHA256SUMS-<platform>.txt` + `SHA256SUMS-android.txt`)
   and the **Android APK is auto-attached** to the same release as the installers.
+- ✅ **The APK is signed in CI** (`android.yml` → *Sign the APK*): a Tauri release
+  build is unsigned, and Android refuses to install an unsigned APK, so the step
+  runs `zipalign` + `apksigner` (your upload keystore when `ANDROID_KEYSTORE_BASE64`,
+  `ANDROID_KEY_ALIAS` and `ANDROID_KEY_PASSWORD` are set — otherwise a throwaway
+  debug keystore) and then `apksigner verify` so an uninstallable file can never be
+  published silently. Skipping this step is what would produce an APK that downloads
+  fine and then refuses to install.
 - ⚠️ **Windows signing is wired but dormant** — it activates only once the repository
   secrets in the `release.yml` header are set. Until then Windows still shows SmartScreen
   "Run anyway". (macOS/iOS signing was removed along with those platforms.)
-- ⚠️ **The signed build is untested end-to-end** — the Windows thumbprint hand-off
-  (`--config windows-signing.conf.json`) has not been run, because that needs the real
-  certificate. A future tagged release is the test.
-- ✅ **No auto-updater, by decision** (§8) — users re-download each release. No cert
-  pinning yet, so `test_connection` still accepts the self-signed Tailscale certificate.
+- ⚠️ **The signed build is verified in CI but has not been run for real** — that needs the
+  actual certificate. The **Verify Windows signature** step makes the next tagged release
+  the test: it fails unless every bundled `.exe`/`.msi` reports `Valid`.
+- ✅ **No auto-updater, by decision** (§A3.10) — no update-signing secrets exist. Users
+  re-download the installer from Releases; there is nothing to configure.
+- ⚠️ **Android FCM is the last real external gate** — needs a Firebase project
+  (`google-services.json`). Web Push (browsers + desktop) already works without it.
+- ✅ **Cert pinning is in** (§A3.11): `test_connection` and every launch verify the
+  host's pinned fingerprint instead of blindly accepting the self-signed Tailscale cert.
+- ✅ **Auto-updater stays out** (§A3.10) — manual re-download, by decision.
+- ✅ **One required repo setting:** the release jobs set `permissions: contents: write`;
+  without it tauri-action / `action-gh-release` cannot publish and the run fails.

@@ -4,11 +4,23 @@ name: Build Android APK
 # as a workflow artifact on a manual run.
 #
 # NOTE: this is the documented Tauri Android flow; the NDK/SDK versions below may
-# need bumping as GitHub's runners update. It has not been run yet.
+# need bumping as GitHub's runners update.
+#
+# The APK is signed in CI (see "Sign the APK") because a Tauri release build is
+# unsigned by default and Android refuses to install an unsigned APK.
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
+
+# softprops/action-gh-release appends the APK to the tagged release, which
+# needs write access to contents.
+permissions:
+  contents: write
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   android:
@@ -65,25 +77,72 @@ jobs:
         working-directory: src-tauri
         run: cargo tauri android build --apk
 
+      # ---------------------------------------------------------------------
+      # Android refuses to install an UNSIGNED apk, and a release build here is
+      # unsigned: Tauri only signs when `gen/android/app/build.gradle.kts` has a
+      # signingConfigs block (per the Tauri docs), and that project is generated
+      # in CI. Rather than patch generated Gradle, sign the output ourselves:
+      #
+      #   * with your upload keystore when ANDROID_KEYSTORE_BASE64 is set;
+      #   * otherwise with a throwaway debug keystore, so the download works
+      #     today (this is what `adb install` of a dev build uses anyway).
+      #
+      # Either way the result is verified with `apksigner verify`, so an
+      # uninstallable APK can never be published silently.
+      # ---------------------------------------------------------------------
+      - name: Sign the APK
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          BUILD_TOOLS="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
+          # Prefer an already-signed artifact; a release build is normally
+          # named `*-unsigned.apk`, so the fallback is the common case.
+          APK="$(find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' ! -name '*unsigned*' -print -quit)"
+          [ -n "$APK" ] || APK="$(find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' -print -quit)"
+          if [ -z "$APK" ]; then
+            echo "::error::The Android build produced no APK at all."
+            exit 1
+          fi
+          echo "Signing $APK"
+
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "Using the upload keystore from repository secrets."
+            KS="$RUNNER_TEMP/upload-keystore.jks"
+            printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$KS"
+            ALIAS="$ANDROID_KEY_ALIAS"
+            PW="$ANDROID_KEY_PASSWORD"
+          else
+            echo "::warning::No ANDROID_KEYSTORE_BASE64 secret — signing with a throwaway debug key. Add ANDROID_KEYSTORE_BASE64, ANDROID_KEY_ALIAS and ANDROID_KEY_PASSWORD to sign with your own."
+            KS="$RUNNER_TEMP/debug.jks"
+            ALIAS="androiddebugkey"
+            PW="android"
+            keytool -genkeypair -v -keystore "$KS" -storepass "$PW" -keypass "$PW" \
+              -alias "$ALIAS" -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+          NAME="E2E-Chat-${GITHUB_REF_NAME}-android.apk"
+          mkdir -p dist
+          "$BUILD_TOOLS/zipalign" -f -p 4 "$APK" dist/unaligned.apk
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks "$KS" --ks-key-alias "$ALIAS" \
+            --ks-pass "pass:$PW" --key-pass "pass:$PW" \
+            --out "dist/$NAME" dist/unaligned.apk
+          rm -f dist/unaligned.apk
+          # Hard proof the artifact is installable.
+          "$BUILD_TOOLS/apksigner" verify --print-certs "dist/$NAME"
+          ls -la dist
+
       - name: Upload APK (workflow artifact)
         uses: actions/upload-artifact@v4
         with:
           name: e2e-chat-android
-          path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
-          if-no-files-found: warn
-
-      # ---------------------------------------------------------------------
-      # Tag push → attach the APK to the same GitHub Release the desktop job
-      # creates, so users get every platform from one page. Runs after the
-      # desktop matrix has had time to create the release; the action creates
-      # it if this job happens to win the race.
-      # ---------------------------------------------------------------------
-      - name: Stage APK for release
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          mkdir -p dist
-          find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' -exec cp {} dist/E2E-Chat-${{ github.ref_name }}-android.apk \;
-          ls -la dist
+          path: dist/*.apk
+          if-no-files-found: error
 
       - name: Generate checksums
         if: startsWith(github.ref, 'refs/tags/')

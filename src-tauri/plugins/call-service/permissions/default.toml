@@ -1,6 +1,13 @@
 [default]
 description = """
-Start and stop the Android foreground service that keeps an active voice call
-alive while the screen is off or the app is backgrounded.
+Keep an active voice call alive while the screen is off or the app is
+backgrounded (start/stop the Android foreground service), and raise the
+full-screen incoming-call notification when a call arrives while the app is
+not in the foreground.
 """
-permissions = ["allow-start", "allow-stop"]
+permissions = [
+    "allow-start",
+    "allow-stop",
+    "allow-incoming-call",
+    "allow-cancel-incoming",
+]

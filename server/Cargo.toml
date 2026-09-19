@@ -29,4 +29,9 @@ rcgen = "0.13"
 rustls-pemfile = "2"
 local-ip-address = "0.6"
 url = "2.5.8"
-reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["native-tls", "json"] }
+# Web Push (VAPID): P-256 for the VAPID JWT + message encryption,
+# AES-128-GCM for the RFC 8291 aes128gcm payload, HMAC-SHA256 for HKDF.
+p256 = { version = "0.13", features = ["ecdsa", "ecdh"] }
+aes-gcm = "0.10"
+hmac = "0.12"

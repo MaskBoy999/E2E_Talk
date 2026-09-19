@@ -3987,6 +3987,33 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 
+    // Box app only: the Connection tab shows which server this app is pointed at
+    // and reopens the setup screen to change it. The Android box has no tray
+    // menu, so without this the address could only be changed by wiping app data
+    // (a plain browser simply never reveals the tab).
+    (function initConnectionSettings() {
+        const connTab = document.getElementById('connection-settings-tab');
+        const tauri = window.__TAURI__;
+        if (!connTab || !tauri || !tauri.core || !tauri.core.invoke) return;
+        const addrEl = document.getElementById('connection-server-address');
+        const changeBtn = document.getElementById('connection-change-server-btn');
+        function refreshAddress() {
+            tauri.core.invoke('get_config').then(function (cfg) {
+                if (addrEl) addrEl.textContent = (cfg && cfg.server_url) || 'Not set';
+            }).catch(function () {});
+        }
+        connTab.style.display = '';
+        connTab.addEventListener('click', refreshAddress);
+        if (changeBtn) {
+            changeBtn.addEventListener('click', function () {
+                tauri.core.invoke('show_setup').catch(function (e) {
+                    console.warn('[box] show_setup failed:', e);
+                });
+            });
+        }
+        refreshAddress();
+    })();
+
     async function fetchBackupStatus() {
         var el = document.getElementById('backup-status-line');
         if (!el) return;
