@@ -76,9 +76,11 @@
         open the chat in a browser.
     </p>
 
-    <label for="server-url">Server address</label>
-    <input id="server-url" type="text" placeholder="https://100.101.102.103:3443" autocomplete="off" spellcheck="false">
-    <p class="hint">Include the port — the default is <code>3443</code>.</p>
+    <label for="server-url">Server IP or address</label>
+    <input id="server-url" type="text" placeholder="100.101.102.103" autocomplete="off" spellcheck="false">
+    <p class="hint">Just the IP (or Tailscale machine name) is enough — <code>https://</code> and port
+        <code>3443</code> are added for you. Only include a port if your server uses a
+        different one, e.g. <code>100.101.102.103:8443</code>.</p>
 
     <div class="row">
         <button id="test-btn" type="button">Test connection</button>
@@ -139,15 +141,23 @@
         troubleEl.style.display = kind === 'err' ? 'block' : 'none';
     }
 
-    // Normalize a typed address: default scheme, default port.
+    // Normalize whatever was typed into a full origin. Accepts a bare IP
+    // (`100.1.2.3`), an IP with a port, a Tailscale machine name, or a whole
+    // pasted URL — and keeps only the origin, so a pasted path like
+    // `https://100.1.2.3:3443/chat` becomes `https://100.1.2.3:3443`.
     function normalize(raw) {
-        var v = (raw || '').trim();
-        if (!v) return v;
-        if (!/^https?:\/\//i.test(v)) v = 'https://' + v;
+        var input = (raw || '').trim();
+        if (!input) return input;
+        var v = /^https?:\/\//i.test(input) ? input : 'https://' + input;
         try {
             var u = new URL(v);
-            if (!u.port) u.port = '3443';
-            return u.toString().replace(/\/$/, '');
+            // Default the port only when none was typed. This has to be tested
+            // against the raw input: the URL parser erases an explicit :443
+            // (and :80) because it equals the scheme's default, so `u.port`
+            // cannot tell us — and we must not rewrite a deliberate :443 to
+            // 3443.
+            if (!/:[0-9]+(\/|$|\?|#)/.test(input)) u.port = '3443';
+            return u.origin;
         } catch (_) {
             return v;
         }
@@ -217,6 +227,12 @@
     document.getElementById('quit-btn').addEventListener('click', function () {
         if (invoke) invoke('quit_app').catch(function () {});
         else window.close();
+    });
+
+    // Echo the address we will actually use, so nobody has to guess whether
+    // "100.101.102.103" means https or which port got picked.
+    urlInput.addEventListener('blur', function () {
+        if (urlInput.value.trim()) urlInput.value = normalize(urlInput.value);
     });
 
     urlInput.addEventListener('keydown', function (e) {
