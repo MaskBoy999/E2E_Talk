@@ -23,6 +23,15 @@ name: Build Android APK
 #      disagreed with the ANDROID_HOME this workflow sets → AGP refused to
 #      resolve the release task's dependencies. This is what failed v0.2.6,
 #      after the Rust lib and its .so had already built successfully.
+#   3. With both fixed, Gradle finally got to assemble and ran 8m31s before
+#      failing. The log-tail step re-emitted only the last 8 lines, which for a
+#      Gradle failure are a multi-KB `Io(Env(...))` dump plus deprecation noise —
+#      so the failing task was STILL hidden. That step now re-emits Gradle's
+#      "What went wrong" block instead of the raw tail.
+#
+# The build is intentionally arm64-v8a only (see "Build APK"): that is the one
+# ABI whose Rust + NDK link is proven to work here, and it covers every phone
+# capable of installing this app.
 on:
   push:
     tags: ['v*']
@@ -116,7 +125,15 @@ jobs:
         run: |
           set -o pipefail
           EXIT=0
-          cargo tauri android build --apk 2>&1 | tee android-build.log || EXIT=$?
+          # --target aarch64 builds ONLY arm64-v8a. The default builds all four
+          # ABIs (aarch64, armv7, i686, x86_64), which multiplies the CI time
+          # and drags in two 32-bit toolchains for no benefit: every device that
+          # can install this app publishes arm64-v8a. It is deliberately NOT
+          # paired with removing rustup targets above — if Gradle still wants
+          # another ABI, keeping the targets installed avoids turning an ABI
+          # filter into a hard "target may not be installed" failure.
+          # Add `--target x86_64` here to also get an emulator-compatible APK.
+          cargo tauri android build --apk --target aarch64 2>&1 | tee android-build.log || EXIT=$?
           echo "BUILD_EXIT=$EXIT" >> "$GITHUB_ENV"
           exit $EXIT
 
@@ -148,23 +165,38 @@ jobs:
           fi
           tail -n 120 android-build.log
 
-          # Job logs need auth even on a public repo, so the failing line above
-          # is invisible to anyone who is not signed in as the owner.
-          # Annotations ARE public, so on failure re-emit the tail as ::error::
-          # annotations and the real Gradle/Rust cause shows up in the job's
-          # Annotations panel. `%` and CR must be escaped or GitHub drops the
-          # message.
+          # Job logs need auth even on a public repo, so everything above is
+          # invisible to anyone not signed in as the owner — while annotations
+          # ARE public. On failure, re-emit the interesting part of the log as
+          # a single multi-line ::error:: annotation (GitHub allows ~64KB per
+          # annotation but caps a step at 10 annotations, so packing whole
+          # block into one beats one-line-each).
+          #
+          # NOT the raw tail. The last lines are a giant `Io(Env(...))` command
+          # dump plus Gradle deprecation noise, which is exactly what made the
+          # v0.2.7 annotation useless: it buried the `What went wrong` block
+          # that actually names the failing task. Anchor on Gradle's FAILURE
+          # line (or the first rustc error) and window forward from there.
           if [ "${BUILD_EXIT:-0}" != "0" ]; then
             echo "--- annotations ---"
-            tail -n 8 android-build.log \
-              | sed -e 's/%/%25/g' -e 's/\r$//' \
-              | while IFS= read -r line; do
-                  # `if` not `&&`: a false test here would leave the pipeline
-                  # exiting 1 and paint this diagnostic step red.
-                  if [ -n "$line" ]; then
-                    printf '::error::%s\n' "${line:0:800}"
-                  fi
-                done
+            START=$(grep -n -m1 -E '^FAILURE: Build failed|^error(\[|:)' android-build.log | cut -d: -f1)
+            if [ -n "$START" ]; then
+              [ "$START" -gt 6 ] && START=$((START - 6))
+            else
+              START=$(( $(wc -l < android-build.log) - 40 ))
+              [ "$START" -gt 1 ] || START=1
+            fi
+            # Truncate each line before joining, and drop the `Io(Env(...))`
+            # tail of the CLI's error — it is a multi-KB dump of every env var
+            # and only the message before it is worth reading.
+            BLOCK=$(sed -n "${START},$((START + 55))p" android-build.log \
+              | sed -e 's/Io(.*//' -e 's/%/%25/g' -e 's/\r$//' \
+              | cut -c1-400 \
+              | sed ':a;N;$!ba;s/\n/%0A/g' \
+              | cut -c1-16000)
+            if [ -n "$BLOCK" ]; then
+              printf '::error::%s\n' "$BLOCK"
+            fi
           fi
 
       - name: Sign the APK
