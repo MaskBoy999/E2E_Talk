@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>E2E Chat — Setup</title>
+<style>
+    :root {
+        --bg: #1e1f22;
+        --panel: #2b2d31;
+        --text: #dbdee1;
+        --muted: #949ba4;
+        --accent: #4fc3f7;
+        --ok: #57f287;
+        --danger: #ed4245;
+        --border: #3f4147;
+    }
+    * { box-sizing: border-box; }
+    body {
+        margin: 0;
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        font-size: 14px;
+        -webkit-user-select: none;
+        user-select: none;
+    }
+    .wrap { padding: 28px 26px 22px; }
+    h1 { font-size: 20px; margin: 0 0 4px; }
+    .sub { color: var(--muted); font-size: 13px; margin: 0 0 22px; line-height: 1.5; }
+    label { display: block; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin-bottom: 6px; }
+    input[type=text] {
+        width: 100%;
+        background: #1a1b1e;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        color: var(--text);
+        padding: 11px 12px;
+        font-size: 14px;
+        font-family: ui-monospace, "Cascadia Code", Menlo, monospace;
+    }
+    input[type=text]:focus { outline: none; border-color: var(--accent); }
+    .hint { color: var(--muted); font-size: 12px; margin: 8px 0 0; line-height: 1.5; }
+    .row { display: flex; gap: 10px; align-items: center; margin-top: 14px; }
+    button {
+        font: inherit;
+        border-radius: 6px;
+        padding: 10px 16px;
+        cursor: pointer;
+        border: 1px solid var(--border);
+        background: var(--panel);
+        color: var(--text);
+    }
+    button:hover { filter: brightness(1.12); }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #06202c; font-weight: 600; }
+    button:disabled { opacity: .55; cursor: default; }
+    #status { margin-top: 12px; font-size: 13px; line-height: 1.5; padding: 10px 12px; border-radius: 6px; display: none; }
+    #status.ok { display: block; background: rgba(87,242,135,.1); border: 1px solid rgba(87,242,135,.35); color: var(--ok); }
+    #status.err { display: block; background: rgba(237,66,69,.1); border: 1px solid rgba(237,66,69,.35); color: var(--danger); }
+    fieldset { border: none; padding: 0; margin: 22px 0 0; }
+    .check { display: flex; align-items: center; gap: 9px; margin: 10px 0; color: var(--text); font-size: 13.5px; cursor: pointer; }
+    .check input { width: 16px; height: 16px; accent-color: var(--accent); }
+    .trouble { margin-top: 14px; padding: 12px 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; display: none; }
+    .trouble h2 { font-size: 13px; margin: 0 0 8px; color: var(--text); }
+    .trouble ul { margin: 0; padding-left: 18px; color: var(--muted); font-size: 12.5px; line-height: 1.7; }
+    .footer { margin-top: 24px; display: flex; justify-content: flex-end; gap: 10px; }
+    code { background: #1a1b1e; padding: 1px 5px; border-radius: 4px; font-size: 12.5px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+    <h1>E2E Chat</h1>
+    <p class="sub">
+        Enter the address of the machine running your E2E Chat server on Tailscale.
+        You'll find it in the Tailscale admin console, or it's the address you use to
+        open the chat in a browser.
+    </p>
+
+    <label for="server-url">Server address</label>
+    <input id="server-url" type="text" placeholder="https://100.101.102.103:3443" autocomplete="off" spellcheck="false">
+    <p class="hint">Include the port — the default is <code>3443</code>.</p>
+
+    <div class="row">
+        <button id="test-btn" type="button">Test connection</button>
+    </div>
+    <div id="status"></div>
+    <div class="trouble" id="trouble">
+        <h2>If it won't connect</h2>
+        <ul>
+            <li>Check the server is running on your host machine.</li>
+            <li>Open Tailscale on this device and make sure it's connected.</li>
+            <li>Confirm the address matches your host's Tailscale IP.</li>
+            <li>Make sure port <code>3443</code> isn't blocked by a firewall.</li>
+        </ul>
+    </div>
+
+    <fieldset>
+        <label class="check"><input id="auto-start" type="checkbox"> Start on system startup</label>
+        <label class="check"><input id="min-tray" type="checkbox" checked> Minimize to tray on close</label>
+    </fieldset>
+
+    <div class="footer">
+        <button id="quit-btn" type="button">Quit</button>
+        <button id="save-btn" class="primary" type="button">Save &amp; Launch</button>
+    </div>
+</div>
+
+<script>
+    var invoke = (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke) || null;
+    var urlInput = document.getElementById('server-url');
+    var statusEl = document.getElementById('status');
+    var troubleEl = document.getElementById('trouble');
+    var testBtn = document.getElementById('test-btn');
+    var saveBtn = document.getElementById('save-btn');
+    var autoStartEl = document.getElementById('auto-start');
+    var minTrayEl = document.getElementById('min-tray');
+
+    function setStatus(kind, text) {
+        statusEl.className = kind;
+        statusEl.textContent = text;
+        statusEl.style.display = 'block';
+        troubleEl.style.display = kind === 'err' ? 'block' : 'none';
+    }
+
+    // Normalize a typed address: default scheme, default port.
+    function normalize(raw) {
+        var v = (raw || '').trim();
+        if (!v) return v;
+        if (!/^https?:\/\//i.test(v)) v = 'https://' + v;
+        try {
+            var u = new URL(v);
+            if (!u.port) u.port = '3443';
+            return u.toString().replace(/\/$/, '');
+        } catch (_) {
+            return v;
+        }
+    }
+
+    if (!invoke) {
+        setStatus('err', 'This setup screen only works inside the E2E Chat desktop app.');
+        document.querySelectorAll('button, input').forEach(function (el) { el.disabled = true; });
+    } else {
+        // Prefill from any saved config.
+        invoke('get_config').then(function (cfg) {
+            if (cfg && cfg.server_url) urlInput.value = cfg.server_url;
+            if (cfg && typeof cfg.auto_start === 'boolean') autoStartEl.checked = cfg.auto_start;
+            if (cfg && typeof cfg.minimize_to_tray === 'boolean') minTrayEl.checked = cfg.minimize_to_tray;
+            urlInput.focus();
+        }).catch(function () {});
+    }
+
+    testBtn.addEventListener('click', function () {
+        if (!invoke) return;
+        var url = normalize(urlInput.value);
+        urlInput.value = url;
+        testBtn.disabled = true;
+        setStatus('ok', 'Testing…');
+        statusEl.className = '';
+        invoke('test_connection', { url: url }).then(function (r) {
+            if (r && r.ok) setStatus('ok', r.detail || 'Connected.');
+            else setStatus('err', (r && r.detail) || 'Could not connect.');
+        }).catch(function (e) {
+            setStatus('err', String(e && e.message ? e.message : e));
+        }).finally(function () {
+            testBtn.disabled = false;
+        });
+    });
+
+    saveBtn.addEventListener('click', function () {
+        if (!invoke) return;
+        var url = normalize(urlInput.value);
+        urlInput.value = url;
+        if (!url) { setStatus('err', 'Enter the server address first.'); return; }
+        saveBtn.disabled = true;
+        invoke('save_config', {
+            serverUrl: url,
+            autoStart: autoStartEl.checked,
+            minimizeToTray: minTrayEl.checked
+        }).then(function () {
+            // The Rust side opens the main window and closes this one.
+        }).catch(function (e) {
+            setStatus('err', String(e && e.message ? e.message : e));
+            saveBtn.disabled = false;
+        });
+    });
+
+    document.getElementById('quit-btn').addEventListener('click', function () {
+        if (invoke) invoke('quit_app').catch(function () {});
+        else window.close();
+    });
+
+    urlInput.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') testBtn.click();
+    });
+</script>
+</body>
+</html>

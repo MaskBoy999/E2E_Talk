@@ -1,0 +1,36 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "E2E Chat",
+  "version": "0.2.0",
+  "identifier": "com.e2echat.app",
+  "build": {
+    "frontendDist": "../static"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "SocialNetworking",
+    "android": {
+      "minSdkVersion": 29,
+      "versionCode": 200
+    },
+    "macOS": {
+      "minimumSystemVersion": "10.15",
+      "hardenedRuntime": true,
+      "entitlements": "Entitlements.plist"
+    },
+    "shortDescription": "Encrypted chat, calls and screen share",
+    "longDescription": "E2E Chat is an end-to-end encrypted chat client. This app is a native shell that connects to your own Tailscale-hosted server.",
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.ico"
+    ]
+  }
+}

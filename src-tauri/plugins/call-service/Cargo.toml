@@ -1,0 +1,15 @@
+[package]
+name = "tauri-plugin-call-service"
+version = "0.1.0"
+description = "Android foreground service that keeps a voice call alive with the screen off"
+authors = ["E2E Chat"]
+edition = "2021"
+rust-version = "1.77"
+# Required by tauri-plugin's build script (it keys permission generation off it).
+links = "tauri-plugin-call-service"
+
+[build-dependencies]
+tauri-plugin = { version = "2", features = ["build"] }
+
+[dependencies]
+tauri = { version = "2", features = [] }

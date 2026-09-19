@@ -1,0 +1,183 @@
+name: Build Desktop Box
+
+# Push a tag like v0.2.0 to publish installers users can download straight from
+# the GitHub Releases page. Run it manually from the Actions tab to get the
+# installers as workflow artifacts without publishing a release.
+#
+# Code signing is OPTIONAL and secret-gated: with no secrets configured the
+# builds still succeed, they just warn on first launch (SmartScreen / Gatekeeper).
+# Configure these repository secrets to get rid of the warnings:
+#
+#   macOS  APPLE_CERTIFICATE          base64 of a Developer ID Application .p12
+#          APPLE_CERTIFICATE_PASSWORD password for that .p12
+#          APPLE_SIGNING_IDENTITY     e.g. "Developer ID Application: Name (TEAMID)"
+#          APPLE_ID                   Apple ID email used for notarization
+#          APPLE_PASSWORD             app-specific password for that Apple ID
+#          APPLE_TEAM_ID              10-char team id from developer.apple.com
+#
+#   Windows WINDOWS_CERTIFICATE       base64 of a code-signing .pfx
+#          WINDOWS_CERTIFICATE_PASSWORD password for that .pfx
+#
+# See WEBSITE_IN_A_BOX_MASTER_PLAN.md §10.4 for how to obtain each of these.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            args: '--target aarch64-apple-darwin'
+            label: macos-arm64
+          - platform: macos-latest
+            args: '--target x86_64-apple-darwin'
+            label: macos-x64
+          - platform: ubuntu-22.04
+            args: ''
+            label: linux-x64
+          - platform: windows-latest
+            args: ''
+            label: windows-x64
+    runs-on: ${{ matrix.platform }}
+    # `secrets` is not usable in step `if:` conditions, so the signing secrets
+    # are surfaced as env vars and the gates below test `env.*`.
+    env:
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tauri's Linux toolchain.
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # ---------------------------------------------------------------------
+      # macOS: import the Developer ID cert. Skipped unless the secret exists,
+      # so forks and unsigned builds keep working.
+      # ---------------------------------------------------------------------
+      - name: Import Apple code signing certificate
+        if: matrix.platform == 'macos-latest' && env.APPLE_CERTIFICATE != ''
+        uses: apple-actions/import-codesign-certs@v3
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
+          p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+
+      # ---------------------------------------------------------------------
+      # Windows: import the .pfx, read its thumbprint, and hand Tauri a config
+      # override that signs every .exe/.msi with it.
+      # ---------------------------------------------------------------------
+      - name: Import Windows code signing certificate
+        id: win-sign
+        if: matrix.platform == 'windows-latest' && env.WINDOWS_CERTIFICATE != ''
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $bytes = [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE)
+          $pfx = Join-Path $env:RUNNER_TEMP 'cert.pfx'
+          [IO.File]::WriteAllBytes($pfx, $bytes)
+          $pw = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -Force -AsPlainText
+          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $pw
+          $conf = Join-Path $env:GITHUB_WORKSPACE 'windows-signing.conf.json'
+          @{
+            bundle = @{
+              windows = @{
+                certificateThumbprint = $cert.Thumbprint
+                digestAlgorithm       = 'sha256'
+                timestampUrl          = 'http://timestamp.digicert.com'
+              }
+            }
+          } | ConvertTo-Json -Depth 5 | Set-Content -Path $conf -Encoding utf8
+          "args=--config `"$conf`"" >> $env:GITHUB_OUTPUT
+          Write-Host "Signing with thumbprint $($cert.Thumbprint)"
+
+      # Tag push → build AND publish a downloadable release.
+      - name: Build and publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Notarization. Tauri signs with the imported keychain identity and
+          # notarizes/staple automatically when these are present.
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'E2E Chat ${{ github.ref_name }}'
+          releaseBody: |
+            Native desktop app for E2E Chat — no browser required.
+
+            **Install:** download the file for your platform below and run it.
+            - Windows: `.msi` or `.exe` (NSIS)
+            - macOS: `.dmg`
+            - Linux: `.AppImage` or `.deb`
+
+            Verify your download against `SHA256SUMS-<platform>.txt`.
+
+            On first launch, enter your server's Tailscale address
+            (e.g. `https://100.x.x.x:3443`) and click **Test connection**.
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }} ${{ steps.win-sign.outputs.args }}
+
+      # Manual run → build only; the installers are uploaded as artifacts.
+      - name: Build installers (manual run)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: tauri-apps/tauri-action@v0
+        with:
+          args: ${{ matrix.args }} ${{ steps.win-sign.outputs.args }}
+
+      - name: Upload installers (manual run)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-chat-${{ matrix.label }}
+          path: src-tauri/target/**/release/bundle/**
+          if-no-files-found: warn
+
+      # ---------------------------------------------------------------------
+      # Checksums: one file per platform so a partial download only ever
+      # invalidates that platform's list.
+      # ---------------------------------------------------------------------
+      - name: Generate checksums
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          out="$GITHUB_WORKSPACE/SHA256SUMS-${{ matrix.label }}.txt"
+          : > "$out"
+          while IFS= read -r -d '' f; do
+            h=$(sha256sum "$f" | cut -d' ' -f1)
+            echo "$h  $(basename "$f")" >> "$out"
+          done < <(find src-tauri/target -type f \
+            \( -name '*.exe' -o -name '*.msi' -o -name '*.dmg' \
+               -o -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' \) -print0)
+          echo "--- $out"
+          cat "$out"
+
+      - name: Attach checksums to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: SHA256SUMS-*.txt
+          fail_on_unmatched_files: false

@@ -1,0 +1,14 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_CALL" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <application>
+        <!-- merged into the app manifest at build time -->
+        <service
+            android:name="com.e2echat.callservice.CallForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="mediaCall" />
+    </application>
+</manifest>

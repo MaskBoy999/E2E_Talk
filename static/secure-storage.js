@@ -465,13 +465,35 @@
     }
 
     /**
+     * True when this device holds the material needed to deterministically
+     * re-derive the storage key: the password blob (`e2e_encrypted_password`)
+     * and the device key that wraps it (`e2e_device_key`).
+     *
+     * When this is true the storage key MUST NEVER be replaced by a random
+     * fallback — every sensitive value (the session `token` above all) is
+     * encrypted under the password-derived key, so a random key makes all of
+     * it permanently unreadable and the user is bounced to the login page on
+     * every cold start.
+     */
+    function _hasPasswordBootstrap() {
+        try {
+            var encPw = _realOrigGet.call(localStorage, 'e2e_encrypted_password');
+            var devKey = _realOrigGet.call(localStorage, 'e2e_device_key');
+            return !!(encPw && devKey);
+        } catch (_) { return false; }
+    }
+
+    /**
      * Ensure the encryption key is available.
      *
      * Priority order:
      *   1. Cached in-memory (fastest path, this page load)
-     *   2. Stored in sessionStorage (cross-page within same tab)
-     *   3. Derive from encrypted password (cross-device deterministic key)
-     *   4. Generate random key (fallback for pre-login state)
+     *   2. Derive from encrypted password — ONLY when a bootstrap is present,
+     *      and BEFORE the caches, because it is the authoritative key the
+     *      session was encrypted under
+     *   3. Stored in sessionStorage (cross-page within same tab)
+     *   4. Persistent localStorage fallback (only safe with no bootstrap)
+     *   5. Generate random key (fallback for pre-login state only)
      */
     function _ensureKey() {
         if (_key) {
@@ -489,7 +511,44 @@
             return _key;
         }
 
-        // Check sessionStorage cache first (tab persistence)
+        // A password bootstrap means the password-derived key is the ONLY key
+        // that can open the stored session. Try it first, and never let the
+        // random fallback win over it: a fallback minted by an earlier load
+        // that lost the sodium-ready race would otherwise orphan the token
+        // forever (the cold-start "logged out on mobile" bug).
+        if (_hasPasswordBootstrap()) {
+            var derivedNow = _tryDeriveFromEncryptedPassword();
+            if (derivedNow) {
+                _key = derivedNow;
+                try { sessionStorage.setItem(SESSION_KEY_NAME, _bytesToBase64(_key)); } catch (_) {}
+                try { _realOrigRemove.call(localStorage, LOCAL_KEY_NAME); } catch (_) {}
+                window._secDerivationPending = false;
+                return _key;
+            }
+            // Derivation is momentarily impossible (E2ECrypto/libsodium not
+            // ready at parse time). Do NOT mint a random key — that would
+            // permanently orphan the token. Reuse an already-cached key if one
+            // exists and flag that a retry is needed once crypto is ready.
+            window._secDerivationPending = true;
+            var cachedKey = sessionStorage.getItem(SESSION_KEY_NAME);
+            if (cachedKey) {
+                try {
+                    var ck = _base64ToBytes(cachedKey);
+                    if (ck.length === 32) { _key = ck; return _key; }
+                } catch (_) {}
+            }
+            try {
+                var fbKey = _realOrigGet.call(localStorage, LOCAL_KEY_NAME);
+                if (fbKey) {
+                    var fk = _base64ToBytes(fbKey);
+                    if (fk.length === 32) { _key = fk; return _key; }
+                }
+            } catch (_) {}
+            return null;
+        }
+
+        // No password bootstrap (fresh device / pre-login): sessionStorage →
+        // persistent fallback → a new random key are all safe here.
         var stored = sessionStorage.getItem(SESSION_KEY_NAME);
         if (stored) {
             try {
@@ -501,8 +560,6 @@
             }
         }
 
-        // If sessionStorage was cleared, try the persistent localStorage fallback
-        // (only used when no password-derived key is available — pre-login state).
         if (!_key) {
             try {
                 var lsKey = _realOrigGet.call(localStorage, LOCAL_KEY_NAME);
@@ -517,17 +574,6 @@
             } catch (_) {
                 _key = null;
             }
-        }
-
-        // Try to derive from encrypted password (cross-device deterministic key)
-        var derived = _tryDeriveFromEncryptedPassword();
-        if (derived) {
-            _key = derived;
-            // Cache in sessionStorage for this tab's lifetime
-            sessionStorage.setItem(SESSION_KEY_NAME, _bytesToBase64(_key));
-            // Remove any stale localStorage fallback (we now have a proper password-derived key)
-            try { _realOrigRemove.call(localStorage, LOCAL_KEY_NAME); } catch (_) {}
-            return _key;
         }
 
         // Fallback: generate random key (pre-login state)
@@ -699,6 +745,13 @@
     }
     // Deferred so the first pass uses AEAD instead of XOR (sodium is not ready at parse time).
     _afterSodium(function () {
+        // Self-heal: a cold start can run the parse-time _secInit() before
+        // libsodium finishes initialising, so the password-derived key wasn't
+        // available yet. Now that it is, re-derive it before anything reads the
+        // session (the app's DOMContentLoaded check runs after this microtask).
+        if (window._secDerivationPending && typeof window._secRedriveKey === 'function') {
+            try { window._secRedriveKey(); } catch (_) {}
+        }
         if (typeof window._secUpgradeToAead === 'function') window._secUpgradeToAead();
         if (typeof window._secInit === 'function') window._secInit();
     });
@@ -798,6 +851,28 @@
      * Escape a string for safe insertion into an HTML attribute (quoted context).
      */
     window.escapeAttr = window.escapeHtml;
+
+    /**
+     * Force one re-derivation of the storage key from the password bootstrap.
+     *
+     * Boot-time self-heal for the cold-start race: when the parse-time
+     * _secInit() could not derive (E2ECrypto/libsodium not ready), the correct
+     * key becomes available a moment later. This swaps the cached key to the
+     * password-derived one so sensitive reads — starting with `token` — succeed
+     * without forcing a re-login. Returns true when a password-derived key is
+     * now active.
+     */
+    window._secRedriveKey = function () {
+        if (!_hasPasswordBootstrap()) return false;
+        var derived = _tryDeriveFromEncryptedPassword();
+        if (!derived) return false;
+        _key = derived;
+        try { sessionStorage.setItem(SESSION_KEY_NAME, _bytesToBase64(_key)); } catch (_) {}
+        // The random fallback is now definitively stale.
+        try { _realOrigRemove.call(localStorage, LOCAL_KEY_NAME); } catch (_) {}
+        window._secDerivationPending = false;
+        return true;
+    };
 
     window._secReKey = function () {
         // Capture the CURRENT key BEFORE clearing anything: the plaintexts must

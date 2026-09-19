@@ -1,0 +1,6 @@
+[default]
+description = """
+Start and stop the Android foreground service that keeps an active voice call
+alive while the screen is off or the app is backgrounded.
+"""
+permissions = ["allow-start", "allow-stop"]

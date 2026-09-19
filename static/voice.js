@@ -1042,6 +1042,25 @@
     }
 
     // ------------------------------------------------------------------
+    // Website-in-a-box bridge
+    // ------------------------------------------------------------------
+    // Android freezes WebView processes once the app is backgrounded, which
+    // kills the WebRTC connection mid-call. The native `call-service` plugin
+    // starts a `mediaCall` foreground service for the duration of the call,
+    // which keeps us alive and shows an ongoing "In call" notification.
+    // Desktop needs nothing (calls already survive a minimised window), and in
+    // a plain browser `window.__TAURI__` is absent, so both are no-ops.
+    function _boxCallService(action, channelName) {
+        var tauri = window.__TAURI__;
+        if (!tauri || !tauri.core || !tauri.core.invoke) return;
+        if (!/Android/i.test(navigator.userAgent || '')) return;
+        var args = action === 'start' ? { channelName: channelName || 'Voice call' } : {};
+        tauri.core.invoke('plugin:call-service|' + action, args).catch(function (e) {
+            console.warn('[box] call-service ' + action + ' failed:', e);
+        });
+    }
+
+    // ------------------------------------------------------------------
     // Joining / leaving
     // ------------------------------------------------------------------
     function joinServerVoice(serverId, channelId, channelName) {
@@ -1100,6 +1119,9 @@
     }
 
     function teardownRoom() {
+        // Any path out of a room (leave, hangup, kick, replace) ends the call,
+        // so release the foreground service here rather than only in leaveVoice.
+        _boxCallService('stop');
         clearRingTimer();
         clearCalleeRingTimer();
         stopRingtone();
@@ -3226,6 +3248,8 @@
         S.muted = S.forceMuted || S.forceDeafened;
         S.deafened = S.forceDeafened;
         S.connected = true;
+        // Keep the call alive if the phone screen goes off.
+        _boxCallService('start', S.channelName || (S.roomType === 'dm' ? 'Direct call' : 'Voice call'));
         if (S.roomType === 'dm') {
             S.dmCallActive = true;
             S.incomingCall = null;

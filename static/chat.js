@@ -3289,8 +3289,19 @@ async function decryptDmMessageForDisplay(m) {
 document.addEventListener('DOMContentLoaded', () => {
     checkTokenExpiry();
 
-    const t = token();
-    const userStr = localStorage.getItem('user');
+    let t = token();
+    let userStr = localStorage.getItem('user');
+
+    // Cold-start self-heal: on a fresh load (mobile browser restart clear
+    // sessionStorage) the storage key may not have been derivable yet when the
+    // values were first read, so the session looks missing. Force one
+    // re-derivation from the password bootstrap and re-read before giving up.
+    if ((!t || !userStr) && typeof window._secRedriveKey === 'function') {
+        if (window._secRedriveKey()) {
+            t = token();
+            userStr = localStorage.getItem('user');
+        }
+    }
 
     if (!t || !userStr) {
         window.location.href = 'login.html';
@@ -10313,6 +10324,17 @@ function startNotifVisualizer(durationMs) {
 }
 
 function showBrowserNotification(title, body, onClick) {
+    // Inside the desktop/mobile box, use the OS notification instead of the Web
+    // Notification API: it looks native, supports actions, and Android WebView
+    // does not implement the Web Notification API at all. The box grants this
+    // origin access to the `notify` command (see src-tauri/src/lib.rs).
+    var tauri = window.__TAURI__;
+    if (tauri && tauri.core && tauri.core.invoke) {
+        try {
+            tauri.core.invoke('notify', { title: title, body: body });
+            return;
+        } catch (_) { /* fall through to the browser path */ }
+    }
     if (!('Notification' in window) || Notification.permission !== 'granted') return;
     try {
         var notif = new Notification(title, { body, icon: '/favicon.ico' });
