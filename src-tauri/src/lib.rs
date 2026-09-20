@@ -63,6 +63,21 @@ fn fingerprint_blocking(url: &str) -> Result<String, String> {
     tauri::async_runtime::block_on(async move { fingerprint(url).await })
 }
 
+/// Whether the configured host answers at all (TCP connect + TLS handshake),
+/// i.e. whether the main window could load anything from it.
+///
+/// `fingerprint_blocking` errors exactly when nothing could be reached — DNS
+/// failure, connection refused, timeout — while a *changed certificate* still
+/// probes successfully. So this is **not** a pin check (that is
+/// `check_pinned_cert`, which deliberately treats an unreachable host as
+/// acceptable so an offline launch still opens the app window); it answers the
+/// blunter question "is this address alive?". Bounded by the connect/read
+/// timeouts in `cert_probe`.
+#[cfg(not(desktop))]
+fn host_reachable(url: &str) -> bool {
+    fingerprint_blocking(url).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,6 +105,41 @@ mod tests {
             out.expect("the recheck task panicked on its own runtime").is_ok(),
             "an unreachable host must not be treated as a certificate mismatch"
         );
+    }
+
+    /// The navigation allowlist must compare whole origins: the same host on a
+    /// different port (or on `http` rather than `https`) is a different server,
+    /// and nothing remote may load before setup has been completed.
+    #[test]
+    fn only_the_configured_origin_may_load_in_the_app_window() {
+        let host = "https://100.1.2.3:3443";
+        let allowed: tauri::Url = "https://100.1.2.3:3443/chat".parse().unwrap();
+        assert!(nav_allowed(&allowed, Some(host)));
+
+        for bad in [
+            "https://100.1.2.3:3444/",       // same host, another port
+            "http://100.1.2.3:3443/",        // same host and port, other scheme
+            "https://100.1.2.4:3443/",       // another host
+            "https://100.1.2.3.evil.com:3443/", // lookalike hostname
+        ] {
+            let url: tauri::Url = bad.parse().unwrap();
+            assert!(
+                !nav_allowed(&url, Some(host)),
+                "{bad} must be handed to the system browser"
+            );
+        }
+
+        // No host configured yet (first run) — nothing remote is allowed.
+        assert!(!nav_allowed(&allowed, None));
+        // A malformed saved host must not open the whole web up, either.
+        assert!(!nav_allowed(&allowed, Some("not a url")));
+
+        // The app's own bundled pages always are: on mobile the setup page
+        // replaces the main window's content and is not on the host's origin.
+        assert!(nav_allowed(&app_page_url(SETUP_PAGE).unwrap(), Some(host)));
+        // As are local, non-network schemes (blob: for media/attachments).
+        let blob: tauri::Url = "blob:https://100.1.2.3:3443/abc".parse().unwrap();
+        assert!(nav_allowed(&blob, Some(host)));
     }
 
     /// The navigation allowlist has to let the app's own bundled pages through:
@@ -204,6 +254,60 @@ fn open_main(app: &tauri::AppHandle, server_url: &str) -> Result<(), String> {
     open_main_window(app, server_url)
 }
 
+/// The main window's navigation allowlist: the window may only ever show the
+/// configured host, the app's own bundled pages, or local `blob:`/`data:`
+/// URLs. Anything else — a link in a message, a redirect to another site — is
+/// handed to the system browser instead of being loaded inside the app.
+///
+/// Shared by *both* places that can create the main window, which matters on
+/// mobile: there the setup page is the first thing the main window ever shows
+/// (first run, or an unreachable saved host), so `open_setup_in_main` builds it
+/// too. A main window built without this would follow whatever a message links
+/// to, and a phone has no tray, no address bar and no back button to recover
+/// with.
+fn nav_allowlist(app: &tauri::AppHandle) -> impl Fn(&tauri::Url) -> bool + Send + 'static {
+    let nav_app = app.clone();
+    move |url: &tauri::Url| {
+        // Read the live config so changing the server from the tray takes
+        // effect immediately, without rebuilding the window.
+        let configured = nav_app
+            .state::<AppState>()
+            .cfg
+            .lock()
+            .ok()
+            .and_then(|c| c.server_url.clone());
+        if nav_allowed(url, configured.as_deref()) {
+            return true;
+        }
+        let _ = nav_app.opener().open_url(url.as_str(), None::<&str>);
+        false
+    }
+}
+
+/// The decision half of [`nav_allowlist`], split out so it can be unit-tested
+/// without an `AppHandle`.
+///
+/// Comparison is on `Url::origin()` — scheme + host + **port** — so the same
+/// host on another port, or the same host on `http` instead of `https`, is a
+/// different server and is *not* allowed.
+fn nav_allowed(url: &tauri::Url, configured: Option<&str>) -> bool {
+    // The app's own bundled pages: on mobile the setup page replaces the main
+    // window's content, and its origin is *not* the configured server, so
+    // without this the address screen would be punted to the system browser and
+    // the change-server flow could never come back.
+    if is_app_page(url) {
+        return true;
+    }
+    // Local (blob:, data:, about:) — no network risk.
+    if !matches!(url.scheme(), "http" | "https") {
+        return true;
+    }
+    let allowed = configured
+        .and_then(|s| s.parse::<tauri::Url>().ok())
+        .map(|u| u.origin());
+    allowed.as_ref() == Some(&url.origin())
+}
+
 /// Create (or focus/navigate) the main window. Does no certificate probing —
 /// callers are responsible for checking the pin first.
 fn open_main_window(app: &tauri::AppHandle, server_url: &str) -> Result<(), String> {
@@ -229,7 +333,6 @@ fn open_main_window(app: &tauri::AppHandle, server_url: &str) -> Result<(), Stri
         return Ok(());
     }
 
-    let nav_app = app.clone();
     WebviewWindowBuilder::new(app, MAIN_LABEL, WebviewUrl::External(parsed))
         .title("E2E Chat")
         .inner_size(1200.0, 780.0)
@@ -241,37 +344,8 @@ fn open_main_window(app: &tauri::AppHandle, server_url: &str) -> Result<(), Stri
         // which has no such handler. The UI uses HTML5 DnD exclusively and
         // never Tauri's `tauri://drag-*` events, so turn the native one off.
         .disable_drag_drop_handler()
-        // Navigation allowlist: the window may only ever show the configured
-        // host (or local blob:/data: URLs). Anything else — a link in a
-        // message, a redirect to another site — is handed to the system
-        // browser instead of being loaded inside the app.
-        .on_navigation(move |url| {
-            // The app's own bundled pages — on mobile the setup page replaces the
-            // main window's content, and its origin is *not* the configured
-            // server, so without this the address screen would be punted to the
-            // system browser and the change-server flow could never come back.
-            if is_app_page(url) {
-                return true;
-            }
-            if !matches!(url.scheme(), "http" | "https") {
-                return true; // local (blob:, data:, about:) — no network risk
-            }
-            // Read the live config so changing the server from the tray takes
-            // effect immediately, without rebuilding the window.
-            let allowed = nav_app
-                .state::<AppState>()
-                .cfg
-                .lock()
-                .ok()
-                .and_then(|c| c.server_url.clone())
-                .and_then(|s| s.parse::<tauri::Url>().ok())
-                .map(|u| u.origin());
-            if allowed.as_ref() == Some(&url.origin()) {
-                return true;
-            }
-            let _ = nav_app.opener().open_url(url.as_str(), None::<&str>);
-            false
-        })
+        // Navigation allowlist — see `nav_allowlist`.
+        .on_navigation(nav_allowlist(app))
         .build()
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -321,9 +395,14 @@ fn open_setup_in_main(app: &tauri::AppHandle) -> Result<(), String> {
         let _ = w.set_focus();
         return Ok(());
     }
+    // On mobile this **is** the main window, so it needs the same navigation
+    // allowlist as `open_main_window` — a window built without it would follow
+    // any external link away from the host, with no tray, no address bar and no
+    // back button on a phone to recover.
     WebviewWindowBuilder::new(app, MAIN_LABEL, WebviewUrl::App(SETUP_PAGE.into()))
         .title("E2E Chat — Setup")
         .inner_size(560.0, 660.0)
+        .on_navigation(nav_allowlist(app))
         .build()
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -658,7 +737,30 @@ pub fn run() {
             *handle.state::<AppState>().cfg.lock().unwrap() = cfg.clone();
 
             // Route the first window: main app when configured, setup otherwise.
-            match cfg.server_url.as_deref() {
+            //
+            // Mobile only: a saved host that cannot be reached is a dead end
+            // there — no tray to reopen setup from, no address bar, so the
+            // window would sit on the WebView's own error page with nothing the
+            // user could do. Treat it as unconfigured and show the setup screen
+            // instead; that page prefills the saved address (`get_config`), so
+            // correcting a typo is one edit away.
+            //
+            // Desktop is deliberately left alone: it has the tray's *Change
+            // Server Address…*, and probing here would delay every launch by the
+            // connect timeout whenever the host is down (an error page it can
+            // still escape from). Cost on the happy path is one extra TLS
+            // handshake, because `open_main` probes again for the pin.
+            let saved_url = cfg.server_url.clone();
+            #[cfg(not(desktop))]
+            let saved_url = saved_url.filter(|url| {
+                let reachable = host_reachable(url);
+                if !reachable {
+                    eprintln!("saved host unreachable ({url}); showing setup");
+                }
+                reachable
+            });
+
+            match saved_url.as_deref() {
                 Some(url) => {
                     if let Err(e) = open_main(&handle, url) {
                         // A broken saved address must not strand the user: fall back.
@@ -667,8 +769,9 @@ pub fn run() {
                     }
                 }
                 None => {
-                    // First run. `open_setup` itself takes over the main window
-                    // where the platform refuses a second one.
+                    // First run — or, on mobile, a host we could not reach.
+                    // `open_setup` itself takes over the main window where the
+                    // platform refuses a second one.
                     if let Err(e) = open_setup(&handle) {
                         eprintln!("open_setup failed: {e}");
                     }

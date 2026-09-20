@@ -96,6 +96,13 @@ embedding property, split rules and `core:webview:allow-create-webview-window` (
 setup page **takes over the main window** instead (`open_setup_in_main`). Saving navigates
 that same window to the new address. Do not "fix" this by adding the Activities back.
 
+A saved host that is **unreachable** also lands here: startup probes it (`host_reachable`) and
+shows this setup screen rather than the WebView's error page, which on a phone left no way out
+at all — no tray, no back button, no address bar. Desktop keeps its error page and its tray
+entry. Because `open_setup_in_main` can be the thing that *creates* the main window, it also
+attaches the navigation allowlist (`nav_allowlist`); without it the app would follow any
+external link away from the host with no way back.
+
 ## 4. Reset the Android project
 
 `gen/android/` is generated and disposable: delete it and re-run

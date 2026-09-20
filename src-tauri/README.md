@@ -65,6 +65,19 @@ cargo tauri build
 - **First launch** (no `config.json`) → the setup window. Enter the host's
   Tailscale address, Test connection, Save & Launch.
 - **Later launches** → the main window opens directly at the saved address.
+- **Android, saved host unreachable** → the setup screen, not a blank error page.
+  Startup probes the saved host (`host_reachable`) and falls back to setup when it
+  does not answer, because there the WebView's own error page was a dead end: no
+  tray, no address bar, nothing to press. Setup prefills the saved address, so
+  correcting a typo is one edit. Desktop is deliberately left alone — it has the
+  tray's *Change Server Address…*, and probing there would delay every launch by
+  the connect timeout whenever the host is down.
+- **External links** (a URL in a message) open in the system browser: the main
+  window's navigation allowlist (`nav_allowlist` in `src/lib.rs`) only ever loads
+  the configured origin, the app's own bundled pages, and local `blob:`/`data:`
+  URLs — the comparison is a full origin, so another port or scheme is refused.
+  Both main-window builders attach it, including the mobile path where the setup
+  page is the first thing the window ever shows.
 - **Close** hides to the tray (unless "Minimize to tray on close" was unchecked).
 - **Tray** (desktop) → Show E2E Chat · Change Server Address… · Quit.
 - **Settings → Connection** (any box build, desktop *and* Android) → shows the server
