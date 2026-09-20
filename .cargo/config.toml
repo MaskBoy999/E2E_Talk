@@ -59,3 +59,46 @@ WRY_RUSTWEBVIEWCLIENT_CLASS_EXTENSION = { force = true, value = """
         handler.proceed()
     }
 """ }
+
+# ── Android: let the WebView capture the screen ──────────────────────────
+#
+# WHY THIS EXISTS
+#
+# Android WebView's `getDisplayMedia()` (used by `static/voice.js` `startScreen()`)
+# sends a `MediaProjection` permission request to the WebChromeClient. Wry's
+# generated `RustWebChromeClient.onPermissionRequest` maps `AUDIO_CAPTURE` /
+# `VIDEO_CAPTURE` to the matching Android runtime prompts, but does **not** handle
+# `MediaProjection` — which means the display-capture request may be auto-denied.
+#
+# The symptom: pressing Share screen on Android either does nothing, or the picker
+# opens and closes immediately with no track returned.
+#
+# The fix: override `onPermissionRequest` to grant `MediaProjection` requests
+# (they come with `resources = [Manifest.permission.ACCESS_MEDIA_PROJECTION]`).
+# This is safe because:
+#   * screen capture is always user-initiated (the system picker must be dismissed
+#     by the user — the app cannot programmatically capture the screen);
+#   * the captured frames go through the same E2EE relay pipeline as camera video;
+#   * the user can stop sharing at any time via the in-app button.
+
+[WRY_RUSTWEBCHROME_CLIENT_CLASS_EXTENSION]
+WRY_RUSTWEBCHROME_CLIENT_CLASS_EXTENSION = { force = true, value = """
+    // ── E2E Chat: allow screen capture (getDisplayMedia) ────────────────────
+    // Injected by .cargo/config.toml. Wry's default RustWebChromeClient does not
+    // handle MediaProjection permission requests, which getDisplayMedia() needs on
+    // Android. Without this override the display-capture request is auto-denied.
+    override fun onPermissionRequest(request: PermissionRequest) {
+        super.onPermissionRequest(request)
+        // Grant MediaProjection requests (screen capture from getDisplayMedia).
+        // The user has already approved this via the system picker, so granting
+        // here is just completing what the user started.
+        if (request.resources.contains(
+                android.Manifest.permission.ACCESS_MEDIA_PROJECTION
+            ) || request.resources.contains(
+                android.Manifest.permission.MEDIA_PROJECTION
+            )
+        ) {
+            request.grant()
+        }
+    }
+""" }

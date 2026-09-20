@@ -32,6 +32,10 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <!-- Required for getDisplayMedia() screen capture: the WebChromeClient needs
+         this permission to grant MediaProjection requests. Without it, the
+         display-capture picker may open but the track is never returned. -->
+    <uses-permission android:name="android.permission.MEDIA_PROJECTION" />
     <!-- Media capture for calls. wry's RustWebChromeClient.onPermissionRequest
          turns the WebView's AUDIO_CAPTURE / VIDEO_CAPTURE requests into the
          matching Android runtime prompt (RECORD_AUDIO, CAMERA) — but only for

@@ -34,3 +34,15 @@
 -keepclassmembers class * extends android.webkit.WebViewClient {
     <init>(...);
 }
+
+# ── WebChromeClient: screen capture (getDisplayMedia) ──────────────────
+#
+# The onPermissionRequest override injected by .cargo/config.toml must survive
+# R8/ProGuard in release builds, otherwise screen sharing (getDisplayMedia) fails
+# silently on Android because the MediaProjection request is auto-denied.
+-keepclassmembers class * extends android.webkit.WebChromeClient {
+    public void onPermissionRequest(android.webkit.PermissionRequest);
+}
+-keepclassmembers class * extends android.webkit.WebChromeClient {
+    <init>(...);
+}

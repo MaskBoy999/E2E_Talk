@@ -62,7 +62,8 @@ function encodePng(size, fn) {
     ]);
 }
 
-const ACCENT = [79, 195, 247, 255];
+const ACCENT_GOLD = [212, 168, 67, 255];
+const ACCENT_CYAN = [79, 195, 247, 255];
 const WHITE = [255, 255, 255, 255];
 const CLEAR = [0, 0, 0, 0];
 
@@ -74,25 +75,65 @@ function inRoundRect(x, y, x0, y0, x1, y1, r) {
     return (x - cx) ** 2 + (y - cy) ** 2 <= r * r;
 }
 
-// A chat bubble with an ellipsis, on a rounded accent tile.
+function dist(x1, y1, x2, y2) {
+    return Math.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2);
+}
+
+// Two interlocking rings on a dark background
 function icon(x, y, size) {
     const s = size / 512;
+    
+    // Clipping to round square (squircle-like)
     if (!inRoundRect(x, y, 26 * s, 26 * s, 486 * s, 486 * s, 108 * s)) return CLEAR;
-
-    for (const dx of [192, 256, 320]) {
-        const r = 24 * s;
-        if ((x - dx * s) ** 2 + (y - 256 * s) ** 2 <= r * r) return ACCENT;
+    
+    // Center of the icon (with slight offset for visual balance)
+    const cx = 256 * s;
+    const cy = 256 * s;
+    
+    // Gold ring center (top-right)
+    const goldCx = 268 * s;
+    const goldCy = 238 * s;
+    
+    // Cyan ring center (bottom-left)
+    const cyanCx = 244 * s;
+    const cyanCy = 274 * s;
+    
+    // Ring radius and thickness
+    const ringR = 72 * s;
+    const ringStroke = 18 * s;
+    
+    // Small center dot radius
+    const dotR = 26 * s;
+    
+    // White info icon element (right side)
+    const infoX = 310 * s;
+    const infoYBase = 244 * s;
+    
+    // Check if inside gold ring's stroke
+    const goldDist = dist(x, y, goldCx, goldCy);
+    const inGoldRing = goldDist >= ringR - ringStroke && goldDist <= ringR;
+    if (inGoldRing) return ACCENT_GOLD;
+    
+    // Check if inside gold center dot
+    if (goldDist <= dotR) return ACCENT_GOLD;
+    
+    // Check if inside cyan ring's stroke
+    const cyanDist = dist(x, y, cyanCx, cyanCy);
+    const inCyanRing = cyanDist >= ringR - ringStroke && cyanDist <= ringR;
+    if (inCyanRing) return ACCENT_CYAN;
+    
+    // Check if inside cyan center dot
+    if (cyanDist <= dotR) return ACCENT_CYAN;
+    
+    // White info icon (vertical bar + dot)
+    if (x >= infoX && x <= infoX + 14 * s && y >= infoYBase && y <= infoYBase + 48 * s) {
+        return WHITE;
     }
-
-    if (inRoundRect(x, y, 118 * s, 148 * s, 394 * s, 364 * s, 58 * s)) return WHITE;
-
-    // Bubble tail.
-    if (y > 360 * s && y < 440 * s) {
-        const t = (y - 360 * s) / (80 * s);
-        const half = 52 * s * (1 - t);
-        if (Math.abs(x - 208 * s) < half) return WHITE;
+    if (dist(x, y, infoX + 7 * s, infoYBase - 14 * s) <= 8 * s) {
+        return WHITE;
     }
-    return ACCENT;
+    
+    return CLEAR;
 }
 
 function encodeIco(png, size) {
