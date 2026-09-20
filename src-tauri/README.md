@@ -43,7 +43,10 @@ The first-run UI is `static/box-setup.html` (bundled as the local `setup` window
 > `plugin:call-service|…`) and the `core:event` API. That is why *Settings → Connection*
 > emits `box:change-server` instead of invoking `show_setup`. Notifications need no command
 > at all: `tauri-plugin-notification`'s init script replaces `window.Notification` with a
-> shim that posts through the plugin. Full explanation: plan §9.2.
+> shim that posts through the plugin — but that shim also **caches** `Notification.permission`
+> once at load, and the cache is wrong on Windows (it resolves to `"denied"`) and stale on
+> Android after the runtime grant, so `static/chat.js` primes it with
+> `Notification.requestPermission()` before anything reads it. Full explanation: plan §9.2.
 
 ## Dev / build
 
@@ -242,11 +245,17 @@ Until then Android push is off; browsers and the desktop box use Web Push
   without them. No auto-updater, so no signing keypair is involved.
 - **Done since:** the in-app *Change server address…* button (it was silently dead — the
   tab called app commands an ACL rejects), the notification bridge (same cause), the media
-  permissions, and the Android `POST_NOTIFICATIONS` request. Details + the per-platform gap
-  list: `WEBSITE_IN_A_BOX_MASTER_PLAN.md` §11.
+  permissions, the Android `POST_NOTIFICATIONS` request, the notification shim's cached
+  permission (no PC notification ever appeared), the mobile fallback to setup when the saved
+  host is unreachable, and the main-window navigation allowlist on Android (which had never
+  been attached). Details + the per-platform gap list: `WEBSITE_IN_A_BOX_MASTER_PLAN.md` §11.
 - **Remaining Android wiring:** nothing in `gen/android/` by hand; the Gradle module is
   picked up automatically (see android-templates/README.md).
-- **Owed, in order of impact:** (1) the Android **upload keystore** secrets — without them
-  CI signs each release with a fresh throwaway debug key, so an in-place update fails and
-  the user has to uninstall; (2) a **device run** (full-screen ring, screen-off call, screen
-  share, in-app address change); (3) a Firebase project for Android FCM push.
+- **Owed, in order of impact:** (1) the Android **upload keystore** secrets — **confirmed
+  still missing**: the published v0.2.9 APK verifies as `CN=Android Debug` and the run warned
+  *"No ANDROID_KEYSTORE_BASE64 secret"*, so that APK cannot install over anything. A tagged
+  release now **fails** instead of publishing one (use *Run workflow* for a debug-signed test
+  artifact). Install `dist/E2E-Chat-v0.2.9-android.apk` instead — it is signed with the upload
+  key, so every properly signed release will update over it. (2) a **device run**: dead-host
+  fallback to setup, full-screen ring, screen-off call, screen share, in-app address change;
+  (3) a Firebase project for Android FCM push.

@@ -4027,30 +4027,54 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     })();
 
-    // Box app on Android only: every native notification the box posts — the
-    // ongoing "In call" one from CallForegroundService, the full-screen incoming
-    // call ring, and the notification shim above — is dropped silently on
-    // Android 13+ until POST_NOTIFICATIONS is granted at runtime. Nothing asks
-    // for it by default, and it has to be granted while the app is in the
-    // foreground, so ask here on the first box page load (never again: Android
-    // stops prompting after a refusal, so nagging is pointless). The command is
-    // reachable because `notification:default` — which includes
-    // `request_permission` — is granted to this remote origin.
+    // Prime `Notification.permission` inside the box — through the *shim's own*
+    // API, which is the whole point.
+    //
+    // The notification plugin's init script replaces `window.Notification` with a
+    // shim that works out `permission` exactly once, at script-init, and caches
+    // it. That cached value was wrong on **both** platforms, and because
+    // `showBrowserNotification()` gates on it, every native notification in the
+    // box was dropped silently:
+    //
+    //   * Windows: the shim is built with the plugin's Windows template flag set,
+    //     so it never asks the plugin at all — it compares against a native
+    //     permission that no longer exists and caches **"denied"** (verified by
+    //     running the shipped shim script directly). Result: no PC notification
+    //     ever appeared, and Settings reported notifications "blocked — enable in
+    //     browser settings", which is a setting no box has.
+    //   * Android: the plugin answers "prompt" until the runtime dialog is
+    //     answered, which the shim caches as "default". Asking through
+    //     `plugin:notification|request_permission` directly — what this used to
+    //     do — bypasses the shim, so it stayed "default" even *after* the user
+    //     granted, and notifications stayed dead until the next launch.
+    //
+    // `Notification.requestPermission()` reaches the same plugin command —
+    // granted with no prompt on desktop, the POST_NOTIFICATIONS dialog on Android
+    // (Android 13+ drops every notification until it is granted, and the ongoing
+    // "In call" service notification and the full-screen ring depend on it) — and
+    // writes the result back into the shim's cached state, so the notification
+    // guard and the Settings toggle both agree with reality afterwards.
     (function initBoxNotificationPermission() {
         var tauri = window.__TAURI__;
         if (!tauri || !tauri.core || !tauri.core.invoke) return;
-        if (!/Android/i.test(navigator.userAgent || '')) return;
-        var KEY = 'box_notif_permission_asked';
-        try { if (localStorage.getItem(KEY) === '1') return; } catch (_) { return; }
-        function done() { try { localStorage.setItem(KEY, '1'); } catch (_) {} }
-        tauri.core.invoke('plugin:notification|is_permission_granted')
-            .then(function (granted) {
-                if (granted) { done(); return; }
-                return tauri.core.invoke('plugin:notification|request_permission')
-                    .then(done)
-                    .catch(done);
-            })
-            .catch(function () {});
+        if (!('Notification' in window) || typeof Notification.requestPermission !== 'function') return;
+        if (Notification.permission === 'granted') return;
+
+        // Android only: ask once per install. The OS stops prompting after a
+        // refusal, so nagging cannot help, and the dialog only appears while the
+        // app is in the foreground — hence at page load. Desktop is deliberately
+        // NOT remembered: there is no prompt to avoid there, and it has to be
+        // re-corrected on every load because the shim caches the wrong answer.
+        if (/Android/i.test(navigator.userAgent || '')) {
+            try {
+                if (localStorage.getItem('box_notif_permission_asked') === '1') return;
+                localStorage.setItem('box_notif_permission_asked', '1');
+            } catch (_) {}
+        }
+        try {
+            var asked = Notification.requestPermission();
+            if (asked && typeof asked.catch === 'function') asked.catch(function () {});
+        } catch (_) {}
     })();
 
     async function fetchBackupStatus() {

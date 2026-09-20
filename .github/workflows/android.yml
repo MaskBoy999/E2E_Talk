@@ -252,8 +252,18 @@ jobs:
             printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$KS"
             ALIAS="$ANDROID_KEY_ALIAS"
             PW="$ANDROID_KEY_PASSWORD"
+          elif [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            # A tagged release MUST carry the owner's key. This branch used to
+            # fall through to the debug key, which silently published v0.2.1-v0.2.9
+            # with a *different, freshly generated* signature on every run: nothing
+            # could install over the previous release
+            # (INSTALL_FAILED_UPDATE_INCOMPATIBLE), and fixing it afterwards forces
+            # every installed user to uninstall first — which wipes the app's local
+            # keys. Refuse loudly instead of shipping that again.
+            echo "::error::Refusing to publish $GITHUB_REF_NAME: ANDROID_KEYSTORE_BASE64 is not visible to this workflow, so the APK would be signed with a throwaway debug key and could never install over a previous release. Check Settings -> Secrets and variables -> Actions -> *Secrets* (not Variables), with the exact names ANDROID_KEYSTORE_BASE64, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD. To get a debug-signed test artifact without publishing, use Run workflow (workflow_dispatch) instead of a tag."
+            exit 1
           else
-            echo "::warning::No ANDROID_KEYSTORE_BASE64 secret — signing with a throwaway debug key. Add ANDROID_KEYSTORE_BASE64, ANDROID_KEY_ALIAS and ANDROID_KEY_PASSWORD to sign with your own."
+            echo "::warning::No ANDROID_KEYSTORE_BASE64 secret — this *manual* build is signed with a throwaway debug key. Tagged releases refuse to publish without it."
             KS="$RUNNER_TEMP/debug.jks"
             ALIAS="androiddebugkey"
             PW="android"

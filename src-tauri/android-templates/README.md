@@ -48,9 +48,11 @@ resolve — check `adb logcat` for `grant_remote_ipc: call-service … failed`.
 **Step 3 — runtime notification permission (Android 13+) — done in the web app.**
 `POST_NOTIFICATIONS` is declared by the plugin manifest, but from API 33 it must also be
 *requested*, and nothing used to ask. `static/chat.js` now does, once per install, from
-`initBoxNotificationPermission()` on the box's first page load (`is_permission_granted` →
-`request_permission`; both are reachable because `notification:default` is granted to the
-remote origin). It has to happen while the app is in the foreground, which is why it is at
+`initBoxNotificationPermission()` on the box's first page load — called through the **shim's
+own** `Notification.requestPermission()`, which is both the plugin call *and* the only thing
+that repairs the shim's cached `permission` (it caches `"denied"` on Windows and `"default"`
+on Android until this runs, and `showBrowserNotification()` gates on it). `notification:default`
+is what makes the call reachable from the remote origin. It has to happen while the app is in the foreground, which is why it is at
 load time rather than on the first call. A denial is not fatal — the service still runs and
 keeps the call alive, only the "tap to return" notification is missing.
 
