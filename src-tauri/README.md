@@ -255,7 +255,7 @@ Until then Android push is off; browsers and the desktop box use Web Push
   still missing**: the published v0.2.9 APK verifies as `CN=Android Debug` and the run warned
   *"No ANDROID_KEYSTORE_BASE64 secret"*, so that APK cannot install over anything. A tagged
   release now **fails** instead of publishing one (use *Run workflow* for a debug-signed test
-  artifact). Install `dist/E2E-Chat-v0.2.9-android.apk` instead — it is signed with the upload
-  key, so every properly signed release will update over it. (2) a **device run**: dead-host
+  artifact). Install the locally signed `dist/E2E-Chat-<version>-android.apk` instead when one
+  is present — it uses the upload key, so every properly signed release updates over it. (2) a **device run**: dead-host
   fallback to setup, full-screen ring, screen-off call, screen share, in-app address change;
   (3) a Firebase project for Android FCM push.
