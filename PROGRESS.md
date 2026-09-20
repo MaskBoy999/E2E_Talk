@@ -7534,3 +7534,4 @@ platform's own runtime permission, and no app can suppress it; it is asked once 
 
 **Files:** `src-tauri/src/win_webview.rs`, `src-tauri/src/lib.rs`, `static/box-setup.html`,
 `tests/box-setup.spec.ts`, `tools/box/probe-box-live.mjs`
+

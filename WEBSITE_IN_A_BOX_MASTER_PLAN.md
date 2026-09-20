@@ -989,3 +989,239 @@ HEAD**).
   snippet that broke the APK build for eight runs. Left as-is on purpose — it is a historical
   record, not a spec — but **do not copy manifest lines out of it**; the committed plugin
   manifest is the source of truth.
+
+---
+
+## 12. Building the Android APK from Windows — complete research
+
+This section documents the full process, every problem encountered, and its solution for building the
+Tauri Android APK on a Windows machine. It is written so the next person (or the CI runner) can follow
+it without repeating the debugging.
+
+### 12.1 Prerequisites
+
+| Requirement | Version | Notes |
+|---|---|---|
+| Node.js | 18+ | `node -v` |
+| Rust | stable | `rustup target add aarch64-linux-android` |
+| Android SDK | 34+ | Installed via Android Studio or command-line tools |
+| Android NDK | 27+ | Installed via `sdkmanager "ndk;27.0.12077973"` |
+| Java JDK | 21 | Oracle or OpenJDK; must be a **full JDK**, not just a JRE or symlink directory |
+
+### 12.2 Environment variables
+
+```bash
+# Windows (PowerShell)
+$env:ANDROID_HOME = "C:\Users\<user>\AppData\Local\Android\Sdk"
+$env:JAVA_HOME = "C:\Program Files\Java\jdk-21.0.11"
+
+# Linux / macOS
+export ANDROID_HOME="$HOME/Android/Sdk"
+export JAVA_HOME="/usr/lib/jvm/java-21-openjdk"
+```
+
+**Critical:** `JAVA_HOME` must point to a **full JDK installation**, not a symlink directory.
+Oracle's `C:\Program Files\Common Files\Oracle\Java\javapath` contains only symlinks to `java.exe`
+and is **not** a valid `JAVA_HOME`. The correct path is typically:
+```
+C:\Program Files\Java\jdk-21.0.11
+```
+
+Find it with:
+```bash
+find "/c/Program Files/Java" -name "java.exe" 2>/dev/null
+```
+
+### 12.3 Build commands
+
+#### Method 1: Single command (recommended for first build)
+
+```bash
+cd src-tauri
+npx tauri android build
+```
+
+This runs two phases:
+1. **Phase 1 — Rust compilation:** Compiles the Rust library for `aarch64-linux-android`, produces
+   `libe2e_chat_app_lib.so`, and symlinks it into `jniLibs/arm64-v8a/`.
+2. **Phase 2 — APK assembly:** Invokes Gradle to package Kotlin/Java code, resources, and native
+   libraries into an APK.
+
+Phase 1 always succeeds (given the NDK is installed). Phase 2 is where JAVA_HOME and Gradle issues
+manifest.
+
+#### Method 2: Gradle directly (when Rust library is already compiled)
+
+If Phase 1 succeeded but Phase 2 failed, skip the Rust build tasks:
+
+```bash
+cd src-tauri/gen/android
+gradlew.bat assembleRelease --no-daemon \
+  -x app:rustBuildArm64Release \
+  -x app:rustBuildArmRelease \
+  -x app:rustBuildX86Release \
+  -x app:rustBuildX86_64Release \
+  -x app:rustBuildUniversalRelease
+```
+
+### 12.4 Problems and solutions
+
+#### Problem 1: `JAVA_HOME` invalid
+
+**Error:** `ERROR: JAVA_HOME is set to an invalid directory: C:/Program Files/Android/Android Studio/jbr`
+
+**Cause:** Android Studio is not installed, or installed in a non-default path.
+
+**Fix:** Find the actual JDK:
+```bash
+find "/c/Program Files/Java" -name "java.exe" 2>/dev/null
+# → /c/Program Files/Java/jdk-21.0.11/bin/java.exe
+```
+Set `JAVA_HOME` to `C:\Program Files\Java\jdk-21.0.11`.
+
+---
+
+#### Problem 2: `--release` passed twice
+
+**Error:** `error: the argument '--release' cannot be used multiple times`
+
+**Cause:** `npx tauri android build -- --release` passes `--release` twice (once by Tauri CLI,
+once by `-- --release`).
+
+**Fix:** Run without the extra flag:
+```bash
+npx tauri android build  # Release flag is added automatically
+```
+
+---
+
+#### Problem 3: Gradle `rustBuild*` fails with WebSocket connection refused
+
+**Error:** `failed to read CLI options: Context("failed to build WebSocket client", ConnectionRefused)`
+
+**Cause:** Tauri's Gradle plugin invokes `npx tauri android android-studio-script --release`, which
+tries to connect to a WebSocket dev server. In a standalone build, this server is not running.
+
+**Fix:** Skip the Rust build tasks (the `.so` is already compiled):
+```bash
+gradlew.bat assembleRelease --no-daemon \
+  -x app:rustBuildArm64Release \
+  -x app:rustBuildArmRelease \
+  -x app:rustBuildX86Release \
+  -x app:rustBuildX86_64Release \
+  -x app:rustBuildUniversalRelease
+```
+
+---
+
+#### Problem 4: First build hangs for 10+ minutes
+
+**Behavior:** No output for 10+ minutes, then times out.
+
+**Cause:** The first Gradle build downloads dependencies (Gradle wrapper, Android SDK components,
+Kotlin compiler, etc.).
+
+**Fix:** Wait for the first build to complete. Subsequent builds are faster (cached).
+Use `--no-daemon` to avoid background Gradle processes.
+
+---
+
+#### Problem 5: ARM-only APK (x86/x86_64 missing)
+
+**Output:**
+```
+> Task :app:packageX86Release
+There are no .so files available to package in the APK for x86.
+```
+
+**Cause:** Tauri's default Android build only targets `aarch64-linux-android` (ARM64).
+
+**Impact:** APK will not run on x86 Android emulators. It will run on 99%+ of real devices.
+
+**Fix:** For emulator support, add targets:
+```bash
+npx tauri android build --target x86_64-linux-android --target i686-linux-android
+```
+
+---
+
+#### Problem 6: ProGuard strips `onReceivedSslError` from release DEX
+
+**Context:** The `onReceivedSslError` override in `RustWebViewClient.kt` must survive R8/ProGuard
+in release builds, otherwise the SSL bypass is removed.
+
+**Fix:** Add ProGuard keep rules in
+`src-tauri/plugins/call-service/android/consumer-proguard-rules.pro`:
+```proguard
+-keep class com.e2echat.app.RustWebViewClient {
+    public void onReceivedSslError(...);
+}
+```
+Reference in `build.gradle.kts`:
+```kotlin
+android {
+    defaultConfig {
+        consumerProguardFiles("consumer-proguard-rules.pro")
+    }
+}
+```
+
+---
+
+#### Problem 7: `--no-daemon` still forks a daemon
+
+**Output:** `To honour the JVM settings for this build a single-use Daemon process will be forked.`
+
+**Cause:** This is informational, not an error. `--no-daemon` prevents long-lived daemons but
+still forks a single-use process.
+
+**Fix:** Ignore the message. The build proceeds correctly.
+
+### 12.5 Verification checklist
+
+After building, verify the APK:
+
+```bash
+# 1. Check file exists and size
+ls -la src-tauri/gen/android/app/build/outputs/apk/universal/release/*.apk
+# Expected: ~15MB unsigned APK
+
+# 2. Verify permissions
+BT=$(ls -d "$ANDROID_HOME/build-tools/"* | tail -1)
+"$BT/aapt2" dump permissions src-tauri/gen/android/app/build/outputs/apk/universal/release/*.apk \
+  | grep -E "RECORD_AUDIO|CAMERA|POST_NOTIFICATIONS"
+# Expected: all three present
+
+# 3. Verify SSL override in DEX
+unzip -o src-tauri/gen/android/app/build/outputs/apk/universal/release/*.apk classes*.dex -d /tmp/dex
+grep -rla "onReceivedSslError" /tmp/dex
+# Expected: found in classes.dex
+
+# 4. Verify version
+"$BT/aapt2" dump badging src-tauri/gen/android/app/build/outputs/apk/universal/release/*.apk \
+  | grep -E "^package|versionName|versionCode"
+# Expected: versionName='0.2.12', versionCode='212'
+```
+
+### 12.6 Key files for Android builds
+
+| File | Purpose |
+|------|---------|
+| `src-tauri/plugins/call-service/android/consumer-proguard-rules.pro` | Keep `onReceivedSslError` from R8 |
+| `src-tauri/plugins/call-service/android/build.gradle.kts` | Reference ProGuard rules, declare permissions |
+| `src-tauri/plugins/call-service/android/src/main/AndroidManifest.xml` | Source of RECORD_AUDIO, CAMERA, POST_NOTIFICATIONS |
+| `.github/workflows/android.yml` | CI guard: verify SSL override survives ProGuard |
+| `.cargo/config.toml` | Android cross-compilation config, `WRY_RUSTWEBVIEWCLIENT_CLASS_EXTENSION` |
+
+### 12.7 CI/CD for Android
+
+The GitHub Actions workflow (`android.yml`) builds the APK on every push to `test`/`main` when
+`src-tauri/**` files change. It includes:
+
+1. **Rust compilation** for `aarch64-linux-android`
+2. **Gradle assembly** with `JAVA_HOME` set correctly
+3. **ProGuard verification** — extracts DEX and checks for `onReceivedSslError`
+4. **APK upload** as a GitHub Actions artifact
+
+The workflow uses `setup-java@v4` with `distribution: 'temurin'` to ensure a consistent JDK,
+avoiding the `JAVA_HOME` issues encountered during local builds.
