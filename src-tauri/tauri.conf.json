@@ -13,11 +13,6 @@
       "csp": null
     }
   },
-  "plugins": {
-    "notification": {
-      "icon": "box_notification"
-    }
-  },
   "bundle": {
     "active": true,
     "targets": "all",
