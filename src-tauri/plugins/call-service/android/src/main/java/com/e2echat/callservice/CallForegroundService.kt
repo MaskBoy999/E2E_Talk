@@ -18,7 +18,7 @@ import androidx.core.app.NotificationCompat
  * user can tap to return to the call.
  *
  * Started/stopped by [CallServicePlugin]; Android requires that a
- * `mediaCall`-type foreground service is created from a foreground context.
+ * `phoneCall`-type foreground service is created from a foreground context.
  */
 class CallForegroundService : Service() {
 
@@ -48,7 +48,7 @@ class CallForegroundService : Service() {
             startForeground(
                 NOTIFICATION_ID,
                 notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_CALL
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL
             )
         } else {
             startForeground(NOTIFICATION_ID, notification)

@@ -1,6 +1,28 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_CALL" />
+    <!--
+      "mediaCall" is NOT a foreground service type — AAPT rejects it and the
+      whole APK fails to build:
+        AAPT: error: 'mediaCall' is incompatible with attribute
+        foregroundServiceType. It is absent from the attribute's flag list.
+      The type for "continue an ongoing call" is `phoneCall`, which needs
+      FOREGROUND_SERVICE_PHONE_CALL plus one of: this app being the default
+      dialer, or MANAGE_OWN_CALLS declared. MANAGE_OWN_CALLS is a normal
+      permission, so declaring it is enough — no runtime prompt.
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
+    <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
+    <!-- Media capture for calls. wry's RustWebChromeClient.onPermissionRequest
+         turns the WebView's AUDIO_CAPTURE / VIDEO_CAPTURE requests into the
+         matching Android runtime prompt (RECORD_AUDIO, CAMERA) — but only for
+         permissions the *merged manifest* declares; for anything undeclared the
+         prompt is auto-denied and getUserMedia fails, i.e. a call with no audio
+         and a video call with no picture. Declaring them here means the plugin
+         manifest carries them into the app. (MODIFY_AUDIO_SETTINGS is a normal
+         permission: granted at install, never prompted.) -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- Ring over the lock screen / other apps while the WebView is frozen. -->
@@ -11,7 +33,7 @@
         <service
             android:name="com.e2echat.callservice.CallForegroundService"
             android:exported="false"
-            android:foregroundServiceType="mediaCall" />
+            android:foregroundServiceType="phoneCall" />
 
         <receiver
             android:name="com.e2echat.callservice.IncomingCallActionReceiver"

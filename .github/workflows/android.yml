@@ -28,6 +28,24 @@ name: Build Android APK
 #      Gradle failure are a multi-KB `Io(Env(...))` dump plus deprecation noise —
 #      so the failing task was STILL hidden. That step now re-emits Gradle's
 #      "What went wrong" block instead of the raw tail.
+#   4. The local `call-service` plugin declared
+#      `android:foregroundServiceType="mediaCall"`, which is not a foreground
+#      service type at all — AAPT failed the resource link, so nothing was ever
+#      assembled. The type for an ongoing call is `phoneCall`, plus
+#      FOREGROUND_SERVICE_PHONE_CALL and MANAGE_OWN_CALLS.
+#   5. Even with that fixed, Gradle's `rustBuildArm64Release` could not run:
+#      the generated project builds Rust through
+#      `npm run -- tauri android android-studio-script`, and this repo had no
+#      `tauri` npm script and no installed CLI, so it died with
+#      `npm error Missing script: "tauri"` and produced no .so at all. Gradle
+#      runs that task in parallel with resource processing, which is why the
+#      AAPT error masked it. Fixed by depending on @tauri-apps/cli and
+#      installing it (`npm ci`) before the build.
+#
+# Verified locally on Windows (SDK 36 + NDK 27): `npx tauri android build --apk
+# --target aarch64` produces app-universal-release-unsigned.apk with
+# lib/arm64-v8a/libe2e_chat_app_lib.so inside, and the merged manifest carries
+# foregroundServiceType="phoneCall" plus RECORD_AUDIO / CAMERA / POST_NOTIFICATIONS.
 #
 # The build is intentionally arm64-v8a only (see "Build APK"): that is the one
 # ABI whose Rust + NDK link is proven to work here, and it covers every phone
@@ -107,13 +125,23 @@ jobs:
         with:
           workspaces: src-tauri
 
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli --version 2.11.2 --locked
+      # The CLI comes from npm rather than `cargo install` because the generated
+      # Gradle project needs it *there*: `gen/android/buildSrc/.../BuildTask.kt`
+      # (written by `android init`) builds Rust with
+      # `npm run -- tauri android android-studio-script`, which resolves
+      # `node_modules/.bin/tauri`. With no installed CLI that step fails
+      # (`npm error Missing script: "tauri"`) — see note 5 above. Using the
+      # prebuilt binary also drops a ~6-minute `cargo install tauri-cli`
+      # compile. Same 2.11.2 as before, pinned in package.json.
+      - name: Install Tauri CLI + JS deps
+        run: |
+          npm ci
+          npx tauri --version
 
       - name: Init Android project (idempotent)
         working-directory: src-tauri
         run: |
-          if [ ! -d gen/android ]; then cargo tauri android init; fi
+          if [ ! -d gen/android ]; then npx tauri android init; fi
 
       # The Gradle error summary is buried thousands of lines above the final
       # exit code, so a plain `run:` step shows "exit code 1" with nothing
@@ -133,7 +161,7 @@ jobs:
           # another ABI, keeping the targets installed avoids turning an ABI
           # filter into a hard "target may not be installed" failure.
           # Add `--target x86_64` here to also get an emulator-compatible APK.
-          cargo tauri android build --apk --target aarch64 2>&1 | tee android-build.log || EXIT=$?
+          npx tauri android build --apk --target aarch64 2>&1 | tee android-build.log || EXIT=$?
           echo "BUILD_EXIT=$EXIT" >> "$GITHUB_ENV"
           exit $EXIT
 

@@ -32,9 +32,18 @@ The first-run UI is `static/box-setup.html` (bundled as the local `setup` window
 | `test_connection { url }` | Reachability probe for the setup screen (verifies the pin) |
 | `probe_certificate { url }` | Return the host's leaf-cert SHA-256 so setup can show/pin it |
 | `save_config { serverUrl, autoStart, minimizeToTray, pinCert }` | Persist, pin the cert, apply auto-start, open the app window |
-| `show_setup` | Re-open the setup window (used by the tray *and* by Settings → Connection) |
+| `show_setup` | Show the setup screen (same as the tray item). **Local pages only** — the web app asks over the `box:change-server` event instead |
 | `quit_app` | Quit |
-| `notify { title, body }` | Native (OS-level) notification |
+
+> **App commands vs. plugin commands.** Every command above is defined in this crate, and
+> Tauri refuses *app* commands to a **remote** origin: the main window renders the host's
+> page, so `get_config` / `save_config` / `show_setup` are unreachable from the web app
+> (`Command … not allowed by ACL`). What the page *can* call is plugin commands whose
+> permission the `remote-main` capability grants (`plugin:notification|…`,
+> `plugin:call-service|…`) and the `core:event` API. That is why *Settings → Connection*
+> emits `box:change-server` instead of invoking `show_setup`. Notifications need no command
+> at all: `tauri-plugin-notification`'s init script replaces `window.Notification` with a
+> shim that posts through the plugin. Full explanation: plan §9.2.
 
 ## Dev / build
 
@@ -58,9 +67,13 @@ cargo tauri build
 - **Later launches** → the main window opens directly at the saved address.
 - **Close** hides to the tray (unless "Minimize to tray on close" was unchecked).
 - **Tray** (desktop) → Show E2E Chat · Change Server Address… · Quit.
-- **Settings → Connection** (any box build, desktop *and* Android) → shows the
-  server this app is pointed at and reopens the setup screen. The Android box has
-  no tray, so this is the only in-app way to change the address.
+- **Settings → Connection** (any box build, desktop *and* Android) → shows the server
+  this app is pointed at (the page's own `location.origin`, no IPC needed) and asks for the
+  setup screen over the `box:change-server` event. On desktop that opens the setup
+  *window*; on mobile it takes over the **main** window (`open_setup_in_main`), because a
+  second Tauri window there needs extra Activities in the generated Android project — and
+  saving navigates that same window to the new address. The Android box has no tray, so
+  this is the only in-app way to change the address.
 - Any **host and port** are accepted in setup — a missing scheme or port just
   defaults to `https://` and `3443`.
 - Config lives under the OS per-app config dir, e.g.
@@ -103,18 +116,27 @@ cargo tauri icon static/icons/icon-192.svg
 The same crate builds for Android. `src/lib.rs` already:
 - carries `#[cfg_attr(mobile, tauri::mobile_entry_point)]`,
 - gates the desktop-only pieces (tray, auto-start, close-to-tray) behind `cfg(desktop)`,
-- grants the configured host access to the `notify` command at runtime
-  (`dynamic-acl` + `CapabilityBuilder`), so notifications work on the remote page.
+- grants the configured host the *plugin* permissions it needs at runtime
+  (`dynamic-acl` + `CapabilityBuilder`): `core:event:default` (events — includes the
+  `box:change-server` the Connection tab sends), `notification:default` (the
+  `window.Notification` shim, including the Android permission prompt) and
+  `call-service:default`. App commands are deliberately *not* reachable from that page —
+  see the plan's §9.2.
 
 ```bash
-# one-time: Android SDK + NDK + Java 17 must be installed
-cargo install tauri-cli --locked
-cd src-tauri && cargo tauri android init
+# one-time: Android SDK 36 + NDK 27 + a JDK must be installed, and the CLI must
+# be installed at the repo root — the *generated* Android project builds Rust by
+# shelling out to `npm run -- tauri android android-studio-script`
+# (gen/android/buildSrc/…/BuildTask.kt), which resolves node_modules/.bin/tauri.
+# Skip this and that Gradle task dies with `npm error Missing script: "tauri"`.
+npm install
 
-# then follow android-templates/README.md (Gradle module + notification permission)
-
-cargo tauri android build --apk
+# then follow android-templates/README.md
+npm run tauri -- android init
+npm run tauri -- android build --apk --target aarch64
 # → gen/android/app/build/outputs/apk/universal/release/…-unsigned.apk
+# (verified on Windows with SDK 36 + NDK 27: a 15 MB APK with
+#  lib/arm64-v8a/libe2e_chat_app_lib.so inside and the phoneCall service declared)
 ```
 
 **A release APK is unsigned** — Tauri only signs when
@@ -128,6 +150,11 @@ refuse to install an unsigned APK. Two ways round it:
   secrets exist, and otherwise a throwaway debug keystore so the release download
   is installable. It runs `apksigner verify` afterwards, so an uninstallable APK
   can't be published silently.
+  ⚠️ **Set those three secrets before anyone is told to update.** The fallback keystore is
+  generated *fresh on every run*, so each release carries a different signature: Android
+  then refuses to install the update over the previous version
+  (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`) and the only way in is to uninstall first — which
+  wipes the app's WebView data (and with it the locally cached keys).
 - **Locally**, build a debug APK instead (`cargo tauri android build --apk
   --debug`, signed with the standard debug key), or sign a release one by hand:
   ```bash
@@ -146,13 +173,16 @@ lock screen. `lib.rs` registers it; the work is Kotlin
 (`android/src/main/java/com/e2echat/callservice/`):
 
 - `CallServicePlugin.kt` — `start` / `stop` / `incomingCall` / `cancelIncoming`;
-- `CallForegroundService.kt` — the `mediaCall` foreground service + its ongoing
+- `CallForegroundService.kt` — the `phoneCall` foreground service + its ongoing
   "In call" notification;
 - `IncomingCallNotifier.kt` — the high-importance **full-screen-intent** ring
   (category CALL, ringtone/vibration, a *Decline* action receiver);
 - the plugin ships its own `AndroidManifest.xml` (`FOREGROUND_SERVICE`,
-  `FOREGROUND_SERVICE_MEDIA_CALL`, `WAKE_LOCK`, `POST_NOTIFICATIONS`,
-  `USE_FULL_SCREEN_INTENT`), so none of it is a manual edit in `gen/android/`.
+  `FOREGROUND_SERVICE_PHONE_CALL`, `MANAGE_OWN_CALLS`, `WAKE_LOCK`, `POST_NOTIFICATIONS`,
+  `USE_FULL_SCREEN_INTENT`) **and the media permissions calls need** (`RECORD_AUDIO`,
+  `MODIFY_AUDIO_SETTINGS`, `CAMERA`) — without those declared, wry's runtime prompt for the
+  WebView's capture request is auto-denied and a call has no audio or video at all. So none
+  of it is a manual edit in `gen/android/`.
 
 It is inert on desktop — calls there already survive a minimised window.
 
@@ -197,7 +227,13 @@ Until then Android push is off; browsers and the desktop box use Web Push
 - **Needs external setup:** a Firebase project (Android push) and the Windows
   code-signing certificate (PFX) — both are wired and dormant, so builds succeed
   without them. No auto-updater, so no signing keypair is involved.
-- **Remaining Android wiring:** the Gradle module + `POST_NOTIFICATIONS` request
-  in `gen/android/` (see android-templates/README.md). The plugin itself is done.
-- **Owed:** a device run to verify the full-screen ring and screen-off call
-  behaviour on real hardware.
+- **Done since:** the in-app *Change server address…* button (it was silently dead — the
+  tab called app commands an ACL rejects), the notification bridge (same cause), the media
+  permissions, and the Android `POST_NOTIFICATIONS` request. Details + the per-platform gap
+  list: `WEBSITE_IN_A_BOX_MASTER_PLAN.md` §11.
+- **Remaining Android wiring:** nothing in `gen/android/` by hand; the Gradle module is
+  picked up automatically (see android-templates/README.md).
+- **Owed, in order of impact:** (1) the Android **upload keystore** secrets — without them
+  CI signs each release with a fresh throwaway debug key, so an in-place update fails and
+  the user has to uninstall; (2) a **device run** (full-screen ring, screen-off call, screen
+  share, in-app address change); (3) a Firebase project for Android FCM push.

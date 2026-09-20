@@ -4,11 +4,12 @@ Status: **feature-complete for Windows / Linux / Android** — Phase 0 (session 
 Phase 1 (desktop + Android scaffold), Phase 2 (background-call service wiring + full-screen
 incoming call), Phase 3 (push: Web Push live, FCM server-side ready) and Phase 4 (cert
 pinning, CI hardening) have all landed. There is deliberately **no auto-updater** —
-desktop and Android builds update by re-downloading the new installer (§8.4). The only things left are **external
-gates** that need *your* accounts/keys: a Firebase project (Android FCM) and the signing
-certificates (§10.4). macOS/iOS stay out of scope by decision (§8).
+desktop and Android builds update by re-downloading the new installer (§8.4). What is left is
+(a) **external gates** that need *your* accounts/keys — a Firebase project (Android FCM) and
+the signing certificates, including a **stable Android upload keystore** (§10.4) — and (b) the
+**Android device run** plus the §5 proof artifacts. macOS/iOS stay out of scope by decision (§8).
 Per-feature status, **how each is built**, and **where to debug it** are in §9;
-downloads/installs are §10.
+downloads/installs are §10; the per-platform gap audit is §11.
 Companion doc: `SECURITY_FIX_PLAN.md` (earlier, narrower Tauri scaffold plan — this
 document supersedes it and adds the verification harness + the session-persistence workstream).
 
@@ -228,18 +229,22 @@ Each feature: **Goal / Strategy / Proof / Risk.**
 - **Proof (device):** call while the app is (a) foreground, (b) backgrounded, (c)
   force-closed → all three ring; Accept joins. Needs an Android device (see §10.3).
 
-#### A3.7 Mobile: hold calls with the screen off
+#### A3.7 Mobile: hold calls with the screen off — ✅ implemented (device test owed)
 - **Goal:** Lock the phone → audio continues both ways, like a phone call.
-- **Strategy:**
-  - **Android:** a `CallForegroundService` (`foregroundServiceType="mediaCall"`) started
-    from JS via a Rust command when a call connects. Manifest: `FOREGROUND_SERVICE`,
-    `FOREGROUND_SERVICE_MEDIA_CALL`, `WAKE_LOCK`, `RECORD_AUDIO`, `POST_NOTIFICATIONS`.
-  - JS hook in `static/voice.js`: on call connect → `invoke('start_call_service', …)`;
-    on end → `invoke('stop_call_service')`. Guard with `if (window.__TAURI__)`.
+- **How it's built:** a `CallForegroundService` declaring
+  `android:foregroundServiceType="phoneCall"` — **not** `mediaCall`, which is not a
+  foreground-service type at all and failed the whole APK build in AAPT until it was
+  corrected (2026-09-20 — §11.1). Manifest: `FOREGROUND_SERVICE`,
+  `FOREGROUND_SERVICE_PHONE_CALL`, `MANAGE_OWN_CALLS` (the documented prerequisite of the
+  `phoneCall` type; a normal permission, so no prompt), `WAKE_LOCK`, `POST_NOTIFICATIONS`,
+  `RECORD_AUDIO`, `MODIFY_AUDIO_SETTINGS`, `CAMERA`.
+  JS hook: `_boxCallService('start'|'stop')` in `static/voice.js` invokes
+  `plugin:call-service|start` / `|stop` on call join and from every `teardownRoom()` exit
+  path, guarded by `window.__TAURI__` + an Android user-agent test.
 - **Proof:** Start a call, lock the screen, wait 5 minutes, verify two-way audio
   (recorded on the other peer). Android also shows the persistent "In voice call"
-  notification.
-- **Risk:** Android 14 foreground-service typing is strict. Budget a bake-in day.
+  notification. **Still owed** — no device run yet (§11.3).
+- **Risk (unchanged):** Android 14 foreground-service typing is strict.
 
 #### A3.8 Mobile screen share
 - **Goal:** Share the phone screen into the existing relay pipeline.
@@ -326,10 +331,10 @@ Each feature: **Goal / Strategy / Proof / Risk.**
 |---|---|---|---|
 | Tray | ✅ | ✅(appindicator) | ❌ |
 | Auto-start | ✅ | ✅ | ✅ |
-| Native local notif (app running) | ✅ | ✅ | ✅ (`notify` bridge; WebView has no Web Notification API) |
+| Native local notif (app running) | ✅ | ✅ | ✅ (`tauri-plugin-notification` shim over `window.Notification`; the WebView has no Web Notification API, and Android 13+ needs the POST_NOTIFICATIONS prompt) |
 | Push (app **closed**) | ⚠️ Web Push *if* the WebView's Push API is available; otherwise: leave it in the tray | ⚠️ same as Windows | ✅ FCM — **needs your Firebase project** (§A3.5) |
 | Full-screen incoming call | – (ring bar) | – (ring bar) | ✅ full-screen intent (device test owed) |
-| Background call, screen off | tray | tray | ✅ `mediaCall` foreground service |
+| Background call, screen off | tray | tray | ✅ `phoneCall` foreground service (+ `MANAGE_OWN_CALLS`) |
 | Screen share | getDisplayMedia | ✅ | getDisplayMedia (API 29+) |
 | Cert pinning (TOFU) | ✅ | ✅ | ✅ |
 | Auto-update | ✖ manual re-download | ✖ manual re-download | ✖ re-install the APK |
@@ -534,9 +539,13 @@ Follow-ups landed since:
   origin; anything else opens in the system browser (via `tauri-plugin-opener`).
 - **Native-notification bridge**: the remote-origin IPC gap is solved with tauri's
   `dynamic-acl` feature — `CapabilityBuilder::new(..).remote(host).window("main")` + 
-  `Manager::add_capability` grants the *runtime-chosen* host access, and
-  `showBrowserNotification()` in `chat.js` now calls the Rust `notify` command
-  (OS banner; also the only option on Android WebView, which has no Web Notification API).
+  `Manager::add_capability` grants the *runtime-chosen* host the *plugin* permissions it
+  needs (`core:event:default`, `notification:default`, `call-service:default`).
+  `showBrowserNotification()` in `chat.js` keeps calling `new Notification(...)`;
+  `tauri-plugin-notification`'s init script has replaced `window.Notification` with a shim
+  that posts `plugin:notification|notify` — the OS banner, and the only option on Android
+  WebView, which has no Web Notification API. (An app-level `notify` command existed here
+  and could never be called from the remote page; removed — §11.1.)
 - **Android build target**: `#[cfg_attr(mobile, tauri::mobile_entry_point)]`, desktop-only
   code gated behind `cfg(desktop)`, `bundle.android.minSdkVersion = 29`, a Kotlin
   `CallForegroundService` template, and `.github/workflows/android.yml` (APK).
@@ -627,9 +636,11 @@ Config file (contains `server_url`, `auto_start`, `minimize_to_tray`):
 Handy console one-liners (inside the app, or a local page):
 ```js
 window.__TAURI__                                     // defined? → IPC available
-window.__TAURI__.core.invoke('get_config')           // read saved config
-tauri.core.invoke('test_connection', { url: 'https://localhost:3443' })
-tauri.core.invoke('notify', { title: 'hi', body: 'test' })   // native banner
+window.__TAURI__.core.invoke('get_config')           // app command: LOCAL pages only
+// Plugin commands DO work from the remote app page (see §9.2):
+tauri.core.invoke('plugin:notification|notify', { options: { title: 'hi', body: 'test' } })
+tauri.core.invoke('plugin:call-service|start', { channelName: 't' })
+tauri.event.emit('box:change-server')                // ask for the setup screen
 ```
 
 ### 9.1 Feature status → where to debug
@@ -637,12 +648,12 @@ tauri.core.invoke('notify', { title: 'hi', body: 'test' })   // native banner
 | Feature | Status | Implemented in | How to debug |
 |---|---|---|---|
 | **First-run setup** (host ID) | ✅ done | `static/box-setup.html`; `open_setup()` + `save_config` in `src-tauri/src/lib.rs`; `src-tauri/src/config.rs`; `open_main_at_setup()` is the single-window fallback (Android below 12L cannot open a second window) | Delete `config.json` and relaunch → setup should appear. Inspect the file after saving. `save_config` validates the URL before writing (a bad address can't brick startup). |
-| **Change host ID** | ✅ done (now in-app too) | desktop tray item `change` → `open_setup()`; **Settings → Connection** tab (`static/index.html` + `initConnectionSettings()` in `static/chat.js`) calls `show_setup()`, so Android can re-point the app as well; the existing window gets `w.navigate(new_url)` | Tray → *Change Server Address…*, or in-app Settings → Connection → *Change server address…*. Any host **and port** are accepted (`normalize()` in `box-setup.html` only defaults a missing scheme / the port to `3443`). Confirm the window reloads the new origin; check stderr for `open_main failed` |
+| **Change host ID** | ✅ done — tray (desktop) **and** in-app (both platforms); the in-app button was silently dead until 2026-09-20 (§11.1) | tray item `change` → `open_setup()`; **Settings → Connection** tab (`static/index.html` + `initConnectionSettings()` in `static/chat.js`) shows `location.origin` and emits `box:change-server`; the listener in `run()` calls `open_setup()`, which opens the setup **window** on desktop and takes over the **main window** on mobile (`open_setup_in_main`, with `app_page_url()`/`is_app_page()` so the navigation allowlist lets the bundled page through); `save_config()` then navigates that same window to the new origin | Tray → *Change Server Address…*, or in-app Settings → Connection → *Change server address…*. Any host **and port** are accepted (`normalize()` in `box-setup.html` only defaults a missing scheme / the port to `3443`). **Why an event and not `invoke('show_setup')`:** this page is served by the *host*, and Tauri refuses app commands to a remote origin — §9.2. Confirm the window reloads the new origin; check stderr for `open_main failed` or `box:change-server: could not open setup` |
 | **Connection test / warning** | ✅ done | `test_connection` (`reqwest`, 8 s timeout, `danger_accept_invalid_certs`) | From the setup screen or console (one-liner above). Compare with `curl -sk <url>`; error text distinguishes timeout vs refused vs HTTP status |
 | **No browser / standalone window** | ✅ done | runtime window creation in `open_main()` | Launch the binary either way; DevTools is the only "browser UI" |
 | **Tray + auto-start + close-to-tray** | ✅ done (desktop) | `build_tray()`; `on_window_event(CloseRequested)`; `tauri-plugin-autostart` | Tray menu ids: `show`, `change`, `quit`. Toggle auto-start in setup → on Linux check `~/.config/autostart/*.desktop`, Windows: Task Manager → Startup |
 | **Navigation allowlist** | ✅ done | `.on_navigation(...)` in `open_main()`; `tauri-plugin-opener` | Click an external link in a message → must open in the system browser, not in-app. Non-http(s) schemes (blob/data) are allowed by design |
-| **Native notifications (desktop + Android, app open)** | ✅ done | Rust `notify` command; `grant_remote_ipc()` (dynamic `CapabilityBuilder` → `add_capability`); `showBrowserNotification()` in `static/chat.js` | If `window.__TAURI__` is `undefined` **on the remote page**, the capability wasn't granted — watch stderr for `grant_remote_ipc(...) failed`. Test directly with the `notify` one-liner. On Windows check Focus Assist; on Linux check a notification daemon is running |
+| **Native notifications (desktop + Android, app open)** | ✅ done — but it was silently dead in the box until 2026-09-20 (§11.1) | `tauri-plugin-notification`: its init script replaces `window.Notification` with a shim that posts `plugin:notification|notify`, which `remote-main` grants through `notification:default`; `showBrowserNotification()` in `static/chat.js` just calls `new Notification(...)` | The page must have `window.__TAURI__` **and** the capability must have been granted (stderr: `grant_remote_ipc(...) failed`). Console: `Notification.permission`, `tauri.core.invoke('plugin:notification|notify', { options: { title: 'hi', body: 'test' } })`. Android also needs POST_NOTIFICATIONS (the box asks once on first page load) and, on Android 14+, *Full screen notifications* in system settings for the incoming-call ring. On Windows check Focus Assist; on Linux a notification daemon |
 | **Session persistence (mobile)** | ✅ done | `static/secure-storage.js` (`_hasPasswordBootstrap`, `_ensureKey` order, `_secRedriveKey`, `_afterSodium`), `static/chat.js` boot self-heal | Console: `window._secGetRaw('token')` (ciphertext) vs `window._secGet('token')` (plaintext, `null` = key mismatch). Force a cold start: `sessionStorage.clear(); location.reload()`. Automated: `npx playwright test tests/session-persistence.spec.ts` (see §6a) |
 | **Screen share (Android)** | ✅ works via web app | existing `startScreen()`/`getDisplayMedia` in `static/voice.js` | In-app console: `typeof navigator.mediaDevices.getDisplayMedia` → `'function'` on Android 10+ (minSdk 29). Remote peer should see frames; check the relay logs |
 | **Android build target** | ⏳ ready, needs toolchain | `#[cfg_attr(mobile, tauri::mobile_entry_point)]`, `cfg(desktop)` gates, `bundle.android.minSdkVersion=29`; `.github/workflows/android.yml` | `cargo tauri android init` → `cargo tauri android build --apk` (CI then **signs** the output with `apksigner`, because an unsigned release APK is uninstallable; locally add `--debug` for an installable build). Install: `adb install -r <apk>`. Logs: `adb logcat | grep -iE 'e2echat|RustStdoutStderr'`. Remote DevTools: `chrome://inspect` (debug builds) |
@@ -665,6 +676,28 @@ silently fall back to the browser path (or nothing happens), check, in order:
    that host didn't match. Note it matches on **host only** (not scheme/port).
 3. Confirm the command allowlist in the capability includes `notification:default` and
    `core:event:default` (added in `src-tauri/src/lib.rs`).
+
+**App commands are unreachable from the app's own page.** The ACL check in tauri's
+`webview/mod.rs` rejects a request when
+`plugin_command.is_some() || has_app_acl_manifest || !is_local` and the command resolved to
+no capability entry. The main window's page is **remote**, so *everything* it calls has to
+be covered by `remote-main` — and `remote-main` can only list *plugin* permissions
+(`core:event:default`, `notification:default`, `call-service:default`). A command defined in
+this crate (`get_config`, `save_config`, `show_setup`, …) therefore can never be called from
+the web app, whatever a comment or an older doc claims; the page just gets
+`Command … not allowed by ACL` (an unhandled promise rejection, i.e. silently nothing).
+What *does* work from the remote page:
+1. a **plugin** command whose permission is granted — `plugin:notification|notify`,
+   `plugin:notification|request_permission`, `plugin:notification|is_permission_granted`,
+   `plugin:call-service|start|stop|incomingCall|cancelIncoming`;
+2. **events** — `core:event:default` includes `emit`, and a JS `emit` reaches every Rust
+   listener registered for that event name (`RuntimeManager::emit` → `Listeners::emit` with
+   no target filter). *Settings → Connection* is built on this (`box:change-server`).
+Local pages (the setup window, or `open_setup_in_main`) are unaffected: `is_local`
+short-circuits the whole check, which is why the app's own commands are fine there.
+Adding an **app-level** permission manifest (`src-tauri/permissions/`) would make app
+commands grantable — and would also switch every app command to ACL-enforced mode for
+*local* windows, so the setup screen would need grants too. Not worth it for one button.
 
 **Storage-key derivation (why a session can look "expired").** The key is
 password-derived; `_ensureKey()` order matters. To debug a "logged out on reopen":
@@ -788,7 +821,7 @@ Android additionally needs the Android SDK + NDK and Java 17.
 | Target | Command | Output |
 |---|---|---|
 | Any desktop | `cargo install tauri-cli --locked && cargo tauri build` | installers under `src-tauri/target/release/bundle/` |
-| Android | `cargo tauri android init` (+ `android-templates/`) then `cargo tauri android build --apk` | `src-tauri/gen/android/app/build/outputs/apk/**/app-*-release.apk` |
+| Android | `npm install` (installs the pinned `@tauri-apps/cli` **and** provides `node_modules/.bin/tauri`, which the generated Gradle project invokes) → `npx tauri android init` (+ `android-templates/`) → `npx tauri android build --apk --target aarch64` | `src-tauri/gen/android/app/build/outputs/apk/**/app-*-release.apk` |
 | Run without packaging | `cargo run --manifest-path src-tauri/Cargo.toml` | a native window (debug) |
 
 ### 10.4 Gaps to close
@@ -817,3 +850,72 @@ Android additionally needs the Android SDK + NDK and Java 17.
 - ✅ **Auto-updater stays out** (§A3.10) — manual re-download, by decision.
 - ✅ **One required repo setting:** the release jobs set `permissions: contents: write`;
   without it tauri-action / `action-gh-release` cannot publish and the run fails.
+
+---
+
+## 11. Per-platform gap audit — 2026-09-20
+
+A read of the code against this plan, per platform, of what is **still** missing. Everything
+not listed here is implemented; the Android column is where the remaining work is, because
+none of it has been run on a device yet.
+
+### 11.1 Found and fixed in this pass
+
+| # | Symptom | Root cause (in the code) | Fix |
+|---|---|---|---|
+| 1 | **The APK never built** — eight red CI runs, v0.2.1–v0.2.8 | `plugins/call-service/android/.../AndroidManifest.xml` declared `android:foregroundServiceType="mediaCall"`, which is not a foreground-service type; AAPT fails the resource link ("`mediaCall` is incompatible with attribute foregroundServiceType") and the whole build dies | `phoneCall` + `FOREGROUND_SERVICE_PHONE_CALL` + `MANAGE_OWN_CALLS` (the documented prerequisite), and `ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL` in Kotlin |
+| 2 | **Settings → Connection did nothing** in the box (the address showed "…") | The tab lives in the *host-served* page, and Tauri refuses **app** commands (`get_config`, `show_setup`) to a remote origin — `remote-main` only grants plugin permissions, so both calls came back `Command … not allowed by ACL` | the tab shows `location.origin` (no IPC at all) and the button emits `box:change-server`; the Rust listener opens the setup screen |
+| 3 | **Change-server on Android** would still have failed after (2) | A second window on Android needs extra Activities declared in the generated project (Tauri's multi-window guide) and this app has none — so `open_setup()` could not work there | `open_setup_in_main()`: on mobile the setup page takes over the **main** window; `app_page_url()` + `is_app_page()` stop the navigation allowlist from punting that bundled page to the system browser |
+| 4 | **No notifications at all inside the box** | `showBrowserNotification()` invoked the app-level `notify` command from the remote page — rejected by the same ACL rule, and the rejected promise was never handled, so nothing appeared anywhere | dropped that branch: the notification plugin's shim already handles `new Notification(...)`. The now-dead `notify` command was deleted rather than left as a trap |
+| 5 | **Calls could not capture audio or video on Android** | `RECORD_AUDIO` / `MODIFY_AUDIO_SETTINGS` / `CAMERA` were never declared anywhere — the plan asked for `RECORD_AUDIO` in A3.7 but the manifest never carried it. wry's `RustWebChromeClient.onPermissionRequest` maps the WebView's capture request onto the Android runtime prompt, but an **undeclared** permission is auto-denied | declared in the plugin manifest (which is the only manifest this repo controls — `gen/android/` is generated) |
+| 6 | **Native notifications dropped on Android 13+** | `POST_NOTIFICATIONS` was declared but never *requested*; nothing prompted, and the incoming-call notifier silently skips when it is not granted | the box asks once per install (via the plugin's `is_permission_granted` → `request_permission`, both granted to the remote origin) on the first page load |
+| 7 | **Gradle's Rust task could not run at all** — in CI too, hidden behind #1 because Gradle runs the two in parallel | `gen/android/buildSrc/…/BuildTask.kt` (written by `android init`) builds Rust by shelling out to `npm run -- tauri android android-studio-script`, and this repo had neither a `tauri` npm script nor an installed `@tauri-apps/cli` → every attempt ended in `npm error Missing script: "tauri"`, so the `.so` was never built at all | `@tauri-apps/cli` 2.11.2 + a `"tauri": "tauri"` script in the root `package.json` (lockfile updated), and CI now installs it with `npm ci` instead of `cargo install tauri-cli` — which also removes a ~6-minute compile from every run |
+
+**Verified locally, not just reasoned about** (Windows, SDK 36 + NDK 27):
+`npx tauri android build --apk --target aarch64` produces a 15 MB
+`app-universal-release-unsigned.apk` containing `lib/arm64-v8a/libe2e_chat_app_lib.so`, and the
+merged manifest carries `foregroundServiceType="phoneCall"` plus `RECORD_AUDIO`,
+`MODIFY_AUDIO_SETTINGS`, `CAMERA` and `POST_NOTIFICATIONS`. The build half is no longer
+guesswork; what remains unproven is everything that needs a device.
+
+> **Deploy both halves.** `static/` is served by **your server**, not shipped inside the APK, so
+> #2/#4/#6 only reach a device once the updated `static/` is deployed there — while the APK
+> carries the other half of #2 (the `box:change-server` listener and `open_setup_in_main`).
+> Updating one alone leaves the button dead: an old APK has no listener, and an old server
+> still calls the app commands the ACL rejects.
+
+### 11.2 Windows / Linux (desktop)
+
+| | Item |
+|---|---|
+| ❌ | **§5 proof artifacts** — `standalone.png`, `setup.png`, `conn-test.png` ×3, `notif-desktop.png` ×3, `change-host.mp4`. `visual-evidence/` holds only unrelated `T1…T8` screenshots, so the "Definition of Done" in §0 is unmet even though the features themselves are in. |
+| ⚠️ | **Windows code-signing certificate** (PFX + secrets) — wired into `release.yml` and auto-verified, but dormant until the secret exists; SmartScreen shows "Run anyway" until then. External gate. |
+| ⚠️ | **A self-signed host certificate stops the app window loading at all** (already documented in A3.11): TOFU covers our HTTP client only — the WebView does its own TLS validation. Fix is `tailscale cert` on the host (or trusting `certs/` in the OS store). Worth repeating in the download notes, because it looks like a broken install rather than a certificate prompt. |
+| ⚠️ | **A3.9 keychain-backed storage is still deferred** — on desktop a WebView data wipe costs the local key material; the session survives only through the server-side encrypted key backup. |
+| ➖ | Web Push inside the WebView stays best-effort by design (A5 note) — the intended desktop mode is "leave the box running in the tray". |
+
+### 11.3 Android
+
+| | Item |
+|---|---|
+| ❌ | **The release APK is signed with a throwaway debug key whenever `ANDROID_KEYSTORE_BASE64` / `ANDROID_KEY_ALIAS` / `ANDROID_KEY_PASSWORD` are unset.** Each CI run generates a *fresh random* keystore, so every release has a different signature: installing an update in place fails (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`) and the user must uninstall first — which wipes the WebView's local keys. **Set those three secrets (and update them in no more than one place) before telling anyone to update**; §10.1's "re-install the APK" wording hides this. |
+| ❌ | **Never run on a device.** Everything in the Android column of §9.1 marked "device test owed": background call with the screen off, the full-screen incoming ring, screen share, session persistence across a real restart, and the new in-app change-server flow. |
+| ❌ | **FCM push while the app is closed** — external gate: a Firebase project, `google-services.json` into `src-tauri/gen/android/app/`, and the `firebase-messaging` dependency (A3.5). |
+| ❌ | **No escape hatch when the saved host is unreachable.** Settings → Connection lives in the *host-served* page, so a wrong or dead address leaves no UI at all — and Android has no tray to fall back on (desktop still has *Change Server Address…*). Suggested fix: show the setup page on load failure, or from a long-press launcher shortcut. The machinery is already there (`open_setup_in_main`); what is missing is a trigger that does not require the remote page to load. |
+| ⚠️ | **Android 14+ gates `USE_FULL_SCREEN_INTENT`** behind "Full screen notifications" in system settings for apps whose core function is not calling/alarms (targetSdk here is 36). Sideloaded, so nothing blocks — but the incoming-call ring degrades to a heads-up notification until the user grants it. Needs a device check, and probably a one-time hint in the app. |
+| ⚠️ | **`minSdkVersion` is 29 (Android 10), but a second window needs API 32+ (12L).** Handled — `open_setup_in_main` avoids the second window entirely on mobile — noted so nobody "simplifies" it back. |
+| ⚠️ | **Android screen share** rides on `getDisplayMedia` + the system picker; A3.8's OEM-variation risk is still unverified. |
+
+### 11.4 Web (plain browser)
+
+Nothing box-specific outstanding: the Connection tab stays hidden without `window.__TAURI__`
+(`initConnectionSettings` returns early), and Workstream B is covered by
+`tests/session-persistence.spec.ts`.
+
+### 11.5 Documentation debt
+
+- `SECURITY_FIX_PLAN.md` is **superseded** by this document (its own header says so), yet it
+  still contains the `FOREGROUND_SERVICE_MEDIA_CALL` / `foregroundServiceType="mediaCall"`
+  snippet that broke the APK build for eight runs. Left as-is on purpose — it is a historical
+  record, not a spec — but **do not copy manifest lines out of it**; the committed plugin
+  manifest is the source of truth.

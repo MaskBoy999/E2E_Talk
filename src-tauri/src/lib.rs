@@ -16,7 +16,7 @@ mod config;
 use std::sync::Mutex;
 
 use tauri::ipc::CapabilityBuilder;
-use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Listener, Manager, WebviewUrl, WebviewWindowBuilder};
 
 #[cfg(desktop)]
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -27,7 +27,6 @@ use tauri::WindowEvent;
 #[cfg(desktop)]
 use tauri_plugin_autostart::MacosLauncher;
 
-use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
 
 use config::Config;
@@ -35,6 +34,13 @@ use config::Config;
 const MAIN_LABEL: &str = "main";
 const SETUP_LABEL: &str = "setup";
 const SETUP_PAGE: &str = "box-setup.html";
+
+/// Event the web app's *Settings → Connection* tab emits to ask for the setup
+/// screen. It has to be an event and not a command: the main window renders the
+/// host's page, and Tauri refuses a remote origin every app command unless a
+/// capability grants it (see `run()`, and `grant_remote_ipc` for what that
+/// origin does get).
+const CHANGE_SERVER_EVENT: &str = "box:change-server";
 
 /// Shared state so window events and commands can read the live config.
 #[derive(Default)]
@@ -85,6 +91,27 @@ mod tests {
             "an unreachable host must not be treated as a certificate mismatch"
         );
     }
+
+    /// The navigation allowlist has to let the app's own bundled pages through:
+    /// on mobile the setup page *replaces* the main window, and its origin is not
+    /// the configured server. A lookalike host or a lookalike scheme must still
+    /// be refused — note `evil://localhost` in particular, which an
+    /// `Url::origin()`-based check would wave straight through, because
+    /// non-special schemes report an opaque `null` origin.
+    #[test]
+    fn bundled_pages_are_local_but_lookalikes_are_not() {
+        let page = app_page_url(SETUP_PAGE).expect("the setup page URL must build");
+        assert!(is_app_page(&page), "{page} is a bundled page");
+
+        for bad in [
+            "https://100.1.2.3:3443/box-setup.html",
+            "http://tauri.localhost.evil.com/box-setup.html",
+            "evil://localhost/box-setup.html",
+        ] {
+            let url: tauri::Url = bad.parse().unwrap();
+            assert!(!is_app_page(&url), "{bad} must not count as a bundled page");
+        }
+    }
 }
 
 // ── Windows ──────────────────────────────────────────────────────────────
@@ -111,8 +138,10 @@ fn grant_remote_ipc(app: &tauri::AppHandle, server_url: &str) {
         None => format!("{}://{}", url.scheme(), url.host_str().unwrap_or_default()),
     };
 
-    // Core capability (events + native notifications). This one must hold:
-    // if it fails, the web app silently falls back to browser notifications.
+    // Core capability (events + native notifications). This one must hold: it
+    // is what lets the page raise the `box:change-server` event, and what makes
+    // the notification plugin's `window.Notification` shim reachable — without
+    // it the page has no `window.__TAURI__` at all and notifications stop.
     let capability = CapabilityBuilder::new("remote-main")
         .remote(origin.clone())
         .window(MAIN_LABEL)
@@ -217,6 +246,13 @@ fn open_main_window(app: &tauri::AppHandle, server_url: &str) -> Result<(), Stri
         // message, a redirect to another site — is handed to the system
         // browser instead of being loaded inside the app.
         .on_navigation(move |url| {
+            // The app's own bundled pages — on mobile the setup page replaces the
+            // main window's content, and its origin is *not* the configured
+            // server, so without this the address screen would be punted to the
+            // system browser and the change-server flow could never come back.
+            if is_app_page(url) {
+                return true;
+            }
             if !matches!(url.scheme(), "http" | "https") {
                 return true; // local (blob:, data:, about:) — no network risk
             }
@@ -241,14 +277,46 @@ fn open_main_window(app: &tauri::AppHandle, server_url: &str) -> Result<(), Stri
     Ok(())
 }
 
-/// Build the **main** window showing the local setup page.
+/// The URL a page bundled with the app is served from — i.e. what
+/// `WebviewUrl::App(page)` resolves to once Tauri has picked the
+/// custom-protocol base.
 ///
-/// Fallback for single-window platforms: Tauri can only open a second window
-/// on Android 12L+ / iOS 13+, so on anything older `open_setup` cannot work at
-/// all. Without this the app would launch to a blank screen with no way to
-/// enter the server address.
-fn open_main_at_setup(app: &tauri::AppHandle) -> Result<(), String> {
+/// Tauri derives that base in `RuntimeManager::get_app_url` (private):
+/// `http://tauri.localhost` on Windows and Android, `tauri://localhost`
+/// elsewhere (or `devUrl` in a dev build that sets one — this app does not).
+/// `navigate()` needs a real `Url`, so the base is reproduced here to put an
+/// existing window back on a bundled page.
+fn app_page_url(page: &str) -> Result<tauri::Url, String> {
+    let base = if cfg!(windows) || cfg!(target_os = "android") {
+        "http://tauri.localhost"
+    } else {
+        "tauri://localhost"
+    };
+    format!("{base}/{page}").parse().map_err(|e| format!("{e}"))
+}
+
+/// Whether a URL points at one of the app's own bundled pages rather than at the
+/// remote server.
+///
+/// Scheme + host deliberately, not `Url::origin()`: `tauri://localhost` uses a
+/// non-special scheme, so the `url` crate reports an **opaque** origin (`null`)
+/// for it — and `null == null` would then accept any non-special scheme at all.
+fn is_app_page(url: &tauri::Url) -> bool {
+    if cfg!(windows) || cfg!(target_os = "android") {
+        matches!(url.scheme(), "http" | "https") && url.host_str() == Some("tauri.localhost")
+    } else {
+        url.scheme() == "tauri" && url.host_str() == Some("localhost")
+    }
+}
+
+/// Show the setup page **in the main window** — the single-window fallback.
+///
+/// `save_config` navigates this same window to the address it saved, so the
+/// change-server flow completes without ever needing a second window.
+fn open_setup_in_main(app: &tauri::AppHandle) -> Result<(), String> {
     if let Some(w) = app.get_webview_window(MAIN_LABEL) {
+        w.navigate(app_page_url(SETUP_PAGE)?)
+            .map_err(|e| e.to_string())?;
         let _ = w.show();
         let _ = w.set_focus();
         return Ok(());
@@ -261,20 +329,37 @@ fn open_main_at_setup(app: &tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Open (or focus) the local setup window.
+/// Open (or focus) the local setup screen — where the server address is entered
+/// and tested. Reached from the tray, from app startup, and from the web app's
+/// *Settings → Connection* tab (over [`CHANGE_SERVER_EVENT`]).
+///
+/// Desktop gets its own window. Mobile does not: a second Tauri window there
+/// needs extra Activities declared in the generated Android project (Tauri's
+/// multi-window guide) and on a phone it would only cover the app anyway — so on
+/// mobile the setup page takes over the main window instead.
 fn open_setup(app: &tauri::AppHandle) -> Result<(), String> {
     if let Some(w) = app.get_webview_window(SETUP_LABEL) {
         let _ = w.show();
         let _ = w.set_focus();
         return Ok(());
     }
-    WebviewWindowBuilder::new(app, SETUP_LABEL, WebviewUrl::App(SETUP_PAGE.into()))
-        .title("E2E Chat — Setup")
-        .inner_size(560.0, 660.0)
-        .resizable(false)
-        .build()
-        .map_err(|e| e.to_string())?;
-    Ok(())
+
+    #[cfg(desktop)]
+    {
+        match WebviewWindowBuilder::new(app, SETUP_LABEL, WebviewUrl::App(SETUP_PAGE.into()))
+            .title("E2E Chat — Setup")
+            .inner_size(560.0, 660.0)
+            .resizable(false)
+            .build()
+        {
+            Ok(_) => return Ok(()),
+            // A platform that refuses a second window must not leave the setup
+            // screen unreachable — fall through to the main window.
+            Err(e) => eprintln!("setup window failed ({e}); showing setup in the main window"),
+        }
+    }
+
+    open_setup_in_main(app)
 }
 
 // ── Commands ─────────────────────────────────────────────────────────────
@@ -439,7 +524,9 @@ async fn save_config(
     Ok(())
 }
 
-/// Re-open the setup window from the UI or the tray.
+/// Show the setup screen again. This is the command form, so it is reachable
+/// from **local** pages only (the setup page itself); the remote app page asks
+/// over [`CHANGE_SERVER_EVENT`], because Tauri denies it app commands.
 #[tauri::command]
 fn show_setup(app: tauri::AppHandle) -> Result<(), String> {
     open_setup(&app)
@@ -449,19 +536,16 @@ fn show_setup(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 fn quit_app(app: tauri::AppHandle) {
     app.exit(0);
-}/// Native (OS-level) notification. The web app calls this when it's running
-/// inside the box; on desktop it renders as a system banner, on Android as a
-/// notification — in both cases far richer than the Web Notification API
-/// (which Android WebView does not support at all).
-#[tauri::command]
-fn notify(app: tauri::AppHandle, title: String, body: String) -> Result<(), String> {
-    app.notification()
-        .builder()
-        .title(title)
-        .body(body)
-        .show()
-        .map_err(|e| e.to_string())
 }
+
+// There is deliberately **no** `notify` command any more. Notifications go
+// through `tauri-plugin-notification` in every case: the plugin's init script
+// replaces `window.Notification` in the WebView with a shim that posts
+// `plugin:notification|notify`, which the remote origin is granted via
+// `notification:default` (see `grant_remote_ipc`). The old app-level command
+// looked like the box's notification path but could never be reached from the
+// app's own page: Tauri rejects *app* commands from a remote origin whose
+// capability does not list it, so in-box notifications silently did nothing.
 
 // ── Desktop tray ─────────────────────────────────────────────────────────
 
@@ -564,8 +648,7 @@ pub fn run() {
             probe_certificate,
             save_config,
             show_setup,
-            quit_app,
-            notify
+            quit_app
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -584,17 +667,32 @@ pub fn run() {
                     }
                 }
                 None => {
-                    // First run. If the platform refuses a second window, show
-                    // the setup page in the main window instead — the address
-                    // can still be entered, and `save_config` navigates that
-                    // same window to the server afterwards.
+                    // First run. `open_setup` itself takes over the main window
+                    // where the platform refuses a second one.
                     if let Err(e) = open_setup(&handle) {
-                        eprintln!("open_setup failed ({e}); showing setup in the main window");
-                        if let Err(e) = open_main_at_setup(&handle) {
-                            eprintln!("setup fallback window failed: {e}");
-                        }
+                        eprintln!("open_setup failed: {e}");
                     }
                 }
+            }
+
+            // The in-app *Settings → Connection* tab asks for the setup screen
+            // over the event channel, because it cannot ask any other way: the
+            // main window loads the **host's** page, and Tauri rejects every
+            // *app* command from a remote origin whose capability does not list
+            // it (`webview/mod.rs`: `!is_local && invoke.acl.is_none()` →
+            // "Command … not allowed by ACL"). `get_config` / `show_setup` are
+            // app commands, and `remote-main` grants only core/notification/
+            // call-service permissions — while `core:event:default`, which
+            // includes `emit`, *is* granted. A JS `emit` lands in
+            // `RuntimeManager::emit`, which calls every listener registered for
+            // the event name regardless of target, so this fires.
+            {
+                let for_events = handle.clone();
+                handle.listen(CHANGE_SERVER_EVENT, move |_event| {
+                    if let Err(e) = open_setup(&for_events) {
+                        eprintln!("{CHANGE_SERVER_EVENT}: could not open setup: {e}");
+                    }
+                });
             }
 
             #[cfg(desktop)]

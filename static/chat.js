@@ -3997,21 +3997,60 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!connTab || !tauri || !tauri.core || !tauri.core.invoke) return;
         const addrEl = document.getElementById('connection-server-address');
         const changeBtn = document.getElementById('connection-change-server-btn');
-        function refreshAddress() {
-            tauri.core.invoke('get_config').then(function (cfg) {
-                if (addrEl) addrEl.textContent = (cfg && cfg.server_url) || 'Not set';
-            }).catch(function () {});
-        }
+
+        // Which server this app talks to. This page *is* that server — the box
+        // opens the saved address, and the navigation allowlist never leaves its
+        // origin — so `location.origin` answers it with no IPC at all. The old
+        // get_config call could never have worked here: Tauri denies app commands
+        // to a remote origin, and this page is served by the host (only core
+        // event / notification / call-service permissions are granted to it).
+        if (addrEl) addrEl.textContent = location.origin;
+
         connTab.style.display = '';
-        connTab.addEventListener('click', refreshAddress);
         if (changeBtn) {
+            // Ask the box for the setup screen over the *event* channel — the one
+            // call this page is allowed to make (`core:event:default` includes
+            // `emit`). The box opens the setup screen in its own window on
+            // desktop, and in this window on mobile where a second window needs
+            // extra native plumbing. `tauri.event.emit` is the API; invoking the
+            // command directly is the fallback for a global bundle without the
+            // event module.
             changeBtn.addEventListener('click', function () {
-                tauri.core.invoke('show_setup').catch(function (e) {
-                    console.warn('[box] show_setup failed:', e);
+                const sent = (tauri.event && tauri.event.emit)
+                    ? tauri.event.emit('box:change-server')
+                    : tauri.core.invoke('plugin:event|emit', { event: 'box:change-server' });
+                Promise.resolve(sent).catch(function (e) {
+                    console.error('[box] change-server failed:', e);
+                    alert('Could not open the server settings: ' + (e && e.message ? e.message : e));
                 });
             });
         }
-        refreshAddress();
+    })();
+
+    // Box app on Android only: every native notification the box posts — the
+    // ongoing "In call" one from CallForegroundService, the full-screen incoming
+    // call ring, and the notification shim above — is dropped silently on
+    // Android 13+ until POST_NOTIFICATIONS is granted at runtime. Nothing asks
+    // for it by default, and it has to be granted while the app is in the
+    // foreground, so ask here on the first box page load (never again: Android
+    // stops prompting after a refusal, so nagging is pointless). The command is
+    // reachable because `notification:default` — which includes
+    // `request_permission` — is granted to this remote origin.
+    (function initBoxNotificationPermission() {
+        var tauri = window.__TAURI__;
+        if (!tauri || !tauri.core || !tauri.core.invoke) return;
+        if (!/Android/i.test(navigator.userAgent || '')) return;
+        var KEY = 'box_notif_permission_asked';
+        try { if (localStorage.getItem(KEY) === '1') return; } catch (_) { return; }
+        function done() { try { localStorage.setItem(KEY, '1'); } catch (_) {} }
+        tauri.core.invoke('plugin:notification|is_permission_granted')
+            .then(function (granted) {
+                if (granted) { done(); return; }
+                return tauri.core.invoke('plugin:notification|request_permission')
+                    .then(done)
+                    .catch(done);
+            })
+            .catch(function () {});
     })();
 
     async function fetchBackupStatus() {
@@ -10351,17 +10390,14 @@ function startNotifVisualizer(durationMs) {
 }
 
 function showBrowserNotification(title, body, onClick) {
-    // Inside the desktop/mobile box, use the OS notification instead of the Web
-    // Notification API: it looks native, supports actions, and Android WebView
-    // does not implement the Web Notification API at all. The box grants this
-    // origin access to the `notify` command (see src-tauri/src/lib.rs).
-    var tauri = window.__TAURI__;
-    if (tauri && tauri.core && tauri.core.invoke) {
-        try {
-            tauri.core.invoke('notify', { title: title, body: body });
-            return;
-        } catch (_) { /* fall through to the browser path */ }
-    }
+    // No box-specific branch needed: inside the box the notification plugin's
+    // init script has already replaced `window.Notification` with a shim that
+    // posts through `plugin:notification|notify` — which this origin *is*
+    // granted, via `notification:default`. It used to invoke the app-level
+    // `notify` command instead, and Tauri refuses app commands to a remote
+    // origin ("not allowed by ACL"), so inside the box nothing was ever shown
+    // and the rejected promise went unhandled. On Android the shim is also the
+    // only option: the WebView has no Web Notification API at all.
     if (!('Notification' in window) || Notification.permission !== 'granted') return;
     try {
         var notif = new Notification(title, { body, icon: '/favicon.ico' });
@@ -10370,10 +10406,12 @@ function showBrowserNotification(title, body, onClick) {
             notif.onclick = function () {
                 window.focus();
                 cb();
-                this.close();
+                if (this && this.close) this.close();
             };
         }
-        setTimeout(function () { notif.close(); }, 10000);
+        // The plugin shim's notification is a plain object with no close(), so
+        // guard it — otherwise this timer throws on every single notification.
+        setTimeout(function () { if (notif && notif.close) notif.close(); }, 10000);
     } catch (e) {
         console.warn('Notification failed:', e);
     }

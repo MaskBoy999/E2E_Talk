@@ -1046,7 +1046,7 @@
     // ------------------------------------------------------------------
     // Android freezes WebView processes once the app is backgrounded, which
     // kills the WebRTC connection mid-call. The native `call-service` plugin
-    // starts a `mediaCall` foreground service for the duration of the call,
+    // starts a `phoneCall` foreground service for the duration of the call,
     // which keeps us alive and shows an ongoing "In call" notification.
     // Desktop needs nothing (calls already survive a minimised window), and in
     // a plain browser `window.__TAURI__` is absent, so both are no-ops.

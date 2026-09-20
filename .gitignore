@@ -93,6 +93,14 @@ progress.md.bak
 reg.json
 NUL
 
+# Android signing material — never commit (CI reads it from repo secrets)
+*.jks
+*.keystore
+upload-keystore*
+
+# Signed release artifacts staged by the release workflows
+/dist/
+
 # Agent skill customizations (local)
 .agents/
 AGENTS.md
