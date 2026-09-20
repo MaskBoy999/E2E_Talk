@@ -66,6 +66,17 @@ jobs:
           workspaces: src-tauri
 
       # ---------------------------------------------------------------------
+      # tauri-action builds by running the *project's own* script
+      # (`npm run tauri build -- --config …`), so the CLI has to be installed —
+      # package.json declares it, but with no node_modules on the runner npm
+      # fails (exit 127 / "Missing script"). That is why every desktop release
+      # from v0.2.1 on failed here while the Android workflow, which does run
+      # `npm ci`, kept getting further. Same root cause, same fix.
+      # ---------------------------------------------------------------------
+      - name: Install Tauri CLI
+        run: npm ci
+
+      # ---------------------------------------------------------------------
       # A single config file carries the optional build tweaks, so we never have
       # to pass two `--config` flags (their precedence is easy to get wrong).
       # Starts as an empty object; the Windows step below merges the cert into
