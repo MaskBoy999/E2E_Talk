@@ -97,6 +97,9 @@ NUL
 *.jks
 *.keystore
 upload-keystore*
+# base64 copy of the upload keystore (the value pasted into ANDROID_KEYSTORE_BASE64)
+keystore-base64.txt
+*keystore*.txt
 
 # Signed release artifacts staged by the release workflows
 /dist/

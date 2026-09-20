@@ -371,7 +371,11 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: clamp(4px, 0.8vw, 8px);
+    /* No flex gap: the in-between drop slots below own ALL the space between
+       rail entries — exactly like the DM list. With a gap here the rail kept a
+       constant ~25px between icons (two flex gaps + the slot), while the DM
+       rows sat close together at rest and only spread out while dragging. */
+    gap: 0;
     width: 100%;
     padding-top: 4px;
 }
@@ -388,11 +392,7 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     margin: 2px 0;
     border-radius: 3px;
     background: transparent;
-    transition: background 0.15s ease;
-}
-
-.server-list-dragging .server-drop-gap {
-    background: rgba(255, 255, 255, 0.06);
+    transition: background 0.15s ease, height 0.15s ease, margin 0.15s ease;
 }
 
 /* Slots *inside* an expanded folder: the same in-between space loose servers
@@ -407,6 +407,25 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
    the rail would otherwise leave nothing to drop onto above it. */
 .server-drop-gap.top {
     height: 4px;
+    margin: 0 0 2px;
+}
+
+/* Picking a server (or a folder) up opens the rail: the slots grow and tint, so
+   the room to drop *between* two icons appears only during the drag — the same
+   cue the DM list gives. At rest the entries sit close together. */
+.server-list-dragging .server-drop-gap {
+    height: 12px;
+    margin: 2px 0;
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.server-list-dragging .server-drop-gap.inside {
+    height: 8px;
+    margin: 2px 0;
+}
+
+.server-list-dragging .server-drop-gap.top {
+    height: 10px;
     margin: 0 0 2px;
 }
 
@@ -1958,6 +1977,16 @@ select.modal-input:focus {
         width: clamp(38px, 10vw, 48px);
         height: clamp(38px, 10vw, 48px);
         font-size: clamp(20px, 5vw, 26px);
+    }
+
+    /* Member-list role circle: a 10px dot is a fiddly tap target with a finger
+       and its colour is easy to miss, so it grows on mobile. Specificity is
+       bumped with .member-item to beat the base rule that appears later in the
+       file (same trick as the server-strip rules above). */
+    .member-item .role-circle {
+        width: 15px;
+        height: 15px;
+        min-width: 15px;
     }
 
     /* Collapsed group grid — scale down on mobile so the 2x2 mini-icons
@@ -11079,6 +11108,31 @@ body.resizing-dm { cursor: ns-resize !important; user-select: none; }
     flex-shrink: 0;
     box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
     cursor: default;
+}
+
+/* The circle the user last tapped is ringed, so "which role is this label
+   talking about" stays obvious while the label is open. */
+.role-circle.role-circle-open {
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35), 0 0 0 3px var(--accent, #5865f2);
+}
+
+/* Tap tooltip for the role circle (phones have no hover). Floated on <body> and
+   positioned in JS, so the member list's scroll/overflow cannot clip it.
+   pointer-events:none keeps it from swallowing a tap aimed at the row it covers
+   — the tap that dismisses it is the tap the underlying row already receives. */
+.role-circle-label {
+    position: fixed;
+    pointer-events: none;
+    z-index: 10000;
+    padding: 3px 8px;
+    border-radius: 6px;
+    background: var(--bg-secondary, #232428);
+    color: var(--text-primary, #fff);
+    border: 1px solid var(--border-color, rgba(255, 255, 255, 0.12));
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+    font-size: 12px;
+    line-height: 1.3;
+    white-space: nowrap;
 }
 
 .roles-list {

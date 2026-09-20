@@ -15476,7 +15476,11 @@ async function loadChannels(serverId) {
             updateChannelBadges();
             updateChannelMutedUI();
             if (window.innerWidth > 768 && !currentChannelId) {
-                var firstCh = list.querySelector('.channel-item');
+                // Auto-enter the first TEXT channel only. A click on a voice row
+                // *joins* it, so auto-selecting the first row in the list used to
+                // drop the user straight into voice whenever the first channel of
+                // the server happened to be a voice channel.
+                var firstCh = list.querySelector('.channel-item:not(.channel-item-voice)');
                 if (firstCh) firstCh.click();
             }
             return;
@@ -15573,7 +15577,10 @@ async function loadChannels(serverId) {
         });
 
         if (window.innerWidth > 768 && !currentChannelId) {
-            list.children[0].click();
+            // Same rule as the categorized path: never auto-click a voice row —
+            // that click joins voice instead of selecting a text channel.
+            var firstTextCh = list.querySelector('.channel-item:not(.channel-item-voice)');
+            if (firstTextCh) firstTextCh.click();
         }
     } catch (err) {
         console.error('Failed to load channels:', err);
@@ -16567,7 +16574,7 @@ async function appendMessage(msg) {
         if (gifData.text) contentHtml += '<div class="text">' + renderEmojiText(gifData.text) + editedHtml + '<span class="time-hover">' + time + '</span></div>';
         contentHtml += '<div class="gif-message">' +
             '<img src="' + escapeHtml(gifData.url) + '" alt="' + escapeHtml(gifData.alt || 'GIF') + '" loading="lazy" style="max-width:300px;max-height:300px;border-radius:8px;cursor:pointer">' +
-            '<button class="media-download-btn" title="Download" data-url="' + escapeHtml(gifData.url) + '" data-filename="sticker.gif">⬇</button>' +
+            '<button class="media-download-btn" title="Download" data-url="' + escapeHtml(gifData.url) + '" data-filename="sticker.gif"><svg class="ui-icon" width="14" height="14"><use href="#icon-download"/></svg></button>' +
             '</div>';
     } else if (stickerData) {
         if (stickerData.text) contentHtml += '<div class="text">' + renderEmojiText(stickerData.text) + editedHtml + '<span class="time-hover">' + time + '</span></div>';
@@ -19843,7 +19850,7 @@ async function appendDmMessage(msg, kp, otherPublicKey) {
         if (gifData.text) contentHtml += '<div class="text">' + renderEmojiText(gifData.text) + '<span class="time-hover">' + time + '</span></div>';
         contentHtml += '<div class="gif-message">' +
             '<img src="' + escapeHtml(gifData.url) + '" alt="' + escapeHtml(gifData.alt || 'GIF') + '" loading="lazy" style="max-width:300px;max-height:300px;border-radius:8px;cursor:pointer">' +
-            '<button class="media-download-btn" title="Download" data-url="' + escapeHtml(gifData.url) + '" data-filename="sticker.gif">⬇</button>' +
+            '<button class="media-download-btn" title="Download" data-url="' + escapeHtml(gifData.url) + '" data-filename="sticker.gif"><svg class="ui-icon" width="14" height="14"><use href="#icon-download"/></svg></button>' +
             '</div>';
     } else if (stickerData) {
         if (stickerData.text) contentHtml += '<div class="text">' + renderEmojiText(stickerData.text) + '<span class="time-hover">' + time + '</span></div>';
@@ -25582,7 +25589,7 @@ function openTextEditorModal(file) {
             modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:10000;display:flex;align-items:center;justify-content:center';
             modal.innerHTML = '<div style="background:#1a1a2e;border-radius:12px;width:90%;max-width:800px;max-height:85vh;display:flex;flex-direction:column;border:1px solid #333;overflow:hidden">'
                 + '<div style="padding:16px 20px;border-bottom:1px solid #333;display:flex;justify-content:space-between;align-items:center">'
-                + '<span style="color:#e0e0e0;font-size:16px;font-weight:600">📝 Edit Text</span>'
+                + '<span style="color:#e0e0e0;font-size:16px;font-weight:600"><svg class="ui-icon" width="16" height="16"><use href="#icon-edit"/></svg> Edit Text</span>'
                 + '<span id="text-edit-filename" style="color:#888;font-size:13px"></span></div>'
                 + '<div style="flex:1;overflow:hidden;padding:0">'
                 + '<textarea id="text-edit-area" style="width:100%;height:100%;min-height:400px;background:#0d1117;color:#c9d1d9;border:none;padding:16px;font-family:Consolas,Monaco,monospace;font-size:14px;resize:none;outline:none;tab-size:4"></textarea>'
@@ -25911,7 +25918,7 @@ function buildFileCardHtml(fileData) {
                 '<span class="audio-file-icon">' + icon('music') + '</span>' +
                 '<span class="audio-file-name">' + escapeHtml(fileData.filename) + '</span>' +
                 '<span class="audio-file-meta">' + formatFileSize(fileData.file_size) + '</span>' +
-                '<button class="file-download-btn audio-download-btn" title="Download">⬇</button>' +
+                '<button class="file-download-btn audio-download-btn" title="Download"><svg class="ui-icon" width="14" height="14"><use href="#icon-download"/></svg></button>' +
             '</div>' +
             '<div class="file-preview" ' +
                 'data-file-id="' + escapeAttr(fileData.file_id) + '" ' +
@@ -25940,7 +25947,7 @@ function buildFileCardHtml(fileData) {
         'data-file-name="' + escapeAttr(fileData.filename) + '" ' +
         'data-file-mime="' + escapeAttr(fileData.mime_type) + '" ' +
         'data-file-size="' + fileData.file_size + '">' +
-        '<button class="file-download-btn" title="Download">⬇</button>' +
+        '<button class="file-download-btn" title="Download"><svg class="ui-icon" width="14" height="14"><use href="#icon-download"/></svg></button>' +
         (isDoc ? '<button class="file-doc-preview-btn" title="Preview document">' + icon('eye') + '</button>' : '') +
 
         '<div class="file-details">' +
@@ -26236,7 +26243,7 @@ async function loadMediaPreview(container, fileData) {
             audio.style.width = '100%';
             audio.onerror = () => {
                 console.warn('Audio preview failed:', blob.type, blob.size, 'file:', fileData.filename);
-                container.innerHTML = '<span style="font-size:24px">🎵</span><span style="color:var(--text-muted);font-size:13px">Audio preview unavailable</span>';
+                container.innerHTML = '<span style="font-size:24px"><svg class="ui-icon" width="24" height="24"><use href="#icon-music"/></svg></span><span style="color:var(--text-muted);font-size:13px">Audio preview unavailable</span>';
             };
             // Custom loop toggle next to the native player.
             const audioWrap = document.createElement('div');
@@ -26750,8 +26757,8 @@ function showAttachmentContextMenu(e, card) {
     var isImage = mime.indexOf('image/') === 0;
     var name = card.getAttribute('data-file-name') || 'file';
     showContextMenuAt(e, [
-        { label: '⬇ Download ' + name, action: function () { downloadAttachmentFromCard(card); } },
-        { label: (isImage ? '🖼 Copy image' : '📋 Copy file'), action: function () { copyAttachmentToClipboard(card); } },
+        { label: '<svg class="ui-icon" width="14" height="14"><use href="#icon-download"/></svg> Download ' + name, action: function () { downloadAttachmentFromCard(card); } },
+        { label: (isImage ? '<svg class="ui-icon" width="14" height="14"><use href="#icon-image"/></svg> Copy image' : '<svg class="ui-icon" width="14" height="14"><use href="#icon-clipboard"/></svg> Copy file'), action: function () { copyAttachmentToClipboard(card); } },
     ]);
 }
 
@@ -26793,8 +26800,8 @@ function handleMediaContextMenu(e) {
         var src = emojiImg.currentSrc || emojiImg.src;
         if (!src) return false;
         showContextMenuAt(e, [
-            { label: '⬇ Download :' + name + ':', action: function () { downloadBlobAs(src, safeDownloadName(name, 'emoji') + '.png', 'image/png'); } },
-            { label: '🖼 Copy image', action: function () { copyImageElementToClipboard(emojiImg, 'Emoji'); } },
+            { label: '<svg class="ui-icon" width="14" height="14"><use href="#icon-download"/></svg> Download :' + name + ':', action: function () { downloadBlobAs(src, safeDownloadName(name, 'emoji') + '.png', 'image/png'); } },
+            { label: '<svg class="ui-icon" width="14" height="14"><use href="#icon-image"/></svg> Copy image', action: function () { copyImageElementToClipboard(emojiImg, 'Emoji'); } },
         ]);
         return true;
     }
@@ -26808,8 +26815,8 @@ function handleMediaContextMenu(e) {
         var sName = (stickerContainer._stickerData && stickerContainer._stickerData.sticker_name) || 'sticker';
         var sMime = stickerContainer.getAttribute('data-mime-type') || 'image/png';
         showContextMenuAt(e, [
-            { label: '⬇ Download ' + sName, action: function () { downloadBlobAs(sUrl, safeDownloadName(sName, 'sticker'), sMime); } },
-            { label: '🖼 Copy image', action: function () { copyImageElementToClipboard(sImg, 'Sticker'); } },
+            { label: '<svg class="ui-icon" width="14" height="14"><use href="#icon-download"/></svg> Download ' + sName, action: function () { downloadBlobAs(sUrl, safeDownloadName(sName, 'sticker'), sMime); } },
+            { label: '<svg class="ui-icon" width="14" height="14"><use href="#icon-image"/></svg> Copy image', action: function () { copyImageElementToClipboard(sImg, 'Sticker'); } },
         ]);
         return true;
     }
@@ -26824,8 +26831,8 @@ function handleMediaContextMenu(e) {
         if (!gifUrl) return false;
         var gifName = (gifBtn && gifBtn.getAttribute('data-filename')) || 'sticker.gif';
         showContextMenuAt(e, [
-            { label: '⬇ Download GIF', action: function () { downloadRemoteAs(gifUrl, gifName, 'image/gif'); } },
-            { label: '🖼 Copy image', action: function () { copyImageElementToClipboard(gifImg, 'GIF'); } },
+            { label: '<svg class="ui-icon" width="14" height="14"><use href="#icon-download"/></svg> Download GIF', action: function () { downloadRemoteAs(gifUrl, gifName, 'image/gif'); } },
+            { label: '<svg class="ui-icon" width="14" height="14"><use href="#icon-image"/></svg> Copy image', action: function () { copyImageElementToClipboard(gifImg, 'GIF'); } },
         ]);
         return true;
     }
@@ -26964,7 +26971,7 @@ function openMediaViewer(url, type, fileData, galleryItems) {
 
         const header = document.createElement('div');
         header.className = 'text-viewer-header';
-        header.innerHTML = '<span class="text-viewer-icon">' + (isMd ? '📝' : '📄') + '</span><span class="text-viewer-filename">' + escapeHtml(filename) + '</span><span class="text-viewer-meta">' + formatFileSize(fullText.length) + '</span>';
+        header.innerHTML = '<span class="text-viewer-icon">' + (isMd ? '<svg class="ui-icon" width="16" height="16"><use href="#icon-edit"/></svg>' : '<svg class="ui-icon" width="16" height="16"><use href="#icon-clipboard"/></svg>') + '</span><span class="text-viewer-filename">' + escapeHtml(filename) + '</span><span class="text-viewer-meta">' + formatFileSize(fullText.length) + '</span>';
         wrapper.appendChild(header);
 
         const codeEl = document.createElement('div');
@@ -27107,7 +27114,7 @@ function navigateViewer(direction) {
 
         const header = document.createElement('div');
         header.className = 'text-viewer-header';
-        header.innerHTML = '<span class="text-viewer-icon">' + (isMd ? '📝' : '📄') + '</span><span class="text-viewer-filename">' + escapeHtml(filename) + '</span><span class="text-viewer-meta">' + formatFileSize(fullText.length) + '</span>';
+        header.innerHTML = '<span class="text-viewer-icon">' + (isMd ? '<svg class="ui-icon" width="16" height="16"><use href="#icon-edit"/></svg>' : '<svg class="ui-icon" width="16" height="16"><use href="#icon-clipboard"/></svg>') + '</span><span class="text-viewer-filename">' + escapeHtml(filename) + '</span><span class="text-viewer-meta">' + formatFileSize(fullText.length) + '</span>';
         wrapper.appendChild(header);
 
         const codeEl = document.createElement('div');
@@ -33031,3 +33038,55 @@ window.requestPushPermission = async function () {
 window.isPushEnabled = function () {
     return 'Notification' in window && Notification.permission === 'granted';
 };
+
+// === Role circle tap label ===
+// The member list's role circle carries its role name in `data-role-name` (plus
+// a native `title` tooltip, which desktop shows on hover). A phone can't hover,
+// so a tap opens the name in a floating label that stays until the user taps
+// anywhere else. Delegated on <body> because the member list is re-rendered.
+(function () {
+    var roleCircleLabelEl = null;
+
+    function hideRoleCircleLabel() {
+        if (roleCircleLabelEl && roleCircleLabelEl.parentNode) {
+            roleCircleLabelEl.parentNode.removeChild(roleCircleLabelEl);
+        }
+        roleCircleLabelEl = null;
+        var open = document.querySelector('.role-circle.role-circle-open');
+        if (open) open.classList.remove('role-circle-open');
+    }
+
+    function showRoleCircleLabel(circle) {
+        hideRoleCircleLabel();
+        var name = circle.getAttribute('data-role-name') || circle.getAttribute('title') || '';
+        if (!name) return;
+        var el = document.createElement('div');
+        el.className = 'role-circle-label';
+        el.textContent = name;
+        document.body.appendChild(el);
+        var r = circle.getBoundingClientRect();
+        var w = el.offsetWidth;
+        // Sit just right of the circle, centred on it — i.e. over that member's
+        // own row — and clamp to the viewport so a circle near the right edge of
+        // a narrow phone cannot push the label off screen. The label is
+        // pointer-events:none (see style.css), so it can never swallow a tap
+        // meant for the row underneath.
+        var left = Math.min(r.right + 8, window.innerWidth - 8 - w);
+        if (left < 8) left = 8;
+        el.style.left = left + 'px';
+        el.style.top = (r.top + r.height / 2) + 'px';
+        el.style.transform = 'translateY(-50%)';
+        roleCircleLabelEl = el;
+        circle.classList.add('role-circle-open');
+    }
+
+    document.addEventListener('click', function (e) {
+        var circle = e.target && e.target.closest ? e.target.closest('.role-circle') : null;
+        if (circle) { showRoleCircleLabel(circle); return; }
+        hideRoleCircleLabel();
+    });
+    document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape') hideRoleCircleLabel();
+    });
+    window.addEventListener('resize', hideRoleCircleLabel);
+})();

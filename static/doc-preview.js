@@ -439,7 +439,7 @@ var DocPreview = (function () {
             row.onmouseenter = function () { row.style.background = 'rgba(255,255,255,0.03)'; };
             row.onmouseleave = function () { row.style.background = ''; };
 
-            var icon = getFileIconForZip(item.path);
+            var iconId = getFileIconForZip(item.path);
             var nameEl = document.createElement('span');
             nameEl.style.cssText = 'flex:1;font-size:13px;color:var(--text-primary,#eee);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:monospace';
             nameEl.textContent = item.path;
@@ -448,7 +448,9 @@ var DocPreview = (function () {
             var sizeEl = document.createElement('span');
             sizeEl.style.cssText = 'font-size:12px;color:var(--text-muted,#999);white-space:nowrap;min-width:60px;text-align:right';
             sizeEl.textContent = formatSize(item.size);
-            row.appendChild(document.createTextNode(icon));
+            var iconSpan = document.createElement('span');
+            iconSpan.innerHTML = '<svg class="ui-icon" width="14" height="14"><use href="#icon-' + iconId + '"/></svg>';
+            row.appendChild(iconSpan);
             row.appendChild(nameEl);
             row.appendChild(sizeEl);
 
@@ -520,18 +522,18 @@ var DocPreview = (function () {
     function getFileIconForZip(path) {
         var ext = path.split('.').pop().toLowerCase();
         var map = {
-            'png': '🖼️', 'jpg': '🖼️', 'jpeg': '🖼️', 'gif': '🖼️', 'bmp': '🖼️', 'webp': '🖼️',
-            'svg': '🎨', 'ico': '🖼️',
-            'mp4': '🎬', 'avi': '🎬', 'mkv': '🎬', 'mov': '🎬',
-            'mp3': '🎵', 'wav': '🎵', 'ogg': '🎵', 'flac': '🎵',
-            'pdf': '📕', 'doc': '📝', 'docx': '📝', 'xls': '📊', 'xlsx': '📊', 'ppt': '📽️', 'pptx': '📽️',
-            'zip': '📦', 'rar': '📦', '7z': '📦', 'tar': '📦', 'gz': '📦',
-            'js': '🟨', 'ts': '🔷', 'py': '🐍', 'rs': '🦀', 'go': '🐹',
-            'html': '🌐', 'css': '🎨', 'json': '📋', 'xml': '📋',
-            'txt': '📄', 'md': '📖', 'csv': '📊',
-            'exe': '⚙️', 'dll': '⚙️', 'so': '⚙️',
+            'png': 'image', 'jpg': 'image', 'jpeg': 'image', 'gif': 'image', 'bmp': 'image', 'webp': 'image',
+            'svg': 'edit', 'ico': 'image',
+            'mp4': 'video', 'avi': 'video', 'mkv': 'video', 'mov': 'video',
+            'mp3': 'music', 'wav': 'music', 'ogg': 'music', 'flac': 'music',
+            'pdf': 'clipboard', 'doc': 'edit', 'docx': 'edit', 'xls': 'clipboard', 'xlsx': 'clipboard', 'ppt': 'video', 'pptx': 'video',
+            'zip': 'folder', 'rar': 'folder', '7z': 'folder', 'tar': 'folder', 'gz': 'folder',
+            'js': 'edit', 'ts': 'edit', 'py': 'edit', 'rs': 'edit', 'go': 'edit',
+            'html': 'edit', 'css': 'edit', 'json': 'clipboard', 'xml': 'clipboard',
+            'txt': 'clipboard', 'md': 'edit', 'csv': 'clipboard',
+            'exe': 'gear', 'dll': 'gear', 'so': 'gear',
         };
-        return map[ext] || '📄';
+        return map[ext] || 'clipboard';
     }
 
     // ── PPTX Preview (custom OOXML parser via JSZip) ──────────────────
@@ -1017,8 +1019,8 @@ var DocPreview = (function () {
         rightPanel.appendChild(annotateLabel);
 
         var annotateBtns = [
-            { icon: '📝', label: 'Add Text', action: function () { pdfEditorAnnotateText(); } },
-            { icon: '🖊️', label: 'Draw', action: function () { pdfEditorAnnotateDraw(); } },
+            { icon: 'icon-edit', label: 'Add Text', action: function () { pdfEditorAnnotateText(); } },
+            { icon: 'icon-brush', label: 'Draw', action: function () { pdfEditorAnnotateDraw(); } },
             { icon: '⬜', label: 'Whiteout', action: function () { pdfEditorAnnotateWhiteout(); } },
         ];
         annotateBtns.forEach(function (t) {

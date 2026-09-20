@@ -6400,7 +6400,7 @@
         if (m.screen) html += ' <span class="' + prefix + '-badge" title="Screen">' + icon('monitor') + '</span>';
         // Soundboard playing indicator — shows who is playing a sound so you know who to mute
         if (window._sbPlayingUsers && window._sbPlayingUsers[m.user_id]) {
-            html += ' <span class="' + prefix + '-badge sb-playing-indicator" title="Playing soundboard">🎵</span>';
+            html += ' <span class="' + prefix + '-badge sb-playing-indicator" title="Playing soundboard"><svg class="ui-icon" width="14" height="14"><use href="#icon-music"/></svg></span>';
         }
         return html;
     }
@@ -6448,7 +6448,7 @@
         // Call button on every OTHER member's row — starts a DM call with them
         // (they leave the voice channel if they accept).
         if (!isSelf) {
-            html += '<button class="voice-member-call" data-uid="' + esc(uid) + '" title="Call ' + esc(name) + '" aria-label="Call ' + esc(name) + '">📞</button>';
+            html += '<button class="voice-member-call" data-uid="' + esc(uid) + '" title="Call ' + esc(name) + '" aria-label="Call ' + esc(name) + '"><svg class="ui-icon" width="14" height="14"><use href="#icon-phone"/></svg></button>';
         }
         html += '<div class="voice-member-media">';
         html += '<video class="remote-video-tile" data-uid="' + esc(uid) + '" data-kind="camera" data-self="' + (isSelf ? '1' : '0') + '" autoplay playsinline muted style="display:' + (local.camera ? 'block' : 'none') + '"></video>';
@@ -8851,7 +8851,7 @@
                 // popup / DM tiles, so the channel list shows who is playing a
                 // sound (and therefore who to mute) without opening the channel.
                 if (window._sbPlayingUsers && window._sbPlayingUsers[m.user_id]) {
-                    badges += '<span class="vc-badge sb-playing-indicator" title="Playing soundboard">🎵</span>';
+                    badges += '<span class="vc-badge sb-playing-indicator" title="Playing soundboard"><svg class="ui-icon" width="14" height="14"><use href="#icon-music"/></svg></span>';
                 }
 
                 var chipStyle = memberNameStyle(m.user_id);
@@ -8862,7 +8862,7 @@
                     (badges ? '<span class="voice-chip-badges">' + badges + '</span>' : '') +
                     // Call button on every OTHER member's chip — starts a DM
                     // call with them right from the channel list.
-                    (!isSelfChip ? '<button class="voice-chip-call" data-uid="' + esc(m.user_id) + '" title="Call ' + esc(name) + '" aria-label="Call ' + esc(name) + '">📞</button>' : '') +
+                    (!isSelfChip ? '<button class="voice-chip-call" data-uid="' + esc(m.user_id) + '" title="Call ' + esc(name) + '" aria-label="Call ' + esc(name) + '"><svg class="ui-icon" width="14" height="14"><use href="#icon-phone"/></svg></button>' : '') +
                     '</div>';
             });
             chipWrap.innerHTML = html;

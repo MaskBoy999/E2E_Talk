@@ -1078,9 +1078,15 @@
 
 
 
-        if (window.innerWidth > 768 && !currentChannelId && list.querySelector('.channel-item')) {
+        // Auto-enter the first TEXT channel only. Clicking a voice row joins that
+        // voice channel, so picking the first row in the list (or the first row of
+        // the first category) used to join voice on entering a server.
 
-            list.querySelector('.channel-item').click();
+        if (window.innerWidth > 768 && !currentChannelId) {
+
+            var firstTextCh = list.querySelector('.channel-item:not(.channel-item-voice)');
+
+            if (firstTextCh) firstTextCh.click();
 
         }
 

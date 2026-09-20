@@ -38,18 +38,18 @@ function renderMutedList() {
     mutedServers.forEach(function (sid) {
         var sv = servers.find(function (s) { return s.id === sid; });
         var name = sv ? (sv.displayName || '[encrypted]') : sid.slice(0, 8);
-        html += '<div class="muted-list-item"><span>🔇 Server: ' + escapeHtml(name) + '</span><button class="unmute-btn" data-type="server" data-id="' + sid + '">Unmute</button></div>';
+        html += '<div class="muted-list-item"><span><svg class="ui-icon" width="14" height="14"><use href="#icon-volume-off"/></svg> Server: ' + escapeHtml(name) + '</span><button class="unmute-btn" data-type="server" data-id="' + sid + '">Unmute</button></div>';
     });
     mutedChannels.forEach(function (cid) {
         var chEl = document.querySelector('.channel-item[data-id="' + cid + '"]');
         var name = chEl ? chEl.dataset.name : cid.slice(0, 8);
-        html += '<div class="muted-list-item"><span>🔇 Channel: #' + escapeHtml(name) + '</span><button class="unmute-btn" data-type="channel" data-id="' + cid + '">Unmute</button></div>';
+        html += '<div class="muted-list-item"><span><svg class="ui-icon" width="14" height="14"><use href="#icon-volume-off"/></svg> Channel: #' + escapeHtml(name) + '</span><button class="unmute-btn" data-type="channel" data-id="' + cid + '">Unmute</button></div>';
     });
     mutedDms.forEach(function (did) {
         var dmConv = dmConversations.find(function (c) { return c.dm_channel_id === did; });
         var _cCache = dmConv ? userDisplayNameCache[dmConv.other_user_id] : null;
         var name = dmConv ? ((_cCache && _cCache.display_name) || dmConv.other_display_name || dmConv.other_username) : did.slice(0, 8);
-        html += '<div class="muted-list-item"><span>🔇 DM: ' + escapeHtml(name) + '</span><button class="unmute-btn" data-type="dm" data-id="' + escapeAttr(did) + '">Unmute</button></div>';
+        html += '<div class="muted-list-item"><span><svg class="ui-icon" width="14" height="14"><use href="#icon-volume-off"/></svg> DM: ' + escapeHtml(name) + '</span><button class="unmute-btn" data-type="dm" data-id="' + escapeAttr(did) + '">Unmute</button></div>';
     });
     if (!html) {
         container.innerHTML = '<div class="muted-empty">No muted servers or channels</div>';
