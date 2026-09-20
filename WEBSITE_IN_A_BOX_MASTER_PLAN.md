@@ -1668,3 +1668,42 @@ one existed nowhere in the repo. Both halves are now closed:
 The source is 192×192 because that is the largest raster of the real mobile art
 that existed. A 1024×1024 replacement would sharpen the desktop `.ico` and is a
 drop-in for the same command.
+
+### 13.12 Release v0.2.13 — shipped, both workflows green
+
+Tagged `v0.2.13` (versionCode 213) from `79b002b`, and **both** workflows built
+it successfully on the first attempt — no CI troubleshooting was needed:
+
+| Workflow | Result | Run |
+| -------- | ------ | --- |
+| Build Android APK | success | `35535636193` |
+| Build Desktop Box | success | `35535636172` |
+
+For contrast, the immediately preceding v0.2.12 attempts on this repo failed the
+Android job twice (`35518035821`, `35518399031`) while the desktop job passed —
+which is the pattern this file's §12 notes describe: the Android job is where the
+generated project, the plugin manifests and the NDK all have to agree at once.
+
+**What changed in the verification story for this release.** Everything below was
+run before the tag, not after:
+
+* `cargo test` — 8/8 (the new launch-routing rule, the two `cert_probe`
+  classification tests, and the pre-existing pin/navigation guards);
+* `cargo check --tests --target aarch64-linux-android` — the only target where the
+  mobile-only code (and `register_android_plugin`) is actually compiled. A
+  host-only check proves nothing about it, which is how the missing registration
+  call in §13.5 survived so long;
+* Gradle: `:tauri-plugin-box-shell:compileReleaseKotlin`,
+  `:tauri-plugin-box-shell:mergeReleaseResources`;
+* Playwright: `tests/box-shell.spec.ts` + `tests/role-circle-and-rail.spec.ts` —
+  9/9. The suite that needs a live server (`roles-permissions.spec.ts`) still
+  cannot run against the dev server already listening on :3443, whose rate limits
+  are not the suite's (registrations come back "Too many accounts created from
+  this IP"); that is a local-environment limitation, not a regression.
+
+**One release-mechanics trap worth remembering.** `git push --follow-tags` only
+carries *annotated* tags, and this repo's tags are lightweight — so the first
+push published the branch and silently left the tag behind, which would have
+meant no release at all while everything looked fine. The tag needs its own
+push (`git push origin vX.Y.Z`); check with
+`git ls-remote --tags origin | grep vX.Y.Z` before assuming CI has been woken.
