@@ -4060,20 +4060,68 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!('Notification' in window) || typeof Notification.requestPermission !== 'function') return;
         if (Notification.permission === 'granted') return;
 
-        // Android only: ask once per install. The OS stops prompting after a
-        // refusal, so nagging cannot help, and the dialog only appears while the
-        // app is in the foreground — hence at page load. Desktop is deliberately
-        // NOT remembered: there is no prompt to avoid there, and it has to be
-        // re-corrected on every load because the shim caches the wrong answer.
-        if (/Android/i.test(navigator.userAgent || '')) {
+        var isAndroid = /Android/i.test(navigator.userAgent || '');
+        var ASKED = 'box_notif_permission_asked';
+        var TOLD = 'box_notif_permission_refused_told';
+
+        // Android, and the permission is already refused: Android will not show
+        // the dialog again — it answers "don't ask" from then on — so the only
+        // lever left is the OS settings screen, and nothing in the app can see
+        // that a notification was dropped. That combination is what "we hear the
+        // sound but nothing appears in the bar" was: the sound is the app's own
+        // (played in the WebView), while the notification itself is silently
+        // discarded by Android because POST_NOTIFICATIONS was refused. Say it
+        // once, so it is at least discoverable.
+        if (isAndroid && Notification.permission === 'denied') {
             try {
-                if (localStorage.getItem('box_notif_permission_asked') === '1') return;
-                localStorage.setItem('box_notif_permission_asked', '1');
+                if (localStorage.getItem(TOLD) !== '1') {
+                    localStorage.setItem(TOLD, '1');
+                    window.showToast('Notifications are blocked for E2E Chat. Enable them in Android Settings → Apps → E2E Chat → Notifications to see messages and calls.');
+                }
+            } catch (_) {}
+            return;
+        }
+
+        // Android only: ask once per install. The dialog only appears while the
+        // app is in the foreground — hence at page load — and the OS stops
+        // prompting after a refusal, so nagging cannot help. Desktop is
+        // deliberately NOT remembered: there is no prompt to avoid there, and it
+        // has to be re-corrected on every load because the shim caches the wrong
+        // answer.
+        if (isAndroid) {
+            try {
+                if (localStorage.getItem(ASKED) === '1') return;
             } catch (_) {}
         }
+        var remember = function (state) {
+            // Remember it as "asked" only when the user actually answered. A
+            // dialog dismissed without an answer leaves the permission at
+            // "default", and that must be asked again next launch rather than
+            // latched into silence.
+            if (!isAndroid) return;
+            try {
+                localStorage.setItem(ASKED, state === 'default' ? '0' : '1');
+            } catch (_) {}
+        };
         try {
             var asked = Notification.requestPermission();
-            if (asked && typeof asked.catch === 'function') asked.catch(function () {});
+            if (asked && typeof asked.then === 'function') {
+                asked.then(function (state) {
+                    remember(state || Notification.permission);
+                    // The shim caches the verdict at script-init, so this is also
+                    // the moment the rest of the app learns the real answer.
+                    if (state && state !== 'granted' && state !== 'default' && isAndroid) {
+                        try {
+                            if (localStorage.getItem(TOLD) !== '1') {
+                                localStorage.setItem(TOLD, '1');
+                                window.showToast('Notifications are blocked for E2E Chat. Enable them in Android Settings → Apps → E2E Chat → Notifications.');
+                            }
+                        } catch (_) {}
+                    }
+                }, function () {});
+            } else {
+                remember(Notification.permission);
+            }
         } catch (_) {}
     })();
 
@@ -9619,42 +9667,137 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         });
     }
-    // Global Escape key closes the topmost visible modal
-    document.addEventListener('keydown', function (e) {
-        if (e.key !== 'Escape') return;
-        // Security-sensitive flows are Cancel-only: while one of these modals
-        // is open, Escape must not close anything underneath (e.g. the
-        // settings modal behind the enrollment/confirmation popup).
-        var enroll2fa = document.getElementById('twofa-enroll-modal');
-        var disable2fa = document.getElementById('twofa-disable-modal');
-        var changePwConfirm = document.getElementById('change-pw-confirm-modal');
-        var kickAllConfirm = document.getElementById('kick-all-confirm-modal');
-        if ((enroll2fa && enroll2fa.style.display !== 'none' && enroll2fa.style.display !== '') ||
-            (disable2fa && disable2fa.style.display !== 'none' && disable2fa.style.display !== '') ||
-            (changePwConfirm && changePwConfirm.style.display !== 'none' && changePwConfirm.style.display !== '') ||
-            (kickAllConfirm && kickAllConfirm.style.display !== 'none' && kickAllConfirm.style.display !== '')) {
-            return;
+    // ── The topmost open layer: Escape, and Android's Back button ────────
+    //
+    // One implementation with two callers. Escape (below) closes the top layer
+    // and stops there; the box's Android shell (static/box-shell.js) asks the
+    // page to close the top layer and only leaves the app when there was
+    // nothing to close — which is why this reports whether it handled the
+    // press instead of returning nothing. Sharing the function is the point:
+    // Back walking through a security confirm, or closing a layer Escape does
+    // not, is exactly the kind of drift two copies would produce.
+
+    /** Whether a layer is currently on screen (class-toggled or inline-styled). */
+    function boxLayerOpen(el) {
+        if (!el) return false;
+        if (el.classList.contains('open') || el.classList.contains('active')) return true;
+        return window.getComputedStyle(el).display !== 'none';
+    }
+
+    /** Hide a layer that has no closer of its own (panels, drawers, bubbles). */
+    function boxHideLayer(el) {
+        el.classList.remove('open', 'active', 'show');
+        if (window.getComputedStyle(el).display !== 'none') el.style.display = 'none';
+    }
+
+    /**
+     * Close `id`, preferring its own cancel control (so whatever teardown the
+     * app does — stopping a trim preview, dropping a pending download, aborting
+     * a crop — still runs) and falling back to hiding it.
+     */
+    function boxCloseLayer(id, closer) {
+        var el = document.getElementById(id);
+        if (!boxLayerOpen(el)) return false;
+        if (closer) {
+            closer();
+            return true;
         }
-        // Find the first (topmost) visible modal and close it
+        // The app's own Cancel/Close affordances, by the id convention it uses
+        // everywhere (`cancel-server-choice`, `close-search-panel`, …). Clicking
+        // one is the same path the user's tap takes.
+        var own = el.querySelector('[id^="cancel-"], [id^="close-"]');
+        if (own && own !== el) {
+            own.click();
+            return true;
+        }
+        boxHideLayer(el);
+        return true;
+    }
+
+    /**
+     * Close the topmost open layer. Returns true when something was closed (or
+     * when the press had to be swallowed on purpose), false when the page had
+     * nothing to close — Android's Back uses that answer to decide whether to
+     * leave the app.
+     */
+    function boxCloseTopLayer() {
+        // Security-sensitive flows are Cancel-only: while one of these modals
+        // is open, nothing underneath may close (e.g. the settings modal behind
+        // the enrollment/confirmation popup). Reported as handled, so Android's
+        // Back cannot close the app out from under a half-finished 2FA setup.
+        if (boxLayerOpen(document.getElementById('twofa-enroll-modal')) ||
+            boxLayerOpen(document.getElementById('twofa-disable-modal')) ||
+            boxLayerOpen(document.getElementById('change-pw-confirm-modal')) ||
+            boxLayerOpen(document.getElementById('kick-all-confirm-modal'))) {
+            return true;
+        }
+
+        // Modals, topmost first: they cover everything else.
         var modals = ['emoji-download-modal', 'friend-code-password-modal', 'sticker-upload-modal', 'upload-modal',
                       'settings-modal', 'server-settings-modal', 'friend-requests-modal',
-                      'add-friend-modal', 'join-server-modal', 'create-server-modal', 'server-choice-modal'];
+                      'add-friend-modal', 'join-server-modal', 'create-server-modal', 'server-choice-modal',
+                      'photo-edit-modal', 'video-edit-modal', 'audio-edit-modal', 'profile-edit-modal',
+                      'create-channel-modal', 'channel-rename-modal', 'category-name-modal', 'channel-perm-modal',
+                      'schedule-msg-modal', 'forward-modal', 'dm-forward-modal', 'invite-modal',
+                      'vault-modal', 'vault-send-modal', 'qr-scanner-modal'];
         for (var i = 0; i < modals.length; i++) {
             var el = document.getElementById(modals[i]);
-            if (el && el.style.display !== 'none' && el.style.display !== '') {
-                el.style.display = 'none';
-                if (el.id === 'settings-modal') {
-                    if (window._stopRingTrimPreview) window._stopRingTrimPreview();
-                    if (window._stopNotifTrimPreview) window._stopNotifTrimPreview();
-                }
-                // Escaping the emoji-download confirm is a Cancel: drop the
-                // pending download so a later Confirm can't save a stale emoji.
-                if (el.id === 'emoji-download-modal') {
-                    _pendingEmojiDownload = null;
-                }
-                break;
+            if (!boxLayerOpen(el)) continue;
+            el.style.display = 'none';
+            if (el.id === 'settings-modal') {
+                if (window._stopRingTrimPreview) window._stopRingTrimPreview();
+                if (window._stopNotifTrimPreview) window._stopNotifTrimPreview();
+            }
+            // Escaping the emoji-download confirm is a Cancel: drop the
+            // pending download so a later Confirm can't save a stale emoji.
+            if (el.id === 'emoji-download-modal') {
+                _pendingEmojiDownload = null;
+            }
+            return true;
+        }
+
+        // Then the named layers with closers of their own.
+        if (boxCloseLayer('pins-modal', closePinsModal)) return true;
+        if (boxCloseLayer('profile-modal', closeProfileModal)) return true;
+        if (boxCloseLayer('search-panel', closeSearchPanel)) return true;
+
+        // The voice/DM call view: close *the view*, exactly like its own X —
+        // the call itself keeps running (back must never hang up on the user).
+        if (window.VoiceManager && window.VoiceManager.getState && window.VoiceManager.exitVoiceChannelView) {
+            var vs = null;
+            try { vs = window.VoiceManager.getState(); } catch (_) { vs = null; }
+            if (vs && vs.popupOpen) {
+                window.VoiceManager.exitVoiceChannelView();
+                return true;
             }
         }
+
+        // Finally the panels and drawers: on a phone these are the layers a user
+        // actually sees most, and the first Back used to close the whole app.
+        if (sidebar && sidebar.classList.contains('open')) { closeSidebar(); return true; }
+        if (membersPanelOpen) {
+            membersPanelOpen = false;
+            document.getElementById('members-panel').classList.remove('open');
+            return true;
+        }
+        var panels = ['mentions-panel', 'sticker-panel', 'attach-popup'];
+        for (var p = 0; p < panels.length; p++) {
+            var pel = document.getElementById(panels[p]);
+            if (boxLayerOpen(pel)) {
+                if (panels[p] === 'attach-popup') closeAttachPopup();
+                else boxHideLayer(pel);
+                return true;
+            }
+        }
+        return false;
+    }
+    // Android's hardware Back button (static/box-shell.js) asks for this.
+    window._boxCloseTopLayer = boxCloseTopLayer;
+
+    // Global Escape key closes the topmost visible layer
+    document.addEventListener('keydown', function (e) {
+        if (e.key !== 'Escape') return;
+        boxCloseTopLayer();
     });
 
     // Server choice modal buttons
@@ -10411,6 +10554,53 @@ function startNotifVisualizer(durationMs) {
         }
     }
     draw();
+}
+
+// ── Notification wording: who / where / (what) ───────────────────────────────
+// One place builds every message notification's title + body, so a notification
+// says the same things wherever it is raised from: **who** it is from, and — for
+// a channel — **which channel in which server**. Streamer mode has to blank all
+// of that, and it can only do so reliably if there is a single spot to blank:
+// while it is on, a notification may say no more than *that* something happened
+// ("New message in a server", "New direct message", "Call activity") — no name,
+// no channel, no server, no content.
+function notifStreamerHidden() {
+    try { return localStorage.getItem('streamerMode') === 'true'; } catch (_) { return false; }
+}
+
+/**
+ * @param {'dm'|'mention'|'reply'|'call'} kind
+ * @param {{sender?:string, channel?:string, server?:string, text?:string}} o
+ */
+function notifText(kind, o) {
+    o = o || {};
+    var sender = o.sender || '';
+    var channel = o.channel ? '#' + o.channel : '';
+    var server = o.server || '';
+    // "#general · My Server", "#general", "My Server", or nothing known.
+    var where = (channel && server) ? channel + ' · ' + server : (channel || server);
+    var what = o.text ? ' — ' + o.text : '';
+
+    if (notifStreamerHidden()) {
+        if (kind === 'call') return { title: 'E2E Chat', body: 'Call activity' };
+        if (kind === 'dm') return { title: 'E2E Chat', body: 'New direct message' };
+        if (kind === 'mention') return { title: 'E2E Chat', body: 'You were mentioned in a server' };
+        if (kind === 'reply') return { title: 'E2E Chat', body: 'New reply in a server' };
+        return { title: 'E2E Chat', body: 'New message in a server' };
+    }
+
+    switch (kind) {
+        case 'dm':
+            return { title: 'New DM from ' + sender, body: (where || 'Direct message') + what };
+        case 'mention':
+            return { title: 'Mentioned by ' + sender, body: 'You were mentioned in ' + (where || 'a channel') + what };
+        case 'reply':
+            return { title: 'Reply from ' + sender, body: 'in ' + (where || 'a channel') + what };
+        case 'call':
+            return { title: 'Call from ' + sender, body: where ? 'in ' + where : 'Incoming call' };
+        default:
+            return { title: 'E2E Chat', body: where + what };
+    }
 }
 
 function showBrowserNotification(title, body, onClick) {
@@ -12073,7 +12263,10 @@ function connectWebSocket(t) {
                             updateDmStripBadge();
                             updateMentionsBadge();
                             saveMentionState();
-                            showBrowserNotification('New DM', data.message.sender_username + ' sent you a message');
+                            var _dmNotif = notifText('dm', { sender: data.message.sender_username });
+                            showBrowserNotification(_dmNotif.title, _dmNotif.body, function () {
+                                navigateToMessage(data.server_id, data.channel_id, data.dm_channel_id, data.message.id);
+                            });
                             playNotificationSound();
                             // New message from a DM conversation → vibrate (mobile).
                             fireNotifHaptic('notifDm');
@@ -13125,8 +13318,8 @@ function connectWebSocket(t) {
                     if (!isMuted(data.server_id, data.channel_id) && !isUserMuted(data.sender_user_id || data.sender_id)) {
                         trackUnreadMention(data.server_id, data.channel_id, data.dm_channel_id, data.message_id, decSender, decChannel, decServer, 'mention', data.sender_user_id || data.sender_id, data.sender_profile_pic);
                         playNotificationSound();
-                        var loc = decChannel ? decChannel : (data.dm_channel_id ? 'your DM' : 'a channel');
-                        showBrowserNotification('Mentioned by ' + decSender, 'You were mentioned in ' + (decServer ? decServer + ' ' : '') + loc, function () {
+                        var _mNotif = notifText('mention', { sender: decSender, channel: decChannel, server: decServer });
+                        showBrowserNotification(_mNotif.title, _mNotif.body, function () {
                             navigateToMessage(data.server_id, data.channel_id, data.dm_channel_id, data.message_id);
                         });
                         // Show in-app toast + flash server icon if currently viewing this channel
@@ -13181,8 +13374,8 @@ function connectWebSocket(t) {
                     if (!isMuted(data.server_id, data.channel_id) && !isUserMuted(data.sender_user_id || data.sender_id)) {
                         trackUnreadMention(data.server_id, data.channel_id, data.dm_channel_id, data.message_id, decSender, decChannel, decServer, 'reply', data.sender_user_id || data.sender_id, data.sender_profile_pic);
                         playNotificationSound();
-                        var loc = decChannel ? decChannel : (data.dm_channel_id ? 'your DM' : 'a channel');
-                        showBrowserNotification('Reply from ' + decSender, decSender + ' replied to you in ' + (decServer ? decServer + ' ' : '') + loc, function () {
+                        var _rNotif = notifText('reply', { sender: decSender, channel: decChannel, server: decServer });
+                        showBrowserNotification(_rNotif.title, _rNotif.body, function () {
                             navigateToMessage(data.server_id, data.channel_id, data.dm_channel_id, data.message_id);
                         });
                     }
@@ -30319,8 +30512,10 @@ function handleDecryptedNotification(notifData) {
             if (!isMuted(notifData.server_id, notifData.channel_id) && !isUserMuted(notifData.sender_user_id || notifData.sender_id)) {
                 trackUnreadMention(notifData.server_id, notifData.channel_id, notifData.dm_channel_id, notifData.message_id, dSender, dChannel, dServer, ntype === 'mention_notification' ? 'mention' : 'reply', notifData.sender_user_id || notifData.sender_id, notifData.sender_profile_pic);
                 playNotificationSound();
-                var loc = dChannel ? dChannel : (notifData.dm_channel_id ? 'your DM' : 'a channel');
-                showBrowserNotification(ntype === 'mention_notification' ? 'Mentioned by ' + dSender : 'Reply from ' + dSender, 'in ' + (dServer ? dServer + ' ' : '') + loc, function () {
+                var _pNotif = notifText(ntype === 'mention_notification' ? 'mention' : 'reply', {
+                    sender: dSender, channel: dChannel, server: dServer
+                });
+                showBrowserNotification(_pNotif.title, _pNotif.body, function () {
                     navigateToMessage(notifData.server_id, notifData.channel_id, notifData.dm_channel_id, notifData.message_id);
                 });
                 updateMentionBadge();
@@ -30331,7 +30526,10 @@ function handleDecryptedNotification(notifData) {
         if (notifData.dm_channel_id && notifData.dm_channel_id !== currentDmChannelId) {
             trackUnreadDm(notifData.dm_channel_id);
             playNotificationSound();
-            showBrowserNotification('New DM', 'You received a new direct message', null);
+            var _offDmNotif = notifText('dm', { sender: notifData.sender_username });
+            showBrowserNotification(_offDmNotif.title, _offDmNotif.body, function () {
+                navigateToMessage(notifData.server_id, notifData.channel_id, notifData.dm_channel_id, notifData.message_id);
+            });
         }
     } else if (ntype === 'friend_request_accepted' || ntype === 'friend_request_received') {
         // Offline-replayed friend event — reload DM conversations so the new

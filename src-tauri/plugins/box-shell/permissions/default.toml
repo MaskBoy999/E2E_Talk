@@ -1,0 +1,10 @@
+[default]
+description = """\nFull-screen shell behaviour on Android: hide the status and navigation bars\n(revealed transiently by a swipe, for as long as the page asks to stay\nimmersive), route the hardware Back button to the page instead of closing the\napp, and close the app when the page has nothing left to close.\n"""
+# NOTE: the identifiers are spelled exactly as `build.rs`'s tauri-plugin build
+# script generates them (`allow-` + the Kotlin command name, camelCase and all).
+permissions = [
+    "allow-enterImmersive",
+    "allow-exitImmersive",
+    "allow-setBackHandler",
+    "allow-exit",
+]

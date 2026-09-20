@@ -1,0 +1,15 @@
+[package]
+name = "tauri-plugin-box-shell"
+version = "0.1.0"
+description = "Android shell behaviour: immersive system bars and a Back button that closes the current layer"
+authors = ["E2E Chat"]
+edition = "2021"
+rust-version = "1.77"
+# Required by tauri-plugin's build script (it keys permission generation off it).
+links = "tauri-plugin-box-shell"
+
+[build-dependencies]
+tauri-plugin = { version = "2", features = ["build"] }
+
+[dependencies]
+tauri = { version = "2", features = [] }

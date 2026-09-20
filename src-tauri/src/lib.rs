@@ -92,19 +92,119 @@ fn pin_mismatch(pinned: Option<&str>, probed: Result<String, String>) -> Option<
     }
 }
 
-/// Whether the configured host answers at all (TCP connect + TLS handshake),
-/// i.e. whether the main window could load anything from it.
+/// What a cold start concluded about the saved address.
+#[cfg(not(desktop))]
+#[derive(Debug, PartialEq, Eq)]
+enum Launch {
+    /// The host answered — open the app window.
+    App,
+    /// The host answered *and refused*: nothing is listening there, so the only
+    /// screen that can fix it is the address screen.
+    Setup,
+    /// No answer at all. Open the app window anyway (see [`launch_for_probe`])
+    /// and watch from behind it in case the host never turns up.
+    AppUnconfirmed,
+}
+
+/// Which screen a saved address should open, given one probe result.
 ///
-/// `fingerprint_blocking` errors exactly when nothing could be reached — DNS
-/// failure, connection refused, timeout — while a *changed certificate* still
-/// probes successfully. So this is **not** a pin check (that is
-/// `check_pinned_cert`, which deliberately treats an unreachable host as
-/// acceptable so an offline launch still opens the app window); it answers the
-/// blunter question "is this address alive?". Bounded by the connect/read
+/// This is the whole of the box's relaunch rule, and it exists because the rule
+/// used to be "the probe did not succeed → show the address screen". On a phone
+/// that is the wrong answer most of the time: Tailscale needs a moment to come
+/// up after a cold boot, and the box then demanded the address be typed again
+/// even though the saved one was perfectly correct — with the user's session
+/// gone, because the app window never opened. Only a **refusal** is evidence
+/// that there is genuinely nothing at that IP/port; anything else (a timeout, a
+/// DNS answer that never comes, a TLS failure) is "could not tell yet".
+///
+/// Pure, so the rule is unit-tested rather than argued about — see
+/// `saved_address_routing_never_strands_the_user`.
+#[cfg(not(desktop))]
+fn launch_for_probe(probe: Result<String, cert_probe::ProbeFailure>) -> Launch {
+    match probe {
+        Ok(_) => Launch::App,
+        Err(cert_probe::ProbeFailure::Refused) => Launch::Setup,
+        Err(cert_probe::ProbeFailure::Unknown(_)) => Launch::AppUnconfirmed,
+    }
+}
+
+/// Probe the saved address for the launch decision. Bounded by the connect/read
 /// timeouts in `cert_probe`.
 #[cfg(not(desktop))]
-fn host_reachable(url: &str) -> bool {
-    fingerprint_blocking(url).is_ok()
+fn launch_for(url: &str) -> Launch {
+    launch_for_probe(cert_probe::fingerprint_of_classified(url))
+}
+
+/// Watch an *unconfirmed* host from behind the app window that was just opened.
+///
+/// The launch is deliberately not delayed by this: the window opens immediately,
+/// which is what was asked for. The problem it solves is the one the old
+/// behaviour was avoiding — a phone has no tray and no address bar, so an app
+/// window sitting on the WebView's own error page used to have no way out at all.
+///
+/// So, off the main thread and with no effect on startup time:
+///
+/// * if the host answers within ~30 s (Tailscale finishing its own start-up is
+///   the usual reason it did not answer yet), the window is pointed at it again
+///   and the app simply loads — the user never sees the address screen;
+/// * if it never answers, the address screen is shown *with the reason*, which
+///   is the only place an address can be corrected on a phone.
+///
+/// It gives up as soon as the user has taken over: the saved address changed, or
+/// the window is showing one of the app's own bundled pages (the setup screen —
+/// they asked for it deliberately through *Settings → Change server address*,
+/// and nothing should yank it away mid-typing).
+#[cfg(not(desktop))]
+fn watch_unconfirmed_host(app: tauri::AppHandle, url: String) {
+    std::thread::spawn(move || {
+        // 12 × 2.5 s ≈ 30 s. Long enough for a phone's Tailscale to come up,
+        // short enough that the address screen still appears in the same launch.
+        for _ in 0..12 {
+            std::thread::sleep(std::time::Duration::from_millis(2500));
+
+            let Some(window) = app.get_webview_window(MAIN_LABEL) else {
+                return; // closed, or the app is shutting down
+            };
+            // The user has moved on: another address was saved, or they opened
+            // the address screen themselves.
+            let saved = app
+                .state::<AppState>()
+                .cfg
+                .lock()
+                .ok()
+                .and_then(|c| c.server_url.clone());
+            if saved.as_deref() != Some(url.as_str()) {
+                return;
+            }
+            if window.url().map(|u| is_app_page(&u)).unwrap_or(false) {
+                return;
+            }
+
+            if cert_probe::fingerprint_of_classified(&url).is_ok() {
+                // Somewhere behind that error page the host has appeared; load
+                // the app for real, still without asking for anything.
+                eprintln!("saved host {url} answered again; loading the app");
+                match url.parse::<tauri::Url>() {
+                    Ok(parsed) => {
+                        let _ = window.navigate(parsed);
+                    }
+                    Err(e) => eprintln!("could not re-open {url}: {e}"),
+                }
+                return;
+            }
+        }
+
+        // Never answered. Say why on the address screen, which is the only
+        // screen on a phone that can do anything about it.
+        eprintln!("saved host {url} never answered; showing setup");
+        if let Ok(mut slot) = app.state::<AppState>().startup_error.lock() {
+            *slot = Some(format!(
+                "Nothing answered at {url}. Check that the host is running and that \
+                 Tailscale is connected on this device, then save this address again."
+            ));
+        }
+        let _ = open_setup_in_main(&app);
+    });
 }
 
 #[cfg(test)]
@@ -153,6 +253,29 @@ mod tests {
         assert!(
             out.expect("the recheck task panicked on its own runtime").is_ok(),
             "an unreachable host must not be treated as a certificate mismatch"
+        );
+    }
+
+    /// The relaunch rule, on every kind of probe answer.
+    ///
+    /// The regression it guards is the box's oldest mobile complaint: a cold
+    /// start showed the address screen ("enter the IP again") whenever the probe
+    /// did not come back instantly, even though the saved address was fine — most
+    /// often because Tailscale needs a moment after a phone boots. Only a
+    /// *refusal* may route to setup; a timeout must open the app window.
+    #[cfg(not(desktop))]
+    #[test]
+    fn saved_address_routing_never_strands_the_user() {
+        use cert_probe::ProbeFailure;
+        assert_eq!(launch_for_probe(Ok("aa11".into())), Launch::App);
+        assert_eq!(launch_for_probe(Err(ProbeFailure::Refused)), Launch::Setup);
+        assert_eq!(
+            launch_for_probe(Err(ProbeFailure::Unknown("timed out".into()))),
+            Launch::AppUnconfirmed
+        );
+        assert_eq!(
+            launch_for_probe(Err(ProbeFailure::Unknown("Cannot resolve x: dns".into()))),
+            Launch::AppUnconfirmed
         );
     }
 
@@ -273,6 +396,16 @@ fn grant_remote_ipc(app: &tauri::AppHandle, server_url: &str) {
         .permission("call-service:default");
     if let Err(e) = app.add_capability(call_service) {
         eprintln!("grant_remote_ipc: call-service for {origin} failed: {e}");
+    }
+
+    // Android-only shell behaviour (immersive bars, Back button), same reasoning
+    // as above: its own capability, so a failure to resolve it is contained.
+    let box_shell = CapabilityBuilder::new("remote-box-shell")
+        .remote(origin.clone())
+        .window(MAIN_LABEL)
+        .permission("box-shell:default");
+    if let Err(e) = app.add_capability(box_shell) {
+        eprintln!("grant_remote_ipc: box-shell for {origin} failed: {e}");
     }
 }
 
@@ -966,7 +1099,11 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         // Android foreground-service keepalive for voice calls. Registered on
         // every platform so the ACL is identical; on desktop it does nothing.
-        .plugin(tauri_plugin_call_service::init());
+        .plugin(tauri_plugin_call_service::init())
+        // Android shell behaviour: immersive system bars, and Back closing the
+        // current layer instead of the app. Also registered everywhere so the
+        // ACL is identical; inert on desktop.
+        .plugin(tauri_plugin_box_shell::init());
 
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_autostart::init(
@@ -1007,13 +1144,23 @@ pub fn run() {
             // still escape from). Cost on the happy path is one extra TLS
             // handshake, because `open_main` probes again for the pin.
             let saved_url = cfg.server_url.clone();
+            // Mobile routing rule (see `launch_for_probe`): a refused address —
+            // and only a refused address — goes to the setup screen. A host that
+            // could not be reached yet opens the app window anyway and is watched
+            // from behind, because re-typing a correct address is not a fix for
+            // "Tailscale has not finished starting".
             #[cfg(not(desktop))]
-            let saved_url = saved_url.filter(|url| {
-                let reachable = host_reachable(url);
-                if !reachable {
-                    eprintln!("saved host unreachable ({url}); showing setup");
+            let saved_url = saved_url.and_then(|url| match launch_for(&url) {
+                Launch::App => Some(url),
+                Launch::Setup => {
+                    eprintln!("nothing is listening at {url}; showing setup");
+                    None
                 }
-                reachable
+                Launch::AppUnconfirmed => {
+                    eprintln!("saved host {url} did not answer yet; opening the app and watching");
+                    watch_unconfirmed_host(handle.clone(), url.clone());
+                    Some(url)
+                }
             });
 
             match saved_url.as_deref() {

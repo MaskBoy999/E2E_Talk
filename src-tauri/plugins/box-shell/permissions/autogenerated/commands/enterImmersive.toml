@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-enterImmersive"
+description = "Enables the enterImmersive command without any pre-configured scope."
+commands.allow = ["enterImmersive"]
+
+[[permission]]
+identifier = "deny-enterImmersive"
+description = "Denies the enterImmersive command without any pre-configured scope."
+commands.deny = ["enterImmersive"]

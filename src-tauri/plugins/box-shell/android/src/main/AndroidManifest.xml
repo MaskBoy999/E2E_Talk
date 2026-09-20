@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Merged into the app manifest at build time. Deliberately empty of permissions:
+  hiding the system bars and intercepting Back need none. It exists so the plugin
+  is a normal Android library module with a manifest of its own (the same shape
+  as the call-service plugin), and so any future shell permission has somewhere
+  committed to live — editing `src-tauri/gen/android/` would not survive
+  `tauri android init`.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" />

@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-setBackHandler"
+description = "Enables the setBackHandler command without any pre-configured scope."
+commands.allow = ["setBackHandler"]
+
+[[permission]]
+identifier = "deny-setBackHandler"
+description = "Denies the setBackHandler command without any pre-configured scope."
+commands.deny = ["setBackHandler"]

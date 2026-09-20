@@ -12,6 +12,26 @@
     -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
     <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
+    <!--
+      Android 14 (API 34) requires a *type-specific* permission for every
+      foreground-service type the service claims, and `phoneCall` alone is the
+      wrong type for this app: it means "continue a call through Telecom's
+      ConnectionService", while what the call actually does is keep capturing
+      the **microphone** from the background.
+
+      That distinction is not cosmetic. Microphone (and camera) access is subject
+      to Android's *while-in-use* restriction: the moment the app stops being the
+      foreground app, the system revokes capture unless a foreground service is
+      running with the `microphone` type. With only `phoneCall` declared, a voice
+      call with the screen off went silent about ten seconds in — the sender
+      stayed open but the OS had already cut the mic — and after a long
+      background stretch the track never recovered, so audio only came back on a
+      rejoin. `camera` and `mediaProjection` are the same story for video calls
+      and screen share.
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <!-- Media capture for calls. wry's RustWebChromeClient.onPermissionRequest
          turns the WebView's AUDIO_CAPTURE / VIDEO_CAPTURE requests into the
          matching Android runtime prompt (RECORD_AUDIO, CAMERA) — but only for
@@ -30,10 +50,14 @@
 
     <application>
         <!-- merged into the app manifest at build time -->
+        <!-- The types this service may claim. It is started with only the ones
+             the call is actually using (CallForegroundService.buildTypeMask), so
+             an audio-only call never asks for the camera type — claiming a type
+             whose runtime permission is not held is itself a SecurityException. -->
         <service
             android:name="com.e2echat.callservice.CallForegroundService"
             android:exported="false"
-            android:foregroundServiceType="phoneCall" />
+            android:foregroundServiceType="phoneCall|microphone|camera|mediaProjection" />
 
         <receiver
             android:name="com.e2echat.callservice.IncomingCallActionReceiver"

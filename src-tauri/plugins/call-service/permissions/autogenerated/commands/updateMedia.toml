@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-updateMedia"
+description = "Enables the updateMedia command without any pre-configured scope."
+commands.allow = ["updateMedia"]
+
+[[permission]]
+identifier = "deny-updateMedia"
+description = "Denies the updateMedia command without any pre-configured scope."
+commands.deny = ["updateMedia"]

@@ -1,4 +1,4 @@
-const COMMANDS: &[&str] = &["start", "stop"];
+const COMMANDS: &[&str] = &["start", "updateMedia", "stop"];
 
 fn main() {
     // The commands are implemented in Kotlin (`CallServicePlugin.kt`) and called

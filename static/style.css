@@ -236,6 +236,19 @@ body, .app, .sidebar, .server-strip, .server-icon, .channel-item,
     text-security: disc;
 }
 
+/* One reveal control per password field, and it is OURS.
+   Chromium-based Edge — which is also the WebView2 the desktop box runs in —
+   draws its own eye *inside* every password input unless the page removes it,
+   so each field showed two: the browser's tucked into the input's right edge and
+   the app's `.toggle-visibility-btn` next to it (see login.html /
+   `setupToggleVisibility` in auth.js). Microsoft's documented way to drop the
+   built-in one is this pseudo-element. Deliberately global: the same duplicate
+   appeared on every password field in the app, not just the auth pages. */
+input[type="password"]::-ms-reveal,
+input[type="password"]::-ms-clear {
+    display: none;
+}
+
 .auth-input-row .toggle-visibility-btn {
     padding: clamp(10px, 2.5vw, 12px) clamp(12px, 3vw, 16px);
     background: transparent;

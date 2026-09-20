@@ -12,6 +12,14 @@ import app.tauri.plugin.Plugin
 @InvokeArg
 class StartArgs {
     var channelName: String? = null
+
+    /**
+     * Media this call is carrying: "audio" (always), "camera", "screen".
+     * Drives the Android 14+ foreground-service types — without the matching
+     * type, Android revokes mic/camera capture as soon as the app is no longer
+     * the foreground app (see CallForegroundService).
+     */
+    var mediaTypes: List<String>? = null
 }
 
 @InvokeArg
@@ -38,6 +46,10 @@ class CallServicePlugin(private val activity: Activity) : Plugin(activity) {
                 CallForegroundService.EXTRA_CHANNEL_NAME,
                 args.channelName ?: "Voice call"
             )
+            putStringArrayListExtra(
+                CallForegroundService.EXTRA_MEDIA_TYPES,
+                ArrayList(args.mediaTypes ?: listOf("audio"))
+            )
         }
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -51,6 +63,39 @@ class CallServicePlugin(private val activity: Activity) : Plugin(activity) {
             // call started, which Android forbids. The call still works while the
             // screen is on; report it so the JS side can log/toast it.
             invoke.reject("Could not start the call service: ${e.message}")
+        }
+    }
+
+    /**
+     * Re-apply the foreground-service types when the call's media changes
+     * (camera or screen sharing toggled, or the mic re-acquired after a wake).
+     * The service keeps running and re-posts the same notification; only the
+     * declared types change, which is what Android checks every time it decides
+     * whether background capture is still allowed.
+     */
+    @Command
+    fun updateMedia(invoke: Invoke) {
+        val args = invoke.parseArgs(StartArgs::class.java)
+        val intent = Intent(activity, CallForegroundService::class.java).apply {
+            action = CallForegroundService.ACTION_UPDATE
+            putExtra(
+                CallForegroundService.EXTRA_CHANNEL_NAME,
+                args.channelName ?: "Voice call"
+            )
+            putStringArrayListExtra(
+                CallForegroundService.EXTRA_MEDIA_TYPES,
+                ArrayList(args.mediaTypes ?: listOf("audio"))
+            )
+        }
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                activity.startForegroundService(intent)
+            } else {
+                activity.startService(intent)
+            }
+            invoke.resolve()
+        } catch (e: Exception) {
+            invoke.reject("Could not update the call service: ${e.message}")
         }
     }
 

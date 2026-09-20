@@ -5,8 +5,14 @@ backgrounded (start/stop the Android foreground service), and raise the
 full-screen incoming-call notification when a call arrives while the app is
 not in the foreground.
 """
+# NOTE: the identifier is spelled exactly as `build.rs`'s tauri-plugin build
+# script generates it (`allow-` + the Kotlin command name, so `updateMedia` →
+# `allow-updateMedia`). The two older hand-written entries below keep their
+# kebab-case spelling because that is the file name/default they were created
+# with; renaming either side would break the ACL at compile time.
 permissions = [
     "allow-start",
+    "allow-updateMedia",
     "allow-stop",
     "allow-incoming-call",
     "allow-cancel-incoming",

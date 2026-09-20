@@ -930,7 +930,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "e2e-chat-app"
-version = "0.2.12"
+version = "0.2.13"
 dependencies = [
  "reqwest 0.12.28",
  "rustls",
@@ -940,6 +940,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-autostart",
+ "tauri-plugin-box-shell",
  "tauri-plugin-call-service",
  "tauri-plugin-notification",
  "tauri-plugin-opener",
@@ -3902,6 +3903,14 @@ dependencies = [
  "tauri",
  "tauri-plugin",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "tauri-plugin-box-shell"
+version = "0.1.0"
+dependencies = [
+ "tauri",
+ "tauri-plugin",
 ]
 
 [[package]]

@@ -6,7 +6,8 @@
   "scripts": {
     "test": "playwright test",
     "audit-fix": "node audit-fix.mjs",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "icon": "node tools/box-icon.mjs"
   },
   "keywords": [],
   "author": "",

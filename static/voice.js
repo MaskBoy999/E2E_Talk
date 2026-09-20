@@ -1054,10 +1054,99 @@
         var tauri = window.__TAURI__;
         if (!tauri || !tauri.core || !tauri.core.invoke) return;
         if (!/Android/i.test(navigator.userAgent || '')) return;
-        var args = action === 'start' ? { channelName: channelName || 'Voice call' } : {};
+        var args = {};
+        if (action === 'start' || action === 'updateMedia') {
+            args = {
+                channelName: channelName || 'Voice call',
+                mediaTypes: _boxCallMediaTypes()
+            };
+        }
         tauri.core.invoke('plugin:call-service|' + action, args).catch(function (e) {
             console.warn('[box] call-service ' + action + ' failed:', e);
         });
+    }
+
+    // Which media this call is carrying right now — the Android side turns this
+    // into the foreground-service types it declares. Android 14+ revokes mic and
+    // camera capture from a backgrounded app unless the running service claims
+    // the matching type, which is why a call used to go silent about ten seconds
+    // after the screen went off. `audio` is always present: every call captures
+    // the mic. No-op outside the box (the native plugin is Android-only).
+    function _boxCallMediaTypes() {
+        var types = ['audio'];
+        if (S.cameraOn) types.push('camera');
+        if (S.screenOn) types.push('screen');
+        return types;
+    }
+
+    // Call after anything that changes camera/screen state mid-call: the set of
+    // foreground-service types has to follow the media, or sharing the screen
+    // (or turning the camera on) would work only while the app stayed open —
+    // and, worse, the *microphone* type would be dropped with it.
+    function _boxSyncCallServiceTypes() {
+        if (!S.connected) return;
+        _boxCallService('updateMedia', S.channelName || (S.roomType === 'dm' ? 'Direct call' : 'Voice call'));
+    }
+
+    // Re-acquire the microphone after the app was backgrounded.
+    //
+    // Android revokes capture from a backgrounded app unless a foreground
+    // service claims the `microphone` type (see `CallForegroundService`), and the
+    // revocation is not always clean: the track can come back `muted` (the OS is
+    // feeding it nothing) or outright `ended`, while the WebRTC sender stays
+    // open and happily sends silence. Nothing used to notice — `S.localStreams.mic`
+    // was still set, so `startMic()` early-returned and the call stayed one-way
+    // until the user rejoined. That is the "we stop sending audio after ~10 s with
+    // the screen off, and never recover" report.
+    //
+    // So: on every return to the foreground, if the call is still up and we are
+    // not deliberately muted, check the track is actually alive and rebuild the
+    // mic (and the RNNoise pipeline with it) when it is not. `stopMic()` first is
+    // what makes `startMic()` do anything: it clears the stream and gates the
+    // senders, and `startMic()` re-acquires and re-adds the fresh track — the
+    // same path a manual unmute takes, so no renegotiation and no new transceiver.
+    function _boxRecoverMic() {
+        if (!S.connected || S.muted || S.deafened) return;
+        var stream = S.localStreams && S.localStreams.mic;
+        var tracks = stream ? stream.getAudioTracks() : [];
+        var alive = tracks.some(function (t) {
+            return t.readyState === 'live' && !t.muted;
+        });
+        if (alive) return;
+        console.info('[box] microphone went silent while backgrounded — re-acquiring it');
+        stopMic();
+        startMic().then(function () {
+            // The OS may still be winding down; if the fresh track is already
+            // dead, one more attempt keeps a long background stint from needing
+            // a rejoin. Bounded to a single retry per wake.
+            if (S._micRecoverRetry) return;
+            S._micRecoverRetry = true;
+            setTimeout(function () {
+                S._micRecoverRetry = false;
+                if (!S.connected || S.muted || S.deafened) return;
+                var s2 = S.localStreams && S.localStreams.mic;
+                var t2 = s2 && s2.getAudioTracks()[0];
+                if (!t2 || t2.readyState !== 'live' || t2.muted) _boxRecoverMic();
+            }, 1500);
+        }).catch(function (e) {
+            console.warn('[box] could not re-acquire the microphone:', e);
+        });
+    }
+
+    // Every return to the foreground: re-apply the foreground-service types (a
+    // camera/screen share may have been toggled while the WebView was frozen) and
+    // make sure the mic is still really capturing. Delayed a beat so the platform
+    // has finished resuming before the new capture is requested.
+    if (typeof document !== 'undefined') {
+        var _boxWake = function () {
+            if (document.hidden) return;
+            setTimeout(function () {
+                _boxSyncCallServiceTypes();
+                _boxRecoverMic();
+            }, 600);
+        };
+        document.addEventListener('visibilitychange', _boxWake);
+        window.addEventListener('focus', _boxWake);
     }
 
     // Full-screen incoming call (Android). While the WebView is backgrounded
@@ -1592,6 +1681,7 @@
                 renderPopup();
                 renderDmPanel();
                 updateSelfUI();
+                _boxSyncCallServiceTypes();
             })
             .catch(function (err) {
                 console.warn('Camera access denied:', err);
@@ -1607,6 +1697,7 @@
         }
         stopVideoRelay('camera');
         S.cameraOn = false;
+        _boxSyncCallServiceTypes();
         setCameraFlashOn(false);
         sendVoiceState();
         renderSelfPreview();
@@ -1641,6 +1732,7 @@
             .then(function (stream) {
                 S.localStreams.screen = stream;
                 S.screenOn = true;
+                _boxSyncCallServiceTypes();
                 var svt = stream.getVideoTracks()[0];
                 if (svt) {
                     try { svt.contentHint = 'detail'; } catch (_) {}
@@ -1689,6 +1781,7 @@
         stopVideoRelay('screen');
         stopScreenAudioRelay();
         S.screenOn = false;
+        _boxSyncCallServiceTypes();
         sendVoiceState();
         renderSelfPreview();
         renderPopup();

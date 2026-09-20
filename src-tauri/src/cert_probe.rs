@@ -32,15 +32,51 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// Why a probe could not come back with a certificate.
+///
+/// The distinction exists for the launch path, not for this module: on mobile a
+/// saved address is probed before the app window is opened, and the two failure
+/// kinds want opposite responses. An address that **refuses** the connection is
+/// genuinely "there is no page at this IP/port", so the setup screen is the
+/// right screen. An address that cannot be *reached* yet (Tailscale still coming
+/// up, a slow first handshake, DNS not ready) is just a slow start — sending the
+/// user to re-type an address that is perfectly correct is the box's oldest
+/// complaint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProbeFailure {
+    /// The address answered and refused: nothing is listening on that port.
+    Refused,
+    /// Could not tell — timeout, DNS, a TLS failure, no certificate.
+    Unknown(String),
+}
+
+impl std::fmt::Display for ProbeFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProbeFailure::Refused => {
+                write!(f, "Connection refused — nothing is listening on that port")
+            }
+            ProbeFailure::Unknown(detail) => write!(f, "{detail}"),
+        }
+    }
+}
+
 /// SHA-256 over the host's leaf certificate (DER), lowercase hex.
 ///
 /// Blocking (raw TCP + TLS handshake) — call it from
 /// `tauri::async_runtime::spawn_blocking`, never directly on the UI thread.
 pub fn fingerprint_of(url: &str) -> Result<String, String> {
-    let url = url::Url::parse(url).map_err(|e| format!("Invalid address: {e}"))?;
+    fingerprint_of_classified(url).map_err(|e| e.to_string())
+}
+
+/// [`fingerprint_of`], but telling "nothing is listening" apart from "could not
+/// reach it yet" — see [`ProbeFailure`].
+pub fn fingerprint_of_classified(url: &str) -> Result<String, ProbeFailure> {
+    let url = url::Url::parse(url)
+        .map_err(|e| ProbeFailure::Unknown(format!("Invalid address: {e}")))?;
     let host = url
         .host_str()
-        .ok_or_else(|| "Address has no host".to_string())?
+        .ok_or_else(|| ProbeFailure::Unknown("Address has no host".to_string()))?
         .to_string();
     let port = url.port().unwrap_or(443);
 
@@ -194,10 +230,52 @@ impl rustls::client::danger::ServerCertVerifier for AnyCertVerifier {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The distinction the mobile launch rule rests on.
+    ///
+    /// A port with nothing listening must come back as `Refused` ("there is no
+    /// page at this IP/port" → the address screen), never as `Unknown` ("could
+    /// not tell yet" → open the app anyway). Localhost with a port in the
+    /// reserved range refuses immediately, so this needs no network and no
+    /// fixture server.
+    #[test]
+    fn a_refused_port_is_refused_not_unknown() {
+        assert_eq!(
+            fingerprint_of_classified("https://127.0.0.1:1").unwrap_err(),
+            ProbeFailure::Refused
+        );
+    }
+
+    /// Anything that never reaches the network is `Unknown`, i.e. "could not
+    /// tell" — it must not be treated as evidence that the host is gone.
+    #[test]
+    fn an_unusable_address_is_unknown_not_refused() {
+        assert!(matches!(
+            fingerprint_of_classified("not an address").unwrap_err(),
+            ProbeFailure::Unknown(_)
+        ));
+        assert!(matches!(
+            fingerprint_of_classified("https:///no-host").unwrap_err(),
+            ProbeFailure::Unknown(_)
+        ));
+    }
+
+    /// The setup screen and the log lines show this verbatim, so the refused case
+    /// must say what a user can act on.
+    #[test]
+    fn the_refused_message_names_the_problem() {
+        let msg = ProbeFailure::Refused.to_string();
+        assert!(msg.contains("refused"), "{msg}");
+    }
+}
+
 /// Blocking TLS handshake used by `fingerprint_of` — connects, completes the
 /// handshake, and returns the peer leaf certificate (DER).
-fn tls_leaf_der(host: &str, port: u16) -> Result<Vec<u8>, String> {
-    use std::io::{Read, Write};
+fn tls_leaf_der(host: &str, port: u16) -> Result<Vec<u8>, ProbeFailure> {
+    use std::io::{ErrorKind, Read, Write};
     use std::net::{TcpStream, ToSocketAddrs};
 
     // Resolve and bound the connect: an unreachable host (Tailscale down, wrong
@@ -206,34 +284,55 @@ fn tls_leaf_der(host: &str, port: u16) -> Result<Vec<u8>, String> {
     let addr = format!("{host}:{port}");
     let candidates = (host, port)
         .to_socket_addrs()
-        .map_err(|e| format!("Cannot resolve {addr}: {e}"))?;
+        .map_err(|e| ProbeFailure::Unknown(format!("Cannot resolve {addr}: {e}")))?;
     let mut sock = None;
     let mut last_err = String::new();
+    // `Refused` is claimed only when *every* resolved address refused: a hostname
+    // that resolves to an IPv4 and an IPv6 address where only the last one is
+    // refused is "could not reach", not "nothing is listening".
+    let mut attempted = 0usize;
+    let mut all_refused = true;
     for candidate in candidates {
+        attempted += 1;
         match TcpStream::connect_timeout(&candidate, Duration::from_secs(5)) {
             Ok(s) => {
                 sock = Some(s);
                 break;
             }
-            Err(e) => last_err = e.to_string(),
+            Err(e) => {
+                if e.kind() != ErrorKind::ConnectionRefused {
+                    all_refused = false;
+                }
+                last_err = e.to_string();
+            }
         }
     }
-    let sock = sock.ok_or_else(|| format!("TCP connect to {addr} failed: {last_err}"))?;
+    let sock = match sock {
+        Some(s) => s,
+        // Nothing is listening on that port — a definitive answer.
+        None if attempted > 0 && all_refused => return Err(ProbeFailure::Refused),
+        // A timeout, an unreachable network, an empty resolution: no answer.
+        None => {
+            return Err(ProbeFailure::Unknown(format!(
+                "TCP connect to {addr} failed: {last_err}"
+            )))
+        }
+    };
     sock.set_read_timeout(Some(Duration::from_secs(8))).ok();
     sock.set_write_timeout(Some(Duration::from_secs(8))).ok();
 
     let config = rustls::ClientConfig::builder_with_provider(provider())
         .with_safe_default_protocol_versions()
-        .map_err(|e| e.to_string())?
+        .map_err(|e| ProbeFailure::Unknown(e.to_string()))?
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(AnyCertVerifier))
         .with_no_client_auth();
 
     let server_name = rustls::pki_types::ServerName::try_from(host.to_string())
-        .map_err(|_| format!("Invalid host name: {host}"))?;
+        .map_err(|_| ProbeFailure::Unknown(format!("Invalid host name: {host}")))?;
 
     let conn = rustls::ClientConnection::new(Arc::new(config), server_name)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| ProbeFailure::Unknown(e.to_string()))?;
     let mut tls = rustls::StreamOwned::new(conn, sock);
 
     // Send a minimal HTTP request; the handshake completes on the first read.
@@ -245,5 +344,5 @@ fn tls_leaf_der(host: &str, port: u16) -> Result<Vec<u8>, String> {
         .peer_certificates()
         .and_then(|certs| certs.first())
         .map(|c| c.as_ref().to_vec())
-        .ok_or_else(|| "Server presented no certificate".to_string())
+        .ok_or_else(|| ProbeFailure::Unknown("Server presented no certificate".to_string()))
 }

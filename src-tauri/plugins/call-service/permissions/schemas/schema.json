@@ -343,10 +343,22 @@
           "markdownDescription": "Denies the stop command without any pre-configured scope."
         },
         {
-          "description": "Keep an active voice call alive while the screen is off or the app is\nbackgrounded (start/stop the Android foreground service), and raise the\nfull-screen incoming-call notification when a call arrives while the app is\nnot in the foreground.\n\n#### This default permission set includes:\n\n- `allow-start`\n- `allow-stop`\n- `allow-incoming-call`\n- `allow-cancel-incoming`",
+          "description": "Enables the updateMedia command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-updateMedia",
+          "markdownDescription": "Enables the updateMedia command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the updateMedia command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-updateMedia",
+          "markdownDescription": "Denies the updateMedia command without any pre-configured scope."
+        },
+        {
+          "description": "Keep an active voice call alive while the screen is off or the app is\nbackgrounded (start/stop the Android foreground service), and raise the\nfull-screen incoming-call notification when a call arrives while the app is\nnot in the foreground.\n\n#### This default permission set includes:\n\n- `allow-start`\n- `allow-updateMedia`\n- `allow-stop`\n- `allow-incoming-call`\n- `allow-cancel-incoming`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Keep an active voice call alive while the screen is off or the app is\nbackgrounded (start/stop the Android foreground service), and raise the\nfull-screen incoming-call notification when a call arrives while the app is\nnot in the foreground.\n\n#### This default permission set includes:\n\n- `allow-start`\n- `allow-stop`\n- `allow-incoming-call`\n- `allow-cancel-incoming`"
+          "markdownDescription": "Keep an active voice call alive while the screen is off or the app is\nbackgrounded (start/stop the Android foreground service), and raise the\nfull-screen incoming-call notification when a call arrives while the app is\nnot in the foreground.\n\n#### This default permission set includes:\n\n- `allow-start`\n- `allow-updateMedia`\n- `allow-stop`\n- `allow-incoming-call`\n- `allow-cancel-incoming`"
         }
       ]
     }

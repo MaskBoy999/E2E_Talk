@@ -8,6 +8,7 @@ not in the foreground.
 #### This default permission set includes the following:
 
 - `allow-start`
+- `allow-updateMedia`
 - `allow-stop`
 - `allow-incoming-call`
 - `allow-cancel-incoming`
@@ -121,6 +122,32 @@ Enables the stop command without any pre-configured scope.
 <td>
 
 Denies the stop command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`call-service:allow-updateMedia`
+
+</td>
+<td>
+
+Enables the updateMedia command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`call-service:deny-updateMedia`
+
+</td>
+<td>
+
+Denies the updateMedia command without any pre-configured scope.
 
 </td>
 </tr>
