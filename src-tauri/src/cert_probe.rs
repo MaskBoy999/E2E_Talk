@@ -47,6 +47,15 @@ pub fn fingerprint_of(url: &str) -> Result<String, String> {
     Ok(sha256_hex(&tls_leaf_der(&host, port)?))
 }
 
+/// First and last few characters of a fingerprint, for log lines: enough to
+/// compare against what the setup screen shows, without printing 64 hex digits.
+pub fn short_fingerprint(hex: &str) -> String {
+    if hex.len() <= 24 {
+        return hex.to_string();
+    }
+    format!("{}…{}", &hex[..8], &hex[hex.len() - 8..])
+}
+
 /// The message shown when the live certificate does not match the pin.
 pub fn mismatch_message() -> String {
     "The server's certificate changed since you trusted it. If you rotated \

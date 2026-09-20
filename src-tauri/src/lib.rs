@@ -12,6 +12,8 @@
 
 mod cert_probe;
 mod config;
+#[cfg(windows)]
+mod win_webview;
 
 use std::sync::Mutex;
 
@@ -46,6 +48,13 @@ const CHANGE_SERVER_EVENT: &str = "box:change-server";
 #[derive(Default)]
 pub struct AppState {
     pub cfg: Mutex<Config>,
+    /// Why the last launch could not open the app window, if it could not.
+    ///
+    /// Startup falls back to the setup screen when the saved host is broken
+    /// (certificate changed, address dead), and until this existed that fallback
+    /// was silent: the user just saw the address screen again. On a phone there
+    /// is no console to read, so the reason has to reach the page.
+    pub startup_error: Mutex<Option<String>>,
 }
 
 // ── Certificate pinning helpers ──────────────────────────────────────────
@@ -61,6 +70,26 @@ async fn fingerprint(url: String) -> Result<String, String> {
 fn fingerprint_blocking(url: &str) -> Result<String, String> {
     let url = url.to_string();
     tauri::async_runtime::block_on(async move { fingerprint(url).await })
+}
+
+/// Whether a successfully probed fingerprint differs from the pinned one.
+///
+/// Split out of `test_connection` so it can be unit-tested without an
+/// `AppHandle`. It exists because a pinned client refuses a changed certificate,
+/// and `reqwest` reports that refusal as a *connection* error — which the setup
+/// screen then rendered as "Connection refused — is the server running on this
+/// port?", sending the user after the wrong problem entirely. Checking the
+/// fingerprint first means the one message that matters (re-trust, or do not
+/// connect) is the one shown.
+///
+/// `None` when the host could not be probed at all: then there is no evidence of
+/// a certificate change, and the caller's own request error is the better
+/// message.
+fn pin_mismatch(pinned: Option<&str>, probed: Result<String, String>) -> Option<String> {
+    match (pinned, probed) {
+        (Some(expected), Ok(actual)) if actual != expected => Some(cert_probe::mismatch_message()),
+        _ => None,
+    }
 }
 
 /// Whether the configured host answers at all (TCP connect + TLS handshake),
@@ -81,6 +110,26 @@ fn host_reachable(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A launch that cannot establish a pin must be refused rather than opened:
+    /// the window would be handed the host's self-signed certificate with nothing
+    /// to accept it, which is Chromium's "Your connection isn't private" page
+    /// instead of the app.
+    #[test]
+    fn an_unpinnable_host_must_not_open_the_app_window() {
+        let err = require_pin(false, false, "https://100.1.2.3:3443")
+            .expect_err("an unpinned, unreadable host must not open the app window");
+        // The message has to name the address and the fix: the setup screen shows
+        // it verbatim, and it is the only explanation a phone gets.
+        assert!(err.contains("100.1.2.3:3443"), "{err}");
+        assert!(err.contains("reachable"), "{err}");
+
+        // Anything already trusted opens normally — including the ordinary case
+        // where the pin was established earlier in this same launch.
+        assert!(require_pin(true, false, "https://100.1.2.3:3443").is_ok());
+        assert!(require_pin(false, true, "https://100.1.2.3:3443").is_ok());
+        assert!(require_pin(true, true, "https://100.1.2.3:3443").is_ok());
+    }
 
     /// Regression guard for the "Save & Launch closes the app" bug.
     ///
@@ -105,6 +154,20 @@ mod tests {
             out.expect("the recheck task panicked on its own runtime").is_ok(),
             "an unreachable host must not be treated as a certificate mismatch"
         );
+    }
+
+    /// A changed certificate must be reported as a changed certificate, not as
+    /// an unreachable host: the message is the only diagnosis the setup screen can
+    /// give, and the two need completely different responses from the user.
+    #[test]
+    fn a_changed_certificate_is_never_reported_as_a_connection_problem() {
+        let pin = "aa11";
+        assert!(pin_mismatch(Some(pin), Ok("bb22".into())).is_some());
+        // Same certificate, or nothing trusted yet: not a mismatch.
+        assert!(pin_mismatch(Some(pin), Ok(pin.into())).is_none());
+        assert!(pin_mismatch(None, Ok("bb22".into())).is_none());
+        // Unreachable host: the caller's own request error says more.
+        assert!(pin_mismatch(Some(pin), Err("refused".into())).is_none());
     }
 
     /// The navigation allowlist must compare whole origins: the same host on a
@@ -250,8 +313,110 @@ fn check_pinned_cert(pinned: &str, probed: Result<String, String>) -> Result<(),
 fn open_main(app: &tauri::AppHandle, server_url: &str) -> Result<(), String> {
     if let Some(expected) = pinned_cert(app) {
         check_pinned_cert(&expected, fingerprint_blocking(server_url))?;
+    } else {
+        // Nothing trusted yet — a config from an older build, or one edited by
+        // hand. Record what the host presents now, or refuse to open the window
+        // at all (see `require_pin`).
+        let established = ensure_pin_blocking(app, server_url);
+        require_pin(false, established, server_url)?;
     }
     open_main_window(app, server_url)
+}
+
+/// Refuse to open the app window when nothing is pinned **and** the host's
+/// certificate could not be read to pin it now.
+///
+/// This is the guard for the box's most persistent symptom. The configured host
+/// is self-signed, so the pinned fingerprint is the app's only trust anchor —
+/// and the sandboxed WebView (WebView2, and the Android WebView) has to be *told*
+/// to accept the certificate that was verified, or it shows Chromium's
+/// *"Your connection isn't private"* page instead of the app. With no pin there
+/// is nothing to tell it.
+///
+/// The hole this closes is a launch race, not a hypothetical: start the app
+/// before the server is listening and `fingerprint_blocking` fails, so an older
+/// build opened the window unpinned (the certificate hook is installed once, at
+/// window creation). The first load that *did* succeed then hit the certificate
+/// warning — every time, until the pin happened to get written.
+///
+/// Split out from `open_main` so the decision is testable without an `AppHandle`.
+/// `has_pin` is whether a pin already exists; `established` whether one was just
+/// recorded. Both false is the only refusal.
+fn require_pin(has_pin: bool, established: bool, server_url: &str) -> Result<(), String> {
+    if has_pin || established {
+        return Ok(());
+    }
+    Err(format!(
+        "no certificate is trusted for {server_url} yet, and its certificate could \
+         not be read to trust it now. Check that the host is running and reachable, \
+         then press Save & Launch again."
+    ))
+}
+
+/// Record the host's certificate fingerprint when none is pinned yet.
+///
+/// Returns whether a pin now exists. Used on the sync launch paths; the async
+/// `save_config` does the same thing with an awaited probe (calling the blocking
+/// variant from there would panic on Tauri's own runtime).
+fn ensure_pin_blocking(app: &tauri::AppHandle, server_url: &str) -> bool {
+    match fingerprint_blocking(server_url) {
+        Ok(actual) => {
+            if let Ok(mut cfg) = app.state::<AppState>().cfg.lock() {
+                cfg.pinned_cert_sha256 = Some(actual.clone());
+                if let Err(e) = config::save(app, &cfg) {
+                    eprintln!("could not persist the certificate pin: {e}");
+                }
+            }
+            eprintln!(
+                "no certificate was pinned yet; trusting {} for {server_url} from now on",
+                cert_probe::short_fingerprint(&actual)
+            );
+            true
+        }
+        Err(e) => {
+            eprintln!("could not read the host certificate to pin it ({e})");
+            false
+        }
+    }
+}
+
+/// Extra browser arguments for the app window, or `None` to keep wry's defaults.
+///
+/// Exactly one thing lives here, and it is opt-in: a **remote debugging port**,
+/// so the box's WebView can be driven and read by the same tooling as the rest of
+/// the app (`chrome://inspect`, or Playwright's `connectOverCDP` for the box
+/// tests). Set `E2E_BOX_DEBUG_PORT=9333` in the environment before launching:
+///
+/// ```text
+/// E2E_BOX_DEBUG_PORT=9333 ./e2e-chat-app.exe
+/// curl -s http://127.0.0.1:9333/json/list
+/// ```
+///
+/// It is deliberately not a build-time switch. An open debugging port lets
+/// anything that can reach the loopback interface drive the app's WebView, so a
+/// shipped build must never have one — and nothing sets this variable unless the
+/// person launching the app does.
+///
+/// `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` cannot be used for this instead: wry
+/// always calls `set_additional_browser_arguments` (with its own defaults when
+/// the app passes none), which overrides that environment variable. Overriding
+/// it here also means repeating wry's defaults, since setting the argument
+/// *replaces* them rather than appending — without them the Office/PDF overlay
+/// UI and SmartScreen would quietly come back and make a debug run behave
+/// differently from a normal one.
+fn webview_browser_args() -> Option<String> {
+    let port = std::env::var("E2E_BOX_DEBUG_PORT").ok()?;
+    let port = port.trim().to_string();
+    if port.is_empty() || !port.chars().all(|c| c.is_ascii_digit()) {
+        eprintln!("E2E_BOX_DEBUG_PORT={port:?} is not a port number; ignoring it");
+        return None;
+    }
+    // `--remote-allow-origins=*`: recent Chromium refuses a DevTools client whose
+    // Origin is not allowlisted, which is how a CDP attach presents itself.
+    Some(format!(
+        "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
+         --remote-debugging-port={port} --remote-allow-origins=*"
+    ))
 }
 
 /// The main window's navigation allowlist: the window may only ever show the
@@ -333,10 +498,21 @@ fn open_main_window(app: &tauri::AppHandle, server_url: &str) -> Result<(), Stri
         return Ok(());
     }
 
-    WebviewWindowBuilder::new(app, MAIN_LABEL, WebviewUrl::External(parsed))
+    // The window starts on a blank page and is pointed at the server afterwards.
+    // On Windows the WebView2 hooks below (the pinned certificate, auto-granted
+    // permissions) are raised *per navigation*, so they have to be installed
+    // before the first request to a remote URL — creating the window straight on
+    // that URL would let the first load race them, which is exactly how the
+    // "Your connection isn't private" page kept appearing. The window is hidden
+    // until the navigation has been requested, so the blank page is never seen.
+    let blank: tauri::Url = "about:blank"
+        .parse()
+        .map_err(|e| format!("could not build the initial page: {e}"))?;
+    let mut builder = WebviewWindowBuilder::new(app, MAIN_LABEL, WebviewUrl::External(blank))
         .title("E2E Chat")
         .inner_size(1200.0, 780.0)
         .min_inner_size(720.0, 480.0)
+        .visible(false)
         // Tauri installs a *native* drop handler on the webview by default
         // (`dragDropEnabled`, default true). On Windows that handler swallows
         // HTML5 drag-and-drop inside the page, so every drag target in the app
@@ -345,9 +521,25 @@ fn open_main_window(app: &tauri::AppHandle, server_url: &str) -> Result<(), Stri
         // never Tauri's `tauri://drag-*` events, so turn the native one off.
         .disable_drag_drop_handler()
         // Navigation allowlist — see `nav_allowlist`.
-        .on_navigation(nav_allowlist(app))
-        .build()
-        .map_err(|e| e.to_string())?;
+        .on_navigation(nav_allowlist(app));
+    if let Some(args) = webview_browser_args() {
+        builder = builder.additional_browser_args(&args);
+    }
+    let window = builder.build().map_err(|e| e.to_string())?;
+
+    #[cfg(windows)]
+    win_webview::install(&window);
+
+    // Never leave an invisible window behind: whatever happens, the user sees a
+    // window (the error path shows the blank one rather than nothing at all).
+    if let Err(e) = window.navigate(parsed) {
+        let _ = window.show();
+        return Err(e.to_string());
+    }
+    #[cfg(desktop)]
+    let _ = window.unminimize();
+    let _ = window.show();
+    let _ = window.set_focus();
     Ok(())
 }
 
@@ -399,12 +591,14 @@ fn open_setup_in_main(app: &tauri::AppHandle) -> Result<(), String> {
     // allowlist as `open_main_window` — a window built without it would follow
     // any external link away from the host, with no tray, no address bar and no
     // back button on a phone to recover.
-    WebviewWindowBuilder::new(app, MAIN_LABEL, WebviewUrl::App(SETUP_PAGE.into()))
+    let mut builder = WebviewWindowBuilder::new(app, MAIN_LABEL, WebviewUrl::App(SETUP_PAGE.into()))
         .title("E2E Chat — Setup")
         .inner_size(560.0, 660.0)
-        .on_navigation(nav_allowlist(app))
-        .build()
-        .map_err(|e| e.to_string())?;
+        .on_navigation(nav_allowlist(app));
+    if let Some(args) = webview_browser_args() {
+        builder = builder.additional_browser_args(&args);
+    }
+    builder.build().map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -425,11 +619,15 @@ fn open_setup(app: &tauri::AppHandle) -> Result<(), String> {
 
     #[cfg(desktop)]
     {
-        match WebviewWindowBuilder::new(app, SETUP_LABEL, WebviewUrl::App(SETUP_PAGE.into()))
-            .title("E2E Chat — Setup")
-            .inner_size(560.0, 660.0)
-            .resizable(false)
-            .build()
+        let mut setup_builder =
+            WebviewWindowBuilder::new(app, SETUP_LABEL, WebviewUrl::App(SETUP_PAGE.into()))
+                .title("E2E Chat — Setup")
+                .inner_size(560.0, 660.0)
+                .resizable(false);
+        if let Some(args) = webview_browser_args() {
+            setup_builder = setup_builder.additional_browser_args(&args);
+        }
+        match setup_builder.build()
         {
             Ok(_) => return Ok(()),
             // A platform that refuses a second window must not leave the setup
@@ -446,6 +644,15 @@ fn open_setup(app: &tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 fn get_config(state: tauri::State<'_, AppState>) -> Config {
     state.cfg.lock().unwrap().clone()
+}
+
+/// The reason the last launch fell back to this setup screen, or `None`.
+///
+/// Only ever reachable from a local page (the setup window / `open_setup_in_main`),
+/// which is exactly where it is needed — a phone has no stderr to read.
+#[tauri::command]
+fn get_startup_error(state: tauri::State<'_, AppState>) -> Option<String> {
+    state.startup_error.lock().ok().and_then(|e| e.clone())
 }
 
 #[derive(serde::Serialize)]
@@ -470,6 +677,19 @@ async fn test_connection(
         .lock()
         .ok()
         .and_then(|c| c.pinned_cert_sha256.clone());
+    // A changed certificate is the first thing to rule out, because it is the one
+    // failure the request below cannot describe accurately: with a pin set,
+    // `pinned_client` refuses any other certificate and the refusal arrives as a
+    // connect error. `test_connection` is the box's only diagnostic, so it has to
+    // name the real problem.
+    if let Some(message) = pin_mismatch(pinned.as_deref(), fingerprint(url.clone()).await) {
+        return Ok(ConnResult {
+            ok: false,
+            status: None,
+            detail: message,
+        });
+    }
+
     let client = cert_probe::pinned_client(pinned.as_deref(), &url)?;
 
     let target = url.trim_end_matches('/').to_string();
@@ -547,14 +767,45 @@ async fn save_config(
         // rotation, which is exactly what the setup copy instructs.
         Some(fingerprint(server_url.clone()).await.map_err(|e| {
             format!(
-                "Could not read the server certificate: {e}\n\nCheck the address, \
-                 or untick \"Trust this server's certificate\"."
+                "Could not read the server certificate: {e}\n\nCheck that the host is \
+                 running and reachable at this address."
             )
         })?)
     } else {
-        // Unticked: keep any pin already established — never silently drop one.
+        // Unticked (only reachable for a config written by an older build): keep
+        // any pin already established — never silently drop one.
         existing_pin
     };
+    // A self-signed host has no other trust anchor, so a launch with *no* pin has
+    // nothing to compare against and no way to tell the WebView what to accept.
+    // Record what the host presents now (the setup screen's checkbox is ticked by
+    // default, so this is the path for configs that lost their pin) — and if even
+    // that fails, stop here rather than opening the app window unpinned, which
+    // would show the browser's certificate warning instead of the app.
+    let new_pin = match new_pin {
+        Some(pin) => Some(pin),
+        None => match fingerprint(server_url.clone()).await {
+            Ok(actual) => {
+                eprintln!(
+                    "no certificate was pinned yet; trusting {} for {server_url} from now on",
+                    cert_probe::short_fingerprint(&actual)
+                );
+                Some(actual)
+            }
+            Err(e) => {
+                eprintln!("could not read the host certificate to pin it ({e})");
+                None
+            }
+        },
+    };
+    if new_pin.is_none() {
+        return Err(format!(
+            "Could not read the server certificate at {server_url}: nothing is trusted for \
+             this address yet, so the app would have to open it with an unverified \
+             certificate. Check that the host is running and reachable, then press \
+             Save & Launch again."
+        ));
+    }
 
     {
         let mut cfg = state.cfg.lock().unwrap();
@@ -597,6 +848,10 @@ async fn save_config(
     }
 
     open_main_window(&app, &server_url)?;
+    // This launch works — drop any stale failure the setup screen is showing.
+    if let Ok(mut slot) = app.state::<AppState>().startup_error.lock() {
+        *slot = None;
+    }
     if let Some(w) = app.get_webview_window(SETUP_LABEL) {
         let _ = w.close();
     }
@@ -723,6 +978,7 @@ pub fn run() {
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             get_config,
+            get_startup_error,
             test_connection,
             probe_certificate,
             save_config,
@@ -764,7 +1020,12 @@ pub fn run() {
                 Some(url) => {
                     if let Err(e) = open_main(&handle, url) {
                         // A broken saved address must not strand the user: fall back.
+                        // Record *why* — the setup screen shows it, because on a
+                        // phone this is the only channel that exists.
                         eprintln!("open_main failed ({e}); opening setup");
+                        if let Ok(mut slot) = handle.state::<AppState>().startup_error.lock() {
+                            *slot = Some(e);
+                        }
                         let _ = open_setup(&handle);
                     }
                 }

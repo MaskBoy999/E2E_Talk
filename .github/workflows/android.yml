@@ -166,6 +166,61 @@ jobs:
           exit $EXIT
 
       # ---------------------------------------------------------------------
+      # The box cannot render the app at all without this, and nothing else
+      # would notice if it went missing — a blank screen on a phone is exactly
+      # what this workflow exists to prevent.
+      #
+      # The server's certificate is self-signed, Android's WebView cancels any
+      # load it cannot verify, and wry's generated `RustWebViewClient` does not
+      # override `onReceivedSslError`. The override is injected by wry's
+      # `{{class-extension}}` hook, configured in `.cargo/config.toml`
+      # (`WRY_RUSTWEBVIEWCLIENT_CLASS_EXTENSION`). Two things can silently break
+      # it: the env var stops reaching wry (a wry change, or that config file
+      # being dropped), or R8 strips the override from the minified release
+      # build (the consumer rule in the call-service plugin prevents that).
+      # Both halves are cheap to check here and impossible to check afterwards.
+      # ---------------------------------------------------------------------
+      - name: Verify the pinned-certificate WebView override survived
+        if: env.BUILD_EXIT == '0'
+        working-directory: src-tauri
+        shell: bash
+        run: |
+          set -e
+          GEN=$(find gen/android/app/src/main/java -name 'RustWebViewClient.kt' -print -quit)
+          if [ -z "$GEN" ]; then
+            echo "::error::No generated RustWebViewClient.kt — the Android codegen did not run."
+            exit 1
+          fi
+          if ! grep -q 'onReceivedSslError' "$GEN"; then
+            echo "::error::WRY_RUSTWEBVIEWCLIENT_CLASS_EXTENSION did not reach the generated WebView client ($GEN). Check .cargo/config.toml [env] — without the override Android cancels the (self-signed) certificate and the app shows a blank screen."
+            exit 1
+          fi
+          echo "Generated client carries the override:"
+          grep -n -A 8 'onReceivedSslError' "$GEN" | head -20
+
+          APK=$(find gen/android/app/build/outputs/apk -name '*.apk' -print -quit)
+          if [ -z "$APK" ]; then
+            echo "::error::No APK to inspect."
+            exit 1
+          fi
+          rm -rf "$RUNNER_TEMP/dexcheck"
+          # python3 rather than `unzip`: guaranteed on the runner, no extra apt.
+          python3 - "$APK" "$RUNNER_TEMP/dexcheck" <<'PY'
+          import os, sys, zipfile
+          apk, out = sys.argv[1], sys.argv[2]
+          os.makedirs(out, exist_ok=True)
+          with zipfile.ZipFile(apk) as z:
+              for name in z.namelist():
+                  if name.startswith('classes') and name.endswith('.dex'):
+                      z.extract(name, out)
+          PY
+          if ! grep -rqa 'onReceivedSslError' "$RUNNER_TEMP/dexcheck"; then
+            echo "::error::onReceivedSslError is absent from the minified release dex — R8 stripped the override, so the release APK would show a blank screen. Check the consumer proguard rules in src-tauri/plugins/call-service/android/."
+            exit 1
+          fi
+          echo "Release dex keeps the override (R8 did not strip it)."
+
+      # ---------------------------------------------------------------------
       # Android refuses to install an UNSIGNED apk, and a release build here is
       # unsigned: Tauri only signs when `gen/android/app/build.gradle.kts` has a
       # signingConfigs block (per the Tauri docs), and that project is generated

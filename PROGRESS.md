@@ -7348,3 +7348,189 @@ bundle version. `multidevice`, `multidevice-api`, `blob-multidevice-writeback`, 
 - **Channel touch drag** (`thread_categories_shortcuts.js`): Wired for channel items (owner only). Touchmove highlights targets (category groups get a blue background, channel items get before/after indicators). Touchend handles same-category reorder via `reorderChannelsAPI()`, cross-category move via `moveChannelToCategory()` + reorder, and drops outside any category move to uncategorized. Auto-scrolls the channel list near edges.
 
 **Files:** `static/chat.js`, `static/thread_categories_shortcuts.js`, `static/index.html`
+
+### 133. Why the APK could never get past setup: Android cancels the self-signed certificate
+
+**Bug (release blocker):** On a phone, setup behaved perfectly — *Test connection* resolved the address
+and verified it — and then **Save & Launch left the app on a blank screen forever**, including after a
+restart. There was no tray, no address bar, no back button and no error, so the only escape was
+clearing the app's data. Every published APK had this.
+
+**Root cause.** The box's own Rust client trusts the host by pinning the leaf certificate's SHA-256
+(`src-tauri/src/cert_probe.rs`), because `server/src/main.rs` auto-generates a **self-signed**
+certificate (`CN=rcgen self signed cert`). The WebView does its own TLS validation and knows nothing
+about that pin — and wry 0.55.1's generated Android `RustWebViewClient` **does not override
+`onReceivedSslError`**, so Android's default cancels the load. Result: `test_connection` succeeds
+(that call goes through Rust) while the window it opens can never render anything. Confirmed by
+reading wry's own template (`src/android/kotlin/RustWebViewClient.kt` — no SSL callback) and by the
+live certificate's fingerprint.
+
+**Fix — the WebView is told to accept exactly the certificate the app already pinned.**
+- `.cargo/config.toml` (new) sets `WRY_RUSTWEBVIEWCLIENT_CLASS_EXTENSION`, which wry substitutes into
+  `{{class-extension}}` inside its generated `RustWebViewClient.kt` (the variable name is
+  `WRY_<FILESTEM>_CLASS_EXTENSION`; see `wry-*/build.rs`). The injected override logs the URL and
+  calls `handler.proceed()`. This is the *supported* extension point, so nothing patches the disposable
+  `src-tauri/gen/android/` project — CI regenerates it from scratch on every run and still gets the
+  override. `[env]` in a cargo config is read by the whole build, including a dependency's build
+  script, and it is found by walking up from the Rust build's working directory (`src-tauri`).
+- **Bounded, not "trust everything":** `check_pinned_cert` in `lib.rs` still refuses to open *or
+  navigate* a window when the host presents a different certificate, so a swapped/MITM certificate is
+  rejected in Rust before the override is ever reached; and `static/box-setup.html` now **forces the
+  pin on** (checkbox checked + disabled) because a pin is the WebView's only trust anchor there. The
+  host is a Tailscale address, so the transport is already an end-to-end-encrypted WireGuard tunnel.
+- `src-tauri/plugins/call-service/android/consumer-proguard-rules.pro` (new, wired with
+  `consumerProguardFiles` in that module's `build.gradle.kts`) keeps the framework-invoked
+  `WebViewClient` callbacks. R8 cannot see the framework calling them, so a minified release build was
+  free to strip the override — which would have reintroduced the blank screen *only in release*, i.e.
+  exactly the build that gets published.
+- `.github/workflows/android.yml`: a new **Verify the pinned-certificate WebView override survived**
+  step fails the job if the override is missing from the generated Kotlin **or** absent from the
+  minified release dex. Neither half was checkable after the fact before.
+
+**Also fixed in the same path (all of it was silent on a phone):**
+- **"Save & Launch gets stuck"** — the button is disabled until `save_config` settles, and the only
+  feedback was the button. It now reports what it is doing, and a 25 s watchdog unsticks it with a
+  billboard instead of leaving a dead button (the probe's own worst case is a bounded ~13 s).
+- **A silent fall back to setup.** When startup cannot open the saved server it shows the address
+  screen again, with no explanation anywhere (a phone has no console) — indistinguishable from the app
+  forgetting everything. `lib.rs` now records the reason (`AppState::startup_error`, set in the startup
+  fallback, cleared on a successful save) and a new `get_startup_error` command is shown by the setup
+  screen. That is what would have turned this whole bug into a one-line message for the user.
+- **`http://` is refused** rather than saved: the box's release builds block cleartext, so an http
+  address is another guaranteed blank screen (`normalize()` now warns at once, and Save refuses).
+- **Desktop-only options hidden on Android** (autostart / minimise-to-tray do nothing there).
+
+**Verified:** `npx tauri android build --apk --target aarch64` exits 0 from a clean `android init`;
+the generated client carries the override; and `onReceivedSslError` is **present in the minified
+release dex** of the APK, so R8 kept it. Windows desktop was re-verified end to end with the freshly
+built exe: the window opens on the saved host and the WebView runs the full app (the WebView2 profile's
+`Local Storage` for `https://100.109.151.38:3443` holds the app's whole key set — `e2e_device_key`,
+`e2e_identity_private_*`, `e2e_invite_*`, `e2e_server_group_assignments_*`), so **only Android was
+affected**. A window-capture helper (`tools/box/capture-window.ps1`) now records the real pixels and
+flags a near-black window, because "the window is open" and "the window shows something" are not the
+same claim.
+
+**Tests:** `tests/box-setup.spec.ts` (new, 7 tests) drives the setup screen with a stubbed
+`window.__TAURI__`: the saved address + pinned fingerprint, the startup-failure message, bare-IP →
+`https://…:3443` with `pinCert: true`, the http refusal, a failing save that reports and re-enables, the
+watchdog unsticking a hanging save (via a frozen clock), and the Android behaviour (pin forced and
+disabled, tray options hidden). **With `static/box-setup.html` stashed to HEAD, 5 of the 7 fail; all 7
+pass with it.** `tests/box-desktop.spec.ts` (new) attaches over CDP to a *running* box
+(`E2E_BOX_DEBUG_PORT`, a new env-gated hook in `lib.rs` — off by default, since an open debugging port
+is a remote-execution surface) and asserts the window really is showing the configured origin with the
+app's UI, not Chromium's certificate interstitial; it skips when no box is listening.
+
+**Files:** `.cargo/config.toml`, `.github/workflows/android.yml`, `src-tauri/src/lib.rs`,
+`static/box-setup.html`, `src-tauri/plugins/call-service/android/build.gradle.kts`,
+`src-tauri/plugins/call-service/android/consumer-proguard-rules.pro`, `tools/box/capture-window.ps1`,
+`tests/box-setup.spec.ts`, `tests/box-desktop.spec.ts`
+
+### 134. The desktop box asked the user to trust its own server, and to allow the microphone
+
+**Bugs (both reported from the running Windows box, and both invisible to the tests that existed):**
+
+1. *"i keep getting the 'your connection isn't private' warning"* — every launch of the app window
+   showed Chromium's interstitial. Read straight out of the running box over CDP:
+   `url = chrome-error://chromewebdata/`, `title = Privacy error`,
+   body `"Your connection isn't private … NET::ERR_CERT_AUTHORITY_INVALID"`. The app only worked
+   because the user clicked through it, which is also why an earlier "Windows is fine" claim about
+   this looked true: by the time it was checked, someone had already clicked past the warning (the
+   WebView2 profile's `Local Storage` for the origin held the app's keys). The same root cause as the
+   Android blocker in #133 — a *self-signed* certificate, and a WebView that knows nothing about the
+   app's TOFU pin — just with the opposite default: WebView2 shows a page, Android cancels the load.
+2. *"it still asks for permissions like for microphone … should all be allowed automatically"* — wry
+   only treats `CLIPBOARD_READ` as implicitly allowed (its one `PermissionRequested` handler), so
+   camera, microphone and notifications fell through to WebView2's own prompt. Calling someone on
+   your own server asked you to allow the microphone first, every time.
+
+**Fix — `src-tauri/src/win_webview.rs` (new, Windows-only), installed by `open_main_window`:**
+
+- **`ServerCertificateErrorDetected`** (interface `_14`; the cast is how the runtime version is
+  checked, and a runtime without it is reported instead of silently skipped) sets the action to
+  `ALWAYS_ALLOW`. This is *not* "ignore certificate errors": the hook is only installed **when a
+  fingerprint is pinned**, which means `check_pinned_cert` has already verified the live certificate
+  and will refuse to open or navigate a window if it ever stops matching. (The first revision installed
+  this only when a pin already existed — "no pin ⇒ no hook" — which left the warning reachable through
+  the launch race described in #135. The hook is now unconditional.)
+- **`PermissionRequested`** grants exactly `CAMERA`, `MICROPHONE`, `NOTIFICATIONS`, `AUTOPLAY` and
+  `CLIPBOARD_READ`; geolocation, MIDI, sensors and the rest keep WebView2's default.
+- **Ordering was the whole game.** Both events are raised *per navigation*, so a window created
+  directly on the server URL races its own first load — which is exactly how the warning page kept
+  winning. `open_main_window` now builds the window **hidden on `about:blank`**, installs the hooks,
+  and only then navigates and shows it, so the blank page is never visible and the first remote
+  request already goes through the handlers.
+- **A missing pin is now self-healing on every launch path**: `open_main` (sync) and `save_config`
+  (async) each record the host's certificate when none is pinned, because a config that lost its pin
+  has nothing to compare against and nothing to tell the WebView to accept.
+
+**Verified against a real running box** (fresh launch, no click-through): at t=4 s the CDP target is
+`https://100.109.151.38:3443/`, title `E2E Chat`, body is the app's (no `chrome-error://`, no
+`Privacy error`). `tests/box-desktop.spec.ts` asserts exactly that. `E2E_BOX_DEBUG_PORT` remains the
+only way in, and it is off unless someone sets it.
+
+**Files:** `src-tauri/src/win_webview.rs`, `src-tauri/src/lib.rs`, `src-tauri/src/cert_probe.rs`,
+`src-tauri/Cargo.toml`
+
+**Still owed: a real device.** No emulator or phone is attached to this machine, so the Android half is
+verified by construction and by inspecting the artifact, not by seeing the app run. The device check is
+one line of logcat — the override logs `accepting the pinned server certificate for …` under the
+`E2EChat` tag:
+
+```bash
+adb install -r dist/E2E-Chat-v0.2.12-android.apk
+adb logcat | grep -iE 'E2EChat|RustStdoutStderr'
+```
+
+### 135. "Your connection isn't private" was still reachable — the unpinned launch race
+
+#134 made the right call (honour the pin in the WebView, grant the app's own permissions) but left one
+door open, and it is the one that kept being reported: **a launch that could not establish a pin still
+opened the app window.**
+
+The chain, exactly as it happens on a real machine:
+
+1. The box and the server are started together (or Tailscale is still coming up).
+2. `open_main` → `ensure_pin_blocking` → `fingerprint_blocking` fails, because nothing is listening yet.
+   The old code logged `could not read the host certificate to pin it` and **carried on**.
+3. `open_main_window` installs the WebView2 hooks, but `win_webview::install` was gated on
+   `pinned_cert(app).is_some()` — false — so **no `ServerCertificateErrorDetected` handler** was added.
+4. The window is created once; the hook decision is made once. The *first* load that did succeed then
+   hit the self-signed certificate with nothing to accept it: Chromium's *"Your connection isn't
+   private"* page. Every relaunch repeated it until a pin happened to get written, which is why it
+   looked intermittent.
+
+**Fixed in three places, so the state is unreachable rather than merely unlikely:**
+
+- `win_webview::install(window)` — the certificate hook is installed **unconditionally**. There is no
+  configuration in which the WebView is left to judge this certificate itself.
+- `require_pin(has_pin, established, url)` in `lib.rs` — a launch that has no pin *and* could not read
+  one is **refused** (`open_main`), instead of opening a window that would show the warning.
+- `save_config` — the same refusal, so *Save & Launch* cannot open the window unpinned either. The
+  setup screen stays up and shows the reason.
+- `static/box-setup.html` — pinning is now forced (checked **and** disabled) on **every** platform, not
+  just Android. With no pin the WebView has nothing to accept, so "trust this server" is not a
+  preference; the checkbox shows that rather than pretending to be a choice.
+
+**Verified on a real box, both directions.** Config with a pin removed but the host up: pins it and
+loads the app (`no certificate was pinned yet; trusting 3eac8545…d031c844`). Config with *no* pin and an
+unreachable host (`https://127.0.0.1:9`) — the pre-fix repro — now opens the **setup window**
+(`E2E Chat — Setup`, `http://tauri.localhost/box-setup.html`) with the reason as user-visible text:
+
+> The app could not open the saved server: no certificate is trusted for https://127.0.0.1:9 yet, and
+> its certificate could not be read to trust it now. Check that the host is running and reachable, then
+> press Save & Launch again.
+
+**Tests:** `require_pin` has a unit test (`an_unpinnable_host_must_not_open_the_app_window`, 5/5 lib
+tests green); `tests/box-setup.spec.ts` asserts the desktop pin is forced *and* that the refusal
+explains itself and stays winnable (8/8 green). The desktop test fails against the pre-fix page —
+`#pin-cert` was enabled — which is the before/after evidence, not a guess.
+
+**Permissions, re-checked rather than assumed.** In a live box over CDP: `microphone: granted`,
+`camera: granted`, `Notification.permission: granted`, and `getUserMedia` resolves with real device
+labels and no prompt. The Android **artifact** (0.2.12, `aapt2 dump permissions`) declares
+`RECORD_AUDIO`, `CAMERA`, `POST_NOTIFICATIONS`, `MODIFY_AUDIO_SETTINGS`, and the release DEX keeps the
+`onReceivedSslError` override. On Android the *first* media use still shows the OS dialog — that is the
+platform's own runtime permission, and no app can suppress it; it is asked once and remembered.
+
+**Files:** `src-tauri/src/win_webview.rs`, `src-tauri/src/lib.rs`, `static/box-setup.html`,
+`tests/box-setup.spec.ts`, `tools/box/probe-box-live.mjs`

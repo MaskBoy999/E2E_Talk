@@ -9,6 +9,12 @@ android {
 
     defaultConfig {
         minSdk = 29
+        // Merged into the app module's R8 config. Keeps the WebViewClient
+        // callbacks the framework (not app code) invokes — including the
+        // pinned-certificate acceptance injected into wry's generated
+        // RustWebViewClient by .cargo/config.toml, which a minified release
+        // build would otherwise be free to strip.
+        consumerProguardFiles("consumer-proguard-rules.pro")
     }
 
     compileOptions {

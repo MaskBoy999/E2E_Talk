@@ -1,0 +1,61 @@
+# Repository-wide Cargo configuration.
+#
+# ── Android: let the WebView load the pinned server certificate ───────────
+#
+# WHY THIS EXISTS
+#
+# The server generates a **self-signed** certificate (server/src/main.rs →
+# `generate_self_signed_cert`, stored in certs/), and the box's Rust client
+# trusts it by pinning the leaf fingerprint on first use (TOFU — see
+# src-tauri/src/cert_probe.rs). Android's WebView has no such pin: it does its
+# own WebPKI validation, and wry's generated `RustWebViewClient` does **not**
+# override `onReceivedSslError` — so Android's default *cancels the load*.
+#
+# The visible symptom was: "Test connection" succeeds (that call goes through
+# Rust, which accepts the pinned cert), then Save & Launch navigates the window
+# to the host and it can never render — a blank/black WebView on every launch
+# after that, with no tray, no address bar and no back button on a phone to
+# escape with. The box was completely unusable on Android.
+#
+# Wry builds its Android Kotlin from templates and substitutes
+# `{{class-extension}}` in `RustWebViewClient.kt` with the value of
+# `WRY_RUSTWEBVIEWCLIENT_CLASS_EXTENSION` (see wry-*/build.rs: the variable name
+# is `WRY_<FILE_STEM_UPPERCASED>_CLASS_EXTENSION`). Setting it here means the
+# override is injected into the generated class on every build, in CI and
+# locally, without patching the disposable `src-tauri/gen/android/` project.
+#
+# WHY `proceed()` IS SAFE HERE
+#
+# Proceeding is bounded by the pin rather than trusting everything:
+#   * static/box-setup.html forces "Trust this server's certificate" on in a box,
+#     so a fingerprint is always pinned before any window opens;
+#   * `check_pinned_cert` in src-tauri/src/lib.rs refuses to open *or navigate* a
+#     window when the host presents a different certificate, so a swapped or
+#     MITM certificate is rejected in Rust before this callback is ever reached;
+#   * the host is a Tailscale address, so the transport is already an
+#     end-to-end-encrypted WireGuard tunnel to the user's own machine.
+#
+# The override is also guarded from R8/ProGuard stripping in release builds by
+# src-tauri/plugins/call-service/android/consumer-proguard-rules.pro.
+[env]
+
+WRY_RUSTWEBVIEWCLIENT_CLASS_EXTENSION = { force = true, value = """
+    // ── E2E Chat: accept the pinned host certificate ──────────────────────
+    // Injected by .cargo/config.toml — see the comment there before changing
+    // this. The server is self-signed, so Android's default behaviour (cancel
+    // the load) leaves the app on a blank screen forever; the certificate has
+    // already been pinned by the Rust side, which refuses to open this window
+    // at all if the live certificate no longer matches.
+    override fun onReceivedSslError(
+        view: WebView,
+        handler: android.webkit.SslErrorHandler,
+        error: android.net.http.SslError
+    ) {
+        android.util.Log.w(
+            "E2EChat",
+            "accepting the pinned server certificate for " + error.url +
+                " (primaryError=" + error.primaryError + ")"
+        )
+        handler.proceed()
+    }
+""" }
