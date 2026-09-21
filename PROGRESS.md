@@ -7597,3 +7597,70 @@ menu already used. The label stays text, so a filename like
 pre-fix `chat.js` and pass with the fix.
 
 **Files:** `static/chat.js`, `static/index.html` (chat.js cache-buster), `tests/context-menu-icons.spec.ts`
+
+### 139. Android screen share, natively (v0.2.17)
+
+**Symptom:** pressing Share screen in the Android box said "screen sharing is not
+supported on this device" and nothing else ever happened.
+
+**Root cause:** `navigator.mediaDevices.getDisplayMedia()` is a **Chrome** API. The
+Android system WebView — which is what the box renders in — has never implemented
+the Screen Capture API. `navigator.mediaDevices` exists (camera and microphone work
+fine), but `getDisplayMedia` is simply `undefined`. Wry's `onPermissionRequest`
+override (§136) was therefore never reachable for screen capture: there is no
+display-capture request to grant. This is exactly why Discord's Android app captures
+the screen natively rather than through the WebView.
+
+**Fix — a native capture path, used only where `getDisplayMedia` is absent:**
+
+* `plugins/call-service/android/.../ScreenCapture.kt` (new) asks for the system
+  MediaProjection permission, mirrors the display into a `VirtualDisplay` +
+  `ImageReader`, and pushes JPEG frames to the page over a Tauri **channel**. The
+  API rules that are load-bearing: `registerCallback` must run *before*
+  `createVirtualDisplay` (API 34+ throws otherwise), the `mediaProjection`
+  foreground-service type must already be claimed before the picker opens, and
+  every `Image` must be closed or the reader's tiny buffer queue wedges.
+* `static/voice.js` paints each frame onto a canvas and exposes it as a real
+  `MediaStream` via `captureStream(0)` + `requestFrame()`. The shared
+  `_onScreenStream()` then runs the *existing* relay encode/encrypt path, tiles and
+  per-member volume — the browser and native paths cannot drift. A canvas stream is
+  an ordinary stream, which is why this needed no changes to the relay at all.
+* The plugin's `build.rs`/`permissions/default.toml` now declare the two new
+  commands, so the remote page's ACL (`call-service:default`) grants them.
+
+**Honest status:** verified by `cargo check` (host **and**
+`aarch64-linux-android`), `:tauri-plugin-call-service:compileReleaseKotlin`, and
+`tests/screen-share-fallback.spec.ts` (the branch: a browser uses `getDisplayMedia`
+and never touches the native path; without it the button takes the native branch and
+cannot throw). The capture itself is **not device-verified** — no Android device or
+emulator is attached to this machine. First device check: press Share screen and
+watch for the system picker, then
+`adb logcat | grep E2EScreenCapture`.
+
+### 140. The installed desktop icon stayed on old artwork (v0.2.17)
+
+**Symptom:** the desktop shortcut (and the installed app) kept showing the old
+blue chat-bubble icon while the Android launcher and the new installer showed the
+current rings artwork.
+
+**Root cause:** on Windows the icon Explorer shows comes from the icon resource
+compiled **into the .exe** by `tauri-build` → `tauri-winres` → `embed-resource`.
+`tauri-build` emits `cargo:rerun-if-changed` for `tauri.conf.json` (and any declared
+`bundle.resources`) but **never for the icons**. Because *some* rerun instruction is
+emitted, Cargo stops using its "re-run when any file in the package changes"
+fallback — so regenerating `icons/icon.ico` no longer re-ran the build script, and
+the embedded resource stayed on the previous drawing.
+
+**Fix:** `src-tauri/build.rs` declares the icon files with
+`cargo:rerun-if-changed`, so changing an icon re-embeds it.
+
+**Verified:** the freshly built `e2e-chat-app.exe` contains all six frames of the
+current `icons/icon.ico` byte-for-byte (checked against the .ico's own directory
+entries). A stale `target/release/resources/icon.ico` from an old build layout was
+also removed; nothing regenerates it, so it was never the cause.
+
+**If a shortcut still shows the old icon:** it is Windows' icon cache. Reinstalling
+from this release fixes it; `ie4uinit.exe -show` forces Explorer to rebuild the
+cache.
+
+**Files:** `src-tauri/build.rs`
