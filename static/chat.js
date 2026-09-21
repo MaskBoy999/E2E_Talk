@@ -26802,7 +26802,19 @@ function showContextMenuAt(e, items) {
         if (!it || (it.label === undefined && it.action === undefined)) return; // skip separators/nulls
         var item = document.createElement('div');
         item.className = 'context-menu-item' + (it.danger ? ' context-menu-danger' : '') + (it.disabled ? ' disabled' : '');
-        item.textContent = it.label; // textContent — never inject
+        // An item may carry `icon` (a sprite name) — render the glyph next to
+        // the label. The icon markup comes from the trusted local icon() sprite
+        // helper; the LABEL is always inserted as text, never as HTML, so a
+        // filename/channel/user name in a label can't inject markup.
+        if (it.icon && typeof icon === 'function') {
+            item.innerHTML = icon(it.icon, it.iconSize || 14);
+            var _lbl = document.createElement('span');
+            _lbl.className = 'context-menu-label';
+            _lbl.textContent = it.label;
+            item.appendChild(_lbl);
+        } else {
+            item.textContent = it.label; // textContent — never inject
+        }
         if (it.disabled) {
             item.style.opacity = '0.4';
             item.style.cursor = 'default';
@@ -26950,8 +26962,8 @@ function showAttachmentContextMenu(e, card) {
     var isImage = mime.indexOf('image/') === 0;
     var name = card.getAttribute('data-file-name') || 'file';
     showContextMenuAt(e, [
-        { label: '<svg class="ui-icon" width="14" height="14"><use href="#icon-download"/></svg> Download ' + name, action: function () { downloadAttachmentFromCard(card); } },
-        { label: (isImage ? '<svg class="ui-icon" width="14" height="14"><use href="#icon-image"/></svg> Copy image' : '<svg class="ui-icon" width="14" height="14"><use href="#icon-clipboard"/></svg> Copy file'), action: function () { copyAttachmentToClipboard(card); } },
+        { icon: 'download', label: 'Download ' + name, action: function () { downloadAttachmentFromCard(card); } },
+        { icon: isImage ? 'image' : 'clipboard', label: isImage ? 'Copy image' : 'Copy file', action: function () { copyAttachmentToClipboard(card); } },
     ]);
 }
 
@@ -26993,8 +27005,8 @@ function handleMediaContextMenu(e) {
         var src = emojiImg.currentSrc || emojiImg.src;
         if (!src) return false;
         showContextMenuAt(e, [
-            { label: '<svg class="ui-icon" width="14" height="14"><use href="#icon-download"/></svg> Download :' + name + ':', action: function () { downloadBlobAs(src, safeDownloadName(name, 'emoji') + '.png', 'image/png'); } },
-            { label: '<svg class="ui-icon" width="14" height="14"><use href="#icon-image"/></svg> Copy image', action: function () { copyImageElementToClipboard(emojiImg, 'Emoji'); } },
+            { icon: 'download', label: 'Download :' + name + ':', action: function () { downloadBlobAs(src, safeDownloadName(name, 'emoji') + '.png', 'image/png'); } },
+            { icon: 'image', label: 'Copy image', action: function () { copyImageElementToClipboard(emojiImg, 'Emoji'); } },
         ]);
         return true;
     }
@@ -27008,8 +27020,8 @@ function handleMediaContextMenu(e) {
         var sName = (stickerContainer._stickerData && stickerContainer._stickerData.sticker_name) || 'sticker';
         var sMime = stickerContainer.getAttribute('data-mime-type') || 'image/png';
         showContextMenuAt(e, [
-            { label: '<svg class="ui-icon" width="14" height="14"><use href="#icon-download"/></svg> Download ' + sName, action: function () { downloadBlobAs(sUrl, safeDownloadName(sName, 'sticker'), sMime); } },
-            { label: '<svg class="ui-icon" width="14" height="14"><use href="#icon-image"/></svg> Copy image', action: function () { copyImageElementToClipboard(sImg, 'Sticker'); } },
+            { icon: 'download', label: 'Download ' + sName, action: function () { downloadBlobAs(sUrl, safeDownloadName(sName, 'sticker'), sMime); } },
+            { icon: 'image', label: 'Copy image', action: function () { copyImageElementToClipboard(sImg, 'Sticker'); } },
         ]);
         return true;
     }
@@ -27024,8 +27036,8 @@ function handleMediaContextMenu(e) {
         if (!gifUrl) return false;
         var gifName = (gifBtn && gifBtn.getAttribute('data-filename')) || 'sticker.gif';
         showContextMenuAt(e, [
-            { label: '<svg class="ui-icon" width="14" height="14"><use href="#icon-download"/></svg> Download GIF', action: function () { downloadRemoteAs(gifUrl, gifName, 'image/gif'); } },
-            { label: '<svg class="ui-icon" width="14" height="14"><use href="#icon-image"/></svg> Copy image', action: function () { copyImageElementToClipboard(gifImg, 'GIF'); } },
+            { icon: 'download', label: 'Download GIF', action: function () { downloadRemoteAs(gifUrl, gifName, 'image/gif'); } },
+            { icon: 'image', label: 'Copy image', action: function () { copyImageElementToClipboard(gifImg, 'GIF'); } },
         ]);
         return true;
     }
