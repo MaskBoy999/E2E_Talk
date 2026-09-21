@@ -219,6 +219,7 @@
         resolveCameraMode: resolveCameraMode,
         resolveScreenMode: resolveScreenMode,
         setVideoWatchdogSecs: setVideoWatchdogSecs,
+        getScreenDiag: getScreenDiag,
         getPeerDiag: function () { return collectPeerDiag(); },
         getVoiceState: function () { return { inVoice: S.connected, channelId: S.channelId, dmChannelId: S.dmChannelId, serverId: S.serverId, roomType: S.roomType }; },
         refreshVoiceDiag: renderVoiceDiag,
@@ -456,6 +457,9 @@
                 });
                 return true;
             },
+            // Last screen-share attempt (tests + the diagnostics panel): which
+            // capture path ran, whether the picker appeared, and frame counts.
+            getScreenDiag: getScreenDiag,
             // Live getStats diagnostics for every peer (tests): frames
             // encoded/decoded, packet loss, E2EE transform presence.
             getPeerDiag: function () { return collectPeerDiag(); },
@@ -1052,8 +1056,8 @@
     // a plain browser `window.__TAURI__` is absent, so both are no-ops.
     function _boxCallService(action, channelName) {
         var tauri = window.__TAURI__;
-        if (!tauri || !tauri.core || !tauri.core.invoke) return;
-        if (!/Android/i.test(navigator.userAgent || '')) return;
+        if (!tauri || !tauri.core || !tauri.core.invoke) return Promise.resolve();
+        if (!/Android/i.test(navigator.userAgent || '')) return Promise.resolve();
         var args = {};
         if (action === 'start' || action === 'updateMedia') {
             args = {
@@ -1061,7 +1065,7 @@
                 mediaTypes: _boxCallMediaTypes()
             };
         }
-        tauri.core.invoke('plugin:call-service|' + action, args).catch(function (e) {
+        return tauri.core.invoke('plugin:call-service|' + action, args).catch(function (e) {
             console.warn('[box] call-service ' + action + ' failed:', e);
         });
     }
@@ -1083,9 +1087,16 @@
     // foreground-service types has to follow the media, or sharing the screen
     // (or turning the camera on) would work only while the app stayed open —
     // and, worse, the *microphone* type would be dropped with it.
+    //
+    // Returns a promise so a caller that *needs* the types applied first can
+    // await it. That matters for screen capture specifically: Android 14+
+    // refuses to create a projection unless a `mediaProjection`-typed
+    // foreground service is already running, and the system picker can be
+    // answered in well under the time an IPC round trip takes — so firing the
+    // update and the picker together is a race the picker can win.
     function _boxSyncCallServiceTypes() {
-        if (!S.connected) return;
-        _boxCallService('updateMedia', S.channelName || (S.roomType === 'dm' ? 'Direct call' : 'Voice call'));
+        if (!S.connected) return Promise.resolve();
+        return _boxCallService('updateMedia', S.channelName || (S.roomType === 'dm' ? 'Direct call' : 'Voice call')) || Promise.resolve();
     }
 
     // Re-acquire the microphone after the app was backgrounded.
@@ -1732,6 +1743,13 @@
             // tiles, per-member volume) is completely unchanged.
             return _startNativeScreenCapture(scrH);
         }
+        _screenDiag.path = 'browser';
+        _screenDiag.state = 'requested';
+        _screenDiag.probe = _screenProbe();
+        _screenDiag.blockedBy = null;
+        _screenDiag.lastError = null;
+        _screenDiag.pickerShown = true;
+        _screenDiag.startedAt = Date.now();
         return navigator.mediaDevices.getDisplayMedia({
             video: {
                 cursor: 'always',
@@ -1750,6 +1768,8 @@
         })
             .then(_onScreenStream)
             .catch(function (err) {
+                _screenDiag.state = 'error';
+                _screenDiag.lastError = (err && err.name ? err.name + ': ' : '') + ((err && err.message) || 'unknown error');
                 console.warn('Screen share error:', err && err.name, err && err.message);
                 var msg = 'Screen sharing failed: ';
                 if (err && err.name === 'NotAllowedError') {
@@ -1771,6 +1791,9 @@
     function _onScreenStream(stream) {
         S.localStreams.screen = stream;
         S.screenOn = true;
+        // Reaching here means a real stream exists, from either path — for the
+        // browser that is "the picker was answered and approved".
+        _screenDiag.state = 'capturing';
         _boxSyncCallServiceTypes();
         var svt = stream.getVideoTracks()[0];
         if (svt) {
@@ -1820,14 +1843,89 @@
     // desktop box) has getDisplayMedia and never reaches this function.
     var _nativeScreen = null; // { canvas, ctx, stream, track, stop }
 
-    function _boxNativeScreenSupported() {
+    // What happened during the last screen-share attempt, surfaced by the
+    // in-app diagnostics panel (Settings → Voice → Advanced).
+    //
+    // Nothing in the capture path branches on this — it is written and never
+    // read — so it cannot change behaviour. It exists because a phone has no
+    // console: without it, the only way to learn whether the system picker
+    // appeared, whether frames arrived, or how many were dropped is adb, which
+    // is exactly the loop this replaces.
+    var _screenDiag = {
+        path: null,           // 'browser' | 'native' — which capture path ran
+        state: 'idle',        // idle | requested | capturing | stopped | error
+        blockedBy: null,      // set when the native path was never attempted
+        probe: null,          // the capability probe at attempt time
+        pickerShown: false,   // the system MediaProjection dialog was launched
+        frames: 0,            // frames pushed up from the native capture
+        decoded: 0,           // ... painted onto the canvas
+        dropped: 0,           // ... superseded before they could be decoded
+        bytes: 0,             // total JPEG payload received
+        w: 0, h: 0, fps: 0,
+        startedAt: 0,
+        lastFrameAt: 0,
+        lastError: null,
+    };
+
+    // Everything the native path needs, observed rather than assumed. Each flag
+    // is kept separately because they fail for different reasons, and "screen
+    // sharing is not supported" is only true for one of them.
+    //
+    // `isAndroid` is deliberately NOT part of the decision to try. The user
+    // agent is a hint about which platform we are on, never evidence that the
+    // bridge works — and making it a *requirement* is what turned one missing
+    // flag into a flat refusal on a phone that had the bridge the whole time.
+    // The attempt is made whenever the bridge is present; a rejection from the
+    // native side is then reported with its own message.
+    function _screenProbe() {
         var tauri = window.__TAURI__;
-        if (!tauri || !tauri.core || !tauri.core.invoke || !tauri.core.Channel) return false;
-        return /Android/i.test(navigator.userAgent || '');
+        var core = tauri && tauri.core;
+        return {
+            hasTauri: !!tauri,
+            hasInvoke: !!(core && typeof core.invoke === 'function'),
+            hasChannel: !!(core && typeof core.Channel === 'function'),
+            isAndroid: /Android/i.test(navigator.userAgent || ''),
+            hasGetDisplayMedia: !!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia),
+        };
+    }
+
+    function _boxNativeScreenSupported() {
+        var p = _screenProbe();
+        return p.hasInvoke && p.hasChannel;
+    }
+
+    function getScreenDiag() {
+        return JSON.parse(JSON.stringify(_screenDiag));
     }
 
     function _startNativeScreenCapture(scrH) {
+        var probe = _screenProbe();
+        _screenDiag.path = 'native';
+        _screenDiag.state = 'requested';
+        _screenDiag.probe = probe;
+        _screenDiag.blockedBy = null;
+        _screenDiag.lastError = null;
+        _screenDiag.pickerShown = false;
+        _screenDiag.frames = 0;
+        _screenDiag.decoded = 0;
+        _screenDiag.dropped = 0;
+        _screenDiag.bytes = 0;
+        _screenDiag.w = 0;
+        _screenDiag.h = 0;
+        _screenDiag.fps = 0;
+        _screenDiag.startedAt = Date.now();
+        _screenDiag.lastFrameAt = 0;
+
         if (!_boxNativeScreenSupported()) {
+            // Two very different failures used to wear the same words in the
+            // UI, so they are kept apart here: "this page has no bridge at all"
+            // (a plain browser, or a box predating native capture) genuinely is
+            // unsupported, while "the bridge exists but is incomplete" is a
+            // build problem and worth naming.
+            _screenDiag.state = 'error';
+            _screenDiag.blockedBy = probe.hasTauri
+                ? 'the native bridge is present but incomplete (invoke=' + probe.hasInvoke + ', Channel=' + probe.hasChannel + ')'
+                : 'no native bridge in this page (a plain browser, or a box older than native capture)';
             showToast('Screen sharing is not supported on this device.');
             return Promise.resolve();
         }
@@ -1851,22 +1949,55 @@
         ch.onmessage = function (msg) {
             if (stopped || !msg) return;
             if (msg.type === 'error') {
+                _screenDiag.state = 'error';
+                _screenDiag.lastError = msg.message || 'capture failed';
                 _abortNativeScreen(msg.message || 'capture failed');
                 return;
             }
+            if (msg.type === 'started') {
+                // The user approved the picker and the native side owns the
+                // display. Frames follow from here.
+                _screenDiag.state = 'capturing';
+                _screenDiag.w = msg.w || 0;
+                _screenDiag.h = msg.h || 0;
+                _screenDiag.fps = msg.fps || 10;
+                return;
+            }
+            if (msg.type === 'stopped') {
+                // The user ended the share from the system "Stop" chip. The
+                // page used to ignore this entirely, so it went on believing it
+                // was still sharing (and kept its tile) until something else
+                // tore the capture down.
+                _screenDiag.state = 'stopped';
+                // The native side has already released the projection — drop our
+                // handle so stopScreen() does not ask it to stop a second time.
+                _nativeScreen = null;
+                stopScreen();
+                return;
+            }
             if (msg.type !== 'frame' || !msg.jpeg) return;
+            _screenDiag.frames++;
+            _screenDiag.bytes += msg.jpeg.length;
+            _screenDiag.lastFrameAt = Date.now();
             pending.push(msg);
             // Decode at most one frame at a time: a burst of base64 payloads
             // queued as separate Images would decode out of order and waste
             // memory. Keeping only the newest frame also means a slow decoder
             // naturally drops stale frames instead of falling behind.
-            if (pending.length > 1) pending.splice(0, pending.length - 1);
+            if (pending.length > 1) {
+                _screenDiag.dropped += pending.length - 1;
+                pending.splice(0, pending.length - 1);
+            }
             _drainNativeFrames();
         };
 
         function _abortNativeScreen(why) {
             stopped = true;
             _nativeScreen = null;
+            if (_screenDiag.state !== 'stopped') {
+                _screenDiag.state = 'error';
+                _screenDiag.lastError = why || 'capture failed';
+            }
             S.screenOn = false;
             _boxSyncCallServiceTypes();
             // Cancelling the system picker is a normal choice, not a failure —
@@ -1886,6 +2017,7 @@
             img.onload = function () {
                 decoding = false;
                 if (stopped) return;
+                _screenDiag.decoded++;
                 var w = frame.w || img.naturalWidth;
                 var h = frame.h || img.naturalHeight;
                 if (canvas.width !== w || canvas.height !== h) {
@@ -1935,18 +2067,34 @@
             _onScreenStream(stream);
         }
 
-        return tauri.core.invoke('plugin:call-service|startScreenCapture', {
-            onFrame: ch,
-            maxHeight: scrH,
-            fps: 10,
-        }).catch(function (e) {
-            _abortNativeScreen((e && e.message) || String(e));
-        });
+        // From here the permission dialog is the native side's to show; record
+        // that we asked, because "never shown" and "shown and refused" are
+        // different problems with different fixes.
+        _screenDiag.pickerShown = true;
+        // Apply the foreground-service types and WAIT for that to land before
+        // opening the picker. Without this the projection can be created before
+        // the `mediaProjection` type is in place, which API 34+ answers with a
+        // SecurityException — i.e. a share that fails for a reason that looks
+        // nothing like the cause.
+        return Promise.resolve(_boxSyncCallServiceTypes())
+            .then(function () {
+                return tauri.core.invoke('plugin:call-service|startScreenCapture', {
+                    onFrame: ch,
+                    maxHeight: scrH,
+                    fps: 10,
+                });
+            })
+            .catch(function (e) {
+                _abortNativeScreen((e && e.message) || String(e));
+            });
     }
 
     function _stopNativeScreenCapture() {
         if (!_nativeScreen) return;
         _nativeScreen = null;
+        if (_screenDiag.state === 'capturing' || _screenDiag.state === 'requested') {
+            _screenDiag.state = 'stopped';
+        }
         var tauri = window.__TAURI__;
         if (tauri && tauri.core && tauri.core.invoke) {
             try { tauri.core.invoke('plugin:call-service|stopScreenCapture'); } catch (_) {}
@@ -11025,6 +11173,51 @@
         return html;
     }
 
+    // One block of plain text describing the last screen-share attempt. Built
+    // only from `_screenDiag` — no getStats, no device access — so it renders
+    // instantly and reads the same whether a share is live or long over. This
+    // is the "why did it not work on my phone" answer that needs no adb.
+    function screenDiagHtml() {
+        var d = _screenDiag;
+        var rows = [];
+        var stateColor = d.state === 'error' ? '#f23f42' : (d.state === 'capturing' ? '#57f287' : 'var(--text-primary)');
+        rows.push('<div>▸ <b>Screen share</b>  [<span style="color:' + stateColor + '">' + esc(d.state) + '</span>' + (d.path ? ' / ' + esc(d.path) : '') + ']</div>');
+        if (d.blockedBy) {
+            rows.push('<div style="padding-left:12px">' + icon('warning') + ' not attempted: ' + esc(d.blockedBy) + '</div>');
+        }
+        if (d.lastError) {
+            rows.push('<div style="padding-left:12px">' + icon('warning') + ' last error: ' + esc(String(d.lastError)) + '</div>');
+        }
+        if (d.probe) {
+            var p = d.probe;
+            rows.push('<div style="padding-left:12px">bridge: tauri ' + (p.hasTauri ? '✓' : '✗')
+                + ' · invoke ' + (p.hasInvoke ? '✓' : '✗')
+                + ' · Channel ' + (p.hasChannel ? '✓' : '✗')
+                + ' · android-ua ' + (p.isAndroid ? '✓' : '✗')
+                + ' · getDisplayMedia ' + (p.hasGetDisplayMedia ? '✓' : '✗') + '</div>');
+        }
+        if (d.path === 'native') {
+            rows.push('<div style="padding-left:12px">picker ' + (d.pickerShown ? 'shown' : 'not shown')
+                + ' · frames ' + d.frames
+                + ' · decoded ' + d.decoded
+                + ' · dropped ' + d.dropped
+                + ' · ' + fmtBytes(d.bytes)
+                + (d.w ? ' · ' + d.w + '×' + d.h + ' @' + (d.fps || 0) + 'fps' : '') + '</div>');
+            if (d.lastFrameAt) {
+                rows.push('<div style="padding-left:12px">last frame ' + Math.max(0, Math.round((Date.now() - d.lastFrameAt) / 1000)) + 's ago</div>');
+            }
+            if (d.state === 'capturing' && d.frames === 0) {
+                rows.push('<div style="padding-left:12px;color:#f0b232">' + icon('warning') + ' the capture started but no frames have arrived — the native side is not producing images (is the foreground-service type mediaProjection actually applied?).</div>');
+            } else if (d.state === 'capturing' && d.decoded === 0) {
+                rows.push('<div style="padding-left:12px;color:#f0b232">' + icon('warning') + ' frames arrive but none decode — the WebView is not painting the captured JPEGs (out of memory, or a broken frame).</div>');
+            }
+        }
+        if (d.path === null && d.state === 'idle') {
+            rows.push('<div style="padding-left:12px;color:var(--text-muted)">No screen share attempted this session.</div>');
+        }
+        return '<div style="margin-bottom:6px">' + rows.join('') + '</div>';
+    }
+
     function renderVoiceDiag() {
         var list = el('voice-diag-list');
         if (!list) return;
@@ -11033,11 +11226,15 @@
             // The panel may have been closed or re-rendered meanwhile — only
             // paint if it's still the same element.
             if (el('voice-diag-list') !== list) return;
+            // The screen-share block is rendered even with no call in progress:
+            // a failed share is exactly the case where you open this panel, and
+            // by then the call may already be over.
             if (!peers.length) {
-                list.innerHTML = '<div style="color:var(--text-muted)">Not in a call — join a voice channel or DM call to see per-peer stats.</div>';
+                list.innerHTML = screenDiagHtml()
+                    + '<div style="color:var(--text-muted)">Not in a call — join a voice channel or DM call to see per-peer stats.</div>';
                 return;
             }
-            var html = peers.map(diagPeerHtml).join('');
+            var html = screenDiagHtml() + peers.map(diagPeerHtml).join('');
             html += '<div style="color:var(--text-muted);margin-top:6px">Updated ' + new Date(when).toLocaleTimeString() + ' · ' + peers.length + ' peer(s)</div>';
             list.innerHTML = html;
         });

@@ -1,6 +1,6 @@
 [package]
 name = "e2e-chat-app"
-version = "0.2.17"
+version = "0.2.18"
 description = "E2E Chat — native desktop shell for the encrypted chat app"
 authors = ["E2E Chat"]
 edition = "2021"

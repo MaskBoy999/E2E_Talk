@@ -29,14 +29,15 @@ android {
 
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
-    // `ComponentActivity.registerForActivityResult` — the MediaProjection
-    // permission dialog is an activity result, and Android only lets a plugin
-    // register the launcher before the activity is STARTED (so it happens in
-    // ScreenCapture's initialiser). The Android module does NOT inherit the app
-    // module's dependencies, so this has to be declared here at the same
-    // version the generated app uses (see plugins/box-shell, which needed the
-    // same line for `onBackPressedDispatcher`).
-    implementation("androidx.appcompat:appcompat:1.7.1")
+    // `androidx.activity.result.ActivityResult` — the type of the system
+    // picker's answer handed to our `@ActivityCallback`. `compileOnly` because
+    // the *type* is all we need: the app always has this artifact at runtime
+    // (Tauri's own `PluginManager` registers its launchers with it), and
+    // declaring it as a real dependency would bump the app's resolved version
+    // for no reason. 1.6.0 is what this module already resolves to (tauri-android
+    // depends on appcompat 1.6.0); naming any other version fights Gradle's
+    // consistent resolution and fails the build outright.
+    compileOnly("androidx.activity:activity:1.6.0")
     // Provided by the generated Android project (`cargo tauri android init`).
     implementation(project(":tauri-android"))
 }

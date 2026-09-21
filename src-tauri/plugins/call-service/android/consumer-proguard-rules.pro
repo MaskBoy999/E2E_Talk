@@ -1,3 +1,14 @@
+# ── The Kotlin plugin classes are reached by NAME, so R8 cannot see them ──
+#
+# Rust resolves this plugin with `find_class("com/e2echat/callservice/…")` from
+# a string, and PluginHandle then invokes the `@Command` / `@ActivityCallback`
+# methods by reflection. R8 sees no reference to any of it, which makes both the
+# class names and the annotated methods fair game for renaming and stripping in
+# a minified release — and the failure is not a broken feature but a launch that
+# dies while building the plugin (`find_class` throws). That is a release-only
+# crash you cannot reproduce from a debug build, so the names are pinned here.
+-keep class com.e2echat.callservice.** { *; }
+
 # Consumer rules for the generated Android app.
 #
 # These are merged into the app module's R8/ProGuard configuration automatically

@@ -3,6 +3,8 @@ package com.e2echat.callservice
 import android.app.Activity
 import android.content.Intent
 import android.os.Build
+import androidx.activity.result.ActivityResult
+import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.TauriPlugin
@@ -53,11 +55,23 @@ class ScreenCaptureArgs {
 class CallServicePlugin(private val activity: Activity) : Plugin(activity) {
 
     /**
-     * Constructed here, not lazily: the class registers the screen-capture
-     * permission launcher in its initialiser, and Android only allows that
-     * before the activity is STARTED (plugins are built during `onCreate`).
+     * Built on first use — deliberately, not "for performance".
+     *
+     * A plugin is constructed *after* the activity is already running, so any
+     * lifecycle-sensitive registration performed from a constructor throws from
+     * the constructor itself: `registerForActivityResult`, for example, is only
+     * legal before the activity reaches STARTED. An exception escaping the
+     * constructor on the launch path is an app crash on start-up, not a failed
+     * screen share. Keeping the field lazy means constructing this plugin can
+     * only ever allocate a reference, and the picker is launched through Tauri's
+     * own activity-result plumbing instead (see [screenCaptureResult]).
      */
-    private val screenCapture = ScreenCapture(activity)
+    private val screenCapture by lazy { ScreenCapture(activity) }
+
+    private companion object {
+        /** Same tag as ScreenCapture.kt, so one logcat filter shows the flow. */
+        const val SCREEN_TAG = "E2EScreenCapture"
+    }
 
     @Command
     fun start(invoke: Invoke) {
@@ -122,9 +136,17 @@ class CallServicePlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     /**
-     * Start sharing the screen natively. Resolves as soon as the system picker
-     * has been asked; the outcome arrives on the `onFrame` channel as
+     * Start sharing the screen natively: pick the geometry, ask the system
+     * picker, and let [screenCaptureResult] finish it. The outcome of the
+     * capture itself arrives on the `onFrame` channel as
      * `{type:"started"|"frame"|"stopped"|"error"}`.
+     *
+     * The picker is launched through Tauri's own activity-result plumbing rather
+     * than a launcher owned by this plugin, because `PluginManager` registers
+     * its launchers once from `onActivityCreate` — early enough to always be
+     * legal, unlike anything we could register ourselves. This does mean the
+     * command resolves after the user answers the dialog; the page does not
+     * depend on that timing, since it acts on the channel messages.
      */
     @Command
     fun startScreenCapture(invoke: Invoke) {
@@ -134,22 +156,64 @@ class CallServicePlugin(private val activity: Activity) : Plugin(activity) {
             invoke.reject("startScreenCapture needs an onFrame channel")
             return
         }
+        val intent = try {
+            screenCapture.prepare(ch, args.maxHeight ?: 480, args.fps ?: 10)
+        } catch (e: Exception) {
+            android.util.Log.e(SCREEN_TAG, "prepare() failed", e)
+            invoke.reject("Could not start screen capture: ${e.message}")
+            return
+        }
+        android.util.Log.i(SCREEN_TAG, "opening the system screen-capture picker")
+        startActivityForResult(invoke, intent, "screenCaptureResult")
+    }
+
+    /**
+     * The system picker's answer. Always resolves the command: declining the
+     * dialog is a normal choice, and the page is told about it over the channel,
+     * which is what raises the toast.
+     */
+    @ActivityCallback
+    fun screenCaptureResult(invoke: Invoke, result: ActivityResult) {
+        val data = result.data
+        // Everything is wrapped, including the resolve: this runs on the main
+        // thread as an activity-result callback, and an exception escaping it
+        // is not a failed screen share — it is a process crash. A failed
+        // capture must always degrade to a message the page can show.
         try {
-            screenCapture.request(ch, args.maxHeight ?: 480, args.fps ?: 10)
+            if (result.resultCode == Activity.RESULT_OK && data != null) {
+                android.util.Log.i(SCREEN_TAG, "capture approved by the user")
+                screenCapture.begin(result.resultCode, data)
+            } else {
+                android.util.Log.i(SCREEN_TAG, "screen capture was not approved")
+                screenCapture.fail("permission denied")
+            }
+        } catch (e: Exception) {
+            android.util.Log.e(SCREEN_TAG, "could not start the projection", e)
+            try {
+                screenCapture.fail("could not start screen capture: ${e.message}")
+            } catch (_: Exception) {
+                // Nothing left to do; the page will time out and say so.
+            }
+        }
+        try {
             invoke.resolve()
         } catch (e: Exception) {
-            invoke.reject("Could not start screen capture: ${e.message}")
+            android.util.Log.w(SCREEN_TAG, "could not settle the capture command: ${e.message}")
         }
     }
 
     @Command
     fun stopScreenCapture(invoke: Invoke) {
+        // Stopping is the one command that must never fail: it is what releases
+        // the projection and gives Android back its screen-capture session. A
+        // rejection here would leave the page believing a share is still live,
+        // so the command always resolves and only logs.
         try {
             screenCapture.stop()
-            invoke.resolve()
         } catch (e: Exception) {
-            invoke.reject("Could not stop screen capture: ${e.message}")
+            android.util.Log.e(SCREEN_TAG, "stop() threw", e)
         }
+        invoke.resolve()
     }
 
     @Command

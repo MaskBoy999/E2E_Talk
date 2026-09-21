@@ -7664,3 +7664,149 @@ from this release fixes it; `ie4uinit.exe -show` forces Explorer to rebuild the
 cache.
 
 **Files:** `src-tauri/build.rs`
+
+### 141. Android screen share is no longer gated on the user agent (v0.2.18)
+
+**Symptom:** after v0.2.17 shipped the native MediaProjection path, pressing
+Share screen on a phone still said *"screen sharing is not supported on this
+device"*.
+
+**Root cause:** that one message had three unrelated triggers, and the check
+that produced it **required** an Android user agent *in addition to* the Tauri
+bridge:
+
+```js
+if (!tauri || !tauri.core || !tauri.core.invoke || !tauri.core.Channel) return false;
+return /Android/i.test(navigator.userAgent || '');   // ← the gate
+```
+
+A user agent is a *hint about the platform*, never evidence that the bridge
+works. Making it a requirement meant any single flag that read `false` produced
+an identical, unfalsifiable refusal — with no way to tell "this page has no
+bridge" apart from "the bridge is there but one field is missing".
+
+**Fix:** the decision is now made on the bridge alone (`invoke` +
+`Channel`), and the UA is recorded, not enforced. `_screenProbe()` reports each
+capability separately; when the bridge really is absent the message says *which*
+thing was missing, and a rejection from the native side is surfaced with its own
+wording instead of being flattened into "not supported".
+
+**The `stopped` message is now handled too.** `ScreenCapture.kt` has always
+posted `{type:"stopped"}` when the user ends a share from the system chip, and
+the page ignored it — so the app went on believing it was still sharing (and kept
+its tile) until something else tore the capture down.
+
+**Files:** `static/voice.js`
+
+### 142. Releasing a screen share crashed the app (v0.2.18)
+
+**Symptom:** stopping a screen share, or the system ending it, closed the app.
+
+**Root cause:** `MediaProjection.stop()` invokes the registered
+`MediaProjection.Callback.onStop()`, and the callback's teardown called
+`stop()` on the projection again:
+
+```
+stop() → projection.stop() → onStop() → stop() → projection.stop() → …
+```
+
+with no base case. The chain ends as a `StackOverflowError` on the capture
+thread — an `Error`, so it is not catchable in any useful way, and it takes the
+whole process down. Nothing about the capture itself was wrong; only the way it
+was released was.
+
+**Fix — both halves, because either alone leaves a hole:**
+
+* a `stopping` flag makes teardown **idempotent**, so a re-entrant call returns
+  immediately instead of recursing; and
+* the callback is **unregistered before** the projection is stopped, so the
+  platform has nothing left to call back into.
+
+`prepare()` clears the flag, because a projection that has been stopped must be
+replaceable by the next share — otherwise screen sharing would work exactly once
+per app run. The page also drops its handle on the `stopped` path so it does not
+ask the native side to stop something it already released.
+
+**Also hardened in the same pass:**
+
+* `screenCaptureResult` (the `@ActivityCallback`) is fully wrapped, including
+  the final `invoke.resolve()`. It runs on the main thread, where an escaping
+  exception is not a failed screen share — it is a process crash.
+* `stopScreenCapture` **always resolves** and only logs. A rejection there would
+  leave the page convinced a share is still live, and stopping is the one
+  command that must never fail.
+* `begin()` turns the API 34 `SecurityException` from `createVirtualDisplay`
+  into a sentence that names the `mediaProjection` foreground-service type,
+  rather than surfacing a bare platform string (or a lie about "0.2.17").
+* Frame decoding is wrapped per-frame: a torn buffer during a rotation or the
+  final frame of a stop dropped a frame correctly before, but a bad `rowStride`
+  could still throw out of the reader callback. A zero/negative padded width is
+  now rejected outright.
+
+**Tests:** `tests/android-plugin-startup.spec.ts` gained three source-level
+guards (the re-entrancy flag + `unregisterCallback`, the contained callback,
+and the named foreground-service failure). They are source-level on purpose:
+every failure they describe happens on a device, in a minified release build.
+
+**Files:** `plugins/call-service/android/.../ScreenCapture.kt`,
+`.../CallServicePlugin.kt`, `tests/android-plugin-startup.spec.ts`
+
+### 143. Screen-share state is readable on a phone (v0.2.18)
+
+**Symptom:** when a share failed on a device, the only ways to find out why were
+`adb logcat` or guesswork. A phone has no console.
+
+**Fix:** the existing diagnostics panel (Settings → Voice → Advanced) now opens
+with a **Screen share** block: which capture path ran (`browser`/`native`), the
+state (`requested`/`capturing`/`stopped`/`error`), every capability the probe
+observed (`tauri`, `invoke`, `Channel`, `android-ua`, `getDisplayMedia`), whether
+the system picker was shown, frames captured / decoded / dropped, payload size,
+capture geometry, and the last error verbatim.
+
+It is written and never read — nothing in the capture path branches on it — so it
+cannot change behaviour. It renders even **outside** a call, because a failed
+share is exactly when you open the panel and by then the call may be over.
+
+**Tests:** `tests/screen-share-native.spec.ts` (8 tests) installs a stand-in
+Tauri bridge in the page, which makes the whole *page half* of native capture
+testable without a device: that a non-Android UA still takes the native path,
+that the no-bridge refusal names the real reason, that frames from the channel
+decode onto the canvas stream the pipeline consumes, and that both a failure and
+the screen-share block are readable in the panel.
+
+**Files:** `static/voice.js`, `static/index.html` (cache-buster), `static/sw.js`,
+`tests/screen-share-native.spec.ts`
+
+### 144. The Windows installer refreshes Explorer's icon cache (v0.2.18)
+
+**Symptom:** after an upgrade the desktop shortcut could still show the old
+artwork even though the new icon was embedded in the `.exe` correctly (§140).
+
+**Root cause:** Explorer paints a shortcut's icon from its **icon cache**, which
+is keyed by path. An upgrade replaces the `.exe` at the same path, so the cached
+entry stays valid as far as the shell is concerned and the old drawing survives.
+§140 fixed what is *inside* the `.exe`; this fixes what Explorer *displays*.
+
+**Fix:** `src-tauri/windows/installer-hooks.nsh` defines `NSIS_HOOK_POSTINSTALL`
+(and `POSTUNINSTALL`), wired through `bundle.windows.nsis.installerHooks`. It:
+
+1. calls `SHChangeNotify(SHCNE_ASSOCCHANGED)` to invalidate the running shell's
+   in-memory caches immediately, and `SHCNE_UPDATEDIR` for the install directory;
+2. runs `ie4uinit.exe -show` so Windows rebuilds the **persisted** cache, with
+   `-ClearIconCache` as a fallback for older shells.
+
+The hook runs *after* the shortcuts are created, which is what makes it
+effective. Every call is best-effort — results are popped and discarded — so a
+failure can never fail the installation. Deleting `iconcache_*.db` by hand is
+deliberately **not** attempted: Explorer holds those files open, so it either
+silently fails or races the shell.
+
+**Verified:** Tauri's generated `installer.nsi` `!include`s the hook file and
+inserts `NSIS_HOOK_POSTINSTALL` directly after `CreateOrUpdateDesktopShortcut`;
+`makensis` compiles it into `E2E Chat_0.2.18_x64-setup.exe`.
+
+**Note:** this covers the NSIS `-setup.exe`. The `.msi` (WiX) has no equivalent
+hook without a custom action, so a user installing only the MSI still needs the
+reinstall-or-`ie4uinit` route described in §140.
+
+**Files:** `src-tauri/windows/installer-hooks.nsh`, `src-tauri/tauri.conf.json`
