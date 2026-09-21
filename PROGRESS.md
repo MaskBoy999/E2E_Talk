@@ -7576,3 +7576,24 @@ storage, causing black screens, wrong identities, or stale data.
 "Clear All Data & Sign Out" to achieve the same effect without reinstalling.
 
 **Files:** `static/box-setup.html`
+
+### 138. Context-menu icons rendered as literal SVG text (v0.2.16)
+
+**Symptom:** right-clicking an image, file, emoji, sticker, or GIF showed the
+raw `<svg class="ui-icon" ...><use href="#icon-download"/></svg>` markup as
+menu text instead of the glyph.
+
+**Root cause:** `showContextMenuAt()` in `static/chat.js` inserts labels via
+`textContent` (deliberately, so filenames can't inject markup), but the
+attachment/emoji/sticker/GIF menus embedded inline `<svg>` in the label string.
+
+**Fix:** the renderer now accepts a dedicated `icon` field (rendered from the
+trusted local `icon()` sprite helper via `innerHTML`) and inserts the label as
+text inside a `.context-menu-label` span — the same pattern the channel context
+menu already used. The label stays text, so a filename like
+`<img src=x onerror=...>.png` is inert.
+
+**Tests:** `tests/context-menu-icons.spec.ts` (2 tests) — both fail against the
+pre-fix `chat.js` and pass with the fix.
+
+**Files:** `static/chat.js`, `static/index.html` (chat.js cache-buster), `tests/context-menu-icons.spec.ts`
