@@ -2,6 +2,7 @@ package com.e2echat.callservice
 
 import android.app.Activity
 import android.content.Intent
+import android.media.projection.MediaProjectionManager
 import android.os.Build
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
@@ -36,6 +37,68 @@ class IncomingCallArgs {
  */
 @TauriPlugin
 class CallServicePlugin(private val activity: Activity) : Plugin(activity) {
+
+    companion object {
+        const val SCREEN_CAPTURE_REQUEST = 0x4E53 // "NS" in hex
+    }
+
+    private var screenCaptureResultCode: Int = 0
+    private var screenCaptureData: Intent? = null
+    private var screenCapturePendingInvoke: Invoke? = null
+
+    /**
+     * Request screen capture via MediaProjection. Shows the system picker.
+     * Returns { granted: true, resultCode, data } on approval, or
+     * { granted: false } on denial.
+     */
+    @Command
+    fun requestScreenCapture(invoke: Invoke) {
+        val mgr = activity.getSystemService(Activity.MEDIA_PROJECTION_SERVICE) as? MediaProjectionManager
+        if (mgr == null) {
+            invoke.reject("MediaProjectionManager not available")
+            return
+        }
+        screenCapturePendingInvoke = invoke
+        try {
+            activity.startActivityForResult(
+                mgr.createScreenCaptureIntent(),
+                SCREEN_CAPTURE_REQUEST
+            )
+        } catch (e: Exception) {
+            screenCapturePendingInvoke = null
+            invoke.reject("Could not start screen capture: ${e.message}")
+        }
+    }
+
+    /**
+     * Called when the system picker returns. Completes the pending invoke.
+     */
+    fun onScreenCaptureResult(resultCode: Int, data: Intent?) {
+        val invoke = screenCapturePendingInvoke ?: return
+        screenCapturePendingInvoke = null
+        if (resultCode == Activity.RESULT_OK && data != null) {
+            screenCaptureResultCode = resultCode
+            screenCaptureData = data
+            invoke.resolve(org.json.JSONObject().apply {
+                put("granted", true)
+                put("resultCode", resultCode)
+            })
+        } else {
+            invoke.resolve(org.json.JSONObject().apply {
+                put("granted", false)
+            })
+        }
+    }
+
+    /**
+     * Stop any active screen capture projection.
+     */
+    @Command
+    fun stopScreenCapture(invoke: Invoke) {
+        screenCaptureResultCode = 0
+        screenCaptureData = null
+        invoke.resolve()
+    }
 
     @Command
     fun start(invoke: Invoke) {

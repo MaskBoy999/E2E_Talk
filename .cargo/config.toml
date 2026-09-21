@@ -73,8 +73,10 @@ WRY_RUSTWEBVIEWCLIENT_CLASS_EXTENSION = { force = true, value = """
 # The symptom: pressing Share screen on Android either does nothing, or the picker
 # opens and closes immediately with no track returned.
 #
-# The fix: override `onPermissionRequest` to grant `MediaProjection` requests
-# (they come with `resources = [Manifest.permission.ACCESS_MEDIA_PROJECTION]`).
+# KEY FIX: Grant MediaProjection BEFORE calling super. Wry's onPermissionRequest
+# auto-grants AUDIO/VIDEO_CAPTURE and auto-denies everything else — if super
+# runs first it denies MediaProjection.
+#
 # This is safe because:
 #   * screen capture is always user-initiated (the system picker must be dismissed
 #     by the user — the app cannot programmatically capture the screen);
@@ -87,18 +89,29 @@ WRY_RUSTWEBCHROME_CLIENT_CLASS_EXTENSION = { force = true, value = """
     // Injected by .cargo/config.toml. Wry's default RustWebChromeClient does not
     // handle MediaProjection permission requests, which getDisplayMedia() needs on
     // Android. Without this override the display-capture request is auto-denied.
+    //
+    // KEY FIX: Grant MediaProjection BEFORE calling super. Wry's
+    // onPermissionRequest auto-grants AUDIO/VIDEO_CAPTURE and auto-denies
+    // everything else — if super runs first it may deny MediaProjection.
+    // Also check both string-based resource names (the Chromium WebView may
+    // send either format depending on the Android version).
     override fun onPermissionRequest(request: PermissionRequest) {
-        super.onPermissionRequest(request)
-        // Grant MediaProjection requests (screen capture from getDisplayMedia).
-        // The user has already approved this via the system picker, so granting
-        // here is just completing what the user started.
-        if (request.resources.contains(
-                android.Manifest.permission.ACCESS_MEDIA_PROJECTION
-            ) || request.resources.contains(
-                android.Manifest.permission.MEDIA_PROJECTION
-            )
-        ) {
-            request.grant()
+        val resources = request.resources.toList()
+        val isMediaProjection = resources.any { r ->
+            r == android.Manifest.permission.ACCESS_MEDIA_PROJECTION ||
+            r == android.Manifest.permission.MEDIA_PROJECTION ||
+            r == "android.webkit.permission.MEDIA_PROJECTION" ||
+            r == "android.webkit.resource.MEDIA_PROJECTION"
         }
+        if (isMediaProjection) {
+            // Grant immediately — the user has already approved via the system
+            // picker; calling super first would auto-deny this unknown resource.
+            android.util.Log.i("E2EChat", "Granting screen capture permission")
+            request.grant(request.resources)
+            return
+        }
+        // For audio/video capture: let wry's default handler show the
+        // Android permission dialog (RECORD_AUDIO, CAMERA).
+        super.onPermissionRequest(request)
     }
 """ }

@@ -1713,6 +1713,10 @@
         // encrypted per-peer, so huge native-res/fps captures starve the
         // pipeline and produce decoder artifacts.
         var scrH = S.settings.sendScreenRes || 480;
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+            showToast('Screen sharing is not supported on this device.');
+            return Promise.resolve();
+        }
         return navigator.mediaDevices.getDisplayMedia({
             video: {
                 cursor: 'always',
@@ -1767,8 +1771,18 @@
                 updateSelfUI();
             })
             .catch(function (err) {
-                console.warn('Screen share denied:', err);
-                showToast('Screen sharing was denied.');
+                console.warn('Screen share error:', err.name, err.message);
+                var msg = 'Screen sharing failed: ';
+                if (err.name === 'NotAllowedError') {
+                    msg += 'Permission denied. On Android, screen capture requires approval via the system dialog.';
+                } else if (err.name === 'NotFoundError') {
+                    msg += 'No screen capture available on this device.';
+                } else if (err.name === 'AbortError') {
+                    msg += 'Cancelled.';
+                } else {
+                    msg += (err.message || 'Unknown error');
+                }
+                showToast(msg);
             });
     }
 
