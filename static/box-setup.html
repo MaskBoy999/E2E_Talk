@@ -285,6 +285,13 @@
             setStatus('err', 'The server did not answer in time. Check Tailscale and the '
                 + 'address, then press Test connection.');
         }, 25000);
+        // Clear all old/stale storage before saving a new server address.
+        // This avoids carrying over bugged cookies, encrypted keys, or
+        // session tokens from a previous server that can cause black
+        // screens, wrong identities, or stale data on the new host.
+        try { localStorage.clear(); } catch (_) {}
+        try { sessionStorage.clear(); } catch (_) {}
+        try { indexedDB.databases().then(function(dbs) { dbs.forEach(function(db) { indexedDB.deleteDatabase(db.name); }); }); } catch (_) {}
         invoke('save_config', {
             serverUrl: url,
             autoStart: autoStartEl.checked,
