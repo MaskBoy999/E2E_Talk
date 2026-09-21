@@ -1532,7 +1532,7 @@ to confirm all three sets really came from one source).
 | Item                        | What settles it                                                                                             |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------ |
 | 13.4 Android notifications  | `adb logcat \| grep -iE 'E2EChat\|Notification'` while a message arrives and while a call rings; and Settings → Apps → E2E Chat → Notifications to see whether `POST_NOTIFICATIONS` was ever granted |
-| 13.6 Screen share           | the same logcat, filtered for `onPermissionRequest` / `PermissionRequest`                                    |
+| 13.6 Screen share           | the same logcat, filtered for `E2EScreenCapture`                                                             |
 | 13.5 Background voice       | after installing the new APK: `adb shell dumpsys activity services \| grep -i CallForegroundService` during a screen-off call (should list `types=microphone\|phoneCall`) |
 | 13.1 / 13.2 / 13.3          | eyes and a back button — no logs needed. **Now implemented** (§13.9); a phone confirms them, nothing here can. |
 
@@ -1629,7 +1629,7 @@ they are the honest to-do list for the next session:
 
 | Item | State | What unblocks it |
 | ---- | ----- | ---------------- |
-| 13.6 Android screen share | **fixed (v0.2.15).** The `onPermissionRequest` override now grants MediaProjection *before* calling super (which auto-denies it). `getDisplayMedia()` should now trigger the system picker and return a track. | Install v0.2.15 APK, join a voice channel, press Share screen → system picker should appear |
+| 13.6 Android screen share | **superseded — see §13.13.** The `onPermissionRequest` override (v0.2.15) was necessary but not sufficient: Android WebView has no Screen Capture API at all, so that callback is never reached. Replaced by a native MediaProjection capture in v0.2.17. | Install the v0.2.17 APK, join a voice channel, press Share screen → the system picker must appear |
 | Call/screen-share popup above other apps | **not built.** The desktop design is a second frameless always-on-top window (plus tray-way-back and a hide button) with a new bundled control page; the Android design is notification actions. Both were agreed in §13.4, neither is written. | nothing external — this is real work (new window, new page, new commands) |
 | Key "not really persisted" | **not investigated.** `secure-storage.js` keeps the key in `sessionStorage` + `localStorage` bootstrapped by `e2e_device_key`; what Android's WebView does to that storage across a cold start (and whether the encrypted-password bootstrap path is what reinstates it) has not been measured. Workstream B's keychain storage is the durable fix either way. | a device + inspecting the app's storage after a cold start |
 | Call notification with richer actions (mute / stop sharing) | **mostly impossible while frozen**, by design, not by omission: Android freezes the WebView when the app is backgrounded, so a notification action has no JS to act on — the honest implementation is "tap to return to the actions", which is what the existing ongoing notification already does. Anything more needs a native WebRTC path or a server-visible call state. | a decision on whether to add native call control |
@@ -1707,3 +1707,72 @@ push published the branch and silently left the tag behind, which would have
 meant no release at all while everything looked fine. The tag needs its own
 push (`git push origin vX.Y.Z`); check with
 `git ls-remote --tags origin | grep vX.Y.Z` before assuming CI has been woken.
+
+### 13.13 Android screen share, the real story — v0.2.17
+
+**§13.6 was diagnosed one layer too high.** It concluded that wry's
+`RustWebChromeClient.onPermissionRequest` was auto-denying the WebView's
+display-capture request, and v0.2.15 changed that override to grant
+MediaProjection before delegating to `super`. That fix is *correct* — it just
+never runs, because there is no such request to answer.
+
+**The actual cause.** `navigator.mediaDevices.getDisplayMedia()` is a **Chrome**
+API. The Android **system WebView** — the only engine the box can render in — has
+never implemented the Screen Capture API. `navigator.mediaDevices` exists (camera
+and microphone work in the box, so `getUserMedia` is fine), but `getDisplayMedia`
+is `undefined`. Hence the literal "screen sharing is not supported on this
+device" the button produced. Web-search confirmation, and the reason Discord's
+Android client does not use the WebView for capture either: the platform API is
+the **only** route, and it is `MediaProjection`.
+
+**The implementation (and why it reuses the whole pipeline).**
+
+| Piece | Where | What it does |
+| --- | --- | --- |
+| Capture | `plugins/call-service/android/.../ScreenCapture.kt` (new) | System picker → `MediaProjection` → `VirtualDisplay` + `ImageReader` → downscale → JPEG → base64 → Tauri **channel** |
+| Bridge | `CallServicePlugin.kt` `startScreenCapture` / `stopScreenCapture` | The commands; declared in the plugin's `build.rs` + `permissions/default.toml` so the remote page's `call-service:default` grant covers them |
+| Glue | `static/voice.js` `_startNativeScreenCapture()` | Paints each frame onto a canvas, `captureStream(0)` + `requestFrame()` → a **real MediaStream** → the existing `_onScreenStream()` |
+
+The choice that made this tractable: **hand the page an ordinary `MediaStream`.**
+Because a canvas stream is indistinguishable from a `getDisplayMedia` stream, the
+relay encoder, the AES-GCM per-peer encryption, the tiles, the per-member volume
+and the screen-audio relay are all untouched — the two capture paths converge
+immediately and cannot drift. Nothing about E2EE changed: frames are encrypted
+downstream exactly as before.
+
+**Android's rules, each of which had to be satisfied:**
+
+1. A foreground service with `foregroundServiceType="mediaProjection"` must
+   already be running when the projection starts — the page claims the type via
+   `updateMedia` *before* opening the picker, and rolls it back if the user
+   cancels.
+2. `MediaProjection.registerCallback` must be called **before**
+   `createVirtualDisplay` (API 34+; otherwise `SecurityException`). It is also
+   how "the user pressed Stop in the system UI" reaches the page.
+3. Every `Image` must be closed — the reader is created with a 2-deep queue and a
+   missed close wedges capture permanently.
+4. `registerForActivityResult` is only legal before the activity is STARTED, so
+   the launcher lives in `ScreenCapture`'s initialiser (plugins are constructed
+   during `onCreate`).
+5. The plugin's Android module does not inherit the app module's dependencies —
+   `androidx.appcompat` had to be declared for it (same trap as §13.9's
+   box-shell).
+
+**Status — honest.** Compile-verified: `cargo check` for both the host and
+`aarch64-linux-android`, `:tauri-plugin-call-service:compileReleaseKotlin`, and
+`tests/screen-share-fallback.spec.ts` (proves the branch: a browser uses
+`getDisplayMedia` and never enters the native path; with `getDisplayMedia`
+deleted the button takes the native path and cannot throw). **Not
+device-verified** — no device or emulator is attached to this machine, and there
+is still no emulator image installed. The one thing a phone must confirm is that
+the system picker appears and frames arrive:
+`adb logcat | grep E2EScreenCapture`.
+
+**The desktop icon, same release.** §13.11 unified the artwork but the installed
+`.exe` kept the old drawing: `tauri-build` emits `cargo:rerun-if-changed` for
+`tauri.conf.json` but **never for the icons**, and because it emits *something*,
+Cargo's "re-run on any file change" fallback is disabled — so regenerating the
+icons no longer re-ran the build script, and the icon compiled into the binary
+(which is what the desktop shortcut shows) stayed stale. `src-tauri/build.rs` now
+declares the icon files. Verified by checking that the newly built binary contains
+all six frames of the current `icons/icon.ico` byte-for-byte.
